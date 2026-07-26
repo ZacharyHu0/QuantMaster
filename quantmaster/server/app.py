@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from quantmaster import __version__
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="QuantMaster", version=__version__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def _series_to_points(s: pd.Series) -> list[list]:
