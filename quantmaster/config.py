@@ -115,6 +115,7 @@ def get_config() -> Config:
     return _config
 
 
-def set_config(cfg: Config) -> None:
+def set_config(cfg: Config | None) -> None:
+    """设置全局配置；传 None 重置（下次 get_config 时按默认路径重新加载）。"""
     global _config
     _config = cfg

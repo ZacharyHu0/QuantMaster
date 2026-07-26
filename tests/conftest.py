@@ -16,7 +16,7 @@ def isolated_config(tmp_path):
     cfg.data.root = str(tmp_path / "data")
     set_config(cfg)
     yield cfg
-    set_config(None)  # type: ignore[arg-type]
+    set_config(None)
 
 
 def make_panel(days: int = 150, n: int = 8, seed: int = 7) -> dict[str, pd.DataFrame]:

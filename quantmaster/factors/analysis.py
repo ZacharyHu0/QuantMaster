@@ -84,16 +84,25 @@ def quantile_backtest(
 
     返回 (每组逐日收益, 每组累计净值)。分组用 T 日因子值，收益取 T+1 日起
     的未来收益（因子已隐含 shift 对齐，无未来函数）。
+
+    periods > 1 表示「每 periods 天调仓一次」：非调仓日沿用上次调仓日的
+    分组，逐日用 1 日收益复利——这是真实可交易的口径。（不要对重叠的
+    多日收益逐日复利：那会把年化波动与回撤系统性低估约 sqrt(periods) 倍。）
     """
-    fwd = forward_returns(close, periods=periods)
+    fwd = forward_returns(close, periods=1)
     factor_aligned, fwd_aligned = factor_values.align(fwd, join="inner")
 
     labels = factor_aligned.rank(axis=1, pct=True)
+    if periods > 1:
+        keep = pd.Series(False, index=labels.index)
+        keep.iloc[::periods] = True
+        labels = labels.where(keep).ffill(limit=periods - 1)
+
     group_returns = {}
     for q in range(quantiles):
         lo, hi = q / quantiles, (q + 1) / quantiles
         mask = (labels > lo) & (labels <= hi) if q > 0 else (labels <= hi)
-        group_returns[f"Q{q + 1}"] = fwd_aligned.where(mask).mean(axis=1) / periods
+        group_returns[f"Q{q + 1}"] = fwd_aligned.where(mask).mean(axis=1)
 
     daily = pd.DataFrame(group_returns).dropna(how="all")
     nav = (1 + daily.fillna(0)).cumprod()

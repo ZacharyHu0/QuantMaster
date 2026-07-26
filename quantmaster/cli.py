@@ -219,6 +219,48 @@ def cmd_paper(args) -> None:
         _print_json(trader.report())
 
 
+def cmd_daily(args) -> None:
+    """每日例程：更新行情 -> 抓取快讯 -> 模拟盘调仓 -> 输出报告。
+
+    适合交易日收盘后跑一次（挂 crontab / Windows 计划任务）：
+        30 15 * * 1-5  cd /path/to/QuantMaster && qm daily >> daily.log 2>&1
+    """
+    from quantmaster.ai.crawler import AICrawler
+    from quantmaster.backtest.paper import PaperTrader
+    from quantmaster.backtest.strategy import FactorStrategy
+    from quantmaster.data import load_history
+    from quantmaster.data.universe import load_universe
+    from quantmaster.factors.library import get_factor
+
+    end = _today()
+    symbols = load_universe(args.universe)
+
+    print(f"== 1/3 更新行情（{len(symbols)} 只 + 基准）==", file=sys.stderr)
+    ok = 0
+    for symbol in [*symbols, args.benchmark]:
+        try:
+            load_history(symbol, args.start, end)
+            ok += 1
+        except Exception as e:
+            print(f"  {symbol}: {e}", file=sys.stderr)
+    print(f"  行情就绪 {ok}/{len(symbols) + 1}", file=sys.stderr)
+
+    print("== 2/3 抓取财经快讯 ==", file=sys.stderr)
+    try:
+        crawl = AICrawler().run(skip_llm=args.skip_llm)
+        print(f"  抓取 {crawl['fetched']} 条，入库 {crawl['saved']} 条", file=sys.stderr)
+    except Exception as e:
+        print(f"  快讯抓取失败（不影响后续）: {e}", file=sys.stderr)
+
+    print("== 3/3 模拟盘调仓 ==", file=sys.stderr)
+    trader = PaperTrader(initial_capital=args.capital)
+    result = trader.run_once(
+        FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance),
+        symbols,
+    )
+    _print_json(result)
+
+
 def cmd_ledger(args) -> None:
     from quantmaster.portfolio import Ledger, TradeRecord, ledger_report
 
@@ -363,6 +405,17 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--capital", type=float, default=1_000_000)
     psub.add_parser("report", help="模拟盘收益报告")
     p.set_defaults(func=cmd_paper, capital=1_000_000)
+
+    p = sub.add_parser("daily", help="每日例程：更新行情+抓快讯+模拟盘调仓（适合挂定时任务）")
+    p.add_argument("--universe", default="demo")
+    p.add_argument("--start", default="2022-01-01")
+    p.add_argument("--factor", default="mom_20d")
+    p.add_argument("--top", type=int, default=5)
+    p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
+    p.add_argument("--benchmark", default="000300.SH")
+    p.add_argument("--capital", type=float, default=1_000_000)
+    p.add_argument("--skip-llm", action="store_true", help="快讯不做 LLM 标注")
+    p.set_defaults(func=cmd_daily)
 
     p = sub.add_parser("ledger", help="实盘账本")
     lsub = p.add_subparsers(dest="ledger_cmd", required=True)

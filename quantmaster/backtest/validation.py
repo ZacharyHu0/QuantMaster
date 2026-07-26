@@ -141,6 +141,9 @@ def walk_forward_ic(
     rows = []
     for i, chunk_idx in enumerate(np.array_split(np.arange(len(ic)), n_splits), start=1):
         chunk = ic.iloc[chunk_idx]
+        # 剔除段尾 periods 天：其未来收益跨越段边界，会让相邻段共享信息
+        if i < n_splits and periods > 0 and len(chunk) > periods:
+            chunk = chunk.iloc[:-periods]
         if chunk.empty:
             rows.append({"segment": i, "start": None, "end": None,
                          "days": 0, "ic_mean": np.nan, "icir": np.nan})

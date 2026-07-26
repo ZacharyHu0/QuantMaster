@@ -185,3 +185,31 @@ class TestCacheReplaceSemantics:
         monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FullSource]})
         df = registry.load_history("600000.SH", "2024-01-02", "2024-06-28", store=store)
         assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
+
+
+class TestQuantilePeriods:
+    def test_periods_rebalance_semantics(self, panel):
+        """periods=3 表示每 3 天调仓：非调仓日沿用旧分组，逐日 1 日收益复利。"""
+        from quantmaster.factors import BUILTIN_FACTORS, compute_factor
+        from quantmaster.factors.analysis import quantile_backtest
+
+        values = compute_factor(BUILTIN_FACTORS["rev_5d"], panel)
+        daily3, nav3 = quantile_backtest(values, panel["close"], periods=3)
+        assert nav3.shape[1] == 5
+        assert nav3.notna().all().all()
+        # 调仓更慢 -> 分组序列变化更少，但两种口径都必须是逐日 1 日收益
+        # （旧实现把 3 日重叠收益 /3 逐日复利，会低估波动 ~sqrt(3) 倍）
+        assert daily3.abs().max().max() < 0.25   # 单日收益量级合理
+
+    def test_constant_factor_invariant_to_periods(self, panel):
+        """因子恒定时分组不随时间变化，periods 取值不应影响净值。"""
+        import pandas as pd
+
+        from quantmaster.factors.analysis import quantile_backtest
+
+        close = panel["close"]
+        const = pd.DataFrame(
+            {s: i for i, s in enumerate(close.columns)}, index=close.index, dtype=float)
+        _, nav1 = quantile_backtest(const, close, periods=1)
+        _, nav5 = quantile_backtest(const, close, periods=5)
+        pd.testing.assert_frame_equal(nav1, nav5)

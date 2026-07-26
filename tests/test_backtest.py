@@ -92,8 +92,10 @@ class TestEngineBasics:
         strategy = FactorStrategy(ExpressionFactor("rank(-delta(close, 5))"),
                                   top_n=3, rebalance="W")
         result = run_backtest(panel, strategy.target_weights(panel))
-        # 净值应始终为正，且现金约束下不出现爆仓
         assert (result.nav > 0).all()
+        # 真正的现金约束：现金 = 总资产 - 持仓市值，任何一天都不允许透支
+        cash = result.nav * 1_000_000 - result.positions.sum(axis=1)
+        assert (cash >= -1e-6).all(), "回测引擎出现现金透支"
 
     def test_benchmark_metrics_present(self, panel):
         strategy = FactorStrategy(ExpressionFactor("rank(-delta(close, 5))"), top_n=3)
