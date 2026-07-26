@@ -112,7 +112,7 @@ class NewsStore:
         with self._conn() as conn:
             for item in items:
                 try:
-                    conn.execute(
+                    cursor = conn.execute(
                         "INSERT OR IGNORE INTO news "
                         "(source,title,content,url,published_at,symbols,event_type,"
                         "sentiment,summary,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -120,7 +120,7 @@ class NewsStore:
                          json.dumps(item.symbols, ensure_ascii=False), item.event_type,
                          item.sentiment, item.summary, time.time()),
                     )
-                    saved += conn.total_changes > 0
+                    saved += cursor.rowcount == 1   # IGNORE 命中重复时 rowcount 为 0
                 except sqlite3.Error:
                     continue
         return saved

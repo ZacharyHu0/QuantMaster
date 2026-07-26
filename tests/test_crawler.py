@@ -1,0 +1,56 @@
+"""爬虫存储与舆情聚合测试（不触网）。"""
+
+from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
+from quantmaster.ai.sentiment import sentiment_panel
+
+
+def _item(title: str, published: str = "2024-05-06 09:30:00", **kw) -> NewsItem:
+    return NewsItem(source="test", title=title, content=title,
+                    published_at=published, **kw)
+
+
+class TestNewsStore:
+    def test_save_and_dedup(self, tmp_path):
+        store = NewsStore(path=tmp_path / "news.sqlite")
+        items = [_item("新闻A"), _item("新闻B")]
+        assert store.save(items) == 2
+        # 重复入库应被去重，计数为 0
+        assert store.save(items) == 0
+        assert len(store.recent()) == 2
+
+    def test_symbols_roundtrip(self, tmp_path):
+        store = NewsStore(path=tmp_path / "news.sqlite")
+        store.save([_item("利好", symbols=["600519.SH"], sentiment=0.8,
+                          event_type="业绩", summary="摘要")])
+        row = store.recent()[0]
+        assert row["symbols"] == ["600519.SH"]
+        assert row["sentiment"] == 0.8
+
+
+class TestCrawlerSkipLLM:
+    def test_run_with_fake_source(self, tmp_path, monkeypatch):
+        from quantmaster.ai import crawler as crawler_mod
+
+        monkeypatch.setitem(crawler_mod.SOURCES, "fake",
+                            lambda limit=30: [_item("快讯1"), _item("快讯2")])
+        c = AICrawler(store=NewsStore(path=tmp_path / "news.sqlite"))
+        result = c.run(sources=["fake"], skip_llm=True)
+        assert result["fetched"] == 2
+        assert result["saved"] == 2
+        assert not result["errors"]
+
+
+class TestSentimentPanel:
+    def test_aggregation_and_decay(self, tmp_path):
+        store = NewsStore(path=tmp_path / "news.sqlite")
+        store.save([
+            _item("大利好", "2024-05-06 09:00:00", symbols=["600519.SH"], sentiment=0.9),
+            _item("小利空", "2024-05-06 10:00:00", symbols=["600519.SH"], sentiment=-0.1),
+            _item("其他", "2024-05-08 09:00:00", symbols=["000858.SZ"], sentiment=0.5),
+        ])
+        panel = sentiment_panel(store=store, halflife_days=1.0)
+        assert set(panel.columns) == {"600519.SH", "000858.SZ"}
+        day1 = panel.loc["2024-05-06", "600519.SH"]
+        assert day1 == (0.9 - 0.1) / 2   # 同日取均值
+        day2 = panel.loc["2024-05-07", "600519.SH"]
+        assert abs(day2 - day1 * 0.5) < 1e-9   # 半衰期 1 天 -> 次日减半
