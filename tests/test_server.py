@@ -48,3 +48,15 @@ class TestLedgerAPI:
         resp = client.post("/api/factors/test",
                            json={"expression": "__import__('os')", "universe": "demo"})
         assert resp.status_code == 400
+
+    def test_validate_bad_expression_400(self):
+        resp = client.post("/api/factors/validate",
+                           json={"expression": "eval(close)", "split": "2024-01-01"})
+        assert resp.status_code == 400
+
+    def test_ledger_nav_empty(self):
+        resp = client.get("/api/ledger/nav")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dates"] == []
+        assert data["excess_annual"] == 0.0

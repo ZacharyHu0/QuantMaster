@@ -9,4 +9,4 @@
 - server    FastAPI 本地服务 + Web 仪表盘
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

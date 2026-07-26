@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantmaster"
-version = "0.1.0"
+version = "0.2.0"
 description = "面向 A 股的开源量化研究与实盘记录平台：多市场数据、因子研究与挖掘、AI 爬虫、回测/模拟盘、实盘账本"
 readme = "README.md"
 requires-python = ">=3.10"

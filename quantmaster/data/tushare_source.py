@@ -14,7 +14,7 @@ from quantmaster.data.base import DataSource, Market, normalize_daily
 
 def _require_tushare():
     try:
-        import tushare as ts  # noqa: PLC0415
+        import tushare as ts
     except ImportError as e:  # pragma: no cover
         raise ImportError("未安装 tushare。请执行: pip install tushare") from e
     token = get_config().data.tushare_token

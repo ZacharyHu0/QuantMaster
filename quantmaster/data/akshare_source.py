@@ -13,7 +13,7 @@ from quantmaster.data.base import DataSource, Market, guess_market, normalize_da
 
 def _require_akshare():
     try:
-        import akshare as ak  # noqa: PLC0415
+        import akshare as ak
         return ak
     except ImportError as e:  # pragma: no cover
         raise ImportError(

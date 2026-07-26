@@ -104,6 +104,15 @@
   <div class="hint">内置因子见下拉提示；表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema…
     字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
   <div id="factor-out"></div>
+  <div class="panel" style="margin-top:16px">
+    <h3>样本外验证（防过拟合）：用上方的因子/股票池，切分日前为训练期、后为验证期</h3>
+    <form class="controls" id="validate-form">
+      <label>切分日期<input name="split" type="date" value="2024-07-01"></label>
+      <label>滚动分段数<input name="n_splits" type="number" value="4" min="2" max="10"></label>
+      <button class="primary" type="submit">验证</button>
+    </form>
+    <div id="validate-out"><div class="hint">挖出来的高 IC 因子务必先过这一关：验证期 IC 掉一半是常态，归零/翻号说明过拟合。</div></div>
+  </div>
 </section>
 
 <!-- ================= 回测 ================= -->
@@ -117,6 +126,8 @@
       <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
     </label>
     <label>基准<input name="benchmark" value="000300.SH"></label>
+    <label>止损<input name="stop_loss" type="number" step="0.01" min="0" max="0.5" placeholder="如 0.08" style="min-width:80px"></label>
+    <label>止盈<input name="take_profit" type="number" step="0.01" min="0" max="2" placeholder="如 0.25" style="min-width:80px"></label>
     <button class="primary" type="submit">运行回测</button>
   </form>
   <div class="hint">回测含 A 股规则：T+1、涨跌停不可成交、佣金/印花税/过户费、整手交易。信号 T 日收盘生成，T+1 开盘成交。</div>
@@ -187,6 +198,10 @@
         <button class="primary" type="submit">记录</button>
       </form>
     </div>
+  </div>
+  <div class="panel" id="ledger-nav-panel" style="display:none">
+    <h3>净值曲线（TWR 时间加权，剔除出入金影响，可与基准直接比较）</h3>
+    <div class="chart-sm" id="ledger-nav-chart"></div>
   </div>
   <div id="ledger-out"><div class="msg">加载中…</div></div>
 </section>
@@ -349,6 +364,34 @@ document.getElementById('factor-form').onsubmit = async e => {
   busy(form, false);
 };
 
+document.getElementById('validate-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  const out = document.getElementById('validate-out');
+  out.innerHTML = '<div class="msg">验证中…</div>';
+  try {
+    const ff = new FormData(document.getElementById('factor-form'));
+    const fd = new FormData(form);
+    const r = await post('/api/factors/validate', {
+      expression: ff.get('expression'), universe: ff.get('universe'), start: ff.get('start'),
+      split: fd.get('split'), n_splits: +fd.get('n_splits') });
+    const verdictColor = r.verdict === '稳健' ? 'up' : (r.verdict === '衰减' ? '' : 'down');
+    out.innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="k">训练期 RankIC（${r.is_days}天）</div><div class="v">${r.is_ic}</div></div>
+        <div class="card"><div class="k">验证期 RankIC（${r.oos_days}天）</div><div class="v">${r.oos_ic}</div></div>
+        <div class="card"><div class="k">训练期 ICIR</div><div class="v">${r.is_icir}</div></div>
+        <div class="card"><div class="k">验证期 ICIR</div><div class="v">${r.oos_icir}</div></div>
+        <div class="card"><div class="k">衰减度</div><div class="v">${r.degradation == null ? '—' : pct(r.degradation)}</div></div>
+        <div class="card"><div class="k">结论</div><div class="v ${verdictColor}">${esc(r.verdict)}</div></div>
+      </div>
+      <table><thead><tr><th>分段</th><th>起止</th><th>天数</th><th>RankIC</th><th>ICIR</th></tr></thead>
+      <tbody>${(r.segments || []).map((s, i) => `<tr><td>${i + 1}</td><td>${esc(s.start)} ~ ${esc(s.end)}</td>
+        <td>${s.days}</td><td class="${cls(s.ic_mean)}">${s.ic_mean == null ? '—' : (+s.ic_mean).toFixed(4)}</td>
+        <td>${s.icir == null ? '—' : (+s.icir).toFixed(3)}</td></tr>`).join('')}</tbody></table>`;
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+
 /* ---------- 回测 ---------- */
 document.getElementById('bt-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
@@ -358,7 +401,9 @@ document.getElementById('bt-form').onsubmit = async e => {
     const fd = new FormData(form);
     const data = await post('/api/backtest/run', {
       factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
-      top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark') });
+      top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark'),
+      stop_loss: fd.get('stop_loss') ? +fd.get('stop_loss') : null,
+      take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null });
     const m = data.metrics;
     out.innerHTML = `
       <div class="cards">
@@ -373,6 +418,10 @@ document.getElementById('bt-form').onsubmit = async e => {
       </div>
       <div class="panel"><h3>净值曲线（起点=1）</h3><div class="chart" id="nav-chart"></div></div>
       <div class="panel"><h3>回撤</h3><div class="chart-sm" id="dd-chart"></div></div>
+      <div class="row">
+        <div class="panel"><h3>年度收益</h3>${yearlyTable(data.yearly)}</div>
+        <div class="panel"><h3>月度收益（%）</h3><div style="overflow-x:auto">${monthlyTable(data.monthly)}</div></div>
+      </div>
       <div class="panel"><h3>最近成交（${data.trades.length} 条）</h3>
         <div style="max-height:300px;overflow:auto"><table><thead><tr>
         <th>日期</th><th>代码</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th></tr></thead>
@@ -396,6 +445,23 @@ document.getElementById('bt-form').onsubmit = async e => {
   } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);
 };
+
+function yearlyTable(rows) {
+  if (!rows || !rows.length) return '<div class="msg">无数据</div>';
+  return `<table><thead><tr><th>年份</th><th>收益</th><th>波动</th><th>最大回撤</th><th>夏普</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td>${r.year}</td>
+      <td class="${cls(r.return)}">${pct(r.return)}</td><td>${pct(r.volatility)}</td>
+      <td>${pct(r.max_drawdown)}</td><td>${r.sharpe ?? '—'}</td></tr>`).join('')}</tbody></table>`;
+}
+function monthlyTable(rows) {
+  if (!rows || !rows.length) return '<div class="msg">无数据</div>';
+  const months = Array.from({length: 12}, (_, i) => String(i + 1));
+  return `<table><thead><tr><th>年份</th>${months.map(m => `<th>${m}月</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr><td>${r.year}</td>${months.map(m => {
+      const v = r[m];
+      return v == null ? '<td>—</td>' : `<td class="${cls(v)}">${(v * 100).toFixed(1)}</td>`;
+    }).join('')}</tr>`).join('')}</tbody></table>`;
+}
 
 /* ---------- 挖掘 ---------- */
 function renderMined(list, extraCols) {
@@ -465,7 +531,27 @@ document.getElementById('news-form').onsubmit = async e => {
 };
 
 /* ---------- 实盘 ---------- */
+async function loadLedgerNav() {
+  try {
+    const r = await api('/api/ledger/nav');
+    if (!r.dates || !r.dates.length) return;
+    document.getElementById('ledger-nav-panel').style.display = '';
+    const twr = r.dates.map((d, i) => [d, r.twr[i]]);
+    const series = [{ name: '我的组合(TWR)', type: 'line', data: twr, showSymbol: false, lineStyle: { width: 2 } }];
+    if (r.benchmark && r.benchmark.length) {
+      series.push({ name: '基准', type: 'line', showSymbol: false, lineStyle: { width: 2 },
+        data: r.dates.map((d, i) => [d, r.benchmark[i]]) });
+    }
+    mkChart('ledger-nav-chart').setOption(baseOpt({
+      legend: { textStyle: { color: INK2 }, top: 0 },
+      xAxis: timeAxis(), yAxis: valAxis(),
+      series,
+    }));
+  } catch (e) { /* 无行情缓存时静默跳过 */ }
+}
+
 async function loadLedger() {
+  loadLedgerNav();
   const out = document.getElementById('ledger-out');
   try {
     const r = await api('/api/ledger/report');

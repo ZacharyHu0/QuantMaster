@@ -75,14 +75,41 @@ def my_pe_factor(panel):
 f = FuncFactor("ep", my_pe_factor, description="盈利收益率 E/P")
 ```
 
+## 3.5 基本面因子与多因子合成
+
+```bash
+# 基本面因子体检（首次会拉取估值/财务数据并缓存，稍慢）
+qm fund-test ep            # 盈利收益率 1/PE
+qm fund-test small_cap     # 小市值因子（A股历史上最强的因子之一，注意风格切换风险）
+```
+
+Python 中做多因子合成：
+
+```python
+from quantmaster.factors import (
+    BUILTIN_FACTORS, compute_factors, factor_correlation,
+    ic_weighted_combine, greedy_select,
+)
+
+values = compute_factors(list(BUILTIN_FACTORS.values()), panel)
+print(factor_correlation(values))              # 相关性矩阵：>0.6 的因子留一个就够
+picked = greedy_select(values, panel["close"]) # 按 |IC| 贪心挑出低相关因子组
+combined, weights = ic_weighted_combine(       # 滚动 IC 加权动态合成（权重已 shift 防未来）
+    {k: values[k] for k in picked}, panel["close"], lookback=60)
+```
+
 ## 4. 挖掘因子
 
 ```bash
 # 遗传规划（本地算力，无需 key）：种群60 × 8代，约几分钟
 qm mine --generations 8 --population 60 --start 2020-01-01 --end 2022-12-31
 
-# 拿挖出的表达式做样本外验证（时间段错开！这是防过拟合的关键）
-qm factor-test "<挖出的表达式>" --start 2023-01-01
+# 拿挖出的表达式做样本外验证（这是防过拟合的关键一步）
+qm validate "<挖出的表达式>" --split 2023-01-01 --start 2020-01-01
+# 输出训练期/验证期 IC 对比、衰减度、以及 稳健/衰减/疑似过拟合/失效 结论
+
+# 参数网格扫描：别只看单点参数的好结果，稳健的策略应该在邻近参数上也不差
+qm grid --factors mom_20d,rev_5d,low_vol_20d --tops 3,5,10 --rebalances W,M
 ```
 
 LLM 挖掘需要先配 key（任选其一）：
@@ -123,6 +150,14 @@ qm paper report
 qm ledger import my_trades.csv
 qm ledger cash --amount 100000 --kind deposit --date 2024-01-02   # 别忘了入金记录
 qm ledger report
+qm ledger nav --benchmark 000300.SH   # 每日净值（TWR）与沪深300对比
+```
+
+回测时启用止损/止盈（A 股常用纪律）：
+
+```bash
+qm backtest --factor mom_20d --stop-loss 0.08 --take-profit 0.25 --full
+# --full 额外输出年度收益表和月度收益表
 ```
 
 Web 界面「实盘」页也可以逐笔录入。

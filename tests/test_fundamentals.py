@@ -1,0 +1,264 @@
+"""基本面数据层与价值/质量因子的测试（全部离线，合成数据，不触网）。"""
+
+import logging
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from quantmaster.data import fundamentals
+from quantmaster.data.fundamentals import (
+    extract_roe,
+    fundamental_panel,
+    fundamental_store,
+    quarterly_to_daily,
+)
+from quantmaster.factors.analysis import analyze_factor
+from quantmaster.factors.engine import compute_factor
+from quantmaster.factors.fundamental import make_fundamental_factors
+
+DATES = pd.bdate_range("2023-01-02", "2023-12-29")
+
+
+def make_quarterly() -> pd.DataFrame:
+    """三个报告期的合成 ROE：Q1=10, Q2=12, Q3=8。"""
+    idx = pd.to_datetime(["2023-03-31", "2023-06-30", "2023-09-30"])
+    return pd.DataFrame({"roe": [10.0, 12.0, 8.0]}, index=idx)
+
+
+def make_fund_panel(close: pd.DataFrame, seed: int = 3) -> dict[str, pd.DataFrame]:
+    """构造与行情面板同形状的合成基本面面板。
+
+    total_mv 按列递增（第 0 列市值最小），方便测小市值因子的方向。
+    """
+    rng = np.random.default_rng(seed)
+    shape = close.shape
+
+    def df(arr) -> pd.DataFrame:
+        return pd.DataFrame(arr, index=close.index, columns=close.columns)
+
+    base_mv = np.linspace(20e8, 2000e8, shape[1])
+    return {
+        "pe_ttm": df(rng.uniform(5.0, 60.0, shape)),
+        "pb": df(rng.uniform(0.5, 8.0, shape)),
+        "dv_ratio": df(rng.uniform(0.0, 6.0, shape)),
+        "total_mv": df(np.tile(base_mv, (shape[0], 1)) * (1 + rng.normal(0, 0.01, shape))),
+        "roe": df(rng.uniform(-5.0, 30.0, shape)),
+    }
+
+
+class TestQuarterlyToDaily:
+    def test_report_date_not_visible(self):
+        """报告期当天财报尚未公布：只能看到上一期的值（防未来函数）。"""
+        daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=45)
+        # Q1 报告期当天（3-31）：Q1 要到 5-15 才可见，此前一无所有
+        assert pd.isna(daily.loc["2023-03-31", "roe"])
+        # Q2 报告期当天（6-30）：可见的仍是 Q1 的 10，而不是 Q2 的 12
+        assert daily.loc["2023-06-30", "roe"] == 10.0
+
+    def test_visible_only_after_lag(self):
+        """报告期 + 45 天后才可见：5-12（周五）仍 NaN，5-15（周一）起为 10。"""
+        daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=45)
+        assert pd.isna(daily.loc["2023-05-12", "roe"])
+        assert daily.loc["2023-05-15", "roe"] == 10.0
+
+    def test_ffill_between_publications(self):
+        """两次披露之间 ffill 保持旧值，披露日切换为新值。"""
+        daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=45)
+        assert daily.loc["2023-07-03", "roe"] == 10.0          # Q2 尚未披露
+        assert daily.loc["2023-08-14", "roe"] == 12.0          # 6-30 + 45 天
+        assert daily.loc["2023-11-13", "roe"] == 12.0          # Q3 尚未披露
+        assert daily.loc["2023-11-14", "roe"] == 8.0           # 9-30 + 45 天
+
+    def test_weekend_publication_not_lost(self):
+        """可见日落在周末（3-31 + 43 = 周六 5-13）时，下个交易日起生效而非丢失。"""
+        daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=43)
+        assert pd.isna(daily.loc["2023-05-12", "roe"])
+        assert daily.loc["2023-05-15", "roe"] == 10.0
+
+    def test_zero_lag_visible_on_report_date(self):
+        """lag_days=0 时报告期当天即可见（用于验证滞后逻辑本身）。"""
+        daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=0)
+        assert daily.loc["2023-03-31", "roe"] == 10.0
+
+    def test_empty_input(self):
+        """空季度数据返回同形状的全 NaN 面板，不报错。"""
+        empty = pd.DataFrame(columns=["roe"])
+        daily = quarterly_to_daily(empty, DATES)
+        assert list(daily.columns) == ["roe"]
+        assert len(daily) == len(DATES)
+        assert daily["roe"].isna().all()
+
+
+class TestExtractRoe:
+    def test_extract_from_chinese_table(self):
+        """从中文财务指标表（日期列 + 净资产收益率(%)列）中标准化抽取。"""
+        raw = pd.DataFrame(
+            {
+                "日期": ["2023-06-30", "2023-03-31"],
+                "净资产收益率(%)": ["12.5", "10.0"],
+                "总资产周转率(次)": [0.3, 0.2],
+            }
+        )
+        out = extract_roe(raw)
+        assert list(out.columns) == ["roe"]
+        assert isinstance(out.index, pd.DatetimeIndex)
+        assert out.index.is_monotonic_increasing
+        assert out.loc["2023-03-31", "roe"] == 10.0
+        assert out.loc["2023-06-30", "roe"] == 12.5
+
+    def test_extract_missing_column_raises(self):
+        raw = pd.DataFrame({"日期": ["2023-03-31"], "毛利率(%)": [30.0]})
+        with pytest.raises(ValueError):
+            extract_roe(raw)
+
+
+class TestFundamentalFactors:
+    def test_factor_shapes_align_with_quote_panel(self, panel):
+        """各因子输出与行情面板 close 完全同形状、同索引。"""
+        factors = make_fundamental_factors(make_fund_panel(panel["close"]))
+        assert set(factors) == {"ep", "bp", "dividend_yield", "small_cap", "roe"}
+        close = panel["close"]
+        for name, factor in factors.items():
+            values = factor.compute(panel)
+            assert values.shape == close.shape, name
+            assert values.index.equals(close.index), name
+            assert values.columns.equals(close.columns), name
+
+    def test_ep_negative_pe_is_nan(self, panel):
+        """PE<=0（亏损）处 EP 为 NaN，正常处等于 1/PE。"""
+        fund = make_fund_panel(panel["close"])
+        fund["pe_ttm"].iloc[0, 0] = -8.0
+        fund["pe_ttm"].iloc[1, 1] = 0.0
+        ep = make_fundamental_factors(fund)["ep"].compute(panel)
+        assert pd.isna(ep.iloc[0, 0])
+        assert pd.isna(ep.iloc[1, 1])
+        assert ep.iloc[2, 2] == pytest.approx(1.0 / fund["pe_ttm"].iloc[2, 2])
+
+    def test_bp_nonpositive_pb_is_nan(self, panel):
+        fund = make_fund_panel(panel["close"])
+        fund["pb"].iloc[0, 0] = -1.5
+        bp = make_fundamental_factors(fund)["bp"].compute(panel)
+        assert pd.isna(bp.iloc[0, 0])
+        assert bp.iloc[0, 1] == pytest.approx(1.0 / fund["pb"].iloc[0, 1])
+
+    def test_small_cap_direction(self, panel):
+        """市值越小因子值越大：第 0 列（最小市值）恒大于最后一列（最大市值）。"""
+        sc = make_fundamental_factors(make_fund_panel(panel["close"]))["small_cap"].compute(panel)
+        assert (sc.iloc[:, 0] > sc.iloc[:, -1]).all()
+
+    def test_missing_field_skips_factor(self, panel):
+        """fund_panel 缺哪个字段就不产出对应因子。"""
+        fund = make_fund_panel(panel["close"])
+        factors = make_fundamental_factors({"pe_ttm": fund["pe_ttm"], "pb": fund["pb"]})
+        assert set(factors) == {"ep", "bp"}
+
+    def test_reindex_fills_missing_symbol_with_nan(self, panel):
+        """基本面数据缺失的股票在因子输出里为 NaN，但形状仍与行情面板一致。"""
+        fund = make_fund_panel(panel["close"])
+        partial_pe = fund["pe_ttm"].iloc[:, :-1]  # 去掉最后一只股票
+        ep = make_fundamental_factors({"pe_ttm": partial_pe})["ep"].compute(panel)
+        assert ep.shape == panel["close"].shape
+        assert ep.iloc[:, -1].isna().all()
+        assert ep.iloc[:, 0].notna().all()
+
+    def test_compute_factor_pipeline(self, panel):
+        """与 compute_factor 标准化流水线（缩尾 + 截面标准分）兼容。"""
+        factors = make_fundamental_factors(make_fund_panel(panel["close"]))
+        values = compute_factor(factors["ep"], panel)
+        assert values.shape == panel["close"].shape
+        # 截面标准分后每日均值应接近 0
+        assert values.mean(axis=1).abs().max() < 1e-6
+
+    def test_analyze_factor_full_chain(self, panel):
+        """全链路：基本面面板 -> 因子 -> 标准化 -> IC / 分层回测报告。"""
+        factors = make_fundamental_factors(make_fund_panel(panel["close"]))
+        values = compute_factor(factors["small_cap"], panel)
+        report = analyze_factor(values, panel["close"], name="small_cap")
+        summary = report.summary()
+        assert set(summary) >= {"ic_mean", "icir", "monotonicity", "quantile_annual"}
+        assert len(report.quantile_returns.columns) == 5
+        assert -1 <= summary["ic_mean"] <= 1
+
+
+class TestFundamentalPanel:
+    START, END = "2023-01-02", "2023-06-30"
+    SYMBOLS = ("600000.SH", "000001.SZ")
+
+    def _seed_cache(self, symbols) -> None:
+        """把合成的每日指标与季度 ROE 写入本地缓存（isolated_config 隔离目录）。"""
+        store = fundamental_store()
+        dates = pd.bdate_range(self.START, self.END)
+        for i, s in enumerate(symbols):
+            indicators = pd.DataFrame(
+                {
+                    "pe": 15.0 + i, "pe_ttm": 10.0 + i, "pb": 2.0 + i,
+                    "dv_ratio": 3.0 + i, "total_mv": (100.0 + i) * 1e8,
+                },
+                index=dates,
+            )
+            store.put(s, indicators)
+            quarterly = pd.DataFrame(
+                {"roe": [10.0 + i, 12.0 + i]},
+                index=pd.to_datetime(["2022-12-31", "2023-03-31"]),
+            )
+            store.put(fundamentals._roe_key(s), quarterly)
+
+    def _forbid_network(self, monkeypatch) -> list:
+        calls: list = []
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("离线测试：禁止触网")
+
+        monkeypatch.setattr(fundamentals, "fetch_daily_indicators", spy)
+        monkeypatch.setattr(fundamentals, "fetch_quarterly_roe", spy)
+        return calls
+
+    def test_panel_from_cache_offline(self, monkeypatch):
+        """缓存命中时完全不触网，输出 {字段: DataFrame(date × symbol)}。"""
+        symbols = list(self.SYMBOLS)
+        self._seed_cache(symbols)
+        calls = self._forbid_network(monkeypatch)
+
+        result = fundamental_panel(symbols, self.START, self.END)
+        assert not calls, "缓存命中时不应触网"
+        assert set(result) == {"pe_ttm", "pb", "dv_ratio", "total_mv", "roe"}
+        for field, df in result.items():
+            assert list(df.columns) == symbols, field
+            assert isinstance(df.index, pd.DatetimeIndex), field
+        assert result["pe_ttm"].loc["2023-03-01", "600000.SH"] == 10.0
+        assert result["pe_ttm"].loc["2023-03-01", "000001.SZ"] == 11.0
+
+    def test_panel_roe_respects_publication_lag(self, monkeypatch):
+        """面板中的 ROE 已含 45 天发布滞后：一季报 5-15 才生效。"""
+        symbols = list(self.SYMBOLS)
+        self._seed_cache(symbols)
+        self._forbid_network(monkeypatch)
+
+        roe = fundamental_panel(symbols, self.START, self.END)["roe"]
+        # 2022 年报（12-31）+45 天 = 2-14 可见；此前 NaN
+        assert pd.isna(roe.loc["2023-02-13", "600000.SH"])
+        assert roe.loc["2023-02-14", "600000.SH"] == 10.0
+        # 2023 一季报（3-31）+45 天 = 5-15 可见；5-12 仍是年报的值
+        assert roe.loc["2023-05-12", "600000.SH"] == 10.0
+        assert roe.loc["2023-05-15", "600000.SH"] == 12.0
+
+    def test_panel_skips_failed_symbol(self, monkeypatch, caplog):
+        """无缓存且获取失败的标的被跳过并告警，其余标的正常返回。"""
+        self._seed_cache(["600000.SH"])
+        self._forbid_network(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="quantmaster.data.fundamentals"):
+            result = fundamental_panel(["600000.SH", "000002.SZ"], self.START, self.END)
+        assert list(result["pe_ttm"].columns) == ["600000.SH"]
+        assert list(result["roe"].columns) == ["600000.SH"]
+        assert "000002.SZ" in caplog.text
+
+    def test_panel_unknown_field_ignored(self, monkeypatch):
+        """未知字段被忽略（告警），不影响其他字段。"""
+        self._seed_cache(["600000.SH"])
+        self._forbid_network(monkeypatch)
+
+        result = fundamental_panel(["600000.SH"], self.START, self.END, fields=["pe_ttm", "nonexist"])
+        assert set(result) == {"pe_ttm"}

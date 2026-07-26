@@ -12,7 +12,7 @@ from quantmaster.data.base import DataSource, Market, normalize_daily
 
 def _require_yfinance():
     try:
-        import yfinance as yf  # noqa: PLC0415
+        import yfinance as yf
         return yf
     except ImportError as e:  # pragma: no cover
         raise ImportError(
