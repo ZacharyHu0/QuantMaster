@@ -119,21 +119,35 @@ def extract_roe(raw: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# A 股财报披露截止日距报告期结束的天数（按报告期月份区分）：
+#   一季报(3-31)/三季报(9-30) 截止次月末     ≈ 31 天
+#   半年报(6-30)              截止 8-31      ≈ 62 天
+#   年报(12-31)               截止次年 4-30  ≈ 120 天
+# 按「截止日」滞后是保守口径：实际多数公司在截止日前披露，回测因此略偏保守，
+# 但绝不会提前读到未披露的财报（用统一 45 天滞后时，年报/半年报会泄漏未来数据）。
+DISCLOSURE_LAG_DAYS = {3: 31, 6: 62, 9: 31, 12: 120}
+
+
 def quarterly_to_daily(
     quarterly_df: pd.DataFrame,
     dates: pd.DatetimeIndex,
-    lag_days: int = 45,
+    lag_days: int | None = None,
 ) -> pd.DataFrame:
     """季度数据（报告期索引）对齐到日频，显式加入财报发布滞后。
 
     步骤：
-    1. 报告期 + lag_days 天 = 「可见日」。财报在报告期结束后才披露
-       （季报约 1 个月，年报最长 4 个月），lag_days=45 是常用的保守近似。
-       跳过这一步就是未来函数：回测会在报告期当天读到尚未公布的财报。
+    1. 报告期 + 披露滞后 = 「可见日」。lag_days=None（默认）按报告期月份
+       使用 A 股披露截止日（DISCLOSURE_LAG_DAYS：季报 31 / 半年报 62 /
+       年报 120 天）；传入整数则统一使用该滞后（仅建议研究实验用，统一值
+       会让年报/半年报在真实披露前就「可见」，构成未来函数）。
     2. 以可见日为索引，与目标日期取并集后 ffill，最后取出目标日期。
        ffill 只会把「过去」的值带到「现在」，方向上安全；之所以先并集
        再 ffill 而不是直接 reindex(dates).ffill()，是因为可见日可能落在
        周末 / 非交易日，直接 reindex 会把那期财报整个丢掉。
+
+    已知局限：数据源返回的是「最新值」（业绩修正/重述后会覆盖原值），
+    并非 point-in-time 数据库；对绝大多数量价+基本面研究影响有限，
+    但请勿用它研究「业绩修正事件」本身。
 
     纯函数，不触网，可离线测试。
     """
@@ -142,8 +156,14 @@ def quarterly_to_daily(
         columns = list(quarterly_df.columns) if quarterly_df is not None else []
         return pd.DataFrame(index=dates, columns=columns, dtype=float)
     published = quarterly_df.copy()
+    report_dates = pd.to_datetime(published.index)
     # 显式滞后：报告期 -> 可见日（防未来函数的关键一步）
-    published.index = pd.to_datetime(published.index) + pd.Timedelta(days=int(lag_days))
+    if lag_days is None:
+        lags = pd.Series(report_dates.month, index=report_dates).map(
+            DISCLOSURE_LAG_DAYS).fillna(120).astype(int)
+        published.index = report_dates + pd.to_timedelta(lags.to_numpy(), unit="D")
+    else:
+        published.index = report_dates + pd.Timedelta(days=int(lag_days))
     published = published.sort_index()
     published = published[~published.index.duplicated(keep="last")]
     combined = published.reindex(published.index.union(dates)).ffill()
@@ -184,13 +204,14 @@ def fundamental_panel(
     start: str,
     end: str,
     fields: Sequence[str] = DEFAULT_FIELDS,
-    lag_days: int = 45,
+    lag_days: int | None = None,
     store: BarStore | None = None,
 ) -> dict[str, pd.DataFrame]:
     """多标的基本面面板：{字段: DataFrame(date × symbol)}。
 
     - 每日估值字段（pe/pe_ttm/pb/dv_ratio/total_mv）直接按日期切片；
-    - roe 为季度数据，先经 quarterly_to_daily() 加 lag_days 发布滞后再对齐；
+    - roe 为季度数据，先经 quarterly_to_daily() 加发布滞后再对齐
+      （默认按 A 股披露截止日区分报告期：季报 31 / 半年报 62 / 年报 120 天）；
     - 优先读本地 parquet 缓存，缺失或过期才触网；单标的失败仅
       logger.warning 并跳过，不影响其余标的（与行情 load_panel 风格一致）。
     """

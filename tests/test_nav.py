@@ -57,7 +57,13 @@ class TestDailyNav:
         assert nav["net_invested"].iloc[-1] == pytest.approx(100_000.0)
 
     def test_second_deposit_no_twr_jump(self, tmp_path):
-        """关键测试：入金日总资产跳涨 50%，但 twr 日收益 = 纯持仓收益 0.2%。"""
+        """关键测试：入金日总资产跳涨 50%，twr 却不因入金本身产生收益。
+
+        入金按期初流量口径进分母（GIPS 常用惯例）：当日盈亏 200 除以
+        「昨日资产 + 当日入金」150000，日收益 ≈ 0.1333%，而不是资产
+        跳涨的 50.2%。（旧的期末流量口径在「入金当日建仓」场景会把
+        收益按前日小基数放大出百倍失真，见 test_deposit_invested_same_day。）
+        """
         ledger = Ledger(path=tmp_path / "l.sqlite")
         ledger.add_cashflow("2024-01-02", 100_000, "deposit")
         ledger.add_trade(_trade("2024-01-03", "buy", 100.0, 100))
@@ -67,11 +73,31 @@ class TestDailyNav:
         nav = daily_nav(ledger, prices)
         d2, d3 = nav.index[1], nav.index[2]
 
-        # 入金日：assets 100000 -> 150200（跳涨 50.2%），但持仓只赚了 200/100000
+        # 入金日：assets 100000 -> 150200（跳涨 50.2%），但持仓只赚了 200
         assert nav.loc[d3, "total_assets"] == pytest.approx(150_200.0, abs=0.01)
         assert nav.loc[d3, "net_invested"] == pytest.approx(150_000.0, abs=0.01)
         day_return = nav.loc[d3, "twr_nav"] / nav.loc[d2, "twr_nav"] - 1.0
-        assert day_return == pytest.approx(0.002, abs=1e-9)
+        assert day_return == pytest.approx(200.0 / 150_000.0, abs=1e-9)
+
+    def test_deposit_invested_same_day(self, tmp_path):
+        """回归测试：大额入金当日建仓，收益必须按含入金的本金基数计算。
+
+        旧口径 r=(assets-flow)/prev 会算出 (1020100-1000000)/10000-1 ≈ +101%
+        的荒谬日收益（真实约 +1%），跌 2% 时甚至把净值打成负数。
+        """
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_cashflow("2024-01-02", 10_000, "deposit")
+        ledger.add_cashflow("2024-01-03", 1_000_000, "deposit")
+        ledger.add_trade(_trade("2024-01-03", "buy", 100.0, 10_000))   # 当日全额买入
+        prices = _prices(["2024-01-02", "2024-01-03"], [100.0, 101.0])
+        nav = daily_nav(ledger, prices)
+        d1, d2 = nav.index[0], nav.index[1]
+
+        day_return = nav.loc[d2, "twr_nav"] / nav.loc[d1, "twr_nav"] - 1.0
+        # 持仓市值 101万，现金 1万，总资产 1,020,000；基数 1,010,000
+        assert day_return == pytest.approx(10_000.0 / 1_010_000.0, abs=1e-9)
+        assert 0 < day_return < 0.02   # 绝不允许出现百分之百量级的失真
+        assert (nav["twr_nav"] > 0).all()
 
     def test_withdraw_no_twr_drop(self, tmp_path):
         """出金日价格不变：总资产下降，但 twr 不动。"""
@@ -211,3 +237,28 @@ class TestNavWithBenchmark:
         result = nav_with_benchmark(empty_nav, bench)
         assert result == {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0}
         json.dumps(result)
+
+
+class TestNavWarnings:
+    def test_negative_cash_warns(self, tmp_path):
+        """漏记入金（只有买入没有入金）必须给出明确警告，而不是静默输出荒谬收益。"""
+        from quantmaster.portfolio import nav_warnings
+
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_trade(_trade("2024-01-03", "buy", 100.0, 100))   # 没有入金记录
+        prices = _prices(["2024-01-03", "2024-01-04"], [100.0, 105.0])
+        nav = daily_nav(ledger, prices)
+        warnings = nav_warnings(nav)
+        assert warnings, "负现金/零入金必须有警告"
+        assert any("入金" in w for w in warnings)
+        # 且 TWR 链条不被负基数打坏
+        assert nav["twr_nav"].notna().all()
+
+    def test_healthy_ledger_no_warnings(self, tmp_path):
+        from quantmaster.portfolio import nav_warnings
+
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_cashflow("2024-01-02", 100_000, "deposit")
+        ledger.add_trade(_trade("2024-01-03", "buy", 100.0, 100))
+        prices = _prices(["2024-01-02", "2024-01-03"], [100.0, 101.0])
+        assert nav_warnings(daily_nav(ledger, prices)) == []

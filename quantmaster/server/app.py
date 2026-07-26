@@ -371,7 +371,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     """实盘每日净值（TWR）与基准对比。行情走本地缓存，缺失标的按最近成交价估值。"""
     from quantmaster.data import load_history
     from quantmaster.data.storage import BarStore
-    from quantmaster.portfolio import Ledger, daily_nav, nav_with_benchmark
+    from quantmaster.portfolio import Ledger, daily_nav, nav_warnings, nav_with_benchmark
 
     ledger = Ledger()
     trades = ledger.trades()
@@ -402,6 +402,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
         payload["twr"] = [round(float(v), 6) for v in nav["twr_nav"]]
     payload["assets"] = _series_to_points(nav["total_assets"])
     payload["pnl"] = _series_to_points(nav["pnl"])
+    payload["warnings"] = nav_warnings(nav)
     return payload
 
 

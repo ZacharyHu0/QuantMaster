@@ -228,7 +228,7 @@ def cmd_ledger(args) -> None:
 
         from quantmaster.data import load_history
         from quantmaster.data.storage import BarStore
-        from quantmaster.portfolio import daily_nav, nav_with_benchmark
+        from quantmaster.portfolio import daily_nav, nav_warnings, nav_with_benchmark
 
         trades = ledger.trades()
         if trades.empty:
@@ -245,6 +245,8 @@ def cmd_ledger(args) -> None:
             except Exception as e:
                 print(f"  {symbol} 行情缺失（按最近成交价估值）: {e}", file=sys.stderr)
         nav = daily_nav(ledger, pd.DataFrame(prices))
+        for warning in nav_warnings(nav):
+            print(f"⚠️  {warning}", file=sys.stderr)
         summary = {
             "as_of": str(nav.index[-1].date()),
             "total_assets": round(float(nav["total_assets"].iloc[-1]), 2),

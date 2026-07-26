@@ -170,13 +170,20 @@ def daily_nav(ledger: Ledger, prices: pd.DataFrame, end: str | None = None) -> p
     pnl = total_assets - net_invested
 
     # ---- TWR：逐日剔除外部出入金（分红不算外部流入，留在收益里）----
-    external_flow = deposit - withdraw
+    # 口径：入金按「期初流量」进分母，出金按「期末流量」加回分子：
+    #     r_t = (assets_t + withdraw_t) / (assets_{t-1} + deposit_t) - 1
+    # 为什么不能用 (assets_t - flow_t) / assets_{t-1}：当日入金当日买入时，
+    # 盈亏在分子里、本金却不在分母里，收益会被前日小基数放大出百倍失真
+    # （极端时净值转负）。入金进分母后，入金当日的持仓盈亏按正确本金计算；
+    # 入金闲置时 r_t 恰为 0，与旧口径一致。
     prev_assets = total_assets.shift(1).fillna(0.0)
+    base = prev_assets + deposit
     daily_return = pd.Series(0.0, index=index)
-    # 昨日资产为 0（含当日才首次入金）时无「本金」可言，该日收益记 0
-    has_base = prev_assets > 1e-9
+    # 本金基数 <= 0（空账本起步、或漏记入金导致资产为负）时该日收益记 0，
+    # 防止负基数把 cumprod 链条永久打坏
+    has_base = base > 1e-9
     daily_return[has_base] = (
-        (total_assets[has_base] - external_flow[has_base]) / prev_assets[has_base] - 1.0
+        (total_assets[has_base] + withdraw[has_base]) / base[has_base] - 1.0
     )
     twr_nav = (1.0 + daily_return).cumprod()
 
@@ -191,6 +198,25 @@ def daily_nav(ledger: Ledger, prices: pd.DataFrame, end: str | None = None) -> p
         },
         index=index,
     )
+
+
+def nav_warnings(nav_df: pd.DataFrame) -> list[str]:
+    """账本数据质量检查。返回的警告通常意味着漏记了出入金，收益率不可信。"""
+    warnings: list[str] = []
+    if nav_df is None or nav_df.empty:
+        return warnings
+    negative_cash = nav_df["cash"] < -1e-6
+    if negative_cash.any():
+        first = nav_df.index[negative_cash][0]
+        warnings.append(
+            f"现金余额自 {pd.Timestamp(first).date()} 起为负：很可能漏记了入金记录"
+            "（qm ledger cash --amount ... --kind deposit），收益率指标不可信"
+        )
+    held = nav_df["position_value"] > 1e-6
+    no_invest = nav_df["net_invested"] <= 1e-6
+    if (held & no_invest).any():
+        warnings.append("存在持仓但累计净入金为 0：请先补录入金，再看收益率")
+    return warnings
 
 
 def _annualize_ratio(total_ratio: float, n_days: int) -> float:

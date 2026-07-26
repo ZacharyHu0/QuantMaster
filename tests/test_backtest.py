@@ -170,6 +170,33 @@ class TestStopLoss:
         assert len(takes) == 1
         assert takes[0].date == str(dates[5].date())
 
+    def test_limit_down_deferred_stop_freezes_buys(self):
+        """跌停顺延止损的当日也不允许加仓——否则摊低均价后止损线永远追不上。"""
+        panel = flat_panel(price=10.0, days=12)
+        # 第 6 天起一字跌停（开盘即 -10%），止损单排不上队
+        for df in (panel["open"], panel["close"], panel["high"], panel["low"]):
+            df.iloc[5:] = 9.0
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[:] = 1.0   # 信号一直要求满仓
+        result = run_backtest(panel, weights, BacktestConfig(stop_loss=0.05))
+        limit_day = str(dates[5].date())
+        buys_on_limit_day = [t for t in result.trades
+                             if t.side == "buy" and t.date == limit_day]
+        assert not buys_on_limit_day, "跌停顺延日不应继续买入摊低成本"
+
+    def test_suspension_keeps_last_valuation(self):
+        """连续停牌（缺价）期间持仓按最近有效收盘价估值，净值不应塌陷。"""
+        panel = flat_panel(price=10.0, days=12)
+        for df in (panel["open"], panel["close"], panel["high"], panel["low"]):
+            df.iloc[6:9] = np.nan    # 停牌 3 天
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+        result = run_backtest(panel, weights)
+        suspended_nav = result.nav.iloc[6:9]
+        assert (suspended_nav > 0.9).all(), "停牌期间净值不应按 0 估值塌陷"
+
     def test_stopped_symbol_not_rebought_same_day(self):
         """止损当日即使信号仍要求持有，也不回补。"""
         panel = self._panel_with_drop()

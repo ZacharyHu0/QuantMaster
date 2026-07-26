@@ -27,6 +27,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -192,9 +194,13 @@ def grid_search(
                     )
                     for col in metric_columns:
                         row[col] = float(result.metrics.get(col, np.nan))
-                except Exception:   # 单组合失败记 NaN，不中断网格
-                    pass
+                except Exception as e:   # 单组合失败记 NaN，不中断网格
+                    logging.getLogger(__name__).warning(
+                        "网格组合失败 factor=%s top_n=%s rebalance=%s: %s",
+                        name, top_n, rebalance, e)
                 rows.append(row)
 
     df = pd.DataFrame(rows)
-    return df.sort_values(metric, ascending=False, na_position="last").reset_index(drop=True)
+    # 排序方向按指标极性：max_drawdown 越小越好，其余越大越好
+    ascending = metric == "max_drawdown"
+    return df.sort_values(metric, ascending=ascending, na_position="last").reset_index(drop=True)

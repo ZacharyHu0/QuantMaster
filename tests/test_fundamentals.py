@@ -231,18 +231,20 @@ class TestFundamentalPanel:
         assert result["pe_ttm"].loc["2023-03-01", "000001.SZ"] == 11.0
 
     def test_panel_roe_respects_publication_lag(self, monkeypatch):
-        """面板中的 ROE 已含 45 天发布滞后：一季报 5-15 才生效。"""
+        """面板中的 ROE 按披露截止日滞后：年报 +120 天、一季报 +31 天。"""
         symbols = list(self.SYMBOLS)
         self._seed_cache(symbols)
         self._forbid_network(monkeypatch)
 
         roe = fundamental_panel(symbols, self.START, self.END)["roe"]
-        # 2022 年报（12-31）+45 天 = 2-14 可见；此前 NaN
-        assert pd.isna(roe.loc["2023-02-13", "600000.SH"])
-        assert roe.loc["2023-02-14", "600000.SH"] == 10.0
-        # 2023 一季报（3-31）+45 天 = 5-15 可见；5-12 仍是年报的值
-        assert roe.loc["2023-05-12", "600000.SH"] == 10.0
-        assert roe.loc["2023-05-15", "600000.SH"] == 12.0
+        # 2022 年报（12-31）+120 天 = 2023-04-30 可见；此前 NaN
+        assert pd.isna(roe.loc["2023-02-14", "600000.SH"])
+        assert pd.isna(roe.loc["2023-04-28", "600000.SH"])
+        # 2023 一季报（3-31）+31 天 = 5-01 可见——注意一季报比上年年报先「可见」，
+        # 这正是 A 股的真实披露节奏（年报最晚 4-30，一季报也是 4 月底前后）
+        first_visible = roe["600000.SH"].first_valid_index()
+        assert str(first_visible.date()) >= "2023-05-01"
+        assert roe.loc["2023-05-04", "600000.SH"] == 12.0
 
     def test_panel_skips_failed_symbol(self, monkeypatch, caplog):
         """无缓存且获取失败的标的被跳过并告警，其余标的正常返回。"""

@@ -101,3 +101,22 @@ class TestGridSearch:
     def test_unknown_metric_raises(self, panel):
         with pytest.raises(ValueError):
             grid_search(panel, ["mom_20d"], top_ns=[2], rebalances=["W"], metric="alpha")
+
+
+class TestGridSortDirection:
+    def test_max_drawdown_sorted_ascending(self, panel):
+        """回撤越小越好：metric=max_drawdown 时第一行必须是回撤最小的组合。"""
+        from quantmaster.backtest.validation import grid_search
+
+        df = grid_search(panel, factor_names=["mom_20d", "rev_5d"],
+                         top_ns=[3], rebalances=["W"], metric="max_drawdown")
+        valid = df["max_drawdown"].dropna()
+        assert df.iloc[0]["max_drawdown"] == valid.min()
+
+    def test_sharpe_sorted_descending(self, panel):
+        from quantmaster.backtest.validation import grid_search
+
+        df = grid_search(panel, factor_names=["mom_20d", "rev_5d"],
+                         top_ns=[3], rebalances=["W"], metric="sharpe")
+        valid = df["sharpe"].dropna()
+        assert df.iloc[0]["sharpe"] == valid.max()

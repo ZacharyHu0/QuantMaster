@@ -116,6 +116,7 @@ def run_backtest(
     cash = config.initial_capital
     shares: dict[str, float] = {s: 0.0 for s in symbols}
     entry_cost: dict[str, float] = {s: 0.0 for s in symbols}   # 持仓的加权平均成本
+    last_close: dict[str, float] = {}   # 最近一个有效收盘价（停牌估值用）
     trades: list[Trade] = []
     nav_values: list[float] = []
     position_rows: list[dict] = []
@@ -144,10 +145,13 @@ def run_backtest(
                     reason = "take_profit"
                 if reason is None:
                     continue
-                # 跌停无法卖出：止损单也排不上队，只能顺延
+                # 跌停无法卖出：止损单也排不上队，只能顺延。
+                # 但仍要冻结当日对该票的加仓——否则调仓信号会继续买入摊低均价，
+                # 止损线随之下移，可能永远触发不了。
                 pc = day_prev_close_sl.get(symbol, np.nan)
                 limit = price_limit(symbol)
                 if config.limit_check and not np.isnan(pc) and px <= pc * (1 - limit) * 1.002:
+                    stopped_today.add(symbol)
                     continue
                 exec_px = float(px) * (1 - tcfg.slippage)
                 amount = shares[symbol] * exec_px
@@ -247,11 +251,12 @@ def run_backtest(
         position_value = 0.0
         row = {"date": date}
         for symbol in symbols:
+            px = day_close.get(symbol, np.nan)
+            if not np.isnan(px):
+                last_close[symbol] = float(px)
             if shares[symbol] > 0:
-                px = day_close.get(symbol, np.nan)
-                if np.isnan(px):
-                    px = prev_close.loc[date].get(symbol, np.nan)
-                value = shares[symbol] * (0.0 if np.isnan(px) else float(px))
+                # 停牌（连续缺价）按最近一个有效收盘价估值，避免市值先塌陷后跳回
+                value = shares[symbol] * last_close.get(symbol, 0.0)
                 position_value += value
                 row[symbol] = value
         nav_values.append(cash + position_value)

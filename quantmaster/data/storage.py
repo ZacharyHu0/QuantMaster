@@ -45,13 +45,17 @@ class BarStore:
         except Exception:
             return None
 
-    def put(self, symbol: str, df: pd.DataFrame) -> None:
+    def put(self, symbol: str, df: pd.DataFrame, replace: bool = False) -> None:
+        """写入缓存。replace=True 整体替换（前复权数据必须整段替换，
+        增量合并会混合不同复权基准，见 registry.load_history 的说明）。"""
         if df is None or df.empty:
             return
-        old = self.get(symbol)
-        if old is not None and not old.empty:
-            df = pd.concat([old, df])
-            df = df[~df.index.duplicated(keep="last")].sort_index()
+        if not replace:
+            old = self.get(symbol)
+            if old is not None and not old.empty:
+                df = pd.concat([old, df])
+                df = df[~df.index.duplicated(keep="last")].sort_index()
+        df = df.sort_index()
         df.to_parquet(self._path(symbol))
         with self._conn() as conn:
             conn.execute(

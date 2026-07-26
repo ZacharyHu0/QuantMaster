@@ -134,7 +134,17 @@ def ledger_report(ledger: Ledger, prices: dict[str, float] | None = None) -> dic
     realized_total = sum(p.realized_pnl for p in positions)
     total_pnl = total_assets - net_invested
 
+    warnings: list[str] = []
+    if cash < -1e-6:
+        warnings.append(
+            "现金余额为负：很可能漏记了入金记录（qm ledger cash --amount ... --kind deposit），"
+            "收益率指标不可信"
+        )
+    if market_value > 1e-6 and net_invested <= 1e-6:
+        warnings.append("存在持仓但累计净入金为 0：请先补录入金，再看收益率")
+
     return {
+        "warnings": warnings,
         "as_of": today,
         "total_assets": round(total_assets, 2),
         "cash": round(cash, 2),

@@ -115,19 +115,27 @@ def ic_weighted_combine(
     else:
         raw = rolling_mean
 
-    # 防未来函数：T 日权重只能用 T-1 日及更早的 IC（见函数 docstring）
-    raw = raw.shift(1)
+    # 防未来函数：T 日权重只能用 T-1 日及更早的 IC（见函数 docstring）。
+    # 先对齐到行情全索引再 shift：IC 序列因末日 forward return 缺失比行情短一天，
+    # 若直接 shift，最后一个交易日（实盘出信号的那天）会拿不到权重。
+    raw = raw.reindex(close.index).shift(1)
 
     # 截面归一：按绝对值之和缩放，保留正负号（负 IC -> 负权重 -> 自动反向）
     denom = raw.abs().sum(axis=1)
     weights = raw.div(denom.where(denom > 0), axis=0)
 
+    # 合成时对「部分因子缺失」的股票按可得因子的 |权重| 重归一，
+    # 避免缺失值被当 0 参与加权（否则部分覆盖的股票合成值被系统性压向 0）。
     combined: pd.DataFrame | None = None
+    coverage: pd.DataFrame | None = None
     for name, vals in values.items():
         w = weights[name].reindex(vals.index)
-        term = vals.mul(w, axis=0)
+        term = vals.fillna(0.0).mul(w, axis=0)
         combined = term if combined is None else combined.add(term, fill_value=0.0)
-    assert combined is not None
+        cov = vals.notna().astype(float).mul(w.abs(), axis=0)
+        coverage = cov if coverage is None else coverage.add(cov, fill_value=0.0)
+    assert combined is not None and coverage is not None
+    combined = combined / coverage.where(coverage > 0)
     return combined, weights
 
 

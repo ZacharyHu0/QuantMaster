@@ -168,3 +168,37 @@ class TestGreedySelect:
         close = make_panel(days=150, n=30, seed=21)["close"]
         values = self._three_factors(close)
         assert greedy_select(values, close, max_corr=0.6, top_k=1) == ["A"]
+
+
+class TestLastDayWeights:
+    def test_combined_last_row_not_all_nan(self, panel):
+        """最后一个交易日（实盘出信号那天）必须有合成值：权重来自 T-1 及更早的 IC。"""
+        from quantmaster.factors import BUILTIN_FACTORS, compute_factors
+        from quantmaster.factors.composite import ic_weighted_combine
+
+        values = compute_factors(
+            [BUILTIN_FACTORS["mom_20d"], BUILTIN_FACTORS["rev_5d"]], panel)
+        combined, weights = ic_weighted_combine(values, panel["close"], lookback=20)
+        assert combined.iloc[-1].notna().any(), "末日合成因子全 NaN——实盘拿不到信号"
+        assert weights.iloc[-1].notna().any(), "末日权重缺失"
+
+    def test_partial_coverage_renormalized(self, panel):
+        """某股票缺一个因子值时，按可得因子的 |权重| 重归一，而不是当 0。"""
+        import numpy as np
+
+        from quantmaster.factors import BUILTIN_FACTORS, compute_factors
+        from quantmaster.factors.composite import ic_weighted_combine
+
+        values = compute_factors(
+            [BUILTIN_FACTORS["mom_20d"], BUILTIN_FACTORS["rev_5d"]], panel)
+        sym = panel["close"].columns[0]
+        a, b = list(values)
+        _full, _ = ic_weighted_combine(values, panel["close"], lookback=20)
+        # 人为挖掉一个因子在末段的值
+        values[a].iloc[-30:, values[a].columns.get_loc(sym)] = np.nan
+        partial, weights = ic_weighted_combine(values, panel["close"], lookback=20)
+        last = partial.index[-1]
+        wb = weights.loc[last, b]
+        if not np.isnan(wb) and abs(wb) > 1e-12:
+            expected = values[b].loc[last, sym] * np.sign(wb)
+            assert partial.loc[last, sym] == pytest.approx(expected, rel=1e-6)

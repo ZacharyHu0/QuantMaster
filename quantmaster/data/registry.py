@@ -60,25 +60,39 @@ def load_history(
     """加载单只标的的标准化日线，命中缓存则不请求网络。"""
     store = store or BarStore()
     cfg = get_config()
+    cached = store.get(symbol)
     if use_cache:
-        cached = store.get(symbol)
         fresh = store.freshness(symbol)
         if cached is not None and not cached.empty and fresh is not None:
             covers = str(cached.index.min().date()) <= start and str(cached.index.max().date()) >= end
-            if covers or fresh < cfg.data.cache_days * 86400:
+            # 「新鲜」只保证 end 端接近今天，还必须覆盖 start 端，
+            # 否则长区间请求会被无声截断成缓存里的短区间
+            fresh_enough = (
+                fresh < cfg.data.cache_days * 86400
+                and str(cached.index.min().date()) <= start
+            )
+            if covers or fresh_enough:
                 sliced = cached.loc[start:end]
                 if not sliced.empty:
                     return sliced
+
+    # 触网时把请求区间放宽到与旧缓存的并集并整体替换缓存，而不是增量合并：
+    # A 股数据源默认前复权（qfq），除权除息后全体历史价会重算，
+    # 增量合并会把两种复权基准拼进同一序列，接缝处出现虚假跳空。
+    fetch_start, fetch_end = start, end
+    if cached is not None and not cached.empty:
+        fetch_start = min(start, str(cached.index.min().date()))
+        fetch_end = max(end, str(cached.index.max().date()))
 
     market = guess_market(symbol)
     errors = []
     for factory in _factories().get(market, []):
         try:
             source = factory()
-            df = source.daily(symbol, start, end)
+            df = source.daily(symbol, fetch_start, fetch_end)
             if df is not None and not df.empty:
-                store.put(symbol, df)
-                return df
+                store.put(symbol, df, replace=True)
+                return df.loc[start:end]
             errors.append(f"{factory.__name__}: 返回空数据")
         except Exception as e:
             errors.append(f"{factory.__name__}: {e}")

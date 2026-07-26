@@ -1,5 +1,7 @@
 """因子表达式引擎、算子与分析的测试。"""
 
+from typing import ClassVar
+
 import pandas as pd
 import pytest
 
@@ -108,3 +110,78 @@ class TestAnalysis:
         report = analyze_factor(values, panel["close"])
         first = report.quantile_returns.iloc[0]
         assert ((first - 1).abs() < 0.1).all()
+
+
+class TestCacheReplaceSemantics:
+    def test_refetch_replaces_mixed_adjustment_bases(self, tmp_path, monkeypatch):
+        """前复权数据触网必须整段重拉替换缓存，不得与旧复权基准增量合并。"""
+        import pandas as pd
+
+        from quantmaster.data import registry
+        from quantmaster.data.base import DataSource, Market
+        from quantmaster.data.storage import BarStore
+
+        store = BarStore(root=tmp_path / "bars")
+        old_dates = pd.bdate_range("2024-01-02", "2024-06-28")
+        # 旧缓存：旧复权基准，恒价 100
+        old = pd.DataFrame({c: 100.0 for c in ["open", "high", "low", "close"]},
+                           index=old_dates)
+        old["volume"] = 1e6
+        store.put("600000.SH", old)
+
+        # 模拟除权后的新基准：全体历史价 ×0.8（qfq 语义）
+        class FakeSource(DataSource):
+            name = "fake"
+            markets = (Market.CN,)
+            calls: ClassVar[list[tuple[str, str]]] = []
+
+            def daily(self, symbol, start, end):
+                FakeSource.calls.append((start, end))
+                dates = pd.bdate_range(start, "2024-12-31")
+                df = pd.DataFrame({c: 80.0 for c in ["open", "high", "low", "close"]},
+                                  index=dates)
+                df["volume"] = 1e6
+                return df
+
+        monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
+        # 让缓存「过期」以强制触网
+        with store._conn() as conn:
+            conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
+
+        registry.load_history("600000.SH", "2024-07-01", "2024-12-31", store=store)
+        # 触网请求必须放宽到旧缓存起点（整段重拉）
+        assert FakeSource.calls[0][0] <= "2024-01-02"
+        # 缓存整体替换成新基准：不存在 100 与 80 的接缝跳空
+        cached = store.get("600000.SH")
+        returns = cached["close"].pct_change().dropna()
+        assert float(returns.abs().max()) < 1e-9, "缓存中出现复权基准接缝跳变"
+
+    def test_fresh_cache_must_cover_start(self, tmp_path, monkeypatch):
+        """『新鲜但不覆盖 start』的缓存不得截断长区间请求。"""
+        import pandas as pd
+
+        from quantmaster.data import registry
+        from quantmaster.data.base import DataSource, Market
+        from quantmaster.data.storage import BarStore
+
+        store = BarStore(root=tmp_path / "bars")
+        short_dates = pd.bdate_range("2024-06-03", "2024-06-28")
+        short = pd.DataFrame({c: 10.0 for c in ["open", "high", "low", "close"]},
+                             index=short_dates)
+        short["volume"] = 1e6
+        store.put("600000.SH", short)   # 新鲜（刚写入）但只覆盖 6 月
+
+        class FullSource(DataSource):
+            name = "full"
+            markets = (Market.CN,)
+
+            def daily(self, symbol, start, end):
+                dates = pd.bdate_range(start, end)
+                df = pd.DataFrame({c: 10.0 for c in ["open", "high", "low", "close"]},
+                                  index=dates)
+                df["volume"] = 1e6
+                return df
+
+        monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FullSource]})
+        df = registry.load_history("600000.SH", "2024-01-02", "2024-06-28", store=store)
+        assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
