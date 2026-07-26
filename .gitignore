@@ -13,8 +13,8 @@ venv/
 .coverage
 htmlcov/
 
-# QuantMaster local data
-data/
+# QuantMaster local data（仅仓库根目录的 data/，勿写成 data/ 以免误伤 quantmaster/data 源码包）
+/data/
 *.sqlite
 *.sqlite3
 *.db
