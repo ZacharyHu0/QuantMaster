@@ -27,6 +27,8 @@ class BacktestConfig:
     trade: TradeConfig = field(default_factory=lambda: get_config().trade)
     limit_check: bool = True         # 是否启用涨跌停约束
     allow_fractional: bool = False   # True 时忽略 100 股整手限制（研究用）
+    stop_loss: float | None = None   # 止损线：开盘价较持仓成本跌幅 ≥ 该比例则清仓（如 0.08）
+    take_profit: float | None = None # 止盈线：开盘价较持仓成本涨幅 ≥ 该比例则清仓（如 0.25）
 
 
 @dataclass
@@ -113,6 +115,7 @@ def run_backtest(
 
     cash = config.initial_capital
     shares: dict[str, float] = {s: 0.0 for s in symbols}
+    entry_cost: dict[str, float] = {s: 0.0 for s in symbols}   # 持仓的加权平均成本
     trades: list[Trade] = []
     nav_values: list[float] = []
     position_rows: list[dict] = []
@@ -121,6 +124,41 @@ def run_backtest(
 
     for i, date in enumerate(dates):
         date_str = str(date.date())
+        stopped_today: set[str] = set()
+
+        # ---- 开盘：止损/止盈检查（先于调仓信号执行）----
+        if config.stop_loss is not None or config.take_profit is not None:
+            day_open_sl = open_px.loc[date]
+            day_prev_close_sl = prev_close.loc[date]
+            for symbol in symbols:
+                if shares[symbol] <= 0 or entry_cost[symbol] <= 0:
+                    continue
+                px = day_open_sl.get(symbol, np.nan)
+                if np.isnan(px) or px <= 0:
+                    continue
+                change = px / entry_cost[symbol] - 1.0
+                reason = None
+                if config.stop_loss is not None and change <= -config.stop_loss:
+                    reason = "stop_loss"
+                elif config.take_profit is not None and change >= config.take_profit:
+                    reason = "take_profit"
+                if reason is None:
+                    continue
+                # 跌停无法卖出：止损单也排不上队，只能顺延
+                pc = day_prev_close_sl.get(symbol, np.nan)
+                limit = price_limit(symbol)
+                if config.limit_check and not np.isnan(pc) and px <= pc * (1 - limit) * 1.002:
+                    continue
+                exec_px = float(px) * (1 - tcfg.slippage)
+                amount = shares[symbol] * exec_px
+                sell_cost = _sell_cost(amount, tcfg)
+                cash += amount - sell_cost
+                trades.append(Trade(date_str, symbol, "sell", round(exec_px, 4),
+                                    shares[symbol], round(amount, 2), round(sell_cost, 2),
+                                    note=reason))
+                shares[symbol] = 0.0
+                entry_cost[symbol] = 0.0
+                stopped_today.add(symbol)   # 当日不再重新买入，避免止损即回补
 
         # ---- 开盘：执行昨日信号 ----
         if pending is not None:
@@ -172,9 +210,13 @@ def run_backtest(
                     cost = _sell_cost(amount, tcfg)
                     cash += amount - cost
                     shares[symbol] -= sell_shares
+                    if shares[symbol] <= 1e-9:
+                        entry_cost[symbol] = 0.0   # 清仓后重置成本（部分卖出保持均价不变）
                     trades.append(Trade(date_str, symbol, "sell", round(exec_px, 4),
                                         sell_shares, round(amount, 2), round(cost, 2)))
                 elif diff_value > 0:
+                    if symbol in stopped_today:
+                        continue   # 当日刚止损/止盈的股票不立即回补
                     # 涨停无法买入
                     if config.limit_check and not np.isnan(pc) and px >= pc * (1 + limit) * 0.998:
                         continue
@@ -190,7 +232,12 @@ def run_backtest(
                     if amount + cost > cash + 1e-6:
                         continue
                     cash -= amount + cost
+                    prev_shares = shares[symbol]
                     shares[symbol] += buy_shares
+                    # 加权平均持仓成本（不含费用，止损线以成交价为基准）
+                    entry_cost[symbol] = (
+                        (prev_shares * entry_cost[symbol] + buy_shares * exec_px) / shares[symbol]
+                    )
                     trades.append(Trade(date_str, symbol, "buy", round(exec_px, 4),
                                         buy_shares, round(amount, 2), round(cost, 2)))
             pending = None

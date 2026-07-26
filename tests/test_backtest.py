@@ -127,6 +127,62 @@ class TestStrategy:
         assert active.iloc[0].sum() == pytest.approx(1.0)
 
 
+class TestStopLoss:
+    def _panel_with_drop(self):
+        """恒价 10 元买入后，第 5 天起分两天阴跌到 8.8（避开一次性跌停无法卖出）。"""
+        panel = flat_panel(price=10.0, days=12)
+        for df in (panel["open"], panel["close"], panel["high"], panel["low"]):
+            df.iloc[5:] = 9.5
+            df.iloc[6:] = 8.8
+        return panel
+
+    def test_stop_loss_triggers(self):
+        panel = self._panel_with_drop()
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+        result = run_backtest(panel, weights, BacktestConfig(stop_loss=0.10))
+        stops = [t for t in result.trades if t.note == "stop_loss"]
+        assert len(stops) == 1
+        # 开盘价 8.8 相对成本 10 跌 12%，第 7 个交易日触发
+        assert stops[0].date == str(dates[6].date())
+        # 止损后空仓：期末净值 ≈ 现金
+        assert result.positions.iloc[-1].sum() == 0
+
+    def test_no_stop_without_config(self):
+        panel = self._panel_with_drop()
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+        result = run_backtest(panel, weights)
+        assert all(t.note != "stop_loss" for t in result.trades)
+
+    def test_take_profit_triggers(self):
+        panel = flat_panel(price=10.0, days=12)
+        for df in (panel["open"], panel["close"], panel["high"], panel["low"]):
+            df.iloc[4:] = 10.9
+            df.iloc[5:] = 11.8
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+        result = run_backtest(panel, weights, BacktestConfig(take_profit=0.15))
+        takes = [t for t in result.trades if t.note == "take_profit"]
+        assert len(takes) == 1
+        assert takes[0].date == str(dates[5].date())
+
+    def test_stopped_symbol_not_rebought_same_day(self):
+        """止损当日即使信号仍要求持有，也不回补。"""
+        panel = self._panel_with_drop()
+        dates = panel["close"].index
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[:] = 1.0   # 每天都发满仓信号
+        result = run_backtest(panel, weights, BacktestConfig(stop_loss=0.10))
+        stop_date = next(t.date for t in result.trades if t.note == "stop_loss")
+        buys_on_stop_day = [t for t in result.trades
+                            if t.side == "buy" and t.date == stop_date]
+        assert not buys_on_stop_day
+
+
 class TestNoLookahead:
     def test_shifted_signal_equals_original(self):
         """引擎只在信号次日交易：把行情整体后移一天，交易日期应同样后移。"""

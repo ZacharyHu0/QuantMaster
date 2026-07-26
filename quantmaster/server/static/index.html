@@ -399,11 +399,18 @@ document.getElementById('bt-form').onsubmit = async e => {
 
 /* ---------- 挖掘 ---------- */
 function renderMined(list, extraCols) {
-  const rows = list.map(f => `<tr><td><code>${esc(f.expression)}</code></td>
+  const rows = list.map(f => `<tr><td><code class="mined-expr" style="cursor:pointer" title="点击填入因子页验证">${esc(f.expression)}</code></td>
     <td class="${cls(f.ic_mean)}">${(+f.ic_mean).toFixed(4)}</td><td>${(+f.icir).toFixed(3)}</td>${extraCols(f)}</tr>`).join('');
-  return `<div class="panel"><h3>挖掘结果（点击表达式可复制到因子页验证）</h3>
+  return `<div class="panel"><h3>挖掘结果（点击表达式 → 跳转因子页体检）</h3>
     <table><thead><tr><th>表达式</th><th>RankIC</th><th>ICIR</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+document.getElementById('mine-out').addEventListener('click', e => {
+  const code = e.target.closest('code.mined-expr');
+  if (!code) return;
+  document.querySelector('#factor-form [name=expression]').value = code.textContent;
+  document.querySelector('nav button[data-tab="factor"]').click();
+  document.getElementById('factor-form').requestSubmit();
+});
 document.getElementById('gp-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   const out = document.getElementById('mine-out');
