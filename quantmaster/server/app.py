@@ -107,9 +107,10 @@ def market_history(symbol: str, start: str = "2023-01-01", end: str | None = Non
 
 @app.get("/api/factors")
 def factors_list() -> dict:
+    from quantmaster.factors.fundamental import list_fundamental_factors
     from quantmaster.factors.library import list_factors
 
-    return {"factors": list_factors()}
+    return {"factors": list_factors() + list_fundamental_factors()}
 
 
 class FactorTestRequest(BaseModel):
@@ -125,12 +126,12 @@ def factors_test(req: FactorTestRequest) -> dict:
     from quantmaster.data import load_panel
     from quantmaster.data.universe import load_universe
     from quantmaster.factors import analyze_factor, compute_factor
-    from quantmaster.factors.library import get_factor
+    from quantmaster.factors.fundamental import resolve_factor
 
     end = req.end or str(pd.Timestamp.now().date())
     try:
-        factor = get_factor(req.expression)
         symbols = load_universe(req.universe)
+        factor = resolve_factor(req.expression, symbols, req.start, end)
         panel = load_panel(symbols, req.start, end)
         values = compute_factor(factor, panel)
         report = analyze_factor(values, panel["close"], name=factor.name,
@@ -165,14 +166,14 @@ def backtest_run(req: BacktestRequest) -> dict:
     from quantmaster.backtest import BacktestConfig, FactorStrategy, full_report, run_backtest
     from quantmaster.data import load_history, load_panel
     from quantmaster.data.universe import load_universe
-    from quantmaster.factors.library import get_factor
+    from quantmaster.factors.fundamental import resolve_factor
 
     end = req.end or str(pd.Timestamp.now().date())
     try:
         symbols = load_universe(req.universe)
         panel = load_panel(symbols, req.start, end)
-        strategy = FactorStrategy(get_factor(req.factor), top_n=req.top_n,
-                                  rebalance=req.rebalance)
+        strategy = FactorStrategy(resolve_factor(req.factor, symbols, req.start, end),
+                                  top_n=req.top_n, rebalance=req.rebalance)
         weights = strategy.target_weights(panel)
         benchmark = None
         try:
@@ -220,12 +221,13 @@ def factors_validate(req: ValidateRequest) -> dict:
     from quantmaster.backtest import train_test_ic, walk_forward_ic
     from quantmaster.data import load_panel
     from quantmaster.data.universe import load_universe
-    from quantmaster.factors.library import get_factor
+    from quantmaster.factors.fundamental import resolve_factor
 
     end = req.end or str(pd.Timestamp.now().date())
     try:
-        factor = get_factor(req.expression)
-        panel = load_panel(load_universe(req.universe), req.start, end)
+        symbols = load_universe(req.universe)
+        factor = resolve_factor(req.expression, symbols, req.start, end)
+        panel = load_panel(symbols, req.start, end)
         result = train_test_ic(factor, panel, split=req.split)
         segments = walk_forward_ic(factor, panel, n_splits=req.n_splits)
         result["segments"] = [

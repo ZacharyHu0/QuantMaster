@@ -78,6 +78,40 @@ _FACTOR_SPECS: tuple[tuple[str, str, Callable[[pd.DataFrame], pd.DataFrame], str
 )
 
 
+# 全部基本面因子名（无需数据即可判断某个名字是不是基本面因子）
+FUNDAMENTAL_FACTOR_NAMES: tuple[str, ...] = tuple(spec[0] for spec in _FACTOR_SPECS)
+
+
+def list_fundamental_factors() -> list[dict]:
+    """基本面因子清单（含说明），供 CLI/Web 展示；不触网。"""
+    return [
+        {"name": name, "description": f"[基本面] {desc}", "expression": ""}
+        for name, _field, _transform, desc in _FACTOR_SPECS
+    ]
+
+
+def resolve_factor(name_or_expr: str, symbols: list[str], start: str, end: str) -> Factor:
+    """统一因子入口：内置量价因子 / 表达式 / 基本面因子（自动拉数）。
+
+    基本面因子首次使用会触网拉取估值/财务数据（此后走本地缓存）；
+    其余情况与 quantmaster.factors.library.get_factor 行为一致。
+    """
+    from quantmaster.factors.library import get_factor
+
+    if name_or_expr in FUNDAMENTAL_FACTOR_NAMES:
+        from quantmaster.data.fundamentals import fundamental_panel
+
+        fund = fundamental_panel(symbols, start, end)
+        factors = make_fundamental_factors(fund)
+        if name_or_expr not in factors:
+            raise ValueError(
+                f"基本面因子 {name_or_expr} 数据获取失败（依赖字段缺失），"
+                f"可用: {sorted(factors) or '无'}"
+            )
+        return factors[name_or_expr]
+    return get_factor(name_or_expr)
+
+
 def make_fundamental_factors(fund_panel: dict[str, pd.DataFrame]) -> dict[str, Factor]:
     """由基本面面板（fundamental_panel 的输出）构造价值/质量因子字典。
 

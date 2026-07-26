@@ -264,3 +264,52 @@ class TestFundamentalPanel:
 
         result = fundamental_panel(["600000.SH"], self.START, self.END, fields=["pe_ttm", "nonexist"])
         assert set(result) == {"pe_ttm"}
+
+
+class TestResolveFactor:
+    """resolve_factor 统一入口：表达式/内置/基本面三类都能解析（离线）。"""
+
+    START, END = "2023-01-02", "2023-06-30"
+
+    def _seed(self):
+        store = fundamental_store()
+        dates = pd.bdate_range(self.START, self.END)
+        indicators = pd.DataFrame(
+            {"pe": 15.0, "pe_ttm": 10.0, "pb": 2.0, "dv_ratio": 3.0, "total_mv": 1e10},
+            index=dates)
+        store.put("600000.SH", indicators)
+
+    def test_resolves_builtin_and_expression(self):
+        from quantmaster.factors.fundamental import resolve_factor
+
+        f1 = resolve_factor("mom_20d", ["600000.SH"], self.START, self.END)
+        assert f1.name == "mom_20d"
+        f2 = resolve_factor("rank(-delta(close, 5))", ["600000.SH"], self.START, self.END)
+        assert "delta" in f2.name
+
+    def test_resolves_fundamental_from_cache(self, monkeypatch):
+        from quantmaster.data import fundamentals as mod
+        from quantmaster.factors.fundamental import resolve_factor
+
+        self._seed()
+        monkeypatch.setattr(mod, "fetch_daily_indicators",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应触网")))
+        monkeypatch.setattr(mod, "fetch_quarterly_roe",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应触网")))
+        factor = resolve_factor("ep", ["600000.SH"], self.START, self.END)
+        dates = pd.bdate_range(self.START, self.END)
+        close = pd.DataFrame({"600000.SH": 10.0}, index=dates)
+        values = factor.compute({"close": close})
+        # ep = 1 / pe_ttm = 0.1
+        assert values["600000.SH"].dropna().iloc[-1] == pytest.approx(0.1)
+
+    def test_names_listing(self):
+        from quantmaster.factors.fundamental import (
+            FUNDAMENTAL_FACTOR_NAMES,
+            list_fundamental_factors,
+        )
+
+        assert set(FUNDAMENTAL_FACTOR_NAMES) == {
+            "ep", "bp", "dividend_yield", "small_cap", "roe"}
+        listing = list_fundamental_factors()
+        assert all(item["description"].startswith("[基本面]") for item in listing)

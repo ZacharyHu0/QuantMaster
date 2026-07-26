@@ -81,6 +81,10 @@
 
 <!-- ================= 市场 ================= -->
 <section class="tab active" id="tab-market">
+  <form class="controls" id="mkt-refresh">
+    <button class="primary" type="submit">刷新行情</button>
+    <span class="hint" id="mkt-stamp" style="align-self:center"></span>
+  </form>
   <div id="mkt-groups"><div class="msg">加载全球市场概览中…（首次会逐个拉取并缓存，可能需要 1-2 分钟）</div></div>
   <div class="panel" id="kline-panel" style="display:none">
     <h3 id="kline-title">K线</h3>
@@ -101,8 +105,8 @@
     <label>分组数<input name="quantiles" type="number" value="5" min="2" max="10"></label>
     <button class="primary" type="submit">因子体检</button>
   </form>
-  <div class="hint">内置因子见下拉提示；表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema…
-    字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
+  <div class="hint">内置因子与 <b>基本面因子</b>（ep/bp/dividend_yield/small_cap/roe，首次使用自动拉取估值/财务数据）见下拉提示；
+    表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema… 字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
   <div id="factor-out"></div>
   <div class="panel" style="margin-top:16px">
     <h3>样本外验证（防过拟合）：用上方的因子/股票池，切分日前为训练期、后为验证期</h3>
@@ -291,10 +295,17 @@ async function loadMarket() {
       }
       container.appendChild(grid);
     }
+    document.getElementById('mkt-stamp').textContent =
+      '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
     container.innerHTML = `<div class="err">市场数据加载失败：${esc(e.message)}\n提示：需安装数据依赖 pip install "quantmaster[data]"，且首次加载较慢。</div>`;
   }
 }
+document.getElementById('mkt-refresh').onsubmit = async e => {
+  e.preventDefault(); busy(e.target, true);
+  await loadMarket();
+  busy(e.target, false);
+};
 async function showKline(symbol, name) {
   document.getElementById('kline-panel').style.display = '';
   document.getElementById('kline-title').textContent = `${name}（${symbol}）日K`;

@@ -75,11 +75,13 @@ def cmd_factors(args) -> None:
 
 
 def cmd_factor_test(args) -> None:
+    from quantmaster.data.universe import load_universe
     from quantmaster.factors import analyze_factor, compute_factor
-    from quantmaster.factors.library import get_factor
+    from quantmaster.factors.fundamental import resolve_factor
 
-    factor = get_factor(args.expression)
-    panel = _load_panel(args.universe, args.start, args.end or _today())
+    end = args.end or _today()
+    factor = resolve_factor(args.expression, load_universe(args.universe), args.start, end)
+    panel = _load_panel(args.universe, args.start, end)
     values = compute_factor(factor, panel)
     report = analyze_factor(values, panel["close"], name=factor.name, quantiles=args.quantiles)
     _print_json(report.summary())
@@ -94,11 +96,14 @@ def cmd_backtest(args) -> None:
         yearly_returns,
     )
     from quantmaster.data import load_history
-    from quantmaster.factors.library import get_factor
+    from quantmaster.data.universe import load_universe
+    from quantmaster.factors.fundamental import resolve_factor
 
     end = args.end or _today()
     panel = _load_panel(args.universe, args.start, end)
-    strategy = FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance)
+    strategy = FactorStrategy(
+        resolve_factor(args.factor, load_universe(args.universe), args.start, end),
+        top_n=args.top, rebalance=args.rebalance)
     benchmark = None
     try:
         benchmark = load_history(args.benchmark, args.start, end)["close"]
@@ -120,10 +125,12 @@ def cmd_backtest(args) -> None:
 def cmd_validate(args) -> None:
     """样本外验证：防过拟合的第一道关卡。"""
     from quantmaster.backtest import train_test_ic, walk_forward_ic
-    from quantmaster.factors.library import get_factor
+    from quantmaster.data.universe import load_universe
+    from quantmaster.factors.fundamental import resolve_factor
 
-    factor = get_factor(args.expression)
-    panel = _load_panel(args.universe, args.start, args.end or _today())
+    end = args.end or _today()
+    factor = resolve_factor(args.expression, load_universe(args.universe), args.start, end)
+    panel = _load_panel(args.universe, args.start, end)
     result = train_test_ic(factor, panel, split=args.split)
     _print_json(result)
     print("\n== 滚动分段 IC（稳定性） ==")
