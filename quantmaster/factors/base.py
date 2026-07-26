@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 from abc import ABC, abstractmethod
-from typing import Callable
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -104,7 +104,7 @@ def _validate(node: ast.AST) -> None:
             raise ExpressionError(f"未注册的算子调用: {ast.unparse(node)}")
         if node.keywords:
             raise ExpressionError("表达式不支持关键字参数")
-        func, arity = OPERATORS[node.func.id]
+        _func, arity = OPERATORS[node.func.id]
         if len(node.args) != arity:
             raise ExpressionError(
                 f"算子 {node.func.id} 需要 {arity} 个参数，实际 {len(node.args)} 个"

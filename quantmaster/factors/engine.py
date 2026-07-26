@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quantmaster.factors.base import Factor, PanelDict
 from quantmaster.factors import ops
+from quantmaster.factors.base import Factor, PanelDict
 
 
 def compute_factor(

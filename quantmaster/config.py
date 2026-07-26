@@ -97,7 +97,7 @@ def load_config(path: str | Path | None = None) -> Config:
     candidates = [Path(path)] if path else DEFAULT_CONFIG_PATHS
     for candidate in candidates:
         if candidate.is_file():
-            with open(candidate, "r", encoding="utf-8") as f:
+            with open(candidate, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             _apply_dict(cfg, data)
             break

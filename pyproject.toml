@@ -52,3 +52,11 @@ addopts = "-q"
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "PIE", "RUF"]
+# 数据源降级/爬虫容错场景大量使用宽 except，属有意设计
+ignore = ["RUF001", "RUF002", "RUF003"]  # 全角标点误报（中文注释）
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

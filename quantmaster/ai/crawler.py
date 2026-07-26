@@ -167,7 +167,7 @@ class AICrawler:
                 continue
             if not isinstance(parsed, list):
                 continue
-            for item, result in zip(batch, parsed):
+            for item, result in zip(batch, parsed, strict=False):
                 if not isinstance(result, dict):
                     continue
                 item.symbols = [str(s) for s in result.get("symbols", [])]

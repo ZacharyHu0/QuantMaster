@@ -116,12 +116,12 @@ def parse_json_reply(text: str) -> dict | list:
         text = fence.group(1).strip()
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         # 从第一个 { 或 [ 起截取到最后一个 } 或 ]
         match = re.search(r"([\[{].*[\]}])", text, re.DOTALL)
         if match:
             return json.loads(match.group(1))
-        raise LLMError(f"无法从 LLM 回复解析 JSON: {text[:200]}")
+        raise LLMError(f"无法从 LLM 回复解析 JSON: {text[:200]}") from e
 
 
 def chat(prompt: str, system: str | None = None) -> str:

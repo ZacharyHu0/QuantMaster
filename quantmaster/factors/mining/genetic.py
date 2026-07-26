@@ -60,7 +60,7 @@ class Node:
     def size(self) -> int:
         return 1 + sum(c.size() for c in self.children if isinstance(c, Node))
 
-    def clone(self) -> "Node":
+    def clone(self) -> Node:
         return Node(
             op=self.op,
             children=[c.clone() if isinstance(c, Node) else c for c in self.children],

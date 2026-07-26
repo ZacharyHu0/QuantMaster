@@ -5,8 +5,8 @@ from quantmaster.backtest.strategy import FactorStrategy, Strategy
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
-    "run_backtest",
-    "performance_metrics",
-    "Strategy",
     "FactorStrategy",
+    "Strategy",
+    "performance_metrics",
+    "run_backtest",
 ]

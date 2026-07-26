@@ -63,7 +63,7 @@ class FactorStrategy(Strategy):
         weights = selected.div(counts, axis=0).clip(upper=self.cap_weight).fillna(0.0)
 
         mask = rebalance_mask(close.index, self.rebalance)
-        weights = weights.where(mask, other=pd.NA)   # 非调仓日不发信号
+        weights = weights.where(mask, other=float("nan"))   # 非调仓日不发信号
         return weights
 
 
@@ -74,7 +74,7 @@ class BuyAndHold(Strategy):
 
     def target_weights(self, panel: PanelDict) -> pd.DataFrame:
         close = panel["close"]
-        weights = pd.DataFrame(pd.NA, index=close.index, columns=close.columns, dtype="float64")
+        weights = pd.DataFrame(float("nan"), index=close.index, columns=close.columns)
         first = close.notna().any(axis=1).idxmax()
         n = close.loc[first].notna().sum()
         weights.loc[first] = close.loc[first].notna().astype(float) / max(n, 1)

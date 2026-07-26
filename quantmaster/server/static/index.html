@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuantMaster</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  /* 验证过的暗色图表调色板（dataviz palette, dark mode） */
+  :root {
+    --page: #0d0d0d; --surface: #1a1a19; --border: rgba(255,255,255,0.10);
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --up: #e66767; --down: #0ca30c;   /* A股惯例：红涨绿跌 */
+    --bad: #d03b3b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--page); color: var(--ink); font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; gap: 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--page); z-index: 10; }
+  header h1 { font-size: 18px; letter-spacing: .5px; }
+  header h1 span { color: var(--s1); }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: none; color: var(--ink-2); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  nav button.active { background: var(--surface); color: var(--ink); }
+  nav button:hover { color: var(--ink); }
+  main { padding: 20px 24px 60px; max-width: 1280px; margin: 0 auto; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .v.up { color: var(--up); } .card .v.down { color: var(--down); }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .panel h3 { font-size: 14px; color: var(--ink-2); margin-bottom: 10px; font-weight: 500; }
+  .chart { width: 100%; height: 340px; }
+  .chart-sm { width: 100%; height: 260px; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > .panel { flex: 1; min-width: 420px; }
+  form.controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 16px; }
+  form.controls label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select { background: var(--page); color: var(--ink); border: 1px solid var(--axis); border-radius: 8px; padding: 8px 10px; font-size: 13px; min-width: 110px; }
+  input:focus, select:focus { outline: 1px solid var(--s1); }
+  button.primary { background: var(--s1); color: #fff; border: none; border-radius: 8px; padding: 9px 18px; cursor: pointer; font-size: 13px; }
+  button.primary:disabled { opacity: .5; cursor: wait; }
+  button.ghost { background: none; border: 1px solid var(--axis); color: var(--ink-2); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--axis); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+  td.up { color: var(--up); } td.down { color: var(--down); }
+  .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+  .mkt-item { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+  .mkt-item:hover { border-color: var(--s1); }
+  .mkt-item .nm { color: var(--ink-2); font-size: 13px; }
+  .mkt-item .px { font-size: 18px; font-weight: 600; }
+  .mkt-item .spark { height: 42px; margin-top: 4px; }
+  .group-title { color: var(--muted); font-size: 13px; margin: 18px 0 8px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--axis); color: var(--ink-2); }
+  .msg { color: var(--muted); padding: 20px 0; }
+  .err { color: var(--bad); white-space: pre-wrap; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  code { background: var(--page); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Quant<span>Master</span></h1>
+  <nav id="nav">
+    <button data-tab="market" class="active">市场</button>
+    <button data-tab="factor">因子</button>
+    <button data-tab="backtest">回测</button>
+    <button data-tab="mine">挖掘</button>
+    <button data-tab="news">资讯</button>
+    <button data-tab="ledger">实盘</button>
+  </nav>
+</header>
+<main>
+
+<!-- ================= 市场 ================= -->
+<section class="tab active" id="tab-market">
+  <div id="mkt-groups"><div class="msg">加载全球市场概览中…（首次会逐个拉取并缓存，可能需要 1-2 分钟）</div></div>
+  <div class="panel" id="kline-panel" style="display:none">
+    <h3 id="kline-title">K线</h3>
+    <div class="chart" id="kline"></div>
+  </div>
+</section>
+
+<!-- ================= 因子 ================= -->
+<section class="tab" id="tab-factor">
+  <form class="controls" id="factor-form">
+    <label>因子（内置名或表达式）
+      <input name="expression" list="factor-list" value="rev_5d" style="min-width:320px"
+             placeholder="如 rank(-delta(close, 5))">
+    </label>
+    <datalist id="factor-list"></datalist>
+    <label>股票池<input name="universe" value="demo"></label>
+    <label>开始<input name="start" type="date" value="2022-01-01"></label>
+    <label>分组数<input name="quantiles" type="number" value="5" min="2" max="10"></label>
+    <button class="primary" type="submit">因子体检</button>
+  </form>
+  <div class="hint">内置因子见下拉提示；表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema…
+    字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
+  <div id="factor-out"></div>
+</section>
+
+<!-- ================= 回测 ================= -->
+<section class="tab" id="tab-backtest">
+  <form class="controls" id="bt-form">
+    <label>因子<input name="factor" list="factor-list" value="mom_20d" style="min-width:260px"></label>
+    <label>股票池<input name="universe" value="demo"></label>
+    <label>开始<input name="start" type="date" value="2022-01-01"></label>
+    <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
+    <label>调仓
+      <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
+    </label>
+    <label>基准<input name="benchmark" value="000300.SH"></label>
+    <button class="primary" type="submit">运行回测</button>
+  </form>
+  <div class="hint">回测含 A 股规则：T+1、涨跌停不可成交、佣金/印花税/过户费、整手交易。信号 T 日收盘生成，T+1 开盘成交。</div>
+  <div id="bt-out"></div>
+</section>
+
+<!-- ================= 挖掘 ================= -->
+<section class="tab" id="tab-mine">
+  <div class="row">
+    <div class="panel">
+      <h3>遗传规划挖掘（本地计算，无需 API key）</h3>
+      <form class="controls" id="gp-form">
+        <label>股票池<input name="universe" value="demo"></label>
+        <label>开始<input name="start" type="date" value="2022-01-01"></label>
+        <label>代数<input name="generations" type="number" value="5" min="1" max="30"></label>
+        <label>种群<input name="population" type="number" value="40" min="10" max="200"></label>
+        <button class="primary" type="submit">开始挖掘</button>
+      </form>
+      <div class="hint">随机生成表达式树 → 按 |RankIC| 适应度进化。耗时与 代数×种群 成正比。</div>
+    </div>
+    <div class="panel">
+      <h3>LLM 挖掘（需配置 ANTHROPIC_API_KEY / OPENAI_API_KEY）</h3>
+      <form class="controls" id="llm-form">
+        <label>股票池<input name="universe" value="demo"></label>
+        <label>开始<input name="start" type="date" value="2022-01-01"></label>
+        <label>每轮个数<input name="n" type="number" value="8" min="2" max="20"></label>
+        <label>轮数<input name="rounds" type="number" value="2" min="1" max="5"></label>
+        <button class="primary" type="submit">开始挖掘</button>
+      </form>
+      <div class="hint">LLM 提出表达式 → 本地 AST 校验 + 数据验证 IC，多轮反馈迭代。</div>
+    </div>
+  </div>
+  <div id="mine-out"></div>
+</section>
+
+<!-- ================= 资讯 ================= -->
+<section class="tab" id="tab-news">
+  <form class="controls" id="news-form">
+    <button class="primary" type="submit">抓取最新快讯</button>
+    <label style="flex-direction:row;align-items:center;gap:6px">
+      <input type="checkbox" name="skip_llm" style="min-width:auto"> 跳过 LLM 标注（未配 key 时勾选）
+    </label>
+  </form>
+  <div class="panel"><h3>最近入库</h3><div id="news-out"><div class="msg">尚无数据，点击上方抓取。</div></div></div>
+</section>
+
+<!-- ================= 实盘 ================= -->
+<section class="tab" id="tab-ledger">
+  <div class="row">
+    <div class="panel">
+      <h3>录入成交（或用 <code>qm ledger import 券商导出.csv</code> 批量导入）</h3>
+      <form class="controls" id="trade-form">
+        <label>日期<input name="date" type="date"></label>
+        <label>代码<input name="symbol" placeholder="600519.SH"></label>
+        <label>方向<select name="side"><option value="buy">买入</option><option value="sell">卖出</option></select></label>
+        <label>价格<input name="price" type="number" step="0.001"></label>
+        <label>数量<input name="shares" type="number" step="100"></label>
+        <label>费用<input name="fee" type="number" step="0.01" value="5"></label>
+        <button class="primary" type="submit">记一笔</button>
+      </form>
+    </div>
+    <div class="panel">
+      <h3>出入金（收益率计算需要区分入金与盈利）</h3>
+      <form class="controls" id="cash-form">
+        <label>日期<input name="date" type="date"></label>
+        <label>金额<input name="amount" type="number" step="0.01"></label>
+        <label>类型<select name="kind"><option value="deposit">入金</option><option value="withdraw">出金</option><option value="dividend">分红</option></select></label>
+        <button class="primary" type="submit">记录</button>
+      </form>
+    </div>
+  </div>
+  <div id="ledger-out"><div class="msg">加载中…</div></div>
+</section>
+</main>
+
+<script>
+const PALETTE = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
+const INK2 = '#c3c2b7', MUTED = '#898781', GRID = '#2c2c2a', AXIS = '#383835';
+const charts = {};
+
+function baseOpt(extra) {
+  return Object.assign({
+    color: PALETTE,
+    backgroundColor: 'transparent',
+    textStyle: { color: INK2 },
+    grid: { left: 60, right: 20, top: 36, bottom: 40 },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross', label: { backgroundColor: AXIS } },
+               backgroundColor: '#1a1a19', borderColor: AXIS, textStyle: { color: '#fff', fontSize: 12 } },
+  }, extra);
+}
+function timeAxis() { return { type: 'time', axisLine: { lineStyle: { color: AXIS } }, axisLabel: { color: MUTED }, splitLine: { show: false } }; }
+function valAxis(fmt) { return { type: 'value', scale: true, axisLabel: { color: MUTED, formatter: fmt }, splitLine: { lineStyle: { color: GRID } } }; }
+function mkChart(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  if (charts[id]) charts[id].dispose();
+  charts[id] = echarts.init(el);
+  return charts[id];
+}
+window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+function post(path, body) {
+  return api(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+}
+function busy(form, on) { const b = form.querySelector('button.primary'); if (b) b.disabled = on; }
+function pct(v) { return v == null ? '—' : (v * 100).toFixed(2) + '%'; }
+function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ---------- 导航 ---------- */
+document.getElementById('nav').addEventListener('click', e => {
+  const tab = e.target.dataset.tab;
+  if (!tab) return;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b === e.target));
+  document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
+  Object.values(charts).forEach(c => c.resize());
+  if (tab === 'ledger') loadLedger();
+  if (tab === 'news') loadNews();
+});
+
+/* ---------- 市场 ---------- */
+async function loadMarket() {
+  const container = document.getElementById('mkt-groups');
+  try {
+    const data = await api('/api/market/overview');
+    container.innerHTML = '';
+    let idx = 0;
+    for (const [group, items] of Object.entries(data.groups)) {
+      const title = document.createElement('div');
+      title.className = 'group-title'; title.textContent = group;
+      container.appendChild(title);
+      const grid = document.createElement('div');
+      grid.className = 'mkt-grid';
+      for (const item of items) {
+        const el = document.createElement('div');
+        el.className = 'mkt-item';
+        el.innerHTML = `<div class="nm">${esc(item.name)} <span class="badge">${esc(item.symbol)}</span></div>
+          <div class="px ${cls(item.change_pct)}">${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small></div>
+          <div class="spark" id="spark-${idx}"></div>`;
+        el.onclick = () => showKline(item.symbol, item.name);
+        grid.appendChild(el);
+        const sid = 'spark-' + idx; idx++;
+        queueMicrotask(() => {
+          const c = mkChart(sid);
+          c.setOption({ backgroundColor: 'transparent',
+            grid: { left: 0, right: 0, top: 2, bottom: 2 },
+            xAxis: { type: 'time', show: false }, yAxis: { type: 'value', show: false, scale: true },
+            series: [{ type: 'line', data: item.nav, showSymbol: false, lineStyle: { width: 2, color: item.change_pct >= 0 ? '#e66767' : '#0ca30c' } }],
+            tooltip: { show: false } });
+        });
+      }
+      container.appendChild(grid);
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="err">市场数据加载失败：${esc(e.message)}\n提示：需安装数据依赖 pip install "quantmaster[data]"，且首次加载较慢。</div>`;
+  }
+}
+async function showKline(symbol, name) {
+  document.getElementById('kline-panel').style.display = '';
+  document.getElementById('kline-title').textContent = `${name}（${symbol}）日K`;
+  const c = mkChart('kline');
+  c.showLoading({ textColor: INK2, maskColor: 'rgba(13,13,13,0.6)' });
+  try {
+    const data = await api('/api/market/history/' + encodeURIComponent(symbol));
+    c.hideLoading();
+    c.setOption(baseOpt({
+      xAxis: { type: 'category', data: data.kline.map(k => k[0]), axisLabel: { color: MUTED }, axisLine: { lineStyle: { color: AXIS } } },
+      yAxis: valAxis(),
+      dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 6, borderColor: AXIS, textStyle: { color: MUTED } }],
+      series: [{ type: 'candlestick', data: data.kline.map(k => k.slice(1, 5)),
+        itemStyle: { color: '#e66767', color0: '#0ca30c', borderColor: '#e66767', borderColor0: '#0ca30c' } }],
+    }));
+    document.getElementById('kline-panel').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) { c.hideLoading(); alert('K线加载失败: ' + e.message); }
+}
+loadMarket();
+
+/* ---------- 因子 ---------- */
+async function loadFactorList() {
+  try {
+    const data = await api('/api/factors');
+    document.getElementById('factor-list').innerHTML =
+      data.factors.map(f => `<option value="${esc(f.name)}">${esc(f.description)}</option>`).join('');
+  } catch (e) { /* 非致命 */ }
+}
+loadFactorList();
+
+document.getElementById('factor-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  const out = document.getElementById('factor-out');
+  out.innerHTML = '<div class="msg">计算中…（首次需拉取行情）</div>';
+  try {
+    const fd = new FormData(form);
+    const data = await post('/api/factors/test', {
+      expression: fd.get('expression'), universe: fd.get('universe'),
+      start: fd.get('start'), quantiles: +fd.get('quantiles') });
+    const s = data.summary;
+    out.innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="k">RankIC 均值</div><div class="v ${cls(s.ic_mean)}">${s.ic_mean}</div></div>
+        <div class="card"><div class="k">ICIR</div><div class="v">${s.icir}</div></div>
+        <div class="card"><div class="k">IC&gt;0 占比</div><div class="v">${pct(s.ic_positive_ratio)}</div></div>
+        <div class="card"><div class="k">多空年化</div><div class="v ${cls(s.long_short_annual)}">${pct(s.long_short_annual)}</div></div>
+        <div class="card"><div class="k">单调性</div><div class="v">${s.monotonicity}</div></div>
+        <div class="card"><div class="k">Top组换手/日</div><div class="v">${pct(s.top_quantile_turnover)}</div></div>
+      </div>
+      <div class="row">
+        <div class="panel"><h3>RankIC（20日滚动均值）</h3><div class="chart-sm" id="ic-chart"></div></div>
+        <div class="panel"><h3>分层净值（Q1 最低分 → Q${Object.keys(data.quantile_nav).length} 最高分）</h3><div class="chart-sm" id="q-chart"></div></div>
+      </div>
+      <div class="hint">经验参考：|IC均值| &gt; 0.03 值得关注；单调性接近 ±1 说明分层有序；换手过高会被交易成本侵蚀。</div>`;
+    mkChart('ic-chart').setOption(baseOpt({
+      xAxis: timeAxis(), yAxis: valAxis(),
+      series: [{ name: 'RankIC(20d)', type: 'line', data: data.ic_series, showSymbol: false, lineStyle: { width: 2 } },
+               { name: '0', type: 'line', data: data.ic_series.map(p => [p[0], 0]), showSymbol: false, lineStyle: { width: 1, color: AXIS }, tooltip: { show: false }, silent: true }],
+    }));
+    const qNames = Object.keys(data.quantile_nav);
+    mkChart('q-chart').setOption(baseOpt({
+      legend: { textStyle: { color: INK2 }, top: 0 },
+      xAxis: timeAxis(), yAxis: valAxis(),
+      series: qNames.map(q => ({ name: q, type: 'line', data: data.quantile_nav[q], showSymbol: false, lineStyle: { width: 2 } })),
+    }));
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+
+/* ---------- 回测 ---------- */
+document.getElementById('bt-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  const out = document.getElementById('bt-out');
+  out.innerHTML = '<div class="msg">回测中…</div>';
+  try {
+    const fd = new FormData(form);
+    const data = await post('/api/backtest/run', {
+      factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
+      top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark') });
+    const m = data.metrics;
+    out.innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="k">累计收益</div><div class="v ${cls(m.total_return)}">${pct(m.total_return)}</div></div>
+        <div class="card"><div class="k">年化收益</div><div class="v ${cls(m.annual_return)}">${pct(m.annual_return)}</div></div>
+        <div class="card"><div class="k">夏普</div><div class="v">${m.sharpe}</div></div>
+        <div class="card"><div class="k">最大回撤</div><div class="v">${pct(m.max_drawdown)}</div></div>
+        <div class="card"><div class="k">卡玛</div><div class="v">${m.calmar}</div></div>
+        <div class="card"><div class="k">超额年化</div><div class="v ${cls(m.excess_annual_return)}">${pct(m.excess_annual_return)}</div></div>
+        <div class="card"><div class="k">信息比率</div><div class="v">${m.information_ratio ?? '—'}</div></div>
+        <div class="card"><div class="k">交易成本</div><div class="v">${(m.total_trade_cost ?? 0).toLocaleString()}</div></div>
+      </div>
+      <div class="panel"><h3>净值曲线（起点=1）</h3><div class="chart" id="nav-chart"></div></div>
+      <div class="panel"><h3>回撤</h3><div class="chart-sm" id="dd-chart"></div></div>
+      <div class="panel"><h3>最近成交（${data.trades.length} 条）</h3>
+        <div style="max-height:300px;overflow:auto"><table><thead><tr>
+        <th>日期</th><th>代码</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th></tr></thead>
+        <tbody>${data.trades.slice().reverse().map(t => `<tr><td>${t.date}</td><td>${esc(t.symbol)}</td>
+          <td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? '买' : '卖'}</td>
+          <td>${t.price}</td><td>${t.shares}</td><td>${t.amount.toLocaleString()}</td><td>${t.cost}</td></tr>`).join('')}
+        </tbody></table></div></div>`;
+    mkChart('nav-chart').setOption(baseOpt({
+      legend: { textStyle: { color: INK2 }, top: 0 },
+      xAxis: timeAxis(), yAxis: valAxis(),
+      series: [
+        { name: data.strategy, type: 'line', data: data.nav, showSymbol: false, lineStyle: { width: 2 } },
+        ...(data.benchmark_nav.length ? [{ name: '基准', type: 'line', data: data.benchmark_nav, showSymbol: false, lineStyle: { width: 2 } }] : []),
+      ],
+    }));
+    mkChart('dd-chart').setOption(baseOpt({
+      xAxis: timeAxis(), yAxis: valAxis(v => (v * 100).toFixed(0) + '%'),
+      series: [{ name: '回撤', type: 'line', data: data.drawdown, showSymbol: false,
+        lineStyle: { width: 2, color: '#d55181' }, areaStyle: { opacity: 0.25, color: '#d55181' } }],
+    }));
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+
+/* ---------- 挖掘 ---------- */
+function renderMined(list, extraCols) {
+  const rows = list.map(f => `<tr><td><code>${esc(f.expression)}</code></td>
+    <td class="${cls(f.ic_mean)}">${(+f.ic_mean).toFixed(4)}</td><td>${(+f.icir).toFixed(3)}</td>${extraCols(f)}</tr>`).join('');
+  return `<div class="panel"><h3>挖掘结果（点击表达式可复制到因子页验证）</h3>
+    <table><thead><tr><th>表达式</th><th>RankIC</th><th>ICIR</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+document.getElementById('gp-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  const out = document.getElementById('mine-out');
+  out.innerHTML = '<div class="msg">遗传规划进化中，视参数可能需要几分钟…</div>';
+  try {
+    const fd = new FormData(form);
+    const data = await post('/api/mine/genetic', {
+      universe: fd.get('universe'), start: fd.get('start'),
+      generations: +fd.get('generations'), population: +fd.get('population') });
+    out.innerHTML = renderMined(data.factors, f => `<td>fitness=${(+f.fitness).toFixed(4)}</td>`);
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+document.getElementById('llm-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  const out = document.getElementById('mine-out');
+  out.innerHTML = '<div class="msg">LLM 生成并验证中…</div>';
+  try {
+    const fd = new FormData(form);
+    const data = await post('/api/mine/llm', {
+      universe: fd.get('universe'), start: fd.get('start'), n: +fd.get('n'), rounds: +fd.get('rounds') });
+    out.innerHTML = renderMined(data.factors, f =>
+      `<td>${f.valid ? '✅ 达标' : '—'} ${esc(f.rationale || '')}</td>`);
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+
+/* ---------- 资讯 ---------- */
+async function loadNews() {
+  const out = document.getElementById('news-out');
+  try {
+    const data = await api('/api/news?limit=80');
+    if (!data.items.length) { out.innerHTML = '<div class="msg">尚无数据，点击上方抓取。</div>'; return; }
+    out.innerHTML = `<table><thead><tr><th>时间</th><th>摘要/内容</th><th>类型</th><th>情绪</th><th>相关标的</th></tr></thead>
+      <tbody>${data.items.map(n => `<tr>
+        <td style="white-space:nowrap">${esc((n.published_at || '').slice(0, 16))}</td>
+        <td>${esc(n.summary || n.content.slice(0, 80))}</td>
+        <td>${n.event_type ? `<span class="badge">${esc(n.event_type)}</span>` : ''}</td>
+        <td class="${cls(n.sentiment)}">${n.sentiment ? (+n.sentiment).toFixed(2) : ''}</td>
+        <td>${(n.symbols || []).map(s => `<span class="badge">${esc(s)}</span>`).join(' ')}</td></tr>`).join('')}
+      </tbody></table>`;
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+document.getElementById('news-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  try {
+    const skip = form.querySelector('[name=skip_llm]').checked;
+    await post('/api/news/crawl?skip_llm=' + skip, {});
+    await loadNews();
+  } catch (err) { document.getElementById('news-out').innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+  busy(form, false);
+};
+
+/* ---------- 实盘 ---------- */
+async function loadLedger() {
+  const out = document.getElementById('ledger-out');
+  try {
+    const r = await api('/api/ledger/report');
+    out.innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="k">总资产</div><div class="v">${r.total_assets.toLocaleString()}</div></div>
+        <div class="card"><div class="k">总盈亏</div><div class="v ${cls(r.total_pnl)}">${r.total_pnl.toLocaleString()}</div></div>
+        <div class="card"><div class="k">累计收益率</div><div class="v ${cls(r.total_return)}">${pct(r.total_return)}</div></div>
+        <div class="card"><div class="k">XIRR 年化</div><div class="v ${cls(r.xirr)}">${pct(r.xirr)}</div></div>
+        <div class="card"><div class="k">已实现盈亏</div><div class="v ${cls(r.realized_pnl)}">${r.realized_pnl.toLocaleString()}</div></div>
+        <div class="card"><div class="k">浮动盈亏</div><div class="v ${cls(r.unrealized_pnl)}">${r.unrealized_pnl.toLocaleString()}</div></div>
+        <div class="card"><div class="k">现金</div><div class="v">${r.cash.toLocaleString()}</div></div>
+        <div class="card"><div class="k">累计费用</div><div class="v">${r.fees.toLocaleString()}</div></div>
+      </div>
+      ${r.missing_price.length ? `<div class="hint">⚠️ 以下持仓未获取到行情，按成本价估值：${r.missing_price.join('、')}</div>` : ''}
+      <div class="panel"><h3>当前持仓</h3>
+        <table><thead><tr><th>代码</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>浮盈</th><th>已实现</th></tr></thead>
+        <tbody>${r.positions.filter(p => p.shares > 0).map(p => `<tr>
+          <td>${esc(p.symbol)}</td><td>${p.shares}</td><td>${p.avg_cost}</td><td>${p.price}</td>
+          <td>${p.market_value.toLocaleString()}</td>
+          <td class="${cls(p.unrealized_pnl)}">${p.unrealized_pnl.toLocaleString()}</td>
+          <td class="${cls(p.realized_pnl)}">${p.realized_pnl.toLocaleString()}</td></tr>`).join('')
+          || '<tr><td colspan="7" class="msg">暂无持仓</td></tr>'}
+        </tbody></table></div>`;
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}\n提示：先入金（右上表单）再录成交。</div>`; }
+}
+document.getElementById('trade-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  try {
+    const fd = new FormData(form);
+    await post('/api/ledger/trade', { date: fd.get('date'), symbol: fd.get('symbol'),
+      side: fd.get('side'), price: +fd.get('price'), shares: +fd.get('shares'), fee: +fd.get('fee') });
+    await loadLedger();
+  } catch (err) { alert(err.message); }
+  busy(form, false);
+};
+document.getElementById('cash-form').onsubmit = async e => {
+  e.preventDefault(); const form = e.target; busy(form, true);
+  try {
+    const fd = new FormData(form);
+    await post('/api/ledger/cashflow', { date: fd.get('date'), amount: +fd.get('amount'), kind: fd.get('kind') });
+    await loadLedger();
+  } catch (err) { alert(err.message); }
+  busy(form, false);
+};
+</script>
+</body>
+</html>

@@ -65,7 +65,7 @@ class BacktestResult:
 def price_limit(symbol: str) -> float:
     """按代码推断涨跌停幅度。"""
     code = symbol.split(".")[0]
-    if code.startswith(("688", "689")) or code.startswith(("300", "301")):
+    if code.startswith(("688", "689", "300", "301")):
         return 0.20
     if code.startswith(("8", "4")) and symbol.endswith(".BJ"):
         return 0.30
