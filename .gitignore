@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# QuantMaster local data
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+config.yaml
+.env
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

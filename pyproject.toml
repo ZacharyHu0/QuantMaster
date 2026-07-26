@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantmaster"
+version = "0.1.0"
+description = "面向 A 股的开源量化研究与实盘记录平台：多市场数据、因子研究与挖掘、AI 爬虫、回测/模拟盘、实盘账本"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "QuantMaster Contributors" }]
+keywords = ["quant", "a-share", "backtest", "factor", "akshare", "llm"]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.5",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# 免费数据源（推荐安装）
+data = [
+    "akshare>=1.14",
+    "yfinance>=0.2.40",
+]
+# 可选数据源
+tushare = ["tushare>=1.4"]
+# 事件驱动回测引擎（可选，内置引擎为向量化）
+backtrader = ["backtrader>=1.9"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+qm = "quantmaster.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["quantmaster*"]
+
+[tool.setuptools.package-data]
+"quantmaster.server" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,28 @@
+# QuantMaster 配置示例：复制为 config.yaml 后按需修改。
+# 所有条目均可用环境变量覆盖（QM_LLM_API_KEY / QM_LLM_PROVIDER / QM_LLM_MODEL /
+# QM_LLM_BASE_URL / TUSHARE_TOKEN / QM_DATA_ROOT）。
+
+llm:
+  provider: anthropic        # anthropic | openai | openai-compatible
+  model: claude-sonnet-5     # openai 示例: gpt-4o；deepseek 示例: deepseek-chat
+  api_key: ""                # 留空则读 ANTHROPIC_API_KEY / OPENAI_API_KEY
+  base_url: ""               # openai-compatible 时必填，如 https://api.deepseek.com/v1
+  max_tokens: 2048
+  temperature: 0.3
+
+data:
+  root: data                 # 本地数据目录（行情缓存/新闻库/账本）
+  tushare_token: ""          # 可选：https://tushare.pro 注册获取
+  cache_days: 1              # 日线缓存有效期（天）
+
+trade:                       # A 股交易成本，按自己券商实际费率修改
+  commission_rate: 0.00025   # 佣金 万2.5
+  commission_min: 5.0        # 最低佣金 5 元
+  stamp_tax_rate: 0.0005     # 印花税（卖出单边）
+  transfer_fee_rate: 0.00001 # 过户费
+  slippage: 0.001            # 滑点假设
+  lot_size: 100
+
+server:
+  host: 127.0.0.1
+  port: 8686
