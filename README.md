@@ -5,6 +5,17 @@
 为已开户的个人投资者设计：假定你有不错的编程能力（计算机本科水平），
 数学与金融只需本科基础——文档与代码注释会把用到的量化概念讲清楚。
 
+<p align="center">
+  <img src="docs/images/market.png" width="49%" alt="全球市场概览">
+  <img src="docs/images/factor.png" width="49%" alt="因子体检与样本外验证">
+</p>
+<p align="center">
+  <img src="docs/images/backtest.png" width="49%" alt="回测报告">
+  <img src="docs/images/ledger.png" width="49%" alt="实盘账本与TWR净值">
+</p>
+
+> 截图为合成数据渲染的界面演示；`qm serve` 拉取真实行情后即为实盘数据。
+
 ## 能做什么
 
 | 模块 | 说明 |
