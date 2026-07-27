@@ -62,7 +62,7 @@ def performance_metrics(
     }
 
     if benchmark_nav is not None and len(benchmark_nav.dropna()) > 2:
-        bench_returns = benchmark_nav.pct_change().reindex(clean.index).fillna(0.0)
+        bench_returns = benchmark_nav.pct_change(fill_method=None).reindex(clean.index).fillna(0.0)
         excess = clean - bench_returns
         tracking_error = float(excess.std() * np.sqrt(TRADING_DAYS))
         excess_annual = float(excess.mean() * TRADING_DAYS)

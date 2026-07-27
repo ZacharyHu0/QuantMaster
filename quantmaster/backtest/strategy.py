@@ -59,7 +59,7 @@ class FactorStrategy(Strategy):
 
         ranks = values.rank(axis=1, ascending=False)
         selected = (ranks <= self.top_n).astype(float).where(values.notna(), 0.0)
-        counts = selected.sum(axis=1).replace(0, pd.NA)
+        counts = selected.sum(axis=1).replace(0, float("nan"))
         weights = selected.div(counts, axis=0).clip(upper=self.cap_weight).fillna(0.0)
 
         mask = rebalance_mask(close.index, self.rebalance)
@@ -113,7 +113,7 @@ class MultiFactorStrategy(Strategy):
         combined = combined.reindex(index=close.index, columns=close.columns)
         ranks = combined.rank(axis=1, ascending=False)
         selected = (ranks <= self.top_n).astype(float).where(combined.notna(), 0.0)
-        counts = selected.sum(axis=1).replace(0, pd.NA)
+        counts = selected.sum(axis=1).replace(0, float("nan"))
         weights = selected.div(counts, axis=0).clip(upper=self.cap_weight).fillna(0.0)
 
         mask = rebalance_mask(close.index, self.rebalance)

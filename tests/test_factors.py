@@ -63,12 +63,25 @@ class TestOps:
 
     def test_arithmetic(self, panel):
         result = ExpressionFactor("close / delay(close, 1) - 1").compute(panel)
-        expected = panel["close"].pct_change()
+        expected = panel["close"].pct_change(fill_method=None)
         pd.testing.assert_frame_equal(result, expected)
 
     def test_derived_vwap_and_returns(self, panel):
         result = ExpressionFactor("ts_mean(returns, 5) + rank(vwap)").compute(panel)
         assert result.shape == panel["close"].shape
+
+    def test_derived_returns_preserve_missing_prices(self, panel):
+        close = panel["close"].copy()
+        close.iloc[10, 0] = float("nan")
+        panel_with_gap = dict(panel)
+        panel_with_gap["close"] = close
+
+        result = ExpressionFactor("returns").compute(panel_with_gap)
+        expected = close.pct_change(fill_method=None)
+
+        pd.testing.assert_frame_equal(result, expected)
+        assert pd.isna(result.iloc[10, 0])
+        assert pd.isna(result.iloc[11, 0])
 
 
 class TestBuiltinFactors:
@@ -154,7 +167,7 @@ class TestCacheReplaceSemantics:
         # 价格列整体校准成新基准：不存在 100 与 80 的接缝跳空。
         cached = store.get("600000.SH")
         assert cached.loc["2024-02-01", "close"] == 80.0
-        returns = cached["close"].pct_change().dropna()
+        returns = cached["close"].pct_change(fill_method=None).dropna()
         assert float(returns.abs().max()) < 1e-9, "缓存中出现复权基准接缝跳变"
 
     def test_fresh_cache_must_cover_start(self, tmp_path, monkeypatch):

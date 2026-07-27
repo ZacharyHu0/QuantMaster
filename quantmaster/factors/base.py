@@ -127,7 +127,8 @@ def _prepare_panel(panel: PanelDict) -> PanelDict:
     if "vwap" not in out and "amount" in out and "volume" in out:
         out["vwap"] = out["amount"] / out["volume"].replace(0, float("nan"))
     if "returns" not in out and "close" in out:
-        out["returns"] = out["close"].pct_change()
+        # 缺失收盘价代表停牌或数据缺口，不能隐式前向填充后伪造零收益。
+        out["returns"] = out["close"].pct_change(fill_method=None)
     return out
 
 

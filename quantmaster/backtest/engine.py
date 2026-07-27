@@ -306,7 +306,7 @@ def run_backtest(
             pending = signal_row
 
     nav = pd.Series(nav_values, index=dates, name="nav") / config.initial_capital
-    returns = nav.pct_change().fillna(0.0)
+    returns = nav.pct_change(fill_method=None).fillna(0.0)
     positions = pd.DataFrame(position_rows).set_index("date").fillna(0.0)
 
     benchmark_nav = None

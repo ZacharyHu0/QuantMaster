@@ -113,7 +113,7 @@ def top_quantile_turnover(factor_values: pd.DataFrame, quantiles: int = 5) -> fl
     """最高分组的成分变动率（日均）。换手过高的因子交易成本会吃掉收益。"""
     labels = factor_values.rank(axis=1, pct=True)
     top = labels > (1 - 1 / quantiles)
-    prev = top.shift(1).fillna(False)
+    prev = top.shift(1, fill_value=False)
     changed = (top & ~prev).sum(axis=1)
     size = top.sum(axis=1).replace(0, np.nan)
     return float((changed / size).mean())

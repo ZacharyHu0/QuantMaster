@@ -94,7 +94,9 @@ class MarketTurnDetector:
             if "close" not in raw or len(raw) < 4:
                 continue
             close = pd.to_numeric(raw["close"], errors="coerce")
-            return_history.extend(close.pct_change(3).abs().dropna().iloc[:-1].tolist())
+            return_history.extend(
+                close.pct_change(3, fill_method=None).abs().dropna().iloc[:-1].tolist()
+            )
         shock_score = _percentile(abs(median_return), pd.Series(return_history))
         breadth_score = _percentile(abs(breadth_delta), breadth_history)
         amount_score = float(np.mean(amount_scores)) if amount_scores else 0.0
