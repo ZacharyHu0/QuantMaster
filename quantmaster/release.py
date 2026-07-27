@@ -4,13 +4,27 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.4.11"
+VERSION = "0.4.12"
 RELEASE_DATE = "2026-07-27"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "服务器安全退出",
+                "items": (
+                    "关闭启动 QuantMaster 的命令行窗口时，服务会主动执行 FastAPI 停机清理。",
+                    "服务持续监视启动器进程，启动器消失后会自动退出，不再残留 Python 监听进程。",
+                    "Ctrl+C、窗口关闭和正常退出统一回收自动任务、Bot 监听与研究线程。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.4.11",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "后台消息整理",

@@ -48,6 +48,7 @@ def _load_panel(universe: str, start: str, end: str):
 def cmd_serve(args) -> None:
     from quantmaster.server.app import serve
 
+    browser_timer = None
     if getattr(args, "open_browser", False):
         import threading
         import webbrowser
@@ -55,10 +56,16 @@ def cmd_serve(args) -> None:
         from quantmaster.config import get_config
 
         cfg = get_config().server
-        threading.Timer(
+        browser_timer = threading.Timer(
             1.5, webbrowser.open, args=(f"http://{cfg.host}:{cfg.port}",)
-        ).start()
-    serve()
+        )
+        browser_timer.daemon = True
+        browser_timer.start()
+    try:
+        serve()
+    finally:
+        if browser_timer is not None:
+            browser_timer.cancel()
 
 
 def cmd_automation(args) -> None:

@@ -1024,7 +1024,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
 
 
 def serve() -> None:  # pragma: no cover - 入口
-    import uvicorn
+    from quantmaster.server.lifecycle import run_uvicorn_foreground
 
     cfg = get_config().server
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
+    run_uvicorn_foreground(app, host=cfg.host, port=cfg.port, log_level="info")
