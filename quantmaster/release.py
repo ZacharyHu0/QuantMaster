@@ -4,13 +4,26 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.4.16"
+VERSION = "0.4.17"
 RELEASE_DATE = "2026-07-27"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "实验室色彩校准",
+                "items": (
+                    "Quant Lab 的画布、面板、分隔线与文字层级改为冷调中性色，减少偏棕色感。",
+                    "保留现有蓝色、琥珀色与状态色语义，不改变布局和交互。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.4.16",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "飞书群聊话题记忆",

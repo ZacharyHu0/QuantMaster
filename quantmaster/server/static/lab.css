@@ -2,14 +2,14 @@
 #nav .nav-lab-label { display:inline-block; transform:translateY(1px); }
 
 #tab-lab {
-  --lab-canvas: oklch(12% .008 80);
-  --lab-panel: oklch(16% .009 80);
-  --lab-panel-2: oklch(19% .010 80);
-  --lab-line: oklch(30% .012 80 / .72);
-  --lab-line-soft: oklch(25% .010 80 / .66);
-  --lab-text: oklch(94% .012 80);
-  --lab-text-2: oklch(74% .018 80);
-  --lab-text-3: oklch(57% .015 80);
+  --lab-canvas: oklch(12% .010 260);
+  --lab-panel: oklch(16% .012 260);
+  --lab-panel-2: oklch(20% .015 260);
+  --lab-line: oklch(31% .018 260 / .72);
+  --lab-line-soft: oklch(25% .014 260 / .66);
+  --lab-text: oklch(94% .008 260);
+  --lab-text-2: oklch(76% .016 260);
+  --lab-text-3: oklch(59% .018 260);
   --lab-blue: oklch(67% .16 250);
   --lab-blue-dim: oklch(24% .055 250);
   --lab-amber: oklch(75% .15 80);
