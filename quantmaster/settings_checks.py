@@ -12,7 +12,13 @@ from typing import Any
 
 import httpx
 
-from quantmaster.settings import DataSettings, LLMSettings, ServerSettings, normalize_api_base
+from quantmaster.settings import (
+    DataSettings,
+    LabSettings,
+    LLMSettings,
+    ServerSettings,
+    normalize_api_base,
+)
 
 
 def _result(status: str, message: str, started: float, **details: Any) -> dict[str, Any]:
@@ -156,3 +162,69 @@ def check_server(settings: ServerSettings) -> dict[str, Any]:
         sock.close()
     return _result(status, message, started, host=settings.host,
                    port=settings.port, available=available)
+
+
+def check_lab(settings: LabSettings, data: DataSettings, tushare_token: str) -> dict[str, Any]:
+    """检测研究股票池、PIT 数据权限和所选计算设备。"""
+    started = time.perf_counter()
+    checks: dict[str, Any] = {}
+    universe = settings.universe
+    if universe == "csi800":
+        if not tushare_token:
+            checks["universe"] = {
+                "status": "warning", "message": "csi800 需要 Tushare Token 与 index_weight 权限",
+            }
+        elif importlib.util.find_spec("tushare") is None:
+            checks["universe"] = {
+                "status": "error", "message": "缺少 tushare 依赖",
+            }
+        else:
+            try:
+                import tushare as ts
+
+                frame = ts.pro_api(tushare_token).index_weight(
+                    index_code="000300.SH", start_date="20240301", end_date="20240331")
+                checks["universe"] = {
+                    "status": "success" if len(frame) else "warning",
+                    "message": f"index_weight 可用，返回 {len(frame)} 条成分记录",
+                }
+            except Exception as exc:
+                text = str(exc).lower()
+                permission = any(word in text for word in (
+                    "积分", "权限", "permission", "privilege", "2000"))
+                checks["universe"] = {
+                    "status": "error" if permission else "warning",
+                    "message": "缺少 index_weight 权限" if permission else "PIT 成分联网检测失败",
+                }
+    elif universe == "demo":
+        checks["universe"] = {"status": "success", "message": "内置 demo 股票池可用"}
+    else:
+        path = Path(data.root).expanduser().resolve() / "universe" / f"{universe}.json"
+        checks["universe"] = {
+            "status": "success" if path.is_file() else "error",
+            "message": "自定义股票池文件可用" if path.is_file() else "自定义股票池不存在",
+        }
+
+    torch_available = importlib.util.find_spec("torch") is not None
+    sklearn_available = importlib.util.find_spec("sklearn") is not None
+    device_status, device_message = "success", f"设备策略 {settings.device} 可用于新任务"
+    if settings.device in {"cuda", "mps"} and not torch_available:
+        device_status, device_message = "warning", "所选设备需要安装 PyTorch"
+    elif settings.device in {"cuda", "mps"} and torch_available:
+        try:
+            import torch
+
+            available = (torch.cuda.is_available() if settings.device == "cuda" else
+                         bool(getattr(torch.backends, "mps", None) and
+                              torch.backends.mps.is_available()))
+            if not available:
+                device_status, device_message = "warning", f"当前环境未检测到 {settings.device}"
+        except Exception:
+            device_status, device_message = "warning", "计算设备检测失败"
+    checks["compute"] = {
+        "status": device_status, "message": device_message,
+        "torch": torch_available, "sklearn": sklearn_available,
+    }
+    statuses = {item["status"] for item in checks.values()}
+    overall = "error" if "error" in statuses else "warning" if "warning" in statuses else "success"
+    return _result(overall, "Quant Lab 研究环境检测完成", started, checks=checks)

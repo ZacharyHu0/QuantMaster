@@ -13,6 +13,7 @@
     selectedModel: 'ridge',
     suggestion: null,
     timer: null,
+    formsDirty: false,
   };
 
   const modelMeta = {
@@ -246,6 +247,24 @@
       <div class="lab-budget-meta"><span>${h((research.weekly_days || []).join(' · '))} 执行</span><span>${h((research.window || []).join(' → '))}</span></div>`;
   }
 
+  function syncResearchForms() {
+    if (state.formsDirty) return;
+    const research = state.overview?.research || {};
+    const horizons = (research.horizons || [3]).map(Number);
+    const preferred = horizons.includes(3) ? 3 : horizons[0];
+    for (const id of ['lab-discovery-form', 'lab-train-form']) {
+      const form = document.getElementById(id);
+      if (!form) continue;
+      if (research.universe) form.elements.universe.value = research.universe;
+      if (research.start) form.elements.start.value = research.start;
+      const select = form.elements.horizon;
+      const selected = horizons.includes(Number(select.value)) ? Number(select.value) : preferred;
+      select.innerHTML = horizons.map(value =>
+        `<option value="${value}" ${value === selected ? 'selected' : ''}>${value} 日</option>`
+      ).join('');
+    }
+  }
+
   function renderMlSetup() {
     const target = document.getElementById('lab-ml-setup');
     const models = state.overview?.capabilities?.models || {};
@@ -424,6 +443,7 @@
     renderExperiments();
     renderJobTable();
     renderTaskTray();
+    syncResearchForms();
   }
 
   async function refreshFactors() {
@@ -460,6 +480,9 @@
 
   function bindEvents() {
     setupDraggableDialog(document.getElementById('lab-factor-dialog'));
+    for (const id of ['lab-discovery-form', 'lab-train-form']) {
+      document.getElementById(id)?.addEventListener('input', () => { state.formsDirty = true; });
+    }
     document.getElementById('tab-lab').addEventListener('click', async event => {
       const viewButton = event.target.closest('[data-lab-view],[data-lab-go]');
       if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
@@ -528,7 +551,9 @@
       const deploy = event.target.closest('[data-deploy-version]');
       if (deploy && window.confirm('设为研究 Champion？这不会连接真实券商。')) try {
         const research = state.overview?.research || {};
-        await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon:3, actor:'web'})});
+        const horizons = (research.horizons || [3]).map(Number);
+        const horizon = horizons.includes(3) ? 3 : horizons[0];
+        await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, actor:'web'})});
         await Promise.all([refreshOverview(), refreshFactors()]);
       } catch (error) { showError('Champion 切换失败', error); }
       const suggest = event.target.closest('[data-suggest-version]');
@@ -570,6 +595,7 @@
       try {
         if (method === 'llm') await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
         else await enqueue('discover_genetic', {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')});
+        state.formsDirty = false;
         setView('automation');
       } catch (error) { showError('发现任务未能创建', error); }
     });
@@ -588,6 +614,7 @@
           end:new Date().toISOString().slice(0,10), horizon:+form.get('horizon'),
           sequence_length:+form.get('sequence_length'), config:{epochs:+form.get('epochs')},
         });
+        state.formsDirty = false;
         setView('automation');
       } catch (error) { showError('训练任务未能创建', error); }
     });
@@ -636,4 +663,10 @@
 
   window.loadQuantLab = loadQuantLab;
   window.quantLabOpenExpression = openExpression;
+  document.addEventListener('quantmaster:settings-applied', event => {
+    if (!(event.detail?.changed_fields || []).some(field => field.startsWith('lab.'))) return;
+    refreshOverview().catch(error => {
+      if (isLabActive()) showError('研究设置同步失败', error);
+    });
+  });
 })();

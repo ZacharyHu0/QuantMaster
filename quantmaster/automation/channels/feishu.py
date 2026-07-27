@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from collections.abc import Callable
 
 from quantmaster.automation.models import ActorContext
@@ -25,24 +26,60 @@ class FeishuBotClient:
             raise ValueError("飞书 App ID 和 App Secret 均不能为空")
         secret_target = CredentialStore.feishu_target(app_id)
         self.credentials.set(secret_target, app_secret)
-        return self.store.save_bot_account(
+        account = self.store.save_bot_account(
             channel="feishu", account_id=app_id, base_url="https://open.feishu.cn",
             secret_target=secret_target, status="configured",
         )
+        self.store.clear_channel_removal_marker("feishu")
+        return account
+
+    def bootstrap_legacy(self) -> dict | None:
+        """仅在账号库为空时接纳旧 YAML/环境变量配置。"""
+        if (self.store.bot_account("feishu") or
+                self.store.channel_credentials_removed("feishu")):
+            return None
+        app_id = get_config().automation.feishu_app_id.strip()
+        secret = os.environ.get("QM_FEISHU_APP_SECRET", "").strip()
+        if not app_id or not secret:
+            return None
+        return self.store.save_bot_account(
+            channel="feishu", account_id=app_id, base_url="https://open.feishu.cn",
+            secret_target="", status="configured",
+        )
+
+    @staticmethod
+    def verify(app_id: str, app_secret: str, timeout: float = 10.0) -> dict:
+        """只验证应用凭据，不启动第二条长连接。"""
+        import httpx
+
+        started = time.perf_counter()
+        try:
+            response = httpx.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": app_id.strip(), "app_secret": app_secret.strip()},
+                timeout=timeout,
+            )
+            payload = response.json()
+            valid = response.is_success and int(payload.get("code", -1)) == 0
+            return {
+                "status": "success" if valid else "error",
+                "message": "App ID / App Secret 有效" if valid else "App ID 或 App Secret 无效",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+        except (httpx.HTTPError, ValueError):
+            return {
+                "status": "warning", "message": "飞书联网验证失败；凭据仍可保存后重试",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
 
     def credentials_value(self) -> tuple[str, str]:
-        env_app_id = os.environ.get("QM_FEISHU_APP_ID", "").strip()
-        account = self.store.bot_account("feishu", env_app_id or None)
-        if env_app_id:
-            app_id = env_app_id
-        elif account:
+        account = self.store.bot_account("feishu")
+        if account and account.get("secret_target"):
             app_id = account["account_id"]
-        else:
-            app_id = get_config().automation.feishu_app_id
-            account = self.store.bot_account("feishu", app_id or None)
-        secret = os.environ.get("QM_FEISHU_APP_SECRET", "")
-        if not secret and account:
             secret = self.credentials.get(account["secret_target"]) or ""
+        else:
+            app_id = (account or {}).get("account_id") or get_config().automation.feishu_app_id
+            secret = os.environ.get("QM_FEISHU_APP_SECRET", "")
         if not app_id or not secret:
             raise RuntimeError("飞书应用 Bot 尚未配置 App ID/App Secret")
         return app_id, secret
@@ -77,9 +114,27 @@ class FeishuBotClient:
                        stop_event: threading.Event) -> None:
         try:
             from lark_oapi.channel import FeishuChannel
+            try:
+                from lark_oapi.channel import PolicyConfig
+            except ImportError:  # 兼容旧 SDK 及精简测试替身。
+                PolicyConfig = None
         except ImportError as exc:
             raise RuntimeError("未安装 lark-oapi，无法启动飞书长连接") from exc
         app_id, secret = self.credentials_value()
+        channel = None
+
+        def bot_mention(mention) -> bool:
+            identity = getattr(channel, "bot_identity", None) if channel is not None else None
+            bot_open_id = str(getattr(identity, "open_id", "") or "")
+            mention_open_id = str(getattr(mention, "open_id", "") or "")
+            if bot_open_id:
+                return bool(mention_open_id and mention_open_id == bot_open_id)
+            bot_names = {"quantmaster"}
+            identity_name = str(getattr(identity, "name", "") or "").strip().casefold()
+            if identity_name:
+                bot_names.add(identity_name)
+            mention_name = str(getattr(mention, "name", "") or "").strip().casefold()
+            return bool(mention_name and mention_name in bot_names)
 
         async def receive(message) -> None:
             if message.sender.is_bot:
@@ -89,11 +144,12 @@ class FeishuBotClient:
             if not message_id or not self.store.claim_inbound(
                     "feishu", message_id, chat_type=chat_type, account_id=app_id):
                 return
-            # FeishuChannel 的 PolicyConfig 已在触发 message 事件前完成群聊 @机器人校验。
-            # lark-oapi 1.7.1 的策略门会放行消息，但不会回写 mentioned_bot 字段，
-            # 因此这里不能再依赖该字段做第二次过滤。
             text = str(message.content_text or "").strip()
-            for mention in message.mentions or []:
+            mentions = list(message.mentions or [])
+            mentioned_bot = chat_type == "direct" or any(bot_mention(item) for item in mentions)
+            for mention in mentions:
+                if chat_type == "group" and not bot_mention(mention):
+                    continue
                 key = str(getattr(mention, "key", "") or "")
                 name = str(getattr(mention, "name", "") or "")
                 if key:
@@ -106,11 +162,30 @@ class FeishuBotClient:
                 channel="feishu", target=str(message.chat_id), account_id=app_id,
                 chat_type=chat_type, sender_id=str(message.sender_id),
                 sender_name=str(message.sender_name or ""),
+                message_id=message_id,
+                reply_to=str(getattr(getattr(message, "reply", None), "message_id", "") or ""),
+                reply_text=str(getattr(getattr(message, "reply", None), "text", "") or ""),
             )
+            bound = self.store.target_by_route("feishu", app_id, actor.target)
+            if chat_type == "group" and bound:
+                self.store.remember_conversation_message(
+                    channel="feishu", account_id=app_id, chat_id=actor.target,
+                    message_id=message_id, sender_id=actor.sender_id,
+                    sender_name=actor.sender_name, text=text, mentioned_bot=mentioned_bot,
+                    reply_to=actor.reply_to,
+                )
+            if chat_type == "group" and not mentioned_bot:
+                return
             on_message(actor, text)
 
         async def serve() -> None:
-            channel = FeishuChannel(app_id=app_id, app_secret=secret)
+            nonlocal channel
+            # 允许普通群消息进入本地上下文缓存；是否回复由上面的真实 @ 检查决定。
+            options = {"app_id": app_id, "app_secret": secret}
+            if PolicyConfig is not None:
+                options["policy"] = PolicyConfig(
+                    require_mention=False, respond_to_mention_all=False)
+            channel = FeishuChannel(**options)
             channel.on("message", receive)
             self.store.set_bot_status("feishu", app_id, "connecting")
             try:

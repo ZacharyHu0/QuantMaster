@@ -54,6 +54,9 @@ class ActorContext:
     chat_type: Literal["direct", "group"]
     sender_id: str
     sender_name: str = ""
+    message_id: str = ""
+    reply_to: str = ""
+    reply_text: str = ""
 
     @property
     def actor_key(self) -> str:

@@ -49,7 +49,7 @@ automation:
   watchlist: []
   sentinel_indices: [000300.SH, 000905.SH, 000852.SH, 399006.SZ]
   weixin_api_base: https://ilinkai.weixin.qq.com
-  feishu_app_id: ""         # 也可在“自动化”页面配置；Secret 只保存到系统凭据库
+  feishu_app_id: ""         # 旧配置导入兼容；新接入请使用“设置 → 自动化”
   retention_days: 90
 
 lab:

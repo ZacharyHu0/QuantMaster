@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +16,7 @@ from quantmaster.automation.news import importance_score
 from quantmaster.automation.policy import policy_allows, resolved_policy
 from quantmaster.automation.service import AutomationService
 from quantmaster.automation.store import AutomationStore
+from quantmaster.config import get_config
 from quantmaster.server.app import app
 
 
@@ -26,6 +29,9 @@ class MemoryCredentials:
 
     def set(self, target, value):
         self.values[target] = value
+
+    def delete(self, target):
+        self.values.pop(target, None)
 
 
 class RecordingGateway:
@@ -89,7 +95,7 @@ def test_binding_code_is_single_use(tmp_path):
 def test_binding_flow_preserves_code_on_wrong_chat_and_requires_owner_first(tmp_path):
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
-    with pytest.raises(ValueError, match="主人私聊"):
+    with pytest.raises(ValueError, match="管理员私聊"):
         service.create_binding("feishu_group")
 
     binding = service.create_binding("feishu_owner")
@@ -192,17 +198,17 @@ def test_bot_has_contextual_help_and_actionable_fallback(tmp_path):
         owner_actor=actor.actor_key, actor="test",
     )
     help_text = router.execute(actor, "帮助")
-    assert "受控指令助手" in help_text
+    assert "固定操作由受控指令助手执行" in help_text
     assert "现在大盘怎么样" in help_text
-    assert "仅主人私聊" in help_text
+    assert "仅管理员私聊" in help_text
 
     service.query = lambda view: {"resolved_view": view}
     natural_query = router.execute(actor, "现在大盘怎么样？")
     assert '"resolved_view": "market"' in natural_query
 
+    service.contextual_chat = lambda current_actor, text: "AI 已结合上下文回答"
     fallback = router.execute(actor, "帮我预测十年后的股价")
-    assert "没有执行任何操作" in fallback
-    assert "发送「帮助」" in fallback
+    assert fallback == "AI 已结合上下文回答"
 
 
 def test_group_help_explains_mention_and_permissions(tmp_path):
@@ -224,7 +230,74 @@ def test_group_help_explains_mention_and_permissions(tmp_path):
     help_text = BotCommandRouter(service, lambda *_: None).execute(actor, "使用说明")
     assert "真正 @QuantMaster" in help_text
     assert "普通成员可以查询" in help_text
-    assert "账本（仅主人私聊" not in help_text
+    assert "账本（仅管理员私聊" not in help_text
+
+
+def test_contextual_chat_compacts_long_history_into_topic_memory(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    owner_actor = "feishu:cli_app:ou_owner"
+    store.bind_target(
+        "feishu_group", target="oc_group", account_id="cli_app",
+        owner_actor=owner_actor, actor="test",
+    )
+    started = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    for index in range(65):
+        topic = "贵州茅台 600519 估值存在分歧" if index % 9 == 0 else "行业日常讨论"
+        store.remember_conversation_message(
+            channel="feishu", account_id="cli_app", chat_id="oc_group",
+            message_id=f"om_{index:03d}", sender_id="ou_member",
+            sender_name="群成员", text=f"{topic}，记录 {index}",
+            created_at=(started + timedelta(minutes=index)).isoformat(timespec="seconds"),
+        )
+    store.remember_conversation_message(
+        channel="feishu", account_id="cli_app", chat_id="oc_group",
+        message_id="om_current", sender_id="ou_owner", sender_name="管理员",
+        text="这个估值分歧具体是什么？", mentioned_bot=True,
+        created_at=(started + timedelta(minutes=66)).isoformat(timespec="seconds"),
+    )
+
+    captured = {}
+
+    class FakeLLMClient:
+        def chat_json(self, prompt, system=None):
+            captured["compact_prompt"] = prompt
+            return {
+                "topics": [{
+                    "topic": "贵州茅台估值", "symbols": ["600519"],
+                    "summary": "群内对估值存在分歧", "viewpoints": ["偏高", "可接受"],
+                    "open_questions": ["需要最新盈利预测"],
+                }],
+                "timeline": [], "carryovers": [],
+            }
+
+        def chat(self, prompt, system=None, history=None):
+            captured["answer_prompt"] = prompt
+            captured["system"] = system
+            return "群里近期围绕 600519 的估值有两类观点。"
+
+    monkeypatch.setattr("quantmaster.ai.llm.LLMClient", FakeLLMClient)
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    actor = ActorContext(
+        channel="feishu", account_id="cli_app", target="oc_group",
+        chat_type="group", sender_id="ou_owner", sender_name="管理员",
+        message_id="om_current", reply_text="贵州茅台是不是太贵了？",
+    )
+
+    answer = service.contextual_chat(actor, "这个估值分歧具体是什么？")
+
+    assert "600519" in answer
+    memory = store.conversation_memory(
+        channel="feishu", account_id="cli_app", chat_id="oc_group",
+    )
+    assert memory["source_count"] > 0
+    assert memory["memory"]["topics"][0]["topic"] == "贵州茅台估值"
+    assert store.conversation_stats(
+        channel="feishu", account_id="cli_app", chat_id="oc_group",
+    )["count"] < 66
+    assert "已有记忆" in captured["compact_prompt"]
+    assert "已压缩的话题记忆" in captured["answer_prompt"]
+    assert "600519" in captured["answer_prompt"]
+    assert "不可信资料" in captured["system"]
 
 
 def test_official_holding_news_has_high_priority():
@@ -262,13 +335,26 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
     store = AutomationStore(tmp_path / "automation.sqlite")
     client = FeishuBotClient(store, MemoryCredentials())
     client.configure("cli_app", "secret")
+    store.bind_target(
+        "feishu_group", target="oc_group", account_id="cli_app",
+        owner_actor="feishu:cli_app:ou_owner", actor="test",
+    )
     lifecycle = []
     received = []
 
+    class FakePolicyConfig:
+        def __init__(self, **kwargs):
+            self.require_mention = kwargs["require_mention"]
+            self.respond_to_mention_all = kwargs["respond_to_mention_all"]
+
     class FakeFeishuChannel:
         def __init__(self, **kwargs):
-            assert kwargs == {"app_id": "cli_app", "app_secret": "secret"}
+            assert kwargs["app_id"] == "cli_app"
+            assert kwargs["app_secret"] == "secret"
+            assert kwargs["policy"].require_mention is False
+            assert kwargs["policy"].respond_to_mention_all is False
             self.handler = None
+            self.bot_identity = SimpleNamespace(open_id="ou_bot", name="QuantMaster")
 
         def on(self, event, handler):
             assert event == "message"
@@ -283,12 +369,31 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
                 sender_name="测试用户",
             )
             await self.handler(direct)
+            context = SimpleNamespace(
+                sender=SimpleNamespace(is_bot=False), message_id="om_context",
+                chat_type="group", mentioned_bot=False,
+                content_text="贵州茅台 600519 的估值最近有分歧",
+                mentions=[], chat_id="oc_group", sender_id="ou_member",
+                sender_name="群成员", reply=None,
+            )
+            await self.handler(context)
+            literal_at = SimpleNamespace(
+                sender=SimpleNamespace(is_bot=False), message_id="om_literal",
+                chat_type="group", mentioned_bot=False,
+                content_text="@QuantMaster 这里只是手工输入的文字",
+                mentions=[], chat_id="oc_group", sender_id="ou_member",
+                sender_name="群成员", reply=None,
+            )
+            await self.handler(literal_at)
             group = SimpleNamespace(
                 sender=SimpleNamespace(is_bot=False), message_id="om_2",
                 chat_type="group", mentioned_bot=False,
                 content_text="@QuantMaster 绑定 QuantMaster ABCD1234",
-                mentions=[SimpleNamespace(key="@_user_1", name="QuantMaster")],
+                mentions=[SimpleNamespace(
+                    key="@_user_1", name="QuantMaster", open_id="ou_bot",
+                )],
                 chat_id="oc_group", sender_id="ou_owner", sender_name="测试用户",
+                reply=None,
             )
             await self.handler(group)
 
@@ -297,19 +402,54 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
 
     monkeypatch.setitem(
         sys.modules, "lark_oapi.channel",
-        SimpleNamespace(FeishuChannel=FakeFeishuChannel),
+        SimpleNamespace(FeishuChannel=FakeFeishuChannel, PolicyConfig=FakePolicyConfig),
     )
     stop_event = threading.Event()
     stop_event.set()
     client.listen_forever(lambda actor, text: received.append((actor, text)), stop_event)
 
     assert lifecycle == [("start", 30), ("stop", None)]
+    assert len(received) == 2
     assert received[0][0].target == "oc_chat"
     assert received[0][0].sender_name == "测试用户"
     assert received[0][1] == "查询大盘"
     assert received[1][0].chat_type == "group"
     assert received[1][1] == "绑定 QuantMaster ABCD1234"
+    context = store.conversation_context(
+        channel="feishu", account_id="cli_app", chat_id="oc_group",
+    )
+    assert [item["text"] for item in context] == [
+        "贵州茅台 600519 的估值最近有分歧",
+        "@QuantMaster 这里只是手工输入的文字",
+        "绑定 QuantMaster ABCD1234",
+    ]
     assert store.bot_account("feishu")["status"] == "configured"
+
+
+def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    service.feishu = FeishuBotClient(store, credentials)
+    monkeypatch.setattr(
+        service.feishu, "verify",
+        lambda app_id, secret: {"status": "success", "message": "有效", "latency_ms": 3},
+    )
+
+    result = service.configure_feishu("cli_first", "secret-one")
+    assert result["verification"]["status"] == "success"
+    assert credentials.values["bot:feishu:cli_first"] == "secret-one"
+    service.configure_feishu("cli_second", "secret-two")
+    assert "bot:feishu:cli_first" not in credentials.values
+    assert store.bot_account("feishu")["account_id"] == "cli_second"
+
+    removed = service.remove_feishu()
+    assert removed == {"status": "ok", "warnings": []}
+    assert credentials.values == {}
+    assert store.bot_account("feishu") is None
+    get_config().automation.feishu_app_id = "cli_legacy"
+    monkeypatch.setenv("QM_FEISHU_APP_SECRET", "legacy-secret")
+    assert FeishuBotClient(store, credentials).bootstrap_legacy() is None
 
 
 def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):
@@ -368,6 +508,11 @@ def test_automation_api_and_ui_contract():
     assert 'data-tab="automation"' in page
     assert "腾讯微信 ClawBot" in page
     assert "飞书企业自建应用 Bot" in page
+    automation_script = client.get("/static/automation.js").text
+    settings_script = client.get("/static/settings.js").text
+    assert "feishu-config-form" not in automation_script
+    assert "data-feishu-diagnose" in automation_script
+    assert "feishuStageLabels" in settings_script
     script = client.get("/static/automation.js").text
     assert "conservative:'保守'" in script
     assert "balanced:'均衡'" in script

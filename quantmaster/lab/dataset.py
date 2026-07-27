@@ -145,7 +145,7 @@ def create_snapshot(
         "config": {
             "data_root": str(get_config().data_root.resolve()),
             "warmup_days": 120,
-            "horizons": [1, 3, 5, 7],
+            "horizons": list(get_config().lab.horizons),
         },
     }
     return DatasetSnapshot(

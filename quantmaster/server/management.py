@@ -24,6 +24,8 @@ router = APIRouter(prefix="/api")
 settings_manager = migration_manager.config_manager
 _csrf_tokens: dict[str, float] = {}
 _CSRF_TTL = 8 * 60 * 60
+_running_server: dict[str, Any] = {}
+_applied_migrations: set[str] = set()
 
 
 def _local(request: Request) -> bool:
@@ -59,13 +61,91 @@ def _require_csrf(request: Request) -> None:
         raise HTTPException(403, "拒绝跨来源设置请求")
 
 
+def capture_runtime_baseline() -> None:
+    """在应用 lifespan 开始时记录真正需要重启才能改变的服务地址。"""
+    cfg = get_config()
+    _running_server.clear()
+    _running_server.update({"host": cfg.server.host, "port": cfg.server.port})
+
+
+def _runtime_status() -> dict[str, Any]:
+    from quantmaster.automation.runtime import get_runtime
+    from quantmaster.lab.worker import get_worker
+
+    cfg = get_config()
+    configured = {"host": cfg.server.host, "port": cfg.server.port}
+    running = _running_server or configured
+    restart = [f"server.{name}" for name in ("host", "port")
+               if running.get(name) != configured.get(name)]
+    return {
+        "config_revision": settings_manager.public().get("config_revision", ""),
+        "server": {
+            "status": "restart_required" if restart else "applied",
+            "running": dict(running), "configured": configured,
+            "restart_required": restart,
+        },
+        "automation": get_runtime().status(),
+        "lab": get_worker().status(),
+    }
+
+
+def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
+    """按变更字段热应用进程内服务；配置落盘成功不因联网状态回滚。"""
+    from quantmaster.automation.runtime import get_runtime
+    from quantmaster.lab.worker import get_worker
+
+    changed = list(result.get("changed_fields") or [])
+    apply_status: dict[str, Any] = {
+        "config": {"status": "applied"},
+        "automation": {"status": "unchanged"},
+        "lab": {"status": "unchanged"},
+        "server": {"status": "restart_required" if result.get("restart_required") else "applied"},
+    }
+    try:
+        runtime = get_runtime()
+        if "data.root" in changed:
+            active = runtime.start() if get_config().automation.enabled else False
+            apply_status["automation"] = {
+                "status": "applied" if active else
+                "disabled" if not get_config().automation.enabled else "standby"
+            }
+        elif any(field.startswith("automation.") for field in changed):
+            apply_status["automation"] = runtime.apply_config(changed)
+    except Exception as exc:  # 配置已安全保存；运行态失败降级为可操作警告。
+        apply_status["automation"] = {"status": "degraded", "message": str(exc)[:300]}
+        result.setdefault("warnings", []).append("自动化配置已保存，但运行时热应用失败")
+    try:
+        worker = get_worker()
+        if "data.root" in changed:
+            if get_config().lab.enabled:
+                worker.start()
+                apply_status["lab"] = {"status": "applied"}
+            else:
+                apply_status["lab"] = {"status": "disabled"}
+        elif any(field.startswith("lab.") for field in changed) or "automation.timezone" in changed:
+            apply_status["lab"] = worker.apply_config(changed)
+    except Exception as exc:
+        apply_status["lab"] = {"status": "degraded", "message": str(exc)[:300]}
+        result.setdefault("warnings", []).append("Quant Lab 配置已保存，但 Worker 热应用失败")
+    result["apply_status"] = apply_status
+    result["runtime"] = _runtime_status()
+    return result
+
+
 @router.get("/settings")
 def get_settings(request: Request, response: Response) -> dict:
     _require_local(request)
     token = _issue_csrf()
     response.set_cookie("qm_csrf", token, httponly=False, samesite="strict",
                         secure=request.url.scheme == "https", max_age=_CSRF_TTL, path="/")
-    return {**settings_manager.public(), "csrf_token": token, "remote_management": False}
+    return {**settings_manager.public(), "csrf_token": token, "remote_management": False,
+            "runtime": _runtime_status()}
+
+
+@router.get("/settings/runtime")
+def settings_runtime(request: Request) -> dict:
+    _require_local(request)
+    return _runtime_status()
 
 
 @router.post("/settings/validate")
@@ -78,7 +158,7 @@ def validate_settings(request: Request, document: SettingsDocument) -> dict:
 def save_settings(request: Request, update: SettingsUpdate) -> dict:
     _require_csrf(request)
     try:
-        result = settings_manager.save(update)
+        result = _apply_runtime(settings_manager.save(update))
     except CredentialError as exc:
         raise HTTPException(409, str(exc)) from None
     except ValueError as exc:
@@ -101,12 +181,14 @@ def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutat
 
 
 @router.post("/settings/check/{kind}")
-def check_setting(kind: Literal["llm-models", "tushare", "storage", "data-sources", "server"],
+def check_setting(kind: Literal[
+        "llm-models", "tushare", "storage", "data-sources", "server", "lab"],
                   request: Request,
                   body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
     _require_csrf(request)
     from quantmaster.settings_checks import (
         check_data_sources,
+        check_lab,
         check_server,
         check_storage,
         check_tushare,
@@ -140,6 +222,8 @@ def check_setting(kind: Literal["llm-models", "tushare", "storage", "data-source
         return check_storage(document.data)
     if kind == "data-sources":
         return check_data_sources(document.llm.timeout)
+    if kind == "lab":
+        return check_lab(document.lab, document.data, tushare_secret)
     return check_server(document.server)
 
 
@@ -175,7 +259,7 @@ def snapshot_diff(snapshot_id: str, request: Request) -> dict:
 def rollback_snapshot(snapshot_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return settings_manager.rollback(snapshot_id)
+        return _apply_runtime(settings_manager.rollback(snapshot_id))
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
     except ValueError as exc:
@@ -202,6 +286,12 @@ class MigrationCreate(BaseModel):
 @router.post("/settings/migration")
 def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
+    from quantmaster.lab.worker import get_worker
+
+    active_job = get_worker().status().get("active_job_id")
+    if active_job:
+        raise HTTPException(
+            409, "Quant Lab 当前有研究任务在执行；任务完成后再迁移，当前任务不会被中断")
     try:
         return migration_manager.create(value.target, value.mode)
     except MigrationError as exc:
@@ -212,7 +302,14 @@ def create_migration(request: Request, value: MigrationCreate) -> dict:
 def get_migration(task_id: str, request: Request) -> dict:
     _require_local(request)
     try:
-        return migration_manager.get(task_id)
+        task = migration_manager.get(task_id)
+        if task.get("status") == "completed" and task_id not in _applied_migrations:
+            _applied_migrations.add(task_id)
+            task["apply"] = _apply_runtime({
+                "status": "ok", "changed_fields": ["data.root"],
+                "restart_required": [], "warnings": [],
+            }).get("apply_status")
+        return task
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
 

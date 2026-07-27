@@ -827,7 +827,7 @@
 <section class="tab" id="tab-settings">
   <div class="settings-heading">
     <div><span class="eyebrow">LOCAL CONTROL PLANE</span><h2>设置中心</h2>
-      <p>模型、数据源、自动化、交易规则与本机服务的唯一配置入口。填写完成后自动校验并生效，密钥不会回显。</p></div>
+      <p>模型、数据、资讯、自动化与研究环境的唯一配置入口。普通设置自动保存并热应用，敏感操作单独确认。</p></div>
     <span class="settings-path" id="settings-config-path">正在读取配置…</span>
   </div>
   <div class="settings-shell">
@@ -835,11 +835,13 @@
       <button type="button" class="active" data-settings-section="llm"><span>01</span>模型服务</button>
       <button type="button" data-settings-section="data"><span>02</span>数据与缓存</button>
       <button type="button" data-settings-section="trade"><span>03</span>交易规则</button>
-      <button type="button" data-settings-section="automation"><span>04</span>自动化</button>
+      <button type="button" data-settings-section="news"><span>04</span>资讯处理</button>
       <button type="button" data-settings-section="sources"><span>05</span>资讯来源</button>
-      <button type="button" data-settings-section="server"><span>06</span>本机服务</button>
-      <button type="button" data-settings-section="backup"><span>07</span>快照回滚</button>
+      <button type="button" data-settings-section="automation"><span>06</span>自动化</button>
+      <button type="button" data-settings-section="lab"><span>07</span>Quant Lab</button>
       <button type="button" data-settings-section="universe"><span>08</span>股票池</button>
+      <button type="button" data-settings-section="backup"><span>09</span>快照回滚</button>
+      <button type="button" data-settings-section="server"><span>10</span>本机服务</button>
     </nav>
     <div class="settings-content">
       <form id="settings-form" novalidate>
@@ -869,16 +871,24 @@
             <label>Tushare 每分钟调用<input name="data.tushare_calls_per_minute" type="number" min="1" required></label>
             <label>Tushare 缓存（天）<input name="data.tushare_cache_days" type="number" min="0" required></label>
             <label>基本面缓存（天）<input name="data.fundamental_cache_days" type="number" min="0" required></label>
-            <label>资讯原文缓存（天）<input name="news.raw_cache_days" type="number" min="0" max="3650" required><small>结构化资讯永久保留；这里只控制原始响应。</small></label>
-            <label>消息面半衰期（天）<input name="news.factor_halflife_days" type="number" min="0.1" max="60" step="0.1" required></label>
-            <label>最低标注置信度<input name="news.factor_min_confidence" type="number" min="0" max="1" step="0.05" required></label>
-            <label class="toggle-field"><span><strong>自动标注新资讯</strong><small>模型不可用时保留在待处理队列。</small></span><input name="news.annotation_enabled" type="checkbox" role="switch"></label>
           </div>
           <div class="check-stack"><div class="check-result" data-check-result="storage">目录尚未检测</div><div class="check-result" data-check-result="data-sources">数据源尚未检测</div><div class="check-result" data-check-result="tushare">Tushare 尚未检测</div></div>
           <div class="migration-box">
             <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
             <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
             <div class="migration-progress" id="migration-progress" hidden><div><span data-migration-phase>准备中</span><strong data-migration-percent>0%</strong></div><div class="load-track"><div class="load-fill"></div></div><button class="ghost" id="migration-cancel" type="button">取消</button></div>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="news">
+          <div class="group-heading"><div><h3>资讯处理</h3><p>控制采集后的归档、批量标注与消息面因子；来源地址和调度频率在相邻分区管理。</p></div></div>
+          <div class="field-grid">
+            <label>资讯原文缓存（天）<input name="news.raw_cache_days" type="number" min="0" max="3650" step="1" required><small>结构化资讯长期保留，仅回收原始响应。</small></label>
+            <label>消息面半衰期（天）<input name="news.factor_halflife_days" type="number" min="0.1" max="30" step="0.1" required></label>
+            <label>最低标注置信度<input name="news.factor_min_confidence" type="number" min="0" max="1" step="0.05" required></label>
+            <label class="toggle-field"><span><strong>自动标注新资讯</strong><small>模型不可用时保留在待处理队列。</small></span><input name="news.annotation_enabled" type="checkbox" role="switch"></label>
+            <label>单批标注条数<input name="news.annotation_batch_size" type="number" min="1" max="50" step="1" required><small>每次 LLM 请求包含的资讯数量。</small></label>
+            <label>每轮处理上限<input name="news.annotation_items_per_run" type="number" min="1" max="1000" step="1" required><small>限制一次后台运行消费的待标注数量。</small></label>
           </div>
         </section>
 
@@ -895,7 +905,7 @@
         </section>
 
         <section class="settings-group" data-settings-panel="automation">
-          <div class="group-heading"><div><h3>自动化与消息通道</h3><p>定时监控、事件推送和 Bot 监听共用这里的范围与时区；启停或修改时区后需重启应用。</p></div><span class="state-pill" id="automation-runtime-state">正在读取状态</span></div>
+          <div class="group-heading"><div><h3>自动化与消息通道</h3><p>启停、时区与 Bot 监听保存后立即应用；已在执行的任务会安全完成。</p></div><span class="state-pill" id="automation-runtime-state">正在读取状态</span></div>
           <div class="field-grid">
             <label class="toggle-field field-wide"><span><strong>启用自动化运行时</strong><small>开启后执行定时任务，并监听已经接入的消息通道。</small></span><input name="automation.enabled" type="checkbox" role="switch"></label>
             <label>时区<input name="automation.timezone" list="automation-timezone-list" required autocomplete="off"><datalist id="automation-timezone-list"><option value="Asia/Shanghai"></option><option value="Asia/Hong_Kong"></option><option value="UTC"></option></datalist></label>
@@ -920,22 +930,47 @@
               <div class="channel-card-head"><div><span class="eyebrow">FEISHU</span><h4>飞书应用 Bot</h4></div><span class="channel-status" id="feishu-channel-state">未配置</span></div>
               <p>填写企业自建应用凭据完成接入。App Secret 只进入系统凭据库，不写入配置或快照。</p>
               <div class="channel-credentials">
-                <label>App ID<input name="automation.feishu_app_id" id="feishu-app-id" autocomplete="off" placeholder="cli_xxxxxxxxxxxxxxxx"></label>
+                <label>App ID<input id="feishu-app-id" autocomplete="off" placeholder="cli_xxxxxxxxxxxxxxxx"></label>
                 <label>App Secret<input id="feishu-app-secret" type="password" autocomplete="new-password" placeholder="接入时填写，不回显"></label>
-                <button class="ghost" type="button" id="feishu-connect">接入飞书</button>
+                <button class="ghost" type="button" id="feishu-connect">验证并接入</button>
               </div>
               <small id="feishu-connect-status">保存 App ID 后，可随时单独更新 App Secret。</small>
+              <div class="channel-inline-actions"><button class="ghost" type="button" id="feishu-check">检测连接</button><button class="ghost danger" type="button" id="feishu-remove">移除接入</button></div>
+              <div class="channel-diagnostic-list" id="feishu-diagnostic" hidden></div>
+              <button class="primary channel-enable" type="button" id="automation-enable-connect" hidden>启用自动化并连接</button>
             </article>
           </div>
         </section>
 
+        <section class="settings-group" data-settings-panel="lab">
+          <div class="group-heading"><div><h3>Quant Lab</h3><p>定义研究默认范围、后台节奏与计算边界；单次实验仍可在 Lab 工作台覆盖。</p></div><div class="button-pair"><span class="state-pill" id="lab-runtime-state">正在读取状态</span><button class="ghost check-button" type="button" data-check="lab">检测研究环境</button></div></div>
+          <div class="field-grid">
+            <label class="toggle-field field-wide"><span><strong>启用内置研究 Worker</strong><small>关闭后停止调度和领取新任务，当前任务完成后退出。</small></span><input name="lab.enabled" type="checkbox" role="switch"></label>
+            <label>默认研究股票池<input name="lab.universe" list="lab-universe-list" required autocomplete="off"><datalist id="lab-universe-list"><option value="csi800"></option><option value="demo"></option></datalist><small>csi800 需要 Tushare index_weight 权限。</small></label>
+            <label>研究起点<input name="lab.start" type="date" required></label>
+            <fieldset class="choice-field field-wide"><legend>统一验证周期</legend><div class="choice-row"><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="1">1 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="3">3 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="5">5 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="7">7 日</label></div><small>新建和定时研究使用；既有报告不会被改写。</small></fieldset>
+          </div>
+          <details class="settings-advanced">
+            <summary>调度、计算与数据共享</summary>
+            <div class="field-grid">
+              <fieldset class="choice-field field-wide"><legend>重型研究星期</legend><div class="choice-row"><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="1">一</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="2">二</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="3">三</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="4">四</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="5">五</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="6">六</label><label><input name="lab.weekly_days" data-list-checkbox type="checkbox" value="7">日</label></div></fieldset>
+              <label>窗口开始<input name="lab.window_start" type="time" required></label>
+              <label>窗口结束<input name="lab.window_end" type="time" required></label>
+              <label>每日重型研究预算（小时）<input name="lab.daily_budget_hours" type="number" min="0.5" max="24" step="0.5" required></label>
+              <label>计算设备<select name="lab.device" required><option value="auto">自动选择</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
+              <label class="toggle-field field-wide"><span><strong>允许匿名云端样本</strong><small>高风险开关；实际发送前仍需每次单独确认。</small></span><input name="lab.allow_cloud_sample" data-confirm-cloud type="checkbox" role="switch"></label>
+            </div>
+          </details>
+          <div class="check-result" data-check-result="lab">研究环境尚未检测</div>
+        </section>
+
         <section class="settings-group" data-settings-panel="server">
-          <div class="group-heading"><div><h3>本机服务</h3><p>host 或 port 修改需重启 QuantMaster；远程监听不会开放设置写入。</p></div><button class="ghost check-button" type="button" data-check="server">检测地址</button></div>
+          <div class="group-heading"><div><h3>本机服务</h3><p>只有 host 或 port 修改需要重启 QuantMaster；提示会持续保留到进程重启。</p></div><button class="ghost check-button" type="button" data-check="server">检测地址</button></div>
           <div class="field-grid"><label>Host<input name="server.host" required></label><label>Port<input name="server.port" type="number" min="1" max="65535" required></label></div>
           <div class="check-result" data-check-result="server">等待检测</div>
         </section>
 
-        <div class="save-dock" role="status" aria-live="polite"><div id="settings-save-state"><span class="save-dot"></span><span>自动保存已开启</span></div><span class="autosave-note">停顿片刻或离开字段后自动生效</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
+        <div class="save-dock" role="status" aria-live="polite"><div id="settings-save-state"><span class="save-dot"></span><span>自动保存已开启</span></div><span class="autosave-note" id="settings-runtime-note">停顿片刻或离开字段后自动生效</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
       </form>
 
       <section class="settings-group" data-settings-panel="sources">

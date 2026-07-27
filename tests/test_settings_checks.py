@@ -6,8 +6,8 @@ from typing import ClassVar
 
 import httpx
 
-from quantmaster.settings import LLMSettings, normalize_api_base
-from quantmaster.settings_checks import list_llm_models
+from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
+from quantmaster.settings_checks import check_lab, list_llm_models
 
 
 class FakeClient:
@@ -78,3 +78,14 @@ def test_unauthorized_and_legacy_endpoint_normalization(monkeypatch):
     assert result["details"]["http_status"] == 401
     assert "do not expose" not in str(result)
     assert normalize_api_base("openai-compatible", "https://gw.test/v1/models") == "https://gw.test/v1"
+
+
+def test_lab_check_reports_demo_and_missing_custom_pool(tmp_path):
+    data = DataSettings(root=str(tmp_path))
+    demo = check_lab(LabSettings(universe="demo", device="cpu"), data, "")
+    assert demo["status"] == "success"
+    assert demo["details"]["checks"]["universe"]["status"] == "success"
+
+    missing = check_lab(LabSettings(universe="research_pool", device="cpu"), data, "")
+    assert missing["status"] == "error"
+    assert "不存在" in missing["details"]["checks"]["universe"]["message"]

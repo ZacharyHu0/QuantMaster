@@ -23,7 +23,7 @@ class AutomationRuntime:
         self.started = False
         self.leader = False
         self._lock = threading.RLock()
-        self._channel_stop = threading.Event()
+        self._channel_stops = {name: threading.Event() for name in ("weixin", "feishu")}
         self._channel_threads: dict[str, threading.Thread] = {}
         self._standby_stop = threading.Event()
         self._standby_thread: threading.Thread | None = None
@@ -48,12 +48,19 @@ class AutomationRuntime:
     def _activate_leader_locked(self) -> bool:
         """在已经取得租约后启动调度器；调用方必须持有 ``_lock``。"""
         self.leader = True
+        if not self._start_scheduler_locked():
+            self.service.store.release_lease("scheduler", self.owner)
+            self.leader = False
+            return False
+        self.start_channels()
+        return True
+
+    def _start_scheduler_locked(self) -> bool:
+        """按当前配置创建调度器；调用方必须持有 ``_lock``。"""
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
         except ImportError:
             logger.exception("未安装 APScheduler，自动化运行时未启动")
-            self.service.store.release_lease("scheduler", self.owner)
-            self.leader = False
             return False
         try:
             self.scheduler = BackgroundScheduler(timezone=self.timezone)
@@ -72,15 +79,12 @@ class AutomationRuntime:
                 "cron", hour=3, minute=15, id="_cleanup", replace_existing=True,
                 coalesce=True, max_instances=1, misfire_grace_time=2700,
             )
-            self.start_channels()
             return True
         except Exception:
             logger.exception("自动化调度器启动失败")
             if self.scheduler:
                 self.scheduler.shutdown(wait=False)
             self.scheduler = None
-            self.leader = False
-            self.service.store.release_lease("scheduler", self.owner)
             return False
 
     def _start_standby_monitor_locked(self) -> None:
@@ -119,14 +123,12 @@ class AutomationRuntime:
         self.service.executor.submit(router.handle, actor, text)
 
     def _channel_worker(self, channel: str) -> None:
+        stop_event = self._channel_stops[channel]
         try:
             if channel == "weixin":
-                self.service.weixin.poll_forever(self._handle_message, self._channel_stop)
+                self.service.weixin.poll_forever(self._handle_message, stop_event)
             else:
-                account = self.service.store.bot_account("feishu")
-                if account:
-                    self.service.store.set_bot_status("feishu", account["account_id"], "listening")
-                self.service.feishu.listen_forever(self._handle_message, self._channel_stop)
+                self.service.feishu.listen_forever(self._handle_message, stop_event)
         except Exception as exc:  # pragma: no cover - 外部 SDK/网络错误路径
             logger.exception("%s Bot 接收线程退出", channel)
             account = self.service.store.bot_account(channel)
@@ -154,6 +156,7 @@ class AutomationRuntime:
                     target=self._channel_worker, args=(channel,),
                     name=f"qm-{channel}-bot", daemon=True,
                 )
+                self._channel_stops[channel].clear()
                 self._channel_threads[channel] = thread
                 thread.start()
                 result[channel] = True
@@ -243,11 +246,101 @@ class AutomationRuntime:
             self.service.weixin.base_url = get_config().automation.weixin_api_base.rstrip("/")
         return self.start()
 
+    def rebuild_scheduler(self) -> str:
+        """热重建任务触发器，不断开已经运行的消息通道。"""
+        with self._lock:
+            if not self.started:
+                return "disabled"
+            if not self.leader:
+                return "standby"
+            if self.scheduler:
+                self.scheduler.shutdown(wait=False)
+                self.scheduler = None
+            return "applied" if self._start_scheduler_locked() else "degraded"
+
+    def restart_channel(self, channel: str) -> str:
+        """只重启指定消息通道；凭据更新不会干扰另一通道或调度器。"""
+        if channel not in self._channel_stops:
+            raise ValueError(f"未知消息通道: {channel}")
+        with self._lock:
+            thread = self._channel_threads.pop(channel, None)
+            stop_event = self._channel_stops[channel]
+            stop_event.set()
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
+        with self._lock:
+            self._channel_stops[channel] = threading.Event()
+            if not get_config().automation.enabled or not self.started:
+                return "disabled"
+            if not self.leader:
+                return "standby"
+            account = self.service.store.bot_account(channel)
+            if not account:
+                return "disabled"
+            replacement = threading.Thread(
+                target=self._channel_worker, args=(channel,),
+                name=f"qm-{channel}-bot", daemon=True,
+            )
+            self._channel_threads[channel] = replacement
+            replacement.start()
+            return "applying"
+
+    def stop_channel(self, channel: str) -> str:
+        if channel not in self._channel_stops:
+            raise ValueError(f"未知消息通道: {channel}")
+        with self._lock:
+            thread = self._channel_threads.pop(channel, None)
+            self._channel_stops[channel].set()
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
+        with self._lock:
+            self._channel_stops[channel] = threading.Event()
+        return "disabled"
+
+    def apply_config(self, changed_fields: list[str]) -> dict[str, str]:
+        """把已落盘配置安全应用到当前进程。"""
+        changed = set(changed_fields)
+        if "automation.weixin_api_base" in changed:
+            self.service.weixin.base_url = get_config().automation.weixin_api_base.rstrip("/")
+        if "automation.enabled" in changed:
+            active = self.reconfigure()
+            state = "applied" if active else (
+                "disabled" if not get_config().automation.enabled else "standby"
+            )
+            return {"status": state}
+        if "automation.timezone" in changed:
+            return {"status": self.rebuild_scheduler()}
+        return {"status": "applied" if changed & {
+            "automation.primary_universe", "automation.watchlist",
+            "automation.sentinel_indices", "automation.retention_days",
+            "automation.weixin_api_base",
+        } else "unchanged"}
+
+    def status(self) -> dict:
+        if not get_config().automation.enabled:
+            state = "disabled"
+        elif self.leader and self.scheduler:
+            state = "running"
+        elif self.started:
+            state = "standby" if not self.leader else "degraded"
+        else:
+            state = "degraded"
+        return {
+            "status": state,
+            "started": self.started,
+            "leader": self.leader,
+            "channels": {
+                name: bool(thread and thread.is_alive())
+                for name, thread in self._channel_threads.items()
+            },
+        }
+
     def stop(self) -> None:
         threads: list[threading.Thread]
         standby_thread: threading.Thread | None
         with self._lock:
-            self._channel_stop.set()
+            for event in self._channel_stops.values():
+                event.set()
             self._standby_stop.set()
             threads = list(self._channel_threads.values())
             standby_thread = self._standby_thread
@@ -262,7 +355,9 @@ class AutomationRuntime:
             thread.join(timeout=5)
         with self._lock:
             self._channel_threads = {}
-            self._channel_stop = threading.Event()
+            self._channel_stops = {
+                name: threading.Event() for name in ("weixin", "feishu")
+            }
             self._standby_thread = None
             self._standby_stop = threading.Event()
 

@@ -19,6 +19,7 @@
     lastSavedFingerprint: '',
     fillingForm: false,
     weixinLoginTimer: null,
+    lastRuntime: null,
   };
   const form = document.getElementById('settings-form');
 
@@ -76,7 +77,7 @@
     form.hidden = ['sources', 'backup', 'universe'].includes(name);
     if (name === 'backup') loadSnapshots();
     if (name === 'universe') loadUniverses();
-    if (name === 'automation') loadAutomationOverview();
+    if (['automation', 'lab'].includes(name)) loadAutomationOverview();
   }
 
   document.getElementById('settings-nav').addEventListener('click', event => {
@@ -93,7 +94,9 @@
     form.querySelectorAll('[name]').forEach(input => {
       const value = getPath(config, input.name);
       if (value === undefined) return;
-      if (input.type === 'checkbox') input.checked = Boolean(value);
+      if (input.dataset.listCheckbox !== undefined) {
+        input.checked = (value || []).map(String).includes(String(input.value));
+      } else if (input.type === 'checkbox') input.checked = Boolean(value);
       else if (input.dataset.valueType === 'list') input.value = (value || []).join('\n');
       else input.value = value;
       input.removeAttribute('aria-invalid');
@@ -108,7 +111,33 @@
     state.savedRevision = state.editRevision;
     state.fillingForm = false;
     setSaveState('', config.managed_by_gui ? '自动保存已开启' : '填写后将自动启用 GUI 配置管理');
+    renderRuntime(config.runtime || state.lastRuntime);
     scheduleAutomaticModelCheck();
+  }
+
+  function renderRuntime(runtime) {
+    if (!runtime) return;
+    state.lastRuntime = runtime;
+    const note = document.getElementById('settings-runtime-note');
+    const restart = runtime.server?.restart_required || [];
+    note.classList.toggle('restart-required', Boolean(restart.length));
+    note.textContent = restart.length
+      ? `${restart.join(' / ')} 已保存，重启服务后生效`
+      : '停顿片刻或离开字段后自动生效';
+    const labels = {
+      running: '运行中', standby: '等待调度租约', disabled: '已停用',
+      draining: '停止领取新任务', degraded: '运行异常', applied: '已应用',
+    };
+    const automation = document.getElementById('automation-runtime-state');
+    if (automation && runtime.automation) {
+      automation.textContent = labels[runtime.automation.status] || runtime.automation.status;
+      automation.className = `state-pill ${runtime.automation.status === 'running' ? 'buy' : ''}`;
+    }
+    const lab = document.getElementById('lab-runtime-state');
+    if (lab && runtime.lab) {
+      lab.textContent = labels[runtime.lab.status] || runtime.lab.status;
+      lab.className = `state-pill ${runtime.lab.status === 'running' ? 'buy' : ''}`;
+    }
   }
 
   function updateSecretStates(config) {
@@ -154,6 +183,9 @@
     if (input.id === 'llm-secret' || input.id === 'tushare-secret') {
       const name = input.id.replace('-secret', '');
       state.secretActions[name] = input.value ? 'replace' : 'keep';
+      if (input.id === 'llm-secret') scheduleAutomaticModelCheck();
+      markDirty('凭据填写完成后自动保存…');
+      return;
     }
     if (['llm.provider', 'llm.base_url'].includes(input.name) || input.id === 'llm-secret') {
       scheduleAutomaticModelCheck();
@@ -170,6 +202,13 @@
       return;
     }
     if (input.id === 'feishu-app-secret' || input.id === 'weixin-verify-code') return;
+    if (input.dataset.confirmCloud !== undefined && input.checked) {
+      const confirmed = window.confirm('允许匿名云端样本会扩大数据出站范围。每次实际发送仍需确认，是否继续？');
+      if (!confirmed) {
+        input.checked = false;
+        return;
+      }
+    }
     if (input.name || ['llm-secret', 'tushare-secret'].includes(input.id)) scheduleAutosave(0);
   });
 
@@ -177,6 +216,12 @@
     const input = event.target;
     if (input.id === 'feishu-app-secret' || input.id === 'weixin-verify-code') return;
     if (input.name || ['llm-secret', 'tushare-secret'].includes(input.id)) scheduleAutosave(0);
+  });
+
+  form.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' || !['llm-secret', 'tushare-secret'].includes(event.target.id)) return;
+    event.preventDefault();
+    event.target.blur();
   });
 
   function scheduleAutomaticModelCheck() {
@@ -213,7 +258,16 @@
       automation: structuredClone(state.config?.automation || {}),
       news: structuredClone(state.config?.news || {}),
       lab: structuredClone(state.config?.lab || {})};
+    const handledLists = new Set();
     form.querySelectorAll('[name]').forEach(input => {
+      if (input.dataset.listCheckbox !== undefined) {
+        if (handledLists.has(input.name)) return;
+        handledLists.add(input.name);
+        const value = [...form.querySelectorAll(`[name="${input.name}"][data-list-checkbox]:checked`)]
+          .map(item => Number(item.value));
+        setPath(payload, input.name, value);
+        return;
+      }
       let value = input.value;
       if (input.type === 'checkbox') value = input.checked;
       else if (input.dataset.valueType === 'list') value = parseSymbols(value);
@@ -237,7 +291,10 @@
     if (!el) return;
     el.className = `check-result ${data.status || ''}`;
     const time = data.checked_at ? new Date(data.checked_at).toLocaleTimeString('zh-CN', {hour12: false}) : '';
-    el.textContent = `${data.message}${data.latency_ms != null ? ` · ${data.latency_ms}ms` : ''}${time ? ` · ${time}` : ''}`;
+    const labChecks = kind === 'lab' ? Object.values(data.details?.checks || {})
+      .map(item => item.message).filter(Boolean) : [];
+    el.textContent = `${data.message}${labChecks.length ? ` · ${labChecks.join('；')}` : ''}` +
+      `${data.latency_ms != null ? ` · ${data.latency_ms}ms` : ''}${time ? ` · ${time}` : ''}`;
     if (kind === 'llm-models' && Array.isArray(data.details?.models)) {
       const list = document.getElementById('settings-model-list');
       list.innerHTML = data.details.models.map(model => `<option value="${html(model)}"></option>`).join('');
@@ -274,6 +331,13 @@
       input.toggleAttribute('aria-invalid', invalid);
       count += Number(invalid);
     });
+    for (const name of ['lab.horizons', 'lab.weekly_days']) {
+      const inputs = [...form.querySelectorAll(`[name="${name}"][data-list-checkbox]`)];
+      const fieldset = inputs[0]?.closest('fieldset');
+      const invalid = inputs.length > 0 && !inputs.some(input => input.checked);
+      fieldset?.toggleAttribute('aria-invalid', invalid);
+      count += Number(invalid);
+    }
     return count;
   }
 
@@ -312,7 +376,7 @@
       const result = await request('/api/settings', {method: 'PUT', body: update});
 
       if (result.settings) {
-        state.config = {...result.settings, csrf_token: state.csrf};
+        state.config = {...result.settings, csrf_token: state.csrf, runtime: result.runtime};
         updateSecretStates(state.config);
       }
       for (const name of ['llm', 'tushare']) {
@@ -330,12 +394,19 @@
       state.lastSavedFingerprint = JSON.stringify(validated.normalized);
       state.savedRevision = revision;
       if (state.editRevision === revision && result.settings) fillForm(state.config);
-      const suffix = result.restart_required.length
+      renderRuntime(result.runtime);
+      const suffix = (result.restart_required || []).length
         ? `；${result.restart_required.join(' / ')} 重启后生效` : '';
-      const warnings = result.warnings.length ? `；${result.warnings.join('；')}` : '';
+      const degraded = Object.entries(result.apply_status || {})
+        .filter(([, value]) => value?.status === 'degraded')
+        .map(([name]) => name === 'automation' ? '自动化运行态异常' : '研究 Worker 运行态异常');
+      const allWarnings = [...(result.warnings || []), ...degraded];
+      const warnings = allWarnings.length ? `；${allWarnings.join('；')}` : '';
       const time = new Date().toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit'});
       setSaveState('saved', `已自动保存 ${time}${suffix}${warnings}`);
-      if (document.querySelector('[data-settings-section="automation"].active')) loadAutomationOverview();
+      document.dispatchEvent(new CustomEvent('quantmaster:settings-applied', {detail: result}));
+      if (document.querySelector('[data-settings-section="automation"].active') ||
+          document.querySelector('[data-settings-section="lab"].active')) loadAutomationOverview();
     } catch (error) {
       setSaveState('error', `自动保存失败：${error.message}`);
       if (error.status === 423) {
@@ -375,7 +446,7 @@
     const runtimeState = document.getElementById('automation-runtime-state');
     try {
       const data = await request('/api/automation/overview');
-      const runtimeLabels = {running: '运行中', standby: '等待调度租约', disabled: '已停用'};
+      const runtimeLabels = {running: '运行中', standby: '等待调度租约', disabled: '已停用', degraded: '运行异常'};
       runtimeState.textContent = runtimeLabels[data.runtime] || data.runtime;
       runtimeState.className = `state-pill ${data.runtime === 'running' ? 'buy' : ''}`;
       for (const channel of ['weixin', 'feishu']) {
@@ -383,9 +454,19 @@
         const configured = Boolean(data.channels?.[channel]?.configured);
         setChannelState(channel, configured, account?.status || '');
       }
+      const feishu = (data.bot_accounts || []).find(item => item.channel === 'feishu');
+      const appId = document.getElementById('feishu-app-id');
+      if (feishu && document.activeElement !== appId) appId.value = feishu.account_id || '';
+      document.getElementById('automation-enable-connect').hidden = !(feishu && !data.enabled);
+      document.getElementById('feishu-remove').disabled = !feishu;
       const universes = await request('/api/settings/universes');
-      document.getElementById('automation-universe-list').innerHTML = universes.universes
+      const universeOptions = universes.universes
         .map(item => `<option value="${html(item.name)}"></option>`).join('');
+      document.getElementById('automation-universe-list').innerHTML = universeOptions;
+      document.getElementById('lab-universe-list').innerHTML =
+        '<option value="csi800"></option>' + universeOptions;
+      const runtime = await request('/api/settings/runtime');
+      renderRuntime(runtime);
     } catch (error) {
       runtimeState.textContent = `状态不可用：${error.message}`;
     }
@@ -455,19 +536,89 @@
       return;
     }
     button.disabled = true;
-    status.textContent = '正在写入系统凭据库并启动通道…';
+    status.textContent = '正在验证凭据并启动长连接…';
     try {
-      await request('/api/automation/channels/feishu/config', {
+      const data = await request('/api/automation/channels/feishu/config', {
         method: 'POST', body: {app_id: appId, app_secret: secretInput.value},
       });
       secretInput.value = '';
-      status.textContent = '飞书凭据已安全保存；自动化启用后会保持长连接。';
+      status.textContent = data.runtime_status === 'disabled'
+        ? '凭据验证通过并已安全保存；自动化尚未启用。'
+        : data.verification?.message || '飞书凭据已安全保存，正在建立长连接。';
       await loadAutomationOverview();
+      await checkFeishu();
     } catch (error) {
       status.textContent = `飞书接入失败：${error.message}`;
     } finally {
       button.disabled = false;
     }
+  });
+
+  const feishuStageLabels = {
+    credential: '应用凭据', runtime: '自动化运行时', websocket: '长连接',
+    event: '消息事件', binding: '会话绑定',
+  };
+
+  function renderFeishuDiagnostic(data) {
+    const root = document.getElementById('feishu-diagnostic');
+    root.hidden = false;
+    root.innerHTML = Object.entries(data.stages || {}).map(([name, stage]) => `
+      <div class="channel-diagnostic-item">
+        <strong>${html(feishuStageLabels[name] || name)}</strong>
+        <span class="${html(stage.status)}">${html({success: '通过', warning: '待处理', error: '失败'}[stage.status] || stage.status)}</span>
+        <span>${html(stage.message)}</span>
+      </div>`).join('');
+  }
+
+  async function checkFeishu() {
+    const button = document.getElementById('feishu-check');
+    const status = document.getElementById('feishu-connect-status');
+    button.disabled = true;
+    status.textContent = '正在逐项检测飞书接入…';
+    try {
+      const data = await request('/api/automation/channels/feishu/check', {method: 'POST'});
+      renderFeishuDiagnostic(data);
+      status.textContent = data.status === 'success'
+        ? '飞书接入链路全部通过。'
+        : '检测完成；请按下方未通过阶段逐项处理。';
+      await loadAutomationOverview();
+      return data;
+    } catch (error) {
+      status.textContent = `飞书检测失败：${error.message}`;
+      return null;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  document.getElementById('feishu-check').addEventListener('click', checkFeishu);
+
+  document.getElementById('feishu-remove').addEventListener('click', async event => {
+    if (!window.confirm('移除飞书接入？凭据会从系统凭据库删除，已有会话将标记为需要重新绑定。')) return;
+    event.currentTarget.disabled = true;
+    const status = document.getElementById('feishu-connect-status');
+    try {
+      const data = await request('/api/automation/channels/feishu/config', {method: 'DELETE'});
+      document.getElementById('feishu-app-id').value = '';
+      document.getElementById('feishu-diagnostic').hidden = true;
+      status.textContent = (data.warnings || []).length
+        ? `接入已移除；${data.warnings.join('；')}` : '飞书凭据和接入记录已移除。';
+      await loadAutomationOverview();
+    } catch (error) {
+      status.textContent = `移除失败：${error.message}`;
+    } finally {
+      event.currentTarget.disabled = !document.getElementById('feishu-app-id').value.trim();
+    }
+  });
+
+  document.getElementById('automation-enable-connect').addEventListener('click', async event => {
+    const toggle = form.elements['automation.enabled'];
+    toggle.checked = true;
+    event.currentTarget.disabled = true;
+    scheduleAutosave(0, '正在启用自动化并连接飞书…');
+    await flushAutosave();
+    event.currentTarget.disabled = false;
+    await checkFeishu();
   });
 
   async function loadSnapshots() {
@@ -587,8 +738,11 @@
     const list = document.getElementById('universe-list');
     try {
       const data = await request('/api/settings/universes');
-      document.getElementById('automation-universe-list').innerHTML = data.universes
+      const options = data.universes
         .map(item => `<option value="${html(item.name)}"></option>`).join('');
+      document.getElementById('automation-universe-list').innerHTML = options;
+      document.getElementById('lab-universe-list').innerHTML =
+        '<option value="csi800"></option>' + options;
       list.innerHTML = data.universes.map(item => `<button class="universe-item" type="button" data-universe="${html(item.name)}">
         <strong>${html(item.name)}${item.readonly ? ' · 内置' : ''}</strong><span>${item.count} 只</span></button>`).join('');
       if (!state.currentUniverse && data.universes.length) selectUniverse(data.universes[0].name);
@@ -679,5 +833,14 @@
     } catch (error) { document.getElementById('universe-editor-status').textContent = error.message; }
   });
 
-  window.QuantMasterManagement = {request, ensureSettings: loadSettings, state};
+  async function openSettings(section = 'llm') {
+    const entry = document.querySelector('[data-tab="settings"]');
+    entry?.click();
+    await loadSettings();
+    switchSection(section);
+  }
+
+  window.QuantMasterManagement = {
+    request, ensureSettings: loadSettings, state, open: openSettings,
+  };
 })();

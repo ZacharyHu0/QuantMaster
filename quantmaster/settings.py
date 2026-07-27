@@ -11,7 +11,7 @@ import re
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -181,12 +181,43 @@ class LabSettings(StrictModel):
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     allow_cloud_sample: bool = False
 
+    @field_validator("universe")
+    @classmethod
+    def validate_universe(cls, value: str) -> str:
+        if value.lower() == "csi800":
+            return "csi800"
+        from quantmaster.data.universe import validate_universe_name
+
+        return validate_universe_name(value, allow_demo=True)
+
+    @field_validator("start")
+    @classmethod
+    def validate_start(cls, value: str) -> str:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError("研究起点必须是有效的 YYYY-MM-DD 日期") from None
+        if parsed > date.today():
+            raise ValueError("研究起点不能晚于今天")
+        return parsed.isoformat()
+
+    @field_validator("horizons")
+    @classmethod
+    def normalize_horizons(cls, value: list[int]) -> list[int]:
+        return [item for item in (1, 3, 5, 7) if item in set(value)]
+
     @field_validator("weekly_days")
     @classmethod
     def validate_weekly_days(cls, value: list[int]) -> list[int]:
         if any(day < 1 or day > 7 for day in value):
             raise ValueError("weekly_days 使用 ISO 星期编号 1–7")
         return sorted(set(value))
+
+    @model_validator(mode="after")
+    def validate_window(self):
+        if self.window_start == self.window_end:
+            raise ValueError("研究窗口的开始和结束时间不能相同")
+        return self
 
 
 class SecretMutation(StrictModel):
@@ -343,6 +374,7 @@ class ConfigManager:
         doc.update({
             "managed_by_gui": bool(raw.get("managed_by_gui")),
             "config_path": str(self.path),
+            "config_revision": _hash_config(raw or doc),
             "secrets": {
                 "llm": self._secret_public("llm", cfg.llm.api_key, meta),
                 "tushare": self._secret_public("tushare", cfg.data.tushare_token, meta),
@@ -366,6 +398,32 @@ class ConfigManager:
             warnings.append(f"数据目录将相对于启动目录解析：{root}")
         if doc.server.host not in {"127.0.0.1", "localhost", "::1"}:
             warnings.append("服务监听非本机地址时，远程设置入口会保持禁用")
+        for label, universe in (("自动化主股票池", doc.automation.primary_universe),
+                                ("Quant Lab 股票池", doc.lab.universe)):
+            if universe.lower() in {"demo", "csi800"}:
+                continue
+            from quantmaster.data.universe import normalize_symbols
+
+            universe_path = Path(doc.data.root).expanduser().resolve() / "universe" / f"{universe}.json"
+            try:
+                raw_symbols = json.loads(universe_path.read_text(encoding="utf-8"))
+                symbols = normalize_symbols([str(item) for item in raw_symbols])
+            except FileNotFoundError:
+                raise ValueError(f"{label}不存在：{universe}") from None
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                raise ValueError(f"{label}文件无效：{universe}") from None
+            if not symbols:
+                raise ValueError(f"{label}为空：{universe}")
+        if doc.lab.device != "auto":
+            import importlib.util
+
+            if importlib.util.find_spec("torch") is None and doc.lab.device in {"cuda", "mps"}:
+                warnings.append(f"当前未安装 PyTorch；{doc.lab.device} 将在安装后用于新训练任务")
+        start_minutes = int(doc.lab.window_start[:2]) * 60 + int(doc.lab.window_start[3:])
+        end_minutes = int(doc.lab.window_end[:2]) * 60 + int(doc.lab.window_end[3:])
+        window_hours = ((end_minutes - start_minutes) % (24 * 60)) / 60
+        if doc.lab.daily_budget_hours > window_hours:
+            warnings.append("Quant Lab 每日预算大于自动研究窗口；实际运行仍受窗口限制")
         return {"valid": True, "normalized": doc.model_dump(), "warnings": warnings}
 
     def save(self, update: SettingsUpdate | dict[str, Any], *, allow_root_change: bool = False) -> dict:
@@ -413,12 +471,15 @@ class ConfigManager:
             _atomic_write(self.path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
             set_config(self.load())
             snapshot = self._create_snapshot(payload, kind="automatic")
-            restart = [name for name in ("host", "port")
+            old_flat = _flatten(current_doc.model_dump())
+            new_flat = _flatten(value.model_dump(exclude={"secrets", "allow_plaintext_secrets"}))
+            changed = sorted(
+                key for key in set(old_flat) | set(new_flat) if old_flat.get(key) != new_flat.get(key)
+            )
+            restart = [f"server.{name}" for name in ("host", "port")
                        if getattr(current_doc.server, name) != getattr(value.server, name)]
-            if (current_doc.automation.enabled != value.automation.enabled or
-                    current_doc.automation.timezone != value.automation.timezone):
-                restart.append("automation")
             return {"status": "ok", "warnings": warnings,
+                    "changed_fields": changed, "config_revision": _hash_config(payload),
                     "restart_required": restart, "snapshot_id": snapshot["id"]}
 
     def _apply_secret(
@@ -485,6 +546,7 @@ class ConfigManager:
             set_config(self.load())
             snap = self._create_snapshot(payload, kind="automatic")
             return {"status": "ok", "warnings": [], "restart_required": [],
+                    "changed_fields": ["data.root"], "config_revision": _hash_config(payload),
                     "snapshot_id": snap["id"]}
 
     def list_snapshots(self) -> list[dict[str, Any]]:
@@ -558,9 +620,15 @@ class ConfigManager:
                     merged[section][field] = current[section][field]
             _atomic_write(self.path, yaml.safe_dump(merged, allow_unicode=True, sort_keys=False))
             set_config(self.load())
+            before = _flatten(_sanitize(current))
+            after = _flatten(_sanitize(merged))
+            changed = sorted(
+                key for key in set(before) | set(after) if before.get(key) != after.get(key)
+            )
+            restart = [field for field in ("server.host", "server.port") if field in changed]
             return {"status": "ok", "snapshot_id": snapshot_id,
-                    "restart_required": ["host", "port"]
-                    if current.get("server") != merged.get("server") else []}
+                    "changed_fields": changed, "config_revision": _hash_config(merged),
+                    "restart_required": restart}
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         item = self._load_snapshot(snapshot_id)

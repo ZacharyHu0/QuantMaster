@@ -56,28 +56,29 @@ class BotCommandRouter:
         lines = [
             "QuantMaster 使用说明",
             "",
-            "你可以直接用自然语言表达，但目前是受控指令助手，不是任意投资问答。",
+            "你可以直接用自然语言表达。固定操作由受控指令助手执行；其他问题会由 AI 回答。",
             "",
             "查询",
             "• 现在大盘怎么样",
             "• 查看今天的选股 / 持仓 / 重要消息 / 告警 / 任务",
             "",
-            "推送与任务（仅主人）",
+            "推送与任务（仅管理员）",
             "• 提醒少一点 / 把推送强度调成均衡 / 提醒敏感一点",
             "• 立即运行收盘 / 暂停盘中监控 / 恢复快讯",
         ]
         if actor.chat_type == "direct":
             lines.extend([
                 "",
-                "账本（仅主人私聊，写入前会再次确认）",
+                "账本（仅管理员私聊，写入前会再次确认）",
                 "• 买入 600519 100股 价格1500 费用5",
                 "• 入金 100000",
             ])
         if actor.channel == "feishu" and actor.chat_type == "group":
             lines.extend([
                 "",
-                "群聊提示：每条指令都要真正 @QuantMaster；普通成员可以查询，"
-                "推送设置和任务控制只有主人可以执行。",
+                "群聊提示：我会静默参考近期话题；内容过长时压缩为话题记忆。"
+                "只有真正 @QuantMaster 才会回复。普通成员可以查询和提问，"
+                "推送设置与任务控制只有管理员可以执行。",
             ])
         lines.extend(["", "随时发送「帮助」可再次查看本说明。"])
         return "\n".join(lines)
@@ -93,6 +94,8 @@ class BotCommandRouter:
         except Exception as exc:
             answer = f"未执行：{exc}\n发送「帮助」查看可用说法。"
         self.reply(actor, answer)
+        if actor.channel == "feishu" and actor.chat_type == "group":
+            self.service.executor.submit(self.service.maintain_conversation, actor)
 
     def execute(self, actor: ActorContext, text: str) -> str:
         if HELP_PATTERN.fullmatch(text):
@@ -189,8 +192,4 @@ class BotCommandRouter:
             if label in text:
                 return self._brief(self.service.query(view))
 
-        return (
-            "我没理解这条消息，也没有执行任何操作。\n"
-            "可以试试「大盘怎么样」「查看任务」或「提醒少一点」。\n"
-            "发送「帮助」查看完整使用说明。"
-        )
+        return self.service.contextual_chat(actor, text)

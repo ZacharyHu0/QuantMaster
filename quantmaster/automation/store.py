@@ -14,9 +14,9 @@ from quantmaster.automation.policy import resolved_policy
 from quantmaster.config import get_config
 
 DEFAULT_TARGETS = (
-    ("weixin_owner", "weixin", "微信主人私聊", "direct"),
+    ("weixin_owner", "weixin", "微信管理员私聊", "direct"),
     ("feishu_group", "feishu", "飞书提醒群", "group"),
-    ("feishu_owner", "feishu", "飞书主人私聊", "direct"),
+    ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
 
 DEFAULT_JOBS = {
@@ -68,6 +68,18 @@ class AutomationStore:
                 CREATE TABLE IF NOT EXISTS inbound_messages (
                     channel TEXT NOT NULL, message_id TEXT NOT NULL, received_at TEXT NOT NULL,
                     PRIMARY KEY(channel,message_id));
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    channel TEXT NOT NULL, account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL, sender_id TEXT NOT NULL DEFAULT '',
+                    sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
+                    is_bot INTEGER NOT NULL DEFAULT 0, mentioned_bot INTEGER NOT NULL DEFAULT 0,
+                    reply_to TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    PRIMARY KEY(channel,message_id));
+                CREATE TABLE IF NOT EXISTS conversation_memories (
+                    channel TEXT NOT NULL, account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+                    memory TEXT NOT NULL DEFAULT '{}', source_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(channel,account_id,chat_id));
                 CREATE TABLE IF NOT EXISTS job_templates (
                     name TEXT PRIMARY KEY, enabled INTEGER NOT NULL, schedule TEXT NOT NULL,
                     args TEXT NOT NULL DEFAULT '{}', next_run TEXT NOT NULL DEFAULT '',
@@ -109,7 +121,9 @@ class AutomationStore:
                 CREATE INDEX IF NOT EXISTS idx_delivery_due
                     ON delivery_attempts(status, next_attempt_at);
                 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
-                PRAGMA user_version=2;
+                CREATE INDEX IF NOT EXISTS idx_conversation_chat_created
+                    ON conversation_messages(channel,account_id,chat_id,created_at DESC);
+                PRAGMA user_version=4;
             """)
             target_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(notification_targets)")}
@@ -145,6 +159,10 @@ class AutomationStore:
                     "INSERT OR IGNORE INTO notification_targets "
                     "(id,channel,label,chat_type,updated_at) VALUES (?,?,?,?,?)",
                     (target_id, channel, label, chat_type, now),
+                )
+                conn.execute(
+                    "UPDATE notification_targets SET label=? WHERE id=?",
+                    (label, target_id),
                 )
             for name, (enabled, schedule) in DEFAULT_JOBS.items():
                 conn.execute(
@@ -250,6 +268,43 @@ class AutomationStore:
             return next((item for item in accounts if item["account_id"] == account_id), None)
         return accounts[0] if accounts else None
 
+    def delete_bot_accounts(self, channel: str, *, mark_targets: bool = True) -> list[dict]:
+        accounts = self.bot_accounts(channel)
+        with self._conn() as conn:
+            conn.execute("DELETE FROM bot_accounts WHERE channel=?", (channel,))
+            if mark_targets:
+                conn.execute(
+                    "UPDATE notification_targets SET status='needs_rebind',"
+                    "last_error='channel_credentials_removed',updated_at=? WHERE channel=?",
+                    (utc_now(), channel),
+                )
+        return accounts
+
+    def channel_credentials_removed(self, channel: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM notification_targets WHERE channel=? "
+                "AND last_error='channel_credentials_removed' LIMIT 1",
+                (channel,),
+            ).fetchone()
+        return row is not None
+
+    def clear_channel_removal_marker(self, channel: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE notification_targets SET status=CASE WHEN target='' THEN 'unbound' "
+                "ELSE 'needs_rebind' END,last_error='',updated_at=? WHERE channel=? "
+                "AND last_error='channel_credentials_removed'",
+                (utc_now(), channel),
+            )
+
+    def delete_other_bot_accounts(self, channel: str, account_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM bot_accounts WHERE channel=? AND account_id<>?",
+                (channel, account_id),
+            )
+
     def update_bot_cursor(self, channel: str, account_id: str, cursor: str) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -290,6 +345,112 @@ class AutomationStore:
             "total": int(row["total"] or 0),
             "last_received_at": str(row["last_received_at"] or ""),
         }
+
+    def remember_conversation_message(
+            self, *, channel: str, account_id: str, chat_id: str, message_id: str,
+            sender_id: str, sender_name: str, text: str, is_bot: bool = False,
+            mentioned_bot: bool = False, reply_to: str = "", created_at: str = "",
+    ) -> bool:
+        """保存已绑定会话文本；过长内容会在被 @ 时压缩为话题记忆。"""
+        value = text.strip()[:4000]
+        if not chat_id or not message_id or not value:
+            return False
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO conversation_messages "
+                "(channel,account_id,chat_id,message_id,sender_id,sender_name,text,is_bot,"
+                "mentioned_bot,reply_to,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (channel, account_id, chat_id, message_id, sender_id, sender_name[:100],
+                 value, int(is_bot), int(mentioned_bot), reply_to, created_at or utc_now()),
+            )
+        return cursor.rowcount == 1
+
+    def conversation_context(
+            self, *, channel: str, account_id: str, chat_id: str,
+            exclude_message_id: str = "", limit: int = 80, oldest: bool = False,
+    ) -> list[dict]:
+        query = (
+            "SELECT * FROM conversation_messages WHERE channel=? AND account_id=? "
+            "AND chat_id=?"
+        )
+        params: list[Any] = [channel, account_id, chat_id]
+        if exclude_message_id:
+            query += " AND message_id<>?"
+            params.append(exclude_message_id)
+        order = "created_at ASC,rowid ASC" if oldest else "created_at DESC,rowid DESC"
+        query += f" ORDER BY {order} LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with self._conn() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        values = [dict(row) for row in rows]
+        return values if oldest else list(reversed(values))
+
+    def conversation_stats(self, *, channel: str, account_id: str, chat_id: str) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count,COALESCE(SUM(LENGTH(text)),0) AS characters "
+                "FROM conversation_messages WHERE channel=? AND account_id=? AND chat_id=?",
+                (channel, account_id, chat_id),
+            ).fetchone()
+        return {"count": int(row["count"]), "characters": int(row["characters"])}
+
+    def conversation_memory(self, *, channel: str, account_id: str, chat_id: str) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT memory,source_count,updated_at FROM conversation_memories "
+                "WHERE channel=? AND account_id=? AND chat_id=?",
+                (channel, account_id, chat_id),
+            ).fetchone()
+        if not row:
+            return {"memory": {}, "source_count": 0, "updated_at": ""}
+        try:
+            memory = json.loads(row["memory"] or "{}")
+        except json.JSONDecodeError:
+            memory = {}
+        return {
+            "memory": memory, "source_count": int(row["source_count"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def compact_conversation(
+            self, *, channel: str, account_id: str, chat_id: str,
+            message_ids: list[str], memory: dict,
+    ) -> int:
+        """原子保存话题记忆并删除已被该记忆覆盖的原文。"""
+        unique_ids = list(dict.fromkeys(value for value in message_ids if value))
+        if not unique_ids:
+            return 0
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT source_count FROM conversation_memories "
+                "WHERE channel=? AND account_id=? AND chat_id=?",
+                (channel, account_id, chat_id),
+            ).fetchone()
+            present = conn.execute(
+                "SELECT COUNT(*) AS count FROM conversation_messages WHERE channel=? "
+                f"AND account_id=? AND chat_id=? AND message_id IN ({placeholders})",
+                (channel, account_id, chat_id, *unique_ids),
+            ).fetchone()
+            covered = int(present["count"] or 0)
+            if not covered:
+                return 0
+            conn.execute(
+                "INSERT INTO conversation_memories "
+                "(channel,account_id,chat_id,memory,source_count,updated_at) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(channel,account_id,chat_id) DO UPDATE SET "
+                "memory=excluded.memory,source_count=excluded.source_count,"
+                "updated_at=excluded.updated_at",
+                (channel, account_id, chat_id, json.dumps(memory, ensure_ascii=False),
+                 int((existing or {"source_count": 0})["source_count"]) + covered, utc_now()),
+            )
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE channel=? AND account_id=? "
+                f"AND chat_id=? AND message_id IN ({placeholders})",
+                (channel, account_id, chat_id, *unique_ids),
+            )
+        return covered
 
     def jobs(self) -> list[dict]:
         with self._conn() as conn:
@@ -591,4 +752,7 @@ class AutomationStore:
             conn.execute(
                 "DELETE FROM delivery_attempts WHERE created_at<? AND status IN ('delivered','failed')",
                 (cutoff,),
+            )
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE created_at<?", (cutoff,)
             )

@@ -95,7 +95,14 @@ def test_plaintext_fallback_requires_confirmation(tmp_path):
 
 
 def test_automation_settings_are_normalized_and_validated(tmp_path):
-    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    data_root = tmp_path / "data"
+    pool_dir = data_root / "universe"
+    pool_dir.mkdir(parents=True)
+    (pool_dir / "core_pool.json").write_text('["600519.SH"]', encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"data": {"root": str(data_root)}}), encoding="utf-8")
+    manager = ConfigManager(config_path, tmp_path / "backups", FakeCredentials())
     raw = _update(manager).model_dump()
     raw["automation"].update({
         "timezone": "Asia/Shanghai",
@@ -141,6 +148,46 @@ def test_snapshot_diff_rollback_preserves_current_secret(tmp_path):
     set_config(None)
 
 
+def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    update = _update(manager)
+    update.news.annotation_batch_size = 7
+    update.news.annotation_items_per_run = 35
+    update.lab.enabled = False
+    update.lab.horizons = [3, 7]
+    result = manager.save(update)
+
+    assert result["restart_required"] == []
+    assert {
+        "news.annotation_batch_size", "news.annotation_items_per_run",
+        "lab.enabled", "lab.horizons",
+    }.issubset(result["changed_fields"])
+    assert manager.public()["config_revision"] == result["config_revision"]
+    assert manager.load().lab.horizons == [3, 7]
+
+    server = _update(manager)
+    server.server.port += 1
+    restarted = manager.save(server)
+    assert restarted["restart_required"] == ["server.port"]
+    set_config(None)
+
+
+def test_settings_reject_missing_pool_and_invalid_lab_window(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    raw = _update(manager).model_dump()
+    raw.pop("secrets")
+    raw.pop("allow_plaintext_secrets")
+    raw["automation"]["primary_universe"] = "missing_pool"
+    with pytest.raises(ValueError, match="不存在"):
+        manager.validate(raw)
+
+    raw = _update(manager).model_dump()
+    raw["lab"]["window_end"] = raw["lab"]["window_start"]
+    with pytest.raises(ValueError, match="不能相同"):
+        SettingsUpdate.model_validate(raw)
+    set_config(None)
+
+
 def test_settings_api_requires_local_csrf_and_never_returns_secret(monkeypatch, tmp_path):
     from quantmaster.server import management
 
@@ -175,3 +222,13 @@ def test_automation_channel_credentials_require_local_csrf():
     assert "must-not-echo" not in rejected.text
     remote = TestClient(app, client=("203.0.113.8", 50000))
     assert remote.post("/api/automation/channels/weixin/login").status_code == 403
+
+    settings = client.get("/api/settings").json()
+    checked = client.post(
+        "/api/automation/channels/feishu/check",
+        headers={"X-CSRF-Token": settings["csrf_token"]},
+    )
+    assert checked.status_code == 200
+    assert set(checked.json()["stages"]) == {
+        "credential", "runtime", "websocket", "event", "binding",
+    }

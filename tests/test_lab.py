@@ -202,6 +202,8 @@ def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
 
     assert '<span class="nav-lab-label">Quant Lab</span>' in page
     assert 'id="lab-ml-setup"' in page
+    assert 'data-settings-panel="lab"' in page
+    assert 'name="lab.horizons" data-list-checkbox' in page
     assert "#nav .nav-lab-label" in styles
     assert "margin:auto" in styles
     assert "--dialog-x" in styles
@@ -211,3 +213,4 @@ def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
     assert "qm lab doctor" in script
     assert "qm lab worker" in script
     assert "aria-disabled" in script
+    assert "quantmaster:settings-applied" in script

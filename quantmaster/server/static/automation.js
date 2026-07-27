@@ -64,19 +64,15 @@
       <div class="bot-row">
         <div class="bot-title"><strong>飞书应用 Bot <span class="badge">主通道</span></strong><span class="status-label ${esc(fs?.status || 'unbound')}">${statusText(fs?.status)}</span></div>
         <div class="bot-meta">${fs ? `App ID ${esc(fs.account_id)}${fs.last_error ? ` · ${esc(fs.last_error)}` : ''}` : '企业自建应用：长连接收命令，消息卡片推送告警'}</div>
-        <form class="bot-actions" id="feishu-config-form">
-          <input name="app_id" autocomplete="off" placeholder="App ID" value="${esc(fs?.account_id || '')}" required>
-          <input name="app_secret" type="password" autocomplete="new-password" placeholder="App Secret" required>
-          <button class="ghost" type="submit">${fs ? '更新凭据' : '保存并连接'}</button>
-        </form>
-        <div class="hint">需开通：以应用身份发消息、读取机器人单聊、接收群聊中 @机器人消息；订阅 im.message.receive_v1 并发布应用版本。</div>
+        <div class="bot-actions"><button class="ghost" type="button" data-manage-channel="automation">${fs ? '管理飞书接入' : '前往设置接入'}</button><button class="ghost" type="button" data-feishu-diagnose ${fs ? '' : 'disabled'}>运行五阶段诊断</button></div>
+        <div class="hint">需开通：以应用身份发消息、读取机器人单聊、获取群组中所有消息（im:message.group_msg）；订阅 im.message.receive_v1 并发布应用版本。普通群消息只用于话题记忆，不触发回复。</div>
+        <div data-feishu-diagnostic></div>
         ${fsDiagnostic}
       </div>
       <div class="bot-row">
         <div class="bot-title"><strong>腾讯微信 ClawBot <span class="badge">轻量提醒</span></strong><span class="status-label ${esc(wx?.status || 'unbound')}">${statusText(wx?.status)}</span></div>
         <div class="bot-meta">${wx ? `Bot ${esc(wx.account_id)}${wx.last_error ? ` · ${esc(wx.last_error)}` : ''}` : 'iLink 能力有限，仅作为文本提醒与简单命令补充'}</div>
-        <div class="bot-actions"><button class="ghost" type="button" data-weixin-login>${wx ? '重新扫码' : '扫码授权'}</button></div>
-        <div id="weixin-login-box"></div>
+        <div class="bot-actions"><button class="ghost" type="button" data-manage-channel="automation">${wx ? '管理微信接入' : '前往设置接入'}</button></div>
       </div>`;
   }
 
@@ -122,7 +118,7 @@
       const bound = Boolean(target.target && target.account_id);
       const binding = state.bindings.get(target.id);
       const groupBlocked = target.id === 'feishu_group' && !ownerBound;
-      const bindLabel = bound ? '重新绑定' : groupBlocked ? '需先绑定主人' : target.id === 'feishu_owner' ? '开始绑定主人' : '开始绑定群聊';
+      const bindLabel = bound ? '重新绑定' : groupBlocked ? '需先绑定管理员' : target.id === 'feishu_owner' ? '开始绑定管理员' : '开始绑定群聊';
       return `<article class="target-card" data-target-card="${esc(target.id)}">
         <div class="target-head"><div><h4>${esc(target.label)}</h4><p>${bound ? `${esc(target.channel)} · ${esc(target.target)}` : `${esc(target.channel)} · 尚未绑定会话`}</p></div>
           <span class="status-label ${esc(target.status)}">${statusText(target.status)}</span></div>
@@ -282,28 +278,25 @@
 
   document.getElementById('automation-refresh').addEventListener('click', () => loadAutomation(true));
   document.getElementById('automation-channels').addEventListener('click', event => {
-    const button = event.target.closest('[data-weixin-login]');
-    if (button) startWeixinLogin(button);
-    const verify = event.target.closest('[data-weixin-verify]');
-    if (verify) {
-      const value = document.querySelector('[data-weixin-verify-input]')?.value.trim();
-      if (value) pollWeixinLogin(value);
+    const manage = event.target.closest('[data-manage-channel]');
+    if (manage) {
+      window.QuantMasterManagement.open(manage.dataset.manageChannel || 'automation');
+      return;
     }
-  });
-  document.getElementById('automation-channels').addEventListener('submit', async event => {
-    if (event.target.id !== 'feishu-config-form') return;
-    event.preventDefault();
-    const button = event.target.querySelector('button'); button.disabled = true;
-    const form = new FormData(event.target);
-    try {
-      const result = await secureApi('/api/automation/channels/feishu/config', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({app_id:form.get('app_id'), app_secret:form.get('app_secret')}),
-      });
-      if (result.restart_required) alert('飞书凭据已更新；当前长连接将在重启 QuantMaster 后使用新凭据。');
-      state.loaded = false; await loadAutomation(true);
-    } catch (error) { alert(error.message); }
-    finally { button.disabled = false; }
+    const diagnose = event.target.closest('[data-feishu-diagnose]');
+    if (!diagnose) return;
+    diagnose.disabled = true;
+    const root = document.querySelector('[data-feishu-diagnostic]');
+    root.innerHTML = '<div class="hint">正在检查凭据、运行时、长连接、消息事件和会话绑定…</div>';
+    secureApi('/api/automation/channels/feishu/check', {method:'POST'})
+      .then(data => {
+        const labels = {credential:'凭据', runtime:'运行时', websocket:'长连接', event:'消息事件', binding:'会话绑定'};
+        root.innerHTML = Object.entries(data.stages || {}).map(([key, value]) =>
+          `<div class="channel-diagnostic ${value.status === 'success' ? 'ok' : 'warn'}"><strong>${esc(labels[key] || key)} · ${value.status === 'success' ? '通过' : value.status === 'error' ? '失败' : '待处理'}</strong><span>${esc(value.message)}</span></div>`
+        ).join('');
+      })
+      .catch(error => { root.innerHTML = `<div class="err">${esc(error.message)}</div>`; })
+      .finally(() => { diagnose.disabled = false; });
   });
 
   document.getElementById('automation-targets').addEventListener('click', async event => {
@@ -328,7 +321,7 @@
       }
       if (bind) {
         if (bind.dataset.bindBlocked === 'true') {
-          alert('请先绑定“飞书主人私聊”。群绑定必须由已绑定主人在目标群内完成。');
+          alert('请先绑定“飞书管理员私聊”。群绑定必须由已绑定管理员在目标群内完成。');
           return;
         }
         const data = await secureApi(`/api/automation/bindings/code?target_id=${encodeURIComponent(bind.dataset.bindTarget)}`, {method:'POST'});

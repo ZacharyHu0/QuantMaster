@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(_: FastAPI):
     from quantmaster.automation.runtime import get_runtime
     from quantmaster.lab.worker import get_worker
+    from quantmaster.server.management import capture_runtime_baseline
 
+    capture_runtime_baseline()
     runtime = get_runtime()
     runtime.start()
     worker = get_worker()

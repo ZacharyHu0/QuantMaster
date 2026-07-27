@@ -71,6 +71,7 @@ class LabService:
             category=category.strip() or "人工研究",
             rationale=rationale.strip(),
             required_features=tuple(sorted(_expression_fields(expression))),
+            horizons=tuple(get_config().lab.horizons),
             tags=("manual",),
         )
         _factor, version, _created = self.store.create_factor(
@@ -141,11 +142,15 @@ class LabService:
         values = compute_factor(factor, panel)
         if progress:
             progress(65, "运行 purged walk-forward 与多重检验")
+        configured_horizons = tuple(get_config().lab.horizons)
+        validation_horizons = tuple(
+            item for item in spec.horizons if item in configured_horizons
+        ) or configured_horizons
         report = validate_factor_values(
             values,
             panel["close"],
             name=spec.name,
-            horizons=tuple(spec.horizons),
+            horizons=validation_horizons,
             membership=membership,
             research_quality=snapshot["payload"]["research_quality"],
         )
@@ -175,6 +180,7 @@ class LabService:
                 description="遗传规划自动生成，待统一验证与人工审批。",
                 category="AI 发现",
                 rationale=f"初筛 fitness={item.fitness:.4f}, IC={item.ic_mean:.4f}",
+                horizons=tuple(get_config().lab.horizons),
                 tags=("genetic", "discovered"),
             )
             _factor, version, _created = self.store.create_factor(
@@ -206,6 +212,7 @@ class LabService:
                 description="AI 提出、由本地历史数据初筛，待统一验证与人工审批。",
                 category="AI 发现",
                 rationale=item.rationale,
+                horizons=tuple(get_config().lab.horizons),
                 tags=("llm", "discovered"),
             )
             _factor, version, _created = self.store.create_factor(
