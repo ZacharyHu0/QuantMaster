@@ -2,6 +2,15 @@
 
 自动化开发过程的阶段性记录（新条目在上）。
 
+## 2026-07-27 · 行业中性化
+
+- data/industry：东财行业板块 -> 股票行业映射（JSON 缓存 30 天，可注入自有分类）
+- factors/neutral：industry_neutralize 行业内去均值（单成员行业与无映射股票保持原值），
+  docstring 讲清"为什么低波动/小市值factor 必须看行业中性后的 IC"
+- CLI `qm factor-test --neutralize`、Web 因子页「行业中性化」勾选框（含降级提示）
+- 测试 154 → 162
+- ⏳ DeepSeek 链接仍无法访问（CloudFront 拦截 + Jina/Archive 均被拒），待用户粘贴内容
+
 ## 2026-07-27 · 多因子组合策略 + 股票池管理
 
 - MultiFactorStrategy：多因子合成选股（等权 / 滚动 IC 动态加权），

@@ -119,6 +119,7 @@ class FactorTestRequest(BaseModel):
     start: str = "2022-01-01"
     end: str | None = None
     quantiles: int = 5
+    neutralize: bool = False          # 行业中性化（行业内去均值）
 
 
 @app.post("/api/factors/test")
@@ -134,12 +135,22 @@ def factors_test(req: FactorTestRequest) -> dict:
         factor = resolve_factor(req.expression, symbols, req.start, end)
         panel = load_panel(symbols, req.start, end)
         values = compute_factor(factor, panel)
+        neutralized = False
+        if req.neutralize:
+            from quantmaster.data.industry import load_industry_map
+            from quantmaster.factors.neutral import industry_neutralize
+
+            mapping = load_industry_map()
+            if mapping:
+                values = industry_neutralize(values, mapping)
+                neutralized = True
         report = analyze_factor(values, panel["close"], name=factor.name,
                                 quantiles=req.quantiles)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
     return {
         "summary": report.summary(),
+        "neutralized": neutralized,
         "ic_series": _series_to_points(report.ic_series.rolling(20, min_periods=5).mean()),
         "quantile_nav": {col: _series_to_points(report.quantile_returns[col])
                          for col in report.quantile_returns.columns},

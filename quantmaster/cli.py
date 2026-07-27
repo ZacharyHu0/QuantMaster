@@ -93,6 +93,14 @@ def cmd_factor_test(args) -> None:
     factor = resolve_factor(args.expression, load_universe(args.universe), args.start, end)
     panel = _load_panel(args.universe, args.start, end)
     values = compute_factor(factor, panel)
+    if args.neutralize:
+        from quantmaster.data.industry import load_industry_map
+        from quantmaster.factors.neutral import industry_neutralize
+
+        mapping = load_industry_map()
+        if not mapping:
+            print("⚠️ 行业映射为空（首次需联网抓取），本次未做中性化", file=sys.stderr)
+        values = industry_neutralize(values, mapping)
     report = analyze_factor(values, panel["close"], name=factor.name, quantiles=args.quantiles)
     _print_json(report.summary())
 
@@ -399,6 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("expression", help="内置因子名或表达式")
     common(p)
     p.add_argument("--quantiles", type=int, default=5)
+    p.add_argument("--neutralize", action="store_true",
+                   help="行业中性化：行业内去均值后再评估（剔除行业押注）")
     p.set_defaults(func=cmd_factor_test)
 
     p = sub.add_parser("backtest", help="因子选股回测（--factor 逗号分隔多个名字 = 多因子组合）")

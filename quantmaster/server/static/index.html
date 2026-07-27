@@ -104,6 +104,9 @@
     <label>股票池<input name="universe" value="demo"></label>
     <label>开始<input name="start" type="date" value="2022-01-01"></label>
     <label>分组数<input name="quantiles" type="number" value="5" min="2" max="10"></label>
+    <label style="flex-direction:row;align-items:center;gap:6px;padding-bottom:9px">
+      <input type="checkbox" name="neutralize" style="min-width:auto"> 行业中性化
+    </label>
     <button class="primary" type="submit">因子体检</button>
   </form>
   <div class="hint">内置因子与 <b>基本面因子</b>（ep/bp/dividend_yield/small_cap/roe，首次使用自动拉取估值/财务数据）见下拉提示；
@@ -379,11 +382,15 @@ document.getElementById('factor-form').onsubmit = async e => {
     const fd = new FormData(form);
     const data = await post('/api/factors/test', {
       expression: fd.get('expression'), universe: fd.get('universe'),
-      start: fd.get('start'), quantiles: +fd.get('quantiles') });
+      start: fd.get('start'), quantiles: +fd.get('quantiles'),
+      neutralize: form.querySelector('[name=neutralize]').checked });
     const s = data.summary;
+    const neutralNote = form.querySelector('[name=neutralize]').checked && !data.neutralized
+      ? '<div class="hint" style="color:var(--s4)">⚠️ 行业映射为空（首次需联网抓取，约1-2分钟），本次未做中性化</div>' : '';
     out.innerHTML = `
+      ${neutralNote}
       <div class="cards">
-        <div class="card"><div class="k">RankIC 均值</div><div class="v ${cls(s.ic_mean)}">${s.ic_mean}</div></div>
+        <div class="card"><div class="k">RankIC 均值${data.neutralized ? '（行业中性）' : ''}</div><div class="v ${cls(s.ic_mean)}">${s.ic_mean}</div></div>
         <div class="card"><div class="k">ICIR</div><div class="v">${s.icir}</div></div>
         <div class="card"><div class="k">IC&gt;0 占比</div><div class="v">${pct(s.ic_positive_ratio)}</div></div>
         <div class="card"><div class="k">多空年化</div><div class="v ${cls(s.long_short_annual)}">${pct(s.long_short_annual)}</div></div>
