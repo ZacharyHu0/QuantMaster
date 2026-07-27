@@ -19,6 +19,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_FILE = "quantmaster/release.py"
@@ -30,6 +31,7 @@ CHANGELOG_PATTERN = re.compile(
     re.MULTILINE,
 )
 RESOLVE_PATTERN = re.compile(r"^github\.com:443:[0-9a-fA-F:.]+$")
+GITHUB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def run_git(
@@ -291,12 +293,31 @@ def push_config_variants(resolve: str = "") -> list[list[tuple[str, str]]]:
         ("http.version", "HTTP/1.1"),
         ("http.lowSpeedLimit", "1"),
         ("http.lowSpeedTime", "120"),
+        ("http.sslVerify", "true"),
+        ("credential.useHttpPath", "true"),
     ]
     variants: list[list[tuple[str, str]]] = []
     if resolve and RESOLVE_PATTERN.fullmatch(resolve):
         variants.append([*common, ("http.curloptResolve", resolve)])
     variants.append(common)
     return variants
+
+
+def github_https_push_url(origin_url: str, username: str = "") -> str:
+    """Scope Git Credential Manager to the intended GitHub account and repository."""
+    parsed = urlparse(origin_url)
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        return ""
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        return ""
+    owner, repository = parts
+    if repository.endswith(".git"):
+        repository = repository[:-4]
+    account = username or owner
+    if not all(GITHUB_NAME_PATTERN.fullmatch(value) for value in (account, owner, repository)):
+        return ""
+    return f"https://{account}@github.com/{owner}/{repository}.git"
 
 
 def push_current_release() -> int:
@@ -358,7 +379,13 @@ def install_hooks(args: argparse.Namespace) -> int:
         ("core.hooksPath", ".githooks"),
         ("quantmaster.releaseAutoPush", "true"),
         ("quantmaster.releasePushRetries", str(args.retries)),
+        ("credential.useHttpPath", "true"),
+        ("http.sslVerify", "true"),
     ]
+    origin_url = config_value("remote.origin.url")
+    push_url = github_https_push_url(origin_url, args.github_user)
+    if push_url:
+        settings.append(("remote.origin.pushurl", push_url))
     if args.github_resolve:
         if not RESOLVE_PATTERN.fullmatch(args.github_resolve):
             return print_errors(
@@ -415,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--github-resolve",
         default="",
         help="可选的 GitHub HTTPS 固定解析，例如 github.com:443:140.82.114.4",
+    )
+    install_parser.add_argument(
+        "--github-user",
+        default="",
+        help="HTTPS push 使用的 GitHub 账号；默认取 origin 仓库 owner",
     )
     subparsers.add_parser("check", help="检查工作区发布元数据")
     subparsers.add_parser("status", help="显示本地与 origin/main 同步状态")

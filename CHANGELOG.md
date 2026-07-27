@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.6（2026-07-27）
+
+### GitHub 发布凭据路由加固
+- 安装发布 hooks 时自动为 HTTPS origin 绑定目标 GitHub 账号和完整仓库路径，避免系统凭据管理器误用另一个账号
+- 自动 push 强制启用 TLS 校验与 `credential.useHttpPath`；固定 GitHub 解析不可用时仍会回退普通连接
+
 ## v0.8.5（2026-07-27）
 
 ### 版本提交与 GitHub 自动同步

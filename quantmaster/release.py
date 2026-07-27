@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 RELEASE_DATE = "2026-07-27"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "GitHub 发布凭据路由加固",
+                "items": (
+                    (
+                        "安装发布 hooks 时自动为 HTTPS origin 绑定目标 GitHub 账号与仓库路径，"
+                        "避免凭据管理器误用其他账号。"
+                    ),
+                    (
+                        "自动推送强制启用 TLS 校验与按路径隔离凭据；"
+                        "固定解析失效时仍会回退普通 GitHub 连接。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.5",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "版本提交与 GitHub 自动同步",

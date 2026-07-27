@@ -8,6 +8,7 @@ import pytest
 from tools.release_sync import (
     CHANGELOG_FILE,
     RELEASE_FILE,
+    github_https_push_url,
     push_config_variants,
     release_assignments,
     validate_metadata,
@@ -74,6 +75,8 @@ def test_version_tuple_rejects_non_semver():
 def test_push_config_prefers_valid_local_resolve_then_falls_back():
     variants = push_config_variants("github.com:443:140.82.114.4")
     assert ("http.curloptResolve", "github.com:443:140.82.114.4") in variants[0]
+    assert ("credential.useHttpPath", "true") in variants[0]
+    assert ("http.sslVerify", "true") in variants[0]
     assert all(key != "http.curloptResolve" for key, _ in variants[-1])
 
 
@@ -81,3 +84,16 @@ def test_push_config_ignores_invalid_resolve():
     variants = push_config_variants("example.com:443:127.0.0.1")
     assert len(variants) == 1
     assert all(key != "http.curloptResolve" for key, _ in variants[0])
+
+
+def test_github_push_url_defaults_to_repository_owner():
+    assert github_https_push_url("https://github.com/ZacharyHu0/QuantMaster.git") == (
+        "https://ZacharyHu0@github.com/ZacharyHu0/QuantMaster.git"
+    )
+
+
+def test_github_push_url_accepts_explicit_account_and_rejects_ssh():
+    assert github_https_push_url(
+        "https://github.com/example/project", "release-bot",
+    ) == "https://release-bot@github.com/example/project.git"
+    assert github_https_push_url("git@github.com:example/project.git") == ""
