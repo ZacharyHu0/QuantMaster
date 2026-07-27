@@ -187,6 +187,34 @@ def test_unapproved_strategy_is_allowed_with_persistent_warning():
     assert service.report(account["id"])["warnings"][0] == account["warning"]
 
 
+def test_paper_creation_reuses_resolved_symbols_when_pinning_decision(
+    tmp_path, monkeypatch,
+):
+    symbols = ["600000.SH", "000001.SZ"]
+    service = PaperService(PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts"))
+    monkeypatch.setattr(
+        service, "_resolve_universe",
+        lambda name, as_of: (symbols, {"as_of": as_of, "quality": "sandbox"}),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.universe.load_universe",
+        lambda name: pytest.fail("候选已经解析，不应在固化策略时重复读取"),
+    )
+    spec = PaperAccountSpec.model_validate({
+        "name": "一次解析",
+        "strategy": {
+            "kind": "decision", "profile": "risk_adjusted", "top_n": 5,
+            "holding_days": 3, "cap_weight": 0.25, "policy_snapshot": {},
+        },
+        "universe": "large-custom", "initial_capital": 100_000, "mode": "manual",
+    })
+
+    account = service.create_account(spec)
+
+    assert account["universe_snapshot"]["symbols"] == sorted(symbols)
+    assert account["strategy"]["policy_snapshot"]["universe"] == "large-custom"
+
+
 def test_daily_orchestration_processes_all_active_and_proposes_only_auto(tmp_path, monkeypatch):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     manual = store.create_account(account_spec("人工账户"), symbols=["600000.SH"])

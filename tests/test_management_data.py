@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from typing import ClassVar
 
 import pytest
 
@@ -45,6 +46,40 @@ def test_symbol_and_universe_validation(tmp_path):
         save_universe("demo", ["600519"])
     with pytest.raises(ValueError, match="只读"):
         save_universe("csi800", ["600519"])
+
+
+def test_canonical_universe_symbols_use_one_batched_master_lookup(monkeypatch):
+    from quantmaster.data import instruments
+
+    class Entry:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+    class Store:
+        instances = 0
+        batches: ClassVar[list[list[str]]] = []
+
+        def __init__(self):
+            type(self).instances += 1
+
+        def get_many(self, symbols):
+            values = list(symbols)
+            type(self).batches.append(values)
+            return {value: Entry(value) for value in values}
+
+        def get(self, symbol):  # pragma: no cover - 规范代码不应退回单项查询
+            raise AssertionError(f"unexpected single lookup: {symbol}")
+
+        def resolve(self, symbol):  # pragma: no cover - 规范代码不应进入模糊搜索
+            raise AssertionError(f"unexpected fuzzy lookup: {symbol}")
+
+    monkeypatch.setattr(instruments, "InstrumentStore", Store)
+
+    assert normalize_symbols(["600519.SH", "000001.SZ", "600519.SH"]) == [
+        "600519.SH", "000001.SZ",
+    ]
+    assert Store.instances == 1
+    assert Store.batches == [["600519.SH", "000001.SZ", "600519.SH"]]
 
 
 def test_copy_migration_keeps_source_and_switches_only_after_verify(tmp_path):

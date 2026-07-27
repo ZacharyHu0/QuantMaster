@@ -395,6 +395,25 @@ class InstrumentStore:
                 "SELECT * FROM instruments WHERE symbol=?", (canonical,)
             ).fetchone())
 
+    def get_many(self, symbols: Iterable[str]) -> dict[str, Instrument]:
+        """批量读取规范代码，避免候选加载时为每只证券重复打开数据库。"""
+        requested = [str(item).strip().upper() for item in dict.fromkeys(symbols)]
+        if not requested:
+            return {}
+        result: dict[str, Instrument] = {}
+        with self._connection() as connection:
+            for offset in range(0, len(requested), 800):
+                batch = requested[offset:offset + 800]
+                rows = connection.execute(
+                    f"SELECT * FROM instruments WHERE symbol IN "
+                    f"({','.join('?' for _ in batch)})", batch,
+                ).fetchall()
+                for row in rows:
+                    instrument = self._instrument(row)
+                    if instrument is not None:
+                        result[instrument.symbol] = instrument
+        return result
+
     def names(self, symbols: Iterable[str]) -> dict[str, str]:
         requested = [str(item).upper() for item in dict.fromkeys(symbols)]
         if not requested:

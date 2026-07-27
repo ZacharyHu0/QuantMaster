@@ -119,6 +119,8 @@ class PaperAccountSpec(BaseModel):
 def pin_decision_strategy(
     spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec,
     universe: str,
+    *,
+    symbols: list[str] | None = None,
 ) -> FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec:
     """Resolve or verify the immutable Hybrid policy used by a stored experiment."""
     if not isinstance(spec, DecisionStrategySpec):
@@ -126,12 +128,13 @@ def pin_decision_strategy(
     if not spec.policy_snapshot:
         from quantmaster.decision import resolve_policy
 
-        try:
-            from quantmaster.data.universe import load_universe
+        if symbols is None:
+            try:
+                from quantmaster.data.universe import load_universe
 
-            symbols = load_universe(universe)
-        except Exception:
-            symbols = None
+                symbols = load_universe(universe)
+            except Exception:
+                symbols = None
         snapshot = resolve_policy(
             universe, spec.holding_days, spec.profile, symbols=symbols,
         )

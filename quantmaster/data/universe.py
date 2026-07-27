@@ -7,8 +7,12 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from quantmaster.config import get_config
+
+if TYPE_CHECKING:
+    from quantmaster.data.instruments import InstrumentStore
 
 # 内置示例候选：沪深各行业代表性大盘股（便于开箱即用地跑通流程）
 DEMO_STOCK_NAMES = {
@@ -52,7 +56,7 @@ def validate_universe_name(name: str, *, allow_demo: bool = False) -> str:
     return value
 
 
-def normalize_symbol(symbol: str) -> str:
+def normalize_symbol(symbol: str, *, store: InstrumentStore | None = None) -> str:
     """兼容旧调用的单值规范化。
 
     新增交互应使用 ``resolve_instrument(s)`` 暴露歧义。这里仅对历史上明确约定
@@ -61,12 +65,16 @@ def normalize_symbol(symbol: str) -> str:
     from quantmaster.data.instruments import InstrumentStore
 
     raw = str(symbol).strip()
-    store = InstrumentStore()
-    result = store.resolve(raw)
+    instrument_store = store if store is not None else InstrumentStore()
+    value = re.sub(r"\s+", "", raw).upper()
+    direct = instrument_store.get(value)
+    if direct is not None:
+        return direct.symbol
+
+    result = instrument_store.resolve(raw)
     if result["status"] == "resolved":
         return result["instrument"]["symbol"]
 
-    value = re.sub(r"\s+", "", raw).upper()
     if re.fullmatch(r"\d{6}", value) and result["status"] in {"ambiguous", "unresolved"}:
         if value.startswith(("4", "8", "92")):
             preferred = f"{value}.BJ"
@@ -82,7 +90,7 @@ def normalize_symbol(symbol: str) -> str:
     # 旧版曾把所有 9xxxxx 指数误写为 .SH；有且只有一个同码 CSI 指数时迁移。
     wrong_csi = re.fullmatch(r"(\d{6})\.SH", value)
     if wrong_csi:
-        corrected = store.get(f"{wrong_csi.group(1)}.CSI")
+        corrected = instrument_store.get(f"{wrong_csi.group(1)}.CSI")
         if corrected and corrected.asset_type == "index":
             return corrected.symbol
     message = result.get("message") or f"证券代码或名称无法识别: {symbol}"
@@ -90,10 +98,17 @@ def normalize_symbol(symbol: str) -> str:
 
 
 def normalize_symbols(symbols: list[str]) -> list[str]:
+    from quantmaster.data.instruments import InstrumentStore
+
+    raw_values = [str(symbol).strip() for symbol in symbols]
+    store = InstrumentStore()
+    canonical_values = [re.sub(r"\s+", "", value).upper() for value in raw_values]
+    known = store.get_many(canonical_values)
     result: list[str] = []
     seen: set[str] = set()
-    for symbol in symbols:
-        normalized = normalize_symbol(symbol)
+    for raw, canonical in zip(raw_values, canonical_values, strict=True):
+        direct = known.get(canonical)
+        normalized = direct.symbol if direct is not None else normalize_symbol(raw, store=store)
         if normalized not in seen:
             seen.add(normalized)
             result.append(normalized)

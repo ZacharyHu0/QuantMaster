@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.8"
-RELEASE_DATE = "2026-07-27"
+VERSION = "0.8.9"
+RELEASE_DATE = "2026-07-28"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "模拟账户创建提速",
+                "items": (
+                    (
+                        "大型自定义候选改为批量校验证券主数据，"
+                        "创建模拟账户不再逐只重复打开数据库和执行模糊搜索。"
+                    ),
+                    (
+                        "Hybrid v2 策略固化直接复用已解析的候选快照，"
+                        "不再为同一次创建重复加载整份候选。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.8",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "决策行情缩放适配",

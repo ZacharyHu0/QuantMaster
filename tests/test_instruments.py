@@ -15,8 +15,10 @@ from quantmaster.server.app import app
 def test_bundled_master_is_offline_and_covers_core_markets(isolated_config):
     store = InstrumentStore()
     diagnostics = store.diagnostics()
+    batch = store.get_many(["600519.SH", "00700.HK", "missing.US"])
 
     assert diagnostics["record_count"] > 30_000
+    assert set(batch) == {"600519.SH", "00700.HK"}
     assert store.get("600519.SH").name == "贵州茅台"
     assert store.get("589160.SH").asset_type == "etf"
     assert store.get("931743.CSI").asset_type == "index"

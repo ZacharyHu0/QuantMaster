@@ -398,10 +398,14 @@ class PaperService:
     def create_account(self, spec: PaperAccountSpec) -> dict:
         from quantmaster.backtest.spec import pin_decision_strategy
 
-        strategy = pin_decision_strategy(spec.strategy, spec.universe)
+        symbols, meta = self._resolve_universe(
+            spec.universe, str(pd.Timestamp.now().date()),
+        )
+        strategy = pin_decision_strategy(
+            spec.strategy, spec.universe, symbols=symbols,
+        )
         if strategy is not spec.strategy:
             spec = spec.model_copy(update={"strategy": strategy})
-        symbols, meta = self._resolve_universe(spec.universe, str(pd.Timestamp.now().date()))
         return self.store.create_account(
             spec, symbols=symbols, universe_meta=meta,
             warning=self._strategy_warning(spec),
