@@ -78,7 +78,16 @@ def automation_events(request: Request, limit: int = 100) -> dict:
 def automation_binding_code(target_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return service().store.create_binding_code(target_id)
+        return service().create_binding(target_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/api/automation/bindings/{action_id}")
+def automation_binding_status(action_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return service().binding_status(action_id)
     except Exception as exc:
         raise _error(exc) from exc
 

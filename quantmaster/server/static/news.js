@@ -80,7 +80,7 @@
       ...(item.symbols || []).slice(0, 4).map(symbol => `<span class="news-tag symbol">${html(symbol)}</span>`),
     ].join('');
     const link = safeUrl(item.url);
-    return `<article class="news-event" data-news-id="${Number(item.id)}">
+    return `<article class="news-event" data-news-id="${Number(item.id)}" data-content-truncated="${Boolean(item.content_truncated)}">
       <button class="news-event-main" type="button" aria-expanded="false">
         <span class="news-event-time"><strong>${html(timestamp.time)}</strong>${html(timestamp.day)}</span>
         <span><span class="news-event-title">${html(item.title)}</span>
@@ -390,12 +390,23 @@
 
   document.getElementById('news-source-new').onclick = () => fillSource(null);
 
-  feed.onclick = event => {
+  feed.onclick = async event => {
     const button = event.target.closest('.news-event-main');
     if (!button) return;
     const article = button.closest('.news-event');
     const expanded = article.classList.toggle('expanded');
     button.setAttribute('aria-expanded', String(expanded));
+    if (expanded && article.dataset.contentTruncated === 'true' && article.dataset.loaded !== 'true') {
+      const copy = article.querySelector('.news-detail-copy');
+      copy.textContent = '正在读取完整正文…';
+      try {
+        const detail = await api(`/api/news/${article.dataset.newsId}`);
+        copy.textContent = detail.content || detail.summary || '暂无正文';
+        article.dataset.loaded = 'true';
+      } catch (error) {
+        copy.textContent = `完整正文读取失败：${error.message}`;
+      }
+    }
   };
 
   filterForm.onsubmit = event => { event.preventDefault(); loadFeed(); };

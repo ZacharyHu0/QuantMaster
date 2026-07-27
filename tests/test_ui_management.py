@@ -157,7 +157,15 @@ def test_decision_chart_survives_progressive_rerender(live_server):
             "recommended_exposure": 0.5, "holding_horizon_days": 3,
             "signal_date": "2026-07-27", "picks": [], "risk_note": "测试",
         },
-        "history": [],
+        "history": [{
+            "signal_date": "2026-07-26", "holding_horizon_days": 3,
+            "recommended_exposure": 0.5,
+            "picks": [
+                {"name": "贵州茅台", "symbol": "600519.SH"},
+                {"name": "宁德时代", "symbol": "300750.SZ"},
+                {"name": "招商银行", "symbol": "600036.SH"},
+            ],
+        }],
     }
     empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
     with playwright_sync.sync_playwright() as manager:
@@ -188,4 +196,11 @@ def test_decision_chart_survives_progressive_rerender(live_server):
         assert state == {
             "canvasCount": 1, "boundConnected": True, "boundToVisible": True,
         }
+        period = page.locator(".snapshot-period").last
+        assert period.evaluate("element => getComputedStyle(element).whiteSpace") == "nowrap"
+        assert period.bounding_box()["width"] >= 72
+        picks = page.locator(".snapshot-pick")
+        assert picks.count() == 3
+        pick_tops = [picks.nth(index).bounding_box()["y"] for index in range(3)]
+        assert pick_tops == sorted(set(pick_tops))
         browser.close()

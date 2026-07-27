@@ -177,6 +177,14 @@
   .decision-table tbody tr:hover { background:color-mix(in oklch,var(--s1) 7%,transparent); }
   .reason { color:var(--muted); font-size:12px; max-width:36ch; }
   .decision-table td.reason { min-width:260px; }
+  .snapshot-table { min-width:380px; table-layout:fixed; }
+  .snapshot-table .snapshot-date { width:96px; white-space:nowrap; }
+  .snapshot-table .snapshot-period { width:72px; white-space:nowrap; }
+  .snapshot-table .snapshot-exposure { width:72px; white-space:nowrap; }
+  .snapshot-pick-list { display:grid; gap:var(--space-xs); }
+  .snapshot-pick { display:flex; align-items:baseline; gap:6px; min-width:0; line-height:1.45; }
+  .snapshot-pick-name { color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .snapshot-pick-symbol { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .reveal { animation:reveal-in 280ms var(--ease-out-expo) both; }
   .reveal-delay { animation-delay:45ms; }
   .runtime-info { position:fixed; inset-inline:16px; bottom:12px; max-width:1120px; margin-inline:auto; z-index:40; background:var(--surface); border:1px solid var(--axis); border-radius:10px; overflow:hidden; color:var(--ink-2); }
@@ -1839,9 +1847,9 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="5" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
         </tbody></table></div>
       <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
-        <table><thead><tr><th>日期</th><th>周期</th><th>仓位</th><th>前三候选</th></tr></thead><tbody>
-        ${(data.history || []).map(h => `<tr><td>${esc(h.signal_date)}</td><td>${h.holding_horizon_days} 日</td><td>${pct(h.recommended_exposure)}</td><td>${(h.picks || []).slice(0,3).map(p => `${esc(p.name || '')}${p.name ? ' ' : ''}${esc(p.symbol)}`).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
-        </tbody></table></div>
+        <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三候选</th></tr></thead><tbody>
+        ${(data.history || []).map(h => `<tr><td class="snapshot-date">${esc(h.signal_date)}</td><td class="snapshot-period">${h.holding_horizon_days} 日</td><td class="snapshot-exposure">${pct(h.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(h.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
+        </tbody></table></div></div>
     </div>`;
 
   regimeHistory = market.past || [];

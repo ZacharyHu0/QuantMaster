@@ -224,7 +224,10 @@ def news_crawl(request: Request, value: CrawlRequest | None = None,
 def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return AICrawler().reanalyze(ids=value.ids, limit=value.limit)
+        crawler = AICrawler()
+        if value.ids is None:
+            return crawler.enrich_pending(limit=value.limit)
+        return crawler.reanalyze(ids=value.ids, limit=value.limit)
     except Exception as exc:
         raise _error(exc) from exc
 

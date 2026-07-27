@@ -45,6 +45,9 @@ class TestBasics:
         assert "createMarketStreamRenderer" in resp.text
         assert "createDecisionStreamRenderer" in resp.text
         assert "existing.getDom() !== el" in resp.text
+        assert 'class="snapshot-table"' in resp.text
+        assert 'class="snapshot-period"' in resp.text
+        assert 'class="snapshot-pick"' in resp.text
         assert "event.partial" in resp.text
         assert "/api/decision/dashboard/stream" in resp.text
         assert 'id="asset-workbench"' in resp.text

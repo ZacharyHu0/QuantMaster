@@ -265,6 +265,18 @@ class AutomationStore:
             )
         return cursor.rowcount == 1
 
+    def inbound_status(self, channel: str) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total,MAX(received_at) AS last_received_at "
+                "FROM inbound_messages WHERE channel=?",
+                (channel,),
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "last_received_at": str(row["last_received_at"] or ""),
+        }
+
     def jobs(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM job_templates ORDER BY rowid").fetchall()
@@ -411,23 +423,50 @@ class AutomationStore:
             raise KeyError("推送目标不存在")
         code = secrets.token_hex(4).upper()
         action_id = uuid.uuid4().hex
+        expires_at = time.time() + 600
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO pending_actions "
                 "(id,kind,actor,route_key,payload,payload_hash,code_hash,expires_at,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (action_id, "binding", actor, "", json.dumps({"target_id": target_id}), "",
-                 self._code_hash(code), time.time() + 600, utc_now()),
+                 self._code_hash(code), expires_at, utc_now()),
             )
-        return {"id": action_id, "code": code, "expires_in": 600, "target_id": target_id}
+        return {
+            "id": action_id, "code": code, "expires_in": 600,
+            "expires_at": expires_at, "target_id": target_id,
+        }
 
-    def consume_binding_code(self, code: str) -> dict | None:
+    def binding_action(self, action_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_actions WHERE id=? AND kind='binding'", (action_id,)
+            ).fetchone()
+            if row and row["status"] == "pending" and row["expires_at"] < time.time():
+                conn.execute(
+                    "UPDATE pending_actions SET status='expired' WHERE id=?", (action_id,)
+                )
+                row = conn.execute(
+                    "SELECT * FROM pending_actions WHERE id=?", (action_id,)
+                ).fetchone()
+        return self._decode_row(row, ("payload",))
+
+    def binding_for_code(self, code: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM pending_actions WHERE kind='binding' AND code_hash=? "
+                "AND status='pending' AND expires_at>=?",
+                (self._code_hash(code), time.time()),
+            ).fetchone()
+        return self._decode_row(row, ("payload",))
+
+    def consume_binding_code(self, code: str, *, expected_id: str = "") -> dict | None:
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM pending_actions WHERE kind='binding' AND code_hash=? "
                 "AND status='pending' AND expires_at>=?", (self._code_hash(code), time.time())).fetchone()
-            if row is None:
+            if row is None or (expected_id and row["id"] != expected_id):
                 return None
             conn.execute("UPDATE pending_actions SET status='consumed' WHERE id=?", (row["id"],))
         return self._decode_row(row, ("payload",))

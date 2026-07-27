@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -209,7 +210,7 @@ class NewsStore:
 
     @staticmethod
     def content_hash(item: NewsItem) -> str:
-        text = re.sub(r"\s+", "", f"{item.title}\n{item.content}".casefold())
+        text = re.sub(r"\s+", "", (item.content or item.title).casefold())
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _migrate(self) -> None:
@@ -255,7 +256,7 @@ class NewsStore:
                     url=row["url"] or "", published_at=row["published_at"] or "",
                 )
                 fingerprint = row["fingerprint"] or self.fingerprint(item)
-                content_hash = row["content_hash"] or self.content_hash(item)
+                content_hash = self.content_hash(item)
                 status = row["analysis_status"] or "pending"
                 has_analysis = (
                     row["summary"] or row["confidence"]
@@ -463,7 +464,14 @@ class NewsStore:
                 f"ORDER BY {order} LIMIT ? OFFSET ?", [*params, page_size + 1, offset],
             ).fetchall()
         has_more = len(rows) > page_size
-        items = [self._decode(row) for row in rows[:page_size]]
+        items = []
+        for row in rows[:page_size]:
+            item = self._decode(row)
+            content = str(item.get("content") or "")
+            item["content_truncated"] = len(content) > 2000
+            if item["content_truncated"]:
+                item["content"] = content[:2000]
+            items.append(item)
         return {
             "items": items, "has_more": has_more,
             "next_cursor": (
@@ -603,17 +611,29 @@ class AICrawler:
 
     @staticmethod
     def _apply_result(item: NewsItem, result: dict) -> None:
-        item.symbols = [str(s).strip().upper() for s in result.get("symbols", []) if str(s).strip()]
-        item.event_type = str(result.get("event_type", "其他"))
+        symbols = result.get("symbols", [])
+        if not isinstance(symbols, list):
+            symbols = []
+        item.symbols = list(dict.fromkeys(
+            value for symbol in symbols
+            if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", value := str(symbol).strip().upper())
+        ))[:30]
+        event_type = str(result.get("event_type", "其他"))
+        allowed_event_types = {"政策", "业绩", "并购", "行业", "宏观", "其他"}
+        item.event_type = event_type if event_type in allowed_event_types else "其他"
         try:
-            item.sentiment = max(-1.0, min(1.0, float(result.get("sentiment", 0))))
+            sentiment = float(result.get("sentiment", 0))
+            item.sentiment = max(-1.0, min(1.0, sentiment)) if math.isfinite(sentiment) else 0.0
         except (TypeError, ValueError):
             item.sentiment = 0.0
         item.summary = str(result.get("summary", ""))[:240]
-        item.scope = str(result.get("scope", "market"))
-        item.urgency = str(result.get("urgency", "normal"))
+        scope = str(result.get("scope", "market"))
+        urgency = str(result.get("urgency", "normal"))
+        item.scope = scope if scope in {"holding", "watchlist", "market"} else "market"
+        item.urgency = urgency if urgency in {"critical", "high", "normal"} else "normal"
         try:
-            item.confidence = max(0.0, min(1.0, float(result.get("confidence", 0))))
+            confidence = float(result.get("confidence", 0))
+            item.confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else 0.0
         except (TypeError, ValueError):
             item.confidence = 0.0
         item.analysis_status = "complete"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.ai.crawler import NewsItem
@@ -54,6 +55,9 @@ def test_policy_presets_and_overrides():
 
 def test_store_binding_outbox_and_delivery(tmp_path):
     store = AutomationStore(tmp_path / "automation.sqlite")
+    assert store.inbound_status("feishu") == {"total": 0, "last_received_at": ""}
+    assert store.claim_inbound("feishu", "om_probe") is True
+    assert store.inbound_status("feishu")["total"] == 1
     store.bind_target(
         "feishu_owner", target="oc_chat", account_id="cli_app",
         owner_actor="feishu:cli_app:ou_owner", actor="test",
@@ -77,6 +81,33 @@ def test_binding_code_is_single_use(tmp_path):
     code = store.create_binding_code("feishu_owner")["code"]
     assert store.consume_binding_code(code)["payload"]["target_id"] == "feishu_owner"
     assert store.consume_binding_code(code) is None
+
+
+def test_binding_flow_preserves_code_on_wrong_chat_and_requires_owner_first(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    with pytest.raises(ValueError, match="主人私聊"):
+        service.create_binding("feishu_group")
+
+    binding = service.create_binding("feishu_owner")
+    wrong_chat = ActorContext(
+        channel="feishu", account_id="cli_app", target="oc_group",
+        chat_type="group", sender_id="ou_owner",
+    )
+    with pytest.raises(ValueError, match="会话类型"):
+        service.bind(wrong_chat, binding["code"])
+    assert service.binding_status(binding["id"])["status"] == "pending"
+
+    owner = ActorContext(
+        channel="feishu", account_id="cli_app", target="oc_owner",
+        chat_type="direct", sender_id="ou_owner",
+    )
+    service.bind(owner, binding["code"])
+    assert service.binding_status(binding["id"])["status"] == "bound"
+
+    group_binding = service.create_binding("feishu_group")
+    service.bind(wrong_chat, group_binding["code"])
+    assert service.binding_status(group_binding["id"])["status"] == "bound"
 
 
 def test_weixin_qr_auth_and_context_send(tmp_path, monkeypatch):
@@ -258,6 +289,7 @@ def test_automation_api_and_ui_contract():
     assert overview.status_code == 200
     data = overview.json()
     assert set(data["channels"]) == {"weixin", "feishu"}
+    assert set(data["inbound"]) == {"weixin", "feishu"}
     assert "gateway" not in data
     assert all("context_token" not in target for target in data["targets"])
     assert client.post("/api/automation/jobs/news_digest/run").status_code == 403
@@ -270,3 +302,5 @@ def test_automation_api_and_ui_contract():
     assert "conservative:'保守'" in script
     assert "balanced:'均衡'" in script
     assert "sensitive:'敏感'" in script
+    assert "长连接正常，但尚未收到消息事件" in script
+    assert "测试（先绑定）" in script

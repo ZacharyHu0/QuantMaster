@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 import feedparser
 import httpx
@@ -108,6 +108,9 @@ def _validate_source_dict(value: dict[str, Any], *, creating: bool = False) -> d
         raise ValueError("来源地址必须是完整的 http(s) URL")
     if parsed.username or parsed.password:
         raise ValueError("来源地址不能包含用户名或密码")
+    if any(re.search(r"auth|token|secret|api[-_]?key", key, re.I)
+           for key, _value in parse_qsl(parsed.query, keep_blank_values=True)):
+        raise ValueError("API Token 不能写入来源地址，请使用专用鉴权字段")
     item_limit = int(result.get("item_limit", 30))
     if not 1 <= item_limit <= 100:
         raise ValueError("单次抓取数量需要在 1–100 之间")
@@ -137,6 +140,11 @@ def _validate_source_dict(value: dict[str, Any], *, creating: bool = False) -> d
     headers = parser.get("headers") or {}
     if not isinstance(headers, dict):
         raise ValueError("普通请求头必须是对象")
+    if len(headers) > 20 or any(
+        not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,63}", str(key))
+        or len(str(value)) > 1000 for key, value in headers.items()
+    ):
+        raise ValueError("普通请求头最多 20 个，且名称或内容不能过长")
     forbidden = {"authorization", "proxy-authorization", "cookie", "host", "content-length"}
     if any(str(key).lower() in forbidden for key in headers):
         raise ValueError("敏感请求头必须使用凭据字段，不能写入解析规则")

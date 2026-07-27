@@ -8,6 +8,7 @@ import time
 
 import httpx
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.ai.crawler import NewsItem, NewsStore
@@ -110,6 +111,12 @@ def test_auth_headers_are_removed_for_cross_origin_detail():
     assert "Authorization" not in _without_auth(headers, source)
 
 
+def test_source_rejects_credentials_in_url(tmp_path):
+    store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
+    with pytest.raises(ValueError, match="API Token"):
+        store.create(source_value(url="https://example.com/feed?api_key=secret"))
+
+
 def test_raw_response_cleanup(tmp_path):
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
     key = store.save_response(
@@ -141,6 +148,33 @@ def test_quality_factor_uses_first_seen_and_defers_after_close(tmp_path):
     assert pd.isna(factor.loc["2024-05-06", "600519.SH"])
     assert factor.loc["2024-05-07", "600519.SH"] == -0.8
     assert -0.8 < factor.loc["2024-05-08", "600519.SH"] < 0
+
+
+def test_news_list_truncates_body_but_detail_is_complete(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    content = "正文" * 1500
+    store.save([NewsItem(source="test", title="长正文", content=content)])
+    listed = store.recent(1)[0]
+    assert listed["content_truncated"] is True
+    assert len(listed["content"]) == 2000
+    assert store.detail(listed["id"])["content"] == content
+
+
+def test_llm_annotations_are_constrained():
+    item = NewsItem(source="test", title="不可信输出", content="内容")
+    from quantmaster.ai.crawler import AICrawler
+
+    AICrawler._apply_result(item, {
+        "symbols": ["600519.sh", "DROP TABLE", "600519.SH"],
+        "event_type": "任意代码", "sentiment": "nan", "confidence": "inf",
+        "scope": "private", "urgency": "now", "summary": "摘要",
+    })
+    assert item.symbols == ["600519.SH"]
+    assert item.event_type == "其他"
+    assert item.sentiment == 0
+    assert item.confidence == 0
+    assert item.scope == "market"
+    assert item.urgency == "normal"
 
 
 def test_news_api_csrf_and_ui_contract():

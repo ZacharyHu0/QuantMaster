@@ -97,6 +97,10 @@ class AutomationService:
                            "label": "腾讯微信 ClawBot", "role": "limited"},
             },
             "bot_accounts": accounts,
+            "inbound": {
+                channel: self.store.inbound_status(channel)
+                for channel in ("feishu", "weixin")
+            },
             "targets": targets, "jobs": self.store.jobs(),
             "recent_runs": self.store.recent_runs(12),
             "recent_events": self.store.recent_events(12),
@@ -111,6 +115,38 @@ class AutomationService:
     def configure_feishu(self, app_id: str, app_secret: str) -> dict:
         account = self.feishu.configure(app_id, app_secret)
         return {key: value for key, value in account.items() if key != "secret_target"}
+
+    def create_binding(self, target_id: str, actor: str = "web") -> dict:
+        target = self.store.target(target_id)
+        if not target:
+            raise KeyError("推送目标不存在")
+        if target["channel"] != "feishu":
+            raise ValueError("绑定码只用于飞书会话")
+        owner = self.store.target("feishu_owner")
+        if target["chat_type"] == "group" and not (
+                owner and owner["target"] and owner["owner_actor"]):
+            raise ValueError("请先完成飞书主人私聊绑定，再由主人到目标群绑定")
+        result = self.store.create_binding_code(target_id, actor)
+        self.store.audit(actor, "create_binding", "target", target_id, {}, {
+            "binding_id": result["id"], "expires_at": result["expires_at"],
+        }, "pending")
+        return result
+
+    def binding_status(self, action_id: str) -> dict:
+        action = self.store.binding_action(action_id)
+        if not action:
+            raise KeyError("绑定会话不存在")
+        target_id = str(action["payload"].get("target_id") or "")
+        target = self.store.target(target_id)
+        if not target:
+            raise KeyError("推送目标不存在")
+        bound = bool(target["target"] and target["account_id"])
+        return {
+            "id": action_id, "target_id": target_id,
+            "status": "bound" if action["status"] == "consumed" and bound else action["status"],
+            "expires_at": action["expires_at"], "bound": bound,
+            "inbound": self.store.inbound_status("feishu"),
+        }
 
     def reply(self, actor: ActorContext, text: str) -> None:
         target = self.store.target_by_route(actor.channel, actor.account_id, actor.target)
@@ -197,7 +233,7 @@ class AutomationService:
             raise PermissionError("账本和模拟盘写入只能在主人私聊中执行")
 
     def bind(self, actor: ActorContext, code: str) -> dict:
-        action = self.store.consume_binding_code(code)
+        action = self.store.binding_for_code(code)
         if not action:
             raise ValueError("绑定码无效、已使用或已过期")
         target_id = action["payload"]["target_id"]
@@ -206,6 +242,8 @@ class AutomationService:
             raise ValueError("绑定码对应的频道或会话类型与当前会话不一致")
         if actor.chat_type == "group" and not self.is_owner(actor):
             raise PermissionError("飞书群必须由已经绑定的主人完成绑定")
+        if not self.store.consume_binding_code(code, expected_id=action["id"]):
+            raise ValueError("绑定码已被使用，请重新生成")
         return self.store.bind_target(
             target_id, target=actor.target, account_id=actor.account_id,
             owner_actor=actor.actor_key, actor=actor.actor_key,
