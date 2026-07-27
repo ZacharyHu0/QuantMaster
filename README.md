@@ -207,6 +207,26 @@ Header 凭据只进入系统凭据库，跨域跳转和跨域详情页不会携�
 在每日清理任务中回收。`news_sentiment` 因子只读取本地资讯库，按首次获取时间对齐交易日，
 15:00 后获取的消息进入下一交易日，默认使用 3 个自然日半衰期。
 
+### 版本提交与 GitHub 自动同步
+
+克隆仓库后执行一次：
+
+```bash
+python tools/release_sync.py install
+```
+
+此后每次提交都必须同时递增 `quantmaster/release.py`、更新实际发布日期并在
+`CHANGELOG.md` 顶部加入对应说明。提交发生在 `main` 且版本确实递增时，post-commit
+钩子会自动重试推送到 `origin/main`；普通功能分支和 Claude 归档分支不会自动上传。
+
+如果网络或授权导致 push 失败，提交仍安全保留，并在 `.git` 内标记为待同步；下一次
+发布会被 pre-commit 阻止，直到运行以下命令完成同步：
+
+```bash
+python tools/release_sync.py status
+python tools/release_sync.py push
+```
+
 ## 设计原则
 
 1. **站在巨人肩膀上**：数据层直接复用 [AKShare](https://github.com/akfamily/akshare)

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.5（2026-07-27）
+
+### 版本提交与 GitHub 自动同步
+- main 上的版本提交完成后自动重试推送到 origin/main；普通功能分支和 Claude 归档分支不会自动上传
+- pre-commit 强制核对版本递增、实际发布日期和 CHANGELOG，并在上一版本尚未同步时阻止继续发布
+- 网络或授权失败会保留本地提交与 `.git` 待同步标记，可用统一的 install、status、check 和 push 命令检查及恢复
+
 ## v0.8.4（2026-07-27）
 
 ### Hybrid v2 决策与 Quant Lab Champion

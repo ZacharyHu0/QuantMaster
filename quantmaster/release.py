@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 RELEASE_DATE = "2026-07-27"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "版本提交与 GitHub 自动同步",
+                "items": (
+                    (
+                        "main 上的版本提交完成后自动重试推送到 origin/main；"
+                        "普通功能分支和 Claude 归档分支不会自动上传。"
+                    ),
+                    (
+                        "提交前强制核对版本递增、实际发布日期与 CHANGELOG；"
+                        "上一版本未同步时会阻止继续发布。"
+                    ),
+                    (
+                        "网络或授权失败会保留本地提交和待同步标记，"
+                        "可通过统一 status 与 push 命令定位并恢复。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.4",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "Hybrid v2 决策与 Quant Lab Champion",
