@@ -38,13 +38,13 @@ def akshare_call(label: str, func: Callable[..., T], *args, **kwargs) -> T:
     for attempt in range(1, attempts + 1):
         try:
             return func(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
             if attempt >= attempts:
                 raise
             delay = backoff * (2 ** (attempt - 1))
-            logger.warning(
-                "AKShare %s 失败（%s/%s），%.2f 秒后重试",
-                label, attempt, attempts, delay, exc_info=True,
+            logger.debug(
+                "AKShare %s 失败（%s/%s），%.2f 秒后重试: %s",
+                label, attempt, attempts, delay, exc,
             )
             if delay:
                 time.sleep(delay)

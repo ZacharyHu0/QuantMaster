@@ -123,7 +123,11 @@ def test_automation_settings_are_normalized_and_validated(tmp_path):
         SettingsUpdate.model_validate(raw)
     raw = loaded.model_dump()
     raw["automation"]["primary_universe"] = "../escape"
-    with pytest.raises(ValueError, match="股票池名称"):
+    with pytest.raises(ValueError, match="候选名称"):
+        SettingsUpdate.model_validate(raw)
+    raw = loaded.model_dump()
+    raw["automation"]["primary_universe"] = "csi800"
+    with pytest.raises(ValueError, match="只读"):
         SettingsUpdate.model_validate(raw)
     set_config(None)
 
@@ -232,3 +236,76 @@ def test_automation_channel_credentials_require_local_csrf():
     assert set(checked.json()["stages"]) == {
         "credential", "runtime", "websocket", "event", "binding",
     }
+
+
+def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, monkeypatch):
+    from quantmaster.server import management
+
+    data_root = tmp_path / "candidate-data"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"data": {"root": str(data_root)}}), encoding="utf-8")
+    manager = ConfigManager(config_path, tmp_path / "backups", FakeCredentials())
+    monkeypatch.setattr(management, "settings_manager", manager)
+    monkeypatch.setattr(
+        management, "_apply_runtime", lambda result: {**result, "runtime": {}})
+    monkeypatch.setattr(
+        "quantmaster.lab.dataset.load_csi800_members_as_of",
+        lambda as_of: {
+            "as_of": as_of,
+            "symbols": ["600519.SH", "000001.SZ"],
+            "snapshot_dates": {"000300.SH": "2026-07-01", "000905.SH": "2026-07-02"},
+        },
+    )
+    set_config(manager.load())
+    client = TestClient(app)
+    settings = client.get("/api/settings").json()
+    headers = {"X-CSRF-Token": settings["csrf_token"]}
+
+    catalog = client.get("/api/settings/universes").json()["universes"]
+    assert [(item["name"], item["kind"]) for item in catalog[:2]] == [
+        ("demo", "fixed"), ("csi800", "dynamic"),
+    ]
+    dynamic = client.get("/api/settings/universes/csi800?as_of=2026-07-27")
+    assert dynamic.status_code == 200
+    assert dynamic.json()["snapshot_dates"]["000300.SH"] == "2026-07-01"
+
+    preview = client.post(
+        "/api/settings/universes/preview",
+        json={"kind": "manual", "symbols": ["600519", "600519.SH", "bad"]},
+        headers=headers,
+    ).json()
+    assert preview["symbols"] == ["600519.SH"]
+    assert preview["duplicates"][0]["symbol"] == "600519.SH"
+    assert preview["errors"][0]["value"] == "bad"
+
+    created = client.post(
+        "/api/settings/universes",
+        json={"name": "core", "symbols": ["600519", "000001"]}, headers=headers,
+    )
+    assert created.status_code == 200
+    detail = client.get("/api/settings/universes/core").json()
+    assert detail["symbols"] == ["600519.SH", "000001.SZ"]
+    assert detail["members"][0]["name"] == "贵州茅台"
+
+    update = _update(manager)
+    update.automation.primary_universe = "core"
+    update.lab.universe = "core"
+    manager.save(update)
+    renamed = client.post(
+        "/api/settings/universes/core/rename",
+        json={"new_name": "renamed"}, headers=headers,
+    )
+    assert renamed.status_code == 200
+    assert set(renamed.json()["updated_references"]) == {
+        "automation.primary_universe", "lab.universe",
+    }
+    assert manager.load().automation.primary_universe == "renamed"
+
+    blocked = client.delete("/api/settings/universes/renamed", headers=headers)
+    assert blocked.status_code == 409
+    deleted = client.delete(
+        "/api/settings/universes/renamed?replacement=demo", headers=headers)
+    assert deleted.status_code == 200
+    assert manager.load().automation.primary_universe == "demo"
+    assert manager.load().lab.universe == "demo"

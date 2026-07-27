@@ -209,7 +209,7 @@ def _market_bars(panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataF
 def analyze_market(
     panel: dict[str, pd.DataFrame], horizons: tuple[int, ...] = (1, 3, 5, 7)
 ) -> dict[str, Any]:
-    """股票池等权市场状态；用宽度修正单一指数可能造成的失真。"""
+    """候选等权市场状态；用宽度修正单一指数可能造成的失真。"""
     bars, breadth = _market_bars(panel)
     frame = indicator_frame(bars)
     breadth_score = (
@@ -226,7 +226,7 @@ def analyze_market(
         "past": frame,
         "future": _forecast(frame, horizons),
         "forecast_validation": _forecast_validation(frame, horizons),
-        "forecast_note": "股票池等权趋势 + 市场宽度的规则型概率展望，不代表确定收益。",
+        "forecast_note": "候选等权趋势 + 市场宽度的规则型概率展望，不代表确定收益。",
     }
     last = frame.dropna(subset=["trend_score"]).iloc[-1]
     report["current"].update({

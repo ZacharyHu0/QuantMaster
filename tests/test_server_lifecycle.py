@@ -63,7 +63,10 @@ def test_run_uvicorn_foreground_releases_handlers(monkeypatch):
     lifecycle.run_uvicorn_foreground("app", "127.0.0.1", 8686)
 
     assert calls == [
-        ("config", "app", {"host": "127.0.0.1", "port": 8686, "log_level": "info"}),
+        ("config", "app", {
+            "host": "127.0.0.1", "port": 8686, "log_level": "warning",
+            "log_config": None, "access_log": False,
+        }),
         ("run",),
         ("unregister",),
     ]

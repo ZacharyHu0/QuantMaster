@@ -213,7 +213,7 @@ class TushareSource(DataSource):
         return mapping
 
     def index_weights(self, index_symbol: str, start: str, end: str) -> pd.DataFrame:
-        """读取指数历史成分权重，用于 point-in-time 股票池。
+        """读取指数历史成分权重，用于 point-in-time 候选。
 
         官方把该接口定义为月度数据并建议按自然月请求。这里逐月拉取、去重并
         单独缓存每个月，既避免长区间响应被截断，也让失败月份可以独立重试。

@@ -54,6 +54,10 @@ class TestBasics:
         assert "event.partial" in resp.text
         assert "/api/decision/dashboard/stream" in resp.text
         assert 'id="asset-workbench"' in resp.text
+        assert 'id="tab-candidates"' in resp.text
+        assert 'id="candidate-workspace"' in resp.text
+        assert 'href="/static/candidates.css"' in resp.text
+        assert 'src="/static/candidates.js"' in resp.text
         assert 'data-regime-window="10y"' in resp.text
         assert "名称 / 代码 / 板块" in resp.text
         assert 'id="runtime-info"' in resp.text
@@ -72,12 +76,23 @@ class TestBasics:
         assert f'data-version="{__version__}"' in resp.text
         assert f'data-release-date="{RELEASE_DATE}"' in resp.text
         assert "%%QM_VERSION%%" not in resp.text
-        nav_markup = resp.text.split('<nav id="nav">', 1)[1].split("</nav>", 1)[0]
+        nav_markup = resp.text.split('<nav id="nav"', 1)[1].split("</nav>", 1)[0]
         assert 'data-tab="settings"' not in nav_markup
+        assert [
+            nav_markup.index(f'data-tab="{tab}"')
+            for tab in ("market", "news", "candidates", "decision", "lab", "backtest",
+                        "paper", "ledger", "automation")
+        ] == sorted([
+            nav_markup.index(f'data-tab="{tab}"')
+            for tab in ("market", "news", "candidates", "decision", "lab", "backtest",
+                        "paper", "ledger", "automation")
+        ])
         assert 'class="header-settings" data-tab="settings"' in resp.text
         settings_markup = resp.text.split('class="header-settings"', 1)[1].split("</button>", 1)[0]
         assert "header-settings-label" not in settings_markup
         assert settings_markup.count("<rect x=\"10.65\"") == 8
+        assert client.get("/static/candidates.css").status_code == 200
+        assert client.get("/static/candidates.js").status_code == 200
 
     def test_validation_error_has_request_id(self):
         resp = client.post("/api/decision/dashboard/stream", json={
@@ -169,7 +184,7 @@ class TestBasics:
         assert [event["progress"] for event in updates] == sorted(
             event["progress"] for event in updates)
         assert updates[-1]["progress"] == 100
-        assert any(event["phase"] == "同步股票池行情" for event in updates)
+        assert any(event["phase"] == "同步候选行情" for event in updates)
         partial_kinds = [
             event["partial"]["kind"] for event in updates if event.get("partial")
         ]

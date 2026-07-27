@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 
 import pandas as pd
@@ -487,7 +488,7 @@ def cmd_universe(args) -> None:
             print("需要 --index（指数成分）或 --symbols（逗号分隔代码）", file=sys.stderr)
             raise SystemExit(1)
         save_universe(args.name, symbols)
-        print(f"股票池 {args.name} 已保存：{len(symbols)} 只")
+        print(f"候选 {args.name} 已保存：{len(symbols)} 只")
     elif args.universe_cmd == "show":
         symbols = load_universe(args.name)
         print(f"{args.name}: {len(symbols)} 只")
@@ -562,10 +563,14 @@ def cmd_ledger(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qm", description="QuantMaster — A股量化研究平台")
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="展开每次完整 traceback；可放在任意子命令前后",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("--universe", default="demo", help="股票池名（默认 demo）")
+        p.add_argument("--universe", default="demo", help="候选名称（默认 demo）")
         p.add_argument("--start", default="2022-01-01")
         p.add_argument("--end", default=None)
 
@@ -604,7 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
         parser.add_argument("--start", default="2022-01-01")
         parser.add_argument("--end", default=None)
 
-    lprepare = lq.add_parser("prepare-data", help="冻结数据与股票池快照")
+    lprepare = lq.add_parser("prepare-data", help="冻结数据与候选快照")
     lab_common(lprepare)
     for command in ("validate", "score"):
         item = lq.add_parser(command, help="提交统一样本外验证任务")
@@ -659,7 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_select)
 
     p = sub.add_parser("decisions", help="查看本地保存的历史选股快照")
-    p.add_argument("--universe", default=None, help="按股票池过滤")
+    p.add_argument("--universe", default=None, help="按候选过滤")
     p.add_argument("--limit", type=int, default=30)
     p.set_defaults(func=cmd_decisions)
 
@@ -759,15 +764,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-llm", action="store_true", help="快讯不做 LLM 标注")
     p.set_defaults(func=cmd_daily)
 
-    p = sub.add_parser("universe", help="股票池管理")
+    p = sub.add_parser("universe", help="候选管理")
     usub = p.add_subparsers(dest="universe_cmd", required=True)
-    uc = usub.add_parser("create", help="创建股票池（指数成分或手动列表）")
+    uc = usub.add_parser("create", help="创建候选（指数成分或手动列表）")
     uc.add_argument("name")
     uc.add_argument("--index", default=None, help="指数代码，如 000300.SH（沪深300成分）")
     uc.add_argument("--symbols", default=None, help="逗号分隔的代码列表")
-    us = usub.add_parser("show", help="查看股票池")
+    us = usub.add_parser("show", help="查看候选")
     us.add_argument("name")
-    usub.add_parser("list", help="列出全部股票池")
+    usub.add_parser("list", help="列出全部候选")
     p.set_defaults(func=cmd_universe)
 
     p = sub.add_parser("ledger", help="实盘账本")
@@ -793,10 +798,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
-    args.func(args)
+def _extract_verbose(argv: list[str]) -> tuple[list[str], bool]:
+    """允许 ``--verbose`` 出现在任意子命令层级，但尊重 ``--`` 分隔符。"""
+    cleaned: list[str] = []
+    verbose = False
+    positional_only = False
+    for value in argv:
+        if value == "--":
+            positional_only = True
+            cleaned.append(value)
+        elif value == "--verbose" and not positional_only:
+            verbose = True
+        else:
+            cleaned.append(value)
+    return cleaned, verbose
+
+
+def main(argv: list[str] | None = None) -> int:
+    from quantmaster.logging_config import configure_logging
+
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parsed_argv, verbose = _extract_verbose(raw_argv)
+    configure_logging(verbose=verbose)
+    args = build_parser().parse_args(parsed_argv)
+    args.verbose = verbose
+    try:
+        args.func(args)
+        return 0
+    except KeyboardInterrupt:
+        logging.getLogger(__name__).info("命令已停止")
+        return 130
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "命令执行失败", extra={"traceback_policy": "always"},
+        )
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

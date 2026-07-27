@@ -1,10 +1,12 @@
-"""本机设置、股票池、迁移与券商 CSV 导入 API。"""
+"""本机设置、候选、迁移与券商 CSV 导入 API。"""
 
 from __future__ import annotations
 
 import hmac
 import secrets
 import time
+from datetime import date
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -18,6 +20,7 @@ from quantmaster.settings import (
     SecretMutations,
     SettingsDocument,
     SettingsUpdate,
+    document_from_config,
 )
 
 router = APIRouter(prefix="/api")
@@ -338,36 +341,179 @@ class UniversePreview(BaseModel):
     index_symbol: str = "000300.SH"
 
 
+class UniverseNameRefresh(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=10_000)
+
+
+def _universe_references(name: str) -> list[dict[str, str]]:
+    cfg = settings_manager.load()
+    references = []
+    if cfg.automation.primary_universe.casefold() == name.casefold():
+        references.append({
+            "key": "automation.primary_universe", "label": "自动化主候选",
+        })
+    if cfg.lab.universe.casefold() == name.casefold():
+        references.append({
+            "key": "lab.universe", "label": "Quant Lab 默认候选",
+        })
+    return references
+
+
+def _fixed_universe_metadata(item: dict) -> dict:
+    built_in = item["name"].casefold() == "demo"
+    return {
+        **item,
+        "kind": "fixed",
+        "source": "built_in" if built_in else "custom",
+        "research_quality": "sandbox",
+        "references": _universe_references(item["name"]),
+    }
+
+
+def _universe_members(symbols: list[str]) -> list[dict[str, str | None]]:
+    from quantmaster.data.names import cached_stock_names
+
+    names = cached_stock_names(symbols)
+    return [{"symbol": symbol, "name": names.get(symbol)} for symbol in symbols]
+
+
+def _rewrite_universe_references(old_name: str, new_name: str) -> tuple[list[str], dict | None]:
+    document = document_from_config(settings_manager.load())
+    changed: list[str] = []
+    if document.automation.primary_universe.casefold() == old_name.casefold():
+        document.automation.primary_universe = new_name
+        changed.append("automation.primary_universe")
+    if document.lab.universe.casefold() == old_name.casefold():
+        document.lab.universe = new_name
+        changed.append("lab.universe")
+    if not changed:
+        return [], None
+    update = SettingsUpdate.model_validate(document.model_dump())
+    return changed, _apply_runtime(settings_manager.save(update))
+
+
+def _validate_replacement(name: str, references: list[dict[str, str]]) -> str:
+    value = str(name).strip()
+    if not value:
+        raise ValueError("请选择替代候选")
+    if value.casefold() == "csi800":
+        if any(item["key"] == "automation.primary_universe" for item in references):
+            raise ValueError("csi800 只适用于 Quant Lab，不能替代自动化主候选")
+        return "csi800"
+    from quantmaster.data.universe import load_universe
+
+    load_universe(value)
+    return value
+
+
 @router.get("/settings/universes")
 def universes(request: Request) -> dict:
     _require_local(request)
     from quantmaster.data.universe import list_universes
 
-    return {"universes": list_universes()}
+    fixed = [_fixed_universe_metadata(item) for item in list_universes()]
+    dynamic = {
+        "name": "csi800", "count": None, "readonly": True, "kind": "dynamic",
+        "source": "tushare:index_weight", "research_quality": "production",
+        "references": _universe_references("csi800"),
+    }
+    data_root = Path(settings_manager.load().data.root).expanduser().resolve()
+    conflicts = []
+    conflict = data_root / "universe" / "csi800.json"
+    if conflict.is_file():
+        conflicts.append({
+            "name": "csi800", "path": str(conflict),
+            "message": "检测到与系统动态候选同名的旧文件；文件已保留，请先改名再使用。",
+        })
+    ordered = ([fixed[0], dynamic, *fixed[1:]] if fixed else [dynamic])
+    return {"universes": ordered, "conflicts": conflicts}
 
 
 @router.get("/settings/universes/{name}")
-def universe_detail(name: str, request: Request) -> dict:
+def universe_detail(name: str, request: Request, as_of: date | None = None) -> dict:
     _require_local(request)
     from quantmaster.data.universe import load_universe
 
     try:
+        if name.casefold() == "csi800":
+            chosen = as_of or date.today()
+            if chosen > date.today():
+                raise ValueError("查看日期不能晚于今天")
+            from quantmaster.lab.dataset import load_csi800_members_as_of
+
+            dynamic = load_csi800_members_as_of(chosen.isoformat())
+            symbols = dynamic["symbols"]
+            return {
+                "name": "csi800", "symbols": symbols,
+                "members": _universe_members(symbols), "count": len(symbols),
+                "readonly": True, "kind": "dynamic", "source": "tushare:index_weight",
+                "research_quality": "production", "as_of": dynamic["as_of"],
+                "snapshot_dates": dynamic["snapshot_dates"],
+                "references": _universe_references("csi800"),
+            }
         symbols = load_universe(name)
-        return {"name": name, "symbols": symbols, "readonly": name == "demo"}
-    except (ValueError, FileNotFoundError) as exc:
+        built_in = name.casefold() == "demo"
+        return {
+            "name": "demo" if built_in else name, "symbols": symbols,
+            "members": _universe_members(symbols), "count": len(symbols),
+            "readonly": built_in, "kind": "fixed",
+            "source": "built_in" if built_in else "custom",
+            "research_quality": "sandbox", "references": _universe_references(name),
+        }
+    except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @router.post("/settings/universes/preview")
 def preview_universe(request: Request, value: UniversePreview) -> dict:
     _require_csrf(request)
-    from quantmaster.data.universe import index_universe, normalize_symbols
+    from quantmaster.data.universe import index_universe, normalize_symbol
 
     try:
         symbols = index_universe(value.index_symbol) if value.kind == "index" else value.symbols
-        normalized = normalize_symbols(symbols)
-        return {"symbols": normalized, "count": len(normalized), "preview": normalized[:100]}
+        normalized: list[str] = []
+        seen: set[str] = set()
+        duplicates: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = []
+        for raw in symbols:
+            candidate = str(raw).strip()
+            if not candidate:
+                continue
+            try:
+                symbol = normalize_symbol(candidate)
+            except ValueError as exc:
+                errors.append({"value": candidate, "message": str(exc)})
+                continue
+            if symbol in seen:
+                duplicates.append({"value": candidate, "symbol": symbol})
+                continue
+            seen.add(symbol)
+            normalized.append(symbol)
+        return {
+            "symbols": normalized, "members": _universe_members(normalized),
+            "count": len(normalized), "preview": normalized[:100],
+            "duplicates": duplicates, "errors": errors,
+        }
     except Exception as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/settings/universes/names/refresh")
+def refresh_universe_names(request: Request, value: UniverseNameRefresh) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.names import load_stock_names
+    from quantmaster.data.universe import normalize_symbols
+
+    try:
+        symbols = normalize_symbols(value.symbols)
+        names = load_stock_names(symbols, refresh=True)
+        return {
+            "names": names,
+            "missing": [symbol for symbol in symbols if symbol not in names],
+        }
+    except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
 
 
@@ -375,7 +521,7 @@ def preview_universe(request: Request, value: UniversePreview) -> dict:
 def create_universe(request: Request, value: UniverseBody) -> dict:
     _require_csrf(request)
     if not value.name:
-        raise HTTPException(400, "缺少股票池名称")
+        raise HTTPException(400, "缺少候选名称")
     from quantmaster.data.universe import load_universe, save_universe
 
     try:
@@ -384,7 +530,7 @@ def create_universe(request: Request, value: UniverseBody) -> dict:
         except FileNotFoundError:
             pass
         else:
-            raise ValueError("股票池已存在")
+            raise ValueError("候选已存在")
         save_universe(value.name, value.symbols)
         return {"status": "ok", "name": value.name}
     except ValueError as exc:
@@ -411,23 +557,55 @@ def rename_universe_route(name: str, request: Request, value: UniverseRename) ->
     _require_csrf(request)
     from quantmaster.data.universe import rename_universe
 
+    renamed = False
     try:
         rename_universe(name, value.new_name)
-        return {"status": "ok", "name": value.new_name}
+        renamed = True
+        changed, runtime = _rewrite_universe_references(name, value.new_name)
+        return {
+            "status": "ok", "name": value.new_name,
+            "updated_references": changed, "runtime": runtime.get("runtime") if runtime else None,
+        }
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
     except (ValueError, FileExistsError) as exc:
+        if renamed:
+            try:
+                rename_universe(value.new_name, name)
+            except Exception:
+                pass
         raise HTTPException(400, str(exc)) from None
 
 
 @router.delete("/settings/universes/{name}")
-def delete_universe_route(name: str, request: Request) -> dict:
+def delete_universe_route(name: str, request: Request, replacement: str | None = None) -> dict:
     _require_csrf(request)
     from quantmaster.data.universe import delete_universe
 
     try:
+        if name.casefold() in {"demo", "csi800"}:
+            raise ValueError("系统候选只读，请复制后再编辑")
+        references = _universe_references(name)
+        changed: list[str] = []
+        runtime = None
+        replacement_name = None
+        if references:
+            if not replacement:
+                raise HTTPException(409, detail={
+                    "message": "该候选正在使用中，请先选择替代候选。",
+                    "references": references, "requires_replacement": True,
+                })
+            replacement_name = _validate_replacement(replacement, references)
+            if replacement_name.casefold() == name.casefold():
+                raise ValueError("替代候选不能与待删除候选相同")
+            changed, runtime = _rewrite_universe_references(name, replacement_name)
         delete_universe(name)
-        return {"status": "ok"}
+        return {
+            "status": "ok", "replacement": replacement_name,
+            "updated_references": changed, "runtime": runtime.get("runtime") if runtime else None,
+        }
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
     except ValueError as exc:

@@ -70,7 +70,7 @@ def swing_score_panel(panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def market_exposure(panel: dict[str, pd.DataFrame]) -> pd.Series:
-    """根据股票池宽度给出逐日风险敞口：牛/震荡/熊约为 100%/65%/30%。"""
+    """根据候选宽度给出逐日风险敞口：牛/震荡/熊约为 100%/65%/30%。"""
     close = panel["close"].sort_index()
     returns = close.pct_change(fill_method=None)
     advance = (returns > 0).sum(axis=1) / returns.notna().sum(axis=1).replace(0, np.nan)

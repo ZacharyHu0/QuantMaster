@@ -60,7 +60,7 @@ class AutomationRuntime:
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
         except ImportError:
-            logger.exception("未安装 APScheduler，自动化运行时未启动")
+            logger.error("未安装 APScheduler，自动化运行时未启动")
             return False
         try:
             self.scheduler = BackgroundScheduler(timezone=self.timezone)

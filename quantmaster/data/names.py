@@ -50,6 +50,14 @@ def save_stock_names(names: dict[str, str]) -> None:
         temp.unlink(missing_ok=True)
 
 
+def cached_stock_names(symbols: list[str]) -> dict[str, str]:
+    """只读内置名称和本地缓存；候选浏览不会隐式触网。"""
+    requested = list(dict.fromkeys(str(symbol) for symbol in symbols))
+    cached, _ = _read_cache()
+    available = {**DEMO_STOCK_NAMES, **cached}
+    return {symbol: available[symbol] for symbol in requested if symbol in available}
+
+
 def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover - 网络
     """一次 AKShare 全市场快照补齐指定代码；底层已统一重试。"""
     from quantmaster.data.akshare_source import AkshareSource

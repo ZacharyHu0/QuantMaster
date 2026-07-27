@@ -155,7 +155,7 @@ def load_history(
             errors.append(f"{factory.__name__}: 返回空数据")
         except Exception as e:
             errors.append(f"{factory.__name__}: {e}")
-            logger.warning("数据源 %s 获取 %s 失败: %s", factory.__name__, symbol, e)
+            logger.debug("数据源 %s 获取 %s 失败: %s", factory.__name__, symbol, e)
 
     # 全部失败但缓存有部分数据时，退回缓存
     cached = store.get(symbol)
@@ -224,7 +224,7 @@ def load_intraday(
             errors.append(f"{factory.__name__}: 返回空数据")
         except Exception as e:
             errors.append(f"{factory.__name__}: {e}")
-            logger.warning("数据源 %s 获取 %s %s 失败: %s", factory.__name__, symbol, frequency, e)
+            logger.debug("数据源 %s 获取 %s %s 失败: %s", factory.__name__, symbol, frequency, e)
     if cached is not None and not cached.empty:
         logger.warning("全部分钟数据源失败，使用本地缓存: %s %s", symbol, frequency)
         return cached.loc[start_ts:end_ts]

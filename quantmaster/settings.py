@@ -398,8 +398,8 @@ class ConfigManager:
             warnings.append(f"数据目录将相对于启动目录解析：{root}")
         if doc.server.host not in {"127.0.0.1", "localhost", "::1"}:
             warnings.append("服务监听非本机地址时，远程设置入口会保持禁用")
-        for label, universe in (("自动化主股票池", doc.automation.primary_universe),
-                                ("Quant Lab 股票池", doc.lab.universe)):
+        for label, universe in (("自动化主候选", doc.automation.primary_universe),
+                                ("Quant Lab 默认候选", doc.lab.universe)):
             if universe.lower() in {"demo", "csi800"}:
                 continue
             from quantmaster.data.universe import normalize_symbols

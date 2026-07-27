@@ -2,8 +2,9 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>QuantMaster</title>
+<link rel="stylesheet" href="/static/candidates.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/automation.css">
 <link rel="stylesheet" href="/static/news.css">
@@ -288,17 +289,26 @@
 <body>
 <header>
   <h1>Quant<span>Master</span></h1>
-  <nav id="nav">
-    <button data-tab="market" class="active">市场</button>
-    <button data-tab="decision">决策</button>
-    <button data-tab="lab"><span class="nav-lab-label">Quant Lab</span></button>
-    <button data-tab="factor" hidden>因子</button>
-    <button data-tab="backtest">回测</button>
-    <button data-tab="mine" hidden>挖掘</button>
-    <button data-tab="paper">模拟盘</button>
-    <button data-tab="news">资讯</button>
-    <button data-tab="ledger">实盘</button>
-    <button data-tab="automation">自动化</button>
+  <nav id="nav" aria-label="主要功能">
+    <span class="nav-group" aria-label="观察">
+      <button data-tab="market" class="active">市场</button>
+      <button data-tab="news">资讯</button>
+    </span>
+    <span class="nav-group" aria-label="决策">
+      <button data-tab="candidates">候选</button>
+      <button data-tab="decision">决策</button>
+    </span>
+    <span class="nav-group" aria-label="研究">
+      <button data-tab="lab"><span class="nav-lab-label">Quant Lab</span></button>
+      <button data-tab="backtest">回测</button>
+    </span>
+    <span class="nav-group" aria-label="执行">
+      <button data-tab="paper">模拟盘</button>
+      <button data-tab="ledger">实盘</button>
+    </span>
+    <span class="nav-group" aria-label="运维">
+      <button data-tab="automation">自动化</button>
+    </span>
   </nav>
   <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
     <span id="release-version">版本</span>
@@ -372,6 +382,42 @@
   </div>
 </section>
 
+<!-- ================= 候选 ================= -->
+<section class="tab" id="tab-candidates">
+  <div class="candidate-heading">
+    <div>
+      <span class="eyebrow">RESEARCH SCOPE</span>
+      <h2>候选</h2>
+      <p>核对研究范围、具体成分和使用位置；自定义候选的变更仅在明确保存后生效。</p>
+    </div>
+    <div class="candidate-heading-actions">
+      <button class="ghost" id="candidate-import" type="button">从我的标的复制</button>
+      <button class="primary" id="candidate-new" type="button">新建候选</button>
+    </div>
+  </div>
+  <div class="candidate-conflict" id="candidate-conflict" role="status" hidden></div>
+  <label class="candidate-mobile-picker" for="candidate-mobile-select">
+    当前候选
+    <select id="candidate-mobile-select" aria-label="选择候选"></select>
+  </label>
+  <div class="candidate-shell">
+    <aside class="candidate-rail" aria-label="候选列表">
+      <label class="candidate-list-search" for="candidate-list-search">
+        查找候选
+        <input id="candidate-list-search" type="search" placeholder="输入名称" autocomplete="off">
+      </label>
+      <div class="candidate-list" id="candidate-list" role="listbox" aria-label="可用候选">
+        <div class="candidate-list-state">正在读取候选…</div>
+      </div>
+    </aside>
+    <section class="candidate-workspace" id="candidate-workspace" aria-live="polite">
+      <div class="candidate-skeleton" aria-label="正在读取候选详情">
+        <span></span><span></span><span></span>
+      </div>
+    </section>
+  </div>
+</section>
+
 <!-- ================= 决策 ================= -->
 <section class="tab" id="tab-decision">
   <div class="section-lead">
@@ -381,12 +427,12 @@
     </div>
   </div>
   <form class="controls" id="decision-form">
-    <label>股票池<input name="universe" value="demo"></label>
+    <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
     <label>研究起点<input name="start" type="date" value="2015-01-01"></label>
     <label>持有周期
       <select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select>
     </label>
-    <label>候选数量<input name="top_n" type="number" value="10" min="1" max="50"></label>
+    <label>入选数量<input name="top_n" type="number" value="10" min="1" max="50"></label>
     <button class="primary" type="submit">生成今日决策</button>
   </form>
   <div class="hint">收盘后生成信号，默认保存本次快照；实际交易按 T+1 开盘执行。首次加载行业映射可能稍慢。</div>
@@ -465,7 +511,7 @@
               <label><input type="radio" name="method" value="llm"><span><b>AI Copilot</b><small>结构提案，本地验证</small></span></label>
             </div>
             <div class="lab-form-grid">
-              <label>股票池<input name="universe" value="demo" required></label>
+              <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all" required><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
               <label>研究起点<input name="start" type="date" value="2022-01-01" required></label>
               <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
               <label>保留候选<input name="top" type="number" value="10" min="2" max="50"></label>
@@ -499,7 +545,7 @@
           <div class="lab-block-head"><div><span>NEW EXPERIMENT</span><h4>训练配置</h4></div><span class="lab-selected-model" id="lab-selected-model">RIDGE</span></div>
           <input type="hidden" name="model" value="ridge">
           <div class="lab-form-grid lab-form-grid-5">
-            <label>股票池<input name="universe" value="demo"></label>
+            <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
             <label>研究起点<input name="start" type="date" value="2022-01-01"></label>
             <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
             <label>序列长度<input name="sequence_length" type="number" value="20" min="1" max="120"></label>
@@ -581,7 +627,7 @@
              placeholder="如 rank(-delta(close, 5))">
     </label>
     <datalist id="factor-list"></datalist>
-    <label>股票池<input name="universe" value="demo"></label>
+    <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
     <label>开始<input name="start" type="date" value="2022-01-01"></label>
     <label>分组数<input name="quantiles" type="number" value="5" min="2" max="10"></label>
     <label style="flex-direction:row;align-items:center;gap:6px;padding-bottom:9px">
@@ -593,7 +639,7 @@
     表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema… 字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
   <div id="factor-out"></div>
   <div class="panel" style="margin-top:16px">
-    <h3>样本外验证（防过拟合）：用上方的因子/股票池，切分日前为训练期、后为验证期</h3>
+    <h3>样本外验证（防过拟合）：用上方的因子与候选，切分日前为训练期、后为验证期</h3>
     <form class="controls" id="validate-form">
       <label>切分日期<input name="split" type="date" value="2024-07-01"></label>
       <label>滚动分段数<input name="n_splits" type="number" value="4" min="2" max="10"></label>
@@ -613,7 +659,7 @@
     <label>合成
       <select name="weighting"><option value="equal">等权</option><option value="ic">IC加权</option></select>
     </label>
-    <label>股票池<input name="universe" value="demo"></label>
+    <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
     <label>开始<input name="start" type="date" value="2022-01-01"></label>
     <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
     <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
@@ -635,7 +681,7 @@
     <div class="panel">
       <h3>遗传规划挖掘（本地计算，无需 API key）</h3>
       <form class="controls" id="gp-form">
-        <label>股票池<input name="universe" value="demo"></label>
+        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
         <label>开始<input name="start" type="date" value="2022-01-01"></label>
         <label>代数<input name="generations" type="number" value="5" min="1" max="30"></label>
         <label>种群<input name="population" type="number" value="40" min="10" max="200"></label>
@@ -646,7 +692,7 @@
     <div class="panel">
       <h3>LLM 挖掘（需配置 ANTHROPIC_API_KEY / OPENAI_API_KEY）</h3>
       <form class="controls" id="llm-form">
-        <label>股票池<input name="universe" value="demo"></label>
+        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
         <label>开始<input name="start" type="date" value="2022-01-01"></label>
         <label>每轮个数<input name="n" type="number" value="8" min="2" max="20"></label>
         <label>轮数<input name="rounds" type="number" value="2" min="1" max="5"></label>
@@ -665,7 +711,7 @@
     <form class="controls" id="paper-form">
       <label>策略<select name="strategy"><option value="swing">1–7 日短线</option><option value="factor">因子策略</option></select></label>
       <label>因子<input name="factor" list="factor-list" value="mom_20d" style="min-width:220px"></label>
-      <label>股票池<input name="universe" value="demo"></label>
+      <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
       <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
       <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
       <label>调仓
@@ -839,9 +885,8 @@
       <button type="button" data-settings-section="sources"><span>05</span>资讯来源</button>
       <button type="button" data-settings-section="automation"><span>06</span>自动化</button>
       <button type="button" data-settings-section="lab"><span>07</span>Quant Lab</button>
-      <button type="button" data-settings-section="universe"><span>08</span>股票池</button>
-      <button type="button" data-settings-section="backup"><span>09</span>快照回滚</button>
-      <button type="button" data-settings-section="server"><span>10</span>本机服务</button>
+      <button type="button" data-settings-section="backup"><span>08</span>快照回滚</button>
+      <button type="button" data-settings-section="server"><span>09</span>本机服务</button>
     </nav>
     <div class="settings-content">
       <form id="settings-form" novalidate>
@@ -909,7 +954,7 @@
           <div class="field-grid">
             <label class="toggle-field field-wide"><span><strong>启用自动化运行时</strong><small>开启后执行定时任务，并监听已经接入的消息通道。</small></span><input name="automation.enabled" type="checkbox" role="switch"></label>
             <label>时区<input name="automation.timezone" list="automation-timezone-list" required autocomplete="off"><datalist id="automation-timezone-list"><option value="Asia/Shanghai"></option><option value="Asia/Hong_Kong"></option><option value="UTC"></option></datalist></label>
-            <label>主股票池<input name="automation.primary_universe" list="automation-universe-list" required autocomplete="off"><datalist id="automation-universe-list"></datalist><small>每日决策与选股任务使用的股票池。</small></label>
+            <label>主候选<div class="candidate-field"><select name="automation.primary_universe" data-candidate-select="fixed" required><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">管理</button></div><small>每日决策与选股任务使用的候选范围。</small></label>
             <label>记录保留天数<input name="automation.retention_days" type="number" min="7" max="3650" step="1" required><small>自动清理更早的运行、事件与投递记录。</small></label>
             <label class="field-wide">重点观察列表<textarea name="automation.watchlist" data-value-type="list" rows="4" placeholder="600519.SH&#10;000858.SZ"></textarea><small>每行或逗号分隔；代码会自动补全市场后缀并去重。</small></label>
             <label class="field-wide">市场哨兵指数<textarea name="automation.sentinel_indices" data-value-type="list" rows="3" required placeholder="000300.SH&#10;000905.SH"></textarea><small>1–12 个指数，用于盘中市场转折监测。</small></label>
@@ -946,7 +991,7 @@
           <div class="group-heading"><div><h3>Quant Lab</h3><p>定义研究默认范围、后台节奏与计算边界；单次实验仍可在 Lab 工作台覆盖。</p></div><div class="button-pair"><span class="state-pill" id="lab-runtime-state">正在读取状态</span><button class="ghost check-button" type="button" data-check="lab">检测研究环境</button></div></div>
           <div class="field-grid">
             <label class="toggle-field field-wide"><span><strong>启用内置研究 Worker</strong><small>关闭后停止调度和领取新任务，当前任务完成后退出。</small></span><input name="lab.enabled" type="checkbox" role="switch"></label>
-            <label>默认研究股票池<input name="lab.universe" list="lab-universe-list" required autocomplete="off"><datalist id="lab-universe-list"><option value="csi800"></option><option value="demo"></option></datalist><small>csi800 需要 Tushare index_weight 权限。</small></label>
+            <label>默认研究候选<div class="candidate-field"><select name="lab.universe" data-candidate-select="all" required><option value="csi800">csi800</option><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">管理</button></div><small>csi800 需要 Tushare index_weight 权限。</small></label>
             <label>研究起点<input name="lab.start" type="date" required></label>
             <fieldset class="choice-field field-wide"><legend>统一验证周期</legend><div class="choice-row"><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="1">1 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="3">3 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="5">5 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="7">7 日</label></div><small>新建和定时研究使用；既有报告不会被改写。</small></fieldset>
           </div>
@@ -1004,16 +1049,6 @@
         <div id="snapshot-list"><div class="msg">加载快照中…</div></div><div id="snapshot-diff" class="diff-panel" hidden></div>
       </section>
 
-      <section class="settings-group" data-settings-panel="universe">
-        <div class="group-heading"><div><h3>股票池</h3><p>代码会自动去空格、转大写、补全可推断的 A 股后缀并去重。</p></div><button class="ghost" id="universe-new" type="button">新建股票池</button></div>
-        <div class="universe-layout"><div id="universe-list" class="universe-list"></div><form id="universe-form" class="universe-editor">
-          <label>名称<input name="name" placeholder="例如 core_holdings" required></label>
-          <label>代码（每行或逗号分隔）<textarea name="symbols" rows="12" placeholder="600519&#10;000858.SZ"></textarea></label>
-          <div class="universe-index"><input name="index_symbol" value="000300.SH"><button class="ghost" data-universe-index type="button">预览指数成分</button></div>
-          <div id="universe-editor-status" class="hint">选择股票池或新建。</div>
-          <div class="editor-actions"><button class="primary" type="submit">保存股票池</button><button class="ghost" data-universe-rename type="button">重命名</button><button class="ghost danger" data-universe-delete type="button">删除</button></div>
-        </form></div>
-      </section>
     </div>
   </div>
 </section>
@@ -1615,6 +1650,7 @@ function loadActiveTab(tab) {
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
   if (tab === 'paper') loadPaper();
+  if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
   if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
   if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
   if (tab === 'decision' && !decisionLoaded && !decisionLoading) {
@@ -1628,6 +1664,7 @@ function activateTab(control, {persist = true, load = true} = {}) {
   document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
   document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
   if (persist) rememberActiveTab(tab);
+  if (control.closest('#nav')) control.scrollIntoView({block:'nearest', inline:'nearest'});
   Object.values(charts).forEach(c => c.resize());
   if (load) loadActiveTab(tab);
   return true;
@@ -1894,7 +1931,7 @@ loadMarket();
 let decisionLoaded = false, decisionLoading = false;
 function fixed(v, digits = 2) { return v == null || !Number.isFinite(+v) ? '—' : (+v).toFixed(digits); }
 function directionLabel(value) { return value === 'up' ? '上行' : value === 'down' ? '下行' : '震荡'; }
-function actionLabel(value) { return value === 'buy' ? '候选' : value === 'watch' ? '观察' : '回避'; }
+function actionLabel(value) { return value === 'buy' ? '入选' : value === 'watch' ? '观察' : '回避'; }
 
 const REGIME_WINDOWS = {
   '7d':{label:'7D', days:7}, '14d':{label:'14D', days:14},
@@ -1983,7 +2020,7 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
       </div>
     </div>
     <div class="panel reveal reveal-delay">
-      <div class="panel-heading"><h3>今日候选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
+      <div class="panel-heading"><h3>今日入选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
       <div class="table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>现价</th><th>资金量</th><th>预期</th><th>止损 / 止盈</th><th>依据</th></tr></thead>
       <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击查看K线">
         <td>${p.rank}</td><td><strong>${esc(p.name || '名称待同步')}</strong><div class="reason">${esc(p.symbol)} · ${esc(p.industry)}</div></td>
@@ -1991,16 +2028,16 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${fixed(p.last_close, 2)}</td>
         <td>${fixed(p.money_ratio, 2)}</td><td class="${cls(p.expected_return)}">${pct(p.expected_return)}</td>
         <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td>
-        <td class="reason">${(p.reasons || []).map(esc).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前过滤条件下没有候选' : '市场状态已可查看，候选仍在计算…'}</td></tr>`}</tbody></table></div>
-      <div class="hint">${esc(selection.risk_note || '候选生成后将在此显示依据与风控位。')}</div>
+        <td class="reason">${(p.reasons || []).map(esc).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前条件下没有标的入选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
+      <div class="hint">${esc(selection.risk_note || '决策结果生成后将在此显示依据与风控位。')}</div>
     </div>
     <div class="decision-grid reveal reveal-delay">
-      <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill">股票池内聚合</span></div>
+      <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill">按当前候选聚合</span></div>
         <table><thead><tr><th>板块</th><th>成分</th><th>状态</th><th>牛熊分</th><th>上涨宽度</th></tr></thead><tbody>
         ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="5" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
         </tbody></table></div>
       <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
-        <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三候选</th></tr></thead><tbody>
+        <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
         ${(data.history || []).map(h => `<tr><td class="snapshot-date">${esc(h.signal_date)}</td><td class="snapshot-period">${h.holding_horizon_days} 日</td><td class="snapshot-exposure">${pct(h.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(h.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
         </tbody></table></div></div>
     </div>`;
@@ -2017,7 +2054,7 @@ function createDecisionStreamRenderer(root) {
     root.innerHTML = `<div class="panel ready-preview stream-enter">
       <div class="ready-preview-head"><strong>已就绪标的</strong><span class="state-pill" data-ready-count>0 / 0</span></div>
       <div class="ready-symbols" data-ready-symbols></div>
-      <div class="hint">已完成的标的可先打开 K 线；跨股票牛熊与选股需等待股票池同步完成。</div></div>`;
+      <div class="hint">已完成的标的可先打开 K 线；跨标的牛熊与选股需等待候选数据同步完成。</div></div>`;
     preview = root.querySelector('.ready-preview');
     symbols = root.querySelector('[data-ready-symbols]');
     count = root.querySelector('[data-ready-count]');
@@ -2081,7 +2118,7 @@ async function loadDecision(form) {
     });
     renderer.finish(data);
     tracker.reveal();
-    tracker.finish(`决策已完成 · ${data.selection?.picks?.length || 0} 只候选`);
+    tracker.finish(`决策已完成 · ${data.selection?.picks?.length || 0} 只入选`);
     decisionLoaded = true;
   } catch (err) {
     tracker.fail(err.message);
@@ -2466,6 +2503,7 @@ document.getElementById('cash-form').onsubmit = async e => {
 </script>
 <script src="/static/automation.js"></script>
 <script src="/static/settings.js"></script>
+<script src="/static/candidates.js"></script>
 <script src="/static/news.js"></script>
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>

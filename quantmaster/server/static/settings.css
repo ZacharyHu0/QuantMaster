@@ -44,10 +44,10 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .group-heading p { color: var(--muted); margin-top: 5px; max-width: 68ch; }
 .group-heading h4, .migration-box h4 { font-size: 14px; color: var(--ink-2); }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
-.field-grid label, .universe-editor > label {
+.field-grid label {
   display: flex; flex-direction: column; gap: 6px; color: var(--ink-2); font-size: 12px;
 }
-.field-grid input, .field-grid select, .universe-editor input { width: 100%; min-width: 0; }
+.field-grid input, .field-grid select { width: 100%; min-width: 0; }
 .field-grid small, .secret-field small { color: var(--muted); font-size: 11px; min-height: 17px; }
 .field-wide { grid-column: 1 / -1; }
 .field-grid [aria-invalid="true"] { border-color: var(--up); }
@@ -135,17 +135,6 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .snapshot-actions { display: flex; gap: 6px; }
 .diff-panel { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
 .diff-panel table td { max-width: 240px; overflow-wrap: anywhere; }
-.universe-layout { display: grid; grid-template-columns: minmax(180px, .55fr) minmax(360px, 1.45fr); gap: 28px; }
-.universe-list { border-top: 1px solid var(--border); }
-.universe-item {
-  width: 100%; display: flex; justify-content: space-between; padding: 11px 8px;
-  color: var(--ink-2); background: transparent; border: 0; border-bottom: 1px solid var(--border);
-  cursor: pointer; text-align: left;
-}
-.universe-item.active { background: var(--surface); color: var(--ink); }
-.universe-item span { color: var(--muted); font-size: 11px; }
-.universe-editor { display: grid; gap: 14px; }
-.universe-index { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
 .editor-actions { display: flex; gap: 8px; }
 
 .channel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 28px; }
@@ -211,7 +200,7 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
   .settings-nav button { grid-template-columns: auto; width: auto; flex: 0 0 auto; padding: 8px 12px; border-bottom: 0; border-radius: 6px; }
   .settings-nav button span { display: none; }
   .settings-content { padding-top: 14px; }
-  .field-grid, .universe-layout, .channel-grid { grid-template-columns: 1fr; }
+  .field-grid, .channel-grid { grid-template-columns: 1fr; }
   .check-stack { grid-template-columns: 1fr; }
   .migration-controls { grid-template-columns: 1fr; }
   .save-dock { flex-wrap: wrap; bottom: 60px; }

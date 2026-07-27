@@ -165,7 +165,7 @@ def check_server(settings: ServerSettings) -> dict[str, Any]:
 
 
 def check_lab(settings: LabSettings, data: DataSettings, tushare_token: str) -> dict[str, Any]:
-    """检测研究股票池、PIT 数据权限和所选计算设备。"""
+    """检测研究候选、PIT 数据权限和所选计算设备。"""
     started = time.perf_counter()
     checks: dict[str, Any] = {}
     universe = settings.universe
@@ -197,12 +197,12 @@ def check_lab(settings: LabSettings, data: DataSettings, tushare_token: str) -> 
                     "message": "缺少 index_weight 权限" if permission else "PIT 成分联网检测失败",
                 }
     elif universe == "demo":
-        checks["universe"] = {"status": "success", "message": "内置 demo 股票池可用"}
+        checks["universe"] = {"status": "success", "message": "内置 demo 候选可用"}
     else:
         path = Path(data.root).expanduser().resolve() / "universe" / f"{universe}.json"
         checks["universe"] = {
             "status": "success" if path.is_file() else "error",
-            "message": "自定义股票池文件可用" if path.is_file() else "自定义股票池不存在",
+            "message": "自定义候选文件可用" if path.is_file() else "自定义候选不存在",
         }
 
     torch_available = importlib.util.find_spec("torch") is not None

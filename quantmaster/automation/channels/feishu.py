@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -11,6 +12,9 @@ from quantmaster.automation.models import ActorContext
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialStore
+from quantmaster.logging_config import normalize_third_party_logger
+
+logger = logging.getLogger(__name__)
 
 
 class FeishuBotClient:
@@ -115,11 +119,16 @@ class FeishuBotClient:
         try:
             from lark_oapi.channel import FeishuChannel
             try:
+                from lark_oapi.core import LogLevel
+            except ImportError:  # 兼容旧 SDK 及精简测试替身。
+                LogLevel = None
+            try:
                 from lark_oapi.channel import PolicyConfig
             except ImportError:  # 兼容旧 SDK 及精简测试替身。
                 PolicyConfig = None
         except ImportError as exc:
             raise RuntimeError("未安装 lark-oapi，无法启动飞书长连接") from exc
+        normalize_third_party_logger("Lark")
         app_id, secret = self.credentials_value()
         channel = None
 
@@ -182,6 +191,8 @@ class FeishuBotClient:
             nonlocal channel
             # 允许普通群消息进入本地上下文缓存；是否回复由上面的真实 @ 检查决定。
             options = {"app_id": app_id, "app_secret": secret}
+            if LogLevel is not None:
+                options["log_level"] = LogLevel.WARNING
             if PolicyConfig is not None:
                 options["policy"] = PolicyConfig(
                     require_mention=False, respond_to_mention_all=False)
@@ -191,10 +202,12 @@ class FeishuBotClient:
             try:
                 await channel.start_background(timeout=30)
                 self.store.set_bot_status("feishu", app_id, "listening")
+                logger.info("飞书 Bot 长连接已就绪")
                 await asyncio.to_thread(stop_event.wait)
             finally:
                 await channel.stop_background()
                 if stop_event.is_set():
                     self.store.set_bot_status("feishu", app_id, "configured")
+                    logger.info("飞书 Bot 长连接已停止")
 
         asyncio.run(serve())

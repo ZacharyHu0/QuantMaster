@@ -15,7 +15,7 @@ Windows 提示：建议用 PowerShell + 官方 python.org 安装包，或直接�
 ## 1. 第一次跑通（10 分钟）
 
 ```bash
-# 预取内置示例股票池（12 只大盘股）的行情到本地缓存
+# 预取内置示例候选（12 只大盘股）的行情到本地缓存
 qm fetch --universe demo --start 2022-01-01
 
 # 看看内置因子
@@ -33,7 +33,12 @@ qm backtest --factor mom_20d --top 5 --rebalance W
 qm serve     # -> http://127.0.0.1:8686
 ```
 
-## 2. 构建自己的股票池
+## 2. 构建自己的候选
+
+Web 界面顶部的“候选”是统一管理入口。左侧选择候选后，右侧可核对证券名称、代码、
+来源、研究质量和当前使用位置。自定义候选的添加、移除和批量粘贴先进入草稿，只有点击
+“保存更改”才会影响后续任务；`demo` 与按日期读取历史成分的 `csi800` 只读，可复制后再编辑。
+重命名会同步更新自动化和 Quant Lab 的当前引用，删除正在使用的候选时必须先选择替代项。
 
 ```python
 from quantmaster.data.universe import save_universe, index_universe
@@ -46,7 +51,7 @@ save_universe("hs300", index_universe("000300.SH"))
 ```
 
 之后所有命令用 `--universe my_pool` 即可。
-注意：股票池越大，首次拉数据越慢（免费接口有频率限制），建议先小池子迭代。
+注意：候选越大，首次拉数据越慢（免费接口有频率限制），建议先从少量标的开始迭代。
 
 ## 3. 研究自己的因子
 
@@ -120,7 +125,7 @@ qm lab jobs
 `qm serve` 会承载本地 Worker；需要把重型训练隔离到单独进程时，运行
 `qm lab worker`。自动研究只在 `lab.window_start` / `window_end` 内消费定时任务，
 并受 `daily_budget_hours` 限制。生产研究应配置 Tushare token，使用从 2015 年开始的
-point-in-time 中证800成分；`demo`/固定股票池会被标记为 sandbox，不能绕过数据硬门槛。
+point-in-time 中证800成分；`demo`/固定候选会被标记为 sandbox，不能绕过数据硬门槛。
 
 AI 自动任务默认只发送表达式结构和本地验证指标。发送匿名样本必须同时开启
 `allow_cloud_sample`，并在当次请求再次确认。无论来源是人工、遗传规划、LLM 还是

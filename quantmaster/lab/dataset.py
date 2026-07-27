@@ -1,4 +1,4 @@
-"""Point-in-time 股票池、数据就绪检查与可复现实验快照。"""
+"""Point-in-time 候选、数据就绪检查与可复现实验快照。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataF
     """把月度指数成分快照扩展为逐交易日可用掩码。
 
     每个指数独立沿用最近一个已公布快照，再取指数之间的并集。这样沪深300
-    和中证500在不同日期更新时，不会暂时丢失另一半股票池。
+    和中证500在不同日期更新时，不会暂时丢失另一半候选。
     """
     dates = pd.DatetimeIndex(pd.to_datetime(list(calendar))).normalize().unique().sort_values()
     if records is None or records.empty or dates.empty:
@@ -68,6 +68,38 @@ def load_csi800_membership(
     if calendar is None:
         calendar = pd.bdate_range(start, end)
     return build_membership_mask(frame, calendar)
+
+
+def load_csi800_members_as_of(as_of: str, *, source=None) -> dict[str, Any]:
+    """读取目标日可知的中证800成分，分别沿用两个指数最近一期快照。"""
+    target = pd.Timestamp(as_of).normalize()
+    if pd.isna(target):
+        raise ValueError("查看日期需要使用 YYYY-MM-DD 格式")
+    if source is None:
+        from quantmaster.data.tushare_source import TushareSource
+
+        source = TushareSource()
+    start = (target - pd.DateOffset(months=4)).replace(day=1)
+    members: set[str] = set()
+    snapshot_dates: dict[str, str] = {}
+    for index_code in CSI800_INDEXES:
+        frame = source.index_weights(
+            index_code, start.strftime("%Y-%m-%d"), target.strftime("%Y-%m-%d"))
+        eligible = frame.loc[pd.to_datetime(frame.get("trade_date"), errors="coerce") <= target]
+        if eligible.empty:
+            raise RuntimeError(
+                f"{index_code} 在 {target.date()} 前没有可用成分；请检查 Tushare token 与 index_weight 权限")
+        latest = pd.to_datetime(eligible["trade_date"]).max().normalize()
+        current = eligible.loc[pd.to_datetime(eligible["trade_date"]).dt.normalize() == latest]
+        members.update(current["symbol"].dropna().astype(str))
+        snapshot_dates[index_code] = latest.strftime("%Y-%m-%d")
+    if not members:
+        raise RuntimeError("中证800动态候选没有可用成分")
+    return {
+        "as_of": target.strftime("%Y-%m-%d"),
+        "symbols": sorted(members),
+        "snapshot_dates": snapshot_dates,
+    }
 
 
 def _bar_manifest(symbols: Iterable[str]) -> dict[str, Any]:

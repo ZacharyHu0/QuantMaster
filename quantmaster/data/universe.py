@@ -1,4 +1,4 @@
-"""股票池管理：指数成分、自定义列表。"""
+"""候选管理：指数成分、自定义列表。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from quantmaster.config import get_config
 
-# 内置示例股票池：沪深各行业代表性大盘股（便于开箱即用地跑通流程）
+# 内置示例候选：沪深各行业代表性大盘股（便于开箱即用地跑通流程）
 DEMO_STOCK_NAMES = {
     "600519.SH": "贵州茅台",
     "601318.SH": "中国平安",
@@ -35,15 +35,20 @@ def _universe_dir() -> Path:
 
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_\-\u4e00-\u9fff]{1,40}")
+SYSTEM_UNIVERSES = {"demo", "csi800"}
 
 
 def validate_universe_name(name: str, *, allow_demo: bool = False) -> str:
-    """股票池名直接映射文件名，必须先严格过滤以阻止路径穿越。"""
+    """候选名直接映射文件名，必须先严格过滤以阻止路径穿越。"""
     value = str(name).strip()
     if not _NAME_RE.fullmatch(value) or value in {".", ".."}:
-        raise ValueError("股票池名称仅支持 1–40 位中英文、数字、下划线和连字符")
-    if value.lower() == "demo" and not allow_demo:
-        raise ValueError("内置 demo 股票池只读")
+        raise ValueError("候选名称仅支持 1–40 位中英文、数字、下划线和连字符")
+    normalized = value.lower()
+    if normalized == "demo" and allow_demo:
+        return "demo"
+    if normalized in SYSTEM_UNIVERSES:
+        label = "内置 demo 候选" if normalized == "demo" else "动态 csi800 候选"
+        raise ValueError(f"{label}只读，请复制后再编辑")
     return value
 
 
@@ -78,9 +83,9 @@ def normalize_symbols(symbols: list[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     if not result:
-        raise ValueError("股票池至少需要一个有效代码")
+        raise ValueError("候选至少需要一个有效代码")
     if len(result) > 10_000:
-        raise ValueError("单个股票池最多 10000 只标的")
+        raise ValueError("单个候选最多 10000 只标的")
     return result
 
 
@@ -104,15 +109,15 @@ def save_universe(name: str, symbols: list[str]) -> None:
 
 
 def load_universe(name: str) -> list[str]:
-    if name == "demo":
+    if str(name).lower() == "demo":
         return list(DEMO_UNIVERSE)
     safe_name = validate_universe_name(name)
     path = _universe_dir() / f"{safe_name}.json"
     if not path.exists():
-        raise FileNotFoundError(f"股票池不存在: {name}（可用 save_universe 创建，或使用 'demo'）")
+        raise FileNotFoundError(f"候选不存在: {name}（可用 save_universe 创建，或使用 'demo'）")
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, list):
-        raise ValueError(f"股票池文件格式错误: {safe_name}")
+        raise ValueError(f"候选文件格式错误: {safe_name}")
     return normalize_symbols([str(item) for item in value])
 
 
@@ -132,7 +137,7 @@ def delete_universe(name: str) -> None:
     safe_name = validate_universe_name(name)
     path = _universe_dir() / f"{safe_name}.json"
     if not path.is_file():
-        raise FileNotFoundError(f"股票池不存在: {safe_name}")
+        raise FileNotFoundError(f"候选不存在: {safe_name}")
     path.unlink()
 
 
@@ -141,14 +146,14 @@ def rename_universe(name: str, new_name: str) -> None:
     new = validate_universe_name(new_name)
     source, target = _universe_dir() / f"{old}.json", _universe_dir() / f"{new}.json"
     if not source.is_file():
-        raise FileNotFoundError(f"股票池不存在: {old}")
+        raise FileNotFoundError(f"候选不存在: {old}")
     if target.exists():
-        raise FileExistsError(f"股票池已存在: {new}")
+        raise FileExistsError(f"候选已存在: {new}")
     os.replace(source, target)
 
 
 def index_universe(index_symbol: str = "000300.SH") -> list[str]:  # pragma: no cover - 网络
-    """从指数成分构建股票池（如沪深300）。"""
+    """从指数成分构建候选（如沪深300）。"""
     from quantmaster.data.akshare_source import AkshareSource
 
     return AkshareSource().index_members(index_symbol)

@@ -52,7 +52,7 @@ def live_server(tmp_path_factory):
     process.wait(timeout=10)
 
 
-def test_settings_universe_and_csv_flow(live_server, tmp_path):
+def test_settings_candidate_and_csv_flow(live_server, tmp_path):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
@@ -70,6 +70,9 @@ def test_settings_universe_and_csv_flow(live_server, tmp_path):
         assert settings.bounding_box()["x"] > page.locator("#nav").bounding_box()["x"]
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
+        assert page.locator("#nav button:not([hidden])").all_inner_texts() == [
+            "市场", "资讯", "候选", "决策", "Quant Lab", "回测", "模拟盘", "实盘", "自动化",
+        ]
         settings.click()
         page.locator("#settings-config-path").wait_for(state="visible")
 
@@ -92,13 +95,20 @@ def test_settings_universe_and_csv_flow(live_server, tmp_path):
         page.locator('#snapshot-form button').click()
         page.get_by_text("UI baseline", exact=True).wait_for()
 
-        page.locator('[data-settings-section="universe"]').click()
-        page.locator('#universe-new').click()
-        page.locator('#universe-form [name="name"]').fill("ui_pool")
-        page.locator('#universe-form [name="symbols"]').fill("600519\n000001\n600519.SH")
-        page.locator('#universe-form button[type="submit"]').click()
-        page.locator('[data-universe="ui_pool"]').wait_for()
-        assert "2 只" in page.locator('[data-universe="ui_pool"]').inner_text()
+        page.get_by_role("button", name="候选", exact=True).click()
+        page.locator(".candidate-detail").wait_for()
+        page.locator("#candidate-new").click()
+        page.locator("#candidate-new-name").fill("ui_candidate")
+        page.get_by_role("button", name="批量编辑", exact=True).click()
+        page.locator("#candidate-bulk-text").fill("600519\n000001\n600519.SH")
+        page.get_by_role("button", name="应用到草稿", exact=True).click()
+        page.get_by_text("有尚未生效的更改", exact=True).wait_for()
+        assert page.locator(".candidate-member-symbol").all_inner_texts() == [
+            "600519.SH", "000001.SZ",
+        ]
+        page.get_by_role("button", name="创建候选", exact=True).click()
+        page.get_by_role("heading", name="ui_candidate", exact=True).wait_for()
+        assert page.locator('[data-candidate-name="ui_candidate"]').is_visible()
 
         csv = tmp_path / "broker.csv"
         csv.write_text(
@@ -122,6 +132,9 @@ def test_settings_universe_and_csv_flow(live_server, tmp_path):
         assert page.locator('#csv-download-errors').is_visible()
 
         page.set_viewport_size({"width": 390, "height": 844})
+        page.get_by_role("button", name="候选", exact=True).click()
+        assert page.locator("#candidate-mobile-select").is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="设置", exact=True).click()
         page.locator('[data-settings-section="data"]').click()
         assert page.locator('[data-settings-panel="data"]').is_visible()

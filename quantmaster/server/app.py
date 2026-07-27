@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import queue
-import re
 import threading
 import uuid
 from collections.abc import Callable, Iterator
@@ -27,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from quantmaster import __version__
 from quantmaster.config import get_config
+from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASES
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(_: FastAPI):
     from quantmaster.automation.runtime import get_runtime
     from quantmaster.lab.worker import get_worker
+    from quantmaster.logging_config import current_log_path
     from quantmaster.server.management import capture_runtime_baseline
 
     capture_runtime_baseline()
@@ -44,11 +45,29 @@ async def lifespan(_: FastAPI):
     worker = get_worker()
     if get_config().lab.enabled:
         worker.start()
+    cfg = get_config()
+    runtime_status = runtime.status()
+    worker_status = worker.status()
+    channels = ",".join(
+        name for name, active in runtime_status.get("channels", {}).items() if active
+    ) or "disabled"
+    log_path = current_log_path()
+    logger.info(
+        "QuantMaster %s 已就绪 · http://%s:%s",
+        __version__, cfg.server.host, cfg.server.port,
+    )
+    logger.info(
+        "自动化 %s · Bot %s · Lab %s · 完整日志 %s",
+        runtime_status.get("status", "unknown"), channels,
+        worker_status.get("status", "unknown"),
+        str(log_path) if log_path else "仅终端",
+    )
     try:
         yield
     finally:
         worker.stop()
         runtime.stop()
+        logger.info("QuantMaster 已停止")
 
 
 app = FastAPI(title="QuantMaster", version=__version__, lifespan=lifespan)
@@ -65,13 +84,7 @@ def _request_id(request: Request) -> str:
 
 def _safe_client_error(exc: Exception) -> str:
     """保留可操作信息，同时避免第三方异常把凭据回显到浏览器。"""
-    message = str(exc).strip() or "数据任务未完成"
-    message = re.sub(
-        r"(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+",
-        r"\1***", message,
-    )
-    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1***", message)
-    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***", message)
+    message = redact_sensitive_text(str(exc).strip() or "数据任务未完成")
     return message[:297] + "…" if len(message) > 300 else message
 
 
@@ -466,13 +479,13 @@ def _decision_dashboard_data(
     end = req.end or str(pd.Timestamp.now().date())
     symbols = load_universe(req.universe)
     if progress:
-        progress(3, "准备股票池", f"共 {len(symbols)} 只标的")
+        progress(3, "准备候选", f"共 {len(symbols)} 只标的")
 
     def on_symbol(completed: int, total: int, symbol: str, success: bool) -> None:
         if progress:
             progress(
                 5 + round(58 * completed / max(1, total)),
-                "同步股票池行情",
+                "同步候选行情",
                 f"{completed}/{total} · {symbol} · {'已就绪' if success else '已跳过'}",
                 {
                     "kind": "decision_symbol", "symbol": symbol,
@@ -1029,4 +1042,4 @@ def serve() -> None:  # pragma: no cover - 入口
     from quantmaster.server.lifecycle import run_uvicorn_foreground
 
     cfg = get_config().server
-    run_uvicorn_foreground(app, host=cfg.host, port=cfg.port, log_level="info")
+    run_uvicorn_foreground(app, host=cfg.host, port=cfg.port, log_level="warning")

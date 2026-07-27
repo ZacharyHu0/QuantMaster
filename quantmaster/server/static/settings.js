@@ -6,7 +6,6 @@
     csrf: '',
     config: null,
     secretActions: { llm: 'keep', tushare: 'keep' },
-    currentUniverse: null,
     migrationTimer: null,
     modelCheckSignature: '',
     modelCheckTimer: null,
@@ -74,9 +73,8 @@
     document.querySelectorAll('[data-settings-panel]').forEach(panel => {
       panel.classList.toggle('active', panel.dataset.settingsPanel === name);
     });
-    form.hidden = ['sources', 'backup', 'universe'].includes(name);
+    form.hidden = ['sources', 'backup'].includes(name);
     if (name === 'backup') loadSnapshots();
-    if (name === 'universe') loadUniverses();
     if (['automation', 'lab'].includes(name)) loadAutomationOverview();
   }
 
@@ -98,7 +96,10 @@
         input.checked = (value || []).map(String).includes(String(input.value));
       } else if (input.type === 'checkbox') input.checked = Boolean(value);
       else if (input.dataset.valueType === 'list') input.value = (value || []).join('\n');
-      else input.value = value;
+      else {
+        if (input.matches('[data-candidate-select]')) input.dataset.candidateValue = value;
+        input.value = value;
+      }
       input.removeAttribute('aria-invalid');
     });
     document.getElementById('settings-config-path').textContent = config.config_path;
@@ -459,12 +460,6 @@
       if (feishu && document.activeElement !== appId) appId.value = feishu.account_id || '';
       document.getElementById('automation-enable-connect').hidden = !(feishu && !data.enabled);
       document.getElementById('feishu-remove').disabled = !feishu;
-      const universes = await request('/api/settings/universes');
-      const universeOptions = universes.universes
-        .map(item => `<option value="${html(item.name)}"></option>`).join('');
-      document.getElementById('automation-universe-list').innerHTML = universeOptions;
-      document.getElementById('lab-universe-list').innerHTML =
-        '<option value="csi800"></option>' + universeOptions;
       const runtime = await request('/api/settings/runtime');
       renderRuntime(runtime);
     } catch (error) {
@@ -728,109 +723,6 @@
   document.getElementById('migration-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.taskId;
     if (id) await request(`/api/settings/migration/${id}/cancel`, {method: 'POST'});
-  });
-
-  function parseSymbols(value) {
-    return value.split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
-  }
-
-  async function loadUniverses() {
-    const list = document.getElementById('universe-list');
-    try {
-      const data = await request('/api/settings/universes');
-      const options = data.universes
-        .map(item => `<option value="${html(item.name)}"></option>`).join('');
-      document.getElementById('automation-universe-list').innerHTML = options;
-      document.getElementById('lab-universe-list').innerHTML =
-        '<option value="csi800"></option>' + options;
-      list.innerHTML = data.universes.map(item => `<button class="universe-item" type="button" data-universe="${html(item.name)}">
-        <strong>${html(item.name)}${item.readonly ? ' · 内置' : ''}</strong><span>${item.count} 只</span></button>`).join('');
-      if (!state.currentUniverse && data.universes.length) selectUniverse(data.universes[0].name);
-    } catch (error) { list.innerHTML = `<div class="err">${html(error.message)}</div>`; }
-  }
-
-  async function selectUniverse(name) {
-    const editor = document.getElementById('universe-form');
-    try {
-      const data = await request(`/api/settings/universes/${encodeURIComponent(name)}`);
-      state.currentUniverse = data.name;
-      editor.elements.name.value = data.name;
-      editor.elements.symbols.value = data.symbols.join('\n');
-      editor.elements.name.disabled = data.readonly;
-      editor.elements.symbols.disabled = data.readonly;
-      editor.querySelector('button[type="submit"]').disabled = data.readonly;
-      editor.querySelector('[data-universe-rename]').disabled = data.readonly;
-      editor.querySelector('[data-universe-delete]').disabled = data.readonly;
-      document.getElementById('universe-editor-status').textContent = `${data.symbols.length} 只标的${data.readonly ? ' · 只读' : ''}`;
-      document.querySelectorAll('[data-universe]').forEach(button => button.classList.toggle('active', button.dataset.universe === name));
-    } catch (error) { document.getElementById('universe-editor-status').textContent = error.message; }
-  }
-
-  document.getElementById('universe-list').addEventListener('click', event => {
-    const button = event.target.closest('[data-universe]');
-    if (button) selectUniverse(button.dataset.universe);
-  });
-
-  document.getElementById('universe-new').addEventListener('click', () => {
-    const editor = document.getElementById('universe-form');
-    state.currentUniverse = null;
-    editor.reset();
-    editor.elements.name.disabled = false;
-    editor.elements.symbols.disabled = false;
-    editor.querySelectorAll('button').forEach(button => button.disabled = false);
-    editor.querySelector('[data-universe-rename]').disabled = true;
-    editor.querySelector('[data-universe-delete]').disabled = true;
-    document.getElementById('universe-editor-status').textContent = '填写名称与代码后保存。';
-  });
-
-  document.getElementById('universe-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const editor = event.target;
-    const body = {name: editor.elements.name.value, symbols: parseSymbols(editor.elements.symbols.value)};
-    try {
-      if (state.currentUniverse) {
-        await request(`/api/settings/universes/${encodeURIComponent(state.currentUniverse)}`, {method: 'PUT', body});
-      } else {
-        await request('/api/settings/universes', {method: 'POST', body});
-        state.currentUniverse = body.name;
-      }
-      await loadUniverses();
-      await selectUniverse(state.currentUniverse);
-    } catch (error) { document.getElementById('universe-editor-status').textContent = error.message; }
-  });
-
-  document.querySelector('[data-universe-index]').addEventListener('click', async () => {
-    const editor = document.getElementById('universe-form');
-    const status = document.getElementById('universe-editor-status');
-    status.textContent = '正在读取指数成分…';
-    try {
-      const data = await request('/api/settings/universes/preview', {method: 'POST', body: {
-        kind: 'index', index_symbol: editor.elements.index_symbol.value,
-      }});
-      editor.elements.symbols.value = data.symbols.join('\n');
-      status.textContent = `预览得到 ${data.count} 只标的；保存前仍可编辑。`;
-    } catch (error) { status.textContent = error.message; }
-  });
-
-  document.querySelector('[data-universe-rename]').addEventListener('click', async () => {
-    if (!state.currentUniverse) return;
-    const next = window.prompt('新的股票池名称', state.currentUniverse);
-    if (!next || next === state.currentUniverse) return;
-    try {
-      await request(`/api/settings/universes/${encodeURIComponent(state.currentUniverse)}/rename`, {method: 'POST', body: {new_name: next}});
-      state.currentUniverse = next;
-      await loadUniverses();
-      await selectUniverse(next);
-    } catch (error) { document.getElementById('universe-editor-status').textContent = error.message; }
-  });
-
-  document.querySelector('[data-universe-delete]').addEventListener('click', async () => {
-    if (!state.currentUniverse || !window.confirm(`删除股票池 ${state.currentUniverse}？`)) return;
-    try {
-      await request(`/api/settings/universes/${encodeURIComponent(state.currentUniverse)}`, {method: 'DELETE'});
-      state.currentUniverse = null;
-      await loadUniverses();
-    } catch (error) { document.getElementById('universe-editor-status').textContent = error.message; }
   });
 
   async function openSettings(section = 'llm') {

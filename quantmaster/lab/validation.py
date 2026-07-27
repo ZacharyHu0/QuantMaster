@@ -187,7 +187,7 @@ def validate_factor_values(
 
     hard_failures = []
     if research_quality != "production":
-        hard_failures.append("股票池不是 point-in-time 生产级快照")
+        hard_failures.append("候选不是 point-in-time 生产级快照")
     if coverage < 0.70:
         hard_failures.append(f"因子覆盖率 {coverage:.1%} 低于 70%")
     if best["oos_days"] < 252:
@@ -223,4 +223,3 @@ def validate_factor_values(
             "override_allowed": not hard_failures,
         },
     }
-

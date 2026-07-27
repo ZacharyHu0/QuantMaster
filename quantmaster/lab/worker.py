@@ -159,7 +159,7 @@ class LabWorker:
             from apscheduler.schedulers.background import BackgroundScheduler
             from apscheduler.triggers.cron import CronTrigger
         except ImportError:  # pragma: no cover - 核心依赖缺失
-            logger.exception("未安装 APScheduler，Quant Lab 自动研究未启动")
+            logger.error("未安装 APScheduler，Quant Lab 自动研究未启动")
             return
         cfg = get_config()
         hour, minute = map(int, cfg.lab.window_start.split(":"))

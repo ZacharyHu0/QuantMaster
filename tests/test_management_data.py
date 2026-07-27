@@ -1,4 +1,4 @@
-"""数据迁移与股票池管理测试。"""
+"""数据迁移与候选管理测试。"""
 
 from __future__ import annotations
 
@@ -43,6 +43,8 @@ def test_symbol_and_universe_validation(tmp_path):
         save_universe("../escape", ["600519"])
     with pytest.raises(ValueError, match="只读"):
         save_universe("demo", ["600519"])
+    with pytest.raises(ValueError, match="只读"):
+        save_universe("csi800", ["600519"])
 
 
 def test_copy_migration_keeps_source_and_switches_only_after_verify(tmp_path):

@@ -96,12 +96,13 @@ def install_windows_console_handler(
     return unregister
 
 
-def run_uvicorn_foreground(app: Any, host: str, port: int, log_level: str = "info") -> None:
+def run_uvicorn_foreground(app: Any, host: str, port: int, log_level: str = "warning") -> None:
     """运行 Uvicorn，并把终端、启动器与服务生命周期绑定在一起。"""
     import uvicorn
 
     server = uvicorn.Server(uvicorn.Config(
         app, host=host, port=port, log_level=log_level,
+        log_config=None, access_log=False,
     ))
     parent_pid = os.getppid()
     stop_watcher = threading.Event()

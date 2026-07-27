@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 from quantmaster.config import Config, set_config
 from quantmaster.lab.catalog import curated_catalog
-from quantmaster.lab.dataset import build_membership_mask, create_snapshot
+from quantmaster.lab.dataset import (
+    build_membership_mask,
+    create_snapshot,
+    load_csi800_members_as_of,
+)
 from quantmaster.lab.ml import engineer_features, make_samples, train
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.store import LabStore
@@ -67,6 +71,22 @@ def test_point_in_time_membership_updates_indexes_independently():
     assert mask.loc["2024-01-03", ["AAA", "BBB"]].all()
     assert not mask.loc["2024-01-05", "AAA"]
     assert mask.loc["2024-01-05", ["BBB", "CCC"]].all()
+
+
+def test_csi800_as_of_uses_latest_known_snapshot_without_lookahead():
+    class Source:
+        def index_weights(self, index_code, start, end):
+            symbol = "600000.SH" if index_code == "000300.SH" else "000001.SZ"
+            return pd.DataFrame([
+                {"index_code": index_code, "symbol": symbol,
+                 "trade_date": "2024-01-31", "weight": 1},
+                {"index_code": index_code, "symbol": "999999.SH",
+                 "trade_date": "2024-03-01", "weight": 1},
+            ])
+
+    result = load_csi800_members_as_of("2024-02-15", source=Source())
+    assert result["symbols"] == ["000001.SZ", "600000.SH"]
+    assert set(result["snapshot_dates"].values()) == {"2024-01-31"}
 
 
 def test_tushare_index_weights_are_loaded_month_by_month(tmp_path, monkeypatch):
