@@ -9,6 +9,7 @@ from quantmaster.automation.models import ActorContext
 from quantmaster.automation.service import AutomationService
 
 PRESET_NAMES = {"保守": "conservative", "均衡": "balanced", "敏感": "sensitive"}
+PRESET_LABELS = {value: label for label, value in PRESET_NAMES.items()}
 TASK_NAMES = {
     "盘中监控": "intraday_monitor", "变盘监控": "intraday_monitor",
     "快讯": "fast_news_scan", "官方公告": "official_news_scan", "定期资讯": "periodic_news_scan",
@@ -16,9 +17,16 @@ TASK_NAMES = {
     "模拟调仓": "paper_rebalance_proposal",
 }
 VIEW_NAMES = {
-    "市场": "market", "选股": "selection", "资讯": "news", "新闻": "news",
+    "市场": "market", "大盘": "market", "行情": "market",
+    "选股": "selection", "候选股": "selection", "股票候选": "selection",
+    "资讯": "news", "新闻": "news", "重要消息": "news",
     "持仓": "ledger", "账本": "ledger", "任务": "jobs", "告警": "alerts",
 }
+HELP_PATTERN = re.compile(
+    r"^(?:/help|help|帮助|使用说明|操作说明|指令|命令|菜单|怎么用|如何使用|"
+    r"你(?:会|能)(?:做)?什么|有什么功能)[？?。！!\s]*$",
+    re.IGNORECASE,
+)
 
 
 class BotCommandRouter:
@@ -33,6 +41,47 @@ class BotCommandRouter:
             raise PermissionError("当前会话尚未绑定，请先在自动化页面生成绑定码")
         return target
 
+    def _help(self, actor: ActorContext) -> str:
+        target = self.service.store.target_by_route(
+            actor.channel, actor.account_id, actor.target,
+        )
+        if not target:
+            return (
+                "QuantMaster 使用说明\n\n"
+                "当前会话还没有绑定，因此暂时不会执行查询或设置。请打开 QuantMaster 的"
+                "「自动化 → Bot 推送」，生成对应绑定码，再把页面给出的完整绑定指令发到这里。\n\n"
+                "绑定成功后，发送「帮助」即可查看全部自然语言示例。"
+            )
+
+        lines = [
+            "QuantMaster 使用说明",
+            "",
+            "你可以直接用自然语言表达，但目前是受控指令助手，不是任意投资问答。",
+            "",
+            "查询",
+            "• 现在大盘怎么样",
+            "• 查看今天的选股 / 持仓 / 重要消息 / 告警 / 任务",
+            "",
+            "推送与任务（仅主人）",
+            "• 提醒少一点 / 把推送强度调成均衡 / 提醒敏感一点",
+            "• 立即运行收盘 / 暂停盘中监控 / 恢复快讯",
+        ]
+        if actor.chat_type == "direct":
+            lines.extend([
+                "",
+                "账本（仅主人私聊，写入前会再次确认）",
+                "• 买入 600519 100股 价格1500 费用5",
+                "• 入金 100000",
+            ])
+        if actor.channel == "feishu" and actor.chat_type == "group":
+            lines.extend([
+                "",
+                "群聊提示：每条指令都要真正 @QuantMaster；普通成员可以查询，"
+                "推送设置和任务控制只有主人可以执行。",
+            ])
+        lines.extend(["", "随时发送「帮助」可再次查看本说明。"])
+        return "\n".join(lines)
+
     @staticmethod
     def _brief(value: object) -> str:
         text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
@@ -42,14 +91,20 @@ class BotCommandRouter:
         try:
             answer = self.execute(actor, text.strip())
         except Exception as exc:
-            answer = f"未执行：{exc}"
+            answer = f"未执行：{exc}\n发送「帮助」查看可用说法。"
         self.reply(actor, answer)
 
     def execute(self, actor: ActorContext, text: str) -> str:
+        if HELP_PATTERN.fullmatch(text):
+            return self._help(actor)
+
         binding = re.fullmatch(r"绑定(?:\s+QuantMaster)?\s+([A-Fa-f0-9]{8})", text)
         if binding:
             target = self.service.bind(actor, binding.group(1))
-            return f"已绑定为「{target['label']}」，默认推送强度：均衡。"
+            return (
+                f"已绑定为「{target['label']}」，默认推送强度：均衡。\n"
+                "现在可以直接问「大盘怎么样」；发送「帮助」查看完整使用说明。"
+            )
 
         self._bound(actor)
         confirm = re.fullmatch(r"确认(?:\s+([a-f0-9]{16,32}))?\s+(\d{6})", text)
@@ -65,13 +120,26 @@ class BotCommandRouter:
             return f"确认完成：{result['type']}，{'已写入' if result['created'] else '此前已写入'}。"
 
         policy = re.search(r"(?:调成|设置为|推送强度为?)\s*(保守|均衡|敏感)", text)
+        natural_policy = None
+        if not policy:
+            if re.search(r"(?:提醒|推送).*(?:少一点|少些|低频|安静一点)", text):
+                natural_policy = "保守"
+            elif re.search(r"(?:提醒|推送).*(?:正常|适中|均衡)", text):
+                natural_policy = "均衡"
+            elif re.search(r"(?:提醒|推送).*(?:多一点|积极一点|敏感一点)", text):
+                natural_policy = "敏感"
         if policy:
+            natural_policy = policy.group(1)
+        if natural_policy:
             self.service.require_owner(actor)
             target = self._bound(actor)
             before = target["preset"]
-            after = PRESET_NAMES[policy.group(1)]
+            after = PRESET_NAMES[natural_policy]
             self.service.update_policy(target["id"], after, target["overrides"], None, actor.actor_key)
-            return f"当前会话推送强度已从 {before} 调整为 {after}。"
+            return (
+                f"当前会话推送强度已从 {PRESET_LABELS.get(before, before)}"
+                f"调整为 {PRESET_LABELS[after]}。"
+            )
 
         for label, task in TASK_NAMES.items():
             if label not in text:
@@ -122,9 +190,7 @@ class BotCommandRouter:
                 return self._brief(self.service.query(view))
 
         return (
-            "可用命令示例：\n"
-            "• 把当前推送强度调成敏感\n• 查看任务 / 持仓 / 新闻 / 告警\n"
-            "• 运行收盘 / 暂停盘中监控 / 恢复快讯\n"
-            "• 买入 600519 100股 价格1500 费用5\n• 入金 100000\n"
-            "所有写入都只允许主人私聊并需要二次确认。"
+            "我没理解这条消息，也没有执行任何操作。\n"
+            "可以试试「大盘怎么样」「查看任务」或「提醒少一点」。\n"
+            "发送「帮助」查看完整使用说明。"
         )

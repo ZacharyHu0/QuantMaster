@@ -166,8 +166,65 @@ def test_chat_can_change_current_target_policy(tmp_path):
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     router = BotCommandRouter(service, lambda *_: None)
     answer = router.execute(actor, "把当前推送强度调成敏感")
-    assert "sensitive" in answer
+    assert "敏感" in answer
     assert store.target("feishu_owner")["preset"] == "sensitive"
+
+    answer = router.execute(actor, "提醒少一点")
+    assert "保守" in answer
+    assert store.target("feishu_owner")["preset"] == "conservative"
+
+
+def test_bot_has_contextual_help_and_actionable_fallback(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    actor = ActorContext(
+        channel="feishu", account_id="cli_app", target="oc_owner",
+        chat_type="direct", sender_id="ou_owner",
+    )
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    router = BotCommandRouter(service, lambda *_: None)
+
+    unbound_help = router.execute(actor, "怎么用？")
+    assert "当前会话还没有绑定" in unbound_help
+    assert "自动化 → Bot 推送" in unbound_help
+
+    store.bind_target(
+        "feishu_owner", target=actor.target, account_id=actor.account_id,
+        owner_actor=actor.actor_key, actor="test",
+    )
+    help_text = router.execute(actor, "帮助")
+    assert "受控指令助手" in help_text
+    assert "现在大盘怎么样" in help_text
+    assert "仅主人私聊" in help_text
+
+    service.query = lambda view: {"resolved_view": view}
+    natural_query = router.execute(actor, "现在大盘怎么样？")
+    assert '"resolved_view": "market"' in natural_query
+
+    fallback = router.execute(actor, "帮我预测十年后的股价")
+    assert "没有执行任何操作" in fallback
+    assert "发送「帮助」" in fallback
+
+
+def test_group_help_explains_mention_and_permissions(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    owner_actor = "feishu:cli_app:ou_owner"
+    store.bind_target(
+        "feishu_owner", target="oc_owner", account_id="cli_app",
+        owner_actor=owner_actor, actor="test",
+    )
+    store.bind_target(
+        "feishu_group", target="oc_group", account_id="cli_app",
+        owner_actor=owner_actor, actor="test",
+    )
+    actor = ActorContext(
+        channel="feishu", account_id="cli_app", target="oc_group",
+        chat_type="group", sender_id="ou_member",
+    )
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    help_text = BotCommandRouter(service, lambda *_: None).execute(actor, "使用说明")
+    assert "真正 @QuantMaster" in help_text
+    assert "普通成员可以查询" in help_text
+    assert "账本（仅主人私聊" not in help_text
 
 
 def test_official_holding_news_has_high_priority():
