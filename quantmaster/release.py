@@ -4,13 +4,29 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.7"
+VERSION = "0.8.8"
 RELEASE_DATE = "2026-07-27"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "决策行情缩放适配",
+                "items": (
+                    (
+                        "今日入选的内联行情图改为按表格实际可见宽度布局，"
+                        "页面缩放时不再把图形或最右侧列推到可见范围之外。"
+                    ),
+                    "展开行情仅调整页面纵向位置，不再改变决策表格的横向滚动位置。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.7",
+        "date": "2026-07-27",
         "sections": (
             {
                 "title": "缺失行情收益口径与 pandas 兼容性",

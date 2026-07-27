@@ -370,11 +370,52 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         first_trigger.focus()
         page.keyboard.press("Enter")
         page.locator("#decision-kline canvas").wait_for()
-        page.set_viewport_size({"width": 390, "height": 844})
-        shell_width = page.locator(".decision-detail-shell").bounding_box()["width"]
-        scroll_width = page.locator(".decision-table").locator("xpath=..").bounding_box()["width"]
-        assert shell_width <= scroll_width + 1, (shell_width, scroll_width)
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        zoom_equivalent_widths = (1600, 1422, 1280, 1164, 1024, 853, 731, 640, 390)
+        for viewport_width in zoom_equivalent_widths:
+            if page.locator(".decision-detail-row").count():
+                first_trigger.evaluate("button => button.click()")
+            page.set_viewport_size({"width": viewport_width, "height": 844})
+            scroller = page.locator(".decision-table-scroll")
+            collapsed_scroll_width = scroller.evaluate("element => element.scrollWidth")
+            expected_scroll_left = scroller.evaluate(
+                """element => {
+                  element.scrollLeft = Math.min(80, element.scrollWidth - element.clientWidth);
+                  return element.scrollLeft;
+                }"""
+            )
+            first_trigger.evaluate("button => button.click()")
+            page.locator("#decision-kline canvas").wait_for()
+            page.evaluate(
+                "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+            )
+            metrics = page.evaluate(
+                """() => {
+                  const scroller = document.querySelector('.decision-table-scroll');
+                  const shell = document.querySelector('.decision-detail-shell');
+                  const chart = document.querySelector('.decision-kline-canvas');
+                  const scrollRect = scroller.getBoundingClientRect();
+                  const shellRect = shell.getBoundingClientRect();
+                  const chartRect = chart.getBoundingClientRect();
+                  return {
+                    clientWidth: scroller.clientWidth,
+                    scrollWidth: scroller.scrollWidth,
+                    scrollLeft: scroller.scrollLeft,
+                    scrollRight: scrollRect.right,
+                    shellLeft: shellRect.left,
+                    shellRight: shellRect.right,
+                    shellWidth: shellRect.width,
+                    chartRight: chartRect.right,
+                    documentFits: document.documentElement.scrollWidth <= window.innerWidth,
+                  };
+                }"""
+            )
+            assert metrics["shellWidth"] <= metrics["clientWidth"] + 1, metrics
+            assert metrics["shellLeft"] >= scroller.bounding_box()["x"] - 1, metrics
+            assert metrics["shellRight"] <= metrics["scrollRight"] + 1, metrics
+            assert metrics["chartRight"] <= metrics["scrollRight"] + 1, metrics
+            assert metrics["scrollWidth"] <= collapsed_scroll_width + 1, metrics
+            assert abs(metrics["scrollLeft"] - expected_scroll_left) <= 1, metrics
+            assert metrics["documentFits"], metrics
 
         page.locator('[data-decision-frequency="1m"]').click()
         page.locator(".decision-kline-error").wait_for()

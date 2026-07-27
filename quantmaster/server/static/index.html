@@ -198,6 +198,7 @@
   .score-track { width:72px; height:3px; background:var(--grid); overflow:hidden; border-radius:2px; }
   .score-fill { height:100%; background:var(--s1); transform:scaleX(var(--score,0)); transform-origin:left; transition:transform 360ms var(--ease-out-expo); }
   .table-scroll { overflow:auto; }
+  .decision-table-scroll { overscroll-behavior-inline:contain; }
   .decision-table { min-width:980px; }
   .decision-table tbody tr { transition:background-color 160ms var(--ease-out-quart); }
   .decision-table tbody tr[data-symbol] { cursor:pointer; }
@@ -211,7 +212,7 @@
   .decision-inline-retry:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
   .decision-detail-row,.decision-detail-row:hover { background:var(--page); }
   .decision-detail-row > td { padding:0; border-bottom:1px solid var(--axis); }
-  .decision-detail-shell { position:sticky; left:0; width:calc(100vw - 64px); max-width:100%; min-width:0; overflow:hidden; padding:var(--space-lg); background:color-mix(in oklch,var(--surface) 82%,var(--page)); animation:decision-detail-in 260ms var(--ease-out-expo) both; }
+  .decision-detail-shell { position:sticky; left:0; width:var(--decision-detail-inline-size,100%); max-width:none; min-width:0; overflow:hidden; padding:var(--space-lg); background:color-mix(in oklch,var(--surface) 82%,var(--page)); animation:decision-detail-in 260ms var(--ease-out-expo) both; }
   .decision-detail-toolbar { display:grid; grid-template-columns:minmax(180px,1fr) auto; align-items:start; gap:var(--space-md) var(--space-lg); }
   .decision-detail-title { display:flex; align-items:baseline; gap:var(--space-sm); min-width:0; }
   .decision-detail-title strong { overflow:hidden; color:var(--ink); font-size:14px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
@@ -1352,6 +1353,7 @@ window.addEventListener('resize', () => {
   if (chartResizeFrame) cancelAnimationFrame(chartResizeFrame);
   chartResizeFrame = requestAnimationFrame(() => {
     chartResizeFrame = 0;
+    syncDecisionDetailWidth();
     Object.values(charts).forEach(chart => {
       chart.resize();
       if (chart.__quantmasterKlineData) renderKlineSeries(chart, chart.__quantmasterKlineData);
@@ -2665,6 +2667,25 @@ function updateDecisionAssetButtons() {
   }
 }
 
+function syncDecisionDetailWidth(shell = document.querySelector('#decision-out .decision-detail-shell')) {
+  const scroller = shell?.closest('.decision-table-scroll');
+  if (!shell || !scroller) return;
+  shell.style.setProperty('--decision-detail-inline-size', `${scroller.clientWidth}px`);
+}
+
+function scrollDecisionDetailVertically(shell) {
+  if (!shell) return;
+  const rect = shell.getBoundingClientRect();
+  const headerBottom = document.querySelector('header')?.getBoundingClientRect().bottom || 0;
+  const safeTop = Math.max(12, headerBottom + 12);
+  const safeBottom = window.innerHeight - 16;
+  if (rect.top >= safeTop && rect.top <= safeBottom) return;
+  window.scrollTo({
+    top:Math.max(0, window.scrollY + rect.top - safeTop),
+    behavior:REDUCED_MOTION ? 'auto' : 'smooth',
+  });
+}
+
 function mountDecisionKline({scroll = false} = {}) {
   disposeChart(DECISION_KLINE_CHART_ID);
   document.querySelectorAll('#decision-out .decision-detail-row').forEach(row => row.remove());
@@ -2680,6 +2701,8 @@ function mountDecisionKline({scroll = false} = {}) {
   if (!trigger) return;
   const row = trigger.closest('tr');
   row.insertAdjacentHTML('afterend', decisionKlineDetailMarkup());
+  const detailShell = row.nextElementSibling?.querySelector('.decision-detail-shell');
+  syncDecisionDetailWidth(detailShell);
   updateDecisionAssetButtons();
   if (decisionKlineState.data && !decisionKlineState.loading && !decisionKlineState.error) {
     const chart = mkChart(DECISION_KLINE_CHART_ID, false);
@@ -2688,9 +2711,7 @@ function mountDecisionKline({scroll = false} = {}) {
       queueMicrotask(() => chart.resize());
     }
   }
-  if (scroll) row.nextElementSibling?.scrollIntoView({
-    behavior:REDUCED_MOTION ? 'auto' : 'smooth', block:'nearest',
-  });
+  if (scroll) scrollDecisionDetailVertically(detailShell);
 }
 
 function closeDecisionKline() {
@@ -2869,7 +2890,7 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
     </div>
     <div class="panel reveal reveal-delay">
       <div class="panel-heading"><h3>今日入选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
-      <div class="table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead>
+      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead>
       <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击展开行情">
         <td>${p.rank}</td><td><button class="decision-symbol-trigger" type="button" data-decision-kline-trigger="${esc(p.symbol)}" aria-expanded="false" aria-controls="decision-kline-detail"><strong>${esc(p.name || '名称待同步')}</strong><span class="reason">${esc(p.symbol)} · ${esc(p.industry)} · ${fixed(p.last_close,2)}</span></button></td>
         <td>${fixed(p.score, 1)}<div class="score-track"><div class="score-fill" style="--score:${Math.max(0,Math.min(1,p.score/100))}"></div></div></td>
