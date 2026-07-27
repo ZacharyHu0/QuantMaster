@@ -1,0 +1,68 @@
+.automation-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:20px; }
+.automation-heading h2 { font-size:24px; line-height:1.2; letter-spacing:-.01em; }
+.automation-heading p { color:var(--muted); max-width:72ch; margin-top:5px; }
+.automation-status { display:flex; align-items:center; gap:8px; color:var(--ink-2); font-size:12px; white-space:nowrap; }
+.automation-status::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--muted); }
+.automation-status.running::before { background:var(--s3); }
+.automation-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(340px,.75fr); gap:16px; align-items:start; }
+.automation-grid .panel { min-width:0; }
+.automation-stack { display:grid; gap:12px; }
+.automation-stack .panel { margin:0; }
+.automation-panel-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.automation-panel-head h3 { color:var(--ink); margin:0; font-weight:600; }
+.automation-panel-head p { color:var(--muted); font-size:12px; margin-top:2px; }
+.bot-row { padding:13px 0; border-top:1px solid var(--border); }
+.bot-row:first-of-type { border-top:0; padding-top:0; }
+.bot-title { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.bot-title strong { font-size:13px; }
+.bot-meta { color:var(--muted); font-size:11px; margin:3px 0 10px; overflow-wrap:anywhere; }
+.bot-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.bot-actions input { flex:1 1 150px; min-width:0; }
+.status-label { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:11px; }
+.status-label::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--muted); }
+.status-label.healthy::before,.status-label.listening::before { background:var(--s3); }
+.status-label.degraded::before,.status-label.needs_rebind::before { background:var(--bad); }
+.status-label.waiting_message::before,.status-label.connecting::before,.status-label.configured::before { background:var(--s4); }
+.weixin-login { display:grid; grid-template-columns:136px 1fr; gap:14px; align-items:center; padding:12px; margin-top:10px; background:var(--page); border:1px solid var(--axis); border-radius:10px; }
+.weixin-login img { width:136px; height:136px; background:#fff; padding:5px; border-radius:6px; }
+.weixin-login p { color:var(--ink-2); font-size:12px; }
+.weixin-login .hint { margin-top:5px; }
+.job-list { display:grid; }
+.job-item { display:grid; grid-template-columns:minmax(150px,1fr) minmax(180px,.85fr) auto; gap:14px; align-items:center; padding:12px 0; border-top:1px solid var(--border); }
+.job-item:first-child { border-top:0; padding-top:0; }
+.job-item strong { display:block; font-size:13px; }
+.job-item small { color:var(--muted); display:block; }
+.job-actions { display:flex; gap:6px; }
+.job-actions button { padding:6px 9px; }
+.target-list { display:grid; gap:12px; }
+.target-card { border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--surface); }
+.target-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.target-head h4 { font-size:14px; }
+.target-head p { color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+.target-controls { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:13px; flex-wrap:wrap; }
+.target-controls .segmented button { min-width:54px; }
+.target-tools { display:flex; gap:7px; flex-wrap:wrap; }
+.target-tools button { padding:6px 10px; }
+.policy-details { display:grid; grid-template-columns:repeat(5,minmax(90px,1fr)); gap:10px; border-top:1px solid var(--border); padding-top:12px; margin-top:12px; }
+.policy-details[hidden] { display:none; }
+.policy-details label { color:var(--muted); font-size:11px; }
+.policy-details input { display:block; width:100%; min-width:0; margin-top:4px; }
+.policy-save { grid-column:1/-1; display:flex; justify-content:flex-end; }
+.binding-code { color:var(--ink-2); background:var(--page); border:1px solid var(--axis); border-radius:7px; padding:7px 9px; font-variant-numeric:tabular-nums; font-size:12px; margin-top:10px; }
+.automation-log { margin-top:16px; }
+.automation-table td { vertical-align:top; }
+.automation-table .muted { color:var(--muted); }
+.automation-empty { color:var(--muted); font-size:12px; padding:8px 0; }
+@media (max-width:900px) {
+  .automation-heading { flex-direction:column; }
+  .automation-grid { grid-template-columns:1fr; }
+  .job-item { grid-template-columns:1fr; gap:5px; }
+  .job-actions { justify-content:flex-start; }
+  .policy-details { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .weixin-login { grid-template-columns:112px 1fr; }
+  .weixin-login img { width:112px; height:112px; }
+}
+@media (max-width:520px) {
+  .weixin-login { grid-template-columns:1fr; }
+  .policy-details { grid-template-columns:1fr; }
+}

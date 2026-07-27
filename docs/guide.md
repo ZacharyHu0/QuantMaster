@@ -100,6 +100,32 @@ combined, weights = ic_weighted_combine(       # 滚动 IC 加权动态合成（
 
 ## 4. 挖掘因子
 
+### AI Quant Lab：推荐工作流
+
+Web 顶部的 **Quant Lab** 把发现、模型实验、因子版本、统一验证、人工审批和
+自动研究队列集中到一个工作台。内置目录固定为 48 个可解释起点；新表达式只能
+使用安全 DSL，AI 不能执行任意 Python。
+
+```bash
+# 基础安装可直接运行 Ridge；深度模型使用可选依赖
+pip install -e ".[data,ml]"
+
+qm lab doctor
+qm lab prepare-data --universe demo --start 2022-01-01
+qm lab discover --method genetic --universe demo --start 2022-01-01
+qm lab train --model transformer --universe demo --start 2022-01-01
+qm lab jobs
+```
+
+`qm serve` 会承载本地 Worker；需要把重型训练隔离到单独进程时，运行
+`qm lab worker`。自动研究只在 `lab.window_start` / `window_end` 内消费定时任务，
+并受 `daily_budget_hours` 限制。生产研究应配置 Tushare token，使用从 2015 年开始的
+point-in-time 中证800成分；`demo`/固定股票池会被标记为 sandbox，不能绕过数据硬门槛。
+
+AI 自动任务默认只发送表达式结构和本地验证指标。发送匿名样本必须同时开启
+`allow_cloud_sample`，并在当次请求再次确认。无论来源是人工、遗传规划、LLM 还是
+深度模型，版本都必须经过统一验证和人工批准后才能成为研究 Champion；该操作不连接券商。
+
 ```bash
 # 遗传规划（本地算力，无需 key）：种群60 × 8代，约几分钟
 qm mine --generations 8 --population 60 --start 2020-01-01 --end 2022-12-31
@@ -124,21 +150,58 @@ export OPENAI_API_KEY=sk-...                     # OpenAI
 qm mine-llm --rounds 2
 ```
 
-## 5. 舆情
+## 5. 资讯与消息面因子
 
 ```bash
-qm crawl                 # 抓新浪/东财快讯 + LLM 标注（股票/事件/情绪）
-qm crawl --skip-llm      # 没配 key：只抓取入库
+qm crawl                 # 抓取全部已启用来源 + LLM 标注（股票/事件/情绪）
+qm crawl --skip-llm      # 没配 key：先归档并进入待标注队列
 ```
 
 Python 中把情绪聚合成因子面板：
 
 ```python
-from quantmaster.ai.sentiment import sentiment_panel
-senti = sentiment_panel()        # date × symbol，可与量价因子合成
+from quantmaster.ai.sentiment import NewsSentimentFactor
+
+factor = NewsSentimentFactor()   # compute(panel) 只读本地资讯库，不会在回测时触网
 ```
 
-## 6. 模拟盘 → 实盘
+Web「资讯」页提供可筛选事件流、标注队列、重要度和 30 日消息面摘要；来源在
+「设置 → 资讯来源」管理。除内置适配器外，可添加三种声明式来源：RSS / Atom、
+JSON 点号路径、HTML CSS 选择器。来源只能访问公开 `http(s)` 地址，Token 必须使用
+Bearer 或自定义 Header 凭据字段，不能写进普通请求头。
+
+来源固定分入快讯、官方、定期三组，默认分别每 10、15、60 分钟采集；启停和频率
+在「自动化」页统一修改。原始响应默认保留 7 天，规范化正文与首次获取时点长期保留。
+`news_sentiment` 使用情绪 × 置信度 × 重要度 × 来源权重，精确重复内容只计一次；
+15:00 后首次获取的消息进入下一交易日，默认按 3 个自然日半衰期衰减。
+
+## 6. 飞书主通道 / 微信轻量提醒
+
+先在「设置 → 自动化运行」把运行状态改为开启并重启 `qm serve`。在「自动化」页面完成接入：
+
+- 飞书：在开放平台创建企业自建应用，启用机器人、开通收发消息权限，订阅
+  `im.message.receive_v1` 并选择长连接；将 App ID / App Secret 填入页面。最小权限建议为
+  `im:message:send_as_bot`、`im:message.p2p_msg:readonly`、
+  `im:message.group_at_msg:readonly`，配置后必须发布应用版本才会生效。
+- 飞书会话绑定：先绑定主人私聊，再由同一主人绑定群聊。绑定码 10 分钟失效且只能使用一次。
+- 腾讯微信 ClawBot（可选）：点击扫码授权；确认后主动给机器人发一句话，让系统取得当前
+  会话的 `context_token`。微信接口只承载文本提醒和简单命令；结构化卡片与完整交互以飞书为准。
+
+常用对话命令：
+
+```text
+把当前推送强度调成敏感
+查看任务
+运行收盘
+暂停盘中监控
+买入 600519 100股 价格1500 费用5
+确认 123456
+```
+
+成交、现金流和模拟调仓不会因一句自然语言直接落账：系统先返回规范化预览，只能由已绑定主人
+在同一私聊用一次性确认码提交。用 `qm automation doctor` 可检查依赖、任务、账号与目标状态。
+
+## 7. 模拟盘 → 实盘
 
 ```bash
 # 每个交易日收盘后跑一次（可挂 cron / 计划任务）
@@ -160,17 +223,43 @@ qm backtest --factor mom_20d --stop-loss 0.08 --take-profit 0.25 --full
 # --full 额外输出年度收益表和月度收益表
 ```
 
-Web 界面「实盘」页也可以逐笔录入。
+Web 界面「实盘」页既可以逐笔录入，也可以直接导入券商 CSV：选择文件后检查
+自动列映射与逐行预览，再选择严格模式或仅导入有效行。疑似重复默认跳过；最终
+有效记录在一个 SQLite 事务中写入，任一数据库错误都会整批回滚。
+
+## 设置中心
+
+顶部「设置」统一管理 LLM、Tushare、缓存、交易费率及本机服务。模型下拉来自
+提供商的模型列表接口，也可保留任意手填 ID；联网检测失败只显示警告，不阻止
+保存。host/port 修改需重启后生效。
+
+数据根目录不要直接编辑 YAML：使用「数据与缓存 → 数据目录迁移」复制并切换。
+系统会用 SQLite 备份 API 复制数据库、对其他文件校验大小与 SHA-256，全部通过
+后才更新配置，旧目录不会删除。设置快照不包含密钥或行情/账本数据，回滚时也会
+保留当前凭据。
 
 ## 7. 常见问题
 
 **Q: akshare 拉数报错/很慢？**
-免费接口有频控。`qm fetch` 会把数据缓存在 `data/bars/`，重跑不再触网；
-偶发失败重跑一次即可，或换 Tushare（配 token 后自动作为 A 股备用源）。
+免费接口有频控。系统会对每个 AKShare 请求做指数退避重试，连续失败后自动
+降级到 Tushare（配置 `TUSHARE_TOKEN` 后启用），最后才使用已有旧缓存。
+`qm fetch` 会把标准化行情写入 `data/bars/`；Tushare 原始响应另存于
+`data/api_cache/tushare/`，因此服务重启后重复区间仍不会再次调用接口。
+
+2000 积分档默认限制为 120 次/分钟，可通过
+`QM_TUSHARE_CALLS_PER_MINUTE` 调整。建议保持保守值；批量回测应先运行一次
+`qm fetch` 完成本地归档，后续研究均复用 Parquet。
 
 **Q: 想用分钟线？**
-当前版本聚焦日线研究（个人投资者最现实的频率）。数据层结构支持扩展，
-欢迎 PR。
+已支持 `1m/5m/15m/30m/60m`，并与日线一样按频率保存为本地 Parquet：
+
+```bash
+qm fetch --universe demo --frequency 5m --start 2026-07-01
+```
+
+Web 市场页点击标的后可在日线、60 分、15 分、5 分和 1 分之间切换。
+免费源的 1 分钟历史回溯有限，适合通过每日增量拉取逐步积累；长期回测应先
+确认本地时间跨度完整，并把分钟级交易成本和滑点纳入假设。
 
 **Q: 回测收益为什么比想象低？**
 默认扣了佣金/印花税/滑点，周调仓 top5 一年成本约 3-6%。这是特性不是 bug——

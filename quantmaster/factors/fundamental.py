@@ -98,6 +98,10 @@ def resolve_factor(name_or_expr: str, symbols: list[str], start: str, end: str) 
     """
     from quantmaster.factors.library import get_factor
 
+    if name_or_expr == "news_sentiment":
+        from quantmaster.ai.sentiment import NewsSentimentFactor
+
+        return NewsSentimentFactor()
     if name_or_expr in FUNDAMENTAL_FACTOR_NAMES:
         from quantmaster.data.fundamentals import fundamental_panel
 

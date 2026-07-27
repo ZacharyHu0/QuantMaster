@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from quantmaster.config import get_config
+from quantmaster.data.resilience import akshare_call
 
 logger = logging.getLogger(__name__)
 
@@ -23,24 +24,78 @@ def _cache_path() -> Path:
     return get_config().data_root / "industry_map.json"
 
 
+def _block_cache_path() -> Path:
+    return get_config().data_root / "industry_blocks.json"
+
+
+def _load_industry_blocks() -> dict[str, dict]:
+    path = _block_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("blocks", {}) if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_industry_blocks(blocks: dict[str, dict]) -> None:
+    """成功一个板块就原子落盘，后续板块失败也不影响已取得的数据。"""
+    path = _block_cache_path()
+    temp = path.with_suffix(".json.tmp")
+    temp.write_text(
+        json.dumps({"updated_at": time.time(), "blocks": blocks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp.replace(path)
+
+
 def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
-    """从东方财富行业板块抓取全 A 股票的行业映射。约几十次请求，较慢。"""
+    """优先用 2000 积分 Tushare 申万行业，失败后回退东方财富。"""
+    tushare_mapping: dict[str, str] = {}
+    if get_config().data.tushare_token:
+        try:
+            from quantmaster.data.tushare_source import TushareSource
+
+            tushare_mapping = TushareSource().industry_map()
+            # A 股在市公司通常远超 3000；低于该值多半是个别行业请求失败。
+            if len(tushare_mapping) >= 3000:
+                return tushare_mapping
+            logger.warning(
+                "Tushare 申万行业映射仅 %s 条，继续用 AKShare 补全", len(tushare_mapping))
+        except Exception as e:
+            logger.warning("Tushare 申万行业映射失败，降级 AKShare: %s", e)
+
     import akshare as ak
 
-    boards = ak.stock_board_industry_name_em()
-    mapping: dict[str, str] = {}
+    boards = akshare_call(
+        "stock_board_industry_name_em", ak.stock_board_industry_name_em)
+    blocks = _load_industry_blocks()
     for _, row in boards.iterrows():
         board = str(row["板块名称"])
         try:
-            cons = ak.stock_board_industry_cons_em(symbol=board)
+            cons = akshare_call(
+                f"stock_board_industry_cons_em({board})",
+                ak.stock_board_industry_cons_em, symbol=board,
+            )
         except Exception as e:
             logger.warning("行业 %s 成分获取失败: %s", board, e)
             continue
+        block_mapping: dict[str, str] = {}
         for code in cons["代码"].astype(str).str.zfill(6):
             suffix = "SH" if code.startswith(("6", "9")) else (
                 "BJ" if code.startswith(("4", "8")) else "SZ")
-            mapping[f"{code}.{suffix}"] = board
-    return mapping
+            block_mapping[f"{code}.{suffix}"] = board
+        # 空响应同样视为不完整，不用它覆盖以前抓到的完整板块。
+        if block_mapping:
+            blocks[board] = {"updated_at": time.time(), "mapping": block_mapping}
+            _save_industry_blocks(blocks)
+    mapping: dict[str, str] = {}
+    for block in blocks.values():
+        if isinstance(block, dict):
+            mapping.update(block.get("mapping", {}))
+    # 对同一股票优先采用申万 2021 一级行业口径。
+    return {**mapping, **tushare_mapping}
 
 
 def save_industry_map(mapping: dict[str, str]) -> None:
@@ -68,8 +123,11 @@ def load_industry_map(refresh: bool = False) -> dict[str, str]:
     try:
         mapping = fetch_industry_map()
         if mapping:
-            save_industry_map(mapping)
-            return mapping
+            # 抓取可能只成功了一部分行业。新数据优先，但绝不能用部分结果
+            # 删除旧缓存中已经完整取得的股票/板块映射。
+            merged = {**cached, **mapping}
+            save_industry_map(merged)
+            return merged
     except Exception as e:
         logger.warning("行业映射抓取失败: %s", e)
     return cached

@@ -24,3 +24,18 @@ jobs:
         run: ruff check quantmaster tests
       - name: Test
         run: pytest
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install UI test dependencies
+        run: |
+          pip install -e ".[dev,ui]"
+          playwright install --with-deps chromium
+      - name: Chromium management flows
+        run: pytest -q tests/test_ui_management.py

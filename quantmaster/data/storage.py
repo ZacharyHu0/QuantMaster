@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,7 +33,10 @@ class BarStore:
             )
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.meta_db)
+        conn = sqlite3.connect(self.meta_db, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
 
     def _path(self, symbol: str) -> Path:
         return self.root / f"{_safe_name(symbol)}.parquet"
@@ -46,8 +51,11 @@ class BarStore:
             return None
 
     def put(self, symbol: str, df: pd.DataFrame, replace: bool = False) -> None:
-        """写入缓存。replace=True 整体替换（前复权数据必须整段替换，
-        增量合并会混合不同复权基准，见 registry.load_history 的说明）。"""
+        """写入缓存。
+
+        ``replace=True`` 只用于已确认完整的前复权响应；来源只返回部分区间时
+        必须合并保存，避免 AKShare 的缺块响应冲掉本地已有研究数据。
+        """
         if df is None or df.empty:
             return
         if not replace:
@@ -56,7 +64,16 @@ class BarStore:
                 df = pd.concat([old, df])
                 df = df[~df.index.duplicated(keep="last")].sort_index()
         df = df.sort_index()
-        df.to_parquet(self._path(symbol))
+        target = self._path(symbol)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=self.root)
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            df.to_parquet(temp_path)
+            os.replace(temp_path, target)
+        finally:
+            temp_path.unlink(missing_ok=True)
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO bar_meta VALUES (?,?,?,?)",
@@ -82,3 +99,16 @@ class BarStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT symbol FROM bar_meta ORDER BY symbol").fetchall()
         return [r[0] for r in rows]
+
+
+class IntradayBarStore(BarStore):
+    """分钟线缓存；按频率隔离目录，避免 1m/5m 数据相互覆盖。"""
+
+    def __init__(self, frequency: str = "5m", root: Path | None = None):
+        from quantmaster.data.base import validate_frequency
+
+        self.frequency = validate_frequency(frequency)
+        if self.frequency == "1d":
+            raise ValueError("IntradayBarStore 仅用于分钟线")
+        base = Path(root) if root else get_config().data_root / "bars" / "intraday"
+        super().__init__(base / self.frequency)

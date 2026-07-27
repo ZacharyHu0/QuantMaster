@@ -35,7 +35,7 @@ class LLMError(RuntimeError):
 class LLMClient:
     def __init__(self, config: LLMConfig | None = None):
         self.config = config or get_config().llm
-        if not self.config.api_key:
+        if not self.config.api_key and self.config.provider != "openai-compatible":
             raise LLMError(
                 "未配置 LLM API key。请设置环境变量 ANTHROPIC_API_KEY / OPENAI_API_KEY / "
                 "QM_LLM_API_KEY，或在 config.yaml 的 llm.api_key 中配置。"
@@ -52,7 +52,9 @@ class LLMClient:
         }
         if system:
             payload["system"] = system
-        base = self.config.base_url or ANTHROPIC_URL
+        base = self.config.base_url.rstrip("/") if self.config.base_url else ANTHROPIC_URL
+        if self.config.base_url and not base.endswith("/messages"):
+            base += "/messages"
         response = httpx.post(
             base,
             headers={
@@ -74,9 +76,11 @@ class LLMClient:
         url = OPENAI_URL
         if self.config.base_url:
             url = self.config.base_url.rstrip("/") + "/chat/completions"
+        headers = ({"Authorization": f"Bearer {self.config.api_key}"}
+                   if self.config.api_key else {})
         response = httpx.post(
             url,
-            headers={"Authorization": f"Bearer {self.config.api_key}"},
+            headers=headers,
             json={
                 "model": self.config.model,
                 "max_tokens": self.config.max_tokens,

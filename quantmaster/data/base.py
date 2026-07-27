@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
 
 
 class Market(str, enum.Enum):
@@ -62,12 +63,13 @@ def guess_market(symbol: str) -> Market:
     return Market.CN
 
 
-def normalize_daily(df: pd.DataFrame) -> pd.DataFrame:
-    """把任意来源的日线数据规范为标准结构。"""
+def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """把任意来源的日线或分钟线规范为统一 OHLCV 结构。"""
     df = df.copy()
     df.columns = [str(c).lower() for c in df.columns]
     rename = {
-        "日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low",
+        "日期": "date", "时间": "date", "日期时间": "date",
+        "开盘": "open", "收盘": "close", "最高": "high", "最低": "low",
         "成交量": "volume", "成交额": "amount", "换手率": "turnover",
         "adj close": "close",
     }
@@ -82,6 +84,21 @@ def normalize_daily(df: pd.DataFrame) -> pd.DataFrame:
     return df.astype(float)
 
 
+def normalize_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """向后兼容的日线标准化入口。"""
+    return normalize_bars(df)
+
+
+def validate_frequency(frequency: str) -> str:
+    """规范并校验 K 线频率。"""
+    value = frequency.strip().lower()
+    aliases = {"d": "1d", "day": "1d", "daily": "1d", "60min": "60m"}
+    value = aliases.get(value, value.replace("min", "m"))
+    if value != "1d" and value not in INTRADAY_FREQUENCIES:
+        raise ValueError(f"不支持的频率 {frequency!r}，可选: 1d/{'/'.join(INTRADAY_FREQUENCIES)}")
+    return value
+
+
 class DataSource(ABC):
     """数据源接口。实现方按需覆盖能力，不支持的抛 NotImplementedError。"""
 
@@ -91,6 +108,12 @@ class DataSource(ABC):
     @abstractmethod
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         """标准化日线。"""
+
+    def intraday(
+        self, symbol: str, start: str, end: str, frequency: str = "5m"
+    ) -> pd.DataFrame:  # pragma: no cover - 依赖网络
+        """标准化分钟线；frequency 为 1m/5m/15m/30m/60m。"""
+        raise NotImplementedError
 
     def spot(self, symbols: list[str]) -> pd.DataFrame:  # pragma: no cover - 依赖网络
         """实时快照：columns = [symbol, name, price, change_pct]。"""

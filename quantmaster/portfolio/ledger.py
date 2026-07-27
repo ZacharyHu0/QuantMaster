@@ -50,63 +50,137 @@ class Ledger:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS trades ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, symbol TEXT,"
-                "side TEXT, price REAL, shares REAL, fee REAL, note TEXT)"
+                "side TEXT, price REAL, shares REAL, fee REAL, note TEXT,"
+                "import_batch TEXT, fingerprint TEXT, idempotency_key TEXT)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS cashflows ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT,"
-                "amount REAL, kind TEXT, note TEXT)"   # kind: deposit/withdraw/dividend
+                "amount REAL, kind TEXT, note TEXT, idempotency_key TEXT)"   # kind: deposit/withdraw/dividend
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+            if "import_batch" not in columns:
+                conn.execute("ALTER TABLE trades ADD COLUMN import_batch TEXT")
+            if "fingerprint" not in columns:
+                conn.execute("ALTER TABLE trades ADD COLUMN fingerprint TEXT")
+            if "idempotency_key" not in columns:
+                conn.execute("ALTER TABLE trades ADD COLUMN idempotency_key TEXT")
+            cash_columns = {row[1] for row in conn.execute("PRAGMA table_info(cashflows)")}
+            if "idempotency_key" not in cash_columns:
+                conn.execute("ALTER TABLE cashflows ADD COLUMN idempotency_key TEXT")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS import_batches ("
+                "id TEXT PRIMARY KEY, file_hash TEXT NOT NULL, filename TEXT,"
+                "encoding TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, row_count INTEGER)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_fingerprint ON trades(fingerprint)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_import_file_hash ON import_batches(file_hash)")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency "
+                "ON trades(idempotency_key) WHERE idempotency_key IS NOT NULL")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_cashflows_idempotency "
+                "ON cashflows(idempotency_key) WHERE idempotency_key IS NOT NULL")
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
 
     # ---- 写入 ----
 
-    def add_trade(self, trade: TradeRecord) -> None:
+    def add_trade(self, trade: TradeRecord, idempotency_key: str | None = None) -> bool:
+        from quantmaster.data.universe import normalize_symbol
+
         side = trade.side.lower()
         if side not in ("buy", "sell"):
             raise ValueError(f"side 必须是 buy/sell: {trade.side}")
-        if trade.price <= 0 or trade.shares <= 0:
+        if trade.price <= 0 or trade.shares <= 0 or trade.fee < 0:
             raise ValueError("price/shares 必须为正数")
+        try:
+            date = str(pd.to_datetime(trade.date, errors="raise").date())
+            symbol = normalize_symbol(trade.symbol)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(str(exc)) from None
         with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO trades (date,symbol,side,price,shares,fee,note) VALUES (?,?,?,?,?,?,?)",
-                (trade.date, trade.symbol, side, trade.price, trade.shares, trade.fee, trade.note),
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO trades "
+                "(date,symbol,side,price,shares,fee,note,idempotency_key) VALUES (?,?,?,?,?,?,?,?)",
+                (date, symbol, side, trade.price, trade.shares, trade.fee, trade.note,
+                 idempotency_key),
             )
+        return cursor.rowcount == 1
 
-    def add_cashflow(self, date: str, amount: float, kind: str = "deposit", note: str = "") -> None:
+    def add_cashflow(self, date: str, amount: float, kind: str = "deposit", note: str = "",
+                     idempotency_key: str | None = None) -> bool:
         if kind not in ("deposit", "withdraw", "dividend"):
             raise ValueError(f"kind 必须是 deposit/withdraw/dividend: {kind}")
+        if not amount:
+            raise ValueError("amount 必须为非零数")
+        try:
+            normalized_date = str(pd.to_datetime(date, errors="raise").date())
+        except (ValueError, TypeError) as exc:
+            raise ValueError(str(exc)) from None
         with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO cashflows (date,amount,kind,note) VALUES (?,?,?,?)",
-                (date, abs(amount), kind, note),
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO cashflows "
+                "(date,amount,kind,note,idempotency_key) VALUES (?,?,?,?,?)",
+                (normalized_date, abs(amount), kind, note, idempotency_key),
             )
+        return cursor.rowcount == 1
 
     def import_csv(self, csv_path: str | Path) -> int:
         """导入券商成交记录 CSV。返回导入条数。"""
-        try:
-            df = pd.read_csv(csv_path, encoding="utf-8")
-        except UnicodeDecodeError:
-            df = pd.read_csv(csv_path, encoding="gbk")
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        required = {"date", "symbol", "side", "price", "shares"}
-        missing = required - set(df.columns)
-        if missing:
-            raise ValueError(f"CSV 缺少列: {missing}（需要 {sorted(required)}）")
-        count = 0
-        for _, row in df.iterrows():
-            self.add_trade(TradeRecord(
-                date=str(pd.to_datetime(row["date"]).date()),
-                symbol=str(row["symbol"]).strip(),
-                side=str(row["side"]).strip().lower(),
-                price=float(row["price"]),
-                shares=float(row["shares"]),
-                fee=float(row.get("fee", 0) or 0),
-            ))
-            count += 1
-        return count
+        from quantmaster.portfolio.csv_import import parse_broker_csv
+
+        path = Path(csv_path)
+        parsed = parse_broker_csv(path.read_bytes(), existing_fingerprints=self.fingerprints())
+        bad = [row for row in parsed.rows if row.errors]
+        if bad:
+            raise ValueError(f"CSV 有 {len(bad)} 行校验失败: 第 {bad[0].row_number} 行 {bad[0].errors[0]}")
+        records = [row.record for row in parsed.rows if row.record and not row.duplicate]
+        return self.import_records(records, parsed.file_hash, path.name, parsed.encoding)
+
+    def fingerprints(self) -> set[str]:
+        from quantmaster.portfolio.csv_import import trade_fingerprint
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT date,symbol,side,price,shares,fee,fingerprint FROM trades"
+            ).fetchall()
+        return {str(row[6]) if row[6] else trade_fingerprint({
+            "date": row[0], "symbol": row[1], "side": row[2], "price": row[3],
+            "shares": row[4], "fee": row[5],
+        }) for row in rows}
+
+    def has_import_hash(self, file_hash: str) -> bool:
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM import_batches WHERE file_hash=? LIMIT 1", (file_hash,)
+            ).fetchone() is not None
+
+    def import_records(self, records: list[dict], file_hash: str, filename: str,
+                       encoding: str) -> int:
+        """在单个 SQLite 事务中写入最终记录；任一失败会整体回滚。"""
+        import uuid
+
+        if not records:
+            return 0
+        batch_id = uuid.uuid4().hex
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                "INSERT INTO trades "
+                "(date,symbol,side,price,shares,fee,note,import_batch,fingerprint) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                [(record["date"], record["symbol"], record["side"],
+                  float(record["price"]), float(record["shares"]), float(record.get("fee", 0)),
+                  str(record.get("note", "")), batch_id, record.get("fingerprint"))
+                 for record in records],
+            )
+            conn.execute(
+                "INSERT INTO import_batches (id,file_hash,filename,encoding,row_count) VALUES (?,?,?,?,?)",
+                (batch_id, file_hash, filename, encoding, len(records)),
+            )
+        return len(records)
 
     # ---- 读取 ----
 

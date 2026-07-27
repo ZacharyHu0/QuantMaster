@@ -186,6 +186,83 @@ class TestCacheReplaceSemantics:
         df = registry.load_history("600000.SH", "2024-01-02", "2024-06-28", store=store)
         assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
 
+    def test_partial_refetch_preserves_complete_cached_chunks(self, tmp_path, monkeypatch):
+        """AKShare 缺头的有效响应要合并保存，不能把旧缓存完整分块冲掉。"""
+        import pandas as pd
+
+        from quantmaster.data import registry
+        from quantmaster.data.base import DataSource, Market
+        from quantmaster.data.storage import BarStore
+
+        store = BarStore(root=tmp_path / "bars")
+        old_dates = pd.bdate_range("2024-01-02", "2024-06-28")
+        old = pd.DataFrame({c: 100.0 for c in ["open", "high", "low", "close"]},
+                           index=old_dates)
+        old["volume"] = 1e6
+        store.put("600000.SH", old)
+
+        class PartialSource(DataSource):
+            name = "partial"
+            markets = (Market.CN,)
+
+            def daily(self, symbol, start, end):
+                # 返回区间有用，但异常缺失了 1-3 月。
+                dates = pd.bdate_range("2024-04-01", "2024-12-31")
+                df = pd.DataFrame({c: 80.0 for c in ["open", "high", "low", "close"]},
+                                  index=dates)
+                df["volume"] = 2e6
+                return df
+
+        monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [PartialSource]})
+        with store._conn() as conn:
+            conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
+
+        result = registry.load_history(
+            "600000.SH", "2024-01-02", "2024-12-31", store=store)
+        cached = store.get("600000.SH")
+        assert str(result.index.min().date()) == "2024-01-02"
+        assert str(result.index.max().date()) == "2024-12-31"
+        assert cached.loc["2024-02-01", "close"] == 100.0
+        assert cached.loc["2024-05-02", "close"] == 80.0
+
+    def test_sparse_response_is_saved_even_when_no_fallback_succeeds(self, tmp_path, monkeypatch):
+        """边界齐全但内部大面积缺行时仍落盘，备用源失败后返回已取得部分。"""
+        import pandas as pd
+
+        from quantmaster.data import registry
+        from quantmaster.data.base import DataSource, Market
+        from quantmaster.data.storage import BarStore
+
+        store = BarStore(root=tmp_path / "bars")
+
+        class SparseSource(DataSource):
+            name = "sparse"
+            markets = (Market.CN,)
+
+            def daily(self, symbol, start, end):
+                dates = pd.bdate_range(start, end)
+                sparse = dates[::3].union(pd.DatetimeIndex([dates[-1]]))
+                frame = pd.DataFrame({
+                    c: 10.0 for c in ["open", "high", "low", "close", "volume"]
+                }, index=sparse)
+                return frame
+
+        class BrokenFallback(DataSource):
+            name = "broken"
+            markets = (Market.CN,)
+
+            def daily(self, symbol, start, end):
+                raise ConnectionError("offline")
+
+        monkeypatch.setattr(
+            registry, "_factories", lambda: {Market.CN: [SparseSource, BrokenFallback]})
+        result = registry.load_history(
+            "600000.SH", "2024-01-02", "2024-06-28", store=store)
+
+        assert not result.empty
+        assert len(result) == len(store.get("600000.SH"))
+        assert str(result.index.max().date()) == "2024-06-28"
+
 
 class TestQuantilePeriods:
     def test_periods_rebalance_semantics(self, panel):

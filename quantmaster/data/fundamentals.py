@@ -25,6 +25,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.akshare_source import _require_akshare
+from quantmaster.data.resilience import akshare_call
 from quantmaster.data.storage import BarStore
 
 logger = logging.getLogger(__name__)
@@ -63,9 +64,20 @@ def fetch_daily_indicators(symbol: str) -> pd.DataFrame:  # pragma: no cover - �
     total_mv（列名标准化为小写）。该接口一次返回上市以来的全部历史，
     适合整体写入缓存后按日期切片使用。
     """
-    ak = _require_akshare()
     code = _six_digit(symbol)
-    raw = ak.stock_a_indicator_lg(symbol=code)
+    try:
+        ak = _require_akshare()
+        raw = akshare_call(
+            f"stock_a_indicator_lg({symbol})", ak.stock_a_indicator_lg, symbol=code)
+        if raw is None or raw.empty:
+            raise RuntimeError("AKShare 返回空数据")
+    except Exception as ak_error:
+        if not get_config().data.tushare_token:
+            raise
+        logger.warning("AKShare 每日指标失败，降级 Tushare daily_basic: %s", ak_error)
+        from quantmaster.data.tushare_source import TushareSource
+
+        return TushareSource().daily_indicators(symbol)
     df = raw.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
     date_col = "trade_date" if "trade_date" in df.columns else df.columns[0]
@@ -82,10 +94,23 @@ def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame: 
     返回 DataFrame(index=报告期 DatetimeIndex, columns=["roe"])。注意：索引
     是「报告期」而非「公布日」，使用前必须经过 quarterly_to_daily() 加滞后。
     """
-    ak = _require_akshare()
     code = _six_digit(symbol)
-    raw = ak.stock_financial_analysis_indicator(symbol=code, start_year=start_year)
-    return extract_roe(raw)
+    try:
+        ak = _require_akshare()
+        raw = akshare_call(
+            f"stock_financial_analysis_indicator({symbol})",
+            ak.stock_financial_analysis_indicator, symbol=code, start_year=start_year,
+        )
+        if raw is None or raw.empty:
+            raise RuntimeError("AKShare 返回空数据")
+        return extract_roe(raw)
+    except Exception as ak_error:
+        if not get_config().data.tushare_token:
+            raise
+        logger.warning("AKShare ROE 失败，降级 Tushare fina_indicator: %s", ak_error)
+        from quantmaster.data.tushare_source import TushareSource
+
+        return TushareSource().quarterly_roe(symbol, start_year=start_year)
 
 
 def extract_roe(raw: pd.DataFrame) -> pd.DataFrame:
@@ -175,17 +200,19 @@ def _load_cached_or_fetch(
     store: BarStore,
     fetch: Callable[[], pd.DataFrame],
     end: str,
+    cache_days: int | None = None,
 ) -> pd.DataFrame | None:
     """缓存优先的加载：缓存覆盖到 end 或仍新鲜就直接用，否则才触网。
 
     触网失败时退回旧缓存（可能为 None），由调用方决定是否跳过该标的。
     """
     cfg = get_config()
+    max_age_days = cfg.data.cache_days if cache_days is None else cache_days
     cached = store.get(key)
     fresh = store.freshness(key)
     if cached is not None and not cached.empty and fresh is not None:
         covers = str(cached.index.max().date()) >= end
-        if covers or fresh < cfg.data.cache_days * 86400:
+        if covers or fresh < max_age_days * 86400:
             return cached
     try:
         df = fetch()
@@ -240,6 +267,7 @@ def fundamental_panel(
                 store,
                 partial(fetch_quarterly_roe, symbol, start_year=roe_start_year),
                 end,
+                cache_days=get_config().data.fundamental_cache_days,
             )
             if q is not None and not q.empty:
                 roe_frames[symbol] = q

@@ -9,4 +9,6 @@
 - server    FastAPI 本地服务 + Web 仪表盘
 """
 
-__version__ = "0.2.0"
+from quantmaster.release import VERSION
+
+__version__ = VERSION

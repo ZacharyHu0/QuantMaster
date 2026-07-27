@@ -30,6 +30,13 @@ class TestLLMClient:
         with pytest.raises(LLMError, match="API key"):
             LLMClient(LLMConfig(api_key=""))
 
+    def test_local_compatible_gateway_allows_missing_key(self):
+        client = LLMClient(LLMConfig(
+            provider="openai-compatible", api_key="", model="local",
+            base_url="http://127.0.0.1:11434/v1",
+        ))
+        assert client.config.api_key == ""
+
     def test_anthropic_request_format(self, monkeypatch):
         captured = {}
 

@@ -1,6 +1,7 @@
 # QuantMaster 配置示例：复制为 config.yaml 后按需修改。
-# 所有条目均可用环境变量覆盖（QM_LLM_API_KEY / QM_LLM_PROVIDER / QM_LLM_MODEL /
-# QM_LLM_BASE_URL / TUSHARE_TOKEN / QM_DATA_ROOT）。
+# 手工维护的旧配置可用环境变量覆盖。首次从 GUI 设置中心保存后会写入
+# managed_by_gui，此后 GUI/YAML 为最终值，环境变量只作为缺省值。
+# API Key 与 Token 默认进入系统凭据库，不写入本文件或配置快照。
 
 llm:
   provider: anthropic        # anthropic | openai | openai-compatible
@@ -14,6 +15,20 @@ data:
   root: data                 # 本地数据目录（行情缓存/新闻库/账本）
   tushare_token: ""          # 可选：https://tushare.pro 注册获取
   cache_days: 1              # 日线缓存有效期（天）
+  intraday_cache_minutes: 5  # 当日分钟线缓存刷新间隔
+  akshare_retries: 3         # AKShare 请求失败后的总尝试次数
+  akshare_retry_backoff: 0.8 # 重试退避：0.8s、1.6s……
+  tushare_calls_per_minute: 120 # 2000 积分档保守限速，可按实际权限调整
+  tushare_cache_days: 1      # Tushare 当期原始响应缓存；历史区间自动长期缓存
+  fundamental_cache_days: 7  # 季度财务指标更新较慢，减少重复调用
+
+news:
+  raw_cache_days: 7          # 原始 HTTP 响应短期保留；结构化资讯长期保留
+  annotation_enabled: true   # 新资讯去重入库后进入 LLM 标注队列
+  annotation_batch_size: 10  # 单次 LLM 批量条数
+  annotation_items_per_run: 100 # 每轮最多处理的待标注资讯
+  factor_halflife_days: 3.0  # 消息面因子按自然日衰减的半衰期
+  factor_min_confidence: 0.35 # 低于该置信度的标注不进入因子
 
 trade:                       # A 股交易成本，按自己券商实际费率修改
   commission_rate: 0.00025   # 佣金 万2.5
@@ -26,3 +41,25 @@ trade:                       # A 股交易成本，按自己券商实际费率�
 server:
   host: 127.0.0.1
   port: 8686
+
+automation:
+  enabled: false            # 开启后运行定时任务，并监听已配置的两个 Bot
+  timezone: Asia/Shanghai
+  primary_universe: demo
+  watchlist: []
+  sentinel_indices: [000300.SH, 000905.SH, 000852.SH, 399006.SZ]
+  weixin_api_base: https://ilinkai.weixin.qq.com
+  feishu_app_id: ""         # 也可在“自动化”页面配置；Secret 只保存到系统凭据库
+  retention_days: 90
+
+lab:
+  enabled: true             # qm serve 内置 Worker；也可单独运行 qm lab worker
+  universe: csi800          # 生产研究默认 PIT 沪深300 + 中证500
+  start: 2015-01-01
+  horizons: [1, 3, 5, 7]
+  weekly_days: [1, 3, 5]    # ISO 星期编号：周一/三/五执行重型研究
+  window_start: "19:00"    # 自动任务允许跨午夜窗口
+  window_end: "07:00"
+  daily_budget_hours: 10.0
+  device: auto              # auto | cpu | cuda | mps
+  allow_cloud_sample: false # 仍需每次请求单独确认，默认只发送指标与结构

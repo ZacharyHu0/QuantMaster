@@ -8,7 +8,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quantmaster.data.base import DataSource, Market, guess_market, normalize_daily
+from quantmaster.data.base import (
+    DataSource,
+    Market,
+    guess_market,
+    normalize_bars,
+    normalize_daily,
+    validate_frequency,
+)
+from quantmaster.data.resilience import akshare_call
 
 
 def _require_akshare():
@@ -43,27 +51,88 @@ class AkshareSource(DataSource):
             or (suffix == "SZ" and code.startswith("399"))
         )
         if market == Market.CN and is_index:
-            raw = ak.index_zh_a_hist(symbol=code, period="daily", start_date=start_c, end_date=end_c)
+            raw = akshare_call(
+                f"index_zh_a_hist({symbol})", ak.index_zh_a_hist,
+                symbol=code, period="daily", start_date=start_c, end_date=end_c,
+            )
         elif market == Market.CN:
-            raw = ak.stock_zh_a_hist(
-                symbol=code, period="daily", start_date=start_c, end_date=end_c, adjust="qfq"
+            raw = akshare_call(
+                f"stock_zh_a_hist({symbol})", ak.stock_zh_a_hist,
+                symbol=code, period="daily", start_date=start_c, end_date=end_c,
+                adjust="qfq",
             )
         elif market == Market.HK:
-            raw = ak.stock_hk_hist(
-                symbol=code, period="daily", start_date=start_c, end_date=end_c, adjust="qfq"
+            raw = akshare_call(
+                f"stock_hk_hist({symbol})", ak.stock_hk_hist,
+                symbol=code, period="daily", start_date=start_c, end_date=end_c,
+                adjust="qfq",
             )
         elif market == Market.FUTURES:
             # 期货主力连续合约，如 AU0 -> 沪金主力
-            raw = ak.futures_zh_daily_sina(symbol=code)
+            raw = akshare_call(
+                f"futures_zh_daily_sina({symbol})", ak.futures_zh_daily_sina,
+                symbol=code,
+            )
         else:
             raise NotImplementedError(f"akshare 不支持该市场: {symbol}")
 
         df = normalize_daily(raw)
         return df.loc[start:end]
 
+    def intraday(
+        self, symbol: str, start: str, end: str, frequency: str = "5m"
+    ) -> pd.DataFrame:
+        """A 股/港股/指数分钟线。
+
+        1m 数据源只提供近期。所有分钟频率均保存不复权价格，确保每日增量
+        归档不会因前复权基准变化产生接缝跳空；日线研究仍使用前复权数据。
+        """
+        ak = _require_akshare()
+        frequency = validate_frequency(frequency)
+        if frequency == "1d":
+            return self.daily(symbol, start, end)
+        period = frequency[:-1]
+        code, suffix = _split(symbol)
+        market = guess_market(symbol)
+        is_index = (
+            symbol in A_SHARE_INDEXES
+            or (suffix == "SH" and code.startswith("000"))
+            or (suffix == "SZ" and code.startswith("399"))
+        )
+        if market == Market.CN and is_index:
+            raw = akshare_call(
+                f"index_zh_a_hist_min_em({symbol},{frequency})",
+                ak.index_zh_a_hist_min_em,
+                symbol=code, period=period, start_date=start, end_date=end,
+            )
+        elif market == Market.CN:
+            raw = akshare_call(
+                f"stock_zh_a_hist_min_em({symbol},{frequency})",
+                ak.stock_zh_a_hist_min_em,
+                symbol=code, period=period, start_date=start, end_date=end,
+                adjust="",
+            )
+        elif market == Market.HK:
+            raw = akshare_call(
+                f"stock_hk_hist_min_em({symbol},{frequency})",
+                ak.stock_hk_hist_min_em,
+                symbol=code, period=period, start_date=start, end_date=end,
+                adjust="",
+            )
+        else:
+            raise NotImplementedError(f"akshare 不支持该市场分钟线: {symbol}")
+        bars = normalize_bars(raw)
+        if period == "1" and "open" in bars:
+            # 东财近期 1m 历史有时将非最新交易日开盘价置 0；用同日上一根
+            # 收盘修复，日内首根则回退到本根收盘，避免伪造 -100% 跳空。
+            previous = bars["close"].groupby(bars.index.normalize()).shift(1)
+            bars["open"] = bars["open"].where(bars["open"] > 0, previous)
+            bars["open"] = bars["open"].fillna(bars["close"])
+        return bars.loc[start:end]
+
     def spot(self, symbols: list[str]) -> pd.DataFrame:  # pragma: no cover - 网络
         ak = _require_akshare()
-        raw = ak.stock_zh_a_spot_em()
+        raw = akshare_call("stock_zh_a_spot_em", ak.stock_zh_a_spot_em)
         raw = raw.rename(columns={"代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "change_pct"})
         codes = {s.split(".")[0] for s in symbols}
         rows = raw[raw["code"].isin(codes)][["code", "name", "price", "change_pct"]]
@@ -73,7 +142,10 @@ class AkshareSource(DataSource):
         """指数成分股。支持 000300.SH(沪深300)、000905.SH(中证500) 等。"""
         ak = _require_akshare()
         code, _ = _split(index_symbol)
-        raw = ak.index_stock_cons_csindex(symbol=code)
+        raw = akshare_call(
+            f"index_stock_cons_csindex({index_symbol})",
+            ak.index_stock_cons_csindex, symbol=code,
+        )
         result = []
         for c in raw["成分券代码"].astype(str).str.zfill(6):
             suffix = "SH" if c.startswith(("6", "9")) else ("BJ" if c.startswith(("4", "8")) else "SZ")

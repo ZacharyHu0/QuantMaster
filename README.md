@@ -20,20 +20,26 @@
 
 | 模块 | 说明 |
 | --- | --- |
-| 📡 多市场数据 | A 股/港股为主，参考美/日/韩指数与大宗商品期货；免费数据源（AKShare、yfinance，可选 Tushare），本地 Parquet 缓存，自动降级 |
-| 🧪 因子研究 | 内置量价因子库 + 基本面因子（PE/PB/股息/市值/ROE，财报滞后对齐）；Alpha101 风格表达式引擎（AST 白名单，安全执行）；IC/ICIR/分层回测/换手率一站式因子体检 |
+| 📡 多市场数据 | A 股/港股为主，参考美/日/韩指数与大宗商品期货；日线及 1/5/15/30/60 分钟线按频率本地 Parquet 归档，断网复用、自动降级 |
+| 🧭 市场状态 | 股票池与行业板块的牛熊分、上行/下行/震荡、市场宽度、MACD、资金量；分当前、历史和未来 1/3/5/7 日概率展望，历史图支持 7D–10Y 观察窗口 |
+| 🎯 每日选股 | 趋势 + MACD + 资金量 + 波动的短周期决策，给出仓位、置信度、止损止盈，面向 1–7 个交易日持有 |
+| 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、1/3/5/7 日 purged walk-forward、FDR 与交易成本门槛；AI 提案和人工修正都必须重新验证、人工批准 |
 | ⛏️ 因子挖掘 | 遗传规划自动搜索因子表达式；LLM 因子挖掘（大模型提出候选 → 本地数据严格验证）；**样本外验证工具**（train/test IC、walk-forward、网格扫描）把防过拟合做成流程 |
 | 🧬 多因子合成 | 因子相关性矩阵、IC/ICIR 动态加权合成（防未来函数）、截面正交化、贪心去冗余 |
-| 🤖 AI 能力 | 统一 LLM 客户端，兼容 **Anthropic / OpenAI / 任何 OpenAI 协议网关**（DeepSeek、通义、Kimi、GLM、本地 Ollama）；AI 爬虫抓取财经快讯并结构化为舆情因子 |
+| 📰 资讯研究 | 内置快讯/官方来源与 RSS、JSON、HTML 声明式来源；原始响应短期缓存、结构化资讯长期归档，去重标注后形成可回测的质量加权消息面因子 |
+| 🤖 AI 能力 | 统一 LLM 客户端，兼容 **Anthropic / OpenAI / 任何 OpenAI 协议网关**（DeepSeek、通义、Kimi、GLM、本地 Ollama）；资讯标注失败会退避重试，不阻塞原文入库 |
 | 📈 回测 Lab | 向量化回测引擎，内置 A 股规则：**T+1、涨跌停、佣金/印花税/过户费、100 股整手、止损/止盈**；净值/回撤/年度/月度收益等完整报告；对比基准指数 |
-| 💰 实盘记录 | 交易账本（支持券商成交记录 CSV 导入），FIFO 成本核算，TWR 时间加权收益 / XIRR 内部收益率，每日净值曲线对比基准 |
-| 🖥️ 本地 Web 界面 | FastAPI + ECharts 仪表盘，`qm serve` 一键启动，浏览器访问；Mac / Windows / Linux 跨平台 |
+| 💰 实盘记录 | 自选、重点关注与实盘持有统一工作台；交易账本支持券商 CSV 导入、FIFO 成本、TWR / XIRR 与基准对比 |
+| 🔔 Bot 自动化 | 以飞书企业自建应用 Bot 为主通道（群聊/私聊命令、结构化告警卡片），腾讯微信 ClawBot iLink 为轻量文本提醒；定时扫描变盘/重要消息/收盘任务，按会话选择推送强度 |
+| 🖥️ 本地 Web 界面 | FastAPI + ECharts 决策工作台；行情卡片逐标的呈现，决策按牛熊/板块/候选分阶段可用，不必等待整次任务结束；日线/分钟线切换采用克制过渡 |
 
 ## 快速开始
 
 ```bash
 # 环境要求 Python 3.10+
 pip install -e ".[data,dev]"     # data = akshare + yfinance（推荐）
+# 已配置 2000 积分 Tushare token 时：pip install -e ".[data,tushare,dev]"
+# 启用 Ridge 与全部深度模型：pip install -e ".[data,ml,dev]"
 
 qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
@@ -42,13 +48,24 @@ qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 
 ```bash
 qm fetch --universe demo --start 2022-01-01          # 拉取内置示例股票池行情
+qm fetch --universe demo --frequency 5m --start 2026-07-01  # 分钟线归档
+qm regime --universe demo --start 2022-01-01         # 牛熊/趋势/板块/未来展望
+qm select --universe demo --horizon 3 --top 10       # 今日短周期选股
+qm decisions --universe demo --limit 20              # 回看当时实际生成的决策
 qm factor-test "rank(-delta(close, 5))"              # 因子体检：IC/分层/换手
 qm backtest --factor mom_20d --top 5                 # 因子选股回测
+qm backtest --strategy swing --holding-days 3 --top 5 # 1–7日策略回测
+qm daily --strategy swing --holding-days 3            # 更新→选股快照→模拟调仓
 qm mine --generations 8                              # 遗传规划挖因子
 qm mine-llm --rounds 2                               # LLM 挖因子（需配置 API key）
 qm crawl                                             # 抓取财经快讯 + LLM 情绪标注
 qm ledger import my_trades.csv                       # 导入实盘成交记录
 qm ledger report                                     # 实盘收益报告
+qm automation doctor                                # 检查 Bot、任务、依赖与绑定状态
+qm lab doctor                                       # Quant Lab 能力、预算与队列状态
+qm lab discover --method genetic --universe demo    # 提交可恢复的因子发现任务
+qm lab train --model ridge --universe demo           # Ridge 基线；ml 依赖支持五种深度模型
+qm lab worker                                       # 独立研究 Worker（Web 进程外运行）
 ```
 
 Python API 同样直接：
@@ -65,7 +82,10 @@ print(report.summary())
 
 ## 配置
 
-复制 `config.example.yaml` 为 `config.yaml`（或使用环境变量）：
+桌面端推荐启动 `qm serve` 后打开顶部「设置」：可校验全部字段、读取模型列表、
+检测数据源、管理股票池及配置快照。API Key 与 Token 优先进入系统凭据库，页面、
+API 响应和快照都不会回显密钥。也可以复制 `config.example.yaml` 为 `config.yaml`
+或使用环境变量：
 
 ```yaml
 llm:
@@ -75,7 +95,59 @@ llm:
   base_url: ""                 # openai-compatible 时填网关地址，如 https://api.deepseek.com/v1
 data:
   tushare_token: ""            # 可选
+  akshare_retries: 3           # 失败后指数退避重试，再降级 Tushare
+  tushare_calls_per_minute: 120 # 2000 积分档保守限速
+  tushare_cache_days: 1        # 当期响应缓存；已结束历史区间长期缓存
 ```
+
+旧的手工配置继续使用“环境变量覆盖 YAML”。首次从 GUI 保存后会写入
+`managed_by_gui`，此后环境变量只提供缺省值，GUI/YAML 是最终值；在 GUI 中清除
+凭据会记录显式禁用状态，不会被遗留环境变量意外恢复。
+
+数据源默认顺序是 **AKShare 最多尝试 3 次 → Tushare 备用 → 本地旧缓存兜底**。
+AKShare 返回不完整但有效的日线时会先合并落盘，不会丢弃；只有确认整段完整时
+才覆盖前复权缓存。行业抓取也按成功板块分别保存，单个板块失败不会清空其他结果。
+Tushare 使用仓库 2000 积分说明中可用的前复权日线、指数、每日指标、财务指标
+和申万行业接口；原始响应按接口与参数写入 `data/api_cache/tushare/`，研究和
+回测重复请求相同区间不会再次占用接口次数。
+
+### 部署需要哪些 Key
+
+- 核心行情、回测、牛熊判断、自选和账本不强制需要 Key；AKShare / yfinance 可直接使用。
+- 建议再配置 `TUSHARE_TOKEN`：作为 A 股日线、指数、基本面和申万行业的稳定备用源。
+- LLM 因子挖掘和资讯标注才需要 LLM API Key；如果这部分已配置好，无需增加其他 AI Key。
+
+因此你当前只需补一个可选但推荐的 `TUSHARE_TOKEN`；没有它平台仍能运行，只是
+AKShare 连续失败时只能回退本地缓存。自选、关注、持仓和所有缓存都存于 `data/`，
+部署时应给该目录挂载持久卷。
+
+### 飞书 Bot（主）与微信 ClawBot（轻量补充）
+
+在「设置 → 自动化运行」开启自动化并重启，然后进入顶部「自动化」：
+
+1. 飞书创建企业自建应用并启用机器人能力、订阅“接收消息”事件，选择长连接方式；在页面
+   填入 App ID / App Secret。Secret 只进入系统凭据库。
+2. 飞书主人私聊先生成绑定码并发送 `绑定 QuantMaster XXXXXXXX`，再由主人到目标群完成群绑定。
+   告警以消息卡片展示强度、方向、数据时点、核查依据、相关标的和原文链接。
+3. 每个目标独立选择“保守 / 均衡 / 敏感”，也可展开高级设置调整阈值、确认根数、冷却时间
+   和每小时上限；在 Bot 对话里发送“把当前推送强度调成敏感”也能修改当前会话。
+4. 如需微信补充提醒，再选择“扫码授权”；授权后先给 ClawBot 发一条消息，系统会保存
+   该会话最新的 `context_token`。受 iLink 能力限制，微信只发送文本，不承载飞书消息卡片等增强能力。
+
+Bot 命令还支持查看任务/持仓/新闻/告警，暂停或恢复扫描，以及主人私聊中的成交和现金流
+二次确认。定时任务与长连接由 `qm serve` 进程承载，服务停止时不会继续推送。
+
+### 资讯研究工作台
+
+顶部「资讯」集中展示事件流、标注状态、消息面因子走势、相关标的和来源健康度。
+「设置 → 资讯来源」可启停内置来源，或添加 RSS、JSON 路径和 HTML CSS 选择器来源；
+自定义来源不执行 Python 或页面脚本，也不允许访问本机/私有网络。Bearer Token 与自定义
+Header 凭据只进入系统凭据库，跨域跳转和跨域详情页不会携带这些凭据。
+
+自动化运行时固定按三组调度：快讯 10 分钟、官方 15 分钟、定期来源 60 分钟。频率、
+暂停和手动运行统一在「自动化」页面管理。结构化资讯长期保留；原始响应默认缓存 7 天并
+在每日清理任务中回收。`news_sentiment` 因子只读取本地资讯库，按首次获取时间对齐交易日，
+15:00 后获取的消息进入下一交易日，默认使用 3 个自然日半衰期。
 
 ## 设计原则
 
@@ -95,14 +167,18 @@ data:
 
 ```
 quantmaster/
-├── config.py            配置（yaml + 环境变量）
+├── config.py/settings.py 版本化配置、凭据状态与安全快照
 ├── data/                数据层：akshare / yfinance / tushare + Parquet 缓存
+├── market/              牛熊/趋势/市场宽度/板块状态与概率展望
+├── decision/            1–7 日每日选股、仓位与风险决策
 ├── factors/             因子：算子库、表达式引擎、内置因子、IC/分层分析
 │   └── mining/          因子挖掘：遗传规划 + LLM
+├── lab/                 AI Quant Lab：版本账本、PIT 快照、验证、ML 与 Worker
 ├── ai/                  统一 LLM 客户端、AI 爬虫、舆情因子
 ├── backtest/            回测引擎（A 股规则）、策略、绩效指标、模拟盘
-├── portfolio/           实盘账本（FIFO 成本、TWR/XIRR）
-└── server/              FastAPI + ECharts Web 界面
+├── portfolio/           实盘账本（FIFO 成本、TWR/XIRR、券商 CSV 事务导入）
+├── automation/          定时任务、事件策略、可靠发件箱、微信/飞书 Bot 直连
+└── server/              FastAPI + ECharts Web 界面及本机设置 API
 ```
 
 更多文档见 [docs/](docs/)。

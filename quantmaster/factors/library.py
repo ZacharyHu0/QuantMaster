@@ -86,6 +86,46 @@ _register(
     "MACD DIF（归一化）：快慢均线差，衡量中短期趋势方向。",
 )
 
+# ---- Quant Lab 扩展因子：保持表达式短、逻辑可解释，作为 AI/ML 的稳定基线 ----
+_register("pct_change(close, 5)", "mom_5d", "5日动量：近一周涨幅，适合短周期趋势研究。")
+_register("pct_change(close, 10)", "mom_10d", "10日动量：两周价格趋势。")
+_register("pct_change(close, 60)", "mom_60d", "60日动量：季度价格趋势。")
+_register("pct_change(close, 120)", "mom_120d", "120日动量：半年价格趋势。")
+_register("-pct_change(close, 1)", "rev_1d", "1日反转：隔夜短期价格反转。")
+_register("-pct_change(close, 3)", "rev_3d", "3日反转：极短周期超跌修复。")
+_register("-pct_change(close, 10)", "rev_10d", "10日反转：两周价格反转。")
+_register("close / ts_mean(close, 5) - 1", "bias_5d", "5日乖离率：价格相对周均线强弱。")
+_register("close / ts_mean(close, 10) - 1", "bias_10d", "10日乖离率：价格相对双周均线强弱。")
+_register("close / ts_mean(close, 60) - 1", "bias_60d", "60日乖离率：价格相对季度均线强弱。")
+_register("(ema(close, 5) - ema(close, 20)) / close", "ema_cross_5_20", "5/20日均线差：短趋势斜率。")
+_register("(ema(close, 10) - ema(close, 60)) / close", "ema_cross_10_60", "10/60日均线差：中期趋势斜率。")
+_register("ts_mean(sign(returns), 20)", "trend_consistency_20", "20日趋势一致性：上涨日占优程度。")
+_register(
+    "(close - ts_max(high, 20)) / (ts_max(high, 20) + 0.0001)",
+    "breakout_20",
+    "20日突破距离：越接近或突破前高越强。",
+)
+_register("-ts_std(returns, 5)", "low_vol_5d", "5日低波动：周内收益波动率取负。")
+_register("-ts_std(returns, 10)", "low_vol_10d", "10日低波动：双周收益波动率取负。")
+_register("-ts_std(returns, 60)", "low_vol_60d", "60日低波动：季度收益波动率取负。")
+_register("-(ts_max(high, 10) / ts_min(low, 10) - 1)", "low_range_10d", "10日低振幅：双周价格区间越窄越好。")
+_register("-(ts_max(high, 60) / ts_min(low, 60) - 1)", "low_range_60d", "60日低振幅：季度价格区间越窄越好。")
+_register("-ts_mean(abs(returns), 20)", "mean_abs_return_20", "20日平均绝对收益取负：稳健的低波动代理。")
+_register("-ts_zscore(volume, 5)", "vol_shrink_5d", "5日缩量：成交量相对短窗均值越低越好。")
+_register("pct_change(ts_mean(volume, 5), 20)", "volume_momentum", "成交量动量：近周均量相对一个月前的变化。")
+_register("ts_zscore(amount, 20)", "amount_shock", "成交额冲击：当前成交额相对月内历史的位置。")
+_register("-ts_zscore(turnover, 10)", "turnover_shock", "换手冲击取负：异常高换手通常伴随短期拥挤。")
+_register("-ts_mean(turnover, 60)", "low_turnover_60", "60日低换手：季度筹码稳定度。")
+_register("-ts_corr(rank(volume), rank(close), 20)", "pv_divergence_20", "20日量价背离：量价相关取负。")
+_register("-(close / vwap - 1)", "vwap_reversion", "VWAP 偏离反转：收盘相对成交均价偏离取负。")
+_register("(close - open) / (high - low + 0.0001)", "intraday_strength", "日内强度：实体涨幅相对全天振幅。")
+_register("-(open / delay(close, 1) - 1)", "overnight_reversal", "隔夜缺口反转：开盘缺口取负。")
+_register(
+    "(close - ts_min(low, 60)) / (ts_max(high, 60) - ts_min(low, 60) + 0.0001)",
+    "price_pos_60",
+    "60日价格位置：当前价在季度区间的位置。",
+)
+
 
 def get_factor(name_or_expr: str) -> Factor:
     """按名称取内置因子；不是内置名称则当作表达式解析。"""

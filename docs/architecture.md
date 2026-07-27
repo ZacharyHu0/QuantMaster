@@ -18,18 +18,95 @@
 所有模块都可以脱离 Web 界面在 Python / CLI 中独立使用；Web 层只是薄薄的
 一层 JSON API。
 
+## 自动化与 Bot（automation/）
+
+- `runtime.py` 在 FastAPI lifespan 内启动 APScheduler，并通过 SQLite 租约保证多进程时只有
+  一个调度器、微信长轮询和飞书长连接处于活动状态。
+- `detector.py` 组合指数 15 分钟收益、量能、市场宽度和多指数同向性检测变盘；
+  `news.py` 按持仓、自选和全市场相关性为消息评分。数据过期或证据不足时不推送。
+- `store.py` 保存任务、事件、目标、策略、审计和 outbox。事件指纹、入站消息 ID、投递唯一键
+  与账本意图键共同保证重启/重试不会重复执行。
+- `channels/feishu.py` 使用飞书官方 Python SDK 的 WebSocket 长连接收事件，并通过消息 OpenAPI
+  向 `chat_id` 发送。它是主通道：私聊和群聊各自绑定为独立目标，告警使用结构化消息卡片。
+- `channels/weixin.py` 直接实现腾讯微信 ClawBot iLink 的二维码授权、`getupdates` 长轮询与
+  `sendmessage`；每次回复使用对应会话的最新 `context_token`。该通道仅作为能力受限的文本提醒补充。
+- `commands.py` 只接受固定中文命令。查询只读；任务/策略变更需要主人身份；账本和模拟调仓写入
+  仅允许主人私聊，并使用 5 分钟有效的一次性确认码。
+
+推送策略按目标保存。三个预设只是起点，高级字段可覆盖变盘阈值、连续确认 K 线、冷却时间、
+重要消息阈值和频率上限。任务失败及极高风险事件不受普通阈值过滤，但仍进入可靠发件箱留痕。
+
+## AI Quant Lab（lab/）
+
+- `catalog.py` 提供 48 个量价、估值、质量、行业与消息面研究起点。
+- `models.py` / `store.py` 定义不可变因子版本、数据快照、验证报告、审批、部署、
+  实验和可恢复任务；独立 `lab.sqlite` 使用 WAL，避免与交易账本耦合。
+- `dataset.py` 按沪深300和中证500各自最近一次历史权重向前填充，再取并集，构造
+  point-in-time 中证800掩码；固定股票池只具备 sandbox 研究质量。
+- `validation.py` 对所有因子统一执行 1/3/5/7 日 walk-forward、隔离期、IC/ICIR、
+  FDR、换手/交易成本、覆盖率和已有生产因子相关性门槛。
+- `ml.py` 在轻量核心外提供 Ridge 与可选 MLP、TCN、GRU、Transformer、DAE，
+  共用 48 维时序特征、按日期切分、Huber 损失和早停。
+- `worker.py` 既可随 Web 启动，也可独立运行；任务中断后恢复，自动任务受时间窗和
+  每日计算预算约束。跨进程调度时隙由 SQLite 幂等占用。
+- `server/lab.py` 只暴露安全 DSL、版本操作、任务和证据 API。人工批准是研究生产
+  的强制边界，部署仅指 Champion 切换，不连接真实券商。
+
+长耗时的市场概览与决策生成另提供 NDJSON 流式接口。数据层按标的回调真实
+完成度，事件除进度外还携带可立即使用的 `partial`：市场逐标的返回卡片数据，
+决策依次返回已就绪标的、牛熊、板块、候选和历史快照。最终结果用于一致性收口；
+反向代理应关闭响应缓冲。
+
 ## 数据层（data/）
 
 - **统一符号**：`600519.SH`、`00700.HK`、`^N225.JP`、`AU0.SHF`……后缀决定市场，
   `guess_market()` 据此路由数据源。
-- **统一数据结构**：所有数据源输出同一种日线 DataFrame
+- **统一数据结构**：所有数据源输出同一种日线/分钟线 DataFrame
   （index=交易日，columns=open/high/low/close/volume/amount/turnover），
   上层模块完全不感知数据来自哪家。
 - **数据源优先级与降级**：每个市场配置一列数据源（如 A 股 = [AKShare, Tushare]），
   逐个尝试，全部失败时回退本地缓存。新增数据源只需实现 `DataSource.daily()`
   并注册到 `registry._factories()`。
-- **缓存**：每标的一个 Parquet 文件，SQLite 记录覆盖区间与更新时间；
+- **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
+  隔离目录并增量归档。SQLite 记录覆盖区间与更新时间；
   命中覆盖区间或缓存足够新（`cache_days`）就不触网。
+- **部分数据保留**：日线响应只有覆盖请求边界且未丢失已知交易日时才整体替换
+  前复权缓存；缺头、缺尾或缺已知分块时先合并落盘，再按需尝试备用源。行业成分
+  按板块单独保存，部分刷新与旧映射合并，成功的数据不会被一次异常请求清除。
+- **数据源韧性**：AKShare 请求统一做指数退避重试；连续失败后，A 股日线
+  降级到 2000 积分 Tushare 的 `daily + adj_factor`，指数使用 `index_daily`。
+  Tushare 统一匀速限流，原始响应按接口和参数缓存为 Parquet；已结束的历史
+  区间长期复用，避免因重复研究消耗调用次数。
+- **基本面与行业降级**：AKShare 估值/ROE 失败时使用 `daily_basic` /
+  `fina_indicator`；行业优先使用申万 2021 `index_classify + index_member_all`，
+  按一级行业分批拉取，规避单次 2000 行上限并缓存 30 天。
+- **分钟线口径**：本地归档使用不复权价格，避免后续增量与变化后的前复权
+  基准拼接产生假跳空；1 分钟免费源回溯有限，需要每日运行 `qm fetch` 积累。
+
+## 市场状态与决策层（market/、decision/）
+
+- `market/regime.py`：逐日计算 MACD、资金量比、波动、牛熊分和五档趋势状态；
+  股票池状态叠加上涨家数、站上 MA20 比例，并按行业映射生成板块强弱。
+- “未来”输出 1/3/5/7 日概率、期望收益和置信度，明确标为规则型展望，
+  不把未知未来包装成事实；同时报告历史样本数、方向准确率与 Brier 概率误差，
+  方便长期检验展望是否真的有用。
+- `decision/swing.py`：趋势、MACD、价格位置、资金量、低波动截面合成；
+  熊市自动降至约 30% 敞口，生成 1–7 日持有、止损止盈与每日候选。
+- `decision/storage.py`：SQLite 保存每次真实生成的选股快照；回测研究可以对照
+  “当时的信号”，避免用后来重算的结果冒充历史决策。
+- Web 决策图按自然时间提供 7D、14D、1M、3M、6M、1Y、3Y、5Y、10Y
+  观察窗口；最长返回 2600 个交易日并复用同一 ECharts 实例做克制更新过渡。
+- `SwingStrategy` 使用同一套逐日历史分数进入 A 股规则回测，信号统一为
+  T 日收盘生成、T+1 开盘成交。
+- `load_bar_panel(..., frequency=...)` 为日线和分钟线提供相同的多标的面板范式，
+  分钟级特征研究无需另写数据拼接代码。
+
+## 标的列表与持仓（portfolio/）
+
+- `AssetListStore` 用 SQLite 独立保存自选与重点关注；A 股六位代码会自动补交易所后缀。
+- 持有列表直接来自 `Ledger.positions()`，不维护第二份持仓真相。
+- 三类列表的报价只读 `BarStore` 本地缓存，浏览列表不会触发 AKShare 或消耗
+  Tushare 调用次数；新增成交后前端会同步刷新持有列表。
 
 ## 因子层（factors/）
 
@@ -63,10 +140,15 @@
 - **llm.py**：直接 httpx 调 REST，`provider` 三选一：`anthropic` /
   `openai` / `openai-compatible`（DeepSeek、通义、Kimi、GLM、Ollama 等
   一切 OpenAI 协议网关，改 `base_url` 即可）。
-- **crawler.py**：`fetch（免费快讯接口）→ extract（LLM 批量结构化：相关股票/
-  事件类型/情绪分/摘要）→ store（SQLite 去重入库）`。
-- **sentiment.py**：把新闻情绪按股票聚合成因子面板（指数半衰衰减），
-  可与量价因子直接合成。
+- **news_sources.py**：持久化来源、运行记录和 HTTP 条件缓存。声明式采集只支持
+  RSS、JSON 点号路径和 HTML CSS 选择器；每次请求及重定向都校验公网地址，响应限制
+  5MB，鉴权凭据不会随跨域跳转或详情链接发送。
+- **crawler.py**：先规范化、指纹去重并写入 SQLite，再把新资讯放入 LLM 批量标注队列。
+  模型不可用不影响归档；失败按 1/5/30 分钟退避，重复资讯不重复消耗模型额度。
+- **sentiment.py**：`news_sentiment` 按首次获取时点而非来源声称的发布时间对齐，聚合
+  情绪、置信度、重要度与来源权重；盘后消息顺延到下一交易日并按自然日半衰衰减。
+- **server/news.py**：本机只读查询、来源管理、解析预览、手动采集与重新标注 API；
+  所有写操作复用设置中心的本机限制与 CSRF 防护。
 
 ## 实盘层（portfolio/）
 
@@ -93,6 +175,7 @@ numpy/pandas、A 股规则完整、LLM 可安全对接。
 2. **新因子**：`ExpressionFactor("...")` 一行；需要财务数据的因子用
    `FuncFactor` 包任意函数。
 3. **新策略**：继承 `Strategy` 实现 `target_weights()`。
-4. **新爬虫源**：写一个返回 `list[NewsItem]` 的函数，登记进 `crawler.SOURCES`。
+4. **新资讯源**：优先在「设置 → 资讯来源」添加 RSS、JSON 或 HTML 声明式规则；
+   只有需要专用协议的可信内置来源才新增适配器并登记进 `crawler.SOURCES`。
 5. **桌面打包**：Web 界面即 UI，后续可用 Tauri/Electron/pywebview 包一层壳，
    或 PyInstaller 打包 `qm serve`。

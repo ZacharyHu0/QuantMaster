@@ -86,3 +86,17 @@ class TestIndustryMapCache:
         monkeypatch.setattr(mod, "fetch_industry_map",
                             lambda: (_ for _ in ()).throw(RuntimeError("offline")))
         assert load_industry_map() == MAPPING
+
+    def test_partial_refresh_merges_without_deleting_old_blocks(self, monkeypatch):
+        """刷新只取得一个板块时，旧缓存的其他完整板块仍然可用。"""
+        from quantmaster.data import industry as mod
+
+        save_industry_map(MAPPING)
+        partial = {"600000.SH": "银行（新口径）", "000001.SZ": "银行（新口径）"}
+        monkeypatch.setattr(mod, "fetch_industry_map", lambda: partial)
+
+        result = load_industry_map(refresh=True)
+        assert result["600000.SH"] == "银行（新口径）"
+        assert result["000001.SZ"] == "银行（新口径）"
+        assert result["300750.SZ"] == "电池"
+        assert result["600519.SH"] == "白酒"

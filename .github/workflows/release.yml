@@ -1,5 +1,8 @@
 name: Release Desktop Builds
 
+permissions:
+  contents: write
+
 # 打 tag（如 v0.3.0）自动构建 Mac / Windows / Linux 三平台单文件可执行程序
 on:
   push:
@@ -31,6 +34,11 @@ jobs:
         run: |
           pip install -e ".[data]"
           pip install pyinstaller
+      - name: Verify tag matches application version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          test "${GITHUB_REF_NAME}" = "v$(python -c 'from quantmaster import __version__; print(__version__)')"
       - name: Build
         working-directory: packaging
         run: pyinstaller quantmaster.spec --noconfirm
@@ -46,3 +54,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}
+          body_path: CHANGELOG.md

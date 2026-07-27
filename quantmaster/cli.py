@@ -2,6 +2,8 @@
 
     qm serve                                    启动 Web 界面
     qm fetch --universe demo --start 2022-01-01 预取行情到本地缓存
+    qm regime --universe demo                     牛熊/趋势/板块状态
+    qm select --universe demo --horizon 3          每日短周期选股
     qm factors                                  列出内置因子
     qm factor-test "rank(-delta(close, 5))"     因子体检
     qm backtest --factor mom_20d --top 5        因子选股回测（--full 输出年/月收益，--stop-loss 止损）
@@ -59,8 +61,100 @@ def cmd_serve(args) -> None:
     serve()
 
 
+def cmd_automation(args) -> None:
+    from quantmaster.automation.service import AutomationService
+    from quantmaster.config import get_config
+
+    service = AutomationService()
+    if args.automation_cmd == "run":
+        _print_json(service.run_task(args.task, actor="cli"))
+        return
+    if args.automation_cmd == "dispatch":
+        _print_json(service.dispatcher.dispatch(args.limit))
+        return
+
+    checks = {}
+    for module in ("apscheduler", "lark_oapi", "qrcode", "keyring"):
+        try:
+            __import__(module)
+            checks[module] = {"ok": True}
+        except Exception as exc:
+            checks[module] = {"ok": False, "message": str(exc)}
+    cfg = get_config().automation
+    accounts = service.store.bot_accounts()
+    _print_json({
+        "enabled": cfg.enabled,
+        "timezone": cfg.timezone,
+        "dependencies": checks,
+        "channels": [
+            {key: value for key, value in account.items() if key != "secret_target"}
+            for account in accounts
+        ],
+        "targets": service.public_targets(),
+        "jobs": service.store.jobs(),
+        "hint": "定时任务和 Bot 长连接由 qm serve 承载",
+    })
+
+
+def cmd_lab(args) -> None:
+    """Quant Lab 的独立 Worker、研究任务和人工审批入口。"""
+    from quantmaster.lab.service import LabService
+
+    if args.lab_cmd == "worker":
+        from quantmaster.lab.worker import run_standalone
+
+        run_standalone()
+        return
+    service = LabService()
+    if args.lab_cmd == "doctor":
+        _print_json(service.overview())
+        return
+    if args.lab_cmd == "list":
+        _print_json(service.store.list_factors(
+            status=args.status, search=args.search, limit=args.limit))
+        return
+    if args.lab_cmd == "jobs":
+        _print_json({"items": service.store.jobs(args.limit)})
+        return
+    if args.lab_cmd == "approve":
+        _print_json(service.store.approve(
+            args.version_id, actor="cli", reason=args.reason))
+        return
+    if args.lab_cmd == "deploy":
+        _print_json(service.store.deploy(
+            args.version_id, universe=args.universe, horizon=args.horizon, actor="cli"))
+        return
+
+    end = args.end or _today()
+    base = {"universe": args.universe, "start": args.start, "end": end}
+    if args.lab_cmd == "prepare-data":
+        job = service.enqueue("prepare_data", base)
+    elif args.lab_cmd in {"validate", "score"}:
+        job = service.enqueue("validate", {"version_id": args.version_id, **base})
+    elif args.lab_cmd == "discover":
+        kind = "discover_llm" if args.method == "llm" else "discover_genetic"
+        params = {**base, "horizon": args.horizon, "top_n": args.top}
+        if args.method == "llm":
+            params = {**base, "horizon": args.horizon, "count": args.top, "rounds": args.rounds}
+        else:
+            params.update({"population": args.population, "generations": args.generations})
+        job = service.enqueue(kind, params)
+    elif args.lab_cmd == "train":
+        job = service.enqueue("train", {
+            **base, "model": args.model, "horizon": args.horizon,
+            "sequence_length": args.sequence_length,
+            "config": {"epochs": args.epochs},
+        })
+    else:  # pragma: no cover - argparse 保证子命令完整
+        raise ValueError(f"未知 lab 子命令: {args.lab_cmd}")
+    _print_json({
+        "job": job,
+        "hint": "任务已进入可恢复队列；由 qm serve 或 qm lab worker 执行",
+    })
+
+
 def cmd_fetch(args) -> None:
-    from quantmaster.data import load_history
+    from quantmaster.data import load_bars
     from quantmaster.data.universe import load_universe
 
     symbols = load_universe(args.universe)
@@ -68,8 +162,10 @@ def cmd_fetch(args) -> None:
     ok = failed = 0
     for symbol in symbols:
         try:
-            df = load_history(symbol, args.start, end, use_cache=not args.force)
-            print(f"  {symbol}: {len(df)} 条 ({df.index.min().date()} ~ {df.index.max().date()})")
+            df = load_bars(symbol, args.start, end, frequency=args.frequency,
+                           use_cache=not args.force)
+            print(f"  {symbol} {args.frequency}: {len(df)} 条 "
+                  f"({df.index.min()} ~ {df.index.max()})")
             ok += 1
         except Exception as e:
             print(f"  {symbol}: 失败 {e}", file=sys.stderr)
@@ -77,10 +173,61 @@ def cmd_fetch(args) -> None:
     print(f"完成: {ok} 成功, {failed} 失败")
 
 
+def cmd_regime(args) -> None:
+    from quantmaster.data.industry import load_industry_map
+    from quantmaster.market import analyze_market, analyze_sectors
+
+    end = args.end or _today()
+    panel = _load_panel(args.universe, args.start, end)
+    report = analyze_market(panel)
+    past = report.pop("past").tail(args.history)
+    payload = {
+        **report,
+        "past": [
+            {"date": str(idx.date()), **{
+                key: (None if pd.isna(value) else (
+                    value.item() if hasattr(value, "item") else value))
+                for key, value in row.items()
+            }}
+            for idx, row in past.iterrows()
+        ],
+        "sectors": [],
+    }
+    if not args.no_sectors:
+        mapping = load_industry_map()
+        sectors = analyze_sectors(panel, mapping).head(args.sector_top)
+        payload["sectors"] = sectors.to_dict(orient="records")
+    _print_json(payload)
+
+
+def cmd_select(args) -> None:
+    from quantmaster.data.industry import load_industry_map
+    from quantmaster.data.names import load_stock_names
+    from quantmaster.decision import DecisionStore, daily_selection
+
+    end = args.end or _today()
+    panel = _load_panel(args.universe, args.start, end)
+    mapping = {} if args.no_industry else load_industry_map()
+    names = load_stock_names(list(panel["close"].columns))
+    report = daily_selection(panel, top_n=args.top, horizon=args.horizon,
+                             industry_map=mapping, name_map=names)
+    if not args.no_save:
+        DecisionStore().save(report, args.universe)
+    _print_json(report)
+
+
+def cmd_decisions(args) -> None:
+    from quantmaster.decision import DecisionStore
+
+    _print_json({"snapshots": DecisionStore().history(args.universe, args.limit)})
+
+
 def cmd_factors(args) -> None:
+    from quantmaster.ai.sentiment import list_news_factors
+    from quantmaster.factors.fundamental import list_fundamental_factors
     from quantmaster.factors.library import list_factors
 
-    for f in list_factors():
+    for f in list_factors() + list_fundamental_factors() + list_news_factors():
         print(f"  {f['name']:<16} {f['expression']:<48} {f['description']}")
 
 
@@ -121,7 +268,11 @@ def cmd_backtest(args) -> None:
     panel = _load_panel(args.universe, args.start, end)
     symbols = load_universe(args.universe)
     names = [n.strip() for n in args.factor.split(",") if n.strip()]
-    if len(names) > 1:
+    if args.strategy == "swing":
+        from quantmaster.backtest import SwingStrategy
+
+        strategy = SwingStrategy(top_n=args.top, holding_days=args.holding_days)
+    elif len(names) > 1:
         from quantmaster.backtest.strategy import MultiFactorStrategy
 
         strategy = MultiFactorStrategy(
@@ -238,14 +389,19 @@ def cmd_crawl(args) -> None:
 
 def cmd_paper(args) -> None:
     from quantmaster.backtest.paper import PaperTrader
-    from quantmaster.backtest.strategy import FactorStrategy
+    from quantmaster.backtest.strategy import FactorStrategy, SwingStrategy
     from quantmaster.data.universe import load_universe
     from quantmaster.factors.library import get_factor
 
     trader = PaperTrader(initial_capital=args.capital)
     if args.paper_cmd == "run":
+        strategy = (
+            SwingStrategy(top_n=args.top, holding_days=args.holding_days)
+            if args.strategy == "swing"
+            else FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance)
+        )
         result = trader.run_once(
-            FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance),
+            strategy,
             load_universe(args.universe),
         )
         _print_json(result)
@@ -254,22 +410,23 @@ def cmd_paper(args) -> None:
 
 
 def cmd_daily(args) -> None:
-    """每日例程：更新行情 -> 抓取快讯 -> 模拟盘调仓 -> 输出报告。
+    """每日例程：更新行情 -> 抓取快讯 -> 生成选股 -> 模拟盘调仓。
 
     适合交易日收盘后跑一次（挂 crontab / Windows 计划任务）：
         30 15 * * 1-5  cd /path/to/QuantMaster && qm daily >> daily.log 2>&1
     """
     from quantmaster.ai.crawler import AICrawler
     from quantmaster.backtest.paper import PaperTrader
-    from quantmaster.backtest.strategy import FactorStrategy
-    from quantmaster.data import load_history
+    from quantmaster.backtest.strategy import FactorStrategy, SwingStrategy
+    from quantmaster.data import load_history, load_panel, load_stock_names
     from quantmaster.data.universe import load_universe
+    from quantmaster.decision import DecisionStore, daily_selection
     from quantmaster.factors.library import get_factor
 
     end = _today()
     symbols = load_universe(args.universe)
 
-    print(f"== 1/3 更新行情（{len(symbols)} 只 + 基准）==", file=sys.stderr)
+    print(f"== 1/4 更新行情（{len(symbols)} 只 + 基准）==", file=sys.stderr)
     ok = 0
     for symbol in [*symbols, args.benchmark]:
         try:
@@ -279,20 +436,36 @@ def cmd_daily(args) -> None:
             print(f"  {symbol}: {e}", file=sys.stderr)
     print(f"  行情就绪 {ok}/{len(symbols) + 1}", file=sys.stderr)
 
-    print("== 2/3 抓取财经快讯 ==", file=sys.stderr)
+    print("== 2/4 抓取财经快讯 ==", file=sys.stderr)
     try:
         crawl = AICrawler().run(skip_llm=args.skip_llm)
         print(f"  抓取 {crawl['fetched']} 条，入库 {crawl['saved']} 条", file=sys.stderr)
     except Exception as e:
         print(f"  快讯抓取失败（不影响后续）: {e}", file=sys.stderr)
 
-    print("== 3/3 模拟盘调仓 ==", file=sys.stderr)
-    trader = PaperTrader(initial_capital=args.capital)
-    result = trader.run_once(
-        FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance),
-        symbols,
+    print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
+    panel = load_panel(symbols, args.start, end)
+    selection = daily_selection(
+        panel, top_n=args.top, horizon=args.holding_days,
+        name_map=load_stock_names(symbols),
     )
-    _print_json(result)
+    DecisionStore().save(selection, args.universe)
+    print(f"  {selection['signal_date']}：{len(selection['picks'])} 只候选，"
+          f"建议仓位 {selection['recommended_exposure']:.0%}", file=sys.stderr)
+
+    print("== 4/4 模拟盘调仓 ==", file=sys.stderr)
+    trader = PaperTrader(initial_capital=args.capital)
+    strategy = (
+        SwingStrategy(top_n=args.top, holding_days=args.holding_days)
+        if args.strategy == "swing"
+        else FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance)
+    )
+    result = trader.run_once(
+        strategy,
+        symbols,
+        panel=panel,
+    )
+    _print_json({"selection": selection, "paper": result})
 
 
 def cmd_universe(args) -> None:
@@ -396,10 +569,92 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
     p.set_defaults(func=cmd_serve, open_browser=True)
 
+    p = sub.add_parser("automation", help="Bot 推送与定时任务诊断/手动执行")
+    asub = p.add_subparsers(dest="automation_cmd", required=True)
+    asub.add_parser("doctor", help="检查依赖、Bot 账号、推送目标和任务状态")
+    arun = asub.add_parser("run", help="立即提交一个自动化任务")
+    arun.add_argument("task", choices=[
+        "intraday_monitor", "fast_news_scan", "official_news_scan", "periodic_news_scan",
+        "daily_close_pipeline", "news_digest", "paper_rebalance_proposal",
+    ])
+    adispatch = asub.add_parser("dispatch", help="立即投递待发消息")
+    adispatch.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_automation)
+
+    p = sub.add_parser("lab", help="AI Quant Lab：发现、训练、验证、审批和 Worker")
+    lq = p.add_subparsers(dest="lab_cmd", required=True)
+    lq.add_parser("doctor", help="查看研究配置、依赖与任务状态")
+    lq.add_parser("worker", help="启动独立研究 Worker")
+    llist = lq.add_parser("list", help="列出版本化因子目录")
+    llist.add_argument("--status", default=None)
+    llist.add_argument("--search", default="")
+    llist.add_argument("--limit", type=int, default=100)
+    ljobs = lq.add_parser("jobs", help="查看研究任务")
+    ljobs.add_argument("--limit", type=int, default=50)
+
+    def lab_common(parser):
+        parser.add_argument("--universe", default="demo")
+        parser.add_argument("--start", default="2022-01-01")
+        parser.add_argument("--end", default=None)
+
+    lprepare = lq.add_parser("prepare-data", help="冻结数据与股票池快照")
+    lab_common(lprepare)
+    for command in ("validate", "score"):
+        item = lq.add_parser(command, help="提交统一样本外验证任务")
+        item.add_argument("version_id")
+        lab_common(item)
+    ldiscover = lq.add_parser("discover", help="提交遗传或 LLM 因子发现任务")
+    lab_common(ldiscover)
+    ldiscover.add_argument("--method", choices=["genetic", "llm"], default="genetic")
+    ldiscover.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    ldiscover.add_argument("--top", type=int, default=10)
+    ldiscover.add_argument("--population", type=int, default=60)
+    ldiscover.add_argument("--generations", type=int, default=8)
+    ldiscover.add_argument("--rounds", type=int, default=2)
+    ltrain = lq.add_parser("train", help="提交 Ridge/深度学习实验")
+    lab_common(ltrain)
+    ltrain.add_argument(
+        "--model", choices=["ridge", "mlp", "tcn", "gru", "transformer", "dae"],
+        default="ridge")
+    ltrain.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    ltrain.add_argument("--sequence-length", type=int, default=20)
+    ltrain.add_argument("--epochs", type=int, default=30)
+    lapprove = lq.add_parser("approve", help="人工批准候选版本")
+    lapprove.add_argument("version_id")
+    lapprove.add_argument("--reason", default="")
+    ldeploy = lq.add_parser("deploy", help="设为研究生产 champion（不连接券商）")
+    ldeploy.add_argument("version_id")
+    ldeploy.add_argument("--universe", default="csi800")
+    ldeploy.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    p.set_defaults(func=cmd_lab)
+
     p = sub.add_parser("fetch", help="预取行情到本地缓存")
     common(p)
+    p.add_argument("--frequency", default="1d",
+                   choices=["1d", "1m", "5m", "15m", "30m", "60m"],
+                   help="K线频率；分钟线会按频率独立长期归档")
     p.add_argument("--force", action="store_true", help="忽略缓存强制刷新")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("regime", help="牛熊、上/下行/震荡、板块强弱与1-7日展望")
+    common(p)
+    p.add_argument("--history", type=int, default=60, help="输出最近多少个历史状态")
+    p.add_argument("--sector-top", type=int, default=10)
+    p.add_argument("--no-sectors", action="store_true", help="不加载行业映射")
+    p.set_defaults(func=cmd_regime)
+
+    p = sub.add_parser("select", help="每日选股：适合持有1-7个交易日的量价/MACD决策")
+    common(p)
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--horizon", type=int, default=3, choices=range(1, 8))
+    p.add_argument("--no-industry", action="store_true", help="不加载行业名称")
+    p.add_argument("--no-save", action="store_true", help="不保存本次决策快照")
+    p.set_defaults(func=cmd_select)
+
+    p = sub.add_parser("decisions", help="查看本地保存的历史选股快照")
+    p.add_argument("--universe", default=None, help="按股票池过滤")
+    p.add_argument("--limit", type=int, default=30)
+    p.set_defaults(func=cmd_decisions)
 
     sub.add_parser("factors", help="列出内置因子").set_defaults(func=cmd_factors)
 
@@ -413,11 +668,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backtest", help="因子选股回测（--factor 逗号分隔多个名字 = 多因子组合）")
     common(p)
+    p.add_argument("--strategy", default="factor", choices=["factor", "swing"],
+                   help="factor=传统因子；swing=1-7日趋势/MACD/资金量选股")
     p.add_argument("--factor", default="mom_20d",
                    help="因子名/表达式；逗号分隔多个则做多因子合成，如 mom_20d,rev_5d,ep")
     p.add_argument("--weighting", default="equal", choices=["equal", "ic"],
                    help="多因子合成方式：等权 或 滚动IC动态加权")
     p.add_argument("--top", type=int, default=5)
+    p.add_argument("--holding-days", type=int, default=3, choices=range(1, 8),
+                   help="swing 策略持有/调仓周期")
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)
@@ -471,8 +730,10 @@ def build_parser() -> argparse.ArgumentParser:
     psub = p.add_subparsers(dest="paper_cmd", required=True)
     pr = psub.add_parser("run", help="按策略执行一次模拟调仓")
     pr.add_argument("--universe", default="demo")
+    pr.add_argument("--strategy", default="factor", choices=["factor", "swing"])
     pr.add_argument("--factor", default="mom_20d")
     pr.add_argument("--top", type=int, default=5)
+    pr.add_argument("--holding-days", type=int, default=3, choices=range(1, 8))
     pr.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     pr.add_argument("--capital", type=float, default=1_000_000)
     psub.add_parser("report", help="模拟盘收益报告")
@@ -481,8 +742,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("daily", help="每日例程：更新行情+抓快讯+模拟盘调仓（适合挂定时任务）")
     p.add_argument("--universe", default="demo")
     p.add_argument("--start", default="2022-01-01")
+    p.add_argument("--strategy", default="swing", choices=["factor", "swing"])
     p.add_argument("--factor", default="mom_20d")
     p.add_argument("--top", type=int, default=5)
+    p.add_argument("--holding-days", type=int, default=3, choices=range(1, 8))
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)

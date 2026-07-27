@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>QuantMaster</title>
+<link rel="stylesheet" href="/static/settings.css">
+<link rel="stylesheet" href="/static/automation.css">
+<link rel="stylesheet" href="/static/news.css">
+<link rel="stylesheet" href="/static/lab.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
 <style>
@@ -16,19 +20,48 @@
     --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     --up: #e66767; --down: #0ca30c;   /* A股惯例：红涨绿跌 */
     --bad: #d03b3b;
+    --space-xs: 4px; --space-sm: 8px; --space-md: 12px; --space-lg: 16px;
+    --space-xl: 24px; --space-2xl: 32px;
+    --ease-out-quart: cubic-bezier(.25,1,.5,1);
+    --ease-out-expo: cubic-bezier(.16,1,.3,1);
   }
   * { box-sizing: border-box; margin: 0; }
   body { background: var(--page); color: var(--ink); font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
   header { display: flex; align-items: center; gap: 24px; padding: 12px 24px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--page); z-index: 10; }
-  header h1 { font-size: 18px; letter-spacing: .5px; }
+  header h1 { flex:0 0 auto; font-size: 18px; letter-spacing: .5px; }
   header h1 span { color: var(--s1); }
-  nav { display: flex; gap: 4px; }
-  nav button { background: none; border: none; color: var(--ink-2); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  nav { display: flex; flex:1 1 auto; gap: 4px; min-width:0; overflow-x:auto; scrollbar-width:thin; }
+  nav button { background: none; border: none; color: var(--ink-2); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 14px; white-space:nowrap; flex:0 0 auto; transition:background-color 180ms var(--ease-out-quart),color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
   nav button.active { background: var(--surface); color: var(--ink); }
   nav button:hover { color: var(--ink); }
-  main { padding: 20px 24px 60px; max-width: 1280px; margin: 0 auto; }
+  nav button:active { transform:scale(.97); }
+  .release-trigger { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; min-height:36px; background:none; border:0; color:var(--ink-2); padding:7px 4px; cursor:pointer; font-size:13px; font-weight:550; line-height:1; font-variant-numeric:tabular-nums; white-space:nowrap; transition:color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
+  .release-trigger:hover,.release-trigger[aria-expanded="true"] { color:var(--ink); }
+  .release-trigger:active { transform:scale(.98); }
+  .release-date { color:var(--muted); font-size:12px; font-weight:500; }
+  .release-date::before { content:"·"; margin-right:6px; color:var(--muted); }
+  .release-popover { position:absolute; top:calc(100% + 8px); right:24px; width:min(420px,calc(100vw - 32px)); max-height:min(620px,calc(100vh - 88px)); overflow:auto; background:var(--surface); border:1px solid var(--axis); border-radius:10px; padding:18px; box-shadow:0 18px 48px rgba(0,0,0,.36); z-index:11; }
+  .release-popover[hidden] { display:none; }
+  .release-popover-head { display:flex; align-items:baseline; justify-content:space-between; gap:16px; padding-bottom:12px; border-bottom:1px solid var(--border); }
+  .release-popover-head h2 { font-size:15px; font-weight:600; }
+  .release-popover-head span { color:var(--muted); font-size:11px; }
+  .release-entry { padding:16px 0; }
+  .release-entry + .release-entry { border-top:1px solid var(--border); }
+  .release-entry-heading { display:flex; align-items:baseline; gap:8px; margin-bottom:10px; }
+  .release-entry-heading strong { font-size:13px; font-weight:600; }
+  .release-entry-heading time { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+  .release-section + .release-section { margin-top:12px; }
+  .release-section h3 { color:var(--ink-2); font-size:12px; font-weight:500; margin-bottom:5px; }
+  .release-section ul { display:grid; gap:5px; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.55; }
+  .header-settings { display:grid; place-items:center; flex:0 0 auto; width:40px; height:40px; background:none; color:var(--ink-2); border:1px solid var(--axis); border-radius:8px; padding:0; cursor:pointer; transition:background-color 180ms var(--ease-out-quart),border-color 180ms var(--ease-out-quart),color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
+  .header-settings svg { display:block; width:20px; height:20px; }
+  .header-settings:hover { color:var(--ink); border-color:color-mix(in oklch,var(--axis) 55%,var(--ink-2)); }
+  .header-settings.active { color:var(--ink); background:var(--surface); border-color:var(--border); }
+  .header-settings:active { transform:scale(.97); }
+  .release-trigger:focus-visible,.header-settings:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
+  main { padding: 20px 24px 88px; max-width: 1280px; margin: 0 auto; }
   .tab { display: none; }
-  .tab.active { display: block; }
+  .tab.active { display: block; animation:tab-in 220ms var(--ease-out-quart) both; }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
   .card .k { color: var(--muted); font-size: 12px; }
@@ -54,15 +87,186 @@
   .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
   .mkt-item { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
   .mkt-item:hover { border-color: var(--s1); }
+  .mkt-item.stream-enter { animation:stream-in 180ms var(--ease-out-quart) both; }
   .mkt-item .nm { color: var(--ink-2); font-size: 13px; }
   .mkt-item .px { font-size: 18px; font-weight: 600; }
   .mkt-item .spark { height: 42px; margin-top: 4px; }
+  .market-detail-panel { margin-top:var(--space-2xl); scroll-margin-top:88px; }
+  .asset-workbench { padding:14px 16px; }
+  .asset-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }
+  .asset-add-form { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+  .asset-add-form input { min-width:160px; }
+  .asset-add-form select { min-width:82px; }
+  .asset-table tbody tr { transition:background-color 160ms var(--ease-out-quart); }
+  .asset-table tbody tr:hover { background:color-mix(in oklch,var(--s1) 7%,transparent); }
+  .symbol-action,.text-action { border:0; background:none; color:var(--ink-2); cursor:pointer; padding:2px 0; font:inherit; }
+  .symbol-action { color:var(--ink); font-weight:600; }
+  .symbol-action:hover,.text-action:hover { color:var(--s1); }
+  .text-action { font-size:12px; }
   .group-title { color: var(--muted); font-size: 13px; margin: 18px 0 8px; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--axis); color: var(--ink-2); }
   .msg { color: var(--muted); padding: 20px 0; }
   .err { color: var(--bad); white-space: pre-wrap; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .load-state { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px; margin:12px 0 16px; contain:paint; }
+  .load-state.has-results { padding:12px 14px; margin-bottom:12px; }
+  .load-state.has-results .load-skeleton { display:none; }
+  .load-state.complete .load-dot { background:var(--s3); animation:none; }
+  .load-state.failed .load-dot { background:var(--bad); animation:none; }
+  .stream-results:empty { display:none; }
+  .stream-results > .group-title:first-child { margin-top:0; }
+  .ready-preview { padding:14px 16px; }
+  .ready-preview-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }
+  .ready-preview-head strong { color:var(--ink-2); font-size:13px; }
+  .ready-symbols { display:flex; gap:6px; flex-wrap:wrap; }
+  .ready-symbol { background:var(--page); color:var(--ink-2); border:1px solid var(--axis); border-radius:7px; padding:4px 8px; cursor:pointer; font-size:11px; }
+  .ready-symbol:hover { color:var(--ink); border-color:var(--s1); }
+  .load-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+  .load-title { display:flex; align-items:center; gap:9px; color:var(--ink-2); font-weight:600; }
+  .load-dot { width:7px; height:7px; border-radius:50%; background:var(--s1); flex:0 0 auto; animation:load-pulse 1.2s cubic-bezier(.65,0,.35,1) infinite; }
+  .load-percent { color:var(--ink); font-size:18px; font-weight:650; font-variant-numeric:tabular-nums; line-height:1.2; }
+  .load-detail { color:var(--muted); font-size:12px; margin:3px 0 12px 16px; min-height:19px; }
+  .load-track { height:4px; background:var(--grid); border-radius:2px; overflow:hidden; }
+  .load-fill { height:100%; background:var(--s1); transform:scaleX(var(--progress,0)); transform-origin:left; transition:transform 260ms var(--ease-out-quart); }
+  .load-meta { display:flex; justify-content:space-between; gap:16px; color:var(--muted); font-size:11px; margin-top:8px; font-variant-numeric:tabular-nums; }
+  .load-skeleton { margin-top:20px; border-top:1px solid var(--border); padding-top:16px; }
+  .skeleton-market { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .skeleton-decision { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(320px,1.7fr); gap:10px; }
+  .skeleton-block { height:62px; border-radius:8px; background:var(--grid); opacity:.52; animation:skeleton-breathe 1.35s cubic-bezier(.65,0,.35,1) infinite alternate; }
+  .skeleton-block.tall { height:108px; }
+  .skeleton-metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .skeleton-metrics .skeleton-block { height:50px; }
   code { background: var(--page); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+  .section-lead { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:20px; }
+  .section-lead h2 { font-size:20px; line-height:1.25; letter-spacing:.2px; font-weight:650; }
+  .section-lead p { color:var(--muted); max-width:68ch; margin-top:4px; }
+  .segmented { display:flex; gap:2px; padding:3px; background:var(--page); border:1px solid var(--axis); border-radius:9px; }
+  .segmented button { border:0; background:none; color:var(--muted); border-radius:6px; padding:4px 9px; cursor:pointer; font-size:12px; transition:background-color 180ms var(--ease-out-quart),color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
+  .segmented button:hover { color:var(--ink); }
+  .segmented button:active { transform:scale(.97); }
+  .segmented button.active { color:var(--ink); background:var(--grid); }
+  .decision-summary { display:grid; grid-template-columns:minmax(230px,.7fr) minmax(460px,1.7fr); border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--surface); margin-bottom:16px; }
+  .regime-block { padding:24px; display:flex; flex-direction:column; justify-content:space-between; min-height:170px; border-bottom:0; }
+  .eyebrow { color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+  .regime-name { font-size:28px; font-weight:680; line-height:1.1; margin-top:6px; }
+  .regime-score { display:flex; align-items:baseline; gap:8px; margin-top:18px; }
+  .regime-score strong { font-size:32px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .metric-strip { display:grid; grid-template-columns:repeat(4,minmax(100px,1fr)); align-content:stretch; border-left:1px solid var(--border); }
+  .metric-cell { padding:18px 16px; min-height:84px; display:flex; flex-direction:column; justify-content:center; }
+  .metric-cell:nth-child(-n+4) { border-bottom:1px solid var(--border); }
+  .metric-cell .k { color:var(--muted); font-size:11px; }
+  .metric-cell .v { margin-top:3px; font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .decision-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(340px,.75fr); gap:16px; }
+  .decision-grid > .panel { min-width:0; }
+  .panel-heading { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:10px; }
+  .panel-heading h3 { margin:0; }
+  .regime-heading { align-items:center; }
+  .regime-heading-title { display:flex; align-items:center; gap:8px; min-width:max-content; }
+  .regime-window { max-width:100%; overflow-x:auto; scrollbar-width:thin; }
+  .regime-window button { flex:0 0 auto; }
+  .state-pill { display:inline-flex; align-items:center; border:1px solid var(--axis); border-radius:999px; padding:2px 8px; font-size:11px; color:var(--ink-2); white-space:nowrap; }
+  .state-pill.buy { color:var(--up); border-color:color-mix(in oklch,var(--up) 40%,transparent); }
+  .state-pill.watch { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
+  .state-pill.avoid { color:var(--down); border-color:color-mix(in oklch,var(--down) 45%,transparent); }
+  .score-track { width:72px; height:3px; background:var(--grid); overflow:hidden; border-radius:2px; }
+  .score-fill { height:100%; background:var(--s1); transform:scaleX(var(--score,0)); transform-origin:left; transition:transform 360ms var(--ease-out-expo); }
+  .table-scroll { overflow:auto; }
+  .decision-table { min-width:980px; }
+  .decision-table tbody tr { transition:background-color 160ms var(--ease-out-quart); }
+  .decision-table tbody tr[data-symbol] { cursor:pointer; }
+  .decision-table tbody tr:hover { background:color-mix(in oklch,var(--s1) 7%,transparent); }
+  .reason { color:var(--muted); font-size:12px; max-width:36ch; }
+  .decision-table td.reason { min-width:260px; }
+  .reveal { animation:reveal-in 280ms var(--ease-out-expo) both; }
+  .reveal-delay { animation-delay:45ms; }
+  .runtime-info { position:fixed; inset-inline:16px; bottom:12px; max-width:1120px; margin-inline:auto; z-index:40; background:var(--surface); border:1px solid var(--axis); border-radius:10px; overflow:hidden; color:var(--ink-2); }
+  .runtime-summary { width:100%; min-height:42px; display:flex; align-items:center; gap:9px; border:0; background:transparent; color:inherit; padding:8px 11px; cursor:pointer; text-align:left; font:inherit; }
+  .runtime-summary:hover { background:color-mix(in oklch,var(--ink) 4%,transparent); }
+  .runtime-summary:focus-visible,.runtime-tool:focus-visible,.runtime-filter:focus-visible,.runtime-copy:focus-visible { outline:1px solid var(--s1); outline-offset:-2px; }
+  .runtime-dot { width:7px; height:7px; flex:0 0 auto; border-radius:50%; background:var(--s3); transition:background-color 180ms var(--ease-out-quart),transform 180ms var(--ease-out-quart); }
+  .runtime-info[data-level="warning"] .runtime-dot { background:var(--s4); }
+  .runtime-info[data-level="error"] .runtime-dot { background:var(--bad); transform:scale(1.15); }
+  .runtime-label { flex:0 0 auto; color:var(--ink); font-weight:600; font-size:12px; }
+  .runtime-latest { min-width:0; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }
+  .runtime-info[data-level="error"] .runtime-latest { color:color-mix(in oklch,var(--bad) 78%,var(--ink)); }
+  .runtime-count { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+  .runtime-error-count { flex:0 0 auto; min-width:20px; padding:1px 6px; border:1px solid color-mix(in oklch,var(--bad) 55%,transparent); border-radius:999px; color:color-mix(in oklch,var(--bad) 75%,var(--ink)); font-size:11px; text-align:center; font-variant-numeric:tabular-nums; }
+  .runtime-error-count[hidden] { display:none; }
+  .runtime-chevron { width:14px; height:14px; flex:0 0 auto; color:var(--muted); transition:transform 200ms var(--ease-out-quart); }
+  .runtime-info.expanded .runtime-chevron { transform:rotate(180deg); }
+  .runtime-drawer-frame { display:grid; grid-template-rows:0fr; transition:grid-template-rows 220ms var(--ease-out-quart); }
+  .runtime-info.expanded .runtime-drawer-frame { grid-template-rows:1fr; }
+  .runtime-drawer-inner { min-height:0; overflow:hidden; }
+  .runtime-drawer { border-top:1px solid var(--border); }
+  .runtime-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-bottom:1px solid var(--border); }
+  .runtime-filters { display:flex; align-items:center; gap:2px; min-width:0; overflow-x:auto; }
+  .runtime-filter,.runtime-tool,.runtime-copy { border:0; background:transparent; color:var(--muted); cursor:pointer; font:inherit; }
+  .runtime-filter { border-radius:6px; padding:4px 8px; white-space:nowrap; font-size:11px; }
+  .runtime-filter:hover,.runtime-filter.active { color:var(--ink); background:var(--grid); }
+  .runtime-actions { display:flex; align-items:center; gap:4px; flex:0 0 auto; }
+  .runtime-tool { padding:4px 6px; font-size:11px; }
+  .runtime-tool:hover,.runtime-copy:hover { color:var(--ink); }
+  .runtime-list { max-height:min(44vh,380px); overflow:auto; overscroll-behavior:contain; }
+  .runtime-entry { display:grid; grid-template-columns:54px minmax(0,1fr) auto; gap:10px; align-items:start; padding:9px 11px; border-bottom:1px solid var(--grid); animation:runtime-entry-in 180ms var(--ease-out-quart) both; }
+  .runtime-entry:last-child { border-bottom:0; }
+  .runtime-entry:hover { background:color-mix(in oklch,var(--ink) 3%,transparent); }
+  .runtime-time { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; padding-top:1px; }
+  .runtime-entry-body { min-width:0; }
+  .runtime-entry-title { display:flex; align-items:baseline; gap:8px; min-width:0; }
+  .runtime-source { color:var(--ink-2); flex:0 0 auto; font-size:12px; font-weight:600; }
+  .runtime-message { color:var(--ink); min-width:0; overflow-wrap:anywhere; font-size:12px; }
+  .runtime-context { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:2px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+  .runtime-request { display:inline-flex; align-items:center; gap:3px; }
+  .runtime-request code { color:var(--ink-2); padding:0 4px; font-size:10px; user-select:all; }
+  .runtime-copy { padding:0 2px; font-size:10px; }
+  .runtime-level { border:1px solid var(--axis); border-radius:999px; color:var(--muted); padding:1px 6px; font-size:10px; white-space:nowrap; }
+  .runtime-entry[data-level="success"] .runtime-level { color:var(--s3); border-color:color-mix(in oklch,var(--s3) 45%,transparent); }
+  .runtime-entry[data-level="warning"] .runtime-level { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
+  .runtime-entry[data-level="error"] { background:color-mix(in oklch,var(--bad) 7%,var(--surface)); }
+  .runtime-entry[data-level="error"] .runtime-level { color:color-mix(in oklch,var(--bad) 74%,var(--ink)); border-color:color-mix(in oklch,var(--bad) 52%,transparent); }
+  .runtime-empty { color:var(--muted); padding:18px 11px; font-size:12px; text-align:center; }
+  @keyframes reveal-in { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes stream-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes tab-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes runtime-entry-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes load-pulse { 0%,100% { opacity:.4; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
+  @keyframes skeleton-breathe { from { opacity:.32; } to { opacity:.62; } }
+  @media (max-width:900px) {
+    header { gap:12px; padding:12px 16px; }
+    header h1 { flex:0 0 auto; }
+    nav { padding-bottom:3px; }
+    main { padding:16px 14px 48px; }
+    .decision-summary,.decision-grid { grid-template-columns:1fr; }
+    .metric-strip { border-left:0; border-top:1px solid var(--border); grid-template-columns:repeat(2,1fr); }
+    .metric-cell:nth-child(-n+6) { border-bottom:1px solid var(--border); }
+    .metric-cell:nth-child(n+7) { border-bottom:0; }
+    .section-lead { flex-direction:column; }
+    .row > .panel { min-width:100%; }
+    .skeleton-decision { grid-template-columns:1fr; }
+    .skeleton-metrics { grid-template-columns:repeat(2,1fr); }
+    .asset-toolbar { align-items:flex-start; flex-direction:column; }
+    .asset-add-form { justify-content:flex-start; width:100%; max-width:100%; }
+    .asset-add-form input { flex:1 1 100%; width:100%; min-width:0; }
+    .regime-heading { align-items:flex-start; flex-direction:column; }
+    .regime-window { width:100%; }
+  }
+  @media (max-width:560px) {
+    .release-trigger { gap:4px; }
+    .release-year { display:none; }
+    .release-date::before { margin-right:4px; }
+    .release-popover { right:16px; }
+    .header-settings { width:40px; height:40px; }
+    .runtime-info { inset-inline:8px; bottom:8px; }
+    .runtime-label { display:none; }
+    .runtime-count { display:none; }
+    .runtime-entry { grid-template-columns:46px minmax(0,1fr); gap:7px; }
+    .runtime-level { grid-column:2; justify-self:start; }
+    .runtime-entry-title { align-items:flex-start; flex-direction:column; gap:1px; }
+    .runtime-toolbar { align-items:flex-start; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
+  }
 </style>
 </head>
 <body>
@@ -70,13 +274,46 @@
   <h1>Quant<span>Master</span></h1>
   <nav id="nav">
     <button data-tab="market" class="active">市场</button>
-    <button data-tab="factor">因子</button>
+    <button data-tab="decision">决策</button>
+    <button data-tab="lab">Quant Lab</button>
+    <button data-tab="factor" hidden>因子</button>
     <button data-tab="backtest">回测</button>
-    <button data-tab="mine">挖掘</button>
+    <button data-tab="mine" hidden>挖掘</button>
     <button data-tab="paper">模拟盘</button>
     <button data-tab="news">资讯</button>
     <button data-tab="ledger">实盘</button>
+    <button data-tab="automation">自动化</button>
   </nav>
+  <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
+    <span id="release-version">版本</span>
+    <time class="release-date" id="release-date" hidden><span class="release-year"></span><span class="release-day"></span></time>
+  </button>
+  <button class="header-settings" data-tab="settings" type="button" aria-label="设置" title="设置">
+    <svg class="settings-gear" viewBox="0 0 24 24" aria-hidden="true">
+      <mask id="settings-gear-cutout">
+        <rect width="24" height="24" fill="white"/>
+        <circle cx="12" cy="12" r="2.6" fill="black"/>
+      </mask>
+      <g fill="currentColor" mask="url(#settings-gear-cutout)">
+        <circle cx="12" cy="12" r="6.7"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(45 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(90 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(135 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(180 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(225 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(270 12 12)"/>
+        <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(315 12 12)"/>
+      </g>
+    </svg>
+  </button>
+  <aside class="release-popover" id="release-popover" role="dialog" aria-modal="false" aria-labelledby="release-popover-title" hidden>
+    <div class="release-popover-head">
+      <h2 id="release-popover-title">更新日志</h2>
+      <span>QuantMaster</span>
+    </div>
+    <div id="release-list"><div class="msg">正在读取更新日志…</div></div>
+  </aside>
 </header>
 <main>
 
@@ -86,11 +323,237 @@
     <button class="primary" type="submit">刷新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
   </form>
+  <div class="panel asset-workbench" id="asset-workbench">
+    <div class="asset-toolbar">
+      <div class="segmented" id="asset-tabs" aria-label="我的标的分类">
+        <button type="button" data-asset-list="favorites" class="active" aria-pressed="true">自选 <span data-asset-count="favorites">0</span></button>
+        <button type="button" data-asset-list="following" aria-pressed="false">关注 <span data-asset-count="following">0</span></button>
+        <button type="button" data-asset-list="holdings" aria-pressed="false">持有 <span data-asset-count="holdings">0</span></button>
+      </div>
+      <form class="asset-add-form" id="asset-add-form">
+        <input name="symbol" aria-label="标的代码" placeholder="输入代码，如 600519" required>
+        <input name="name" aria-label="标的名称" placeholder="名称（可选）">
+        <select name="list_name" aria-label="加入列表"><option value="favorites">加自选</option><option value="following">加关注</option></select>
+        <button class="ghost" type="submit">添加</button>
+      </form>
+    </div>
+    <div class="table-scroll" id="asset-list"><div class="msg">正在读取本地列表…</div></div>
+    <div class="hint">自选与关注保存在本地；持有来自实盘账本。报价只读本地缓存，不额外请求数据源。</div>
+  </div>
   <div id="mkt-groups"><div class="msg">加载全球市场概览中…（首次会逐个拉取并缓存，可能需要 1-2 分钟）</div></div>
-  <div class="panel" id="kline-panel" style="display:none">
-    <h3 id="kline-title">K线</h3>
+  <div class="panel market-detail-panel" id="kline-panel" style="display:none">
+    <div class="panel-heading">
+      <h3 id="kline-title">K线</h3>
+      <div class="segmented" id="kline-frequency" aria-label="K线周期">
+        <button type="button" data-frequency="1d" class="active" aria-pressed="true">日线</button>
+        <button type="button" data-frequency="60m" aria-pressed="false">60分</button>
+        <button type="button" data-frequency="15m" aria-pressed="false">15分</button>
+        <button type="button" data-frequency="5m" aria-pressed="false">5分</button>
+        <button type="button" data-frequency="1m" aria-pressed="false">1分</button>
+      </div>
+    </div>
     <div class="chart" id="kline"></div>
   </div>
+</section>
+
+<!-- ================= 决策 ================= -->
+<section class="tab" id="tab-decision">
+  <div class="section-lead">
+    <div>
+      <h2>市场状态与每日决策</h2>
+      <p>同一份本地行情同时驱动牛熊判断、板块强弱和 1–7 日候选；未来展望以历史概率误差校验，不呈现为确定结论。</p>
+    </div>
+  </div>
+  <form class="controls" id="decision-form">
+    <label>股票池<input name="universe" value="demo"></label>
+    <label>研究起点<input name="start" type="date" value="2015-01-01"></label>
+    <label>持有周期
+      <select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select>
+    </label>
+    <label>候选数量<input name="top_n" type="number" value="10" min="1" max="50"></label>
+    <button class="primary" type="submit">生成今日决策</button>
+  </form>
+  <div class="hint">收盘后生成信号，默认保存本次快照；实际交易按 T+1 开盘执行。首次加载行业映射可能稍慢。</div>
+  <div id="decision-out"><div class="msg">选择参数后生成市场与选股决策。</div></div>
+</section>
+
+<!-- ================= AI Quant Lab ================= -->
+<section class="tab" id="tab-lab">
+  <div class="lab-masthead">
+    <div>
+      <div class="lab-kicker"><span class="lab-live-dot"></span>AI QUANT LAB · RESEARCH OS</div>
+      <h2>从研究假设到可审计因子</h2>
+      <p>AI 提案、人工修正、统一验证和模型实验共用同一份版本账本；只有人工批准的版本才能进入研究生产。</p>
+    </div>
+    <div class="lab-head-actions">
+      <button class="lab-button lab-button-quiet" type="button" data-lab-action="create-factor">新建因子</button>
+      <button class="lab-button lab-button-primary" type="button" data-lab-go="discover">启动发现任务</button>
+    </div>
+  </div>
+
+  <div class="lab-capability-strip" id="lab-capabilities" aria-live="polite">
+    <span class="lab-capability"><i></i>正在读取研究环境…</span>
+  </div>
+
+  <div class="lab-shell">
+    <aside class="lab-rail" aria-label="Quant Lab 分区">
+      <div class="lab-rail-label">WORKSPACE</div>
+      <button class="active" type="button" data-lab-view="overview"><span>01</span>总览</button>
+      <button type="button" data-lab-view="discover"><span>02</span>AI 发现</button>
+      <button type="button" data-lab-view="experiments"><span>03</span>模型实验</button>
+      <button type="button" data-lab-view="library"><span>04</span>因子库</button>
+      <button type="button" data-lab-view="automation"><span>05</span>研究自动化</button>
+      <div class="lab-rail-foot">
+        <span>APPROVAL MODE</span>
+        <strong>Human gated</strong>
+        <small>不连接真实券商</small>
+      </div>
+    </aside>
+
+    <div class="lab-workspace">
+      <section class="lab-view active" data-lab-panel="overview">
+        <div class="lab-view-head">
+          <div><span class="lab-overline">CONTROL ROOM</span><h3>研究总览</h3></div>
+          <span class="lab-asof" id="lab-asof">LOCAL LEDGER</span>
+        </div>
+        <div class="lab-metrics" id="lab-metrics">
+          <div class="lab-metric"><span>因子目录</span><strong>—</strong><small>正在同步</small></div>
+          <div class="lab-metric"><span>待审候选</span><strong>—</strong><small>人工门控</small></div>
+          <div class="lab-metric"><span>运行任务</span><strong>—</strong><small>可恢复队列</small></div>
+          <div class="lab-metric"><span>生产 Champion</span><strong>—</strong><small>仅研究部署</small></div>
+        </div>
+        <div class="lab-overview-grid">
+          <article class="lab-block lab-pipeline-block">
+            <div class="lab-block-head"><div><span>RESEARCH PIPELINE</span><h4>因子晋级漏斗</h4></div><button type="button" data-lab-go="library">查看全部</button></div>
+            <div class="lab-pipeline" id="lab-pipeline"></div>
+          </article>
+          <article class="lab-block">
+            <div class="lab-block-head"><div><span>ACTIVE QUEUE</span><h4>研究任务</h4></div><button type="button" data-lab-go="automation">任务中心</button></div>
+            <div class="lab-job-list" id="lab-overview-jobs"><div class="lab-empty">暂无任务</div></div>
+          </article>
+          <article class="lab-block lab-wide">
+            <div class="lab-block-head"><div><span>MODEL BENCH</span><h4>统一模型后端</h4></div><button type="button" data-lab-go="experiments">发起实验</button></div>
+            <div class="lab-model-ribbon" id="lab-model-ribbon"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="discover">
+        <div class="lab-view-head">
+          <div><span class="lab-overline">DISCOVERY ENGINE</span><h3>AI 驱动的候选发现</h3><p>外部模型只接收表达式结构和验证指标；原始股票数据默认不离开本机。</p></div>
+        </div>
+        <div class="lab-discovery-grid">
+          <form class="lab-block lab-form" id="lab-discovery-form">
+            <div class="lab-method-switch" role="radiogroup" aria-label="发现方法">
+              <label><input type="radio" name="method" value="genetic" checked><span><b>遗传规划</b><small>本机演化安全 DSL</small></span></label>
+              <label><input type="radio" name="method" value="llm"><span><b>AI Copilot</b><small>结构提案，本地验证</small></span></label>
+            </div>
+            <div class="lab-form-grid">
+              <label>股票池<input name="universe" value="demo" required></label>
+              <label>研究起点<input name="start" type="date" value="2022-01-01" required></label>
+              <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+              <label>保留候选<input name="top" type="number" value="10" min="2" max="50"></label>
+              <label data-genetic-field>种群<input name="population" type="number" value="60" min="10" max="500"></label>
+              <label data-genetic-field>进化代数<input name="generations" type="number" value="8" min="1" max="50"></label>
+              <label data-llm-field hidden>反馈轮数<input name="rounds" type="number" value="2" min="1" max="5"></label>
+            </div>
+            <div class="lab-form-note"><span>DATA POLICY</span><p>自动任务仅共享指标和因子结构。匿名样本必须在单次请求中再次确认。</p></div>
+            <button class="lab-button lab-button-primary" type="submit">加入发现队列</button>
+          </form>
+          <div class="lab-block lab-graph-block">
+            <div class="lab-block-head"><div><span>VISUAL PIPELINE · FOUNDATION</span><h4>研究图谱</h4></div><span class="lab-beta">FRAMEWORK</span></div>
+            <div class="lab-node-graph" aria-label="发现任务处理顺序">
+              <div class="lab-node"><span>01</span><strong>GENERATE</strong><small>AI / GP 提案</small></div><i>→</i>
+              <div class="lab-node"><span>02</span><strong>DSL CHECK</strong><small>AST 白名单</small></div><i>→</i>
+              <div class="lab-node"><span>03</span><strong>LOCAL TEST</strong><small>PIT 数据验证</small></div><i>→</i>
+              <div class="lab-node"><span>04</span><strong>REVIEW</strong><small>人工批准</small></div>
+            </div>
+            <div class="lab-guardrails"><div><b>禁止</b><span>任意 Python 执行</span></div><div><b>默认</b><span>不上传原始行情</span></div><div><b>必须</b><span>重新验证修订版本</span></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="experiments">
+        <div class="lab-view-head">
+          <div><span class="lab-overline">MODEL BENCH</span><h3>机器学习与深度因子</h3><p>所有模型共享 48 维无未来信息特征、按日期切分、早停和相同样本外评估。</p></div>
+        </div>
+        <div class="lab-model-grid" id="lab-model-grid"></div>
+        <form class="lab-block lab-form lab-experiment-form" id="lab-train-form">
+          <div class="lab-block-head"><div><span>NEW EXPERIMENT</span><h4>训练配置</h4></div><span class="lab-selected-model" id="lab-selected-model">RIDGE</span></div>
+          <input type="hidden" name="model" value="ridge">
+          <div class="lab-form-grid lab-form-grid-5">
+            <label>股票池<input name="universe" value="demo"></label>
+            <label>研究起点<input name="start" type="date" value="2022-01-01"></label>
+            <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+            <label>序列长度<input name="sequence_length" type="number" value="20" min="1" max="120"></label>
+            <label>最大轮次<input name="epochs" type="number" value="30" min="1" max="500"></label>
+          </div>
+          <div class="lab-form-footer"><p>深度模型是可选安装；标准桌面环境保持轻量。工件保存到本地实验目录。</p><button class="lab-button lab-button-primary" type="submit">开始训练</button></div>
+        </form>
+        <div class="lab-block">
+          <div class="lab-block-head"><div><span>EXPERIMENT LEDGER</span><h4>最近实验</h4></div></div>
+          <div id="lab-experiment-list"><div class="lab-empty">尚无模型实验</div></div>
+        </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="library">
+        <div class="lab-view-head lab-library-head">
+          <div><span class="lab-overline">FACTOR REGISTRY</span><h3>因子库与候选审阅</h3><p>每次人工或 AI 修正都会生成不可变版本；证据、审批和部署记录可追溯。</p></div>
+          <button class="lab-button lab-button-quiet" type="button" data-lab-action="create-factor">+ 安全 DSL 因子</button>
+        </div>
+        <div class="lab-library-toolbar">
+          <label class="lab-search"><span>⌕</span><input id="lab-factor-search" placeholder="搜索名称、slug 或表达式"></label>
+          <div class="lab-filter-row" id="lab-status-filters">
+            <button type="button" class="active" data-status="">全部</button>
+            <button type="button" data-status="candidate">待审</button>
+            <button type="button" data-status="approved">已批准</button>
+            <button type="button" data-status="production">生产</button>
+            <button type="button" data-status="draft">草稿</button>
+          </div>
+        </div>
+        <div class="lab-review-grid">
+          <div class="lab-factor-pane" id="lab-factor-list"><div class="lab-empty">正在读取因子目录…</div></div>
+          <article class="lab-evidence-pane" id="lab-factor-evidence"><div class="lab-empty">选择一个因子查看验证证据</div></article>
+          <aside class="lab-copilot-pane" id="lab-copilot"><div class="lab-copilot-mark">AI</div><h4>研究 Copilot</h4><p>选择因子后，可基于本地指标生成最小修正建议。</p></aside>
+        </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="automation">
+        <div class="lab-view-head">
+          <div><span class="lab-overline">AUTONOMOUS RESEARCH</span><h3>研究自动化与资源预算</h3><p>Worker 可独立运行并在中断后恢复；每个关键晋级动作仍保留人工门控。</p></div>
+        </div>
+        <div class="lab-automation-grid">
+          <article class="lab-block" id="lab-budget-card"></article>
+          <article class="lab-block">
+            <div class="lab-block-head"><div><span>SCHEDULE POLICY</span><h4>默认节奏</h4></div><span class="lab-beta">CONFIG</span></div>
+            <div class="lab-schedule"><div><b>每日</b><span>数据就绪检查 · 因子打分 · 漂移监控</span></div><div><b>每周</b><span>AI / GP 发现 · 模型重训 · 候选归档</span></div><div><b>门控</b><span>批准、覆盖软门槛、Champion 切换</span></div></div>
+          </article>
+        </div>
+        <div class="lab-block">
+          <div class="lab-block-head"><div><span>RECOVERABLE QUEUE</span><h4>全部研究任务</h4></div><button type="button" id="lab-refresh-jobs">刷新</button></div>
+          <div id="lab-job-table"><div class="lab-empty">暂无任务</div></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="lab-task-tray" id="lab-task-tray" hidden>
+    <div><span class="lab-task-pulse"></span><b id="lab-task-title">研究任务</b><small id="lab-task-phase">等待执行</small></div>
+    <div class="lab-task-progress"><i id="lab-task-fill"></i></div>
+    <strong id="lab-task-percent">0%</strong>
+    <button type="button" id="lab-task-open">查看</button>
+  </div>
+
+  <dialog class="lab-dialog" id="lab-factor-dialog">
+    <form method="dialog" class="lab-dialog-card" id="lab-factor-create-form">
+      <div class="lab-dialog-head"><div><span>SAFE DSL EDITOR</span><h3>新建人工因子</h3></div><button type="button" data-lab-close-dialog aria-label="关闭">×</button></div>
+      <label>名称<input name="name" maxlength="120" placeholder="例如：低波动量价背离" required></label>
+      <label>表达式<textarea name="expression" rows="5" maxlength="2000" placeholder="rank(-ts_corr(rank(volume), rank(close), 20))" required></textarea></label>
+      <div class="lab-dialog-grid"><label>分类<input name="category" value="人工研究"></label><label>研究逻辑<input name="rationale" placeholder="一句话说明经济含义"></label></div>
+      <p>仅允许字段、数字和白名单算子；不会执行任意 Python。</p>
+      <div class="lab-dialog-actions"><button class="lab-button lab-button-quiet" type="button" data-lab-close-dialog>取消</button><button class="lab-button lab-button-primary" type="submit" value="default">创建草稿</button></div>
+    </form>
+  </dialog>
 </section>
 
 <!-- ================= 因子 ================= -->
@@ -126,6 +589,9 @@
 <!-- ================= 回测 ================= -->
 <section class="tab" id="tab-backtest">
   <form class="controls" id="bt-form">
+    <label>策略
+      <select name="strategy"><option value="factor">因子策略</option><option value="swing">1–7 日短线</option></select>
+    </label>
     <label>因子（逗号分隔=多因子组合）<input name="factor" list="factor-list" value="mom_20d" style="min-width:260px" placeholder="mom_20d,rev_5d,ep"></label>
     <label>合成
       <select name="weighting"><option value="equal">等权</option><option value="ic">IC加权</option></select>
@@ -133,6 +599,7 @@
     <label>股票池<input name="universe" value="demo"></label>
     <label>开始<input name="start" type="date" value="2022-01-01"></label>
     <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
+    <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
     <label>调仓
       <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
     </label>
@@ -179,9 +646,11 @@
   <div class="panel">
     <h3>模拟盘：真实行情 + 虚拟资金，先证明策略再上实盘。每个交易日收盘后执行一次调仓（或挂 <code>qm daily</code> 定时任务）</h3>
     <form class="controls" id="paper-form">
+      <label>策略<select name="strategy"><option value="swing">1–7 日短线</option><option value="factor">因子策略</option></select></label>
       <label>因子<input name="factor" list="factor-list" value="mom_20d" style="min-width:220px"></label>
       <label>股票池<input name="universe" value="demo"></label>
       <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
+      <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
       <label>调仓
         <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
       </label>
@@ -198,17 +667,74 @@
 
 <!-- ================= 资讯 ================= -->
 <section class="tab" id="tab-news">
-  <form class="controls" id="news-form">
-    <button class="primary" type="submit">抓取最新快讯</button>
-    <label style="flex-direction:row;align-items:center;gap:6px">
-      <input type="checkbox" name="skip_llm" style="min-width:auto"> 跳过 LLM 标注（未配 key 时勾选）
-    </label>
+  <div class="news-heading">
+    <div><span class="eyebrow">EVENT INTELLIGENCE</span><h2>资讯研究工作台</h2>
+      <p>按首次获取时点归档、去重和标注，将消息流转化为可追溯的短周期研究输入。</p></div>
+    <div class="news-heading-actions"><span class="news-live-state" id="news-live-state"><i></i>等待数据</span><button class="primary" id="news-sync" type="button">立即同步</button></div>
+  </div>
+
+  <div class="news-status-strip" aria-label="资讯处理状态">
+    <div><span>近 30 日入库</span><strong id="news-stat-total">—</strong></div>
+    <div><span>标注覆盖率</span><strong id="news-stat-coverage">—</strong></div>
+    <div><span>待处理 / 失败</span><strong id="news-stat-pending">—</strong></div>
+    <div><span>高重要度事件</span><strong id="news-stat-important">—</strong></div>
+  </div>
+
+  <form class="news-toolbar" id="news-form" role="search">
+    <label class="news-search"><span>检索</span><input name="q" type="search" placeholder="标题、摘要或正文关键词" autocomplete="off"></label>
+    <label><span>来源组</span><select name="group"><option value="">全部来源组</option><option value="fast">快讯 · 10 分钟</option><option value="official">官方 · 15 分钟</option><option value="periodic">定期 · 60 分钟</option></select></label>
+    <label><span>来源</span><select name="source" id="news-source-filter"><option value="">全部来源</option></select></label>
+    <label><span>情绪</span><select name="sentiment"><option value="">全部情绪</option><option value="positive">偏正面</option><option value="neutral">中性</option><option value="negative">偏负面</option></select></label>
+    <label><span>标注</span><select name="status"><option value="">全部状态</option><option value="complete">已完成</option><option value="pending">待处理</option><option value="failed">失败</option></select></label>
+    <label><span>排序</span><select name="sort"><option value="recent">最新入库</option><option value="importance">重要度</option></select></label>
+    <button class="ghost" type="submit">筛选</button>
+    <button class="news-reset" id="news-reset" type="button">重置</button>
   </form>
-  <div class="panel"><h3>最近入库</h3><div id="news-out"><div class="msg">尚无数据，点击上方抓取。</div></div></div>
+
+  <div class="news-workbench">
+    <section class="news-feed-panel" aria-labelledby="news-feed-title">
+      <div class="news-panel-head"><div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div><button class="text-action" id="news-reanalyze" type="button">处理待标注</button></div>
+      <div id="news-out" class="news-feed"><div class="news-skeleton" aria-label="加载中"><i></i><i></i><i></i></div></div>
+      <button class="news-load-more" id="news-load-more" type="button" hidden>加载更早资讯</button>
+    </section>
+    <aside class="news-analysis" aria-label="资讯量化摘要">
+      <section><div class="news-panel-head"><div><h3>消息面因子</h3><p>质量加权 · 3 日半衰期</p></div><span class="state-pill">news_sentiment</span></div><div class="sentiment-number" id="news-factor-value">—</div><div class="sentiment-axis"><span>偏空</span><i><b id="news-factor-marker"></b></i><span>偏多</span></div><svg id="news-factor-chart" class="news-factor-chart" viewBox="0 0 320 92" role="img" aria-label="近 30 日消息面因子走势"></svg></section>
+      <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
+      <section><div class="news-panel-head"><div><h3>来源运行状态</h3><p>最近一次采集结果</p></div><button class="text-action" id="news-open-sources" type="button">管理来源</button></div><div id="news-source-health" class="news-source-health"><span class="news-muted">正在读取…</span></div></section>
+    </aside>
+  </div>
 </section>
 
 <!-- ================= 实盘 ================= -->
 <section class="tab" id="tab-ledger">
+  <div class="panel import-workbench" id="ledger-import">
+    <div class="import-heading">
+      <div><span class="eyebrow">BROKER CSV</span><h2>导入券商成交记录</h2></div>
+      <ol class="step-rail" aria-label="导入步骤">
+        <li class="active" data-import-step="1"><span>1</span>选择文件</li>
+        <li data-import-step="2"><span>2</span>映射预览</li>
+        <li data-import-step="3"><span>3</span>确认入账</li>
+      </ol>
+    </div>
+    <form id="csv-preview-form" class="import-file-row">
+      <label class="file-drop" for="broker-csv">
+        <input id="broker-csv" name="file" type="file" accept=".csv,text/csv" required>
+        <strong>选择券商导出的 CSV</strong>
+        <span>UTF-8 / UTF-8-SIG / GB18030，最大 20MB</span>
+      </label>
+      <button class="ghost" type="submit">读取并预览</button>
+    </form>
+    <div id="csv-import-status" class="hint" role="status" aria-live="polite">文件只在本机解析，不会上传到外部服务。</div>
+    <div id="csv-mapping" class="import-collapse" hidden></div>
+    <div id="csv-preview" class="import-collapse" hidden></div>
+    <div class="import-actions" id="csv-submit-actions" hidden>
+      <label><input type="radio" name="csv-mode" value="strict" checked> 严格模式</label>
+      <label><input type="radio" name="csv-mode" value="valid"> 仅导入有效行</label>
+      <label><input id="csv-duplicates" type="checkbox"> 显式包含疑似重复</label>
+      <button class="primary" id="csv-submit" type="button">确认导入</button>
+      <button class="ghost" id="csv-download-errors" type="button" hidden>下载失败清单</button>
+    </div>
+  </div>
   <div class="row">
     <div class="panel">
       <h3>录入成交（或用 <code>qm ledger import 券商导出.csv</code> 批量导入）</h3>
@@ -238,16 +764,243 @@
   </div>
   <div id="ledger-out"><div class="msg">加载中…</div></div>
 </section>
+
+<!-- ================= 自动化 ================= -->
+<section class="tab" id="tab-automation">
+  <div class="automation-heading">
+    <div><span class="eyebrow">BOT OPERATIONS</span><h2>消息与定时任务</h2>
+      <p>飞书企业自建应用 Bot 是主通道，支持群聊/私聊命令与结构化消息卡片；微信 ClawBot 作为轻量文本提醒补充。每个会话独立设置推送强度。</p></div>
+    <div class="automation-status" id="automation-runtime">正在读取运行状态</div>
+  </div>
+  <div class="automation-grid">
+    <div class="automation-stack">
+      <section class="panel">
+        <div class="automation-panel-head"><div><h3>定时任务</h3><p>交易时段、收盘流程与资讯扫描均由本机调度器执行。</p></div><button class="ghost" id="automation-refresh" type="button">刷新</button></div>
+        <div class="job-list" id="automation-jobs"><div class="automation-empty">正在读取任务…</div></div>
+      </section>
+      <section class="panel">
+        <div class="automation-panel-head"><div><h3>推送目标与强度</h3><p>每个私聊或群聊独立设置；高级阈值会覆盖所选预设。</p></div></div>
+        <div class="target-list" id="automation-targets"><div class="automation-empty">正在读取推送目标…</div></div>
+      </section>
+    </div>
+    <aside class="automation-stack">
+      <section class="panel">
+        <div class="automation-panel-head"><div><h3>Bot 接入</h3><p>优先配置飞书。凭据只保存到系统凭据库，页面不会回显 Token 或 Secret。</p></div></div>
+        <div id="automation-channels"><div class="automation-empty">正在读取接入状态…</div></div>
+      </section>
+      <section class="panel">
+        <div class="automation-panel-head"><div><h3>最近事件</h3><p>事件先入库、经目标策略过滤后再进入可靠发件箱。</p></div></div>
+        <div id="automation-events"><div class="automation-empty">暂无事件</div></div>
+      </section>
+    </aside>
+  </div>
+  <section class="panel automation-log">
+    <div class="automation-panel-head"><div><h3>操作审计</h3><p>绑定、强度调整、任务变更与二次确认均留痕。</p></div></div>
+    <div class="table-scroll" id="automation-audit"><div class="automation-empty">暂无操作记录</div></div>
+  </section>
+</section>
+
+<!-- ================= 设置 ================= -->
+<section class="tab" id="tab-settings">
+  <div class="settings-heading">
+    <div><span class="eyebrow">LOCAL CONTROL PLANE</span><h2>设置中心</h2>
+      <p>模型、数据源、自动化、交易规则与本机服务的唯一配置入口。填写完成后自动校验并生效，密钥不会回显。</p></div>
+    <span class="settings-path" id="settings-config-path">正在读取配置…</span>
+  </div>
+  <div class="settings-shell">
+    <nav class="settings-nav" id="settings-nav" aria-label="设置分组">
+      <button type="button" class="active" data-settings-section="llm"><span>01</span>模型服务</button>
+      <button type="button" data-settings-section="data"><span>02</span>数据与缓存</button>
+      <button type="button" data-settings-section="trade"><span>03</span>交易规则</button>
+      <button type="button" data-settings-section="automation"><span>04</span>自动化</button>
+      <button type="button" data-settings-section="sources"><span>05</span>资讯来源</button>
+      <button type="button" data-settings-section="server"><span>06</span>本机服务</button>
+      <button type="button" data-settings-section="backup"><span>07</span>快照回滚</button>
+      <button type="button" data-settings-section="universe"><span>08</span>股票池</button>
+    </nav>
+    <div class="settings-content">
+      <form id="settings-form" novalidate>
+        <section class="settings-group active" data-settings-panel="llm">
+          <div class="group-heading"><div><h3>模型服务</h3><p>读取模型列表不会发送推理请求，也不代表模型兼容聊天接口。</p></div><button class="ghost check-button" type="button" data-check="llm-models">刷新模型</button></div>
+          <div class="field-grid">
+            <label>提供商<select name="llm.provider" required><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+            <label>模型 ID<input name="llm.model" list="settings-model-list" autocomplete="off" required><datalist id="settings-model-list"></datalist><small id="model-hint">可手动输入任意模型 ID</small></label>
+            <label class="field-wide">API 根地址<input name="llm.base_url" type="url" placeholder="官方服务可留空；兼容网关如 http://127.0.0.1:11434/v1"></label>
+            <label class="field-wide secret-field">API Key<div><input id="llm-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="llm">清除</button></div><small id="llm-secret-state"></small></label>
+            <label>最大输出 Token<input name="llm.max_tokens" type="number" min="1" max="1000000" required></label>
+            <label>Temperature<input name="llm.temperature" type="number" min="0" max="2" step="0.1" required></label>
+            <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
+          </div>
+          <div class="check-result" data-check-result="llm-models">等待检测</div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="data">
+          <div class="group-heading"><div><h3>数据与缓存</h3><p>数据目录变更必须经过校验与迁移任务，原目录始终保留。</p></div><div class="button-pair"><button class="ghost check-button" type="button" data-check="storage">检测目录</button><button class="ghost check-button" type="button" data-check="data-sources">检测数据源</button></div></div>
+          <div class="field-grid">
+            <label class="field-wide">当前数据根目录<input name="data.root" readonly><small>要更换目录，请使用下方迁移工具。</small></label>
+            <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button><button type="button" class="ghost check-button" data-check="tushare">检测</button></div><small id="tushare-secret-state"></small></label>
+            <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
+            <label>分钟缓存（分钟）<input name="data.intraday_cache_minutes" type="number" min="0" required></label>
+            <label>AKShare 重试<input name="data.akshare_retries" type="number" min="1" max="20" required></label>
+            <label>退避初始秒数<input name="data.akshare_retry_backoff" type="number" min="0" max="60" step="0.1" required></label>
+            <label>Tushare 每分钟调用<input name="data.tushare_calls_per_minute" type="number" min="1" required></label>
+            <label>Tushare 缓存（天）<input name="data.tushare_cache_days" type="number" min="0" required></label>
+            <label>基本面缓存（天）<input name="data.fundamental_cache_days" type="number" min="0" required></label>
+            <label>资讯原文缓存（天）<input name="news.raw_cache_days" type="number" min="0" max="3650" required><small>结构化资讯永久保留；这里只控制原始响应。</small></label>
+            <label>消息面半衰期（天）<input name="news.factor_halflife_days" type="number" min="0.1" max="60" step="0.1" required></label>
+            <label>最低标注置信度<input name="news.factor_min_confidence" type="number" min="0" max="1" step="0.05" required></label>
+            <label class="toggle-field"><span><strong>自动标注新资讯</strong><small>模型不可用时保留在待处理队列。</small></span><input name="news.annotation_enabled" type="checkbox" role="switch"></label>
+          </div>
+          <div class="check-stack"><div class="check-result" data-check-result="storage">目录尚未检测</div><div class="check-result" data-check-result="data-sources">数据源尚未检测</div><div class="check-result" data-check-result="tushare">Tushare 尚未检测</div></div>
+          <div class="migration-box">
+            <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
+            <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
+            <div class="migration-progress" id="migration-progress" hidden><div><span data-migration-phase>准备中</span><strong data-migration-percent>0%</strong></div><div class="load-track"><div class="load-fill"></div></div><button class="ghost" id="migration-cancel" type="button">取消</button></div>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="trade">
+          <div class="group-heading"><div><h3>A 股交易规则</h3><p>费率按小数填写，例如万 2.5 为 0.00025。</p></div></div>
+          <div class="field-grid">
+            <label>佣金率<input name="trade.commission_rate" type="number" min="0" max="0.1" step="0.000001" required></label>
+            <label>最低佣金（元）<input name="trade.commission_min" type="number" min="0" step="0.01" required></label>
+            <label>印花税率<input name="trade.stamp_tax_rate" type="number" min="0" max="0.1" step="0.000001" required></label>
+            <label>过户费率<input name="trade.transfer_fee_rate" type="number" min="0" max="0.1" step="0.000001" required></label>
+            <label>滑点<input name="trade.slippage" type="number" min="0" max="0.5" step="0.0001" required></label>
+            <label>每手股数<input name="trade.lot_size" type="number" min="1" step="1" required></label>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="automation">
+          <div class="group-heading"><div><h3>自动化与消息通道</h3><p>定时监控、事件推送和 Bot 监听共用这里的范围与时区；启停或修改时区后需重启应用。</p></div><span class="state-pill" id="automation-runtime-state">正在读取状态</span></div>
+          <div class="field-grid">
+            <label class="toggle-field field-wide"><span><strong>启用自动化运行时</strong><small>开启后执行定时任务，并监听已经接入的消息通道。</small></span><input name="automation.enabled" type="checkbox" role="switch"></label>
+            <label>时区<input name="automation.timezone" list="automation-timezone-list" required autocomplete="off"><datalist id="automation-timezone-list"><option value="Asia/Shanghai"></option><option value="Asia/Hong_Kong"></option><option value="UTC"></option></datalist></label>
+            <label>主股票池<input name="automation.primary_universe" list="automation-universe-list" required autocomplete="off"><datalist id="automation-universe-list"></datalist><small>每日决策与选股任务使用的股票池。</small></label>
+            <label>记录保留天数<input name="automation.retention_days" type="number" min="7" max="3650" step="1" required><small>自动清理更早的运行、事件与投递记录。</small></label>
+            <label class="field-wide">重点观察列表<textarea name="automation.watchlist" data-value-type="list" rows="4" placeholder="600519.SH&#10;000858.SZ"></textarea><small>每行或逗号分隔；代码会自动补全市场后缀并去重。</small></label>
+            <label class="field-wide">市场哨兵指数<textarea name="automation.sentinel_indices" data-value-type="list" rows="3" required placeholder="000300.SH&#10;000905.SH"></textarea><small>1–12 个指数，用于盘中市场转折监测。</small></label>
+            <label class="field-wide">微信 ClawBot API 地址<input name="automation.weixin_api_base" type="url" required placeholder="https://ilinkai.weixin.qq.com"><small>通常无需修改；仅在腾讯接口地址或兼容代理发生变化时调整。</small></label>
+          </div>
+
+          <div class="channel-grid">
+            <article class="channel-card">
+              <div class="channel-card-head"><div><span class="eyebrow">WEIXIN</span><h4>腾讯微信 ClawBot</h4></div><span class="channel-status" id="weixin-channel-state">未配置</span></div>
+              <p>扫码后 Bot Token 只保存到系统凭据库。首次连接后，请给机器人发送一条消息建立直连会话。</p>
+              <button class="ghost" type="button" id="weixin-login-start">生成登录二维码</button>
+              <div class="channel-connect" id="weixin-login-panel" hidden>
+                <img id="weixin-login-qr" alt="微信 ClawBot 登录二维码">
+                <div><strong id="weixin-login-status">请使用微信扫码</strong><small>二维码约 5 分钟有效；页面会自动等待确认。</small><label>可选验证码<input id="weixin-verify-code" inputmode="numeric" autocomplete="one-time-code" maxlength="12"></label></div>
+              </div>
+            </article>
+            <article class="channel-card">
+              <div class="channel-card-head"><div><span class="eyebrow">FEISHU</span><h4>飞书应用 Bot</h4></div><span class="channel-status" id="feishu-channel-state">未配置</span></div>
+              <p>填写企业自建应用凭据完成接入。App Secret 只进入系统凭据库，不写入配置或快照。</p>
+              <div class="channel-credentials">
+                <label>App ID<input name="automation.feishu_app_id" id="feishu-app-id" autocomplete="off" placeholder="cli_xxxxxxxxxxxxxxxx"></label>
+                <label>App Secret<input id="feishu-app-secret" type="password" autocomplete="new-password" placeholder="接入时填写，不回显"></label>
+                <button class="ghost" type="button" id="feishu-connect">接入飞书</button>
+              </div>
+              <small id="feishu-connect-status">保存 App ID 后，可随时单独更新 App Secret。</small>
+            </article>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="server">
+          <div class="group-heading"><div><h3>本机服务</h3><p>host 或 port 修改需重启 QuantMaster；远程监听不会开放设置写入。</p></div><button class="ghost check-button" type="button" data-check="server">检测地址</button></div>
+          <div class="field-grid"><label>Host<input name="server.host" required></label><label>Port<input name="server.port" type="number" min="1" max="65535" required></label></div>
+          <div class="check-result" data-check-result="server">等待检测</div>
+        </section>
+
+        <div class="save-dock" role="status" aria-live="polite"><div id="settings-save-state"><span class="save-dot"></span><span>自动保存已开启</span></div><span class="autosave-note">停顿片刻或离开字段后自动生效</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
+      </form>
+
+      <section class="settings-group" data-settings-panel="sources">
+        <div class="group-heading"><div><h3>资讯来源</h3><p>内置来源可启停和调权；自定义来源仅支持 RSS、JSON 路径与 HTML CSS 选择器，不执行任意脚本。</p></div><button class="ghost" id="news-source-new" type="button">添加来源</button></div>
+        <div class="source-manager">
+          <div id="news-source-list" class="source-list"><div class="msg">加载来源中…</div></div>
+          <form id="news-source-editor" class="source-editor" novalidate>
+            <input name="id" type="hidden">
+            <div class="source-editor-head"><div><span class="eyebrow" id="source-editor-kind">CUSTOM SOURCE</span><h4 id="source-editor-title">选择来源或添加一个来源</h4></div><span class="state-pill" id="source-secret-state">无鉴权</span></div>
+            <div class="field-grid">
+              <label>名称<input name="name" maxlength="80" required></label>
+              <label>类型<select name="kind" required><option value="builtin">内置适配器</option><option value="rss">RSS / Atom</option><option value="json">JSON API</option><option value="html">HTML 页面</option></select></label>
+              <label>来源组<select name="group_name"><option value="fast">快讯 · 10 分钟</option><option value="official">官方 · 15 分钟</option><option value="periodic">定期 · 60 分钟</option></select></label>
+              <label>单次上限<input name="item_limit" type="number" min="1" max="100" value="30" required></label>
+              <label>因子权重<input name="factor_weight" type="number" min="0" max="3" step="0.1" value="1" required><small>0 表示不进入消息面因子。</small></label>
+              <label class="toggle-field"><span><strong>启用来源</strong><small>停用后定时任务会跳过。</small></span><input name="enabled" type="checkbox" role="switch" checked></label>
+              <label class="toggle-field"><span><strong>官方来源</strong><small>用于重要度与来源质量加权。</small></span><input name="is_official" type="checkbox" role="switch"></label>
+              <label class="field-wide">请求地址<input name="url" type="url" maxlength="2048" placeholder="https://example.com/feed.xml" required></label>
+            </div>
+            <fieldset class="source-parser" data-source-parser="json" hidden><legend>JSON 路径</legend><p>使用点号访问嵌套字段，数组下标可直接写数字。</p><div class="field-grid"><label>列表路径<input name="items_path" placeholder="data.items"></label><label>标题路径<input name="title_path" placeholder="title"></label><label>正文路径<input name="content_path" placeholder="content"></label><label>链接路径<input name="url_path" placeholder="url"></label><label>发布时间路径<input name="published_at_path" placeholder="published_at"></label></div></fieldset>
+            <fieldset class="source-parser" data-source-parser="html" hidden><legend>HTML 选择器</legend><p>选择器基于 CSS 语法；详情正文选择器会并发抓取每条详情页。</p><div class="field-grid"><label>条目选择器<input name="item_selector" placeholder=".news-list li"></label><label>标题选择器<input name="title_selector" placeholder="a.title"></label><label>摘要选择器<input name="content_selector" placeholder=".summary"></label><label>链接选择器<input name="url_selector" placeholder="a.title"></label><label>时间选择器<input name="published_at_selector" placeholder="time"></label><label>详情正文选择器<input name="detail_content_selector" placeholder="article .content"></label></div></fieldset>
+            <fieldset class="source-auth"><legend>接口鉴权</legend><div class="field-grid"><label>鉴权方式<select name="auth_type"><option value="none">无需鉴权</option><option value="bearer">Bearer Token</option><option value="header">自定义 Header</option></select></label><label data-auth-header hidden>Header 名称<input name="auth_header" placeholder="X-API-Key"></label><label class="field-wide">API Token<input name="token" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><small>凭据只进入系统凭据库，不写入配置或响应。</small></label></div></fieldset>
+            <div id="news-source-preview" class="source-preview"><span class="news-muted">保存前可先测试解析结果。</span></div>
+            <div class="editor-actions"><button class="primary" type="submit">保存来源</button><button class="ghost" data-source-test type="button">测试解析</button><button class="ghost" data-source-run type="button">立即采集</button><button class="ghost" data-source-clear-token type="button">清除凭据</button><button class="ghost danger" data-source-delete type="button">删除来源</button></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="settings-group" data-settings-panel="backup">
+        <div class="group-heading"><div><h3>配置快照</h3><p>只包含非敏感设置。回滚会保留当前密钥与业务数据。</p></div><form id="snapshot-form" class="inline-create"><input name="name" placeholder="快照名称" required maxlength="80"><button class="ghost" type="submit">创建快照</button></form></div>
+        <div id="snapshot-list"><div class="msg">加载快照中…</div></div><div id="snapshot-diff" class="diff-panel" hidden></div>
+      </section>
+
+      <section class="settings-group" data-settings-panel="universe">
+        <div class="group-heading"><div><h3>股票池</h3><p>代码会自动去空格、转大写、补全可推断的 A 股后缀并去重。</p></div><button class="ghost" id="universe-new" type="button">新建股票池</button></div>
+        <div class="universe-layout"><div id="universe-list" class="universe-list"></div><form id="universe-form" class="universe-editor">
+          <label>名称<input name="name" placeholder="例如 core_holdings" required></label>
+          <label>代码（每行或逗号分隔）<textarea name="symbols" rows="12" placeholder="600519&#10;000858.SZ"></textarea></label>
+          <div class="universe-index"><input name="index_symbol" value="000300.SH"><button class="ghost" data-universe-index type="button">预览指数成分</button></div>
+          <div id="universe-editor-status" class="hint">选择股票池或新建。</div>
+          <div class="editor-actions"><button class="primary" type="submit">保存股票池</button><button class="ghost" data-universe-rename type="button">重命名</button><button class="ghost danger" data-universe-delete type="button">删除</button></div>
+        </form></div>
+      </section>
+    </div>
+  </div>
+</section>
 </main>
+
+<aside class="runtime-info" id="runtime-info" data-level="success" aria-label="运行信息">
+  <button class="runtime-summary" id="runtime-summary" type="button" aria-expanded="false" aria-controls="runtime-drawer-frame">
+    <span class="runtime-dot" aria-hidden="true"></span>
+    <span class="runtime-label">运行信息</span>
+    <span class="runtime-latest" id="runtime-latest">系统已就绪</span>
+    <span class="runtime-count" id="runtime-count">1 条</span>
+    <span class="runtime-error-count" id="runtime-error-count" hidden aria-label="未读错误"></span>
+    <svg class="runtime-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 6 4.5 4 4.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+  <div class="runtime-drawer-frame" id="runtime-drawer-frame" aria-hidden="true" inert>
+    <div class="runtime-drawer-inner">
+      <section class="runtime-drawer" aria-label="运行消息明细">
+        <div class="runtime-toolbar">
+          <div class="runtime-filters" role="group" aria-label="筛选运行消息">
+            <button class="runtime-filter active" type="button" data-runtime-filter="all">全部</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="normal">正常</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="warning">告警</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="error">错误</button>
+          </div>
+          <div class="runtime-actions">
+            <button class="runtime-tool" id="runtime-clear" type="button">清空</button>
+            <button class="runtime-tool" id="runtime-collapse" type="button">收起</button>
+          </div>
+        </div>
+        <div class="runtime-list" id="runtime-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      </section>
+    </div>
+  </div>
+</aside>
 
 <script>
 const PALETTE = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
 const INK2 = '#c3c2b7', MUTED = '#898781', GRID = '#2c2c2a', AXIS = '#383835';
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const charts = {};
 
 function baseOpt(extra) {
   return Object.assign({
     color: PALETTE,
+    animation: !REDUCED_MOTION,
     backgroundColor: 'transparent',
     textStyle: { color: INK2 },
     grid: { left: 60, right: 20, top: 36, bottom: 40 },
@@ -257,112 +1010,945 @@ function baseOpt(extra) {
 }
 function timeAxis() { return { type: 'time', axisLine: { lineStyle: { color: AXIS } }, axisLabel: { color: MUTED }, splitLine: { show: false } }; }
 function valAxis(fmt) { return { type: 'value', scale: true, axisLabel: { color: MUTED, formatter: fmt }, splitLine: { lineStyle: { color: GRID } } }; }
-function mkChart(id) {
+function mkChart(id, reset = true) {
   const el = document.getElementById(id);
   if (!el) return null;
+  const existing = charts[id];
+  if (existing && (existing.isDisposed() || existing.getDom() !== el)) {
+    if (!existing.isDisposed()) existing.dispose();
+    delete charts[id];
+  }
+  if (charts[id] && !reset) return charts[id];
   if (charts[id]) charts[id].dispose();
   charts[id] = echarts.init(el);
   return charts[id];
 }
 window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
 
-async function api(path, opts) {
-  const res = await fetch(path, opts);
+class QuantApiError extends Error {
+  constructor(message, options = {}) {
+    super(message);
+    this.name = 'QuantApiError';
+    Object.assign(this, options);
+  }
+}
+function apiRoute(path) {
+  try { return new URL(path, window.location.origin).pathname; }
+  catch (_) { return String(path || ''); }
+}
+function sourceForPath(path) {
+  const route = apiRoute(path);
+  const sources = [
+    ['/api/market', '市场行情'], ['/api/decision', '每日决策'],
+    ['/api/factors', '因子研究'], ['/api/backtest', '策略回测'],
+    ['/api/mining', '因子挖掘'], ['/api/paper', '模拟交易'],
+    ['/api/news', '资讯分析'], ['/api/ledger', '实盘账本'],
+    ['/api/assets', '我的标的'], ['/api/settings', '设置中心'],
+    ['/api/automation', '自动任务'],
+  ];
+  return sources.find(([prefix]) => route.startsWith(prefix))?.[1] || '本地服务';
+}
+function readableDetail(detail) {
+  if (typeof detail === 'string') return detail.trim();
+  if (Array.isArray(detail)) return detail.map(item => {
+    const field = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
+    return [field, item?.msg || item?.message].filter(Boolean).join('：');
+  }).filter(Boolean).join('；');
+  if (detail && typeof detail === 'object') {
+    if (detail.message) return String(detail.message);
+    try { return JSON.stringify(detail); } catch (_) { return ''; }
+  }
+  return '';
+}
+function friendlyHttpMessage(status) {
+  if (status === 400) return '请求未通过检查';
+  if (status === 401) return '身份验证未通过';
+  if (status === 403) return '当前操作没有权限';
+  if (status === 404) return '没有找到所需数据';
+  if (status === 409) return '当前数据状态有冲突';
+  if (status === 413) return '提交的数据超过大小限制';
+  if (status === 422) return '有些输入需要修改';
+  if (status === 423) return '数据目录正在迁移';
+  if (status === 429) return '数据源请求过于频繁';
+  if (status >= 500) return '服务端处理失败';
+  return '请求未能完成';
+}
+function responseError(response, data, path, method) {
+  const title = friendlyHttpMessage(response.status);
+  const detail = readableDetail(data.detail);
+  const requestId = data.error_id || response.headers.get('X-Request-ID') || '';
+  const route = apiRoute(path);
+  const error = new QuantApiError(detail ? `${title}：${detail}` : title, {
+    status:response.status, detail:data.detail, detailText:detail,
+    requestId, path:route, method, logged:true,
+  });
+  runtimeInfo.add('error', sourceForPath(path), title, {
+    detail:detail || '可以稍后重试；如持续发生，请复制请求编号定位后端日志。',
+    requestId, path:`${method} ${route}`,
+  });
+  return error;
+}
+async function api(path, opts = {}) {
+  const method = String(opts.method || 'GET').toUpperCase();
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (cause) {
+    const cancelled = cause?.name === 'AbortError';
+    const message = cancelled ? '请求已取消' : '无法连接本地服务';
+    const error = new QuantApiError(message, {
+      cause, path:apiRoute(path), method, logged:true,
+    });
+    runtimeInfo.add(cancelled ? 'warning' : 'error', sourceForPath(path), message, {
+      detail:cancelled ? '本次操作没有继续执行。' : '请确认 QuantMaster 服务仍在运行，然后重试。',
+      path:`${method} ${apiRoute(path)}`,
+    });
+    throw error;
+  }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || res.statusText);
+  if (!res.ok) throw responseError(res, data, path, method);
+  if (method !== 'GET') {
+    runtimeInfo.add('success', sourceForPath(path), '操作已完成', {
+      requestId:res.headers.get('X-Request-ID') || '', path:`${method} ${apiRoute(path)}`,
+    });
+  }
   return data;
 }
 function post(path, body) {
   return api(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
 }
-function busy(form, on) { const b = form.querySelector('button.primary'); if (b) b.disabled = on; }
+function busy(form, on, label = '') {
+  const b = form.querySelector('button.primary');
+  if (!b) return;
+  if (on) {
+    b.dataset.idleText = b.textContent;
+    if (label) b.textContent = label;
+  } else if (b.dataset.idleText) {
+    b.textContent = b.dataset.idleText;
+    delete b.dataset.idleText;
+  }
+  b.disabled = on;
+}
 function pct(v) { return v == null ? '—' : (v * 100).toFixed(2) + '%'; }
 function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+const runtimeInfo = (() => {
+  const root = document.getElementById('runtime-info');
+  const summary = document.getElementById('runtime-summary');
+  const drawer = document.getElementById('runtime-drawer-frame');
+  const latest = document.getElementById('runtime-latest');
+  const count = document.getElementById('runtime-count');
+  const errorCount = document.getElementById('runtime-error-count');
+  const list = document.getElementById('runtime-list');
+  const entries = [];
+  const lastPhase = new Map();
+  const levelLabels = {info:'进行中', success:'正常', warning:'告警', error:'错误'};
+  let activeFilter = 'all', expanded = false, sequence = 0;
+
+  function visible(entry) {
+    if (activeFilter === 'all') return true;
+    if (activeFilter === 'normal') return ['info', 'success'].includes(entry.level);
+    return entry.level === activeFilter;
+  }
+  function render() {
+    const shown = entries.filter(visible).slice().reverse();
+    count.textContent = `${entries.length} 条`;
+    const errors = entries.filter(entry => entry.level === 'error').length;
+    errorCount.hidden = errors === 0;
+    errorCount.textContent = errors ? String(errors) : '';
+    errorCount.setAttribute('aria-label', `${errors} 条错误`);
+    list.innerHTML = shown.length ? shown.map(entry => {
+      const context = [entry.detail, entry.path].filter(Boolean).map(value => `<span>${esc(value)}</span>`).join('<span aria-hidden="true">·</span>');
+      const request = entry.requestId ? `<span class="runtime-request">请求 <code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span>` : '';
+      return `<article class="runtime-entry" data-level="${entry.level}" data-runtime-id="${entry.id}">
+        <time class="runtime-time" datetime="${esc(entry.iso)}">${esc(entry.time)}</time>
+        <div class="runtime-entry-body"><div class="runtime-entry-title"><span class="runtime-source">${esc(entry.source)}</span><span class="runtime-message">${esc(entry.message)}</span></div>
+          ${(context || request) ? `<div class="runtime-context">${context}${request}</div>` : ''}</div>
+        <span class="runtime-level">${levelLabels[entry.level]}</span></article>`;
+    }).join('') : '<div class="runtime-empty">当前筛选下没有运行消息。</div>';
+  }
+  function setExpanded(next) {
+    expanded = Boolean(next);
+    root.classList.toggle('expanded', expanded);
+    summary.setAttribute('aria-expanded', String(expanded));
+    drawer.setAttribute('aria-hidden', String(!expanded));
+    drawer.inert = !expanded;
+    if (expanded) queueMicrotask(() => list.scrollTop = 0);
+  }
+  function add(level, source, message, meta = {}) {
+    const safeLevel = levelLabels[level] ? level : 'info';
+    const now = new Date();
+    entries.push({
+      id:++sequence, level:safeLevel, source:String(source || '系统'),
+      message:String(message || '状态已更新'), detail:String(meta.detail || ''),
+      path:String(meta.path || ''), requestId:String(meta.requestId || ''),
+      iso:now.toISOString(),
+      time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
+    });
+    if (entries.length > 100) entries.splice(0, entries.length - 100);
+    latest.textContent = `${source || '系统'} · ${message || '状态已更新'}`;
+    root.dataset.level = safeLevel === 'info' ? 'success' : safeLevel;
+    render();
+    if (safeLevel === 'error') setExpanded(true);
+    return entries.at(-1);
+  }
+  function phase(source, event, path = '') {
+    const requestId = event.request_id || '';
+    if (event.level === 'warning') {
+      add('warning', source, event.detail || '部分数据未能加载', {
+        detail:event.phase, requestId, path,
+      });
+      return;
+    }
+    const key = `${source}\u0000${requestId}`;
+    if (lastPhase.get(key) === event.phase) return;
+    lastPhase.set(key, event.phase);
+    add(event.level === 'success' ? 'success' : 'info', source, event.phase || '正在处理', {
+      detail:event.detail, requestId, path,
+    });
+  }
+  summary.addEventListener('click', () => setExpanded(!expanded));
+  document.getElementById('runtime-collapse').addEventListener('click', () => {
+    setExpanded(false); summary.focus();
+  });
+  document.getElementById('runtime-clear').addEventListener('click', () => {
+    entries.length = 0; lastPhase.clear();
+    latest.textContent = '暂无运行消息'; root.dataset.level = 'success'; render();
+  });
+  document.querySelector('.runtime-filters').addEventListener('click', event => {
+    const button = event.target.closest('[data-runtime-filter]');
+    if (!button) return;
+    activeFilter = button.dataset.runtimeFilter;
+    document.querySelectorAll('[data-runtime-filter]').forEach(item => item.classList.toggle('active', item === button));
+    render();
+  });
+  list.addEventListener('click', async event => {
+    const button = event.target.closest('[data-copy-request]');
+    if (!button) return;
+    try {
+      await navigator.clipboard.writeText(button.dataset.copyRequest);
+      button.textContent = '已复制';
+      setTimeout(() => { if (button.isConnected) button.textContent = '复制'; }, 1200);
+    } catch (_) { button.previousElementSibling?.focus?.(); }
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && expanded) setExpanded(false);
+  });
+  add('success', '系统', '前端界面已就绪');
+  return {add, phase, open:() => setExpanded(true), close:() => setExpanded(false)};
+})();
+window.QuantMasterRunInfo = runtimeInfo;
+window.QuantMasterAPI = api;
+
+function reportLocalError(source, message, error) {
+  if (error?.logged) return;
+  runtimeInfo.add('error', source, message, {
+    detail:error?.message || String(error || '请重试'),
+  });
+  if (error && typeof error === 'object') error.logged = true;
+}
+window.addEventListener('error', event => {
+  if (event.error?.logged) return;
+  if (event.target && event.target !== window) {
+    const url = event.target.src || event.target.href || event.target.tagName;
+    runtimeInfo.add('error', '前端资源', '界面资源加载失败', {detail:String(url || '')});
+    return;
+  }
+  runtimeInfo.add('error', '前端界面', '页面脚本运行异常', {
+    detail:[event.message, event.filename ? `${event.filename.split('/').pop()}:${event.lineno || 0}:${event.colno || 0}` : ''].filter(Boolean).join(' · '),
+  });
+  if (event.error && typeof event.error === 'object') event.error.logged = true;
+}, true);
+window.addEventListener('unhandledrejection', event => {
+  if (event.reason?.logged) return;
+  runtimeInfo.add('error', '前端界面', '异步操作意外中断', {
+    detail:event.reason?.message || String(event.reason || '未知原因'),
+  });
+  if (event.reason && typeof event.reason === 'object') event.reason.logged = true;
+});
+
+function skeletonMarkup(kind) {
+  if (kind === 'decision') return `<div class="load-skeleton skeleton-decision" aria-hidden="true">
+    <div class="skeleton-block tall"></div><div class="skeleton-metrics">${'<div class="skeleton-block"></div>'.repeat(8)}</div></div>`;
+  return `<div class="load-skeleton skeleton-market" aria-hidden="true">${'<div class="skeleton-block"></div>'.repeat(6)}</div>`;
+}
+
+function createLoadProgress(container, title, kind = 'market') {
+  const started = Date.now();
+  container.innerHTML = `<div class="load-state" role="status" aria-live="polite" aria-atomic="false">
+    <div class="load-head"><div><div class="load-title"><span class="load-dot"></span><span data-load-phase>${esc(title)}</span></div>
+      <div class="load-detail" data-load-detail>正在检查本地缓存…</div></div><div class="load-percent" data-load-percent>0%</div></div>
+    <div class="load-track" role="progressbar" aria-label="数据加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="load-fill"></div></div>
+    <div class="load-meta"><span data-load-elapsed>已用时 0 秒</span><span>可继续浏览其他页面</span></div>
+    ${skeletonMarkup(kind)}</div><div class="stream-results" data-stream-results aria-live="polite"></div>`;
+  const root = container.querySelector('.load-state');
+  const results = container.querySelector('[data-stream-results]');
+  const phase = root.querySelector('[data-load-phase]');
+  const detail = root.querySelector('[data-load-detail]');
+  const percent = root.querySelector('[data-load-percent]');
+  const track = root.querySelector('[role=progressbar]');
+  const elapsed = root.querySelector('[data-load-elapsed]');
+  let currentPhase = title, hasResults = false;
+  const timer = setInterval(() => {
+    elapsed.textContent = `已用时 ${Math.floor((Date.now() - started) / 1000)} 秒`;
+  }, 1000);
+  return {
+    update(event) {
+      const value = Math.max(0, Math.min(100, Number(event.progress) || 0));
+      root.style.setProperty('--progress', value / 100);
+      track.setAttribute('aria-valuenow', String(Math.round(value)));
+      percent.textContent = `${Math.round(value)}%`;
+      detail.textContent = event.detail || '';
+      if (event.phase && event.phase !== currentPhase) {
+        currentPhase = event.phase;
+        phase.textContent = event.phase;
+        if (!REDUCED_MOTION) phase.animate(
+          [{opacity:.45, transform:'translateY(2px)'}, {opacity:1, transform:'translateY(0)'}],
+          {duration:180, easing:'cubic-bezier(.25,1,.5,1)'});
+      }
+    },
+    reveal() {
+      if (!hasResults) {
+        hasResults = true;
+        root.classList.add('has-results');
+      }
+      return results;
+    },
+    finish(detailText = '全部数据已加载，可继续操作') {
+      clearInterval(timer);
+      root.classList.add('has-results', 'complete');
+      root.style.setProperty('--progress', 1);
+      track.setAttribute('aria-valuenow', '100');
+      percent.textContent = '100%';
+      phase.textContent = '加载完成';
+      detail.textContent = detailText;
+    },
+    fail(message) {
+      clearInterval(timer);
+      root.classList.add('has-results', 'failed');
+      phase.textContent = hasResults ? '部分数据已保留' : '加载失败';
+      detail.textContent = message;
+    },
+    stop() { clearInterval(timer); },
+    get results() { return results; },
+    get hasResults() { return hasResults; },
+  };
+}
+
+async function streamJson(path, opts, onProgress) {
+  const method = String(opts?.method || 'GET').toUpperCase();
+  const source = sourceForPath(path), route = apiRoute(path);
+  runtimeInfo.add('info', source, '开始加载数据', {path:`${method} ${route}`});
+  let requestId = '';
+  try {
+    const response = await fetch(path, opts);
+    requestId = response.headers.get('X-Request-ID') || '';
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw responseError(response, data, path, method);
+    }
+    if (!response.body) throw new Error('当前浏览器不支持流式进度');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '', result, streamError;
+    const consume = line => {
+      if (!line.trim()) return;
+      const event = JSON.parse(line);
+      requestId = event.request_id || event.error_id || requestId;
+      if (event.type === 'progress') {
+        runtimeInfo.phase(source, event, `${method} ${route}`);
+        onProgress?.(event);
+      }
+      if (event.type === 'result') result = event.data;
+      if (event.type === 'error') streamError = {
+        message:event.message || '数据任务失败', requestId:event.error_id || requestId,
+      };
+    };
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream:!done});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      lines.forEach(consume);
+      if (done) break;
+    }
+    consume(buffer);
+    if (streamError) {
+      const error = new QuantApiError(`数据任务未完成：${streamError.message}`, {
+        requestId:streamError.requestId, path:route, method, logged:true,
+      });
+      runtimeInfo.add('error', source, '数据任务未完成', {
+        detail:streamError.message, requestId:streamError.requestId,
+        path:`${method} ${route}`,
+      });
+      throw error;
+    }
+    if (result === undefined) throw new Error('数据流提前结束，请重试');
+    runtimeInfo.add('success', source, '数据加载完成', {
+      requestId, path:`${method} ${route}`,
+    });
+    return result;
+  } catch (error) {
+    if (!error?.logged) {
+      const network = error instanceof TypeError && /fetch/i.test(error.message || '');
+      runtimeInfo.add('error', source, network ? '无法连接本地服务' : '数据流意外中断', {
+        detail:network ? '请确认 QuantMaster 服务仍在运行，然后重试。' : error?.message,
+        requestId, path:`${method} ${route}`,
+      });
+      if (error && typeof error === 'object') error.logged = true;
+    }
+    throw error;
+  }
+}
+
+/* ---------- 版本与更新日志 ---------- */
+(() => {
+  const trigger = document.getElementById('release-trigger');
+  const panel = document.getElementById('release-popover');
+  const list = document.getElementById('release-list');
+  const dateElement = document.getElementById('release-date');
+
+  function renderSummary(data) {
+    if (!data?.version) return;
+    document.getElementById('release-version').textContent = `v${data.version}`;
+    const releaseDate = data.release_date || '';
+    const [year, month, day] = String(releaseDate).split('-');
+    document.querySelector('#release-date .release-year').textContent = year ? `${year}.` : '';
+    document.querySelector('#release-date .release-day').textContent = [month, day].filter(Boolean).join('.');
+    dateElement.dateTime = releaseDate;
+    dateElement.hidden = !releaseDate;
+    trigger.title = [`v${data.version}`, releaseDate, '查看更新日志'].filter(Boolean).join(' · ');
+    trigger.setAttribute('aria-label', releaseDate
+      ? `版本 ${data.version}，发布于 ${releaseDate}，查看更新日志`
+      : `版本 ${data.version}，查看更新日志`);
+  }
+
+  function renderReleases(releases) {
+    list.innerHTML = (releases || []).map(release => `
+      <section class="release-entry">
+        <div class="release-entry-heading"><strong>v${esc(release.version)}</strong><time datetime="${esc(release.date)}">${esc(release.date)}</time></div>
+        ${(release.sections || []).map(section => `
+          <div class="release-section"><h3>${esc(section.title)}</h3><ul>
+            ${(section.items || []).map(item => `<li>${esc(item)}</li>`).join('')}
+          </ul></div>`).join('')}
+      </section>`).join('') || '<div class="msg">暂无更新日志。</div>';
+  }
+
+  function setOpen(open) {
+    panel.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+  }
+
+  trigger.addEventListener('click', event => {
+    event.stopPropagation();
+    setOpen(panel.hidden);
+  });
+  panel.addEventListener('click', event => event.stopPropagation());
+  document.addEventListener('click', () => setOpen(false));
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !panel.hidden) {
+      setOpen(false);
+      trigger.focus();
+    }
+  });
+
+  const embeddedVersion = trigger.dataset.version;
+  const embeddedDate = trigger.dataset.releaseDate;
+  const hasEmbeddedSummary = embeddedVersion && !embeddedVersion.includes('%%QM_');
+  if (hasEmbeddedSummary) renderSummary({version:embeddedVersion, release_date:embeddedDate});
+  else api('/api/health').then(renderSummary).catch(() => {});
+
+  api('/api/release').then(data => {
+    renderSummary(data);
+    renderReleases(data.releases);
+  }).catch(() => {
+    list.innerHTML = '<div class="msg">更新日志暂不可用，版本信息仍可正常查看。</div>';
+  });
+})();
+
 /* ---------- 导航 ---------- */
-document.getElementById('nav').addEventListener('click', e => {
-  const tab = e.target.dataset.tab;
+document.querySelector('header').addEventListener('click', e => {
+  const control = e.target.closest('[data-tab]');
+  if (!control) return;
+  const tab = control.dataset.tab;
   if (!tab) return;
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b === e.target));
+  document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
   document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
   Object.values(charts).forEach(c => c.resize());
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
   if (tab === 'paper') loadPaper();
+  if (tab === 'automation') loadAutomation();
+  if (tab === 'lab' && window.loadQuantLab) window.loadQuantLab();
+  if (tab === 'decision' && !decisionLoaded && !decisionLoading) {
+    document.getElementById('decision-form').requestSubmit();
+  }
 });
 
-/* ---------- 市场 ---------- */
-async function loadMarket() {
-  const container = document.getElementById('mkt-groups');
+/* ---------- 我的标的 ---------- */
+let assetListsData = { favorites:[], following:[], holdings:[] };
+let activeAssetList = 'favorites';
+const assetListEmpty = {
+  favorites:'暂无自选标的，可从右上方添加。',
+  following:'暂无重点关注标的。',
+  holdings:'实盘账本中暂无持仓。',
+};
+
+function renderAssetList() {
+  const items = assetListsData[activeAssetList] || [];
+  document.querySelectorAll('[data-asset-count]').forEach(el => {
+    el.textContent = (assetListsData[el.dataset.assetCount] || []).length;
+  });
+  document.querySelectorAll('#asset-tabs [data-asset-list]').forEach(button => {
+    const active = button.dataset.assetList === activeAssetList;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const out = document.getElementById('asset-list');
+  if (!items.length) {
+    out.innerHTML = `<div class="msg">${assetListEmpty[activeAssetList]}</div>`;
+    return;
+  }
+  if (activeAssetList === 'holdings') {
+    out.innerHTML = `<table class="asset-table"><thead><tr><th>代码</th><th>持有</th><th>成本</th><th>缓存现价</th><th>浮动盈亏</th><th>收益率</th><th>市值</th></tr></thead><tbody>
+      ${items.map(item => `<tr><td><button class="symbol-action" data-show-asset="${esc(item.symbol)}">${esc(item.symbol)}</button></td>
+        <td>${item.shares}</td><td>${fixed(item.avg_cost,2)}</td><td>${fixed(item.last,2)}</td>
+        <td class="${cls(item.unrealized_pnl)}">${fixed(item.unrealized_pnl,2)}</td><td class="${cls(item.pnl_pct)}">${pct(item.pnl_pct)}</td>
+        <td>${Number(item.market_value || 0).toLocaleString()}</td></tr>`).join('')}</tbody></table>`;
+    return;
+  }
+  out.innerHTML = `<table class="asset-table"><thead><tr><th>代码 / 名称</th><th>缓存现价</th><th>日变动</th><th>行情日期</th><th></th></tr></thead><tbody>
+    ${items.map(item => `<tr><td><button class="symbol-action" data-show-asset="${esc(item.symbol)}" data-asset-name="${esc(item.name || item.symbol)}">${esc(item.symbol)}</button>
+      <span class="reason">${esc(item.name || '')}</span></td><td>${fixed(item.last,2)}</td>
+      <td class="${cls(item.change_pct)}">${item.change_pct == null ? '—' : `${item.change_pct > 0 ? '+' : ''}${fixed(item.change_pct,2)}%`}</td>
+      <td>${esc(item.as_of || '暂无缓存')}</td><td><button class="text-action" data-remove-asset="${activeAssetList}" data-symbol="${esc(item.symbol)}">移除</button></td></tr>`).join('')}</tbody></table>`;
+}
+
+async function loadAssetLists(showError = true) {
   try {
-    const data = await api('/api/market/overview');
-    container.innerHTML = '';
-    let idx = 0;
-    for (const [group, items] of Object.entries(data.groups)) {
-      const title = document.createElement('div');
-      title.className = 'group-title'; title.textContent = group;
-      container.appendChild(title);
-      const grid = document.createElement('div');
-      grid.className = 'mkt-grid';
-      for (const item of items) {
-        const el = document.createElement('div');
-        el.className = 'mkt-item';
-        el.innerHTML = `<div class="nm">${esc(item.name)} <span class="badge">${esc(item.symbol)}</span></div>
-          <div class="px ${cls(item.change_pct)}">${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small></div>
-          <div class="spark" id="spark-${idx}"></div>`;
-        el.onclick = () => showKline(item.symbol, item.name);
-        grid.appendChild(el);
-        const sid = 'spark-' + idx; idx++;
-        queueMicrotask(() => {
-          const c = mkChart(sid);
-          c.setOption({ backgroundColor: 'transparent',
-            grid: { left: 0, right: 0, top: 2, bottom: 2 },
-            xAxis: { type: 'time', show: false }, yAxis: { type: 'value', show: false, scale: true },
-            series: [{ type: 'line', data: item.nav, showSymbol: false, lineStyle: { width: 2, color: item.change_pct >= 0 ? '#e66767' : '#0ca30c' } }],
-            tooltip: { show: false } });
-        });
-      }
-      container.appendChild(grid);
+    assetListsData = await api('/api/assets/lists');
+    renderAssetList();
+  } catch (error) {
+    if (showError) document.getElementById('asset-list').innerHTML = `<div class="err">${esc(error.message)}</div>`;
+  }
+}
+
+document.getElementById('asset-tabs').addEventListener('click', event => {
+  const button = event.target.closest('[data-asset-list]');
+  if (!button) return;
+  activeAssetList = button.dataset.assetList;
+  renderAssetList();
+});
+document.getElementById('asset-add-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector('button[type=submit]');
+  const values = new FormData(form), listName = values.get('list_name');
+  button.disabled = true;
+  try {
+    assetListsData = await post(`/api/assets/lists/${encodeURIComponent(listName)}`, {
+      symbol:values.get('symbol'), name:values.get('name'),
+    });
+    activeAssetList = listName;
+    const selected = listName;
+    form.reset();
+    form.elements.list_name.value = selected;
+    renderAssetList();
+  } catch (error) { reportLocalError('我的标的', '添加标的失败', error); }
+  button.disabled = false;
+});
+document.getElementById('asset-list').addEventListener('click', async event => {
+  const remove = event.target.closest('[data-remove-asset]');
+  if (remove) {
+    remove.disabled = true;
+    try {
+      assetListsData = await api(`/api/assets/lists/${remove.dataset.removeAsset}/${encodeURIComponent(remove.dataset.symbol)}`, {method:'DELETE'});
+      renderAssetList();
+    } catch (error) { remove.disabled = false; reportLocalError('我的标的', '移除标的失败', error); }
+    return;
+  }
+  const symbol = event.target.closest('[data-show-asset]');
+  if (symbol) showKline(symbol.dataset.showAsset, symbol.dataset.assetName || symbol.dataset.showAsset, '1d');
+});
+loadAssetLists();
+
+/* ---------- 市场 ---------- */
+let marketLoading = false;
+let marketStreamCycle = 0;
+
+function disposeMarketSparks() {
+  for (const [id, chart] of Object.entries(charts)) {
+    if (id.startsWith('spark-stream-')) {
+      chart.dispose();
+      delete charts[id];
     }
+  }
+}
+
+function marketChangeSeries(nav) {
+  return (nav || []).map(point => [point[0], +((Number(point[1]) - 1) * 100).toFixed(4)]);
+}
+
+function createMarketStreamRenderer(root) {
+  const cycle = ++marketStreamCycle, groups = new Map(), seen = new Set();
+  let index = 0, count = 0;
+  return {
+    add(group, item) {
+      if (!item || seen.has(`${group}\u0000${item.symbol}`)) return false;
+      seen.add(`${group}\u0000${item.symbol}`);
+      if (!groups.has(group)) {
+        const title = document.createElement('div');
+        title.className = 'group-title'; title.textContent = group;
+        const grid = document.createElement('div'); grid.className = 'mkt-grid';
+        root.append(title, grid); groups.set(group, grid);
+      }
+      const sparkId = `spark-stream-${cycle}-${index++}`;
+      const element = document.createElement('div');
+      element.className = 'mkt-item stream-enter';
+      element.innerHTML = `<div class="nm">${esc(item.name)} <span class="badge">${esc(item.symbol)}</span></div>
+        <div class="px ${cls(item.change_pct)}">${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small></div>
+        <div class="spark" id="${sparkId}"></div>`;
+      element.onclick = () => showKline(item.symbol, item.name);
+      groups.get(group).appendChild(element); count += 1;
+      queueMicrotask(() => {
+        if (!document.getElementById(sparkId)) return;
+        const chart = mkChart(sparkId);
+        const changeSeries = marketChangeSeries(item.nav);
+        chart.setOption({backgroundColor:'transparent', animation:!REDUCED_MOTION,
+          grid:{left:0,right:0,top:2,bottom:2}, xAxis:{type:'time',show:false},
+          yAxis:{type:'value',show:false,scale:true,boundaryGap:['12%','12%'],
+            min:value => Math.min(value.min,0),max:value => Math.max(value.max,0)},
+          tooltip:{show:false},
+          series:[{type:'line',data:changeSeries,showSymbol:false,
+            lineStyle:{width:2,color:item.change_pct >= 0 ? '#e66767' : '#0ca30c'},
+            markLine:{silent:true,symbol:'none',label:{show:false},
+              lineStyle:{color:'rgba(195,194,183,.36)',width:1,type:'dashed'},
+              data:[{yAxis:0}]}}]});
+      });
+      return true;
+    },
+    addAll(data) {
+      for (const [group, items] of Object.entries(data.groups || {})) {
+        for (const item of items) this.add(group, item);
+      }
+    },
+    get count() { return count; },
+  };
+}
+
+async function loadMarket() {
+  if (marketLoading) return;
+  marketLoading = true;
+  disposeMarketSparks();
+  const container = document.getElementById('mkt-groups');
+  const tracker = createLoadProgress(container, '准备市场数据', 'market');
+  const renderer = createMarketStreamRenderer(tracker.results);
+  try {
+    const data = await streamJson('/api/market/overview/stream', {}, event => {
+      tracker.update(event);
+      const partial = event.partial;
+      if (partial?.kind === 'market_item') {
+        tracker.reveal();
+        renderer.add(partial.group, partial.item);
+      }
+    });
+    renderer.addAll(data);
+    if (renderer.count) tracker.reveal();
+    tracker.finish(`已加载 ${renderer.count} 个市场标的，可点击查看 K 线`);
     document.getElementById('mkt-stamp').textContent =
       '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
-    container.innerHTML = `<div class="err">市场数据加载失败：${esc(e.message)}\n提示：需安装数据依赖 pip install "quantmaster[data]"，且首次加载较慢。</div>`;
+    tracker.fail(e.message);
+    tracker.reveal().insertAdjacentHTML('beforeend',
+      `<div class="err">市场数据加载失败：${esc(e.message)}\n已完成的卡片仍可继续使用。</div>`);
+  } finally {
+    marketLoading = false;
   }
 }
 document.getElementById('mkt-refresh').onsubmit = async e => {
-  e.preventDefault(); busy(e.target, true);
+  e.preventDefault(); busy(e.target, true, '同步中…');
   await loadMarket();
   busy(e.target, false);
 };
-async function showKline(symbol, name) {
+let activeKline = { symbol: '', name: '', frequency: '1d' };
+async function showKline(symbol, name, frequency = '1d') {
+  activeKline = { symbol, name, frequency };
   document.getElementById('kline-panel').style.display = '';
-  document.getElementById('kline-title').textContent = `${name}（${symbol}）日K`;
-  const c = mkChart('kline');
+  document.querySelectorAll('#kline-frequency button').forEach(button => {
+    const active = button.dataset.frequency === frequency;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const frequencyName = frequency === '1d' ? '日线' : frequency.replace('m', ' 分钟');
+  document.getElementById('kline-title').textContent = `${name}（${symbol}）· ${frequencyName}`;
+  const c = mkChart('kline', false);
   c.showLoading({ textColor: INK2, maskColor: 'rgba(13,13,13,0.6)' });
   try {
-    const data = await api('/api/market/history/' + encodeURIComponent(symbol));
+    const start = frequency === '1d'
+      ? '2023-01-01'
+      : new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+    const data = await api('/api/market/history/' + encodeURIComponent(symbol)
+      + `?frequency=${encodeURIComponent(frequency)}&start=${start}`);
     c.hideLoading();
+    if (!data.kline.length) throw new Error('所选周期暂无本地或远端数据');
     const closes = data.kline.map(k => k[2]);
+    const categories = data.kline.map(k => k[0]);
     const ma = n => closes.map((_, i) =>
       i + 1 < n ? null : +(closes.slice(i + 1 - n, i + 1).reduce((a, b) => a + b, 0) / n).toFixed(3));
     c.setOption(baseOpt({
+      animationDuration: 260, animationDurationUpdate: 340,
+      animationEasing: 'cubicOut', animationEasingUpdate: 'cubicOut',
       legend: { textStyle: { color: INK2 }, top: 0, data: ['MA5', 'MA20'] },
-      xAxis: { type: 'category', data: data.kline.map(k => k[0]), axisLabel: { color: MUTED }, axisLine: { lineStyle: { color: AXIS } } },
-      yAxis: valAxis(),
-      dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 6, borderColor: AXIS, textStyle: { color: MUTED } }],
+      grid: [{ left: 60, right: 20, top: 38, height: '58%' },
+             { left: 60, right: 20, top: '76%', height: '12%' }],
+      xAxis: [
+        { type: 'category', data: categories, axisLabel: { color: MUTED }, axisLine: { lineStyle: { color: AXIS } } },
+        { type: 'category', gridIndex: 1, data: categories, axisLabel: { show: false }, axisLine: { lineStyle: { color: AXIS } }, axisTick: { show: false } },
+      ],
+      yAxis: [valAxis(), { ...valAxis(v => v >= 1e8 ? (v / 1e8).toFixed(1) + '亿' : (v / 1e4).toFixed(0) + '万'), gridIndex: 1, splitNumber: 2 }],
+      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] },
+        { type: 'slider', xAxisIndex: [0, 1], height: 16, bottom: 2, borderColor: AXIS, textStyle: { color: MUTED } }],
       series: [
         { type: 'candlestick', data: data.kline.map(k => k.slice(1, 5)),
           itemStyle: { color: '#e66767', color0: '#0ca30c', borderColor: '#e66767', borderColor0: '#0ca30c' } },
         { name: 'MA5', type: 'line', data: ma(5), showSymbol: false, lineStyle: { width: 1.5 } },
         { name: 'MA20', type: 'line', data: ma(20), showSymbol: false, lineStyle: { width: 1.5 } },
+        { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+          data: data.kline.map((k, i) => ({ value: k[5], itemStyle: { color: k[2] >= k[1] ? 'rgba(230,103,103,.55)' : 'rgba(12,163,12,.55)' } })),
+          barMaxWidth: 8, silent: true },
       ],
-    }));
-    document.getElementById('kline-panel').scrollIntoView({ behavior: 'smooth' });
-  } catch (e) { c.hideLoading(); alert('K线加载失败: ' + e.message); }
+    }), { notMerge: true });
+    document.getElementById('kline-panel').scrollIntoView({ behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
+  } catch (e) { c.hideLoading(); reportLocalError('K 线', '行情加载失败', e); }
 }
+document.getElementById('kline-frequency').addEventListener('click', e => {
+  const frequency = e.target.dataset.frequency;
+  if (!frequency || !activeKline.symbol || frequency === activeKline.frequency) return;
+  showKline(activeKline.symbol, activeKline.name, frequency);
+});
 loadMarket();
+
+/* ---------- 决策 ---------- */
+let decisionLoaded = false, decisionLoading = false;
+function fixed(v, digits = 2) { return v == null || !Number.isFinite(+v) ? '—' : (+v).toFixed(digits); }
+function directionLabel(value) { return value === 'up' ? '上行' : value === 'down' ? '下行' : '震荡'; }
+function actionLabel(value) { return value === 'buy' ? '候选' : value === 'watch' ? '观察' : '回避'; }
+
+const REGIME_WINDOWS = {
+  '7d':{label:'7D', days:7}, '14d':{label:'14D', days:14},
+  '1m':{label:'1M', months:1}, '3m':{label:'3M', months:3}, '6m':{label:'6M', months:6},
+  '1y':{label:'1Y', years:1}, '3y':{label:'3Y', years:3}, '5y':{label:'5Y', years:5}, '10y':{label:'10Y', years:10},
+};
+let regimeHistory = [];
+let activeRegimeWindow = '3m';
+
+function renderRegimeChart(windowKey = activeRegimeWindow) {
+  const spec = REGIME_WINDOWS[windowKey] || REGIME_WINDOWS['3m'];
+  activeRegimeWindow = windowKey;
+  const lastDate = regimeHistory.length
+    ? new Date(`${regimeHistory[regimeHistory.length - 1].date}T00:00:00Z`) : new Date();
+  const cutoff = new Date(lastDate);
+  if (spec.days) cutoff.setUTCDate(cutoff.getUTCDate() - spec.days);
+  if (spec.months) cutoff.setUTCMonth(cutoff.getUTCMonth() - spec.months);
+  if (spec.years) cutoff.setUTCFullYear(cutoff.getUTCFullYear() - spec.years);
+  const history = regimeHistory.filter(row => new Date(`${row.date}T00:00:00Z`) >= cutoff);
+  document.querySelectorAll('[data-regime-window]').forEach(button => {
+    const active = button.dataset.regimeWindow === windowKey;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const count = document.getElementById('regime-window-count');
+  if (count) count.textContent = `${spec.label} · ${history.length} 个交易日`;
+  const chart = mkChart('regime-chart', false);
+  if (!chart) return;
+  chart.setOption(baseOpt({
+    animationDuration:280, animationDurationUpdate:360,
+    animationEasing:'cubicOut', animationEasingUpdate:'cubicOut',
+    grid:{left:42,right:45,top:44,bottom:36},
+    legend:{textStyle:{color:INK2},top:0},
+    xAxis:timeAxis(), yAxis:[valAxis(),{...valAxis(v => (v * 100).toFixed(0) + '%'),min:0,max:1}],
+    series:[
+      {name:'牛熊分',type:'line',data:history.map(r => [r.date,r.bull_score]),showSymbol:false,smooth:.16,lineStyle:{width:2}},
+      {name:'上涨宽度',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.advance_ratio]),showSymbol:false,lineStyle:{width:1.5,color:'#c98500'}},
+      {name:'站上MA20',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.above_ma20_ratio]),showSymbol:false,lineStyle:{width:1.5,color:'#199e70'}},
+    ],
+  }), {notMerge:true});
+}
+
+function renderDecision(data, target = document.getElementById('decision-out')) {
+  const out = target;
+  const market = data.market, current = market.current;
+  const selectionReady = Boolean(data.selection), selection = data.selection || {};
+  const sectorsReady = Array.isArray(market.sectors), historyReady = Array.isArray(data.history);
+  const validation = Object.fromEntries((market.forecast_validation || []).map(v => [v.horizon_days, v]));
+  const tone = current.trend_score > .2 ? 'up' : current.trend_score < -.2 ? 'down' : '';
+  const picks = selection.picks || [];
+  out.innerHTML = `
+    <div class="decision-summary reveal">
+      <div class="regime-block">
+        <div><div class="eyebrow">${esc(current.as_of)} · ${current.universe_size} 只标的</div>
+          <div class="regime-name ${tone}">${esc(current.state_label)}</div></div>
+        <div class="regime-score"><strong class="${tone}">${fixed(current.bull_score, 1)}</strong><span class="hint">牛熊分 / 100</span></div>
+      </div>
+      <div class="metric-strip">
+        <div class="metric-cell"><div class="k">建议仓位</div><div class="v">${pct(selection.recommended_exposure)}</div></div>
+        <div class="metric-cell"><div class="k">趋势分</div><div class="v ${cls(current.trend_score)}">${fixed(current.trend_score, 3)}</div></div>
+        <div class="metric-cell"><div class="k">上涨宽度</div><div class="v">${pct(current.advance_ratio)}</div></div>
+        <div class="metric-cell"><div class="k">站上 MA20</div><div class="v">${pct(current.above_ma20_ratio)}</div></div>
+        <div class="metric-cell"><div class="k">MACD 柱</div><div class="v ${cls(current.macd_hist)}">${fixed(current.macd_hist, 4)}</div></div>
+        <div class="metric-cell"><div class="k">成交额 5/20 日</div><div class="v">${fixed(current.amount_ratio, 2)}</div></div>
+        <div class="metric-cell"><div class="k">20 日波动</div><div class="v">${pct(current.volatility_20d)}</div></div>
+        <div class="metric-cell"><div class="k">决策周期</div><div class="v">${selectionReady ? `${selection.holding_horizon_days} 日` : '计算中'}</div></div>
+      </div>
+    </div>
+    <div class="decision-grid reveal reveal-delay">
+      <div class="panel"><div class="panel-heading regime-heading">
+        <div class="regime-heading-title"><h3>牛熊分与市场宽度</h3><span class="state-pill" id="regime-window-count">3M</span></div>
+        <div class="segmented regime-window" aria-label="牛熊观察窗口">
+          <button type="button" data-regime-window="7d" aria-pressed="false">7D</button><button type="button" data-regime-window="14d" aria-pressed="false">14D</button>
+          <button type="button" data-regime-window="1m" aria-pressed="false">1M</button><button type="button" data-regime-window="3m" class="active" aria-pressed="true">3M</button>
+          <button type="button" data-regime-window="6m" aria-pressed="false">6M</button><button type="button" data-regime-window="1y" aria-pressed="false">1Y</button>
+          <button type="button" data-regime-window="3y" aria-pressed="false">3Y</button><button type="button" data-regime-window="5y" aria-pressed="false">5Y</button>
+          <button type="button" data-regime-window="10y" aria-pressed="false">10Y</button>
+        </div></div><div class="chart" id="regime-chart"></div></div>
+      <div class="panel"><div class="panel-heading"><h3>未来概率与历史验证</h3><span class="state-pill">非确定预测</span></div>
+        <table><thead><tr><th>周期</th><th>方向</th><th>上涨概率</th><th>期望</th><th>准确率</th><th>Brier</th></tr></thead>
+        <tbody>${(market.future || []).map(f => { const v = validation[f.horizon_days] || {}; return `<tr>
+          <td>${f.horizon_days} 日</td><td class="${cls(f.probability_up - .5)}">${directionLabel(f.direction)}</td>
+          <td>${pct(f.probability_up)}</td><td class="${cls(f.expected_return)}">${pct(f.expected_return)}</td>
+          <td>${v.direction_accuracy == null ? '—' : pct(v.direction_accuracy)}</td><td>${fixed(v.brier_score, 3)}</td></tr>`; }).join('')}</tbody></table>
+        <div class="hint">Brier 越低越好；准确率和误差只评价历史已揭晓样本。</div>
+      </div>
+    </div>
+    <div class="panel reveal reveal-delay">
+      <div class="panel-heading"><h3>今日候选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
+      <div class="table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>现价</th><th>资金量</th><th>预期</th><th>止损 / 止盈</th><th>依据</th></tr></thead>
+      <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击查看K线">
+        <td>${p.rank}</td><td><strong>${esc(p.name || '名称待同步')}</strong><div class="reason">${esc(p.symbol)} · ${esc(p.industry)}</div></td>
+        <td>${fixed(p.score, 1)}<div class="score-track"><div class="score-fill" style="--score:${Math.max(0,Math.min(1,p.score/100))}"></div></div></td>
+        <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${fixed(p.last_close, 2)}</td>
+        <td>${fixed(p.money_ratio, 2)}</td><td class="${cls(p.expected_return)}">${pct(p.expected_return)}</td>
+        <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td>
+        <td class="reason">${(p.reasons || []).map(esc).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前过滤条件下没有候选' : '市场状态已可查看，候选仍在计算…'}</td></tr>`}</tbody></table></div>
+      <div class="hint">${esc(selection.risk_note || '候选生成后将在此显示依据与风控位。')}</div>
+    </div>
+    <div class="decision-grid reveal reveal-delay">
+      <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill">股票池内聚合</span></div>
+        <table><thead><tr><th>板块</th><th>成分</th><th>状态</th><th>牛熊分</th><th>上涨宽度</th></tr></thead><tbody>
+        ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="5" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
+        </tbody></table></div>
+      <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
+        <table><thead><tr><th>日期</th><th>周期</th><th>仓位</th><th>前三候选</th></tr></thead><tbody>
+        ${(data.history || []).map(h => `<tr><td>${esc(h.signal_date)}</td><td>${h.holding_horizon_days} 日</td><td>${pct(h.recommended_exposure)}</td><td>${(h.picks || []).slice(0,3).map(p => `${esc(p.name || '')}${p.name ? ' ' : ''}${esc(p.symbol)}`).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
+        </tbody></table></div>
+    </div>`;
+
+  regimeHistory = market.past || [];
+  renderRegimeChart(activeRegimeWindow);
+}
+
+function createDecisionStreamRenderer(root) {
+  const state = {market:null, sectors:null, selection:null, history:null};
+  let completed = 0, total = 0, successful = 0, preview = null, symbols = null, count = null;
+  const ensurePreview = () => {
+    if (preview) return;
+    root.innerHTML = `<div class="panel ready-preview stream-enter">
+      <div class="ready-preview-head"><strong>已就绪标的</strong><span class="state-pill" data-ready-count>0 / 0</span></div>
+      <div class="ready-symbols" data-ready-symbols></div>
+      <div class="hint">已完成的标的可先打开 K 线；跨股票牛熊与选股需等待股票池同步完成。</div></div>`;
+    preview = root.querySelector('.ready-preview');
+    symbols = root.querySelector('[data-ready-symbols]');
+    count = root.querySelector('[data-ready-count]');
+  };
+  const render = () => {
+    if (!state.market) return;
+    if (state.sectors) state.market.sectors = state.sectors;
+    renderDecision({market:state.market, selection:state.selection, history:state.history}, root);
+  };
+  return {
+    partial(partial) {
+      if (!partial) return;
+      if (partial.kind === 'decision_symbol') {
+        completed = partial.completed; total = partial.total;
+        if (partial.success) successful += 1;
+        ensurePreview();
+        count.textContent = `${completed} / ${total} · ${successful} 成功`;
+        if (partial.success && symbols.children.length < 24) {
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'ready-symbol stream-enter';
+          button.dataset.previewSymbol = partial.symbol; button.textContent = partial.symbol;
+          symbols.appendChild(button);
+        }
+        return;
+      }
+      if (partial.kind === 'decision_market') state.market = partial.market;
+      if (partial.kind === 'decision_sectors') state.sectors = partial.sectors;
+      if (partial.kind === 'decision_selection') state.selection = partial.selection;
+      if (partial.kind === 'decision_history') state.history = partial.history;
+      render();
+    },
+    finish(data) {
+      state.market = data.market; state.selection = data.selection; state.history = data.history;
+      state.sectors = data.market?.sectors || [];
+      renderDecision(data, root);
+    },
+  };
+}
+
+async function loadDecision(form) {
+  if (decisionLoading) return;
+  decisionLoading = true;
+  const out = document.getElementById('decision-out');
+  busy(form, true, '生成中…');
+  const tracker = createLoadProgress(out, '准备每日决策', 'decision');
+  const renderer = createDecisionStreamRenderer(tracker.results);
+  try {
+    const fd = new FormData(form);
+    const body = {
+      universe:fd.get('universe'), start:fd.get('start'), horizon:+fd.get('horizon'),
+      top_n:+fd.get('top_n'), sector_top:10, history:2600, save:true,
+    };
+    const data = await streamJson('/api/decision/dashboard/stream', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+    }, event => {
+      tracker.update(event);
+      if (event.partial) {
+        tracker.reveal();
+        renderer.partial(event.partial);
+      }
+    });
+    renderer.finish(data);
+    tracker.reveal();
+    tracker.finish(`决策已完成 · ${data.selection?.picks?.length || 0} 只候选`);
+    decisionLoaded = true;
+  } catch (err) {
+    tracker.fail(err.message);
+    if (!tracker.hasResults) {
+      tracker.reveal().innerHTML = `<div class="err">${esc(err.message)}</div>`;
+    } else {
+      tracker.results.insertAdjacentHTML('beforeend',
+        `<div class="err">后续阶段加载失败：${esc(err.message)}；上方已完成结果仍可使用。</div>`);
+    }
+  }
+  decisionLoading = false;
+  busy(form, false);
+}
+document.getElementById('decision-form').onsubmit = e => { e.preventDefault(); loadDecision(e.target); };
+document.getElementById('decision-out').addEventListener('click', e => {
+  const preview = e.target.closest('[data-preview-symbol]');
+  if (preview) {
+    document.querySelector('nav button[data-tab="market"]').click();
+    showKline(preview.dataset.previewSymbol, preview.dataset.previewSymbol, '1d');
+    return;
+  }
+  const windowButton = e.target.closest('[data-regime-window]');
+  if (windowButton) { renderRegimeChart(windowButton.dataset.regimeWindow); return; }
+  const row = e.target.closest('tr[data-symbol]');
+  if (!row) return;
+  document.querySelector('nav button[data-tab="market"]').click();
+  showKline(row.dataset.symbol, row.dataset.name || row.dataset.symbol, '1d');
+});
 
 /* ---------- 因子 ---------- */
 async function loadFactorList() {
@@ -453,8 +2039,9 @@ document.getElementById('bt-form').onsubmit = async e => {
   try {
     const fd = new FormData(form);
     const data = await post('/api/backtest/run', {
-      factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
+      strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
       top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark'),
+      holding_days:+fd.get('holding_days'),
       stop_loss: fd.get('stop_loss') ? +fd.get('stop_loss') : null,
       take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null,
       weighting: fd.get('weighting') });
@@ -528,8 +2115,8 @@ document.getElementById('mine-out').addEventListener('click', e => {
   const code = e.target.closest('code.mined-expr');
   if (!code) return;
   document.querySelector('#factor-form [name=expression]').value = code.textContent;
-  document.querySelector('nav button[data-tab="factor"]').click();
-  document.getElementById('factor-form').requestSubmit();
+  document.querySelector('nav button[data-tab="lab"]').click();
+  if (window.quantLabOpenExpression) window.quantLabOpenExpression(code.textContent);
 });
 document.getElementById('gp-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
@@ -604,8 +2191,8 @@ document.getElementById('paper-form').onsubmit = async e => {
   try {
     const fd = new FormData(form);
     const result = await post('/api/paper/run', {
-      factor: fd.get('factor'), universe: fd.get('universe'),
-      top_n: +fd.get('top_n'), rebalance: fd.get('rebalance') });
+      strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'),
+      top_n: +fd.get('top_n'), holding_days:+fd.get('holding_days'), rebalance: fd.get('rebalance') });
     await loadPaper();
     const executed = result.executed || [];
     if (executed.length) {
@@ -702,7 +2289,8 @@ document.getElementById('trade-form').onsubmit = async e => {
     await post('/api/ledger/trade', { date: fd.get('date'), symbol: fd.get('symbol'),
       side: fd.get('side'), price: +fd.get('price'), shares: +fd.get('shares'), fee: +fd.get('fee') });
     await loadLedger();
-  } catch (err) { alert(err.message); }
+    await loadAssetLists(false);
+  } catch (err) { reportLocalError('实盘账本', '成交记录未能保存', err); }
   busy(form, false);
 };
 document.getElementById('cash-form').onsubmit = async e => {
@@ -711,9 +2299,14 @@ document.getElementById('cash-form').onsubmit = async e => {
     const fd = new FormData(form);
     await post('/api/ledger/cashflow', { date: fd.get('date'), amount: +fd.get('amount'), kind: fd.get('kind') });
     await loadLedger();
-  } catch (err) { alert(err.message); }
+  } catch (err) { reportLocalError('实盘账本', '资金流水未能保存', err); }
   busy(form, false);
 };
 </script>
+<script src="/static/automation.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/news.js"></script>
+<script src="/static/ledger-import.js"></script>
+<script src="/static/lab.js"></script>
 </body>
 </html>

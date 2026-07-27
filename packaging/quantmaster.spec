@@ -2,7 +2,14 @@
 # 产物：dist/QuantMaster(.exe) 单文件；双击运行 = qm app（启动服务并打开浏览器），
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
+from PyInstaller.utils.hooks import collect_submodules
+
 datas = [("../quantmaster/server/static", "quantmaster/server/static")]
+optional_hidden = (
+    collect_submodules("keyring.backends") + collect_submodules("multipart") +
+    collect_submodules("apscheduler") + collect_submodules("lark_oapi") +
+    collect_submodules("qrcode")
+)
 
 a = Analysis(
     ["entry.py"],
@@ -11,7 +18,7 @@ a = Analysis(
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on",
-    ],
+    ] + optional_hidden,
     excludes=["tkinter", "matplotlib"],
 )
 pyz = PYZ(a.pure)
