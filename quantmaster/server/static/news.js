@@ -106,34 +106,11 @@
   async function streamAnnotationEvents(onEvent) {
     await window.QuantMasterManagement.ensureSettings();
     const csrf = window.QuantMasterManagement.state.csrf;
-    const response = await fetch('/api/news/reanalyze/stream', {
+    return window.QuantMasterNDJSON('/api/news/reanalyze/stream', {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
       body: JSON.stringify({limit: 100, batch_size: 5}),
-    });
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const payload = await response.json();
-        message = typeof payload.detail === 'string' ? payload.detail : JSON.stringify(payload.detail);
-      } catch (_) { /* 保留 HTTP 状态 */ }
-      throw new Error(message);
-    }
-    if (!response.body) throw new Error('当前浏览器不支持流式响应');
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const {done, value} = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (line.trim()) onEvent(JSON.parse(line));
-      }
-      if (done) break;
-    }
-    if (buffer.trim()) onEvent(JSON.parse(buffer));
+    }, onEvent);
   }
 
   function localDate(value) {
@@ -615,6 +592,15 @@
           processed ? `${completed} 条结果已全部写入事件流。` : '当前队列无需处理。',
       );
       report(`标注处理完成：${completed}/${processed}`, null, 'success');
+      if (failed) {
+        window.QuantMasterRunInfo.add('warning', '资讯分析', '部分资讯标注失败', {
+          detail:`完成 ${completed} 条，失败 ${failed} 条；失败项已进入退避重试。`,
+          action:'已完成结果可以使用；稍后再次处理待标注资讯。',
+          key:'news:annotation:partial',
+        });
+      } else {
+        window.QuantMasterRunInfo.resolve('news:annotation:partial');
+      }
       await Promise.all([loadFeed(), loadStats()]);
     } catch (error) {
       const current = Number(document.getElementById('news-annotation-track').getAttribute('aria-valuenow'));
