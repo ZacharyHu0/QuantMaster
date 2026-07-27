@@ -177,6 +177,81 @@ def test_llm_annotations_are_constrained():
     assert item.urgency == "normal"
 
 
+def test_annotation_stream_yields_each_persisted_batch(tmp_path):
+    from quantmaster.ai.crawler import AICrawler
+
+    class FakeLLM:
+        def chat_json(self, prompt, system=""):
+            count = int(prompt.split("分析以下 ", 1)[1].split(" 条", 1)[0])
+            return [{
+                "symbols": ["600519.SH"], "event_type": "业绩",
+                "sentiment": 0.4, "summary": f"批次标注 {index + 1}",
+                "scope": "market", "urgency": "normal", "confidence": 0.8,
+            } for index in range(count)]
+
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([
+        NewsItem(source="test", title=f"待标注 {index}", content=f"正文 {index}")
+        for index in range(7)
+    ])
+    events = AICrawler(client=FakeLLM(), store=store).enrich_pending_events(
+        limit=7, batch_size=3,
+    )
+    started = next(events)
+    assert started == {
+        "type": "start", "total": 7, "processed": 0,
+        "completed": 0, "failed": 0, "batch_count": 3,
+    }
+
+    first_batch = next(events)
+    assert first_batch["type"] == "batch"
+    assert first_batch["processed"] == 3
+    assert first_batch["completed"] == 3
+    assert len(first_batch["updated_items"]) == 3
+    assert len(store.query(status="complete", limit=20)["items"]) == 3
+    assert len(store.query(status="pending", limit=20)["items"]) == 4
+
+    remaining = list(events)
+    assert [event["type"] for event in remaining] == ["batch", "batch", "complete"]
+    assert remaining[-1]["completed"] == 7
+    assert len(store.query(status="complete", limit=20)["items"]) == 7
+
+
+def test_annotation_stream_api_contract(monkeypatch):
+    from quantmaster.server import news as news_module
+
+    class FakeStore:
+        def reset_analysis(self, ids):
+            return len(ids or [])
+
+    class FakeCrawler:
+        def __init__(self):
+            self.store = FakeStore()
+
+        def enrich_pending_events(self, **kwargs):
+            yield {"type": "start", "total": 2, "processed": 0,
+                   "completed": 0, "failed": 0, "batch_count": 1}
+            yield {"type": "batch", "batch": 1, "batch_count": 1,
+                   "processed": 2, "total": 2, "completed": 2, "failed": 0,
+                   "batch_completed": 2, "batch_failed": 0,
+                   "completed_ids": [1, 2], "updated_items": [], "error": ""}
+            yield {"type": "complete", "processed": 2, "completed": 2,
+                   "failed": 0, "completed_ids": [1, 2]}
+
+    monkeypatch.setattr(news_module, "AICrawler", FakeCrawler)
+    client = TestClient(app)
+    token = _issue_csrf()
+    client.cookies.set("qm_csrf", token)
+    with client.stream(
+        "POST", "/api/news/reanalyze/stream",
+        json={"limit": 10, "batch_size": 2}, headers={"X-CSRF-Token": token},
+    ) as response:
+        events = [json.loads(line) for line in response.iter_lines() if line]
+        assert response.status_code == 200
+        assert response.headers["X-Accel-Buffering"] == "no"
+    assert [event["type"] for event in events] == ["start", "batch", "complete"]
+
+
 def test_news_api_csrf_and_ui_contract():
     client = TestClient(app)
     assert client.get("/api/news/sources").status_code == 200
@@ -193,6 +268,7 @@ def test_news_api_csrf_and_ui_contract():
 
     page = client.get("/").text
     assert 'id="news-factor-chart"' in page
+    assert 'id="news-annotation-progress"' in page
     assert 'data-settings-section="sources"' in page
     assert "/static/news.js" in page
     assert "/static/news.css" in page

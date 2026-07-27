@@ -189,3 +189,25 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
         })
         assert queued.status_code == 202
         assert queued.json()["status"] == "queued"
+
+
+def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
+    _config(tmp_path, enabled=False)
+    from quantmaster.server.app import app
+
+    with TestClient(app) as client:
+        page = client.get("/").text
+        styles = client.get("/static/lab.css").text
+        script = client.get("/static/lab.js").text
+
+    assert '<span class="nav-lab-label">Quant Lab</span>' in page
+    assert 'id="lab-ml-setup"' in page
+    assert "#nav .nav-lab-label" in styles
+    assert "margin:auto" in styles
+    assert "--dialog-x" in styles
+    assert "setupDraggableDialog" in script
+    assert "clampDialogOffset" in script
+    assert 'python -m pip install -e ".[data,ml]"' in script
+    assert "qm lab doctor" in script
+    assert "qm lab worker" in script
+    assert "aria-disabled" in script

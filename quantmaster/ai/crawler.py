@@ -19,6 +19,7 @@ import re
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -182,6 +183,17 @@ EXTRACT_SYSTEM = """你是A股财经新闻分析师。对每条新闻输出：
 - scope: holding|watchlist|market
 - urgency: critical|high|normal
 - confidence: 0到1"""
+
+
+def _safe_analysis_error(exc: Exception) -> str:
+    message = str(exc).strip() or "标注服务未返回结果"
+    message = re.sub(
+        r"(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+",
+        r"\1***", message,
+    )
+    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1***", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***", message)
+    return message[:497] + "…" if len(message) > 500 else message
 
 
 class NewsStore:
@@ -720,30 +732,56 @@ class AICrawler:
             for item in articles
         ]
 
-    def enrich_pending(self, limit: int | None = None, ids: list[int] | None = None) -> dict:
+    @staticmethod
+    def _annotation_prompt(items: list[NewsItem]) -> str:
+        numbered = "\n".join(
+            f"{offset + 1}. {item.content[:500]}" for offset, item in enumerate(items)
+        )
+        return (
+            f"分析以下 {len(items)} 条新闻，输出 JSON 数组（与输入同序等长）：\n"
+            '[{"symbols": [], "event_type": "其他", "sentiment": 0.0, "summary": "", '
+            '"scope": "market", "urgency": "normal", "confidence": 0.5}]\n\n'
+            + numbered
+        )
+
+    @staticmethod
+    def _stream_item(item: dict) -> dict:
+        value = dict(item)
+        content = str(value.get("content") or "")
+        value["content_truncated"] = len(content) > 2000
+        if value["content_truncated"]:
+            value["content"] = content[:2000]
+        return value
+
+    def enrich_pending_events(
+        self, limit: int | None = None, ids: list[int] | None = None,
+        batch_size: int | None = None,
+    ) -> Iterator[dict]:
+        """逐批处理待标注资讯，每批落库后立即产出可流式发送的真实进度。"""
         cfg = get_config().news
         rows = self.store.pending(limit=limit or cfg.annotation_items_per_run, ids=ids)
-        if not rows:
-            return {"processed": 0, "completed": 0, "failed": 0, "completed_ids": []}
-        batch_size = cfg.annotation_batch_size
-        completed = 0
+        size = max(1, min(int(batch_size or cfg.annotation_batch_size), 50))
+        total = len(rows)
+        batch_count = math.ceil(total / size) if total else 0
+        yield {
+            "type": "start", "total": total, "processed": 0,
+            "completed": 0, "failed": 0, "batch_count": batch_count,
+        }
+        completed = failed = processed = 0
         completed_ids: list[int] = []
-        for index in range(0, len(rows), batch_size):
-            chunk = rows[index:index + batch_size]
+        for index in range(0, total, size):
+            chunk = rows[index:index + size]
             items = [NewsItem(
                 source=row["source_id"], title=row["title"], content=row["content"],
                 url=row["url"], published_at=row["published_at"],
                 is_official=row["is_official"], db_id=row["id"],
             ) for row in chunk]
-            numbered = "\n".join(f"{offset + 1}. {item.content[:500]}" for offset, item in enumerate(items))
-            prompt = (
-                f"分析以下 {len(items)} 条新闻，输出 JSON 数组（与输入同序等长）：\n"
-                '[{"symbols": [], "event_type": "其他", "sentiment": 0.0, "summary": "", '
-                '"scope": "market", "urgency": "normal", "confidence": 0.5}]\n\n'
-                + numbered
-            )
+            chunk_completed = 0
+            error = ""
             try:
-                parsed = self.client.chat_json(prompt, system=EXTRACT_SYSTEM)
+                parsed = self.client.chat_json(
+                    self._annotation_prompt(items), system=EXTRACT_SYSTEM,
+                )
                 if not isinstance(parsed, list) or len(parsed) != len(items):
                     raise ValueError("LLM 标注结果数量与输入不一致")
                 if any(not isinstance(result, dict) for result in parsed):
@@ -755,13 +793,42 @@ class AICrawler:
                     item.importance_score, item.scope, _ = importance_score(item, set(), set())
                     self.store.update_analysis(int(item.db_id), item)
                     completed += 1
+                    chunk_completed += 1
                     completed_ids.append(int(item.db_id))
             except Exception as exc:
-                self.store.analysis_failure([int(item.db_id) for item in items], str(exc))
-        return {
+                error = _safe_analysis_error(exc)
+                self.store.analysis_failure([int(item.db_id) for item in items], error)
+            chunk_failed = len(items) - chunk_completed
+            failed += chunk_failed
+            processed += len(items)
+            updated_ids = [int(item.db_id) for item in items]
+            updated_items = [
+                self._stream_item(value) for item_id in updated_ids
+                if (value := self.store.detail(item_id)) is not None
+            ]
+            yield {
+                "type": "batch", "batch": index // size + 1,
+                "batch_count": batch_count, "processed": processed, "total": total,
+                "completed": completed, "failed": failed,
+                "batch_completed": chunk_completed, "batch_failed": chunk_failed,
+                "completed_ids": completed_ids[-chunk_completed:] if chunk_completed else [],
+                "updated_items": updated_items, "error": error,
+            }
+        result = {
             "processed": len(rows), "completed": completed,
-            "failed": len(rows) - completed, "completed_ids": completed_ids,
+            "failed": failed, "completed_ids": completed_ids,
         }
+        yield {"type": "complete", **result}
+
+    def enrich_pending(
+        self, limit: int | None = None, ids: list[int] | None = None,
+        batch_size: int | None = None,
+    ) -> dict:
+        result = {"processed": 0, "completed": 0, "failed": 0, "completed_ids": []}
+        for event in self.enrich_pending_events(limit=limit, ids=ids, batch_size=batch_size):
+            if event["type"] == "complete":
+                result = {key: value for key, value in event.items() if key != "type"}
+        return result
 
     def reanalyze(self, ids: list[int] | None = None, limit: int | None = None) -> dict:
         reset = self.store.reset_analysis(ids)

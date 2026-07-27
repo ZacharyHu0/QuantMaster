@@ -165,7 +165,9 @@ from quantmaster.ai.sentiment import NewsSentimentFactor
 factor = NewsSentimentFactor()   # compute(panel) 只读本地资讯库，不会在回测时触网
 ```
 
-Web「资讯」页提供可筛选事件流、标注队列、重要度和 30 日消息面摘要；来源在
+Web「资讯」页提供可筛选事件流、标注队列、重要度和 30 日消息面摘要。点击「处理待标注」
+后，页面按每批 5 条显示真实进度与已用时间；批次一经写入便实时更新事件、统计和因子，
+无需等待全部内容处理完成。来源在
 「设置 → 资讯来源」管理。除内置适配器外，可添加三种声明式来源：RSS / Atom、
 JSON 点号路径、HTML CSS 选择器。来源只能访问公开 `http(s)` 地址，Token 必须使用
 Bearer 或自定义 Header 凭据字段，不能写进普通请求头。

@@ -10,6 +10,11 @@
     sources: [],
     selectedSource: null,
     clearToken: false,
+    updatedIds: new Set(),
+    annotationTimer: null,
+    annotationHideTimer: null,
+    annotationStatsTimer: null,
+    annotationStartedAt: 0,
   };
 
   const feed = document.getElementById('news-out');
@@ -49,6 +54,82 @@
     return window.QuantMasterManagement.request(path, options);
   }
 
+  function elapsedText() {
+    const seconds = Math.max(0, Math.floor((performance.now() - state.annotationStartedAt) / 1000));
+    if (seconds < 60) return `已用时 ${seconds} 秒`;
+    return `已用时 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  }
+
+  function setAnnotationProgress({percent = 0, phase, detail, count} = {}) {
+    const panel = document.getElementById('news-annotation-progress');
+    const value = Math.max(0, Math.min(100, Math.round(percent)));
+    panel.style.setProperty('--annotation-progress', value / 100);
+    document.getElementById('news-annotation-percent').textContent = `${value}%`;
+    document.getElementById('news-annotation-track').setAttribute('aria-valuenow', String(value));
+    if (phase) document.getElementById('news-annotation-phase').textContent = phase;
+    if (detail) document.getElementById('news-annotation-detail').textContent = detail;
+    if (count) document.getElementById('news-annotation-count').textContent = count;
+  }
+
+  function startAnnotationProgress() {
+    const panel = document.getElementById('news-annotation-progress');
+    clearInterval(state.annotationTimer);
+    clearTimeout(state.annotationHideTimer);
+    state.annotationStartedAt = performance.now();
+    panel.hidden = false;
+    panel.className = 'news-annotation-progress running';
+    document.getElementById('news-annotation-elapsed').textContent = '已用时 0 秒';
+    setAnnotationProgress({
+      percent: 0, phase: '准备标注队列', detail: '正在读取可处理的待标注资讯…', count: '0 / 0',
+    });
+    state.annotationTimer = setInterval(() => {
+      document.getElementById('news-annotation-elapsed').textContent = elapsedText();
+    }, 1000);
+  }
+
+  function finishAnnotationProgress(kind, phase, detail, percent = 100) {
+    const panel = document.getElementById('news-annotation-progress');
+    clearInterval(state.annotationTimer);
+    panel.className = `news-annotation-progress ${kind}`;
+    document.getElementById('news-annotation-elapsed').textContent = elapsedText();
+    setAnnotationProgress({percent, phase, detail});
+    clearTimeout(state.annotationHideTimer);
+    state.annotationHideTimer = setTimeout(() => { panel.hidden = true; }, 7000);
+  }
+
+  async function streamAnnotationEvents(onEvent) {
+    await window.QuantMasterManagement.ensureSettings();
+    const csrf = window.QuantMasterManagement.state.csrf;
+    const response = await fetch('/api/news/reanalyze/stream', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify({limit: 100, batch_size: 5}),
+    });
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const payload = await response.json();
+        message = typeof payload.detail === 'string' ? payload.detail : JSON.stringify(payload.detail);
+      } catch (_) { /* 保留 HTTP 状态 */ }
+      throw new Error(message);
+    }
+    if (!response.body) throw new Error('当前浏览器不支持流式响应');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.trim()) onEvent(JSON.parse(line));
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) onEvent(JSON.parse(buffer));
+  }
+
   function localDate(value) {
     if (!value) return {day: '时间未知', time: ''};
     const parsed = new Date(value);
@@ -80,7 +161,8 @@
       ...(item.symbols || []).slice(0, 4).map(symbol => `<span class="news-tag symbol">${html(symbol)}</span>`),
     ].join('');
     const link = safeUrl(item.url);
-    return `<article class="news-event" data-news-id="${Number(item.id)}" data-content-truncated="${Boolean(item.content_truncated)}">
+    const updated = state.updatedIds.has(Number(item.id)) ? ' stream-updated' : '';
+    return `<article class="news-event${updated}" data-news-id="${Number(item.id)}" data-content-truncated="${Boolean(item.content_truncated)}">
       <button class="news-event-main" type="button" aria-expanded="false">
         <span class="news-event-time"><strong>${html(timestamp.time)}</strong>${html(timestamp.day)}</span>
         <span><span class="news-event-title">${html(item.title)}</span>
@@ -112,6 +194,42 @@
     const more = document.getElementById('news-load-more');
     more.hidden = !state.hasMore;
     more.disabled = false;
+    state.updatedIds.clear();
+  }
+
+  function matchesCurrentFilters(item) {
+    const filters = Object.fromEntries(new FormData(filterForm));
+    const query = String(filters.q || '').trim().toLocaleLowerCase('zh-CN');
+    const searchable = `${item.title || ''} ${item.summary || ''} ${item.content || ''}`
+      .toLocaleLowerCase('zh-CN');
+    if (query && !searchable.includes(query)) return false;
+    if (filters.group && item.source_group !== filters.group) return false;
+    if (filters.source && item.source_id !== filters.source) return false;
+    if (filters.status && item.analysis_status !== filters.status) return false;
+    const sentiment = Number(item.sentiment || 0);
+    if (filters.sentiment === 'positive' && sentiment <= .15) return false;
+    if (filters.sentiment === 'negative' && sentiment >= -.15) return false;
+    if (filters.sentiment === 'neutral' && (sentiment < -.15 || sentiment > .15)) return false;
+    return true;
+  }
+
+  function mergeAnnotationItems(items) {
+    const byId = new Map(state.items.map(item => [Number(item.id), item]));
+    const updated = new Set();
+    for (const item of items || []) {
+      const id = Number(item.id);
+      byId.set(id, {...(byId.get(id) || {}), ...item});
+      updated.add(id);
+    }
+    state.items = [...byId.values()].filter(matchesCurrentFilters);
+    const importance = filterForm.elements.sort.value === 'importance';
+    state.items.sort(importance
+      ? (left, right) => Number(right.importance_score || 0) -
+        Number(left.importance_score || 0) || Number(right.id) - Number(left.id)
+      : (left, right) => Number(right.id) - Number(left.id));
+    state.items = state.items.slice(0, 40);
+    state.updatedIds = updated;
+    renderFeed();
   }
 
   function queryString(cursor = null) {
@@ -431,12 +549,63 @@
   document.getElementById('news-reanalyze').onclick = async event => {
     const button = event.currentTarget;
     button.disabled = true;
+    button.textContent = '标注处理中';
+    startAnnotationProgress();
+    let finalEvent = null;
     try {
-      const result = await secure('/api/news/reanalyze', {method: 'POST', body: {limit: 100}});
-      report(`标注处理完成：${result.completed || 0}/${result.processed || 0}`, null, 'success');
+      await streamAnnotationEvents(update => {
+        if (update.type === 'error') throw new Error(update.message || '标注流异常中断');
+        if (update.type === 'start') {
+          const total = Number(update.total || 0);
+          button.textContent = total ? `标注中 0/${total}` : '没有待处理资讯';
+          setAnnotationProgress({
+            percent: total ? 0 : 100,
+            phase: total ? `共 ${total} 条 · ${update.batch_count} 个批次` : '队列已经处理完毕',
+            detail: total ? '每个批次完成后会立即写入并刷新事件流。' : '当前没有可处理或可重试的资讯。',
+            count: `0 / ${total}`,
+          });
+        }
+        if (update.type === 'batch') {
+          const processed = Number(update.processed || 0);
+          const total = Number(update.total || 0);
+          const percent = total ? processed / total * 100 : 100;
+          button.textContent = `标注中 ${processed}/${total}`;
+          setAnnotationProgress({
+            percent,
+            phase: `第 ${update.batch} / ${update.batch_count} 批已写入`,
+            detail: update.error
+              ? `本批完成 ${update.batch_completed} 条，失败 ${update.batch_failed} 条：${update.error}`
+              : `本批 ${update.batch_completed} 条已完成，事件流与消息面统计正在刷新。`,
+            count: `完成 ${update.completed} · 失败 ${update.failed} · ${processed} / ${total}`,
+          });
+          mergeAnnotationItems(update.updated_items || []);
+          clearTimeout(state.annotationStatsTimer);
+          state.annotationStatsTimer = setTimeout(loadStats, 160);
+        }
+        if (update.type === 'complete') finalEvent = update;
+      });
+      finalEvent ||= {processed: 0, completed: 0, failed: 0};
+      const failed = Number(finalEvent.failed || 0);
+      const processed = Number(finalEvent.processed || 0);
+      const completed = Number(finalEvent.completed || 0);
+      document.getElementById('news-annotation-count').textContent =
+        `完成 ${completed} · 失败 ${failed} · ${processed} / ${processed}`;
+      finishAnnotationProgress(
+        failed ? 'warning' : 'success',
+        processed ? '本轮标注已完成' : '没有待处理资讯',
+        failed ? `${completed} 条完成，${failed} 条进入退避重试。` :
+          processed ? `${completed} 条结果已全部写入事件流。` : '当前队列无需处理。',
+      );
+      report(`标注处理完成：${completed}/${processed}`, null, 'success');
       await Promise.all([loadFeed(), loadStats()]);
-    } catch (error) { report('标注任务失败', error); }
-    finally { button.disabled = false; }
+    } catch (error) {
+      const current = Number(document.getElementById('news-annotation-track').getAttribute('aria-valuenow'));
+      finishAnnotationProgress('failed', '标注任务中断', error.message, current);
+      report('标注任务失败', error);
+    } finally {
+      button.disabled = false;
+      button.textContent = '处理待标注';
+    }
   };
 
   function openSourceSettings() {

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from quantmaster.ai.crawler import AICrawler, NewsStore
@@ -79,6 +82,7 @@ class CrawlRequest(StrictModel):
 class ReanalyzeRequest(StrictModel):
     ids: list[int] | None = None
     limit: int = Field(default=100, ge=1, le=1000)
+    batch_size: int = Field(default=5, ge=1, le=10)
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -226,10 +230,42 @@ def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
     try:
         crawler = AICrawler()
         if value.ids is None:
-            return crawler.enrich_pending(limit=value.limit)
-        return crawler.reanalyze(ids=value.ids, limit=value.limit)
+            return crawler.enrich_pending(limit=value.limit, batch_size=value.batch_size)
+        reset = crawler.store.reset_analysis(value.ids)
+        return {
+            "reset": reset,
+            **crawler.enrich_pending(
+                ids=value.ids, limit=value.limit, batch_size=value.batch_size,
+            ),
+        }
     except Exception as exc:
         raise _error(exc) from exc
+
+
+@router.post("/reanalyze/stream")
+def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> StreamingResponse:
+    """逐批发送真实标注进度；每个 batch 事件都包含刚刚落库的资讯。"""
+    _require_csrf(request)
+    crawler = AICrawler()
+    if value.ids is not None:
+        crawler.store.reset_analysis(value.ids)
+
+    def generate() -> Iterator[str]:
+        try:
+            for event in crawler.enrich_pending_events(
+                ids=value.ids, limit=value.limit, batch_size=value.batch_size,
+            ):
+                yield json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n"
+        except Exception as exc:
+            error = _error(exc)
+            yield json.dumps(
+                {"type": "error", "message": error.detail}, ensure_ascii=False,
+            ) + "\n"
+
+    return StreamingResponse(
+        generate(), media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{item_id}")

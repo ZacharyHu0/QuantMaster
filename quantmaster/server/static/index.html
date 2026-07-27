@@ -711,6 +711,12 @@
   <div class="news-workbench">
     <section class="news-feed-panel" aria-labelledby="news-feed-title">
       <div class="news-panel-head"><div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div><button class="text-action" id="news-reanalyze" type="button">处理待标注</button></div>
+      <div class="news-annotation-progress" id="news-annotation-progress" role="status" aria-live="polite" hidden>
+        <div class="news-annotation-head"><div><span class="news-annotation-dot" aria-hidden="true"></span><strong id="news-annotation-phase">准备标注队列</strong></div><b id="news-annotation-percent">0%</b></div>
+        <p id="news-annotation-detail">正在读取待处理资讯…</p>
+        <div class="news-annotation-track" id="news-annotation-track" role="progressbar" aria-label="资讯标注进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="news-annotation-fill"></i></div>
+        <div class="news-annotation-meta"><span id="news-annotation-count">0 / 0</span><span id="news-annotation-elapsed">已用时 0 秒</span></div>
+      </div>
       <div id="news-out" class="news-feed"><div class="news-skeleton" aria-label="加载中"><i></i><i></i><i></i></div></div>
       <button class="news-load-more" id="news-load-more" type="button" hidden>加载更早资讯</button>
     </section>
