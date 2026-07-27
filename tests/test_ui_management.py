@@ -204,3 +204,80 @@ def test_decision_chart_survives_progressive_rerender(live_server):
         pick_tops = [picks.nth(index).bounding_box()["y"] for index in range(3)]
         assert pick_tops == sorted(set(pick_tops))
         browser.close()
+
+
+def test_active_tab_survives_reload(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url)
+        page.get_by_role("button", name="回测", exact=True).click()
+        assert page.locator("#tab-backtest").is_visible()
+        assert page.evaluate("sessionStorage.getItem('quantmaster.activeTab')") == "backtest"
+
+        page.reload()
+        assert page.locator("#tab-backtest").is_visible()
+        assert page.locator('header [data-tab="backtest"]').evaluate(
+            "element => element.classList.contains('active')"
+        )
+
+        page.evaluate("sessionStorage.setItem('quantmaster.activeTab', 'missing-page')")
+        page.reload()
+        assert page.locator("#tab-market").is_visible()
+        assert page.evaluate("sessionStorage.getItem('quantmaster.activeTab')") is None
+        browser.close()
+
+
+def test_runtime_messages_are_compact_and_diagnostic(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url)
+        page.evaluate("document.getElementById('runtime-clear').click()")
+        page.evaluate(
+            """() => {
+              const key = window.QuantMasterRunInfo.begin(
+                '诊断测试', '正在加载数据', {path:'GET /api/test'});
+              window.QuantMasterRunInfo.phase('诊断测试', {
+                phase:'读取行情', detail:'第一阶段', request_id:'req-test'
+              }, 'GET /api/test', key);
+              window.QuantMasterRunInfo.phase('诊断测试', {
+                phase:'计算指标', detail:'第二阶段', request_id:'req-test'
+              }, 'GET /api/test', key);
+            }"""
+        )
+        test_entries = page.locator(".runtime-entry", has_text="诊断测试")
+        assert test_entries.count() == 1
+        assert "计算指标" in test_entries.inner_text()
+
+        page.evaluate(
+            """window.QuantMasterRunInfo.add(
+              'error', '诊断测试', '服务端处理失败', {
+                detail:'database is locked', action:'稍后重试。',
+                path:'POST /api/test', requestId:'req-test', key:'request:test'
+              })"""
+        )
+        assert not page.locator("#runtime-info").evaluate(
+            "element => element.classList.contains('expanded')"
+        )
+        page.locator("#runtime-summary").click()
+        problem = page.locator('.runtime-entry[data-level="error"]', has_text="诊断测试")
+        assert problem.is_visible()
+        assert "稍后重试。" in problem.inner_text()
+        diagnostics = problem.locator(".runtime-diagnostics")
+        assert not diagnostics.evaluate("element => element.open")
+        diagnostics.locator("summary").click()
+        assert "database is locked" in diagnostics.inner_text()
+        assert "POST /api/test" in diagnostics.inner_text()
+        assert "req-test" in diagnostics.inner_text()
+
+        page.evaluate(
+            """window.QuantMasterRunInfo.add(
+              'success', '诊断测试', '操作已恢复', {key:'request:test'})"""
+        )
+        assert page.locator(
+            '.runtime-entry[data-level="error"]', has_text="服务端处理失败"
+        ).count() == 0
+        browser.close()

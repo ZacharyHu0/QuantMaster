@@ -92,9 +92,12 @@
   function bindingMarkup(target, session) {
     if (!session) return '';
     const command = `绑定 QuantMaster ${session.code}`;
+    const noEvent = target.chat_type === 'group'
+      ? '未收到群聊 @机器人 事件。请确认消息中真正 @QuantMaster，并检查 im:message.group_at_msg:readonly 已开通、审批且随新版本发布。'
+      : '尚未收到私聊消息事件，请检查 im.message.receive_v1、单聊权限、应用发布状态和可用范围。';
     const status = {
       waiting:'等待飞书消息事件…', event_seen:'已收到消息，正在完成绑定…',
-      no_event:'尚未收到消息事件，请检查飞书事件订阅和应用发布状态。',
+      no_event:noEvent,
       bound:'绑定成功，可以发送测试消息。', expired:'绑定码已过期，请重新开始绑定。',
       error:`绑定状态检查失败：${session.error || '未知错误'}`,
     }[session.status] || '等待绑定';
@@ -329,10 +332,12 @@
           return;
         }
         const data = await secureApi(`/api/automation/bindings/code?target_id=${encodeURIComponent(bind.dataset.bindTarget)}`, {method:'POST'});
+        const target = state.data.targets.find(item => item.id === bind.dataset.bindTarget);
+        const inbound = state.data?.inbound?.feishu?.[target.chat_type] || {total:0};
         const session = {
           id:data.id, code:data.code, status:'waiting', startedAt:Date.now(),
           expiresAt:Number(data.expires_at) * 1000,
-          initialInbound:Number(state.data?.inbound?.feishu?.total || 0), error:'',
+          initialInbound:Number(inbound.total || 0), error:'',
         };
         state.bindings.set(bind.dataset.bindTarget, session);
         renderTargets();

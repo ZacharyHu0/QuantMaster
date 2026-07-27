@@ -69,6 +69,119 @@
     }
   }
 
+  async function copyText(value) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const field = document.createElement('textarea');
+    field.value = value;
+    field.setAttribute('readonly', '');
+    field.style.cssText = 'position:fixed;left:-9999px;opacity:0';
+    document.body.appendChild(field);
+    field.select();
+    const copied = document.execCommand('copy');
+    field.remove();
+    if (!copied) throw new Error('浏览器未允许访问剪贴板，请手动复制命令。');
+  }
+
+  function dialogOffset(dialog, axis) {
+    return Number.parseFloat(dialog.style.getPropertyValue(`--dialog-${axis}`)) || 0;
+  }
+
+  function viewportBox() {
+    const viewport = window.visualViewport;
+    return {
+      left: viewport?.offsetLeft || 0,
+      top: viewport?.offsetTop || 0,
+      width: viewport?.width || window.innerWidth,
+      height: viewport?.height || window.innerHeight,
+    };
+  }
+
+  function clampDialogOffset(dialog, x, y) {
+    const safe = 12;
+    const viewport = viewportBox();
+    const currentX = dialogOffset(dialog, 'x');
+    const currentY = dialogOffset(dialog, 'y');
+    const rect = dialog.getBoundingClientRect();
+    const baseLeft = rect.left - currentX;
+    const baseTop = rect.top - currentY;
+    const minX = viewport.left + safe - baseLeft;
+    const maxX = viewport.left + viewport.width - safe - baseLeft - rect.width;
+    const minY = viewport.top + safe - baseTop;
+    const maxY = viewport.top + viewport.height - safe - baseTop - rect.height;
+    return {
+      x: minX <= maxX ? Math.min(maxX, Math.max(minX, x)) : 0,
+      y: minY <= maxY ? Math.min(maxY, Math.max(minY, y)) : 0,
+    };
+  }
+
+  function moveDialog(dialog, x, y) {
+    const next = clampDialogOffset(dialog, x, y);
+    dialog.style.setProperty('--dialog-x', `${next.x}px`);
+    dialog.style.setProperty('--dialog-y', `${next.y}px`);
+  }
+
+  function resetDialogPosition(dialog) {
+    dialog.style.setProperty('--dialog-x', '0px');
+    dialog.style.setProperty('--dialog-y', '0px');
+    dialog.classList.remove('is-dragging');
+  }
+
+  function setupDraggableDialog(dialog) {
+    const handle = dialog.querySelector('.lab-dialog-head');
+    if (!handle || handle.dataset.dragReady) return;
+    handle.dataset.dragReady = 'true';
+    let drag = null;
+
+    handle.addEventListener('pointerdown', event => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      if (event.target.closest('button,a,input,textarea,select,label')) return;
+      drag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        offsetX: dialogOffset(dialog, 'x'),
+        offsetY: dialogOffset(dialog, 'y'),
+      };
+      handle.setPointerCapture(event.pointerId);
+      dialog.classList.add('is-dragging');
+      event.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', event => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      moveDialog(
+        dialog,
+        drag.offsetX + event.clientX - drag.startX,
+        drag.offsetY + event.clientY - drag.startY
+      );
+    });
+
+    const finishDrag = event => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      drag = null;
+      dialog.classList.remove('is-dragging');
+    };
+    handle.addEventListener('pointerup', finishDrag);
+    handle.addEventListener('pointercancel', finishDrag);
+
+    const keepInViewport = () => {
+      if (dialog.open) moveDialog(dialog, dialogOffset(dialog, 'x'), dialogOffset(dialog, 'y'));
+    };
+    window.addEventListener('resize', keepInViewport);
+    window.visualViewport?.addEventListener('resize', keepInViewport);
+  }
+
+  function openFactorDialog(expression) {
+    const dialog = document.getElementById('lab-factor-dialog');
+    resetDialogPosition(dialog);
+    if (expression !== undefined) dialog.querySelector('[name=expression]').value = expression || '';
+    if (!dialog.open) dialog.showModal();
+  }
+
   function isLabActive() {
     return document.getElementById('tab-lab')?.classList.contains('active');
   }
@@ -133,17 +246,54 @@
       <div class="lab-budget-meta"><span>${h((research.weekly_days || []).join(' · '))} 执行</span><span>${h((research.window || []).join(' → '))}</span></div>`;
   }
 
+  function renderMlSetup() {
+    const target = document.getElementById('lab-ml-setup');
+    const models = state.overview?.capabilities?.models || {};
+    if (!target) return;
+    target.classList.toggle('ready', Boolean(models.torch));
+    if (models.torch) {
+      const names = (models.available_models || []).map(key => modelMeta[key]?.[0] || key).join(' · ');
+      target.innerHTML = `<div class="lab-ml-setup-summary"><i class="lab-ml-setup-status"></i><div><b>深度学习后端已就绪</b><span>${h(names || 'PyTorch 模型可用')}；可直接创建训练任务。</span></div></div>
+        <span class="lab-ml-setup-device">DEVICE · ${h(models.device || 'CPU')}</span>`;
+      return;
+    }
+    const title = models.sklearn ? '当前可运行 Ridge；深度模型还未安装' : '模型后端未完整安装';
+    const detail = models.sklearn
+      ? '按顺序执行以下命令即可启用 MLP、TCN、GRU、Transformer 与 DAE。'
+      : '先安装机器学习依赖，再诊断环境并启动网页服务或独立研究 Worker。';
+    const commands = [
+      ['01', 'lab-ml-install-command', 'python -m pip install -e ".[data,ml]"', '复制安装命令'],
+      ['02', 'lab-ml-doctor-command', 'qm lab doctor', '复制诊断命令'],
+      ['03', 'lab-ml-serve-command', 'qm serve', '复制网页服务命令'],
+      ['04', 'lab-ml-worker-command', 'qm lab worker', '复制独立 Worker 命令'],
+    ];
+    target.innerHTML = `<div class="lab-ml-setup-summary"><i class="lab-ml-setup-status"></i><div><b>${h(title)}</b><span>${h(detail)} 安装后请重启正在运行的网页服务。GPU 用户请使用 <a class="lab-ml-setup-link" href="https://docs.pytorch.org/get-started/locally/" target="_blank" rel="noopener noreferrer">PyTorch 官方安装选择器</a>。</span></div></div>
+      <div class="lab-ml-setup-steps">${commands.map(command => `<div class="lab-ml-command"><span>${command[0]}</span><code id="${command[1]}">${h(command[2])}</code><button type="button" data-copy-target="${command[1]}" aria-label="${command[3]}">复制</button></div>`).join('')}</div>`;
+  }
+
   function renderModels() {
-    const available = new Set(state.overview?.capabilities?.models?.available_models || []);
+    const availableModels = state.overview?.capabilities?.models?.available_models || [];
+    const available = new Set(availableModels);
+    if (!available.has(state.selectedModel) && availableModels.length) state.selectedModel = availableModels[0];
+    renderMlSetup();
     const ribbon = document.getElementById('lab-model-ribbon');
     if (ribbon) ribbon.innerHTML = Object.entries(modelMeta).map(([key, meta]) =>
       `<div class="lab-model-chip ${available.has(key) ? 'available' : ''}"><b>${meta[0]}</b><span>${available.has(key) ? 'READY' : 'ML OPTIONAL'}</span></div>`
     ).join('');
     const grid = document.getElementById('lab-model-grid');
     if (grid) grid.innerHTML = Object.entries(modelMeta).map(([key, meta]) =>
-      `<button type="button" class="lab-model-card ${state.selectedModel === key ? 'active' : ''} ${available.has(key) ? 'available' : ''}" data-model="${key}">
+      `<button type="button" class="lab-model-card ${state.selectedModel === key && available.has(key) ? 'active' : ''} ${available.has(key) ? 'available' : ''}" data-model="${key}" aria-disabled="${available.has(key) ? 'false' : 'true'}">
         <b>${meta[0]}</b><span>${available.has(key) ? 'READY' : 'OPTIONAL'}</span><p>${meta[1]}</p></button>`
     ).join('');
+    const form = document.getElementById('lab-train-form');
+    if (form) {
+      form.elements.model.value = state.selectedModel;
+      document.getElementById('lab-selected-model').textContent = modelMeta[state.selectedModel]?.[0] || 'MODEL';
+      const submit = form.querySelector('[type=submit]');
+      const canTrain = available.has(state.selectedModel);
+      submit.disabled = !canTrain;
+      submit.textContent = canTrain ? '开始训练' : '先安装模型后端';
+    }
   }
 
   function renderJobList(targetId, jobs) {
@@ -309,19 +459,42 @@
   }
 
   function bindEvents() {
+    setupDraggableDialog(document.getElementById('lab-factor-dialog'));
     document.getElementById('tab-lab').addEventListener('click', async event => {
       const viewButton = event.target.closest('[data-lab-view],[data-lab-go]');
       if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
       if (event.target.closest('[data-lab-action="create-factor"]')) {
-        document.getElementById('lab-factor-dialog').showModal();
+        openFactorDialog();
       }
       if (event.target.closest('[data-lab-close-dialog]')) {
         document.getElementById('lab-factor-dialog').close();
+      }
+      const copyButton = event.target.closest('[data-copy-target]');
+      if (copyButton) {
+        const command = document.getElementById(copyButton.dataset.copyTarget)?.textContent || '';
+        const previousLabel = copyButton.textContent;
+        try {
+          await copyText(command);
+          copyButton.textContent = '已复制';
+          copyButton.disabled = true;
+          window.setTimeout(() => {
+            copyButton.textContent = previousLabel;
+            copyButton.disabled = false;
+          }, 1600);
+        } catch (error) {
+          showError('命令复制失败', error);
+        }
       }
       const factor = event.target.closest('[data-factor-version]');
       if (factor) selectFactor(factor.dataset.factorVersion);
       const model = event.target.closest('[data-model]');
       if (model) {
+        if (model.getAttribute('aria-disabled') === 'true') {
+          const setup = document.getElementById('lab-ml-setup');
+          setup?.scrollIntoView({behavior:'smooth', block:'center'});
+          setup?.focus({preventScroll:true});
+          return;
+        }
         state.selectedModel = model.dataset.model;
         document.querySelector('#lab-train-form [name=model]').value = state.selectedModel;
         document.getElementById('lab-selected-model').textContent = modelMeta[state.selectedModel][0];
@@ -404,6 +577,11 @@
     document.getElementById('lab-train-form').addEventListener('submit', async event => {
       event.preventDefault();
       const form = new FormData(event.target);
+      const available = new Set(state.overview?.capabilities?.models?.available_models || []);
+      if (!available.has(form.get('model'))) {
+        document.getElementById('lab-ml-setup')?.focus();
+        return;
+      }
       try {
         await enqueue('train', {
           model:form.get('model'), universe:form.get('universe'), start:form.get('start'),
@@ -453,9 +631,7 @@
   function openExpression(expression) {
     loadQuantLab();
     setView('library');
-    const dialog = document.getElementById('lab-factor-dialog');
-    dialog.querySelector('[name=expression]').value = expression || '';
-    dialog.showModal();
+    openFactorDialog(expression);
   }
 
   window.loadQuantLab = loadQuantLab;

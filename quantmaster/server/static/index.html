@@ -198,6 +198,7 @@
   .runtime-latest { min-width:0; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }
   .runtime-info[data-level="error"] .runtime-latest { color:color-mix(in oklch,var(--bad) 78%,var(--ink)); }
   .runtime-count { flex:0 0 auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+  .runtime-count[hidden] { display:none; }
   .runtime-error-count { flex:0 0 auto; min-width:20px; padding:1px 6px; border:1px solid color-mix(in oklch,var(--bad) 55%,transparent); border-radius:999px; color:color-mix(in oklch,var(--bad) 75%,var(--ink)); font-size:11px; text-align:center; font-variant-numeric:tabular-nums; }
   .runtime-error-count[hidden] { display:none; }
   .runtime-chevron { width:14px; height:14px; flex:0 0 auto; color:var(--muted); transition:transform 200ms var(--ease-out-quart); }
@@ -215,7 +216,7 @@
   .runtime-tool { padding:4px 6px; font-size:11px; }
   .runtime-tool:hover,.runtime-copy:hover { color:var(--ink); }
   .runtime-list { max-height:min(44vh,380px); overflow:auto; overscroll-behavior:contain; }
-  .runtime-entry { display:grid; grid-template-columns:54px minmax(0,1fr) auto; gap:10px; align-items:start; padding:9px 11px; border-bottom:1px solid var(--grid); animation:runtime-entry-in 180ms var(--ease-out-quart) both; }
+  .runtime-entry { display:grid; grid-template-columns:50px minmax(0,1fr) auto; gap:10px; align-items:start; padding:10px 11px; border-bottom:1px solid var(--grid); animation:runtime-entry-in 180ms var(--ease-out-quart) both; }
   .runtime-entry:last-child { border-bottom:0; }
   .runtime-entry:hover { background:color-mix(in oklch,var(--ink) 3%,transparent); }
   .runtime-time { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; padding-top:1px; }
@@ -223,14 +224,21 @@
   .runtime-entry-title { display:flex; align-items:baseline; gap:8px; min-width:0; }
   .runtime-source { color:var(--ink-2); flex:0 0 auto; font-size:12px; font-weight:600; }
   .runtime-message { color:var(--ink); min-width:0; overflow-wrap:anywhere; font-size:12px; }
-  .runtime-context { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:2px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+  .runtime-note,.runtime-advice { margin-top:3px; max-width:75ch; color:var(--muted); font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
+  .runtime-advice { color:var(--ink-2); }
+  .runtime-diagnostics { margin-top:4px; color:var(--muted); font-size:11px; }
+  .runtime-diagnostics summary { width:max-content; cursor:pointer; color:var(--muted); user-select:none; }
+  .runtime-diagnostics summary:hover { color:var(--ink-2); }
+  .runtime-diagnostics-grid { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:3px 9px; margin:5px 0 0; }
+  .runtime-diagnostics-grid dt { color:var(--muted); }
+  .runtime-diagnostics-grid dd { min-width:0; margin:0; color:var(--ink-2); overflow-wrap:anywhere; }
   .runtime-request { display:inline-flex; align-items:center; gap:3px; }
   .runtime-request code { color:var(--ink-2); padding:0 4px; font-size:10px; user-select:all; }
   .runtime-copy { padding:0 2px; font-size:10px; }
   .runtime-level { border:1px solid var(--axis); border-radius:999px; color:var(--muted); padding:1px 6px; font-size:10px; white-space:nowrap; }
   .runtime-entry[data-level="success"] .runtime-level { color:var(--s3); border-color:color-mix(in oklch,var(--s3) 45%,transparent); }
   .runtime-entry[data-level="warning"] .runtime-level { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
-  .runtime-entry[data-level="error"] { background:color-mix(in oklch,var(--bad) 7%,var(--surface)); }
+  .runtime-entry[data-level="error"] { background:color-mix(in oklch,var(--bad) 5%,var(--surface)); }
   .runtime-entry[data-level="error"] .runtime-level { color:color-mix(in oklch,var(--bad) 74%,var(--ink)); border-color:color-mix(in oklch,var(--bad) 52%,transparent); }
   .runtime-empty { color:var(--muted); padding:18px 11px; font-size:12px; text-align:center; }
   @keyframes reveal-in { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
@@ -267,7 +275,7 @@
     .runtime-info { inset-inline:8px; bottom:8px; }
     .runtime-label { display:none; }
     .runtime-count { display:none; }
-    .runtime-entry { grid-template-columns:46px minmax(0,1fr); gap:7px; }
+    .runtime-entry { grid-template-columns:42px minmax(0,1fr); gap:7px; }
     .runtime-level { grid-column:2; justify-self:start; }
     .runtime-entry-title { align-items:flex-start; flex-direction:column; gap:1px; }
     .runtime-toolbar { align-items:flex-start; }
@@ -283,7 +291,7 @@
   <nav id="nav">
     <button data-tab="market" class="active">市场</button>
     <button data-tab="decision">决策</button>
-    <button data-tab="lab">Quant Lab</button>
+    <button data-tab="lab"><span class="nav-lab-label">Quant Lab</span></button>
     <button data-tab="factor" hidden>因子</button>
     <button data-tab="backtest">回测</button>
     <button data-tab="mine" hidden>挖掘</button>
@@ -485,6 +493,7 @@
         <div class="lab-view-head">
           <div><span class="lab-overline">MODEL BENCH</span><h3>机器学习与深度因子</h3><p>所有模型共享 48 维无未来信息特征、按日期切分、早停和相同样本外评估。</p></div>
         </div>
+        <section class="lab-ml-setup" id="lab-ml-setup" aria-live="polite" tabindex="-1"></section>
         <div class="lab-model-grid" id="lab-model-grid"></div>
         <form class="lab-block lab-form lab-experiment-form" id="lab-train-form">
           <div class="lab-block-head"><div><span>NEW EXPERIMENT</span><h4>训练配置</h4></div><span class="lab-selected-model" id="lab-selected-model">RIDGE</span></div>
@@ -972,10 +981,10 @@
 <aside class="runtime-info" id="runtime-info" data-level="success" aria-label="运行信息">
   <button class="runtime-summary" id="runtime-summary" type="button" aria-expanded="false" aria-controls="runtime-drawer-frame">
     <span class="runtime-dot" aria-hidden="true"></span>
-    <span class="runtime-label">运行信息</span>
-    <span class="runtime-latest" id="runtime-latest">系统已就绪</span>
-    <span class="runtime-count" id="runtime-count">1 条</span>
-    <span class="runtime-error-count" id="runtime-error-count" hidden aria-label="未读错误"></span>
+    <span class="runtime-label">后台状态</span>
+    <span class="runtime-latest" id="runtime-latest">后台正常</span>
+    <span class="runtime-count" id="runtime-count" hidden></span>
+    <span class="runtime-error-count" id="runtime-error-count" hidden aria-label="后台问题"></span>
     <svg class="runtime-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 6 4.5 4 4.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
   <div class="runtime-drawer-frame" id="runtime-drawer-frame" aria-hidden="true" inert>
@@ -984,9 +993,9 @@
         <div class="runtime-toolbar">
           <div class="runtime-filters" role="group" aria-label="筛选运行消息">
             <button class="runtime-filter active" type="button" data-runtime-filter="all">全部</button>
-            <button class="runtime-filter" type="button" data-runtime-filter="normal">正常</button>
-            <button class="runtime-filter" type="button" data-runtime-filter="warning">告警</button>
-            <button class="runtime-filter" type="button" data-runtime-filter="error">错误</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="problem">问题</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="running">进行中</button>
+            <button class="runtime-filter" type="button" data-runtime-filter="completed">已完成</button>
           </div>
           <div class="runtime-actions">
             <button class="runtime-tool" id="runtime-clear" type="button">清空</button>
@@ -1081,7 +1090,18 @@ function friendlyHttpMessage(status) {
   if (status >= 500) return '服务端处理失败';
   return '请求未能完成';
 }
-function responseError(response, data, path, method) {
+function recoveryForStatus(status) {
+  if ([400, 422].includes(status)) return '按页面提示修改输入后重试。';
+  if (status === 401) return '检查设置中的账号或密钥，然后重试。';
+  if (status === 403) return '检查对应服务的权限或应用授权，然后重试。';
+  if (status === 404) return '确认所需数据或配置仍然存在，然后重试。';
+  if (status === 409) return '刷新当前数据，确认最新状态后重试。';
+  if (status === 413) return '减少本次提交的数据量后重试。';
+  if (status === 423) return '等待数据迁移完成后再试。';
+  if (status === 429) return '稍候再试；如频繁出现，请降低刷新频率。';
+  return '重试一次；如仍失败，请复制诊断信息排查后端日志。';
+}
+function responseError(response, data, path, method, key = '') {
   const title = friendlyHttpMessage(response.status);
   const detail = readableDetail(data.detail);
   const requestId = data.error_id || response.headers.get('X-Request-ID') || '';
@@ -1091,13 +1111,14 @@ function responseError(response, data, path, method) {
     requestId, path:route, method, logged:true,
   });
   runtimeInfo.add('error', sourceForPath(path), title, {
-    detail:detail || '可以稍后重试；如持续发生，请复制请求编号定位后端日志。',
-    requestId, path:`${method} ${route}`,
+    detail:detail || `HTTP ${response.status}`, action:recoveryForStatus(response.status),
+    requestId, path:`${method} ${route}`, key,
   });
   return error;
 }
 async function api(path, opts = {}) {
   const method = String(opts.method || 'GET').toUpperCase();
+  const route = apiRoute(path), requestKey = `request:${method}:${route}`;
   let res;
   try {
     res = await fetch(path, opts);
@@ -1105,21 +1126,23 @@ async function api(path, opts = {}) {
     const cancelled = cause?.name === 'AbortError';
     const message = cancelled ? '请求已取消' : '无法连接本地服务';
     const error = new QuantApiError(message, {
-      cause, path:apiRoute(path), method, logged:true,
+      cause, path:route, method, logged:true,
     });
     runtimeInfo.add(cancelled ? 'warning' : 'error', sourceForPath(path), message, {
-      detail:cancelled ? '本次操作没有继续执行。' : '请确认 QuantMaster 服务仍在运行，然后重试。',
-      path:`${method} ${apiRoute(path)}`,
+      detail:cause?.message || '',
+      action:cancelled ? '无需处理；需要时可重新执行。' : '确认 QuantMaster 服务仍在运行，然后重试。',
+      path:`${method} ${route}`, key:requestKey,
     });
     throw error;
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw responseError(res, data, path, method);
+  if (!res.ok) throw responseError(res, data, path, method, requestKey);
   if (method !== 'GET') {
     runtimeInfo.add('success', sourceForPath(path), '操作已完成', {
-      requestId:res.headers.get('X-Request-ID') || '', path:`${method} ${apiRoute(path)}`,
+      requestId:res.headers.get('X-Request-ID') || '', path:`${method} ${route}`,
+      key:requestKey,
     });
-  }
+  } else runtimeInfo.resolve(requestKey);
   return data;
 }
 function post(path, body) {
@@ -1150,31 +1173,55 @@ const runtimeInfo = (() => {
   const errorCount = document.getElementById('runtime-error-count');
   const list = document.getElementById('runtime-list');
   const entries = [];
-  const lastPhase = new Map();
-  const levelLabels = {info:'进行中', success:'正常', warning:'告警', error:'错误'};
-  let activeFilter = 'all', expanded = false, sequence = 0;
+  const levelLabels = {info:'进行中', success:'完成', warning:'需留意', error:'失败'};
+  const emptyLabels = {
+    all:'暂无后台记录。', problem:'没有需要处理的问题。',
+    running:'当前没有进行中的任务。', completed:'暂无已完成任务。',
+  };
+  let activeFilter = 'all', expanded = false, sequence = 0, operationSequence = 0;
 
+  function compactText(value, limit = 360) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+  }
   function visible(entry) {
     if (activeFilter === 'all') return true;
-    if (activeFilter === 'normal') return ['info', 'success'].includes(entry.level);
-    return entry.level === activeFilter;
+    if (activeFilter === 'problem') return ['warning', 'error'].includes(entry.level);
+    if (activeFilter === 'running') return entry.level === 'info';
+    if (activeFilter === 'completed') return entry.level === 'success';
+    return true;
+  }
+  function syncSummary() {
+    const problems = entries.filter(entry => ['warning', 'error'].includes(entry.level));
+    const errors = problems.filter(entry => entry.level === 'error');
+    const focus = problems.at(-1) || entries.at(-1);
+    count.hidden = entries.length === 0;
+    count.textContent = entries.length ? `${entries.length} 项` : '';
+    errorCount.hidden = problems.length === 0;
+    errorCount.textContent = problems.length ? `${problems.length} 个问题` : '';
+    errorCount.setAttribute('aria-label', problems.length ? `${problems.length} 个后台问题` : '没有后台问题');
+    latest.textContent = focus ? `${focus.source} · ${focus.message}` : '后台正常';
+    root.dataset.level = errors.length ? 'error' : problems.length ? 'warning' : 'success';
+  }
+  function diagnostics(entry) {
+    const rows = [];
+    if (entry.detail) rows.push(`<dt>原因</dt><dd>${esc(entry.detail)}</dd>`);
+    if (entry.path) rows.push(`<dt>接口</dt><dd><code>${esc(entry.path)}</code></dd>`);
+    if (entry.requestId) rows.push(`<dt>请求编号</dt><dd><span class="runtime-request"><code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span></dd>`);
+    return rows.length ? `<details class="runtime-diagnostics"><summary>诊断信息</summary><dl class="runtime-diagnostics-grid">${rows.join('')}</dl></details>` : '';
   }
   function render() {
+    syncSummary();
     const shown = entries.filter(visible).slice().reverse();
-    count.textContent = `${entries.length} 条`;
-    const errors = entries.filter(entry => entry.level === 'error').length;
-    errorCount.hidden = errors === 0;
-    errorCount.textContent = errors ? String(errors) : '';
-    errorCount.setAttribute('aria-label', `${errors} 条错误`);
     list.innerHTML = shown.length ? shown.map(entry => {
-      const context = [entry.detail, entry.path].filter(Boolean).map(value => `<span>${esc(value)}</span>`).join('<span aria-hidden="true">·</span>');
-      const request = entry.requestId ? `<span class="runtime-request">请求 <code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span>` : '';
+      const secondary = ['warning', 'error'].includes(entry.level)
+        ? (entry.action ? `<div class="runtime-advice">${esc(entry.action)}</div>` : '') + diagnostics(entry)
+        : (entry.detail ? `<div class="runtime-note">${esc(entry.detail)}</div>` : '');
       return `<article class="runtime-entry" data-level="${entry.level}" data-runtime-id="${entry.id}">
         <time class="runtime-time" datetime="${esc(entry.iso)}">${esc(entry.time)}</time>
-        <div class="runtime-entry-body"><div class="runtime-entry-title"><span class="runtime-source">${esc(entry.source)}</span><span class="runtime-message">${esc(entry.message)}</span></div>
-          ${(context || request) ? `<div class="runtime-context">${context}${request}</div>` : ''}</div>
+        <div class="runtime-entry-body"><div class="runtime-entry-title"><span class="runtime-source">${esc(entry.source)}</span><span class="runtime-message">${esc(entry.message)}</span></div>${secondary}</div>
         <span class="runtime-level">${levelLabels[entry.level]}</span></article>`;
-    }).join('') : '<div class="runtime-empty">当前筛选下没有运行消息。</div>';
+    }).join('') : `<div class="runtime-empty">${emptyLabels[activeFilter] || emptyLabels.all}</div>`;
   }
   function setExpanded(next) {
     expanded = Boolean(next);
@@ -1186,34 +1233,46 @@ const runtimeInfo = (() => {
   }
   function add(level, source, message, meta = {}) {
     const safeLevel = levelLabels[level] ? level : 'info';
-    const now = new Date();
-    entries.push({
-      id:++sequence, level:safeLevel, source:String(source || '系统'),
-      message:String(message || '状态已更新'), detail:String(meta.detail || ''),
-      path:String(meta.path || ''), requestId:String(meta.requestId || ''),
+    const now = new Date(), key = String(meta.key || '');
+    const existingIndex = key ? entries.findIndex(entry => entry.key === key) : -1;
+    const previous = existingIndex >= 0 ? entries[existingIndex] : null;
+    const entry = {
+      id:previous?.id || ++sequence, key, level:safeLevel,
+      source:compactText(source || '系统', 40), message:compactText(message || '状态已更新', 160),
+      detail:compactText(meta.detail), action:compactText(meta.action, 220),
+      path:compactText(meta.path, 220), requestId:compactText(meta.requestId, 80),
       iso:now.toISOString(),
       time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
-    });
-    if (entries.length > 100) entries.splice(0, entries.length - 100);
-    latest.textContent = `${source || '系统'} · ${message || '状态已更新'}`;
-    root.dataset.level = safeLevel === 'info' ? 'success' : safeLevel;
+    };
+    if (existingIndex >= 0) entries.splice(existingIndex, 1);
+    entries.push(entry);
+    if (entries.length > 40) entries.splice(0, entries.length - 40);
     render();
-    if (safeLevel === 'error') setExpanded(true);
-    return entries.at(-1);
+    return entry;
   }
-  function phase(source, event, path = '') {
+  function begin(source, message, meta = {}) {
+    const key = `operation:${Date.now()}:${++operationSequence}`;
+    add('info', source, message, {...meta, key});
+    return key;
+  }
+  function resolve(key) {
+    const index = entries.findIndex(entry => entry.key === key);
+    if (index < 0) return;
+    entries.splice(index, 1);
+    render();
+  }
+  function phase(source, event, path = '', key = '') {
     const requestId = event.request_id || '';
     if (event.level === 'warning') {
-      add('warning', source, event.detail || '部分数据未能加载', {
-        detail:event.phase, requestId, path,
+      const warningKey = `${key || source}:warning:${event.phase || event.detail || 'partial'}`;
+      add('warning', source, event.phase || '部分数据未完成', {
+        detail:event.detail, action:'已完成的结果仍可使用；需要完整数据时请稍后重试。',
+        requestId, path, key:warningKey,
       });
       return;
     }
-    const key = `${source}\u0000${requestId}`;
-    if (lastPhase.get(key) === event.phase) return;
-    lastPhase.set(key, event.phase);
     add(event.level === 'success' ? 'success' : 'info', source, event.phase || '正在处理', {
-      detail:event.detail, requestId, path,
+      detail:event.detail, requestId, path, key,
     });
   }
   summary.addEventListener('click', () => setExpanded(!expanded));
@@ -1221,8 +1280,8 @@ const runtimeInfo = (() => {
     setExpanded(false); summary.focus();
   });
   document.getElementById('runtime-clear').addEventListener('click', () => {
-    entries.length = 0; lastPhase.clear();
-    latest.textContent = '暂无运行消息'; root.dataset.level = 'success'; render();
+    entries.length = 0;
+    render();
   });
   document.querySelector('.runtime-filters').addEventListener('click', event => {
     const button = event.target.closest('[data-runtime-filter]');
@@ -1243,8 +1302,8 @@ const runtimeInfo = (() => {
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && expanded) setExpanded(false);
   });
-  add('success', '系统', '前端界面已就绪');
-  return {add, phase, open:() => setExpanded(true), close:() => setExpanded(false)};
+  render();
+  return {add, begin, resolve, phase, open:() => setExpanded(true), close:() => setExpanded(false)};
 })();
 window.QuantMasterRunInfo = runtimeInfo;
 window.QuantMasterAPI = api;
@@ -1253,6 +1312,8 @@ function reportLocalError(source, message, error) {
   if (error?.logged) return;
   runtimeInfo.add('error', source, message, {
     detail:error?.message || String(error || '请重试'),
+    action:'重试刚才的操作；如仍失败，请刷新页面后再试。',
+    key:`local:${source}:${message}`,
   });
   if (error && typeof error === 'object') error.logged = true;
 }
@@ -1260,11 +1321,16 @@ window.addEventListener('error', event => {
   if (event.error?.logged) return;
   if (event.target && event.target !== window) {
     const url = event.target.src || event.target.href || event.target.tagName;
-    runtimeInfo.add('error', '前端资源', '界面资源加载失败', {detail:String(url || '')});
+    runtimeInfo.add('error', '前端资源', '界面资源加载失败', {
+      detail:String(url || ''), action:'刷新页面；如仍失败，请检查本地服务和网络连接。',
+      key:`resource:${url}`,
+    });
     return;
   }
   runtimeInfo.add('error', '前端界面', '页面脚本运行异常', {
     detail:[event.message, event.filename ? `${event.filename.split('/').pop()}:${event.lineno || 0}:${event.colno || 0}` : ''].filter(Boolean).join(' · '),
+    action:'刷新页面；若问题再次出现，请展开诊断信息进行排查。',
+    key:`script:${event.message}:${event.filename}:${event.lineno}`,
   });
   if (event.error && typeof event.error === 'object') event.error.logged = true;
 }, true);
@@ -1272,6 +1338,8 @@ window.addEventListener('unhandledrejection', event => {
   if (event.reason?.logged) return;
   runtimeInfo.add('error', '前端界面', '异步操作意外中断', {
     detail:event.reason?.message || String(event.reason || '未知原因'),
+    action:'重试刚才的操作；若问题再次出现，请展开诊断信息进行排查。',
+    key:`promise:${event.reason?.message || String(event.reason || '')}`,
   });
   if (event.reason && typeof event.reason === 'object') event.reason.logged = true;
 });
@@ -1348,14 +1416,14 @@ function createLoadProgress(container, title, kind = 'market') {
 async function streamJson(path, opts, onProgress) {
   const method = String(opts?.method || 'GET').toUpperCase();
   const source = sourceForPath(path), route = apiRoute(path);
-  runtimeInfo.add('info', source, '开始加载数据', {path:`${method} ${route}`});
+  const operationKey = runtimeInfo.begin(source, '正在加载数据', {path:`${method} ${route}`});
   let requestId = '';
   try {
     const response = await fetch(path, opts);
     requestId = response.headers.get('X-Request-ID') || '';
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      throw responseError(response, data, path, method);
+      throw responseError(response, data, path, method, operationKey);
     }
     if (!response.body) throw new Error('当前浏览器不支持流式进度');
     const reader = response.body.getReader();
@@ -1366,7 +1434,7 @@ async function streamJson(path, opts, onProgress) {
       const event = JSON.parse(line);
       requestId = event.request_id || event.error_id || requestId;
       if (event.type === 'progress') {
-        runtimeInfo.phase(source, event, `${method} ${route}`);
+        runtimeInfo.phase(source, event, `${method} ${route}`, operationKey);
         onProgress?.(event);
       }
       if (event.type === 'result') result = event.data;
@@ -1389,13 +1457,14 @@ async function streamJson(path, opts, onProgress) {
       });
       runtimeInfo.add('error', source, '数据任务未完成', {
         detail:streamError.message, requestId:streamError.requestId,
-        path:`${method} ${route}`,
+        path:`${method} ${route}`, key:operationKey,
+        action:'已完成的结果会保留；重试一次，如仍失败请复制诊断信息。',
       });
       throw error;
     }
     if (result === undefined) throw new Error('数据流提前结束，请重试');
     runtimeInfo.add('success', source, '数据加载完成', {
-      requestId, path:`${method} ${route}`,
+      requestId, path:`${method} ${route}`, key:operationKey,
     });
     return result;
   } catch (error) {
@@ -1403,7 +1472,8 @@ async function streamJson(path, opts, onProgress) {
       const network = error instanceof TypeError && /fetch/i.test(error.message || '');
       runtimeInfo.add('error', source, network ? '无法连接本地服务' : '数据流意外中断', {
         detail:network ? '请确认 QuantMaster 服务仍在运行，然后重试。' : error?.message,
-        requestId, path:`${method} ${route}`,
+        action:network ? '确认 QuantMaster 服务仍在运行，然后重试。' : '重试一次；如仍失败，请复制诊断信息。',
+        requestId, path:`${method} ${route}`, key:operationKey,
       });
       if (error && typeof error === 'object') error.logged = true;
     }
@@ -1477,23 +1547,65 @@ async function streamJson(path, opts, onProgress) {
 })();
 
 /* ---------- 导航 ---------- */
-document.querySelector('header').addEventListener('click', e => {
-  const control = e.target.closest('[data-tab]');
-  if (!control) return;
-  const tab = control.dataset.tab;
-  if (!tab) return;
-  document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
-  document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
-  Object.values(charts).forEach(c => c.resize());
+const ACTIVE_TAB_STORAGE_KEY = 'quantmaster.activeTab';
+
+function storedActiveTab() {
+  try { return sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || ''; }
+  catch (_) { return ''; }
+}
+
+function rememberActiveTab(tab) {
+  try { sessionStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab); }
+  catch (_) { /* 禁用会话存储时仍可正常导航 */ }
+}
+
+function forgetActiveTab() {
+  try { sessionStorage.removeItem(ACTIVE_TAB_STORAGE_KEY); }
+  catch (_) { /* 禁用会话存储时无需清理 */ }
+}
+
+function tabControl(tab) {
+  return Array.from(document.querySelectorAll('header [data-tab]')).find(control =>
+    control.dataset.tab === tab && !control.hidden && !control.disabled
+    && document.getElementById('tab-' + tab));
+}
+
+function loadActiveTab(tab) {
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
   if (tab === 'paper') loadPaper();
-  if (tab === 'automation') loadAutomation();
-  if (tab === 'lab' && window.loadQuantLab) window.loadQuantLab();
+  if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
+  if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
   if (tab === 'decision' && !decisionLoaded && !decisionLoading) {
     document.getElementById('decision-form').requestSubmit();
   }
+}
+
+function activateTab(control, {persist = true, load = true} = {}) {
+  const tab = control?.dataset.tab;
+  if (!tab || !document.getElementById('tab-' + tab)) return false;
+  document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
+  document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
+  if (persist) rememberActiveTab(tab);
+  Object.values(charts).forEach(c => c.resize());
+  if (load) loadActiveTab(tab);
+  return true;
+}
+
+document.querySelector('header').addEventListener('click', e => {
+  const control = e.target.closest('[data-tab]');
+  if (!control) return;
+  activateTab(control);
 });
+
+const restoredTab = storedActiveTab();
+const restoredControl = tabControl(restoredTab);
+if (restoredControl) {
+  activateTab(restoredControl, {persist:false, load:false});
+  window.addEventListener('load', () => loadActiveTab(restoredTab), {once:true});
+} else if (restoredTab) {
+  forgetActiveTab();
+}
 
 /* ---------- 我的标的 ---------- */
 let assetListsData = { favorites:[], following:[], holdings:[] };

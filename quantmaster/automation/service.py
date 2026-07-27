@@ -98,8 +98,12 @@ class AutomationService:
             },
             "bot_accounts": accounts,
             "inbound": {
-                channel: self.store.inbound_status(channel)
-                for channel in ("feishu", "weixin")
+                "feishu": {
+                    **self.store.inbound_status("feishu"),
+                    "direct": self.store.inbound_status("feishu", "direct"),
+                    "group": self.store.inbound_status("feishu", "group"),
+                },
+                "weixin": self.store.inbound_status("weixin"),
             },
             "targets": targets, "jobs": self.store.jobs(),
             "recent_runs": self.store.recent_runs(12),
@@ -145,7 +149,7 @@ class AutomationService:
             "id": action_id, "target_id": target_id,
             "status": "bound" if action["status"] == "consumed" and bound else action["status"],
             "expires_at": action["expires_at"], "bound": bound,
-            "inbound": self.store.inbound_status("feishu"),
+            "inbound": self.store.inbound_status("feishu", target["chat_type"]),
         }
 
     def reply(self, actor: ActorContext, text: str) -> None:

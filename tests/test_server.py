@@ -45,6 +45,9 @@ class TestBasics:
         assert "createMarketStreamRenderer" in resp.text
         assert "createDecisionStreamRenderer" in resp.text
         assert "existing.getDom() !== el" in resp.text
+        assert "ACTIVE_TAB_STORAGE_KEY" in resp.text
+        assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in resp.text
+        assert "activateTab(restoredControl, {persist:false, load:false})" in resp.text
         assert 'class="snapshot-table"' in resp.text
         assert 'class="snapshot-period"' in resp.text
         assert 'class="snapshot-pick"' in resp.text
@@ -56,6 +59,11 @@ class TestBasics:
         assert 'id="runtime-info"' in resp.text
         assert 'id="runtime-drawer-frame"' in resp.text
         assert "window.QuantMasterRunInfo" in resp.text
+        assert 'data-runtime-filter="problem"' in resp.text
+        assert 'data-runtime-filter="running"' in resp.text
+        assert '<summary>诊断信息</summary>' in resp.text
+        assert "runtimeInfo.begin(source, '正在加载数据'" in resp.text
+        assert "if (safeLevel === 'error') setExpanded(true)" not in resp.text
         assert "window.QuantMasterAPI" in resp.text
         assert "unhandledrejection" in resp.text
         assert 'id="release-trigger"' in resp.text

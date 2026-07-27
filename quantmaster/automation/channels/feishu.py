@@ -85,16 +85,21 @@ class FeishuBotClient:
             if message.sender.is_bot:
                 return
             message_id = str(message.message_id or "").strip()
-            if not message_id or not self.store.claim_inbound("feishu", message_id):
-                return
             chat_type = "direct" if message.chat_type == "p2p" else "group"
-            if chat_type == "group" and not message.mentioned_bot:
+            if not message_id or not self.store.claim_inbound(
+                    "feishu", message_id, chat_type=chat_type, account_id=app_id):
                 return
+            # FeishuChannel 的 PolicyConfig 已在触发 message 事件前完成群聊 @机器人校验。
+            # lark-oapi 1.7.1 的策略门会放行消息，但不会回写 mentioned_bot 字段，
+            # 因此这里不能再依赖该字段做第二次过滤。
             text = str(message.content_text or "").strip()
             for mention in message.mentions or []:
                 key = str(getattr(mention, "key", "") or "")
+                name = str(getattr(mention, "name", "") or "")
                 if key:
                     text = text.replace(key, "").strip()
+                if name:
+                    text = text.replace(f"@{name}", "").strip()
             if not text:
                 return
             actor = ActorContext(

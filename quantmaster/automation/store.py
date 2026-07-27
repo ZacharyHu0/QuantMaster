@@ -116,6 +116,14 @@ class AutomationStore:
             if "context_token" not in target_columns:
                 conn.execute(
                     "ALTER TABLE notification_targets ADD COLUMN context_token TEXT NOT NULL DEFAULT ''")
+            inbound_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(inbound_messages)")}
+            if "chat_type" not in inbound_columns:
+                conn.execute(
+                    "ALTER TABLE inbound_messages ADD COLUMN chat_type TEXT NOT NULL DEFAULT ''")
+            if "account_id" not in inbound_columns:
+                conn.execute(
+                    "ALTER TABLE inbound_messages ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -257,20 +265,26 @@ class AutomationStore:
                 (status, error[:500], utc_now(), channel, account_id),
             )
 
-    def claim_inbound(self, channel: str, message_id: str) -> bool:
+    def claim_inbound(self, channel: str, message_id: str, *, chat_type: str = "",
+                      account_id: str = "") -> bool:
         with self._conn() as conn:
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO inbound_messages(channel,message_id,received_at) VALUES (?,?,?)",
-                (channel, message_id, utc_now()),
+                "INSERT OR IGNORE INTO inbound_messages"
+                "(channel,message_id,received_at,chat_type,account_id) VALUES (?,?,?,?,?)",
+                (channel, message_id, utc_now(), chat_type, account_id),
             )
         return cursor.rowcount == 1
 
-    def inbound_status(self, channel: str) -> dict:
+    def inbound_status(self, channel: str, chat_type: str = "") -> dict:
+        where = "channel=?"
+        params: tuple[str, ...] = (channel,)
+        if chat_type:
+            where += " AND chat_type=?"
+            params = (channel, chat_type)
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) AS total,MAX(received_at) AS last_received_at "
-                "FROM inbound_messages WHERE channel=?",
-                (channel,),
+                f"FROM inbound_messages WHERE {where}", params,
             ).fetchone()
         return {
             "total": int(row["total"] or 0),

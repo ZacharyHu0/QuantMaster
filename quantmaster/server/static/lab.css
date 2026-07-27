@@ -1,4 +1,6 @@
 /* AI Quant Lab — compact research terminal, scoped to #tab-lab. */
+#nav .nav-lab-label { display:inline-block; transform:translateY(1px); }
+
 #tab-lab {
   --lab-canvas: oklch(12% .008 80);
   --lab-panel: oklch(16% .009 80);
@@ -141,10 +143,29 @@
 .lab-guardrails b { color:var(--lab-amber); font-size:9px; }
 .lab-guardrails span { margin-top:3px; color:var(--lab-text-3); font-size:9px; }
 
+.lab-ml-setup { display:grid; grid-template-columns:minmax(220px,.72fr) minmax(420px,1.28fr); gap:18px; margin-bottom:10px; padding:13px 14px; border:1px solid var(--lab-line); background:var(--lab-panel); outline:none; }
+.lab-ml-setup:focus-visible { border-color:var(--lab-blue); }
+.lab-ml-setup.ready { grid-template-columns:1fr auto; align-items:center; }
+.lab-ml-setup-summary { display:flex; align-items:flex-start; gap:10px; min-width:0; }
+.lab-ml-setup-status { width:7px; height:7px; margin-top:4px; flex:0 0 auto; border-radius:50%; background:var(--lab-amber); }
+.lab-ml-setup.ready .lab-ml-setup-status { background:var(--lab-green); }
+.lab-ml-setup-summary b,.lab-ml-setup-summary span { display:block; }
+.lab-ml-setup-summary b { font-size:11px; }
+.lab-ml-setup-summary span { margin-top:5px; color:var(--lab-text-3); font-size:9px; line-height:1.5; }
+.lab-ml-setup-device { color:var(--lab-green); font:600 9px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; text-transform:uppercase; }
+.lab-ml-setup-steps { display:grid; gap:6px; }
+.lab-ml-command { display:grid; grid-template-columns:18px minmax(0,1fr) auto; align-items:center; gap:8px; min-height:31px; padding:4px 5px 4px 8px; background:var(--lab-canvas); }
+.lab-ml-command > span { color:var(--lab-text-3); font:600 8px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
+.lab-ml-command code { min-width:0; overflow-x:auto; color:var(--lab-text-2); font:500 9px/1.4 ui-monospace,"SFMono-Regular",Consolas,monospace; white-space:nowrap; }
+.lab-ml-command button { min-height:24px; padding:4px 8px; border:1px solid var(--lab-line); background:transparent; color:var(--lab-blue); cursor:pointer; font-size:9px; }
+.lab-ml-command button:hover { border-color:var(--lab-blue); }
+.lab-ml-setup-link { color:var(--lab-blue); font-size:9px; text-underline-offset:2px; }
 .lab-model-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px; }
 .lab-model-card { position:relative; min-height:116px; background:var(--lab-panel); border:1px solid var(--lab-line); padding:14px; cursor:pointer; text-align:left; color:var(--lab-text); }
 .lab-model-card:hover { border-color:var(--lab-text-3); }
 .lab-model-card.active { border-color:var(--lab-blue); background:var(--lab-blue-dim); }
+.lab-model-card[aria-disabled="true"] { cursor:not-allowed; opacity:.58; }
+.lab-model-card[aria-disabled="true"]:hover { border-color:var(--lab-line); }
 .lab-model-card b { display:block; font:650 14px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
 .lab-model-card p { margin-top:10px; color:var(--lab-text-3); font-size:10px; max-width:34ch; }
 .lab-model-card span { position:absolute; top:13px; right:13px; color:var(--lab-text-3); font:600 8px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
@@ -238,13 +259,14 @@
 .lab-task-tray > strong { font:620 11px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
 .lab-task-tray > button { border:0; background:transparent; color:var(--lab-blue); cursor:pointer; font-size:9px; }
 
-.lab-dialog { width:min(620px,calc(100vw - 28px)); padding:0; border:1px solid var(--lab-line); border-radius:6px; background:var(--lab-panel); color:var(--lab-text); box-shadow:0 28px 80px rgba(0,0,0,.58); }
+.lab-dialog { --dialog-x:0px; --dialog-y:0px; position:fixed; inset:0; width:min(620px,calc(100vw - 28px)); max-height:calc(100dvh - 32px); margin:auto; padding:0; overflow:hidden; border:1px solid var(--lab-line); border-radius:6px; background:var(--lab-panel); color:var(--lab-text); box-shadow:0 28px 80px rgba(0,0,0,.58); transform:translate3d(var(--dialog-x),var(--dialog-y),0); will-change:transform; }
 .lab-dialog::backdrop { background:rgba(0,0,0,.68); }
-.lab-dialog-card { padding:18px; }
-.lab-dialog-head { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:18px; }
+.lab-dialog-card { max-height:inherit; padding:18px; overflow:auto; overscroll-behavior:contain; }
+.lab-dialog-head { display:flex; align-items:flex-start; justify-content:space-between; margin:-18px -18px 18px; padding:18px 18px 10px; cursor:grab; touch-action:none; user-select:none; }
+.lab-dialog.is-dragging .lab-dialog-head { cursor:grabbing; }
 .lab-dialog-head span { color:var(--lab-blue); font:600 8px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; letter-spacing:.12em; }
 .lab-dialog-head h3 { margin-top:5px; font-size:16px; }
-.lab-dialog-head button { border:0; background:transparent; color:var(--lab-text-3); cursor:pointer; font-size:22px; }
+.lab-dialog-head button { min-width:32px; min-height:32px; margin:-8px -8px 0 0; border:0; background:transparent; color:var(--lab-text-3); cursor:pointer; font-size:22px; }
 .lab-dialog-card > label,.lab-dialog-grid label { display:flex; flex-direction:column; gap:5px; margin-bottom:12px; color:var(--lab-text-3); font-size:10px; }
 .lab-dialog textarea { resize:vertical; font-family:ui-monospace,"SFMono-Regular",Consolas,monospace; line-height:1.55; }
 .lab-dialog-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
@@ -283,6 +305,8 @@
   .lab-pipeline { grid-template-columns:1fr; }
   .lab-pipeline-stage { min-height:66px; }
   .lab-pipeline-stage + .lab-pipeline-stage { border-left:0; border-top:1px solid var(--lab-line-soft); }
+  .lab-ml-setup { grid-template-columns:1fr; }
+  .lab-ml-setup.ready { grid-template-columns:1fr auto; }
   .lab-model-grid { grid-template-columns:1fr 1fr; }
   .lab-form-grid,.lab-form-grid-5 { grid-template-columns:1fr 1fr; }
   .lab-node-graph { grid-template-columns:1fr; }
@@ -304,6 +328,7 @@
   .lab-kicker { font-size:8px; }
   .lab-view-head { min-height:0; }
   .lab-view-head p { font-size:11px; }
+  .lab-ml-setup.ready { grid-template-columns:1fr; }
   .lab-model-ribbon,.lab-model-grid { grid-template-columns:1fr 1fr; }
   .lab-form-grid,.lab-form-grid-5 { grid-template-columns:1fr; }
   .lab-method-switch { grid-template-columns:1fr; }

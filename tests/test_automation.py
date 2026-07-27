@@ -56,8 +56,11 @@ def test_policy_presets_and_overrides():
 def test_store_binding_outbox_and_delivery(tmp_path):
     store = AutomationStore(tmp_path / "automation.sqlite")
     assert store.inbound_status("feishu") == {"total": 0, "last_received_at": ""}
-    assert store.claim_inbound("feishu", "om_probe") is True
+    assert store.claim_inbound(
+        "feishu", "om_probe", chat_type="direct", account_id="cli_app") is True
     assert store.inbound_status("feishu")["total"] == 1
+    assert store.inbound_status("feishu", "direct")["total"] == 1
+    assert store.inbound_status("feishu", "group")["total"] == 0
     store.bind_target(
         "feishu_owner", target="oc_chat", account_id="cli_app",
         owner_actor="feishu:cli_app:ou_owner", actor="test",
@@ -216,13 +219,21 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
 
         async def start_background(self, *, timeout):
             lifecycle.append(("start", timeout))
-            message = SimpleNamespace(
+            direct = SimpleNamespace(
                 sender=SimpleNamespace(is_bot=False), message_id="om_1",
                 chat_type="p2p", mentioned_bot=False, content_text="查询大盘",
                 mentions=[], chat_id="oc_chat", sender_id="ou_owner",
                 sender_name="测试用户",
             )
-            await self.handler(message)
+            await self.handler(direct)
+            group = SimpleNamespace(
+                sender=SimpleNamespace(is_bot=False), message_id="om_2",
+                chat_type="group", mentioned_bot=False,
+                content_text="@QuantMaster 绑定 QuantMaster ABCD1234",
+                mentions=[SimpleNamespace(key="@_user_1", name="QuantMaster")],
+                chat_id="oc_group", sender_id="ou_owner", sender_name="测试用户",
+            )
+            await self.handler(group)
 
         async def stop_background(self):
             lifecycle.append(("stop", None))
@@ -239,6 +250,8 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
     assert received[0][0].target == "oc_chat"
     assert received[0][0].sender_name == "测试用户"
     assert received[0][1] == "查询大盘"
+    assert received[1][0].chat_type == "group"
+    assert received[1][1] == "绑定 QuantMaster ABCD1234"
     assert store.bot_account("feishu")["status"] == "configured"
 
 
