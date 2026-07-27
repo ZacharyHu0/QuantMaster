@@ -49,16 +49,10 @@
   }
 
   async function request(path, options = {}) {
-    const response = await fetch(path, {
+    return window.QuantMasterAPI(path, {
       headers: {'Content-Type': 'application/json', ...(options.headers || {})},
       ...options,
     });
-    if (!response.ok) {
-      let detail = `请求失败 (${response.status})`;
-      try { detail = (await response.json()).detail || detail; } catch (_) { /* no-op */ }
-      throw new Error(Array.isArray(detail) ? detail.map(item => item.msg).join('；') : detail);
-    }
-    return response.json();
   }
 
   function showError(title, error) {
@@ -398,7 +392,11 @@
     const horizonCards = Object.values(horizons).map(item => `<div class="lab-horizon"><span>${item.horizon}D · OOS RANK IC</span>
       <b>${number(item.oos_rank_ic, 4)}</b><small>ICIR ${number(item.oos_icir, 3)} · Q ${number(item.q_value, 3)}</small></div>`).join('');
     const canApprove = detail.status === 'candidate';
-    const canDeploy = ['approved', 'degraded'].includes(detail.status);
+    const canDeploy = ['approved', 'degraded', 'production'].includes(detail.status);
+    const researchHorizons = (state.overview?.research?.horizons || [3]).map(Number);
+    const validatedHorizons = Object.keys(horizons).map(Number).filter(Number.isFinite);
+    const deployHorizons = validatedHorizons.length ? validatedHorizons : researchHorizons;
+    const preferredHorizon = deployHorizons.includes(3) ? 3 : deployHorizons[0];
     document.getElementById('lab-factor-evidence').innerHTML = `
       <div class="lab-evidence-title"><div><h4>${h(detail.name)}</h4><span>${h(statusLabel[detail.status] || detail.status)}</span></div><code>${h(detail.spec?.expression || detail.slug)}</code></div>
       <div class="lab-evidence-meta"><div><span>CANDIDATE SCORE</span><b>${number(report?.candidate_score, 1)}</b></div><div><span>COVERAGE</span><b>${report ? number(report.coverage * 100, 1) + '%' : '—'}</b></div><div><span>MAX CORR</span><b>${number(report?.max_existing_correlation, 2)}</b></div></div>
@@ -407,7 +405,12 @@
       <div class="lab-evidence-actions">
         <button class="primary" type="button" data-validate-version="${h(detail.id)}">运行统一验证</button>
         ${canApprove ? `<button type="button" data-approve-version="${h(detail.id)}">人工批准</button>` : ''}
-        ${canDeploy ? `<button type="button" data-deploy-version="${h(detail.id)}">设为 Champion</button>` : ''}
+        ${canDeploy ? `<div class="lab-deploy-config" aria-label="Champion 生效范围">
+          <label>周期<select data-deploy-horizon>${deployHorizons.map(value => `<option value="${value}" ${value === preferredHorizon ? 'selected' : ''}>${value} 日</option>`).join('')}</select></label>
+          <label>画像<select data-deploy-profile><option value="all">全部画像</option><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
+          <label>范围<select data-deploy-scope><option value="exact">仅当前候选</option><option value="a_share">全部 A 股候选</option></select></label>
+          <button type="button" data-deploy-version="${h(detail.id)}">设为 Champion</button>
+        </div>` : ''}
       </div>`;
   }
 
@@ -429,9 +432,9 @@
       target.innerHTML = '<div class="lab-empty">尚无模型实验。选择上方模型发起第一次基线训练。</div>';
       return;
     }
-    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>实验</th><th>模型</th><th>状态</th><th>相关性</th><th>验证 MSE</th><th>更新时间</th></tr></thead><tbody>${state.experiments.map(item => `<tr>
+    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>实验</th><th>模型</th><th>状态</th><th>相关性</th><th>验证 MSE</th><th>产出版本</th><th>更新时间</th></tr></thead><tbody>${state.experiments.map(item => `<tr>
       <td>${h(item.name)}</td><td>${h((item.method || '').toUpperCase())}</td><td><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span></td>
-      <td>${number(item.result_json?.metrics?.correlation, 4)}</td><td>${number(item.result_json?.metrics?.mse, 6)}</td><td>${h((item.updated_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}</tbody></table></div>`;
+      <td>${number(item.result_json?.metrics?.correlation, 4)}</td><td>${number(item.result_json?.metrics?.mse, 6)}</td><td>${item.result_json?.version_id ? `<button type="button" data-factor-version="${h(item.result_json.version_id)}">${h(statusLabel[item.result_json.version_status] || item.result_json.version_status || '影子候选')}</button>` : '—'}</td><td>${h((item.updated_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
   async function refreshOverview() {
@@ -509,7 +512,10 @@
         }
       }
       const factor = event.target.closest('[data-factor-version]');
-      if (factor) selectFactor(factor.dataset.factorVersion);
+      if (factor) {
+        if (!factor.closest('#lab-factor-list')) setView('library');
+        selectFactor(factor.dataset.factorVersion);
+      }
       const model = event.target.closest('[data-model]');
       if (model) {
         if (model.getAttribute('aria-disabled') === 'true') {
@@ -551,9 +557,11 @@
       const deploy = event.target.closest('[data-deploy-version]');
       if (deploy && window.confirm('设为研究 Champion？这不会连接真实券商。')) try {
         const research = state.overview?.research || {};
-        const horizons = (research.horizons || [3]).map(Number);
-        const horizon = horizons.includes(3) ? 3 : horizons[0];
-        await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, actor:'web'})});
+        const config = deploy.closest('.lab-deploy-config');
+        const horizon = Number(config?.querySelector('[data-deploy-horizon]')?.value || 3);
+        const profile = config?.querySelector('[data-deploy-profile]')?.value || 'all';
+        const scope = config?.querySelector('[data-deploy-scope]')?.value || 'exact';
+        await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
         await Promise.all([refreshOverview(), refreshFactors()]);
       } catch (error) { showError('Champion 切换失败', error); }
       const suggest = event.target.closest('[data-suggest-version]');

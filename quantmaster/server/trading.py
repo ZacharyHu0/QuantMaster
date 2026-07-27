@@ -1,0 +1,237 @@
+"""回测工作台与多账户模拟盘 API。"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
+
+from quantmaster.backtest.paper_accounts import get_paper_service
+from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec
+from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
+from quantmaster.server.management import _require_csrf
+
+router = APIRouter(prefix="/api")
+
+
+def _service() -> BacktestService:
+    return get_backtest_worker().service
+
+
+def _error(exc: Exception) -> HTTPException:
+    if isinstance(exc, KeyError):
+        return HTTPException(404, str(exc).strip("'"))
+    return HTTPException(400, str(exc))
+
+
+@router.post("/backtests", status_code=202)
+def create_backtest(spec: BacktestSpec, request: Request) -> dict:
+    _require_csrf(request)
+    worker = get_backtest_worker()
+    run = worker.service.enqueue(spec)
+    worker.start()
+    return run
+
+
+@router.get("/backtests")
+def list_backtests(limit: int = Query(50, ge=1, le=200)) -> dict:
+    return {"items": _service().store.list(limit)}
+
+
+@router.get("/backtests/{run_id}")
+def get_backtest(run_id: str) -> dict:
+    run = _service().store.get(run_id, include_artifact=True)
+    if run is None:
+        raise HTTPException(404, "回测不存在")
+    return run
+
+
+@router.get("/backtests/{run_id}/events")
+def backtest_events(run_id: str, after: int = Query(0, ge=0)) -> dict:
+    try:
+        return {"items": _service().store.events(run_id, after=after)}
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/backtests/{run_id}/cancel")
+def cancel_backtest(run_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return _service().store.cancel(run_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+class CompareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_ids: list[str] = Field(..., min_length=2, max_length=4)
+
+
+@router.post("/backtests/compare")
+def compare_backtests(payload: CompareRequest, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return _service().compare(payload.run_ids)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/backtests/{run_id}/export")
+def export_backtest(run_id: str, format: Literal["json", "trades_csv"] = "json") -> Response:
+    run = _service().store.get(run_id, include_artifact=True)
+    if run is None:
+        raise HTTPException(404, "回测不存在")
+    artifact = run.get("artifact")
+    if run["status"] != "completed" or not artifact:
+        raise HTTPException(409, "回测尚未完成，不能导出")
+    filename = f"quantmaster-backtest-{run_id[:8]}"
+    if format == "json":
+        return Response(
+            json.dumps(artifact, ensure_ascii=False, indent=2),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
+        )
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        stream, fieldnames=["date", "symbol", "side", "price", "shares", "amount", "cost", "note"],
+    )
+    writer.writeheader()
+    writer.writerows(artifact.get("trades") or [])
+    return Response(
+        stream.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}-trades.csv"'},
+    )
+
+
+class PromoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(..., min_length=1, max_length=40)
+    mode: Literal["manual", "auto"] = "manual"
+
+
+@router.post("/backtests/{run_id}/paper-account", status_code=201)
+def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> dict:
+    _require_csrf(request)
+    run = _service().store.get(run_id)
+    if run is None:
+        raise HTTPException(404, "回测不存在")
+    if run["status"] != "completed":
+        raise HTTPException(409, "只有已完成回测才能创建模拟账户")
+    try:
+        spec = PaperAccountSpec.model_validate({
+            "name": payload.name,
+            "strategy": run["config"]["strategy"],
+            "universe": run["config"]["universe"],
+            "initial_capital": run["config"]["initial_capital"],
+            "mode": payload.mode,
+            "source_backtest_id": run_id,
+        })
+        return get_paper_service().create_account(spec)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/paper/accounts", status_code=201)
+def create_paper_account(spec: PaperAccountSpec, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().create_account(spec)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/paper/accounts")
+def list_paper_accounts(include_archived: bool = False) -> dict:
+    service = get_paper_service()
+    return {"items": service.store.accounts(include_archived=include_archived)}
+
+
+@router.get("/paper/accounts/{account_id}")
+def get_paper_account(account_id: str) -> dict:
+    account = get_paper_service().store.account(account_id)
+    if account is None:
+        raise HTTPException(404, "模拟账户不存在")
+    return account
+
+
+class PaperAccountUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["active", "paused", "archived"] | None = None
+    mode: Literal["manual", "auto"] | None = None
+
+
+@router.patch("/paper/accounts/{account_id}")
+def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: Request) -> dict:
+    _require_csrf(request)
+    if payload.status is None and payload.mode is None:
+        raise HTTPException(422, "至少需要修改状态或执行模式")
+    try:
+        return get_paper_service().store.update_account(
+            account_id, status=payload.status, mode=payload.mode,
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+class CloneAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(..., min_length=1, max_length=40)
+    mode: Literal["manual", "auto"] = "manual"
+
+
+@router.post("/paper/accounts/{account_id}/clone", status_code=201)
+def clone_paper_account(account_id: str, payload: CloneAccountRequest, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().clone_account(account_id, name=payload.name, mode=payload.mode)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/paper/accounts/{account_id}/proposals")
+def propose_paper_cycle(account_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().propose(account_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/paper/cycles/{cycle_id}/confirm")
+def confirm_paper_cycle(cycle_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().store.confirm(cycle_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/paper/accounts/{account_id}/process")
+def process_paper_account(account_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().process(account_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/paper/accounts/{account_id}/report")
+def paper_account_report(account_id: str) -> dict:
+    try:
+        return get_paper_service().report(account_id)
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/paper/accounts/{account_id}/cycles")
+def paper_account_cycles(account_id: str, limit: int = Query(30, ge=1, le=200)) -> dict:
+    service = get_paper_service()
+    if service.store.account(account_id) is None:
+        raise HTTPException(404, "模拟账户不存在")
+    return {"items": service.store.cycles(account_id, limit=limit)}

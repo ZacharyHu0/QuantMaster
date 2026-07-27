@@ -639,7 +639,7 @@ class AutomationService:
     def _task_daily_close_pipeline(self) -> dict:
         from quantmaster.data import load_panel
         from quantmaster.data.universe import load_universe
-        from quantmaster.decision import DecisionStore, daily_selection
+        from quantmaster.decision import DecisionStore, hybrid_daily_selection
         from quantmaster.market.regime import analyze_market
 
         cfg = get_config().automation
@@ -650,7 +650,10 @@ class AutomationService:
         latest = pd.Timestamp(panel["close"].dropna(how="all").index[-1]).normalize()
         if latest < end:
             return {"status": "skipped", "reason": "无新 K 线", "latest": str(latest.date())}
-        selection = daily_selection(panel, top_n=10, horizon=3)
+        selection = hybrid_daily_selection(
+            panel, top_n=10, horizon=3, profile="risk_adjusted",
+            universe=cfg.primary_universe,
+        )
         DecisionStore().save(selection, cfg.primary_universe)
         market = analyze_market(panel)
         current = market["current"]
@@ -717,33 +720,52 @@ class AutomationService:
         return {"items": len(items)}
 
     def _task_paper_rebalance_proposal(self) -> dict:
-        from quantmaster.backtest.paper import PaperTrader
-        from quantmaster.backtest.strategy import SwingStrategy
-        from quantmaster.data.universe import load_universe
+        from quantmaster.backtest.paper_accounts import get_paper_service
+        from quantmaster.backtest.spec import PaperAccountSpec
 
+        service = get_paper_service()
+        active_result = service.run_active_accounts()
         owner_targets = [target for target in self.store.targets()
                          if target["chat_type"] == "direct" and target["owner_actor"] and target["target"]]
         if not owner_targets:
-            return {"status": "skipped", "reason": "尚未绑定管理员私聊"}
+            return {
+                "status": "completed" if active_result["processed"] else "skipped",
+                "reason": "尚未绑定管理员私聊",
+                "active_accounts": active_result,
+            }
         target = next((value for value in owner_targets if value["id"] == "feishu_owner"), owner_targets[0])
-        symbols = load_universe(get_config().automation.primary_universe)
-        proposal = PaperTrader(initialize=False).propose_once(
-            SwingStrategy(top_n=5, holding_days=3), symbols)
+        account = next(
+            (item for item in service.store.accounts() if item["name"] == "自动化模拟盘"), None,
+        )
+        if account is None:
+            account = service.create_account(PaperAccountSpec.model_validate({
+                "name": "自动化模拟盘",
+                "strategy": {
+                    "kind": "swing", "top_n": 5, "holding_days": 3, "cap_weight": 0.25,
+                },
+                "universe": get_config().automation.primary_universe,
+                "initial_capital": 1_000_000,
+                "mode": "manual",
+            }))
+        proposal = service.propose(account["id"])
+        if proposal.get("status") == "not_due":
+            return {"status": "skipped", "reason": proposal.get("message", "今天不是调仓日")}
         route_key = f"{target['channel']}:{target['account_id']}:{target['target']}"
         pending = self.store.create_pending_action(
             kind="paper_rebalance", actor=target["owner_actor"], route_key=route_key,
-            payload=proposal, ttl_seconds=300,
+            payload={"account_id": account["id"], "cycle_id": proposal["id"]}, ttl_seconds=300,
         )
         event = AlertEvent(
             kind="task_report", score=0, severity="info", data_as_of=proposal["signal_date"],
-            evidence=[f"计划成交 {len(proposal['planned'])} 笔",
+            evidence=[f"计划调整 {len(proposal.get('orders') or [])} 只标的",
                       f"确认码 {pending['code']}，5 分钟内在当前私聊确认"],
             dedupe_key=stable_hash({"paper_proposal": proposal["signal_date"]}),
             payload={"title": "模拟调仓待确认", "intent_id": pending["intent_id"]},
         )
         self.process_event(event, {target["id"]})
         return {"status": "pending_confirmation", "intent_id": pending["intent_id"],
-                "planned": len(proposal["planned"])}
+                "planned": len(proposal.get("orders") or []),
+                "active_accounts": active_result}
 
     # ---------- 私聊二阶段写入 ----------
 
@@ -788,11 +810,12 @@ class AutomationService:
             from quantmaster.portfolio import Ledger
             created = Ledger().add_cashflow(**payload, idempotency_key=intent_id)
         elif kind == "paper_rebalance":
-            from quantmaster.backtest.paper import PaperTrader
-            from quantmaster.portfolio import TradeRecord
-            trades = [TradeRecord(**item) for item in payload.get("planned", [])]
-            created = bool(PaperTrader(initialize=False).apply_rebalance(
-                trades, idempotency_prefix=intent_id))
+            if not payload.get("cycle_id"):
+                raise ValueError("旧版模拟调仓提案不能安全成交，请重新生成提案")
+            from quantmaster.backtest.paper_accounts import get_paper_service
+
+            cycle = get_paper_service().store.confirm(payload["cycle_id"])
+            created = cycle.get("status") == "confirmed"
         else:
             raise ValueError("未知确认类型")
         self.store.audit(actor.actor_key, "confirm_write", kind, intent_id, {}, payload,

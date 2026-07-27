@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import random
@@ -15,6 +16,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from quantmaster.config import get_config
 
 MODEL_KINDS = ("ridge", "mlp", "tcn", "gru", "transformer", "dae")
 Progress = Callable[[int, str], None]
@@ -97,6 +100,53 @@ def engineer_features(panel: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]
     return features
 
 
+def normalize_features(
+    features: dict[str, pd.DataFrame],
+) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
+    """Cross-sectionally winsorize/z-score features using same-date data only.
+
+    Missing values become the same-date cross-sectional median (zero after
+    standardization).  A separate validity mask is retained so callers can
+    enforce coverage rather than confusing imputation with observed data.
+    """
+    normalized: dict[str, pd.DataFrame] = {}
+    validity: dict[str, pd.DataFrame] = {}
+    for name, raw in features.items():
+        values = raw.astype(float).replace([np.inf, -np.inf], np.nan)
+        valid = values.notna()
+        lower = values.quantile(0.01, axis=1)
+        upper = values.quantile(0.99, axis=1)
+        clipped = values.clip(lower=lower, upper=upper, axis=0)
+        mean = clipped.mean(axis=1)
+        std = clipped.std(axis=1, ddof=0).replace(0, np.nan)
+        normalized[name] = clipped.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
+        validity[name] = valid
+    return normalized, validity
+
+
+def _feature_cube(
+    panel: dict[str, pd.DataFrame],
+) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex, pd.Index, list[str]]:
+    raw = engineer_features(panel)
+    features, validity = normalize_features(raw)
+    names = list(features)
+    close = panel["close"].astype(float)
+    indexes = close.index.intersection(next(iter(features.values())).index)
+    columns = close.columns
+    arrays = [
+        value.reindex(index=indexes, columns=columns).to_numpy(float)
+        for value in features.values()
+    ]
+    valid_arrays = [
+        value.reindex(index=indexes, columns=columns).fillna(False).to_numpy(bool)
+        for value in validity.values()
+    ]
+    return (
+        np.stack(arrays, axis=-1), np.stack(valid_arrays, axis=-1),
+        pd.DatetimeIndex(indexes), columns, names,
+    )
+
+
 def make_samples(
     panel: dict[str, pd.DataFrame],
     *,
@@ -109,14 +159,11 @@ def make_samples(
         raise ValueError("horizon 只支持 1/3/5/7 日")
     if sequence_length < 1:
         raise ValueError("sequence_length 必须为正整数")
-    features = engineer_features(panel)
-    names = list(features)
     close = panel["close"].astype(float)
-    indexes = close.index.intersection(next(iter(features.values())).index)
-    columns = close.columns
-    arrays = [value.reindex(index=indexes, columns=columns).to_numpy(float) for value in features.values()]
-    cube = np.stack(arrays, axis=-1)
-    target = (close.shift(-horizon) / close - 1).reindex(index=indexes, columns=columns).to_numpy(float)
+    cube, valid_cube, indexes, columns, names = _feature_cube(panel)
+    raw_target = close.shift(-horizon) / close - 1
+    excess_target = raw_target.sub(raw_target.median(axis=1), axis=0)
+    target = excess_target.reindex(index=indexes, columns=columns).to_numpy(float)
     member_values = None
     if membership is not None:
         member_values = membership.reindex(index=indexes, columns=columns).fillna(False).to_numpy(bool)
@@ -131,16 +178,46 @@ def make_samples(
                 continue
             sample = cross_section[:, symbol_pos, :]
             label = y_values[symbol_pos]
-            if np.isfinite(sample).all() and np.isfinite(label):
+            coverage = float(valid_cube[date_pos - sequence_length + 1:date_pos + 1,
+                                        symbol_pos, :].mean())
+            if coverage >= 0.80 and np.isfinite(sample).all() and np.isfinite(label):
                 samples.append(sample.astype(np.float32))
                 labels.append(float(label))
                 metadata.append({
                     "date": pd.Timestamp(indexes[date_pos]).strftime("%Y-%m-%d"),
+                    "target_date": pd.Timestamp(indexes[date_pos + horizon]).strftime("%Y-%m-%d"),
                     "symbol": str(symbol),
                 })
     if not samples:
         raise ValueError("清洗后没有可训练样本；请扩大日期范围或检查数据覆盖率")
     return np.stack(samples), np.asarray(labels, dtype=np.float32), metadata, names
+
+
+def make_inference_samples(
+    panel: dict[str, pd.DataFrame], *, sequence_length: int = 20,
+    minimum_coverage: float = 0.80,
+) -> tuple[np.ndarray, list[dict[str, str]], list[str]]:
+    """Build label-free samples with the exact training preprocessing path."""
+    if sequence_length < 1:
+        raise ValueError("sequence_length 必须为正整数")
+    cube, valid_cube, indexes, columns, names = _feature_cube(panel)
+    samples: list[np.ndarray] = []
+    metadata: list[dict[str, str]] = []
+    for date_pos in range(sequence_length - 1, len(indexes)):
+        window = cube[date_pos - sequence_length + 1:date_pos + 1]
+        valid_window = valid_cube[date_pos - sequence_length + 1:date_pos + 1]
+        for symbol_pos, symbol in enumerate(columns):
+            sample = window[:, symbol_pos, :]
+            coverage = float(valid_window[:, symbol_pos, :].mean())
+            if coverage >= minimum_coverage and np.isfinite(sample).all():
+                samples.append(sample.astype(np.float32))
+                metadata.append({
+                    "date": pd.Timestamp(indexes[date_pos]).strftime("%Y-%m-%d"),
+                    "symbol": str(symbol),
+                })
+    if not samples:
+        raise ValueError("没有满足 80% 特征覆盖率的推理样本")
+    return np.stack(samples), metadata, names
 
 
 def _split_by_date(metadata: list[dict[str, str]], validation_ratio: float) -> int:
@@ -185,8 +262,15 @@ def train(
     seed = int(config.get("seed", 42))
     _seed_everything(seed)
     cutoff = _split_by_date(metadata, float(config.get("validation_ratio", 0.2)))
-    x_train, x_valid = samples[:cutoff], samples[cutoff:]
-    y_train, y_valid = targets[:cutoff], targets[cutoff:]
+    validation_start = metadata[cutoff]["date"]
+    # Purge training rows whose forward-return label reaches into the OOS block.
+    # This is the holding-period embargo needed to keep the saved model honest.
+    training_positions = [
+        index for index, item in enumerate(metadata[:cutoff])
+        if item.get("target_date", item["date"]) < validation_start
+    ]
+    x_train, x_valid = samples[training_positions], samples[cutoff:]
+    y_train, y_valid = targets[training_positions], targets[cutoff:]
     if min(len(x_train), len(x_valid)) < 10:
         raise ValueError("训练集或验证集样本不足")
     artifact_path = Path(artifact_dir)
@@ -195,12 +279,20 @@ def train(
         progress(10, "准备训练样本")
 
     if kind == "ridge":
-        return _train_ridge(
+        result = _train_ridge(
             x_train, y_train, x_valid, y_valid, artifact_path, config, progress, cancelled
         )
-    return _train_torch(
-        kind, x_train, y_train, x_valid, y_valid, artifact_path, config, progress, cancelled
+    else:
+        result = _train_torch(
+            kind, x_train, y_train, x_valid, y_valid, artifact_path, config, progress, cancelled
+        )
+    result["fit_through"] = max(
+        metadata[index].get("target_date", metadata[index]["date"])
+        for index in training_positions
     )
+    result["validation_start"] = validation_start
+    result["_validation_metadata"] = metadata[cutoff:]
+    return result
 
 
 def _train_ridge(
@@ -235,6 +327,8 @@ def _train_ridge(
         "validation_samples": len(x_valid),
         "metrics": _metrics(y_valid, predicted),
         "config": config,
+        "_predicted": predicted,
+        "_actual": y_valid,
     }
 
 
@@ -412,4 +506,81 @@ def _train_torch(
         "metrics": _metrics(y_valid, predicted),
         "history": history,
         "config": config,
+        "_predicted": predicted,
+        "_actual": y_valid,
     }
+
+
+def artifact_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_manifest(model: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+    manifest_name = str(model.get("manifest") or "")
+    if not manifest_name:
+        raise ValueError("学习模型没有推理清单")
+    root = Path(get_config().data_root).resolve()
+    manifest_path = (root / manifest_name).resolve()
+    if not manifest_path.is_relative_to(root):
+        raise ValueError("模型清单路径越出数据目录")
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"模型清单不存在：{manifest_name}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_path = (root / str(manifest.get("artifact") or "")).resolve()
+    if not artifact_path.is_relative_to(root) or not artifact_path.is_file():
+        raise FileNotFoundError("模型工件不存在或路径不安全")
+    expected = str(manifest.get("artifact_sha256") or "")
+    actual = artifact_sha256(artifact_path)
+    if not expected or actual != expected:
+        raise ValueError("模型工件完整性校验失败")
+    return manifest, artifact_path
+
+
+def predict_panel(
+    panel: dict[str, pd.DataFrame], model: dict[str, Any],
+) -> pd.DataFrame:
+    """Load a versioned Lab artifact and return date×symbol predictions."""
+    manifest, artifact_path = _artifact_manifest(model)
+    sequence_length = int(manifest.get("sequence_length", 20))
+    samples, metadata, feature_names = make_inference_samples(
+        panel, sequence_length=sequence_length,
+        minimum_coverage=float(manifest.get("minimum_feature_coverage", 0.80)),
+    )
+    if feature_names != list(manifest.get("features") or []):
+        raise ValueError("模型特征模式与当前运行时不一致")
+    kind = str(manifest.get("kind") or "")
+    if kind == "ridge":
+        artifact = np.load(artifact_path)
+        coefficient = np.asarray(artifact["coef"], dtype=float)
+        intercept = float(np.asarray(artifact["intercept"], dtype=float).reshape(-1)[0])
+        predicted = samples[:, -1, :] @ coefficient + intercept
+    else:
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("当前环境未安装 PyTorch，学习模型已回退") from exc
+        checkpoint = torch.load(artifact_path, map_location="cpu", weights_only=False)
+        model_class = _torch_models(samples.shape[-1], samples.shape[1]).get(kind)
+        if model_class is None:
+            raise ValueError(f"不支持的学习模型工件：{kind}")
+        network = model_class()
+        network.load_state_dict(checkpoint["state_dict"])
+        network.eval()
+        with torch.no_grad():
+            predicted = network(torch.from_numpy(samples)).detach().cpu().numpy()
+    index = pd.DatetimeIndex(panel["close"].index)
+    columns = panel["close"].columns
+    result = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
+    for item, value in zip(metadata, np.asarray(predicted, dtype=float), strict=True):
+        date = pd.Timestamp(item["date"])
+        symbol = item["symbol"]
+        if date in result.index and symbol in result.columns:
+            result.at[date, symbol] = float(value)
+    validation_start = manifest.get("validation_start")
+    if validation_start:
+        result.loc[result.index < pd.Timestamp(validation_start)] = np.nan
+    return result

@@ -55,6 +55,9 @@ class LabStore:
                     FOREIGN KEY(version_id) REFERENCES factor_versions(id));
                 CREATE TABLE IF NOT EXISTS deployments (
                     id TEXT PRIMARY KEY, universe TEXT NOT NULL, horizon INTEGER NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'factor',
+                    profile TEXT NOT NULL DEFAULT 'all',
+                    scope TEXT NOT NULL DEFAULT 'exact',
                     version_id TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL, retired_at TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(version_id) REFERENCES factor_versions(id));
@@ -91,8 +94,22 @@ class LabStore:
                     ON lab_jobs(status,created_at);
                 CREATE INDEX IF NOT EXISTS idx_job_events
                     ON lab_job_events(job_id,seq);
-                PRAGMA user_version=1;
             """)
+            deployment_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(deployments)")
+            }
+            for name, declaration in (
+                ("role", "TEXT NOT NULL DEFAULT 'factor'"),
+                ("profile", "TEXT NOT NULL DEFAULT 'all'"),
+                ("scope", "TEXT NOT NULL DEFAULT 'exact'"),
+            ):
+                if name not in deployment_columns:
+                    conn.execute(f"ALTER TABLE deployments ADD COLUMN {name} {declaration}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
+                "ON deployments(status,universe,horizon,profile,role)"
+            )
+            conn.execute("PRAGMA user_version=2")
 
     @staticmethod
     def _decode(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -227,7 +244,14 @@ class LabStore:
             raise KeyError("因子版本不存在")
         now, report_id = utc_now(), uuid.uuid4().hex
         hard_failures = report.get("gates", {}).get("hard_failures", [])
-        next_status = "draft" if hard_failures else "candidate"
+        if current["status"] == "production":
+            next_status = "degraded" if hard_failures else "production"
+        elif current["status"] in {"approved", "degraded"}:
+            # A successful revalidation does not silently redeploy a degraded model;
+            # it returns to approved and still needs an explicit production action.
+            next_status = "degraded" if hard_failures else "approved"
+        else:
+            next_status = "draft" if hard_failures else "candidate"
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO validation_reports VALUES (?,?,?,?,?)",
@@ -280,7 +304,10 @@ class LabStore:
             )
         return self.version(version_id) or {}
 
-    def deploy(self, version_id: str, *, universe: str, horizon: int, actor: str) -> dict:
+    def deploy(
+        self, version_id: str, *, universe: str, horizon: int, actor: str,
+        profile: str = "all", scope: str = "exact",
+    ) -> dict:
         value = self.version(version_id)
         if value is None:
             raise KeyError("因子版本不存在")
@@ -288,6 +315,22 @@ class LabStore:
             raise ValueError("只有已批准版本可以设为生产 champion")
         if horizon not in {1, 3, 5, 7}:
             raise ValueError("horizon 只支持 1/3/5/7 日")
+        if profile not in {"all", "risk_adjusted", "short_term", "stable"}:
+            raise ValueError("profile 只支持 all/risk_adjusted/short_term/stable")
+        if scope not in {"exact", "a_share"}:
+            raise ValueError("scope 只支持 exact/a_share")
+        report = value.get("validation") or {}
+        gates = report.get("gates") or {}
+        if gates.get("hard_failures"):
+            raise ValueError("当前验证存在硬门槛失败，不能设为 champion")
+        has_horizon_evidence = bool(report.get("horizons")) or report.get("best_horizon") is not None
+        if (has_horizon_evidence and str(horizon) not in (report.get("horizons") or {})
+                and report.get("best_horizon") != horizon):
+            raise ValueError(f"版本没有 {horizon} 日验证证据，不能部署到该周期")
+        spec = value.get("spec") or {}
+        role = "ml" if spec.get("kind") == "learned" else "factor"
+        if role == "ml" and not (spec.get("model") or {}).get("manifest"):
+            raise ValueError("学习模型缺少可验证的推理工件")
         now, deployment_id = utc_now(), uuid.uuid4().hex
         with self._conn() as conn:
             evidence = conn.execute(
@@ -299,20 +342,20 @@ class LabStore:
                 raise ValueError("缺少统一验证或人工批准记录，不能设为 champion")
             rows = conn.execute(
                 "SELECT id,version_id FROM deployments WHERE universe=? AND horizon=? "
-                "AND status='active'", (universe, horizon),
+                "AND role=? AND profile=? AND scope=? AND status='active'",
+                (universe, horizon, role, profile, scope),
             ).fetchall()
             for row in rows:
                 conn.execute(
                     "UPDATE deployments SET status='retired',retired_at=? WHERE id=?",
                     (now, row["id"]),
                 )
-                conn.execute(
-                    "UPDATE factor_versions SET status='approved',updated_at=? "
-                    "WHERE id=? AND status='production'", (now, row["version_id"]),
-                )
             conn.execute(
-                "INSERT INTO deployments VALUES (?,?,?,?,?,?,?)",
-                (deployment_id, universe, horizon, version_id, "active", now, ""),
+                "INSERT INTO deployments "
+                "(id,universe,horizon,role,profile,scope,version_id,status,created_at,retired_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (deployment_id, universe, horizon, role, profile, scope,
+                 version_id, "active", now, ""),
             )
             conn.execute(
                 "UPDATE factor_versions SET status='production',updated_at=? WHERE id=?",
@@ -320,9 +363,23 @@ class LabStore:
             )
             conn.execute(
                 "INSERT INTO approvals VALUES (?,?,?,?,?,?)",
-                (uuid.uuid4().hex, version_id, "deploy", actor, f"{universe}/{horizon}d", now),
+                (uuid.uuid4().hex, version_id, "deploy", actor,
+                 f"{universe}/{horizon}d/{profile}/{role}/{scope}", now),
             )
-        return {"deployment_id": deployment_id, "version": self.version(version_id)}
+            for row in rows:
+                still_active = conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM deployments WHERE version_id=? AND status='active')",
+                    (row["version_id"],),
+                ).fetchone()[0]
+                if not still_active:
+                    conn.execute(
+                        "UPDATE factor_versions SET status='approved',updated_at=? "
+                        "WHERE id=? AND status='production'", (now, row["version_id"]),
+                    )
+        return {
+            "deployment_id": deployment_id, "role": role, "profile": profile,
+            "scope": scope, "version": self.version(version_id),
+        }
 
     def save_snapshot(self, payload: dict) -> dict:
         digest = payload.get("snapshot_hash") or content_hash(payload)
@@ -426,10 +483,23 @@ class LabStore:
             ).fetchone()[0]
         return max(0.0, float(value or 0.0))
 
-    def active_deployments(self) -> list[dict]:
+    def active_deployments(
+        self, *, universe: str | None = None, horizon: int | None = None,
+        profile: str | None = None, role: str | None = None,
+    ) -> list[dict]:
+        filters, params = ["status='active'"], []
+        for column, value in (
+            ("universe", universe), ("horizon", horizon),
+            ("profile", profile), ("role", role),
+        ):
+            if value is not None:
+                filters.append(f"{column}=?")
+                params.append(value)
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM deployments WHERE status='active' ORDER BY created_at DESC"
+                "SELECT * FROM deployments WHERE " + " AND ".join(filters)
+                + " ORDER BY created_at DESC",
+                tuple(params),
             ).fetchall()
         return [dict(row) for row in rows]
 

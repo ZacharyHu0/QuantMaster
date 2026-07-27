@@ -19,6 +19,9 @@ class TestBasics:
         assert resp.json()["status"] == "ok"
         assert resp.json()["version"] == __version__
         assert resp.json()["release_date"] == RELEASE_DATE
+        assert resp.json()["level"] in {"ok", "warning", "error"}
+        assert resp.json()["checked_at"]
+        assert isinstance(resp.json()["issues"], list)
         assert len(resp.headers["X-Request-ID"]) == 12
 
     def test_release_info(self):
@@ -38,12 +41,22 @@ class TestBasics:
         assert 'id="kline-frequency"' in resp.text
         assert 'class="panel market-detail-panel" id="kline-panel"' in resp.text
         assert "function marketChangeSeries" in resp.text
+        assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text
+        assert "market-section-title" in resp.text
+        assert "mkt-memberships" in resp.text
+        assert "queueMarketReload" in resp.text
         assert "data:[{yAxis:0}]" in resp.text
         assert "type:'dashed'" in resp.text
         assert "prefers-reduced-motion" in resp.text
         assert "createLoadProgress" in resp.text
         assert "createMarketStreamRenderer" in resp.text
         assert "createDecisionStreamRenderer" in resp.text
+        assert "function loadKlineSeries" in resp.text
+        assert "function renderKlineSeries" in resp.text
+        assert "function openDecisionKline" in resp.text
+        assert "data-decision-kline-trigger" in resp.text
+        assert "data-decision-asset-toggle" in resp.text
+        assert "showKline(row.dataset.symbol" not in resp.text
         assert "existing.getDom() !== el" in resp.text
         assert "ACTIVE_TAB_STORAGE_KEY" in resp.text
         assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in resp.text
@@ -66,6 +79,11 @@ class TestBasics:
         assert 'id="data-refresh-resume"' in resp.text
         assert 'id="runtime-drawer-frame"' in resp.text
         assert "window.QuantMasterRunInfo" in resp.text
+        assert "window.QuantMasterProblemDialog" in resp.text
+        assert "window.QuantMasterNDJSON" in resp.text
+        assert "runtimeInfo.sync('health'" in resp.text
+        assert 'id="operation-problem-dialog"' in resp.text
+        assert 'class="quality-summary"' in resp.text
         assert 'data-runtime-filter="problem"' in resp.text
         assert 'data-runtime-filter="running"' in resp.text
         assert '<summary>诊断信息</summary>' in resp.text
@@ -103,6 +121,29 @@ class TestBasics:
         })
         assert resp.status_code == 422
         assert resp.json()["error_id"] == resp.headers["X-Request-ID"]
+
+    def test_backtest_partial_data_returns_confirmation_problem(self, monkeypatch):
+        dates = pd.bdate_range("2026-06-01", periods=25)
+        panel = {
+            "open": pd.DataFrame({"A": range(10, 35)}, index=dates),
+            "close": pd.DataFrame({"A": range(11, 36)}, index=dates),
+        }
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe", lambda name: ["A", "B"],
+        )
+        monkeypatch.setattr("quantmaster.data.load_panel", lambda *args, **kwargs: panel)
+
+        resp = client.post("/api/backtest/run", json={
+            "strategy": "factor", "factor": "mom_20d", "universe": "demo",
+            "start": "2026-06-01", "top_n": 1,
+        })
+
+        assert resp.status_code == 409
+        data = resp.json()
+        assert data["problem"]["code"] == "partial_market_data"
+        assert data["problem"]["blocking"] is True
+        assert data["problem"]["can_continue"] is True
+        assert data["data_quality"]["missing_symbols"] == ["B"]
 
     def test_stream_error_message_redacts_credentials(self):
         from quantmaster.server import app as app_module
@@ -192,11 +233,20 @@ class TestBasics:
         })
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert set(data) == {"market", "selection", "history"}
+        assert set(data) == {
+            "market", "selection", "history", "model_snapshot", "data_quality",
+        }
         assert data["market"]["current"]["state"] in {
             "strong_up", "up", "range", "down", "strong_down"}
         assert len(data["market"]["sectors"]) == 2
         assert len(data["selection"]["picks"]) == 4
+        assert data["selection"]["profile"] == "risk_adjusted"
+        assert data["selection"]["model_version"].startswith("hybrid-v2:")
+        assert data["model_snapshot"]["engine_version"] == "hybrid-v2"
+        assert all(
+            "probability_up" in pick and "component_scores" in pick
+            for pick in data["selection"]["picks"]
+        )
         assert all(pick["name"] == names[pick["symbol"]]
                    for pick in data["selection"]["picks"])
         assert data["history"][0]["signal_date"] == data["selection"]["signal_date"]
@@ -219,8 +269,8 @@ class TestBasics:
             event["partial"]["kind"] for event in updates if event.get("partial")
         ]
         assert partial_kinds.count("decision_symbol") == len(symbols)
-        assert partial_kinds[-4:] == [
-            "decision_market", "decision_sectors",
+        assert partial_kinds[-5:] == [
+            "decision_market", "decision_sectors", "decision_policy",
             "decision_selection", "decision_history",
         ]
         assert next(

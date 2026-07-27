@@ -15,14 +15,7 @@ class DecisionStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else get_config().data_root / "decisions.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._conn() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS selection_snapshots ("
-                "signal_date TEXT NOT NULL, universe TEXT NOT NULL, "
-                "horizon INTEGER NOT NULL, model_version TEXT NOT NULL, "
-                "payload TEXT NOT NULL, created_at REAL NOT NULL, "
-                "PRIMARY KEY(signal_date, universe, horizon, model_version))"
-            )
+        self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30.0)
@@ -30,29 +23,78 @@ class DecisionStore:
         conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
+    def _migrate(self) -> None:
+        with self._conn() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='selection_snapshots'"
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "CREATE TABLE selection_snapshots ("
+                    "signal_date TEXT NOT NULL, universe TEXT NOT NULL, "
+                    "horizon INTEGER NOT NULL, profile TEXT NOT NULL, "
+                    "policy_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
+                    "payload TEXT NOT NULL, created_at REAL NOT NULL, "
+                    "PRIMARY KEY(signal_date,universe,horizon,profile,policy_hash))"
+                )
+                return
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(selection_snapshots)")
+            }
+            if {"profile", "policy_hash"} <= columns:
+                return
+            conn.execute(
+                "CREATE TABLE selection_snapshots_v2 ("
+                "signal_date TEXT NOT NULL, universe TEXT NOT NULL, "
+                "horizon INTEGER NOT NULL, profile TEXT NOT NULL, "
+                "policy_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
+                "payload TEXT NOT NULL, created_at REAL NOT NULL, "
+                "PRIMARY KEY(signal_date,universe,horizon,profile,policy_hash))"
+            )
+            conn.execute(
+                "INSERT INTO selection_snapshots_v2 "
+                "SELECT signal_date,universe,horizon,'legacy',model_version,"
+                "model_version,payload,created_at FROM selection_snapshots"
+            )
+            conn.execute("DROP TABLE selection_snapshots")
+            conn.execute("ALTER TABLE selection_snapshots_v2 RENAME TO selection_snapshots")
+
     def save(self, report: dict[str, Any], universe: str) -> None:
         """同日同模型重复运行覆盖旧快照，避免计划任务重跑产生重复记录。"""
         with self._conn() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO selection_snapshots VALUES (?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO selection_snapshots "
+                "(signal_date,universe,horizon,profile,policy_hash,model_version,payload,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (
                     report["signal_date"], universe, report["holding_horizon_days"],
+                    report.get("profile", "legacy"),
+                    report.get("policy_hash", report.get("model_version", "swing-v1")),
                     report.get("model_version", "swing-v1"),
                     json.dumps(report, ensure_ascii=False, allow_nan=False), time.time(),
                 ),
             )
 
-    def history(self, universe: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+    def history(
+        self, universe: str | None = None, limit: int = 30,
+        profile: str | None = None,
+    ) -> list[dict[str, Any]]:
         if limit < 1:
             return []
-        query = (
-            "SELECT payload FROM selection_snapshots "
-            + ("WHERE universe=? " if universe else "")
-            + "ORDER BY signal_date DESC, created_at DESC LIMIT ?"
-        )
-        params: tuple[Any, ...] = (universe, limit) if universe else (limit,)
+        filters, values = [], []
+        if universe:
+            filters.append("universe=?")
+            values.append(universe)
+        if profile:
+            filters.append("profile=?")
+            values.append(profile)
+        query = "SELECT payload FROM selection_snapshots "
+        if filters:
+            query += "WHERE " + " AND ".join(filters) + " "
+        query += "ORDER BY signal_date DESC, created_at DESC LIMIT ?"
+        values.append(limit)
         with self._conn() as conn:
-            rows = conn.execute(query, params).fetchall()
+            rows = conn.execute(query, tuple(values)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def latest(self, universe: str | None = None) -> dict[str, Any] | None:

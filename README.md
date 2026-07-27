@@ -22,8 +22,8 @@
 | --- | --- |
 | 📡 多市场数据 | 约 3.4 万条内地/香港/美国证券主数据随包离线可用，支持代码、名称和拼音智能解析；日线及 1/5/15/30/60 分钟线按频率本地 Parquet 归档，断网复用、自动降级 |
 | 🧭 市场状态 | 候选与行业板块的牛熊分、上行/下行/震荡、市场宽度、MACD、资金量；分当前、历史和未来 1/3/5/7 日概率展望，历史图支持 7D–10Y 观察窗口 |
-| 🎯 每日选股 | 趋势 + MACD + 资金量 + 波动的短周期决策，给出仓位、置信度、止损止盈，面向 1–7 个交易日持有 |
-| 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、1/3/5/7 日 purged walk-forward、FDR 与交易成本门槛；AI 提案和人工修正都必须重新验证、人工批准 |
+| 🎯 Hybrid v2 决策 | 自适应规则 + Quant Lab 因子 / ML Champion；提供三种策略画像、扣费后预期、概率校准、模型贡献、连续仓位和异常回退，面向 1 / 3 / 5 / 7 个交易日 |
+| 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、purged walk-forward、FDR 与交易成本门槛；学习模型先影子运行，统一验证和人工批准后才能按候选 / 周期 / 画像设为 Champion |
 | ⛏️ 因子挖掘 | 遗传规划自动搜索因子表达式；LLM 因子挖掘（大模型提出候选 → 本地数据严格验证）；**样本外验证工具**（train/test IC、walk-forward、网格扫描）把防过拟合做成流程 |
 | 🧬 多因子合成 | 因子相关性矩阵、IC/ICIR 动态加权合成（防未来函数）、截面正交化、贪心去冗余 |
 | 📰 资讯研究 | 内置快讯/官方来源与 RSS、JSON、HTML 声明式来源；原始响应短期缓存、结构化资讯长期归档，去重标注后形成可回测的质量加权消息面因子 |
@@ -58,12 +58,12 @@ traceback 时，可把 `--verbose` 放在任意命令位置，或设置 `QM_LOG_
 qm fetch --universe demo --start 2022-01-01          # 拉取内置示例候选行情
 qm fetch --universe demo --frequency 5m --start 2026-07-01  # 分钟线归档
 qm regime --universe demo --start 2022-01-01         # 牛熊/趋势/板块/未来展望
-qm select --universe demo --horizon 3 --top 10       # 今日短周期选股
+qm select --universe demo --horizon 3 --profile risk_adjusted --top 10 # Hybrid v2 今日决策
 qm decisions --universe demo --limit 20              # 回看当时实际生成的决策
 qm factor-test "rank(-delta(close, 5))"              # 因子体检：IC/分层/换手
 qm backtest --factor mom_20d --top 5                 # 因子选股回测
-qm backtest --strategy swing --holding-days 3 --top 5 # 1–7日策略回测
-qm daily --strategy swing --holding-days 3            # 更新→选股快照→模拟调仓
+qm backtest --strategy decision --profile stable --holding-days 3 --top 5 # 固化 Champion 回测
+qm daily --strategy decision --holding-days 3         # 更新→Hybrid 快照→模拟调仓
 qm mine --generations 8                              # 遗传规划挖因子
 qm mine-llm --rounds 2                               # LLM 挖因子（需配置 API key）
 qm crawl                                             # 抓取财经快讯 + LLM 情绪标注
@@ -112,6 +112,18 @@ data:
 旧的手工配置继续使用“环境变量覆盖 YAML”。首次从 GUI 保存后会写入
 `managed_by_gui`，此后环境变量只提供缺省值，GUI/YAML 是最终值；在 GUI 中清除
 凭据会记录显式禁用状态，不会被遗留环境变量意外恢复。
+
+### Hybrid v2 决策与 Champion
+
+「决策」默认使用扣费风险收益画像，也可切换短期命中收益或稳定可解释。规则基线始终
+参与评分；Quant Lab 只有存在已批准且与候选、持有期和画像匹配的部署时，才会叠加
+表达式因子或学习模型。页面的“模型依据与不可变快照”可核对实际生效版本、权重、
+样本外校准和回退原因，单只候选还能展开规则 / 因子 / ML 贡献。
+
+学习模型训练完成后先作为影子候选，不会自动影响每日决策。进入 Quant Lab 因子库，
+检查统一验证证据并人工批准后，选择生效周期、画像及“仅当前候选 / 全部 A 股候选”，
+再设为 Champion。回测任务和模拟账户会在创建时固化当时的策略快照；之后切换 Champion
+不会改写旧结果。模拟盘只生成提案并按 T+1 开盘规则撮合，不连接真实券商。
 
 日常启动优先显示本地行情：已完整覆盖的历史区间不会因 TTL 过期反复联网，近期行情
 只请求缺失边界和 5 个交易日的校准窗口。动态前复权发生变化时会用重叠窗口统一价格

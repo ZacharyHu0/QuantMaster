@@ -74,6 +74,24 @@ class TestEngineBasics:
         result = run_backtest(panel, weights)
         assert all(t.date != str(dates[1].date()) for t in result.trades)
 
+    def test_limit_up_order_retries_on_following_session(self):
+        """涨停订单不会静默丢失；没有新信号时应在下一交易日继续尝试。"""
+        panel = flat_panel(price=10.0, days=6)
+        dates = panel["close"].index
+        panel["open"].iloc[1] = 11.0
+        panel["close"].iloc[1] = 11.0
+        panel["open"].iloc[2] = 10.8
+        panel["close"].iloc[2] = 10.8
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+
+        result = run_backtest(panel, weights)
+
+        assert result.trades[0].date == str(dates[2].date())
+        assert result.blocked_orders[0].date == str(dates[1].date())
+        assert result.blocked_orders[0].reason == "limit_up"
+        assert result.metrics["blocked_order_count"] >= 1
+
     def test_limit_down_blocks_sell(self):
         """开盘跌停卖不出：持仓保持不变。"""
         panel = flat_panel(price=10.0, days=10)

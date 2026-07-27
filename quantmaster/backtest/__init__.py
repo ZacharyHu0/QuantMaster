@@ -1,13 +1,17 @@
 from quantmaster.backtest.engine import BacktestConfig, BacktestResult, run_backtest
 from quantmaster.backtest.metrics import performance_metrics
 from quantmaster.backtest.report import full_report, monthly_return_table, yearly_returns
+from quantmaster.backtest.spec import BacktestSpec, DecisionStrategySpec, PaperAccountSpec
 from quantmaster.backtest.strategy import FactorStrategy, Strategy, SwingStrategy
 from quantmaster.backtest.validation import grid_search, train_test_ic, walk_forward_ic
 
 __all__ = [
     "BacktestConfig",
     "BacktestResult",
+    "BacktestSpec",
+    "DecisionStrategySpec",
     "FactorStrategy",
+    "PaperAccountSpec",
     "Strategy",
     "SwingStrategy",
     "full_report",

@@ -30,6 +30,13 @@ from quantmaster import __version__
 from quantmaster.config import get_config
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASES
+from quantmaster.server.problems import (
+    OperationProblem,
+    assess_panel_quality,
+    assess_signal_quality,
+    collect_health_report,
+    make_problem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +44,22 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     from quantmaster.automation.runtime import get_runtime
+    from quantmaster.backtest.workbench import get_backtest_worker
+    from quantmaster.data.instruments import InstrumentStore, refresh_instrument_master
     from quantmaster.lab.worker import get_worker
     from quantmaster.logging_config import current_log_path
     from quantmaster.server.management import capture_runtime_baseline
 
     capture_runtime_baseline()
+    InstrumentStore()
+    threading.Thread(
+        target=refresh_instrument_master, name="instrument-master-refresh", daemon=True,
+    ).start()
     runtime = get_runtime()
     runtime.start()
     worker = get_worker()
+    backtest_worker = get_backtest_worker()
+    backtest_worker.start()
     if get_config().lab.enabled:
         worker.start()
     cfg = get_config()
@@ -67,6 +82,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        backtest_worker.stop()
         worker.stop()
         runtime.stop()
         logger.info("QuantMaster 已停止")
@@ -93,7 +109,17 @@ def _safe_client_error(exc: Exception) -> str:
 @app.exception_handler(RequestValidationError)
 async def safe_validation_error(request: Request, exc: RequestValidationError):
     """设置请求的校验错误不回显输入值，防止替换中的密钥进入响应。"""
-    content = {"error_id": _request_id(request)}
+    content = {
+        "error_id": _request_id(request),
+        "problem": make_problem(
+            "request_validation_failed",
+            source="本地服务",
+            title="提交内容需要修改",
+            message="部分字段缺失或格式不正确。",
+            action="按页面提示修改输入后重试。",
+            blocking=True,
+        ),
+    }
     if (request.url.path.startswith("/api/settings") or
             request.url.path.startswith("/api/news/sources") or
             request.url.path.startswith("/api/automation/channels/")):
@@ -103,6 +129,15 @@ async def safe_validation_error(request: Request, exc: RequestValidationError):
         return JSONResponse(status_code=422, content=content)
     content["detail"] = jsonable_encoder(exc.errors())
     return JSONResponse(status_code=422, content=content)
+
+
+@app.exception_handler(OperationProblem)
+async def operation_problem(request: Request, exc: OperationProblem):
+    """向普通请求和前端返回一致、可恢复的问题语义。"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=jsonable_encoder(exc.response(_request_id(request))),
+    )
 
 
 @app.middleware("http")
@@ -118,9 +153,21 @@ async def request_context_and_migration_lock(request: Request, call_next):
                (path == "/api/settings" and request.method == "GET"))
     try:
         if migration_manager.active and path.startswith("/api/") and not allowed:
+            problem = make_problem(
+                "data_migration_active",
+                severity="warning",
+                source="数据目录",
+                title="数据目录正在迁移",
+                message="迁移完成前，读取或写入数据的操作已暂停。",
+                action="等待迁移完成后重试。",
+                blocking=True,
+            )
             response = JSONResponse(
                 status_code=423,
-                content={"detail": "数据目录正在迁移，请稍后重试", "error_id": request_id},
+                content={
+                    "detail": problem["message"], "problem": problem,
+                    "error_id": request_id,
+                },
             )
         else:
             response = await call_next(request)
@@ -129,10 +176,19 @@ async def request_context_and_migration_lock(request: Request, call_next):
             "未处理的接口异常 request_id=%s method=%s path=%s",
             request_id, request.method, path,
         )
+        problem = make_problem(
+            "unhandled_server_error",
+            source="本地服务",
+            title="服务端处理失败",
+            message="请求未能完成，详细原因已写入服务端日志。",
+            action="稍后重试；如持续发生，请提供请求编号。",
+            blocking=True,
+        )
         response = JSONResponse(
             status_code=500,
             content={
-                "detail": "服务端处理失败，请稍后重试；如持续发生，请提供请求编号",
+                "detail": problem["message"],
+                "problem": problem,
                 "error_id": request_id,
             },
         )
@@ -151,11 +207,13 @@ from quantmaster.server.automation import router as automation_router  # noqa: E
 from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
 from quantmaster.server.news import router as news_router  # noqa: E402
+from quantmaster.server.trading import router as trading_router  # noqa: E402
 
 app.include_router(management_router)
 app.include_router(automation_router)
 app.include_router(lab_router)
 app.include_router(news_router)
+app.include_router(trading_router)
 
 
 def _series_to_points(s: pd.Series) -> list[list]:
@@ -203,11 +261,33 @@ def _progress_stream(
             events.put({
                 "type": "result", "data": task(emit), "request_id": request_id,
             })
+        except OperationProblem as exc:
+            logger.warning(
+                "流式数据任务被业务门禁阻止 request_id=%s code=%s",
+                request_id, exc.problem.get("code"),
+            )
+            event = {
+                "type": "error", "message": exc.problem["message"],
+                "problem": exc.problem,
+                "error_id": request_id, "request_id": request_id,
+            }
+            if exc.data_quality is not None:
+                event["data_quality"] = exc.data_quality
+            events.put(event)
         except Exception as exc:
             logger.exception("流式数据任务失败 request_id=%s", request_id)
             message = _safe_client_error(exc)
+            problem = make_problem(
+                "stream_task_failed",
+                source="后台任务",
+                title="数据任务未完成",
+                message=message,
+                action="重试一次；如仍失败，请复制请求编号排查后端日志。",
+                blocking=True,
+            )
             events.put({
                 "type": "error", "message": message,
+                "problem": problem,
                 "error_id": request_id, "request_id": request_id,
             })
         finally:
@@ -244,7 +324,10 @@ def index() -> HTMLResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "version": __version__, "release_date": RELEASE_DATE}
+    return {
+        "status": "ok", "version": __version__, "release_date": RELEASE_DATE,
+        **collect_health_report(),
+    }
 
 
 @app.get("/api/release")
@@ -258,6 +341,41 @@ def release_info() -> dict:
 
 
 # ---------- 市场 ----------
+
+
+PERSONAL_MARKET_GROUP = "我的股票"
+
+
+def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """合并自选、关注与持有，保留来源分类并优先使用用户填写的名称。"""
+    from quantmaster.data import load_stock_names
+    from quantmaster.portfolio import AssetListStore, Ledger
+
+    symbols: dict[str, str] = {}
+    memberships: dict[str, list[str]] = {}
+    lists = AssetListStore().all()
+    for list_name in ("favorites", "following"):
+        for item in lists.get(list_name, []):
+            symbol = str(item["symbol"]).upper()
+            name = str(item.get("name") or "").strip()
+            symbols.setdefault(symbol, name)
+            if name and not symbols[symbol]:
+                symbols[symbol] = name
+            memberships.setdefault(symbol, []).append(list_name)
+
+    for position in Ledger().positions():
+        if position.shares <= 0:
+            continue
+        symbol = str(position.symbol).upper()
+        symbols.setdefault(symbol, "")
+        memberships.setdefault(symbol, []).append("holdings")
+
+    missing = [symbol for symbol, name in symbols.items() if not name]
+    if missing:
+        cached_names = load_stock_names(missing)
+        for symbol in missing:
+            symbols[symbol] = cached_names.get(symbol, symbol)
+    return symbols, memberships
 
 
 def _market_groups() -> dict[str, dict[str, str]]:
@@ -379,7 +497,7 @@ def _market_overview_data(
     progress: ProgressEmitter | None = None,
     refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
-    """全球参考市场概览：A股/港股/美日韩指数 + 商品期货的近一年走势。"""
+    """个人股票与全球参考市场概览：返回近一年走势并优先发送本地缓存。"""
     from quantmaster.data import load_history
     from quantmaster.data.storage import BarStore
     from quantmaster.data.yfinance_source import GLOBAL_REFS
@@ -387,7 +505,8 @@ def _market_overview_data(
     end = pd.Timestamp.now().normalize()
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
     start_value, end_value = str(start_ts.date()), str(end.date())
-    groups = _market_groups()
+    personal_symbols, personal_memberships = _personal_market_symbols()
+    groups = {PERSONAL_MARKET_GROUP: personal_symbols, **_market_groups()}
     store = BarStore()
     items: dict[tuple[str, str], dict] = {}
     total = sum(len(symbols) for symbols in groups.values())
@@ -403,6 +522,8 @@ def _market_overview_data(
                 symbol, name, cached.loc[start_value:end_value], store.metadata(symbol))
             if item is None:
                 continue
+            if group == PERSONAL_MARKET_GROUP:
+                item["memberships"] = personal_memberships.get(symbol, [])
             items[(group, symbol)] = item
             if progress:
                 progress(
@@ -440,29 +561,31 @@ def _market_overview_data(
                 except Exception as exc:
                     logger.debug("Yahoo 市场批量同步失败: %s", exc)
                     frames = {}
-                batch_lookup = {
-                    symbol: (candidate_group, candidate_name)
-                    for candidate_group, values in groups.items()
-                    for symbol, candidate_name in values.items()
-                    if symbol in yahoo_symbols
-                }
+                batch_lookup: dict[str, list[tuple[str, str]]] = {}
+                for candidate_group, values in groups.items():
+                    for candidate_symbol, candidate_name in values.items():
+                        if candidate_symbol in yahoo_symbols:
+                            batch_lookup.setdefault(candidate_symbol, []).append(
+                                (candidate_group, candidate_name))
                 for batch_symbol in batch:
-                    completed += 1
-                    batch_group, batch_name = batch_lookup[batch_symbol]
                     frame = frames.get(batch_symbol)
-                    item = _market_item(
-                        batch_symbol, batch_name, frame, store.metadata(batch_symbol))
-                    if item is not None:
-                        items[(batch_group, batch_symbol)] = item
-                    if progress:
-                        progress(
-                            3 + round(94 * completed / max(1, total)), "同步全球市场",
-                            f"{completed}/{total} · {batch_name} · "
-                            f"{'已更新' if item else '沿用缓存或跳过'}",
-                            {"kind": "market_item", "stage": "updated", "group": batch_group,
-                             "item": item} if item else None,
-                            "info" if item else "warning",
-                        )
+                    for batch_group, batch_name in batch_lookup[batch_symbol]:
+                        completed += 1
+                        item = _market_item(
+                            batch_symbol, batch_name, frame, store.metadata(batch_symbol))
+                        if item is not None and batch_group == PERSONAL_MARKET_GROUP:
+                            item["memberships"] = personal_memberships.get(batch_symbol, [])
+                        if item is not None:
+                            items[(batch_group, batch_symbol)] = item
+                        if progress:
+                            progress(
+                                3 + round(94 * completed / max(1, total)), "同步市场行情",
+                                f"{completed}/{total} · {batch_name} · "
+                                f"{'已更新' if item else '沿用缓存或跳过'}",
+                                {"kind": "market_item", "stage": "updated",
+                                 "group": batch_group, "item": item} if item else None,
+                                "info" if item else "warning",
+                            )
                 continue
             completed += 1
             try:
@@ -471,11 +594,13 @@ def _market_overview_data(
             except Exception as exc:
                 logger.debug("市场概览跳过 %s: %s", symbol, exc)
                 item = items.get((group, symbol))
+            if item is not None and group == PERSONAL_MARKET_GROUP:
+                item["memberships"] = personal_memberships.get(symbol, [])
             if item is not None:
                 items[(group, symbol)] = item
             if progress:
                 progress(
-                    3 + round(94 * completed / max(1, total)), "同步全球市场",
+                    3 + round(94 * completed / max(1, total)), "同步市场行情",
                     f"{completed}/{total} · {name} · {'已更新' if item else '已跳过'}",
                     {"kind": "market_item", "stage": "updated", "group": group, "item": item}
                     if item is not None else None,
@@ -486,14 +611,17 @@ def _market_overview_data(
         group: [items[(group, symbol)] for symbol in symbols if (group, symbol) in items]
         for group, symbols in groups.items()
     }
-    return {"groups": result}
+    return {
+        "groups": result,
+        "group_counts": {group: len(symbols) for group, symbols in groups.items()},
+    }
 
 
 @app.get("/api/market/overview")
 def market_overview(
     start: str | None = None, refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
-    """全球参考市场概览：A股/港股/美日韩指数 + 商品期货的近一年走势。"""
+    """个人股票与全球参考市场概览。"""
     return _market_overview_data(start, refresh=refresh)
 
 
@@ -579,7 +707,8 @@ class SelectionRequest(BaseModel):
     start: str = "2022-01-01"
     end: str | None = None
     top_n: int = 10
-    horizon: int = Field(3, ge=1, le=7)
+    horizon: Literal[1, 3, 5, 7] = 3
+    profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
     include_industry: bool = True
     save: bool = False
 
@@ -590,7 +719,7 @@ def selection_daily(req: SelectionRequest) -> dict:
     from quantmaster.data import load_panel, load_stock_names
     from quantmaster.data.industry import load_industry_map
     from quantmaster.data.universe import load_universe
-    from quantmaster.decision import daily_selection
+    from quantmaster.decision import hybrid_daily_selection
 
     end = req.end or str(pd.Timestamp.now().date())
     try:
@@ -598,8 +727,10 @@ def selection_daily(req: SelectionRequest) -> dict:
         panel = load_panel(symbols, req.start, end)
         mapping = load_industry_map() if req.include_industry else {}
         names = load_stock_names(symbols)
-        report = daily_selection(panel, top_n=req.top_n, horizon=req.horizon,
-                                 industry_map=mapping, name_map=names)
+        report = hybrid_daily_selection(
+            panel, top_n=req.top_n, horizon=req.horizon, profile=req.profile,
+            universe=req.universe, industry_map=mapping, name_map=names,
+        )
         if req.save:
             from quantmaster.decision import DecisionStore
 
@@ -610,11 +741,15 @@ def selection_daily(req: SelectionRequest) -> dict:
 
 
 @app.get("/api/selection/history")
-def selection_history(universe: str | None = None, limit: int = 30) -> dict:
+def selection_history(
+    universe: str | None = None, limit: int = 30, profile: str | None = None,
+) -> dict:
     from quantmaster.data import load_stock_names
     from quantmaster.decision import DecisionStore
 
-    snapshots = DecisionStore().history(universe, min(max(limit, 1), 200))
+    snapshots = DecisionStore().history(
+        universe, min(max(limit, 1), 200), profile=profile,
+    )
     symbols = list(dict.fromkeys(
         pick.get("symbol", "")
         for snapshot in snapshots for pick in snapshot.get("picks", [])
@@ -633,7 +768,8 @@ class DecisionDashboardRequest(BaseModel):
     start: str = "2022-01-01"
     end: str | None = None
     top_n: int = Field(10, ge=1, le=50)
-    horizon: int = Field(3, ge=1, le=7)
+    horizon: Literal[1, 3, 5, 7] = 3
+    profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
     sector_top: int = Field(10, ge=1, le=50)
     history: int = Field(2600, ge=7, le=3000)
     save: bool = True
@@ -654,7 +790,7 @@ def _decision_dashboard_data(
     from quantmaster.data import load_panel, load_stock_names
     from quantmaster.data.industry import load_industry_map
     from quantmaster.data.universe import load_universe
-    from quantmaster.decision import DecisionStore, daily_selection
+    from quantmaster.decision import DecisionStore, hybrid_daily_selection, resolve_policy
     from quantmaster.market import analyze_market, analyze_sectors
 
     end = req.end or str(pd.Timestamp.now().date())
@@ -706,10 +842,21 @@ def _decision_dashboard_data(
             90, "板块数据已就绪", f"已生成 {len(market['sectors'])} 个板块状态",
             {"kind": "decision_sectors", "sectors": market["sectors"]},
         )
-        progress(92, "生成每日候选", f"目标持有 {req.horizon} 日")
-    selection = daily_selection(
-        panel, top_n=req.top_n, horizon=req.horizon,
-        industry_map=mapping, name_map=names)
+        progress(91, "匹配 Quant Lab Champion", f"{req.profile} · {req.horizon} 日")
+    policy = resolve_policy(
+        req.universe, req.horizon, req.profile, symbols=list(panel["close"].columns),
+    )
+    if progress:
+        progress(
+            92, "决策模型已就绪", policy["profile_label"],
+            {"kind": "decision_policy", "policy": policy},
+        )
+        progress(93, "生成每日候选", f"目标持有 {req.horizon} 日")
+    selection = hybrid_daily_selection(
+        panel, top_n=req.top_n, horizon=req.horizon, profile=req.profile,
+        universe=req.universe, industry_map=mapping, name_map=names,
+        policy_snapshot=policy,
+    )
     if progress:
         progress(
             96, "每日候选已就绪", f"已生成 {len(selection.get('picks', []))} 只候选",
@@ -720,7 +867,7 @@ def _decision_dashboard_data(
         if progress:
             progress(97, "保存决策快照", "写入本地 SQLite")
         store.save(selection, req.universe)
-    history = store.history(req.universe, limit=10)
+    history = store.history(req.universe, limit=10, profile=req.profile)
     # 旧版本快照没有 name 字段；响应时补齐，避免历史区继续只显示代码。
     for snapshot in history:
         for pick in snapshot.get("picks", []):
@@ -735,6 +882,8 @@ def _decision_dashboard_data(
         "market": market,
         "selection": selection,
         "history": history,
+        "model_snapshot": selection.get("model_snapshot"),
+        "data_quality": selection.get("data_quality"),
     }
     if progress:
         progress(100, "决策数据已就绪", f"生成 {len(selection.get('picks', []))} 只候选")
@@ -809,19 +958,20 @@ def factors_test(req: FactorTestRequest) -> dict:
 # ---------- 回测 ----------
 
 class BacktestRequest(BaseModel):
-    strategy: str = "factor"         # factor | swing
+    strategy: Literal["factor", "swing"] = "factor"
     factor: str = "mom_20d"
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
-    top_n: int = 5
-    rebalance: str = "W"
+    top_n: int = Field(5, ge=1, le=200)
+    rebalance: Literal["D", "W", "M"] = "W"
     benchmark: str = "000300.SH"
-    initial_capital: float = 1_000_000.0
+    initial_capital: float = Field(1_000_000.0, ge=10_000)
     stop_loss: float | None = None
     take_profit: float | None = None
-    weighting: str = "equal"          # 多因子合成方式：equal | ic
+    weighting: Literal["equal", "ic"] = "equal"
     holding_days: int = Field(3, ge=1, le=7)
+    allow_partial: bool = False
 
 
 @app.post("/api/backtest/run")
@@ -833,34 +983,75 @@ def backtest_run(req: BacktestRequest) -> dict:
     from quantmaster.factors.fundamental import resolve_factor
 
     end = req.end or str(pd.Timestamp.now().date())
+    quality: dict = {}
+    warnings: list[dict] = []
     try:
         symbols = load_universe(req.universe)
         panel = load_panel(symbols, req.start, end)
+        quality, panel_warnings = assess_panel_quality(
+            panel, symbols, minimum_symbols=req.top_n,
+            allow_partial=req.allow_partial,
+        )
+        warnings.extend(panel_warnings)
         names = [n.strip() for n in req.factor.split(",") if n.strip()]
         if req.strategy == "swing":
             from quantmaster.backtest import SwingStrategy
 
             strategy = SwingStrategy(top_n=req.top_n, holding_days=req.holding_days)
-        elif req.strategy != "factor":
-            raise ValueError("strategy 仅支持 factor/swing")
         elif len(names) > 1:
             strategy = MultiFactorStrategy(
                 [resolve_factor(n, symbols, req.start, end) for n in names],
                 top_n=req.top_n, rebalance=req.rebalance, weighting=req.weighting)
         else:
+            if not names:
+                raise ValueError("因子表达式不能为空")
             strategy = FactorStrategy(resolve_factor(names[0], symbols, req.start, end),
                                       top_n=req.top_n, rebalance=req.rebalance)
         weights = strategy.target_weights(panel)
+        warnings.extend(assess_signal_quality(
+            panel, weights, quality, allow_partial=req.allow_partial,
+        ))
         benchmark = None
-        try:
-            benchmark = load_history(req.benchmark, req.start, end)["close"]
-        except Exception as e:
-            logger.warning("基准 %s 加载失败: %s", req.benchmark, e)
+        if req.benchmark:
+            try:
+                benchmark = load_history(req.benchmark, req.start, end)["close"]
+                if benchmark.empty:
+                    raise ValueError("基准没有可用收盘价")
+                quality["benchmark_status"] = "complete"
+            except Exception as e:
+                logger.warning("基准 %s 加载失败: %s", req.benchmark, e)
+                quality["benchmark_status"] = "unavailable"
+                quality["status"] = "partial"
+                warnings.append(make_problem(
+                    "benchmark_unavailable",
+                    severity="warning",
+                    source="策略回测",
+                    title="基准数据不可用",
+                    message=f"{req.benchmark} 未能加载，超额收益和信息比率将不可用。",
+                    action="回测主体结果仍可使用；需要相对收益时请刷新基准行情后重试。",
+                    problem_id=f"backtest:benchmark:{req.benchmark}",
+                ))
+        else:
+            quality["benchmark_status"] = "not_requested"
         result = run_backtest(panel, weights,
                               BacktestConfig(initial_capital=req.initial_capital,
                                              stop_loss=req.stop_loss,
                                              take_profit=req.take_profit),
                               benchmark_close=benchmark)
+        if not result.trades:
+            problem = make_problem(
+                "no_valid_trades",
+                source="策略回测",
+                title="回测没有产生有效成交",
+                message="所有信号均未形成可验证成交，不能把空净值曲线当作有效回测结果。",
+                action="检查成交日价格、涨跌停限制、资金规模和策略信号后重试。",
+                blocking=True,
+                problem_id="backtest:no-valid-trades",
+            )
+            quality["status"] = "blocked"
+            raise OperationProblem(422, problem, data_quality=quality)
+    except OperationProblem:
+        raise
     except HTTPException:
         raise
     except Exception as e:
@@ -868,6 +1059,8 @@ def backtest_run(req: BacktestRequest) -> dict:
 
     drawdown = 1.0 - result.nav / result.nav.cummax()
     report = full_report(result)
+    quality["warning_count"] = len(warnings)
+    quality["trade_count"] = len(result.trades)
     return {
         "strategy": strategy.name,
         "metrics": result.metrics,
@@ -879,6 +1072,8 @@ def backtest_run(req: BacktestRequest) -> dict:
         "yearly": report["yearly"],
         "monthly": report["monthly"],
         "trade_stats": report["trade_stats"],
+        "data_quality": quality,
+        "warnings": warnings,
     }
 
 
@@ -982,26 +1177,43 @@ class PaperRunRequest(BaseModel):
 
 
 @app.post("/api/paper/run")
-def paper_run(req: PaperRunRequest) -> dict:
-    """按策略最新信号执行一次模拟盘调仓（行情走缓存，缺失才触网）。"""
-    from quantmaster.backtest.paper import PaperTrader
-    from quantmaster.backtest.strategy import FactorStrategy, SwingStrategy
-    from quantmaster.data.universe import load_universe
-    from quantmaster.factors.fundamental import resolve_factor
+def paper_run(req: PaperRunRequest, request: Request) -> dict:
+    """兼容入口：只生成提案，不再按收盘价直接写入成交。"""
+    from quantmaster.backtest.paper_accounts import get_paper_service
+    from quantmaster.backtest.spec import PaperAccountSpec
+    from quantmaster.server.management import _require_csrf
 
+    _require_csrf(request)
     try:
-        symbols = load_universe(req.universe)
-        end = str(pd.Timestamp.now().date())
-        start = str((pd.Timestamp.now() - pd.Timedelta(days=400)).date())
-        trader = PaperTrader(initial_capital=req.initial_capital)
+        service = get_paper_service()
+        account = next(
+            (item for item in service.store.accounts() if item["name"] == "默认模拟盘"), None,
+        )
         if req.strategy == "swing":
-            strategy = SwingStrategy(top_n=req.top_n, holding_days=req.holding_days)
+            strategy = {
+                "kind": "swing", "top_n": req.top_n,
+                "holding_days": req.holding_days, "cap_weight": 0.25,
+            }
         elif req.strategy == "factor":
-            strategy = FactorStrategy(resolve_factor(req.factor, symbols, start, end),
-                                      top_n=req.top_n, rebalance=req.rebalance)
+            strategy = {
+                "kind": "factor", "factor": req.factor, "top_n": req.top_n,
+                "rebalance": req.rebalance, "weighting": "equal", "cap_weight": 0.35,
+            }
         else:
             raise ValueError("strategy 仅支持 factor/swing")
-        return trader.run_once(strategy, symbols)
+        if account is None:
+            account = service.create_account(PaperAccountSpec.model_validate({
+                "name": "默认模拟盘", "strategy": strategy, "universe": req.universe,
+                "initial_capital": req.initial_capital, "mode": "manual",
+            }))
+        elif account["strategy"] != strategy or account["universe"] != req.universe:
+            raise ValueError("默认模拟盘的策略快照不同；请在新版模拟盘中新建账户")
+        result = service.propose(account["id"])
+        return {
+            **result,
+            "deprecated": True,
+            "notice": "此兼容入口只生成提案；请确认后等待下一交易日开盘撮合。",
+        }
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 

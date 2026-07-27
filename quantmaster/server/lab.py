@@ -54,6 +54,8 @@ class Decision(BaseModel):
 class Deployment(BaseModel):
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     horizon: Literal[1, 3, 5, 7] = 3
+    profile: Literal["all", "risk_adjusted", "short_term", "stable"] = "all"
+    scope: Literal["exact", "a_share"] = "exact"
     actor: str = Field(default="web", min_length=1, max_length=120)
 
 
@@ -123,7 +125,8 @@ def reject(version_id: str, body: Decision) -> dict:
 def deploy(version_id: str, body: Deployment) -> dict:
     try:
         return get_lab_service().store.deploy(
-            version_id, universe=body.universe, horizon=body.horizon, actor=body.actor)
+            version_id, universe=body.universe, horizon=body.horizon, actor=body.actor,
+            profile=body.profile, scope=body.scope)
     except Exception as exc:
         raise _fail(exc) from exc
 

@@ -218,6 +218,10 @@
 .lab-evidence-actions button { border:1px solid var(--lab-line); border-radius:4px; background:transparent; color:var(--lab-text-2); padding:6px 9px; cursor:pointer; font-size:9px; }
 .lab-evidence-actions button:hover { border-color:var(--lab-blue); color:var(--lab-blue); }
 .lab-evidence-actions button.primary { background:var(--lab-blue); color:var(--lab-canvas); border-color:var(--lab-blue); }
+.lab-deploy-config { display:flex; flex:1 0 100%; align-items:end; gap:6px; flex-wrap:wrap; margin-top:5px; padding-top:10px; border-top:1px solid var(--lab-line); }
+.lab-deploy-config label { display:grid; gap:3px; color:var(--lab-muted); font-size:8px; letter-spacing:.08em; text-transform:uppercase; }
+.lab-deploy-config select { min-height:29px; border:1px solid var(--lab-line); border-radius:4px; background:var(--lab-canvas); color:var(--lab-text-2); padding:4px 22px 4px 7px; font:inherit; font-size:9px; text-transform:none; }
+.lab-deploy-config select:focus-visible { outline:1px solid var(--lab-blue); outline-offset:1px; }
 .lab-copilot-pane { padding:16px; border-left:1px solid var(--lab-line); background:var(--lab-panel); }
 .lab-copilot-mark { display:grid; place-items:center; width:30px; height:30px; border:1px solid var(--lab-blue); color:var(--lab-blue); font:700 10px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
 .lab-copilot-pane h4 { margin-top:13px; font-size:12px; }

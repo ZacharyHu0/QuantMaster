@@ -1,8 +1,7 @@
 """模拟盘（Paper Trading）：用真实行情、虚拟资金演练策略。
 
-与回测的关系：回测跑历史，模拟盘跑「现在」。每个交易日收盘后执行一次
-`run_once`，按策略最新信号在模拟账本里调仓（成交价用最新收盘价+滑点），
-积累一段时间后用 ledger_report 查看虚拟收益，再决定是否实盘。
+与回测的关系：回测跑历史，模拟盘跑「现在」。旧 ``PaperTrader`` 仅保留
+兼容读取和提案能力；多账户、确认与 T+1 开盘撮合由 ``PaperService`` 负责。
 
 模拟账本与实盘账本共用 Ledger 结构（存于 ledger_paper.sqlite）。
 """
@@ -119,24 +118,18 @@ class PaperTrader:
         lookback_days: int = 400,
         panel: dict[str, pd.DataFrame] | None = None,
     ) -> dict:  # pragma: no cover - 网络
-        """取最新行情 → 计算策略目标权重 → 模拟调仓。
+        """兼容别名：取最新行情并生成提案，不再直接写入成交。
 
         调用方已经完成每日行情更新时可传 panel，避免重复加载与重复触网。
         """
-        if panel is None:
-            from quantmaster.data import load_panel
-
-            end = pd.Timestamp.now().normalize()
-            start = end - pd.Timedelta(days=lookback_days)
-            panel = load_panel(universe, str(start.date()), str(end.date()))
-        signal_date, weights, prices = self._signal(strategy, panel)
-        executed = self.rebalance_to(weights, prices)
-        report = ledger_report(self.ledger, prices=prices)
+        proposal = self.propose_once(
+            strategy, universe, lookback_days=lookback_days, panel=panel,
+        )
         return {
-            "signal_date": signal_date,
-            "target_weights": weights,
-            "executed": [t.__dict__ for t in executed],
-            "report": report,
+            **proposal,
+            "executed": [],
+            "deprecated": True,
+            "notice": "run_once 只生成提案；请使用 PaperService 确认并在 T+1 开盘撮合。",
         }
 
     def report(self, prices: dict[str, float] | None = None) -> dict:

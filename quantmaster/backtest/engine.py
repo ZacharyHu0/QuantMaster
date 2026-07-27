@@ -18,6 +18,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from quantmaster.backtest.execution import (
+    buy_cost,
+    limit_reason,
+    sell_cost,
+)
+from quantmaster.backtest.execution import price_limit as price_limit
 from quantmaster.config import TradeConfig, get_config
 
 
@@ -44,6 +50,15 @@ class Trade:
 
 
 @dataclass
+class BlockedOrder:
+    date: str
+    symbol: str
+    side: str
+    reason: str
+    note: str = ""
+
+
+@dataclass
 class BacktestResult:
     nav: pd.Series                    # 组合净值（初始=1）
     returns: pd.Series                # 日收益率
@@ -51,6 +66,7 @@ class BacktestResult:
     trades: list[Trade]
     metrics: dict
     benchmark_nav: pd.Series | None = None
+    blocked_orders: list[BlockedOrder] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -61,29 +77,16 @@ class BacktestResult:
                 if self.benchmark_nav is not None else None
             ),
             "trades": [t.__dict__ for t in self.trades[-500:]],
+            "blocked_orders": [order.__dict__ for order in self.blocked_orders[-500:]],
         }
 
 
-def price_limit(symbol: str) -> float:
-    """按代码推断涨跌停幅度。"""
-    code = symbol.split(".")[0]
-    if code.startswith(("688", "689", "300", "301")):
-        return 0.20
-    if code.startswith(("8", "4")) and symbol.endswith(".BJ"):
-        return 0.30
-    return 0.10
-
-
 def _buy_cost(amount: float, t: TradeConfig) -> float:
-    return max(amount * t.commission_rate, t.commission_min) + amount * t.transfer_fee_rate
+    return buy_cost(amount, t)
 
 
 def _sell_cost(amount: float, t: TradeConfig) -> float:
-    return (
-        max(amount * t.commission_rate, t.commission_min)
-        + amount * t.stamp_tax_rate
-        + amount * t.transfer_fee_rate
-    )
+    return sell_cost(amount, t)
 
 
 def run_backtest(
@@ -118,6 +121,7 @@ def run_backtest(
     entry_cost: dict[str, float] = {s: 0.0 for s in symbols}   # 持仓的加权平均成本
     last_close: dict[str, float] = {}   # 最近一个有效收盘价（停牌估值用）
     trades: list[Trade] = []
+    blocked_orders: list[BlockedOrder] = []
     nav_values: list[float] = []
     position_rows: list[dict] = []
 
@@ -149,8 +153,15 @@ def run_backtest(
                 # 但仍要冻结当日对该票的加仓——否则调仓信号会继续买入摊低均价，
                 # 止损线随之下移，可能永远触发不了。
                 pc = day_prev_close_sl.get(symbol, np.nan)
-                limit = price_limit(symbol)
-                if config.limit_check and not np.isnan(pc) and px <= pc * (1 - limit) * 1.002:
+                blocked = limit_reason(
+                    symbol, "sell", float(px),
+                    float(pc) if not np.isnan(pc) else None,
+                    enabled=config.limit_check,
+                )
+                if blocked:
+                    blocked_orders.append(BlockedOrder(
+                        date_str, symbol, "sell", blocked, note=reason,
+                    ))
                     stopped_today.add(symbol)
                     continue
                 exec_px = float(px) * (1 - tcfg.slippage)
@@ -169,9 +180,12 @@ def run_backtest(
             day_open = open_px.loc[date]
             day_prev_close = prev_close.loc[date]
             portfolio_value = cash + sum(
-                shares[s] * day_open.get(s, np.nan)
-                for s in symbols
-                if shares[s] > 0 and not np.isnan(day_open.get(s, np.nan))
+                shares[s] * (
+                    float(day_open.get(s))
+                    if pd.notna(day_open.get(s)) and float(day_open.get(s)) > 0
+                    else last_close.get(s, 0.0)
+                )
+                for s in symbols if shares[s] > 0
             )
 
             weights = pending.fillna(0.0).clip(lower=0.0)
@@ -181,9 +195,16 @@ def run_backtest(
 
             # 先卖后买（腾出资金）
             orders: list[tuple[str, float]] = []
+            retry_pending = False
             for symbol in symbols:
                 px = day_open.get(symbol, np.nan)
                 if np.isnan(px) or px <= 0:
+                    if shares[symbol] > 0 or float(weights.get(symbol, 0.0)) > 0:
+                        side = "sell" if float(weights.get(symbol, 0.0)) <= 0 else "rebalance"
+                        blocked_orders.append(BlockedOrder(
+                            date_str, symbol, side, "missing_open",
+                        ))
+                        retry_pending = True
                     continue
                 target_value = portfolio_value * float(weights.get(symbol, 0.0))
                 diff_value = target_value - shares[symbol] * px
@@ -193,13 +214,20 @@ def run_backtest(
             for symbol, diff_value in orders:
                 px = float(day_open[symbol])
                 pc = day_prev_close.get(symbol, np.nan)
-                limit = price_limit(symbol)
                 if abs(diff_value) < max(portfolio_value * 5e-4, 100 * px * 0.5):
                     continue   # 忽略过小的调整，抑制无谓换手
 
                 if diff_value < 0 and shares[symbol] > 0:
                     # 跌停无法卖出
-                    if config.limit_check and not np.isnan(pc) and px <= pc * (1 - limit) * 1.002:
+                    blocked = limit_reason(
+                        symbol, "sell", px, float(pc) if not np.isnan(pc) else None,
+                        enabled=config.limit_check,
+                    )
+                    if blocked:
+                        blocked_orders.append(BlockedOrder(
+                            date_str, symbol, "sell", blocked,
+                        ))
+                        retry_pending = True
                         continue
                     sell_shares = min(shares[symbol], -diff_value / px)
                     if not config.allow_fractional:
@@ -222,7 +250,15 @@ def run_backtest(
                     if symbol in stopped_today:
                         continue   # 当日刚止损/止盈的股票不立即回补
                     # 涨停无法买入
-                    if config.limit_check and not np.isnan(pc) and px >= pc * (1 + limit) * 0.998:
+                    blocked = limit_reason(
+                        symbol, "buy", px, float(pc) if not np.isnan(pc) else None,
+                        enabled=config.limit_check,
+                    )
+                    if blocked:
+                        blocked_orders.append(BlockedOrder(
+                            date_str, symbol, "buy", blocked,
+                        ))
+                        retry_pending = True
                         continue
                     exec_px = px * (1 + tcfg.slippage)
                     budget = min(diff_value, cash)
@@ -234,6 +270,9 @@ def run_backtest(
                     amount = buy_shares * exec_px
                     cost = _buy_cost(amount, tcfg)
                     if amount + cost > cash + 1e-6:
+                        blocked_orders.append(BlockedOrder(
+                            date_str, symbol, "buy", "insufficient_cash",
+                        ))
                         continue
                     cash -= amount + cost
                     prev_shares = shares[symbol]
@@ -244,7 +283,7 @@ def run_backtest(
                     )
                     trades.append(Trade(date_str, symbol, "buy", round(exec_px, 4),
                                         buy_shares, round(amount, 2), round(cost, 2)))
-            pending = None
+            pending = weights if retry_pending else None
 
         # ---- 收盘：结算市值、读取新信号 ----
         day_close = close_px.loc[date]
@@ -276,7 +315,9 @@ def run_backtest(
         benchmark_nav = bench / bench.iloc[0]
 
     metrics = performance_metrics(returns, benchmark_nav=benchmark_nav, trades=trades)
+    metrics["blocked_order_count"] = len(blocked_orders)
     return BacktestResult(
         nav=nav, returns=returns, positions=positions,
         trades=trades, metrics=metrics, benchmark_nav=benchmark_nav,
+        blocked_orders=blocked_orders,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -121,25 +122,33 @@ class LabService:
         self, version_id: str, *, universe: str, start: str, end: str,
         progress=None,
     ) -> dict:
-        from quantmaster.factors import compute_factor
-        from quantmaster.factors.fundamental import resolve_factor
         from quantmaster.lab.validation import validate_factor_values
 
         version = self.store.version(version_id)
         if version is None:
             raise KeyError("因子版本不存在")
         spec = FactorSpec.from_dict(version["spec"])
-        if spec.kind != "expression":
-            raise ValueError("学习型因子需先完成训练并生成预测值")
         panel, membership, snapshot = self._context(universe, start, end, progress)
-        symbols = list(panel["close"].columns)
-        expression = spec.expression or spec.slug
-        if expression == "news_sentiment":
-            raise ValueError("消息面因子需先完成新闻标注；当前快照没有 news_sentiment 字段")
-        if progress:
-            progress(58, "计算因子并执行统一标准化")
-        factor = resolve_factor(expression, symbols, start, end)
-        values = compute_factor(factor, panel)
+        if spec.kind == "learned":
+            from quantmaster.lab.ml import predict_panel
+
+            if progress:
+                progress(58, "加载学习模型并校验工件完整性")
+            values = predict_panel(panel, spec.model)
+        elif spec.kind == "expression":
+            from quantmaster.factors import compute_factor
+            from quantmaster.factors.fundamental import resolve_factor
+
+            symbols = list(panel["close"].columns)
+            expression = spec.expression or spec.slug
+            if expression == "news_sentiment":
+                raise ValueError("消息面因子需先完成新闻标注；当前快照没有 news_sentiment 字段")
+            if progress:
+                progress(58, "计算因子并执行统一标准化")
+            factor = resolve_factor(expression, symbols, start, end)
+            values = compute_factor(factor, panel)
+        else:
+            raise ValueError(f"{spec.kind} 类型尚未提供可复验的运行时")
         if progress:
             progress(65, "运行 purged walk-forward 与多重检验")
         configured_horizons = tuple(get_config().lab.horizons)
@@ -230,7 +239,9 @@ class LabService:
         sequence_length: int = 20, config: dict | None = None, progress=None,
         cancelled=None,
     ) -> dict:
-        from quantmaster.lab.ml import make_samples, train
+        from quantmaster.lab.ml import artifact_sha256, make_samples, train
+        from quantmaster.lab.models import utc_now
+        from quantmaster.lab.validation import validate_factor_values
 
         experiment = self.store.create_experiment(
             f"{model.upper()} · {universe} · {horizon}d", model,
@@ -251,10 +262,96 @@ class LabService:
                 config={"device": get_config().lab.device, **(config or {})},
                 progress=progress, cancelled=cancelled,
             )
+            predicted = result.pop("_predicted")
+            result.pop("_actual")
+            validation_metadata = result.pop("_validation_metadata")
+            prediction_rows = pd.DataFrame(validation_metadata)
+            prediction_rows["value"] = predicted
+            prediction_rows["date"] = pd.to_datetime(prediction_rows["date"])
+            predicted_values = prediction_rows.pivot(
+                index="date", columns="symbol", values="value",
+            ).reindex(columns=panel["close"].columns)
+            if progress:
+                progress(92, "运行学习模型样本外统一验证")
+            report = validate_factor_values(
+                predicted_values,
+                panel["close"],
+                name=f"{model.upper()} {horizon}日超额收益",
+                horizons=(horizon,),
+                membership=membership,
+                research_quality=snapshot["payload"]["research_quality"],
+            )
+            report["model_metrics"] = result.get("metrics", {})
+            report["dataset_snapshot"] = snapshot["snapshot_hash"]
+
+            root = Path(get_config().data_root).resolve()
+            artifact = Path(result["artifact"]).resolve()
+            artifact_relative = artifact.relative_to(root).as_posix()
+            manifest_path = artifact_dir / "manifest.json"
+            manifest = {
+                "schema_version": 1,
+                "kind": model,
+                "features": feature_names,
+                "feature_version": "lab-v2-cross-sectional",
+                "minimum_feature_coverage": 0.80,
+                "sequence_length": sequence_length,
+                "horizon": horizon,
+                "training_universe": universe,
+                "training_start": start,
+                "trained_through": end,
+                "fit_through": result.get("fit_through"),
+                "validation_start": result.get("validation_start"),
+                "snapshot_hash": snapshot["snapshot_hash"],
+                "research_quality": snapshot["payload"]["research_quality"],
+                "artifact": artifact_relative,
+                "artifact_sha256": artifact_sha256(artifact),
+                "metrics": result.get("metrics", {}),
+                "created_at": utc_now(),
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+            manifest_relative = manifest_path.resolve().relative_to(root).as_posix()
+            learned = FactorSpec(
+                slug=f"ml_{model}_{experiment['id'][:12]}",
+                name=f"{model.upper()} · {universe} · {horizon}日",
+                kind="learned",
+                description="Quant Lab 训练的超额收益模型；默认影子运行，验证和人工批准后方可部署。",
+                category="学习模型",
+                required_features=tuple(feature_names),
+                horizons=(horizon,),
+                rationale="48 维日线特征、截面标准化与时间顺序样本外验证。",
+                model={
+                    "manifest": manifest_relative,
+                    "artifact_sha256": manifest["artifact_sha256"],
+                    "experiment_id": experiment["id"],
+                    "trained_through": end,
+                    "fit_through": result.get("fit_through"),
+                    "validation_start": result.get("validation_start"),
+                    "training_universe": universe,
+                    "research_quality": manifest["research_quality"],
+                },
+                tags=("ml", model, "shadow"),
+            )
+            _factor, version, _created = self.store.create_factor(
+                learned, source="ml", actor="worker",
+            )
+            version = self.store.save_validation(
+                version["id"], snapshot["snapshot_hash"], report,
+            )
             result.update({
                 "features": feature_names,
                 "snapshot_hash": snapshot["snapshot_hash"],
                 "experiment_id": experiment["id"],
+                "version_id": version["id"],
+                "version_status": version["status"],
+                "validation": {
+                    "candidate_score": report.get("candidate_score"),
+                    "best_horizon": report.get("best_horizon"),
+                    "coverage": report.get("coverage"),
+                    "gates": report.get("gates", {}),
+                },
+                "manifest": manifest_relative,
             })
             self.store.update_experiment(
                 experiment["id"], status="completed", result=result,

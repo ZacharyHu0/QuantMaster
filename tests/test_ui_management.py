@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -99,6 +100,16 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator(".candidate-detail").wait_for()
         page.locator("#candidate-new").click()
         page.locator("#candidate-new-name").fill("ui_candidate")
+        page.get_by_role("button", name="添加代码", exact=True).click()
+        instrument_input = page.locator("#candidate-add-symbol")
+        instrument_input.fill("700")
+        page.locator("#candidate-instrument-options").wait_for(state="visible")
+        choices = page.locator("#candidate-instrument-options").inner_text()
+        assert "000700.SZ" in choices and "00700.HK" in choices
+        instrument_input.press("ArrowDown")
+        instrument_input.press("Enter")
+        assert instrument_input.input_value() == "00700.HK"
+        page.get_by_role("button", name="收起", exact=True).click()
         page.get_by_role("button", name="批量编辑", exact=True).click()
         page.locator("#candidate-bulk-text").fill("600519\n000001\n600519.SH")
         page.get_by_role("button", name="应用到草稿", exact=True).click()
@@ -219,6 +230,209 @@ def test_decision_chart_survives_progressive_rerender(live_server):
         browser.close()
 
 
+def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
+    url, _ = live_server
+    decision = {
+        "market": {
+            "current": {
+                "as_of": "2026-07-27", "universe_size": 2, "state_label": "震荡",
+                "bull_score": 52, "trend_score": 0.05, "advance_ratio": 0.5,
+                "above_ma20_ratio": 0.55, "macd_hist": 0.01, "amount_ratio": 1.1,
+                "volatility_20d": 0.02,
+            },
+            "forecast_validation": [], "future": [], "sectors": [], "past": [],
+        },
+        "selection": {
+            "recommended_exposure": 0.5, "holding_horizon_days": 3,
+            "signal_date": "2026-07-27", "risk_note": "测试风险说明",
+            "picks": [
+                {
+                    "rank": 1, "symbol": "600519.SH", "name": "贵州茅台",
+                    "industry": "白酒", "score": 82, "action": "buy",
+                    "last_close": 1500, "money_ratio": 1.2, "expected_return": 0.03,
+                    "stop_loss": 0.04, "take_profit": 0.08, "reasons": ["趋势向上"],
+                },
+                {
+                    "rank": 2, "symbol": "300750.SZ", "name": "宁德时代",
+                    "industry": "电池", "score": 76, "action": "buy",
+                    "last_close": 260, "money_ratio": 1.1, "expected_return": 0.02,
+                    "stop_loss": 0.04, "take_profit": 0.07, "reasons": ["资金改善"],
+                },
+            ],
+        },
+        "history": [],
+    }
+    lists = {
+        "favorites": [{"symbol": "600519.SH", "name": "贵州茅台"}],
+        "following": [], "holdings": [],
+    }
+    history_calls = []
+
+    def history_handler(route):
+        request_url = route.request.url
+        history_calls.append(request_url)
+        if "frequency=1m" in request_url:
+            route.fulfill(status=404, json={"detail": "1 分钟行情暂不可用"})
+            return
+        symbol = request_url.split("/api/market/history/", 1)[1].split("?", 1)[0]
+        frequency = request_url.split("frequency=", 1)[1].split("&", 1)[0]
+        route.fulfill(json={
+            "symbol": symbol, "frequency": frequency,
+            "kline": [
+                ["2026-07-24", 10, 10.5, 9.8, 10.8, 1000],
+                ["2026-07-25", 10.5, 11, 10.2, 11.2, 1200],
+            ],
+        })
+
+    def asset_handler(route):
+        request = route.request
+        tail = request.url.split("/api/assets/lists", 1)[1].split("?", 1)[0].strip("/")
+        if request.method == "POST":
+            list_name = tail.split("/", 1)[0]
+            item = request.post_data_json
+            lists[list_name] = [
+                existing for existing in lists[list_name]
+                if existing["symbol"] != item["symbol"]
+            ]
+            lists[list_name].insert(0, item)
+        elif request.method == "DELETE":
+            list_name, symbol = tail.split("/", 1)
+            lists[list_name] = [
+                item for item in lists[list_name] if item["symbol"] != symbol
+            ]
+        route.fulfill(json=lists)
+
+    empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route(
+            "**/api/market/overview/stream*",
+            lambda route: route.fulfill(
+                status=200, content_type="application/x-ndjson", body=empty_market),
+        )
+        page.route("**/api/market/history/**", history_handler)
+        page.route("**/api/assets/lists**", asset_handler)
+        page.goto(url)
+        page.evaluate(
+            """data => {
+              document.querySelectorAll('header [data-tab]').forEach(button =>
+                button.classList.toggle('active', button.dataset.tab === 'decision'));
+              document.querySelectorAll('.tab').forEach(section =>
+                section.classList.toggle('active', section.id === 'tab-decision'));
+              renderDecision(data);
+            }""",
+            decision,
+        )
+
+        first_row = page.locator('tr[data-symbol="600519.SH"]')
+        first_trigger = first_row.locator("[data-decision-kline-trigger]")
+        first_trigger.click()
+        page.locator("#decision-kline canvas").wait_for()
+        assert page.locator("#tab-decision").is_visible()
+        assert not page.locator("#tab-market").is_visible()
+        assert page.locator(".decision-detail-row").count() == 1
+        assert first_row.evaluate(
+            "row => row.nextElementSibling.classList.contains('decision-detail-row')"
+        )
+        assert first_trigger.get_attribute("aria-expanded") == "true"
+        assert page.locator(
+            '[data-decision-asset-toggle="favorites"]'
+        ).inner_text() == "已自选"
+
+        page.locator('[data-decision-frequency="60m"]').click()
+        page.locator("#decision-kline canvas").wait_for()
+        assert any("frequency=60m" in request_url for request_url in history_calls)
+
+        following = page.locator('[data-decision-asset-toggle="following"]')
+        following.click()
+        page.wait_for_function(
+            "document.querySelector('[data-decision-asset-toggle=following]').innerText === '已关注'"
+        )
+        assert first_trigger.get_attribute("aria-expanded") == "true"
+        following.click()
+        page.wait_for_function(
+            "document.querySelector('[data-decision-asset-toggle=following]').innerText === '加入关注'"
+        )
+        assert page.locator(".decision-detail-row").count() == 1
+
+        second_trigger = page.locator(
+            'tr[data-symbol="300750.SZ"] [data-decision-kline-trigger]'
+        )
+        second_trigger.click()
+        page.locator("#decision-kline canvas").wait_for()
+        assert page.locator(".decision-detail-row").count() == 1
+        assert first_trigger.get_attribute("aria-expanded") == "false"
+        assert second_trigger.get_attribute("aria-expanded") == "true"
+        second_trigger.click()
+        assert page.locator(".decision-detail-row").count() == 0
+
+        first_trigger.focus()
+        page.keyboard.press("Enter")
+        page.locator("#decision-kline canvas").wait_for()
+        page.set_viewport_size({"width": 390, "height": 844})
+        shell_width = page.locator(".decision-detail-shell").bounding_box()["width"]
+        scroll_width = page.locator(".decision-table").locator("xpath=..").bounding_box()["width"]
+        assert shell_width <= scroll_width + 1, (shell_width, scroll_width)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+        page.locator('[data-decision-frequency="1m"]').click()
+        page.locator(".decision-kline-error").wait_for()
+        assert "1 分钟行情暂不可用" in page.locator(".decision-kline-error").inner_text()
+        assert page.locator("#tab-decision").is_visible()
+        browser.close()
+
+
+def test_personal_market_group_is_first_and_shows_memberships(live_server):
+    url, _ = live_server
+    personal = {
+        "symbol": "600519.SH", "name": "贵州茅台", "last": 1530.0,
+        "change_pct": 0.99, "nav": [[1784505600000, 1.0], [1784592000000, 1.02]],
+        "as_of": "2026-07-21", "cache_status": "ready",
+        "memberships": ["favorites", "holdings"],
+    }
+    index = {
+        "symbol": "000300.SH", "name": "沪深300", "last": 4600.0,
+        "change_pct": -0.2, "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
+        "as_of": "2026-07-21", "cache_status": "ready",
+    }
+    stream = "\n".join([
+        json.dumps({
+            "type": "progress", "progress": 10, "phase": "读取本地市场缓存",
+            "detail": "贵州茅台", "partial": {
+                "kind": "market_item", "group": "我的股票", "item": personal,
+            }, "request_id": "market-test",
+        }, ensure_ascii=False),
+        json.dumps({
+            "type": "result", "data": {
+                "groups": {"我的股票": [personal], "A股指数": [index]},
+            }, "request_id": "market-test",
+        }, ensure_ascii=False),
+    ]) + "\n"
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route(
+            "**/api/market/overview/stream*",
+            lambda route: route.fulfill(
+                status=200, content_type="application/x-ndjson", body=stream),
+        )
+        page.goto(url)
+        personal_section = page.locator('[data-market-group="我的股票"]')
+        index_section = page.locator('[data-market-group="A股指数"]')
+        personal_section.wait_for()
+        index_section.wait_for()
+
+        assert personal_section.locator(".market-section-title").inner_text() == "我的股票"
+        assert personal_section.locator(".mkt-memberships").inner_text() == "自选 · 持有"
+        assert personal_section.locator(".mkt-item").count() == 1
+        assert personal_section.bounding_box()["y"] < index_section.bounding_box()["y"]
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        browser.close()
+
+
 def test_active_tab_survives_reload(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -293,6 +507,46 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         assert page.locator(
             '.runtime-entry[data-level="error"]', has_text="服务端处理失败"
         ).count() == 0
+        browser.close()
+
+
+def test_active_health_issue_survives_clear_and_confirmation_dialog_is_explicit(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url)
+        page.evaluate(
+            """window.QuantMasterRunInfo.sync('test-health', [{
+              id:'provider:test', revision:'one', severity:'warning', source:'行情数据源',
+              title:'测试数据源暂停请求', message:'上游暂不可用',
+              action:'稍后由系统自动探测恢复。'
+            }])"""
+        )
+        page.locator("#runtime-clear").click()
+        assert page.locator(".runtime-entry", has_text="测试数据源暂停请求").count() == 1
+
+        page.evaluate("window.QuantMasterRunInfo.sync('test-health', [])")
+        assert page.locator(".runtime-entry", has_text="测试数据源暂停请求").count() == 0
+
+        page.evaluate(
+            """window.__problemDecision = null;
+            window.QuantMasterProblemDialog.open({
+              id:'backtest:partial', severity:'warning', title:'回测数据不完整',
+              message:'一只候选缺少行情。', action:'建议先补齐数据。',
+              blocking:true, can_continue:true, items:['000001.SZ']
+            }, {usable_symbol_count:4, requested_symbol_count:5,
+                actual_start:'2026-01-01', actual_end:'2026-07-27',
+                executable_signals:9, selected_signals:10})
+              .then(value => { window.__problemDecision = value; });"""
+        )
+        dialog = page.locator("#operation-problem-dialog")
+        assert dialog.is_visible()
+        assert "回测数据不完整" in dialog.inner_text()
+        assert dialog.locator("#operation-problem-continue").is_visible()
+        dialog.locator("#operation-problem-continue").click()
+        page.wait_for_function("window.__problemDecision === true")
+        assert not dialog.is_visible()
         browser.close()
 
 

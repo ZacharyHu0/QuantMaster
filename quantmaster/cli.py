@@ -13,7 +13,7 @@
     qm mine --generations 8                     遗传规划挖因子
     qm mine-llm --rounds 2                      LLM 挖因子
     qm crawl [--skip-llm]                       抓取财经快讯
-    qm paper run --factor mom_20d               模拟盘执行一次调仓
+    qm paper run --factor mom_20d               兼容命令：生成模拟调仓提案
     qm ledger import trades.csv                 导入券商成交
     qm ledger report                            实盘收益报告
     qm ledger nav                               实盘每日净值（TWR）与基准对比
@@ -211,14 +211,16 @@ def cmd_regime(args) -> None:
 def cmd_select(args) -> None:
     from quantmaster.data.industry import load_industry_map
     from quantmaster.data.names import load_stock_names
-    from quantmaster.decision import DecisionStore, daily_selection
+    from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
     end = args.end or _today()
     panel = _load_panel(args.universe, args.start, end)
     mapping = {} if args.no_industry else load_industry_map()
     names = load_stock_names(list(panel["close"].columns))
-    report = daily_selection(panel, top_n=args.top, horizon=args.horizon,
-                             industry_map=mapping, name_map=names)
+    report = hybrid_daily_selection(
+        panel, top_n=args.top, horizon=args.horizon, profile=args.profile,
+        universe=args.universe, industry_map=mapping, name_map=names,
+    )
     if not args.no_save:
         DecisionStore().save(report, args.universe)
     _print_json(report)
@@ -276,7 +278,14 @@ def cmd_backtest(args) -> None:
     panel = _load_panel(args.universe, args.start, end)
     symbols = load_universe(args.universe)
     names = [n.strip() for n in args.factor.split(",") if n.strip()]
-    if args.strategy == "swing":
+    if args.strategy == "decision":
+        from quantmaster.decision import HybridDecisionStrategy
+
+        strategy = HybridDecisionStrategy(
+            top_n=args.top, holding_days=args.holding_days,
+            profile=args.profile, universe=args.universe,
+        )
+    elif args.strategy == "swing":
         from quantmaster.backtest import SwingStrategy
 
         strategy = SwingStrategy(top_n=args.top, holding_days=args.holding_days)
@@ -396,40 +405,77 @@ def cmd_crawl(args) -> None:
 
 
 def cmd_paper(args) -> None:
-    from quantmaster.backtest.paper import PaperTrader
-    from quantmaster.backtest.strategy import FactorStrategy, SwingStrategy
-    from quantmaster.data.universe import load_universe
-    from quantmaster.factors.library import get_factor
+    from quantmaster.backtest.paper_accounts import get_paper_service
+    from quantmaster.backtest.spec import PaperAccountSpec
 
-    trader = PaperTrader(initial_capital=args.capital)
-    if args.paper_cmd == "run":
-        strategy = (
-            SwingStrategy(top_n=args.top, holding_days=args.holding_days)
-            if args.strategy == "swing"
-            else FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance)
-        )
-        result = trader.run_once(
-            strategy,
-            load_universe(args.universe),
-        )
-        _print_json(result)
-    else:
-        _print_json(trader.report())
+    service = get_paper_service()
+    if args.paper_cmd == "accounts":
+        _print_json({"items": service.store.accounts(include_archived=True)})
+        return
+    if args.paper_cmd == "confirm":
+        _print_json(service.store.confirm(args.cycle))
+        return
+    if args.paper_cmd == "process":
+        _print_json(service.process(args.account))
+        return
+    if args.paper_cmd == "report":
+        account_id = args.account
+        if not account_id:
+            accounts = service.store.accounts()
+            if not accounts:
+                raise ValueError("还没有模拟账户；先运行 qm paper create")
+            account_id = accounts[0]["id"]
+        _print_json(service.report(account_id))
+        return
+
+    strategy = (
+        {"kind": "decision", "profile": args.profile, "top_n": args.top,
+         "holding_days": args.holding_days, "cap_weight": 0.25,
+         "policy_snapshot": {}}
+        if args.strategy == "decision"
+        else {"kind": "swing", "top_n": args.top,
+         "holding_days": args.holding_days, "cap_weight": 0.25}
+        if args.strategy == "swing"
+        else {"kind": "factor", "factor": args.factor, "top_n": args.top,
+              "rebalance": args.rebalance, "weighting": "equal", "cap_weight": 0.35}
+    )
+    if args.paper_cmd == "create":
+        account = service.create_account(PaperAccountSpec.model_validate({
+            "name": args.name, "strategy": strategy, "universe": args.universe,
+            "initial_capital": args.capital, "mode": args.mode,
+        }))
+        _print_json(account)
+        return
+    if args.paper_cmd == "propose":
+        _print_json(service.propose(args.account))
+        return
+
+    account = next(
+        (item for item in service.store.accounts() if item["name"] == "CLI 默认账户"), None,
+    )
+    if account is None:
+        account = service.create_account(PaperAccountSpec.model_validate({
+            "name": "CLI 默认账户", "strategy": strategy, "universe": args.universe,
+            "initial_capital": args.capital, "mode": "manual",
+        }))
+    _print_json({
+        **service.propose(account["id"]),
+        "notice": "run 现在只生成提案；使用 confirm 后等待 process 按下一交易日开盘撮合。",
+    })
 
 
 def cmd_daily(args) -> None:
-    """每日例程：更新行情 -> 抓取快讯 -> 生成选股 -> 模拟盘调仓。
+    """每日例程：更新行情 -> 抓取快讯 -> 生成选股 -> 处理已确认订单并提案。
 
     适合交易日收盘后跑一次（挂 crontab / Windows 计划任务）：
         30 15 * * 1-5  cd /path/to/QuantMaster && qm daily >> daily.log 2>&1
     """
     from quantmaster.ai.crawler import AICrawler
-    from quantmaster.backtest.paper import PaperTrader
-    from quantmaster.backtest.strategy import FactorStrategy, SwingStrategy
+    from quantmaster.backtest.paper_accounts import get_paper_service
+    from quantmaster.backtest.spec import PaperAccountSpec
     from quantmaster.data import load_history, load_panel, load_stock_names
     from quantmaster.data.universe import load_universe
-    from quantmaster.decision import DecisionStore, daily_selection
-    from quantmaster.factors.library import get_factor
+    from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
     end = _today()
     symbols = load_universe(args.universe)
@@ -453,27 +499,48 @@ def cmd_daily(args) -> None:
 
     print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
     panel = load_panel(symbols, args.start, end)
-    selection = daily_selection(
-        panel, top_n=args.top, horizon=args.holding_days,
+    selection = hybrid_daily_selection(
+        panel, top_n=args.top, horizon=args.holding_days, profile=args.profile,
+        universe=args.universe,
         name_map=load_stock_names(symbols),
     )
     DecisionStore().save(selection, args.universe)
     print(f"  {selection['signal_date']}：{len(selection['picks'])} 只候选，"
           f"建议仓位 {selection['recommended_exposure']:.0%}", file=sys.stderr)
 
-    print("== 4/4 模拟盘调仓 ==", file=sys.stderr)
-    trader = PaperTrader(initial_capital=args.capital)
+    print("== 4/4 处理模拟订单并生成收盘提案 ==", file=sys.stderr)
     strategy = (
-        SwingStrategy(top_n=args.top, holding_days=args.holding_days)
+        {"kind": "decision", "profile": args.profile, "top_n": args.top,
+         "holding_days": args.holding_days, "cap_weight": 0.25,
+         "policy_snapshot": {}}
+        if args.strategy == "decision"
+        else {"kind": "swing", "top_n": args.top,
+         "holding_days": args.holding_days, "cap_weight": 0.25}
         if args.strategy == "swing"
-        else FactorStrategy(get_factor(args.factor), top_n=args.top, rebalance=args.rebalance)
+        else {"kind": "factor", "factor": args.factor, "top_n": args.top,
+              "rebalance": args.rebalance, "weighting": "equal", "cap_weight": 0.35}
     )
-    result = trader.run_once(
-        strategy,
-        symbols,
-        panel=panel,
+    service = get_paper_service()
+    desired_spec = PaperAccountSpec.model_validate({
+        "name": "每日例程模拟盘", "strategy": strategy, "universe": args.universe,
+        "initial_capital": args.capital, "mode": "manual",
+    })
+    account = next(
+        (item for item in service.store.accounts() if item["name"] == "每日例程模拟盘"), None,
     )
-    _print_json({"selection": selection, "paper": result})
+    if account is None:
+        account = service.create_account(desired_spec)
+    else:
+        from quantmaster.backtest.spec import pin_decision_strategy
+
+        desired_strategy = pin_decision_strategy(
+            desired_spec.strategy, desired_spec.universe,
+        ).model_dump(mode="json")
+        if account["strategy"] != desired_strategy or account["universe"] != args.universe:
+            raise ValueError("每日例程模拟盘的策略快照不同；请新建账户或恢复原参数")
+    processed = service.process(account["id"], panel=panel)
+    proposal = service.propose(account["id"], panel=panel)
+    _print_json({"selection": selection, "processed": processed, "proposal": proposal})
 
 
 def cmd_universe(args) -> None:
@@ -655,10 +722,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-sectors", action="store_true", help="不加载行业映射")
     p.set_defaults(func=cmd_regime)
 
-    p = sub.add_parser("select", help="每日选股：适合持有1-7个交易日的量价/MACD决策")
+    p = sub.add_parser("select", help="Hybrid v2 每日决策：规则、Quant Lab 因子与批准模型")
     common(p)
     p.add_argument("--top", type=int, default=10)
-    p.add_argument("--horizon", type=int, default=3, choices=range(1, 8))
+    p.add_argument("--horizon", type=int, default=3, choices=[1, 3, 5, 7])
+    p.add_argument("--profile", default="risk_adjusted",
+                   choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--no-industry", action="store_true", help="不加载行业名称")
     p.add_argument("--no-save", action="store_true", help="不保存本次决策快照")
     p.set_defaults(func=cmd_select)
@@ -680,15 +749,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backtest", help="因子选股回测（--factor 逗号分隔多个名字 = 多因子组合）")
     common(p)
-    p.add_argument("--strategy", default="factor", choices=["factor", "swing"],
-                   help="factor=传统因子；swing=1-7日趋势/MACD/资金量选股")
+    p.add_argument("--strategy", default="factor", choices=["factor", "decision", "swing"],
+                   help="factor=传统因子；decision=Hybrid v2；swing=旧版短线")
+    p.add_argument("--profile", default="risk_adjusted",
+                   choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--factor", default="mom_20d",
                    help="因子名/表达式；逗号分隔多个则做多因子合成，如 mom_20d,rev_5d,ep")
     p.add_argument("--weighting", default="equal", choices=["equal", "ic"],
                    help="多因子合成方式：等权 或 滚动IC动态加权")
     p.add_argument("--top", type=int, default=5)
-    p.add_argument("--holding-days", type=int, default=3, choices=range(1, 8),
-                   help="swing 策略持有/调仓周期")
+    p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7],
+                   help="decision / swing 策略持有与调仓周期")
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)
@@ -738,26 +809,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-llm", action="store_true", help="只抓取不做 LLM 标注")
     p.set_defaults(func=cmd_crawl)
 
-    p = sub.add_parser("paper", help="模拟盘")
+    p = sub.add_parser("paper", help="多账户模拟盘")
     psub = p.add_subparsers(dest="paper_cmd", required=True)
-    pr = psub.add_parser("run", help="按策略执行一次模拟调仓")
-    pr.add_argument("--universe", default="demo")
-    pr.add_argument("--strategy", default="factor", choices=["factor", "swing"])
-    pr.add_argument("--factor", default="mom_20d")
-    pr.add_argument("--top", type=int, default=5)
-    pr.add_argument("--holding-days", type=int, default=3, choices=range(1, 8))
-    pr.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
-    pr.add_argument("--capital", type=float, default=1_000_000)
-    psub.add_parser("report", help="模拟盘收益报告")
+    def paper_strategy_args(command):
+        command.add_argument("--universe", default="demo")
+        command.add_argument("--strategy", default="factor", choices=["factor", "decision", "swing"])
+        command.add_argument("--profile", default="risk_adjusted",
+                             choices=["risk_adjusted", "short_term", "stable"])
+        command.add_argument("--factor", default="mom_20d")
+        command.add_argument("--top", type=int, default=5)
+        command.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
+        command.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
+        command.add_argument("--capital", type=float, default=1_000_000)
+
+    pr = psub.add_parser("run", help="兼容命令：为 CLI 默认账户生成提案")
+    paper_strategy_args(pr)
+    pc = psub.add_parser("create", help="创建不可变策略快照账户")
+    pc.add_argument("--name", required=True)
+    pc.add_argument("--mode", default="manual", choices=["manual", "auto"])
+    paper_strategy_args(pc)
+    pp = psub.add_parser("propose", help="按最新收盘信号生成提案（不写成交）")
+    pp.add_argument("--account", required=True)
+    pcf = psub.add_parser("confirm", help="确认提案并进入待开盘")
+    pcf.add_argument("--cycle", required=True)
+    ppx = psub.add_parser("process", help="按下一可用交易日开盘处理订单")
+    ppx.add_argument("--account", required=True)
+    preport = psub.add_parser("report", help="模拟账户收益与订单报告")
+    preport.add_argument("--account", default="")
+    psub.add_parser("accounts", help="列出模拟账户")
     p.set_defaults(func=cmd_paper, capital=1_000_000)
 
-    p = sub.add_parser("daily", help="每日例程：更新行情+抓快讯+模拟盘调仓（适合挂定时任务）")
+    p = sub.add_parser("daily", help="每日例程：更新行情、抓快讯、处理订单并生成模拟提案")
     p.add_argument("--universe", default="demo")
     p.add_argument("--start", default="2022-01-01")
-    p.add_argument("--strategy", default="swing", choices=["factor", "swing"])
+    p.add_argument("--strategy", default="decision", choices=["factor", "decision", "swing"])
+    p.add_argument("--profile", default="risk_adjusted",
+                   choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--factor", default="mom_20d")
     p.add_argument("--top", type=int, default=5)
-    p.add_argument("--holding-days", type=int, default=3, choices=range(1, 8))
+    p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)

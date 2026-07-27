@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/static/automation.css">
 <link rel="stylesheet" href="/static/news.css">
 <link rel="stylesheet" href="/static/lab.css">
+<link rel="stylesheet" href="/static/trading.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
 <style>
@@ -85,12 +86,24 @@
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--axis); }
   td { padding: 6px 10px; border-bottom: 1px solid var(--grid); }
   td.up { color: var(--up); } td.down { color: var(--down); }
+  .market-groups { display:flex; flex-direction:column; gap:var(--space-xl); }
+  .market-section { display:grid; gap:var(--space-md); }
+  .market-section[data-market-order]:not([data-market-order="0"]) { padding-top:var(--space-xl); border-top:1px solid var(--border); }
+  .market-section-head { display:flex; align-items:baseline; justify-content:space-between; gap:var(--space-lg); }
+  .market-section-heading { display:flex; align-items:baseline; gap:var(--space-sm); min-width:0; }
+  .market-section-title { color:var(--ink-2); font-size:14px; font-weight:600; }
+  .market-section-count { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .market-section-description { color:var(--muted); font-size:11px; text-align:right; }
+  .market-section-empty { color:var(--muted); padding:var(--space-lg) 0; font-size:12px; }
   .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
-  .mkt-item { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+  .mkt-item { width:100%; background: var(--surface); color:inherit; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; text-align:left; font:inherit; }
   .mkt-item:hover { border-color: var(--s1); }
+  .mkt-item:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
   .mkt-item.stream-enter { animation:stream-in 180ms var(--ease-out-quart) both; }
+  .mkt-item > span { display:block; }
   .mkt-item .nm { color: var(--ink-2); font-size: 13px; }
   .mkt-item .px { font-size: 18px; font-weight: 600; }
+  .mkt-memberships { color:var(--s1); font-size:11px; margin-top:var(--space-xs); }
   .mkt-item .mkt-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .mkt-item .spark { height: 42px; margin-top: 4px; }
   .market-detail-panel { margin-top:var(--space-2xl); scroll-margin-top:88px; }
@@ -105,7 +118,6 @@
   .symbol-action { color:var(--ink); font-weight:600; }
   .symbol-action:hover,.text-action:hover { color:var(--s1); }
   .text-action { font-size:12px; }
-  .group-title { color: var(--muted); font-size: 13px; margin: 18px 0 8px; }
   .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--axis); color: var(--ink-2); }
   .msg { color: var(--muted); padding: 20px 0; }
   .err { color: var(--bad); white-space: pre-wrap; }
@@ -116,7 +128,6 @@
   .load-state.complete .load-dot { background:var(--s3); animation:none; }
   .load-state.failed .load-dot { background:var(--bad); animation:none; }
   .stream-results:empty { display:none; }
-  .stream-results > .group-title:first-child { margin-top:0; }
   .ready-preview { padding:14px 16px; }
   .ready-preview-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }
   .ready-preview-head strong { color:var(--ink-2); font-size:13px; }
@@ -148,11 +159,25 @@
   .segmented button:active { transform:scale(.97); }
   .segmented button.active { color:var(--ink); background:var(--grid); }
   .decision-summary { display:grid; grid-template-columns:minmax(230px,.7fr) minmax(460px,1.7fr); border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--surface); margin-bottom:16px; }
+  .decision-profile-picker { flex:1 0 100%; min-width:0; margin:0; padding:0; border:0; }
+  .decision-profile-picker legend { margin-bottom:7px; color:var(--muted); font-size:12px; }
+  .decision-profile-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  form.controls .decision-profile-option { position:relative; display:grid; grid-template-columns:auto minmax(0,1fr); grid-template-rows:auto auto; gap:2px 9px; min-width:0; padding:11px 12px; border:1px solid var(--axis); border-radius:9px; background:var(--surface); color:var(--ink); cursor:pointer; transition:border-color 160ms var(--ease-out-quart),background-color 160ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
+  .decision-profile-option:hover { border-color:color-mix(in oklch,var(--s1) 55%,var(--axis)); }
+  .decision-profile-option:active { transform:scale(.99); }
+  .decision-profile-option:has(input:checked) { border-color:var(--s1); background:color-mix(in oklch,var(--s1) 8%,var(--surface)); }
+  .decision-profile-option:has(input:focus-visible) { outline:2px solid var(--s1); outline-offset:2px; }
+  .decision-profile-option input { grid-row:1/3; align-self:start; width:15px; height:15px; margin:2px 0 0; accent-color:var(--s1); }
+  .decision-profile-option strong { font-size:13px; font-weight:650; }
+  .decision-profile-option small { min-width:0; color:var(--muted); font-size:11px; line-height:1.45; }
   .regime-block { padding:24px; display:flex; flex-direction:column; justify-content:space-between; min-height:170px; border-bottom:0; }
   .eyebrow { color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
   .regime-name { font-size:28px; font-weight:680; line-height:1.1; margin-top:6px; }
   .regime-score { display:flex; align-items:baseline; gap:8px; margin-top:18px; }
   .regime-score strong { font-size:32px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .decision-strategy-line { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px; color:var(--muted); font-size:11px; }
+  .model-health { color:var(--s3); }
+  .model-health.fallback { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
   .metric-strip { display:grid; grid-template-columns:repeat(4,minmax(100px,1fr)); align-content:stretch; border-left:1px solid var(--border); }
   .metric-cell { padding:18px 16px; min-height:84px; display:flex; flex-direction:column; justify-content:center; }
   .metric-cell:nth-child(-n+4) { border-bottom:1px solid var(--border); }
@@ -176,9 +201,74 @@
   .decision-table { min-width:980px; }
   .decision-table tbody tr { transition:background-color 160ms var(--ease-out-quart); }
   .decision-table tbody tr[data-symbol] { cursor:pointer; }
-  .decision-table tbody tr:hover { background:color-mix(in oklch,var(--s1) 7%,transparent); }
+  .decision-table tbody tr[data-symbol]:hover,
+  .decision-table tbody tr[data-symbol].is-expanded { background:color-mix(in oklch,var(--s1) 7%,transparent); }
+  .decision-symbol-trigger { display:grid; gap:1px; width:100%; border:0; background:none; color:inherit; padding:2px 0; cursor:pointer; text-align:left; font:inherit; }
+  .decision-symbol-trigger strong { color:var(--ink); font-weight:650; }
+  .decision-symbol-trigger:hover strong { color:color-mix(in oklch,var(--s1) 72%,var(--ink)); }
+  .decision-symbol-trigger:focus-visible,
+  .decision-list-toggle:focus-visible,.decision-detail-close:focus-visible,
+  .decision-inline-retry:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
+  .decision-detail-row,.decision-detail-row:hover { background:var(--page); }
+  .decision-detail-row > td { padding:0; border-bottom:1px solid var(--axis); }
+  .decision-detail-shell { position:sticky; left:0; width:calc(100vw - 64px); max-width:100%; min-width:0; overflow:hidden; padding:var(--space-lg); background:color-mix(in oklch,var(--surface) 82%,var(--page)); animation:decision-detail-in 260ms var(--ease-out-expo) both; }
+  .decision-detail-toolbar { display:grid; grid-template-columns:minmax(180px,1fr) auto; align-items:start; gap:var(--space-md) var(--space-lg); }
+  .decision-detail-title { display:flex; align-items:baseline; gap:var(--space-sm); min-width:0; }
+  .decision-detail-title strong { overflow:hidden; color:var(--ink); font-size:14px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+  .decision-detail-title .badge { flex:0 0 auto; }
+  .decision-detail-tools { display:flex; align-items:center; justify-content:flex-end; gap:var(--space-sm); min-width:0; flex-wrap:wrap; }
+  .decision-frequency { max-width:100%; min-width:0; overflow-x:auto; scrollbar-width:thin; }
+  .decision-frequency button { flex:0 0 auto; }
+  .decision-list-actions { display:flex; align-items:center; gap:var(--space-xs); }
+  .decision-list-toggle,.decision-detail-close,.decision-inline-retry { min-height:32px; border:1px solid var(--axis); border-radius:7px; background:var(--page); color:var(--ink-2); padding:5px 10px; cursor:pointer; font:inherit; font-size:12px; transition:background-color 140ms var(--ease-out-quart),border-color 140ms var(--ease-out-quart),color 140ms var(--ease-out-quart),transform 100ms var(--ease-out-quart); }
+  .decision-list-toggle:hover,.decision-detail-close:hover,.decision-inline-retry:hover { border-color:var(--s1); color:var(--ink); }
+  .decision-list-toggle:active,.decision-detail-close:active,.decision-inline-retry:active { transform:scale(.97); }
+  .decision-list-toggle[aria-pressed="true"] { border-color:color-mix(in oklch,var(--s1) 58%,var(--axis)); background:color-mix(in oklch,var(--s1) 13%,var(--page)); color:color-mix(in oklch,var(--s1) 55%,var(--ink)); }
+  .decision-list-toggle:disabled { opacity:.55; cursor:wait; transform:none; }
+  .decision-detail-close { border-color:transparent; background:transparent; color:var(--muted); }
+  .decision-detail-feedback { display:flex; align-items:center; gap:var(--space-sm); min-height:22px; margin-top:var(--space-xs); color:var(--muted); font-size:11px; }
+  .decision-detail-feedback.success { color:var(--s3); }
+  .decision-detail-feedback.error { color:color-mix(in oklch,var(--bad) 75%,var(--ink)); }
+  .decision-detail-feedback .decision-inline-retry { min-height:28px; padding:3px 8px; }
+  .decision-kline-canvas { width:100%; height:340px; margin-top:var(--space-sm); }
+  .decision-kline-loading { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:end; gap:var(--space-sm); height:300px; padding:40px var(--space-xl) 24px; }
+  .decision-kline-loading i { display:block; height:52%; border-radius:4px; background:var(--grid); opacity:.62; animation:skeleton-breathe 1.35s cubic-bezier(.65,0,.35,1) infinite alternate; }
+  .decision-kline-loading i:nth-child(2) { height:82%; animation-delay:100ms; }
+  .decision-kline-loading i:nth-child(3) { height:66%; animation-delay:180ms; }
+  .decision-kline-loading span { grid-column:1/-1; align-self:start; color:var(--muted); font-size:12px; }
+  .decision-kline-error { display:flex; align-items:center; justify-content:space-between; gap:var(--space-lg); min-height:150px; padding:var(--space-xl); border-top:1px solid var(--border); color:var(--ink-2); }
+  .decision-kline-error p { max-width:65ch; color:var(--muted); font-size:12px; }
   .reason { color:var(--muted); font-size:12px; max-width:36ch; }
   .decision-table td.reason { min-width:260px; }
+  .decision-model-evidence { margin:0 0 16px; border:1px solid var(--border); border-radius:10px; background:var(--surface); }
+  .decision-model-evidence > summary { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:45px; padding:10px 14px; color:var(--ink-2); cursor:pointer; list-style:none; }
+  .decision-model-evidence > summary::-webkit-details-marker { display:none; }
+  .decision-model-evidence > summary:hover { background:color-mix(in oklch,var(--ink) 3%,transparent); }
+  .decision-model-evidence > summary:focus-visible { outline:2px solid var(--s1); outline-offset:-2px; }
+  .decision-model-evidence > summary strong { font-size:13px; }
+  .decision-model-evidence > summary span { color:var(--muted); font-size:11px; text-align:right; }
+  .decision-model-body { padding:0 14px 14px; border-top:1px solid var(--border); }
+  .decision-component-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin-top:12px; border:1px solid var(--axis); border-radius:8px; overflow:hidden; background:var(--axis); }
+  .decision-component { min-width:0; padding:11px 12px; background:var(--page); }
+  .decision-component-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .decision-component-head strong { overflow:hidden; color:var(--ink); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+  .decision-component-head span { color:var(--s1); font-size:12px; font-variant-numeric:tabular-nums; }
+  .decision-component small { display:block; margin-top:4px; color:var(--muted); font-size:10px; line-height:1.45; overflow-wrap:anywhere; }
+  .decision-component[data-status="fallback"] .decision-component-head span { color:var(--s4); }
+  .decision-policy-meta { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; color:var(--muted); font-size:10px; }
+  .decision-policy-meta code { color:var(--ink-2); font-size:10px; user-select:all; }
+  .decision-policy-warnings { margin:10px 0 0; padding-left:20px; color:var(--s4); font-size:11px; line-height:1.55; }
+  .pick-evidence { min-width:150px; }
+  .pick-evidence summary { width:max-content; color:var(--s1); cursor:pointer; font-size:11px; list-style:none; }
+  .pick-evidence summary::-webkit-details-marker { display:none; }
+  .pick-evidence summary::after { content:' +'; color:var(--muted); }
+  .pick-evidence[open] summary::after { content:' −'; }
+  .pick-evidence summary:focus-visible { outline:1px solid var(--s1); outline-offset:2px; }
+  .pick-contributions { display:grid; gap:3px; margin-top:6px; color:var(--muted); font-size:10px; }
+  .pick-contribution { display:grid; grid-template-columns:38px 38px 64px; gap:5px; align-items:center; }
+  .pick-contribution i { height:3px; border-radius:2px; background:var(--grid); overflow:hidden; }
+  .pick-contribution i::after { content:''; display:block; width:var(--component-score,0%); height:100%; background:var(--s1); }
+  .pick-reasons { margin-top:6px; max-width:34ch; color:var(--muted); line-height:1.45; }
   .snapshot-table { min-width:380px; table-layout:fixed; }
   .snapshot-table .snapshot-date { width:96px; white-space:nowrap; }
   .snapshot-table .snapshot-period { width:72px; white-space:nowrap; }
@@ -243,8 +333,39 @@
   .runtime-entry[data-level="error"] { background:color-mix(in oklch,var(--bad) 5%,var(--surface)); }
   .runtime-entry[data-level="error"] .runtime-level { color:color-mix(in oklch,var(--bad) 74%,var(--ink)); border-color:color-mix(in oklch,var(--bad) 52%,transparent); }
   .runtime-empty { color:var(--muted); padding:18px 11px; font-size:12px; text-align:center; }
+  .problem-dialog { width:min(520px,calc(100vw - 28px)); padding:0; border:1px solid var(--axis); border-radius:12px; background:var(--surface); color:var(--ink); box-shadow:0 24px 70px rgba(0,0,0,.48); }
+  .problem-dialog::backdrop { background:rgba(0,0,0,.64); }
+  .problem-dialog-card { display:grid; gap:0; }
+  .problem-dialog-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:20px 20px 14px; border-bottom:1px solid var(--border); }
+  .problem-dialog-kicker { color:var(--s4); font-size:10px; font-weight:700; letter-spacing:.1em; }
+  .problem-dialog[data-severity="error"] .problem-dialog-kicker { color:var(--bad); }
+  .problem-dialog h2 { margin:4px 0 0; font-size:18px; line-height:1.35; }
+  .problem-dialog-close { width:30px; height:30px; border:0; border-radius:7px; background:transparent; color:var(--muted); cursor:pointer; font-size:21px; line-height:1; }
+  .problem-dialog-close:hover,.problem-dialog-close:focus-visible { color:var(--ink); background:var(--grid); outline:none; }
+  .problem-dialog-body { display:grid; gap:12px; padding:18px 20px; }
+  .problem-dialog-message { margin:0; color:var(--ink-2); line-height:1.65; }
+  .problem-dialog-action { margin:0; padding:10px 12px; border:1px solid var(--axis); border-radius:8px; color:var(--ink); background:var(--page); font-size:12px; line-height:1.55; }
+  .problem-dialog-items { margin:0; padding-left:20px; max-height:130px; overflow:auto; color:var(--muted); font-size:12px; }
+  .problem-dialog-quality { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; border:1px solid var(--axis); border-radius:8px; overflow:hidden; background:var(--axis); }
+  .problem-dialog-quality div { min-width:0; padding:9px 10px; background:var(--page); }
+  .problem-dialog-quality span { display:block; color:var(--muted); font-size:10px; }
+  .problem-dialog-quality strong { display:block; margin-top:2px; overflow:hidden; text-overflow:ellipsis; color:var(--ink-2); font-size:12px; white-space:nowrap; }
+  .problem-dialog-actions { display:flex; justify-content:flex-end; gap:8px; padding:14px 20px 18px; border-top:1px solid var(--border); }
+  .problem-dialog-actions .runtime-tool { margin-right:auto; }
+  .quality-summary { margin-bottom:16px; border:1px solid var(--axis); border-radius:10px; background:var(--surface); overflow:hidden; }
+  .quality-summary-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border-bottom:1px solid var(--border); }
+  .quality-summary-head strong { font-size:13px; }
+  .quality-state { border:1px solid var(--axis); border-radius:999px; padding:2px 7px; color:var(--s3); font-size:10px; }
+  .quality-summary[data-status="partial"] .quality-state { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
+  .quality-summary-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); }
+  .quality-summary-grid div { min-width:0; padding:10px 13px; border-right:1px solid var(--border); }
+  .quality-summary-grid div:last-child { border-right:0; }
+  .quality-summary-grid span { display:block; color:var(--muted); font-size:10px; }
+  .quality-summary-grid strong { display:block; margin-top:2px; overflow:hidden; text-overflow:ellipsis; color:var(--ink-2); font-size:12px; white-space:nowrap; }
+  .quality-warning-list { margin:0; padding:9px 28px 11px; border-top:1px solid var(--border); color:var(--s4); font-size:11px; }
   @keyframes reveal-in { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
   @keyframes stream-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes decision-detail-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
   @keyframes tab-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
   @keyframes runtime-entry-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
   @keyframes load-pulse { 0%,100% { opacity:.4; transform:scale(.8); } 50% { opacity:1; transform:scale(1); } }
@@ -255,6 +376,8 @@
     nav { padding-bottom:3px; }
     main { padding:16px 14px 48px; }
     .decision-summary,.decision-grid { grid-template-columns:1fr; }
+    .decision-profile-options { grid-template-columns:1fr; }
+    .decision-component-grid { grid-template-columns:1fr; }
     .metric-strip { border-left:0; border-top:1px solid var(--border); grid-template-columns:repeat(2,1fr); }
     .metric-cell:nth-child(-n+6) { border-bottom:1px solid var(--border); }
     .metric-cell:nth-child(n+7) { border-bottom:0; }
@@ -265,8 +388,13 @@
     .asset-toolbar { align-items:flex-start; flex-direction:column; }
     .asset-add-form { justify-content:flex-start; width:100%; max-width:100%; }
     .asset-add-form input { flex:1 1 100%; width:100%; min-width:0; }
+    .market-section-head { align-items:flex-start; flex-direction:column; gap:var(--space-xs); }
+    .market-section-description { text-align:left; }
     .regime-heading { align-items:flex-start; flex-direction:column; }
     .regime-window { width:100%; }
+    .decision-detail-toolbar { grid-template-columns:1fr; }
+    .decision-detail-tools { justify-content:flex-start; }
+    .decision-kline-canvas { height:300px; }
   }
   @media (max-width:560px) {
     .release-trigger { gap:4px; }
@@ -277,10 +405,30 @@
     .runtime-info { inset-inline:8px; bottom:8px; }
     .runtime-label { display:none; }
     .runtime-count { display:none; }
+    .problem-dialog-quality { grid-template-columns:1fr; }
+    .quality-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .quality-summary-grid div { border-bottom:1px solid var(--border); }
+    .problem-dialog-actions { flex-wrap:wrap; }
+    .problem-dialog-actions .runtime-tool { width:100%; margin-right:0; text-align:left; }
     .runtime-entry { grid-template-columns:42px minmax(0,1fr); gap:7px; }
     .runtime-level { grid-column:2; justify-self:start; }
     .runtime-entry-title { align-items:flex-start; flex-direction:column; gap:1px; }
     .runtime-toolbar { align-items:flex-start; }
+    .decision-detail-shell { padding:var(--space-md); }
+    .decision-model-evidence > summary { align-items:flex-start; flex-direction:column; gap:3px; }
+    .decision-model-evidence > summary span { text-align:left; }
+    .decision-detail-title { flex-wrap:wrap; }
+    .decision-detail-tools { align-items:stretch; flex-direction:column; }
+    .decision-frequency { width:100%; }
+    .decision-list-actions { width:100%; }
+    .decision-list-toggle { flex:1 1 0; }
+    .decision-detail-close { align-self:flex-start; }
+    .decision-kline-canvas { height:260px; }
+    .decision-kline-loading { height:230px; padding-inline:var(--space-sm); }
+    .decision-kline-error { align-items:flex-start; flex-direction:column; min-height:130px; padding:var(--space-lg) var(--space-sm); }
+  }
+  @media (pointer:coarse) {
+    .decision-symbol-trigger,.decision-list-toggle,.decision-detail-close,.decision-inline-retry { min-height:44px; }
   }
   @media (prefers-reduced-motion:reduce) {
     *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
@@ -365,7 +513,7 @@
       </form>
     </div>
     <div class="table-scroll" id="asset-list"><div class="msg">正在读取本地列表…</div></div>
-    <div class="hint">自选与关注保存在本地；持有来自实盘账本。报价只读本地缓存，不额外请求数据源。</div>
+    <div class="hint">自选与关注保存在本地，持有来自实盘账本；下方“我的股票”会随市场行情同步并显示走势图。</div>
   </div>
   <div id="mkt-groups"><div class="msg">正在读取本地市场缓存…</div></div>
   <div class="panel market-detail-panel" id="kline-panel" style="display:none">
@@ -428,6 +576,14 @@
     </div>
   </div>
   <form class="controls" id="decision-form">
+    <fieldset class="decision-profile-picker">
+      <legend>策略画像</legend>
+      <div class="decision-profile-options">
+        <label class="decision-profile-option"><input type="radio" name="profile" value="risk_adjusted" checked><strong>扣费风险收益</strong><small>平衡净收益、回撤与换手，适合作为默认决策。</small></label>
+        <label class="decision-profile-option"><input type="radio" name="profile" value="short_term"><strong>短期命中收益</strong><small>提高 1–7 日 Top-N 命中，允许更高模型占比。</small></label>
+        <label class="decision-profile-option"><input type="radio" name="profile" value="stable"><strong>稳定可解释</strong><small>规则权重更高，限制模型占比与整体仓位。</small></label>
+      </div>
+    </fieldset>
     <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
     <label>研究起点<input name="start" type="date" value="2015-01-01"></label>
     <label>持有周期
@@ -652,28 +808,47 @@
 
 <!-- ================= 回测 ================= -->
 <section class="tab" id="tab-backtest">
-  <form class="controls" id="bt-form">
-    <label>策略
-      <select name="strategy"><option value="factor">因子策略</option><option value="swing">1–7 日短线</option></select>
-    </label>
-    <label>因子（逗号分隔=多因子组合）<input name="factor" list="factor-list" value="mom_20d" style="min-width:260px" placeholder="mom_20d,rev_5d,ep"></label>
-    <label>合成
-      <select name="weighting"><option value="equal">等权</option><option value="ic">IC加权</option></select>
-    </label>
-    <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-    <label>开始<input name="start" type="date" value="2022-01-01"></label>
-    <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
-    <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
-    <label>调仓
-      <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
-    </label>
-    <label>基准<input name="benchmark" value="000300.SH"></label>
-    <label>止损<input name="stop_loss" type="number" step="0.01" min="0" max="0.5" placeholder="如 0.08" style="min-width:80px"></label>
-    <label>止盈<input name="take_profit" type="number" step="0.01" min="0" max="2" placeholder="如 0.25" style="min-width:80px"></label>
-    <button class="primary" type="submit">运行回测</button>
-  </form>
-  <div class="hint">回测含 A 股规则：T+1、涨跌停不可成交、佣金/印花税/过户费、整手交易。信号 T 日收盘生成，T+1 开盘成交。</div>
-  <div id="bt-out"></div>
+  <div class="trading-heading">
+    <div><span class="trading-eyebrow">REPRODUCIBLE RESEARCH</span><h2>回测工作台</h2>
+      <p>保存每次参数、数据快照和成交假设，让结果可以复查、比较并直接进入模拟验证。</p></div>
+    <div class="trading-rule"><strong>T 收盘</strong><span>生成信号</span><i aria-hidden="true">→</i><strong>T+1 开盘</strong><span>模拟成交</span></div>
+  </div>
+  <div class="trading-layout">
+    <aside class="trading-config" aria-labelledby="bt-config-title">
+      <div class="trading-block-head"><h3 id="bt-config-title">实验配置</h3><span>保存为不可变快照</span></div>
+      <form id="bt-form" class="trading-form">
+        <label class="wide">实验名称<span>可选</span><input name="name" maxlength="80" placeholder="例如：动量周频 · 低成本假设"></label>
+        <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="factor">因子策略</option><option value="swing">旧版 1–7 日短线</option></select></label>
+        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
+        <label class="wide" data-bt-field="factor">因子<span>逗号分隔可组合</span><input name="factor" list="factor-list" value="mom_20d" placeholder="mom_20d,rev_5d,ep" required></label>
+        <label data-bt-field="factor">合成<select name="weighting"><option value="equal">等权</option><option value="ic">滚动 IC 加权</option></select></label>
+        <label data-bt-field="factor">调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
+        <label data-bt-field="swing decision" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-bt-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
+        <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
+        <label>开始日期<input name="start" type="date" value="2022-01-01" required></label>
+        <label>结束日期<span>留空为今天</span><input name="end" type="date"></label>
+        <label>初始资金<input name="initial_capital" type="number" value="1000000" min="10000" step="10000" required></label>
+        <label>对比基准<input name="benchmark" value="000300.SH" maxlength="40"></label>
+        <details class="trading-advanced wide"><summary>风险与退出规则</summary><div>
+          <label>止损比例<input name="stop_loss" type="number" step="0.01" min="0.01" max="0.5" placeholder="例如 0.08"></label>
+          <label>止盈比例<input name="take_profit" type="number" step="0.01" min="0.01" max="2" placeholder="例如 0.25"></label>
+        </div></details>
+        <div class="trading-form-note wide">Hybrid v2 会在创建时固化 Champion 与权重；固定候选会标注幸存者偏差，csi800 使用历史成分快照。</div>
+        <button class="trading-primary wide" type="submit">创建并运行回测</button>
+      </form>
+    </aside>
+    <div class="trading-workspace">
+      <div class="trading-toolbar">
+        <div><h3>运行与结果</h3><span id="bt-history-count">正在读取历史记录…</span></div>
+        <div><button id="bt-compare" class="trading-secondary" type="button" disabled>比较所选</button><button id="bt-refresh" class="trading-secondary" type="button">刷新</button></div>
+      </div>
+      <div id="bt-job-state" class="trading-job-state" aria-live="polite"></div>
+      <div id="bt-out" class="trading-result"><div class="trading-empty"><strong>尚未选择回测</strong><span>运行新实验，或从下方历史记录打开一个结果。</span></div></div>
+      <div class="trading-history-head"><h3>实验历史</h3><span>最多选择 4 个已完成实验比较</span></div>
+      <div id="bt-history" class="trading-history" aria-live="polite"><div class="trading-skeleton"></div></div>
+    </div>
+  </div>
 </section>
 
 <!-- ================= 挖掘 ================= -->
@@ -707,26 +882,39 @@
 
 <!-- ================= 模拟盘 ================= -->
 <section class="tab" id="tab-paper">
-  <div class="panel">
-    <h3>模拟盘：真实行情 + 虚拟资金，先证明策略再上实盘。每个交易日收盘后执行一次调仓（或挂 <code>qm daily</code> 定时任务）</h3>
-    <form class="controls" id="paper-form">
-      <label>策略<select name="strategy"><option value="swing">1–7 日短线</option><option value="factor">因子策略</option></select></label>
-      <label>因子<input name="factor" list="factor-list" value="mom_20d" style="min-width:220px"></label>
-      <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-      <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
-      <label>短线持有<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
-      <label>调仓
-        <select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select>
-      </label>
-      <button class="primary" type="submit">执行一次调仓</button>
-    </form>
-    <div class="hint">首次执行会以 100 万虚拟资金开户；调仓按最新收盘价 + 滑点成交，含佣金/印花税。</div>
+  <div class="trading-heading">
+    <div><span class="trading-eyebrow">PAPER EXECUTION DESK</span><h2>模拟盘</h2>
+      <p>一个账户对应一份不可变策略快照。先看调仓提案，再确认订单，下一交易日开盘才会撮合。</p></div>
+    <div class="trading-rule"><strong>提案</strong><span>不写账本</span><i aria-hidden="true">→</i><strong>确认</strong><span>进入待开盘</span></div>
   </div>
-  <div class="panel" id="paper-nav-panel" style="display:none">
-    <h3>模拟盘净值（TWR）</h3>
-    <div class="chart-sm" id="paper-nav-chart"></div>
+  <div class="paper-layout">
+    <aside class="paper-accounts" aria-labelledby="paper-accounts-title">
+      <div class="trading-block-head"><h3 id="paper-accounts-title">模拟账户</h3><button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button></div>
+      <form id="paper-form" class="paper-create-form" hidden>
+        <label class="wide">账户名称<input name="name" maxlength="40" placeholder="例如：周频动量验证" required></label>
+        <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="swing">旧版 1–7 日短线</option><option value="factor">因子策略</option></select></label>
+        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
+        <label class="wide" data-paper-field="factor" hidden>因子<input name="factor" list="factor-list" value="mom_20d"></label>
+        <label data-paper-field="factor" hidden>调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
+        <label data-paper-field="swing decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-paper-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
+        <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
+        <label>初始资金<input name="initial_capital" type="number" value="1000000" min="10000" step="10000" required></label>
+        <label class="wide paper-auto"><input name="auto" type="checkbox"><span><strong>自动确认提案</strong><small>仅为该账户开启；遇到硬错误会自动暂停。</small></span></label>
+        <button class="trading-primary wide" type="submit">创建模拟账户</button>
+      </form>
+      <div id="paper-account-list" class="paper-account-list" aria-live="polite"><div class="trading-skeleton"></div></div>
+    </aside>
+    <div class="paper-workspace">
+      <div class="trading-toolbar">
+        <div><h3 id="paper-account-title">选择一个账户</h3><span id="paper-account-meta">策略快照和订单互相隔离</span></div>
+        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button></div>
+      </div>
+      <div id="paper-status" class="trading-job-state" aria-live="polite"></div>
+      <div id="paper-nav-panel" class="paper-nav-panel" hidden><div class="paper-nav-head"><h3>策略净值</h3><span>TWR，剔除出入金影响</span></div><div class="chart-sm" id="paper-nav-chart"></div></div>
+      <div id="paper-out" class="trading-result"><div class="trading-empty"><strong>还没有选中账户</strong><span>选择已有账户，或创建一份新的策略快照。</span></div></div>
+    </div>
   </div>
-  <div id="paper-out"><div class="msg">加载中…</div></div>
 </section>
 
 <!-- ================= 资讯 ================= -->
@@ -1102,6 +1290,26 @@
   </div>
 </aside>
 
+<dialog class="problem-dialog" id="operation-problem-dialog" aria-labelledby="operation-problem-title" aria-describedby="operation-problem-message">
+  <div class="problem-dialog-card">
+    <header class="problem-dialog-head">
+      <div><div class="problem-dialog-kicker" id="operation-problem-kicker">操作已暂停</div><h2 id="operation-problem-title">无法继续</h2></div>
+      <button class="problem-dialog-close" id="operation-problem-close" type="button" aria-label="关闭">×</button>
+    </header>
+    <div class="problem-dialog-body">
+      <p class="problem-dialog-message" id="operation-problem-message"></p>
+      <p class="problem-dialog-action" id="operation-problem-action"></p>
+      <div class="problem-dialog-quality" id="operation-problem-quality" hidden></div>
+      <ul class="problem-dialog-items" id="operation-problem-items" hidden></ul>
+    </div>
+    <footer class="problem-dialog-actions">
+      <button class="runtime-tool" id="operation-problem-status" type="button">查看后台状态</button>
+      <button class="ghost" id="operation-problem-cancel" type="button">取消</button>
+      <button class="primary" id="operation-problem-continue" type="button" hidden>仍用可用数据继续</button>
+    </footer>
+  </div>
+</dialog>
+
 <script>
 const PALETTE = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
 const INK2 = '#c3c2b7', MUTED = '#898781', GRID = '#2c2c2a', AXIS = '#383835';
@@ -1134,7 +1342,22 @@ function mkChart(id, reset = true) {
   charts[id] = echarts.init(el);
   return charts[id];
 }
-window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+function disposeChart(id) {
+  const chart = charts[id];
+  if (chart && !chart.isDisposed()) chart.dispose();
+  delete charts[id];
+}
+let chartResizeFrame = 0;
+window.addEventListener('resize', () => {
+  if (chartResizeFrame) cancelAnimationFrame(chartResizeFrame);
+  chartResizeFrame = requestAnimationFrame(() => {
+    chartResizeFrame = 0;
+    Object.values(charts).forEach(chart => {
+      chart.resize();
+      if (chart.__quantmasterKlineData) renderKlineSeries(chart, chart.__quantmasterKlineData);
+    });
+  });
+});
 
 class QuantApiError extends Error {
   constructor(message, options = {}) {
@@ -1155,7 +1378,7 @@ function sourceForPath(path) {
     ['/api/mining', '因子挖掘'], ['/api/paper', '模拟交易'],
     ['/api/news', '资讯分析'], ['/api/ledger', '实盘账本'],
     ['/api/assets', '我的标的'], ['/api/settings', '设置中心'],
-    ['/api/automation', '自动任务'],
+    ['/api/automation', '自动任务'], ['/api/lab', 'Quant Lab'],
   ];
   return sources.find(([prefix]) => route.startsWith(prefix))?.[1] || '本地服务';
 }
@@ -1195,18 +1418,61 @@ function recoveryForStatus(status) {
   if (status === 429) return '稍候再试；如频繁出现，请降低刷新频率。';
   return '重试一次；如仍失败，请复制诊断信息排查后端日志。';
 }
+function normalizeProblem(value, fallback = {}) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const message = typeof value === 'string' ? value : (raw.message || fallback.message || '操作未能完成');
+  const severity = ['info','warning','error'].includes(raw.severity) ? raw.severity : (fallback.severity || 'error');
+  return {
+    id:String(raw.id || fallback.id || raw.code || `problem:${message}`),
+    revision:String(raw.revision || ''),
+    code:String(raw.code || fallback.code || 'operation_problem'),
+    severity,
+    source:String(raw.source || fallback.source || '本地服务'),
+    title:String(raw.title || fallback.title || (severity === 'warning' ? '操作需要确认' : '操作未能完成')),
+    message:String(message),
+    action:String(raw.action || fallback.action || '检查提示后重试。'),
+    blocking:Boolean(raw.blocking ?? fallback.blocking),
+    can_continue:Boolean(raw.can_continue ?? fallback.can_continue),
+    items:Array.isArray(raw.items) ? raw.items.map(String) : [],
+  };
+}
+function ingestResponseProblems(data, scope = 'operation') {
+  if (!data || typeof data !== 'object') return [];
+  const values = [
+    ...(Array.isArray(data.issues) ? data.issues : []),
+    ...(Array.isArray(data.warnings) ? data.warnings : []),
+  ];
+  const problems = values.map((value, index) => normalizeProblem(value, {
+    id:`${scope}:warning:${index}`, severity:'warning', source:'本地服务',
+    title:'结果包含注意事项', action:'查看页面结果中的数据质量说明。',
+  }));
+  problems.forEach(problem => runtimeInfo.add(
+    problem.severity === 'error' ? 'error' : problem.severity === 'info' ? 'info' : 'warning',
+    problem.source, problem.title, {
+      detail:problem.message, action:problem.action,
+      key:`${scope}:problem:${problem.id}`, revision:problem.revision,
+    },
+  ));
+  return problems;
+}
 function responseError(response, data, path, method, key = '') {
-  const title = friendlyHttpMessage(response.status);
+  const fallbackTitle = friendlyHttpMessage(response.status);
   const detail = readableDetail(data.detail);
   const requestId = data.error_id || response.headers.get('X-Request-ID') || '';
   const route = apiRoute(path);
-  const error = new QuantApiError(detail ? `${title}：${detail}` : title, {
-    status:response.status, detail:data.detail, detailText:detail,
-    requestId, path:route, method, logged:true,
+  const problem = normalizeProblem(data.problem, {
+    id:`request:${method}:${route}`, source:sourceForPath(path), title:fallbackTitle,
+    message:detail || fallbackTitle, action:recoveryForStatus(response.status),
+    blocking:true, severity:response.status === 409 ? 'warning' : 'error',
   });
-  runtimeInfo.add('error', sourceForPath(path), title, {
-    detail:detail || `HTTP ${response.status}`, action:recoveryForStatus(response.status),
-    requestId, path:`${method} ${route}`, key,
+  const error = new QuantApiError(`${problem.title}：${problem.message}`, {
+    status:response.status, detail:data.detail, detailText:detail,
+    requestId, path:route, method, logged:true, problem,
+    dataQuality:data.data_quality || null,
+  });
+  runtimeInfo.add(problem.severity === 'warning' ? 'warning' : 'error', problem.source, problem.title, {
+    detail:problem.message || `HTTP ${response.status}`, action:problem.action,
+    requestId, path:`${method} ${route}`, key, revision:problem.revision,
   });
   return error;
 }
@@ -1237,6 +1503,7 @@ async function api(path, opts = {}) {
       key:requestKey,
     });
   } else runtimeInfo.resolve(requestKey);
+  if (route !== '/api/health') ingestResponseProblems(data, requestKey);
   return data;
 }
 function post(path, body) {
@@ -1330,19 +1597,44 @@ const runtimeInfo = (() => {
     const now = new Date(), key = String(meta.key || '');
     const existingIndex = key ? entries.findIndex(entry => entry.key === key) : -1;
     const previous = existingIndex >= 0 ? entries[existingIndex] : null;
+    const revision = compactText(meta.revision, 80);
+    if (previous && revision && previous.revision === revision) return previous;
     const entry = {
       id:previous?.id || ++sequence, key, level:safeLevel,
       source:compactText(source || '系统', 40), message:compactText(message || '状态已更新', 160),
       detail:compactText(meta.detail), action:compactText(meta.action, 220),
       path:compactText(meta.path, 220), requestId:compactText(meta.requestId, 80),
+      revision, scope:compactText(meta.scope, 80), persistent:Boolean(meta.persistent),
       iso:now.toISOString(),
       time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
     };
     if (existingIndex >= 0) entries.splice(existingIndex, 1);
     entries.push(entry);
-    if (entries.length > 40) entries.splice(0, entries.length - 40);
+    while (entries.length > 40) {
+      const transientIndex = entries.findIndex(item => !item.persistent);
+      entries.splice(transientIndex >= 0 ? transientIndex : 0, 1);
+    }
     render();
     return entry;
+  }
+  function sync(scope, problems = []) {
+    const normalized = problems.map((problem, index) => normalizeProblem(problem, {
+      id:`${scope}:${index}`, source:'后台状态', severity:'warning',
+    }));
+    const activeKeys = new Set(normalized.map(problem => `persistent:${scope}:${problem.id}`));
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry.persistent && entry.scope === scope && !activeKeys.has(entry.key)) entries.splice(index, 1);
+    }
+    normalized.forEach(problem => add(
+      problem.severity === 'error' ? 'error' : problem.severity === 'warning' ? 'warning' : 'info',
+      problem.source, problem.title, {
+        detail:problem.message, action:problem.action,
+        key:`persistent:${scope}:${problem.id}`, scope, persistent:true,
+        revision:problem.revision,
+      },
+    ));
+    render();
   }
   function begin(source, message, meta = {}) {
     const key = `operation:${Date.now()}:${++operationSequence}`;
@@ -1374,7 +1666,9 @@ const runtimeInfo = (() => {
     setExpanded(false); summary.focus();
   });
   document.getElementById('runtime-clear').addEventListener('click', () => {
-    entries.length = 0;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      if (!entries[index].persistent) entries.splice(index, 1);
+    }
     render();
   });
   document.querySelector('.runtime-filters').addEventListener('click', event => {
@@ -1397,10 +1691,95 @@ const runtimeInfo = (() => {
     if (event.key === 'Escape' && expanded) setExpanded(false);
   });
   render();
-  return {add, begin, resolve, phase, open:() => setExpanded(true), close:() => setExpanded(false)};
+  return {add, begin, resolve, phase, sync, open:() => setExpanded(true), close:() => setExpanded(false)};
 })();
 window.QuantMasterRunInfo = runtimeInfo;
 window.QuantMasterAPI = api;
+
+const operationProblemDialog = (() => {
+  const dialog = document.getElementById('operation-problem-dialog');
+  const kicker = document.getElementById('operation-problem-kicker');
+  const title = document.getElementById('operation-problem-title');
+  const message = document.getElementById('operation-problem-message');
+  const action = document.getElementById('operation-problem-action');
+  const items = document.getElementById('operation-problem-items');
+  const quality = document.getElementById('operation-problem-quality');
+  const cancelButton = document.getElementById('operation-problem-cancel');
+  const continueButton = document.getElementById('operation-problem-continue');
+  const closeButton = document.getElementById('operation-problem-close');
+  const statusButton = document.getElementById('operation-problem-status');
+  let resolver = null, previousFocus = null;
+
+  function settle(value) {
+    if (!resolver) return;
+    const resolve = resolver;
+    resolver = null;
+    if (dialog.open) dialog.close();
+    previousFocus?.focus?.();
+    resolve(Boolean(value));
+  }
+  function qualityMarkup(data) {
+    if (!data || typeof data !== 'object') return '';
+    const range = data.actual_start && data.actual_end ? `${data.actual_start} — ${data.actual_end}` : '—';
+    return [
+      ['可用标的', `${data.usable_symbol_count ?? 0} / ${data.requested_symbol_count ?? 0}`],
+      ['有效区间', range],
+      ['可成交信号', `${data.executable_signals ?? 0} / ${data.selected_signals ?? 0}`],
+    ].map(([label, value]) => `<div><span>${esc(label)}</span><strong title="${esc(value)}">${esc(value)}</strong></div>`).join('');
+  }
+  function open(problemValue, dataQuality = null) {
+    const problem = normalizeProblem(problemValue);
+    if (resolver) settle(false);
+    previousFocus = document.activeElement;
+    dialog.dataset.severity = problem.severity;
+    kicker.textContent = problem.can_continue ? '数据不完整 · 需要确认' : '操作已暂停';
+    title.textContent = problem.title;
+    message.textContent = problem.message;
+    action.textContent = problem.action;
+    action.hidden = !problem.action;
+    items.innerHTML = problem.items.map(item => `<li>${esc(item)}</li>`).join('');
+    items.hidden = problem.items.length === 0;
+    quality.innerHTML = qualityMarkup(dataQuality);
+    quality.hidden = !quality.innerHTML;
+    continueButton.hidden = !problem.can_continue;
+    cancelButton.textContent = problem.can_continue ? '取消' : '关闭';
+    dialog.showModal();
+    queueMicrotask(() => cancelButton.focus());
+    return new Promise(resolve => { resolver = resolve; });
+  }
+  cancelButton.addEventListener('click', () => settle(false));
+  closeButton.addEventListener('click', () => settle(false));
+  continueButton.addEventListener('click', () => settle(true));
+  statusButton.addEventListener('click', () => { settle(false); runtimeInfo.open(); });
+  dialog.addEventListener('cancel', event => { event.preventDefault(); settle(false); });
+  dialog.addEventListener('close', () => {
+    if (resolver) settle(false);
+  });
+  return {open};
+})();
+window.QuantMasterProblemDialog = operationProblemDialog;
+
+async function refreshBackendHealth() {
+  if (document.visibilityState === 'hidden') return;
+  try {
+    const data = await api('/api/health', {cache:'no-store'});
+    runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
+  } catch (error) {
+    const problem = error?.problem || normalizeProblem(null, {
+      id:'health-unreachable', severity:'error', source:'后台状态',
+      title:'无法读取后台状态', message:error?.message || '本地服务未响应',
+      action:'确认 QuantMaster 服务仍在运行，然后重试。',
+    });
+    runtimeInfo.resolve('request:GET:/api/health');
+    runtimeInfo.sync('health', [problem]);
+  }
+}
+queueMicrotask(refreshBackendHealth);
+setInterval(refreshBackendHealth, 30_000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshBackendHealth();
+});
+window.addEventListener('online', refreshBackendHealth);
 
 function reportLocalError(source, message, error) {
   if (error?.logged) return;
@@ -1507,6 +1886,72 @@ function createLoadProgress(container, title, kind = 'market') {
   };
 }
 
+async function readNdjsonEvents(path, opts = {}, onEvent) {
+  const method = String(opts?.method || 'GET').toUpperCase();
+  const source = sourceForPath(path), route = apiRoute(path);
+  const operationKey = runtimeInfo.begin(source, '后台任务正在处理', {path:`${method} ${route}`});
+  let requestId = '';
+  try {
+    const response = await fetch(path, opts);
+    requestId = response.headers.get('X-Request-ID') || '';
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw responseError(response, data, path, method, operationKey);
+    }
+    if (!response.body) throw new Error('当前浏览器不支持流式响应');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const consume = line => {
+      if (!line.trim()) return;
+      const event = JSON.parse(line);
+      requestId = event.request_id || event.error_id || requestId;
+      if (event.type === 'error') {
+        const problem = normalizeProblem(event.problem, {
+          id:`stream:${method}:${route}`, source, title:'后台任务未完成',
+          message:event.message || '数据流异常中断',
+          action:'重试一次；如仍失败，请复制请求编号排查后端日志。',
+          blocking:true,
+        });
+        runtimeInfo.add(problem.severity === 'warning' ? 'warning' : 'error', problem.source, problem.title, {
+          detail:problem.message, action:problem.action, requestId,
+          path:`${method} ${route}`, key:operationKey, revision:problem.revision,
+        });
+        throw new QuantApiError(`${problem.title}：${problem.message}`, {
+          problem, dataQuality:event.data_quality || null, requestId,
+          path:route, method, logged:true,
+        });
+      }
+      if (event.type === 'progress') runtimeInfo.phase(source, event, `${method} ${route}`, operationKey);
+      onEvent?.(event);
+    };
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream:!done});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      lines.forEach(consume);
+      if (done) break;
+    }
+    consume(buffer);
+    runtimeInfo.add('success', source, '后台任务已完成', {
+      requestId, path:`${method} ${route}`, key:operationKey,
+    });
+  } catch (error) {
+    if (!error?.logged) {
+      const network = error instanceof TypeError && /fetch/i.test(error.message || '');
+      runtimeInfo.add('error', source, network ? '无法连接本地服务' : '数据流意外中断', {
+        detail:network ? '请确认 QuantMaster 服务仍在运行，然后重试。' : error?.message,
+        action:network ? '确认 QuantMaster 服务仍在运行，然后重试。' : '重试一次；如仍失败，请复制诊断信息。',
+        requestId, path:`${method} ${route}`, key:operationKey,
+      });
+      if (error && typeof error === 'object') error.logged = true;
+    }
+    throw error;
+  }
+}
+window.QuantMasterNDJSON = readNdjsonEvents;
+
 async function streamJson(path, opts, onProgress) {
   const method = String(opts?.method || 'GET').toUpperCase();
   const source = sourceForPath(path), route = apiRoute(path);
@@ -1534,6 +1979,7 @@ async function streamJson(path, opts, onProgress) {
       if (event.type === 'result') result = event.data;
       if (event.type === 'error') streamError = {
         message:event.message || '数据任务失败', requestId:event.error_id || requestId,
+        problem:event.problem || null, dataQuality:event.data_quality || null,
       };
     };
     while (true) {
@@ -1546,13 +1992,20 @@ async function streamJson(path, opts, onProgress) {
     }
     consume(buffer);
     if (streamError) {
-      const error = new QuantApiError(`数据任务未完成：${streamError.message}`, {
-        requestId:streamError.requestId, path:route, method, logged:true,
-      });
-      runtimeInfo.add('error', source, '数据任务未完成', {
-        detail:streamError.message, requestId:streamError.requestId,
-        path:`${method} ${route}`, key:operationKey,
+      const problem = normalizeProblem(streamError.problem, {
+        id:`stream:${method}:${route}`, source, title:'数据任务未完成',
+        message:streamError.message,
         action:'已完成的结果会保留；重试一次，如仍失败请复制诊断信息。',
+        blocking:true,
+      });
+      const error = new QuantApiError(`${problem.title}：${problem.message}`, {
+        requestId:streamError.requestId, path:route, method, logged:true, problem,
+        dataQuality:streamError.dataQuality,
+      });
+      runtimeInfo.add(problem.severity === 'warning' ? 'warning' : 'error', problem.source, problem.title, {
+        detail:problem.message, requestId:streamError.requestId,
+        path:`${method} ${route}`, key:operationKey,
+        action:problem.action, revision:problem.revision,
       });
       throw error;
     }
@@ -1560,6 +2013,7 @@ async function streamJson(path, opts, onProgress) {
     runtimeInfo.add('success', source, '数据加载完成', {
       requestId, path:`${method} ${route}`, key:operationKey,
     });
+    ingestResponseProblems(result, operationKey);
     return result;
   } catch (error) {
     if (!error?.logged) {
@@ -1705,6 +2159,9 @@ if (restoredControl) {
 
 /* ---------- 我的标的 ---------- */
 let assetListsData = { favorites:[], following:[], holdings:[] };
+let assetListsLoaded = false;
+let assetListsError = '';
+let assetListsLoading = null;
 let activeAssetList = 'favorites';
 const assetListEmpty = {
   favorites:'暂无自选标的，可从右上方添加。',
@@ -1742,12 +2199,30 @@ function renderAssetList() {
       <td>${esc(item.as_of || '暂无缓存')}</td><td><button class="text-action" data-remove-asset="${activeAssetList}" data-symbol="${esc(item.symbol)}">移除</button></td></tr>`).join('')}</tbody></table>`;
 }
 
+function acceptAssetLists(data) {
+  assetListsData = data || {favorites:[], following:[], holdings:[]};
+  assetListsLoaded = true;
+  assetListsError = '';
+  renderAssetList();
+  if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
+}
+
 async function loadAssetLists(showError = true) {
+  if (assetListsLoading) return assetListsLoading;
+  assetListsError = '';
+  if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
+  assetListsLoading = api('/api/assets/lists');
   try {
-    assetListsData = await api('/api/assets/lists');
-    renderAssetList();
+    acceptAssetLists(await assetListsLoading);
+    return assetListsData;
   } catch (error) {
+    assetListsLoaded = false;
+    assetListsError = error.message || '无法读取列表状态';
     if (showError) document.getElementById('asset-list').innerHTML = `<div class="err">${esc(error.message)}</div>`;
+    if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
+    return null;
+  } finally {
+    assetListsLoading = null;
   }
 }
 
@@ -1763,14 +2238,15 @@ document.getElementById('asset-add-form').addEventListener('submit', async event
   const values = new FormData(form), listName = values.get('list_name');
   button.disabled = true;
   try {
-    assetListsData = await post(`/api/assets/lists/${encodeURIComponent(listName)}`, {
+    acceptAssetLists(await post(`/api/assets/lists/${encodeURIComponent(listName)}`, {
       symbol:values.get('symbol'), name:values.get('name'),
-    });
+    }));
     activeAssetList = listName;
     const selected = listName;
     form.reset();
     form.elements.list_name.value = selected;
     renderAssetList();
+    queueMarketReload();
   } catch (error) { reportLocalError('我的标的', '添加标的失败', error); }
   button.disabled = false;
 });
@@ -1779,8 +2255,8 @@ document.getElementById('asset-list').addEventListener('click', async event => {
   if (remove) {
     remove.disabled = true;
     try {
-      assetListsData = await api(`/api/assets/lists/${remove.dataset.removeAsset}/${encodeURIComponent(remove.dataset.symbol)}`, {method:'DELETE'});
-      renderAssetList();
+      acceptAssetLists(await api(`/api/assets/lists/${remove.dataset.removeAsset}/${encodeURIComponent(remove.dataset.symbol)}`, {method:'DELETE'}));
+      queueMarketReload();
     } catch (error) { remove.disabled = false; reportLocalError('我的标的', '移除标的失败', error); }
     return;
   }
@@ -1791,7 +2267,16 @@ loadAssetLists();
 
 /* ---------- 市场 ---------- */
 let marketLoading = false;
+let marketReloadPending = false;
 let marketStreamCycle = 0;
+const PERSONAL_MARKET_GROUP = '我的股票';
+const marketGroupMeta = {
+  [PERSONAL_MARKET_GROUP]: {order:0, description:'自选、关注与实盘持有'},
+  'A股指数': {order:1, description:'A股主要基准'},
+  '全球市场': {order:2, description:'港股、美股与亚太指数'},
+  '商品与汇率': {order:3, description:'主要商品期货与货币'},
+};
+const assetMembershipLabels = {favorites:'自选', following:'关注', holdings:'持有'};
 
 function disposeMarketSparks() {
   for (const [id, chart] of Object.entries(charts)) {
@@ -1809,6 +2294,26 @@ function marketChangeSeries(nav) {
 function createMarketStreamRenderer(root) {
   const cycle = ++marketStreamCycle, groups = new Map(), entries = new Map();
   let index = 0, count = 0;
+  root.classList.add('market-groups');
+  function ensureGroup(group) {
+    if (groups.has(group)) return groups.get(group);
+    const meta = marketGroupMeta[group] || {order:99, description:''};
+    const section = document.createElement('section');
+    section.className = 'market-section';
+    section.dataset.marketGroup = group;
+    section.dataset.marketOrder = String(meta.order);
+    section.style.order = String(meta.order);
+    section.innerHTML = `<div class="market-section-head"><div class="market-section-heading">
+      <h2 class="market-section-title">${esc(group)}</h2><span class="market-section-count">0 只</span></div>
+      ${meta.description ? `<p class="market-section-description">${esc(meta.description)}</p>` : ''}</div>
+      <div class="mkt-grid"></div><div class="market-section-empty" hidden></div>`;
+    root.appendChild(section);
+    const entry = {section, grid:section.querySelector('.mkt-grid'),
+      count:section.querySelector('.market-section-count'),
+      empty:section.querySelector('.market-section-empty'), size:0};
+    groups.set(group, entry);
+    return entry;
+  }
   function draw(entry, item) {
     entry.item = item;
     entry.element.querySelector('.nm').innerHTML =
@@ -1816,6 +2321,10 @@ function createMarketStreamRenderer(root) {
     entry.element.querySelector('.px').className = `px ${cls(item.change_pct)}`;
     entry.element.querySelector('.px').innerHTML =
       `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
+    const memberships = (item.memberships || []).map(value => assetMembershipLabels[value]).filter(Boolean);
+    const membership = entry.element.querySelector('.mkt-memberships');
+    membership.textContent = memberships.join(' · ');
+    membership.hidden = memberships.length === 0;
     const status = item.cache_status === 'stale' || item.cache_status === 'refresh_failed'
       ? '本地缓存 · 数据源暂不可用' : '数据截至';
     entry.element.querySelector('.mkt-meta').textContent =
@@ -1845,28 +2354,49 @@ function createMarketStreamRenderer(root) {
         draw(entries.get(key), item);
         return false;
       }
-      if (!groups.has(group)) {
-        const title = document.createElement('div');
-        title.className = 'group-title'; title.textContent = group;
-        const grid = document.createElement('div'); grid.className = 'mkt-grid';
-        root.append(title, grid); groups.set(group, grid);
-      }
+      const groupEntry = ensureGroup(group);
       const sparkId = `spark-stream-${cycle}-${index++}`;
-      const element = document.createElement('div');
+      const element = document.createElement('button');
+      element.type = 'button';
       element.className = 'mkt-item stream-enter';
-      element.innerHTML = `<div class="nm"></div><div class="px"></div><div class="mkt-meta"></div>
-        <div class="spark" id="${sparkId}"></div>`;
-      groups.get(group).appendChild(element); count += 1;
+      element.innerHTML = `<span class="nm"></span><span class="px"></span><span class="mkt-memberships" hidden></span><span class="mkt-meta"></span>
+        <span class="spark" id="${sparkId}"></span>`;
+      groupEntry.grid.appendChild(element);
+      groupEntry.size += 1;
+      groupEntry.count.textContent = `${groupEntry.size} 只`;
+      groupEntry.empty.hidden = true;
+      count += 1;
       const entry = {element, sparkId, item}; entries.set(key, entry); draw(entry, item);
       return true;
     },
     addAll(data) {
       for (const [group, items] of Object.entries(data.groups || {})) {
         for (const item of items) this.add(group, item);
+        if (group !== PERSONAL_MARKET_GROUP) continue;
+        const entry = ensureGroup(group);
+        const configured = Number(data.group_counts?.[group] ?? items.length);
+        if (configured > entry.size) {
+          entry.count.textContent = `${entry.size} / ${configured} 只`;
+          entry.empty.textContent = entry.size
+            ? `另有 ${configured - entry.size} 只股票暂无可绘制行情，可点击“同步最新行情”重试。`
+            : `已添加 ${configured} 只股票，但暂无可绘制行情；请同步最新行情或检查数据源。`;
+          entry.empty.hidden = false;
+        } else if (!configured) {
+          entry.empty.textContent = '暂无自选、关注或持有股票；在上方添加后，这里会显示对应走势图。';
+          entry.empty.hidden = false;
+        }
       }
     },
     get count() { return count; },
   };
+}
+
+function queueMarketReload() {
+  if (marketLoading) {
+    marketReloadPending = true;
+    return;
+  }
+  void loadMarket('auto');
 }
 
 async function loadMarket(refresh = 'auto') {
@@ -1887,7 +2417,7 @@ async function loadMarket(refresh = 'auto') {
     });
     renderer.addAll(data);
     if (renderer.count) tracker.reveal();
-    tracker.finish(`已加载 ${renderer.count} 个市场标的，可点击查看 K 线`);
+    tracker.finish(`已加载 ${renderer.count} 个行情标的，可点击查看 K 线`);
     document.getElementById('mkt-stamp').textContent =
       '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
@@ -1896,6 +2426,10 @@ async function loadMarket(refresh = 'auto') {
       `<div class="err">市场数据加载失败：${esc(e.message)}\n已完成的卡片仍可继续使用。</div>`);
   } finally {
     marketLoading = false;
+    if (marketReloadPending) {
+      marketReloadPending = false;
+      queueMicrotask(() => loadMarket('auto'));
+    }
   }
 }
 document.getElementById('mkt-refresh').onsubmit = async e => {
@@ -1903,56 +2437,88 @@ document.getElementById('mkt-refresh').onsubmit = async e => {
   await loadMarket('incremental');
   busy(e.target, false);
 };
-let activeKline = { symbol: '', name: '', frequency: '1d' };
+function klineFrequencyName(frequency) {
+  return frequency === '1d' ? '日线' : frequency.replace('m', ' 分钟');
+}
+
+function klineStartDate(frequency) {
+  return frequency === '1d'
+    ? '2023-01-01'
+    : new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+}
+
+async function loadKlineSeries(symbol, frequency) {
+  const data = await api('/api/market/history/' + encodeURIComponent(symbol)
+    + `?frequency=${encodeURIComponent(frequency)}&start=${klineStartDate(frequency)}`);
+  if (!Array.isArray(data.kline) || !data.kline.length) {
+    throw new Error('所选周期暂无本地或远端数据');
+  }
+  return data;
+}
+
+function renderKlineSeries(chart, data) {
+  chart.__quantmasterKlineData = data;
+  const compact = chart.getDom().clientWidth < 520;
+  const closes = data.kline.map(k => k[2]);
+  const categories = data.kline.map(k => k[0]);
+  const ma = n => closes.map((_, i) =>
+    i + 1 < n ? null : +(closes.slice(i + 1 - n, i + 1).reduce((a, b) => a + b, 0) / n).toFixed(3));
+  const priceAxis = valAxis();
+  priceAxis.axisLabel = {...priceAxis.axisLabel, fontSize:compact ? 10 : 12};
+  const volumeAxis = valAxis(v => v >= 1e8
+    ? (v / 1e8).toFixed(1) + '亿' : (v / 1e4).toFixed(0) + '万');
+  Object.assign(volumeAxis, {gridIndex:1, splitNumber:compact ? 1 : 2});
+  volumeAxis.axisLabel = {...volumeAxis.axisLabel, show:!compact, fontSize:compact ? 9 : 12};
+  chart.setOption(baseOpt({
+    animationDuration:260, animationDurationUpdate:340,
+    animationEasing:'cubicOut', animationEasingUpdate:'cubicOut',
+    legend:{textStyle:{color:INK2},top:0,data:['MA5','MA20']},
+    grid:[{left:compact ? 46 : 60,right:compact ? 8 : 20,top:38,height:compact ? '50%' : '58%'},
+          {left:compact ? 46 : 60,right:compact ? 8 : 20,top:compact ? '69%' : '76%',height:compact ? '13%' : '12%'}],
+    xAxis:[
+      {type:'category',data:categories,axisLabel:{color:MUTED,fontSize:compact ? 9 : 12,hideOverlap:true,...(compact ? {interval:2} : {})},axisLine:{lineStyle:{color:AXIS}}},
+      {type:'category',gridIndex:1,data:categories,axisLabel:{show:false},axisLine:{lineStyle:{color:AXIS}},axisTick:{show:false}},
+    ],
+    yAxis:[priceAxis,volumeAxis],
+    dataZoom:[{type:'inside',xAxisIndex:[0,1]},
+      {type:'slider',xAxisIndex:[0,1],height:16,bottom:2,borderColor:AXIS,textStyle:{color:MUTED}}],
+    series:[
+      {type:'candlestick',data:data.kline.map(k => k.slice(1,5)),
+        itemStyle:{color:'#e66767',color0:'#0ca30c',borderColor:'#e66767',borderColor0:'#0ca30c'}},
+      {name:'MA5',type:'line',data:ma(5),showSymbol:false,lineStyle:{width:1.5}},
+      {name:'MA20',type:'line',data:ma(20),showSymbol:false,lineStyle:{width:1.5}},
+      {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,
+        data:data.kline.map(k => ({value:k[5],itemStyle:{color:k[2] >= k[1] ? 'rgba(230,103,103,.55)' : 'rgba(12,163,12,.55)'}})),
+        barMaxWidth:8,silent:true},
+    ],
+  }), {notMerge:true});
+}
+
+let activeKline = {symbol:'', name:'', frequency:'1d', request:0};
 async function showKline(symbol, name, frequency = '1d') {
-  activeKline = { symbol, name, frequency };
+  const request = activeKline.request + 1;
+  activeKline = {symbol, name, frequency, request};
   document.getElementById('kline-panel').style.display = '';
   document.querySelectorAll('#kline-frequency button').forEach(button => {
     const active = button.dataset.frequency === frequency;
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', String(active));
   });
-  const frequencyName = frequency === '1d' ? '日线' : frequency.replace('m', ' 分钟');
-  document.getElementById('kline-title').textContent = `${name}（${symbol}）· ${frequencyName}`;
-  const c = mkChart('kline', false);
-  c.showLoading({ textColor: INK2, maskColor: 'rgba(13,13,13,0.6)' });
+  document.getElementById('kline-title').textContent =
+    `${name}（${symbol}）· ${klineFrequencyName(frequency)}`;
+  const chart = mkChart('kline', false);
+  chart.showLoading({textColor:INK2,maskColor:'rgba(13,13,13,0.6)'});
   try {
-    const start = frequency === '1d'
-      ? '2023-01-01'
-      : new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
-    const data = await api('/api/market/history/' + encodeURIComponent(symbol)
-      + `?frequency=${encodeURIComponent(frequency)}&start=${start}`);
-    c.hideLoading();
-    if (!data.kline.length) throw new Error('所选周期暂无本地或远端数据');
-    const closes = data.kline.map(k => k[2]);
-    const categories = data.kline.map(k => k[0]);
-    const ma = n => closes.map((_, i) =>
-      i + 1 < n ? null : +(closes.slice(i + 1 - n, i + 1).reduce((a, b) => a + b, 0) / n).toFixed(3));
-    c.setOption(baseOpt({
-      animationDuration: 260, animationDurationUpdate: 340,
-      animationEasing: 'cubicOut', animationEasingUpdate: 'cubicOut',
-      legend: { textStyle: { color: INK2 }, top: 0, data: ['MA5', 'MA20'] },
-      grid: [{ left: 60, right: 20, top: 38, height: '58%' },
-             { left: 60, right: 20, top: '76%', height: '12%' }],
-      xAxis: [
-        { type: 'category', data: categories, axisLabel: { color: MUTED }, axisLine: { lineStyle: { color: AXIS } } },
-        { type: 'category', gridIndex: 1, data: categories, axisLabel: { show: false }, axisLine: { lineStyle: { color: AXIS } }, axisTick: { show: false } },
-      ],
-      yAxis: [valAxis(), { ...valAxis(v => v >= 1e8 ? (v / 1e8).toFixed(1) + '亿' : (v / 1e4).toFixed(0) + '万'), gridIndex: 1, splitNumber: 2 }],
-      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] },
-        { type: 'slider', xAxisIndex: [0, 1], height: 16, bottom: 2, borderColor: AXIS, textStyle: { color: MUTED } }],
-      series: [
-        { type: 'candlestick', data: data.kline.map(k => k.slice(1, 5)),
-          itemStyle: { color: '#e66767', color0: '#0ca30c', borderColor: '#e66767', borderColor0: '#0ca30c' } },
-        { name: 'MA5', type: 'line', data: ma(5), showSymbol: false, lineStyle: { width: 1.5 } },
-        { name: 'MA20', type: 'line', data: ma(20), showSymbol: false, lineStyle: { width: 1.5 } },
-        { name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
-          data: data.kline.map((k, i) => ({ value: k[5], itemStyle: { color: k[2] >= k[1] ? 'rgba(230,103,103,.55)' : 'rgba(12,163,12,.55)' } })),
-          barMaxWidth: 8, silent: true },
-      ],
-    }), { notMerge: true });
-    document.getElementById('kline-panel').scrollIntoView({ behavior: REDUCED_MOTION ? 'auto' : 'smooth' });
-  } catch (e) { c.hideLoading(); reportLocalError('K 线', '行情加载失败', e); }
+    const data = await loadKlineSeries(symbol, frequency);
+    if (request !== activeKline.request) return;
+    chart.hideLoading();
+    renderKlineSeries(chart, data);
+    document.getElementById('kline-panel').scrollIntoView({behavior:REDUCED_MOTION ? 'auto' : 'smooth'});
+  } catch (error) {
+    if (request !== activeKline.request) return;
+    chart.hideLoading();
+    reportLocalError('K 线', '行情加载失败', error);
+  }
 }
 document.getElementById('kline-frequency').addEventListener('click', e => {
   const frequency = e.target.dataset.frequency;
@@ -1966,6 +2532,247 @@ let decisionLoaded = false, decisionLoading = false;
 function fixed(v, digits = 2) { return v == null || !Number.isFinite(+v) ? '—' : (+v).toFixed(digits); }
 function directionLabel(value) { return value === 'up' ? '上行' : value === 'down' ? '下行' : '震荡'; }
 function actionLabel(value) { return value === 'buy' ? '入选' : value === 'watch' ? '观察' : '回避'; }
+const DECISION_PROFILES = {
+  risk_adjusted:'扣费风险收益', short_term:'短期命中收益', stable:'稳定可解释', legacy:'历史模型',
+};
+const DECISION_COMPONENTS = {rule:'规则', factor:'因子', ml:'ML'};
+const DECISION_PROFILE_STORAGE_KEY = 'quantmaster.decision.profile.v2';
+function decisionProfileLabel(value) { return DECISION_PROFILES[value] || value || '扣费风险收益'; }
+function decisionComponentLabel(value) { return DECISION_COMPONENTS[value] || String(value || '').toUpperCase(); }
+function decisionComponentState(component) {
+  if (component?.status === 'fallback') return '已回退';
+  if (component?.role === 'ml' && component?.status !== 'production') return '影子';
+  return '生效';
+}
+function decisionModelEvidenceMarkup(snapshot, selection = {}) {
+  if (!snapshot) return '';
+  const components = snapshot.components || [];
+  const fallback = Boolean(snapshot.fallback_active || components.some(item => item.status === 'fallback'));
+  const effective = snapshot.effective_weights || {};
+  const componentMarkup = components.map(component => {
+    const weight = component.effective_weight ?? effective[component.role] ?? component.weight;
+    const version = component.version_id || component.kind || 'built-in';
+    const status = decisionComponentState(component);
+    const note = component.fallback_reason || `${version} · ${component.scope || 'exact'}`;
+    return `<div class="decision-component" data-status="${esc(component.status || 'active')}">
+      <div class="decision-component-head"><strong title="${esc(component.name || version)}">${esc(decisionComponentLabel(component.role))} · ${esc(component.name || version)}</strong><span>${weight == null ? status : pct(weight)}</span></div>
+      <small>${esc(status)} · ${esc(note)}</small></div>`;
+  }).join('');
+  const warnings = [...new Set([...(snapshot.warnings || []), ...(selection.warnings || [])])];
+  const validation = selection.validation_summary || {};
+  const hash = snapshot.policy_hash || selection.policy_hash || '';
+  return `<details class="decision-model-evidence">
+    <summary><strong>模型依据与不可变快照</strong><span>${esc(snapshot.profile_label || decisionProfileLabel(snapshot.profile))} · ${components.length} 个组件 · ${fallback ? '自动回退中' : '运行正常'}</span></summary>
+    <div class="decision-model-body">
+      <div class="decision-component-grid">${componentMarkup || '<div class="decision-component"><div class="decision-component-head"><strong>规则基线</strong><span>100.00%</span></div><small>未匹配到 Quant Lab Champion</small></div>'}</div>
+      <div class="decision-policy-meta"><span>引擎 <code>${esc(snapshot.engine_version || 'hybrid-v2')}</code></span><span>快照 <code>${esc(hash ? hash.slice(0,16) : '—')}</code></span><span>校准样本 <code>${esc(validation.samples ?? '—')}</code></span><span>Brier <code>${fixed(validation.brier_score,3)}</code></span></div>
+      ${warnings.length ? `<ul class="decision-policy-warnings">${warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+    </div></details>`;
+}
+function decisionPickEvidenceMarkup(pick) {
+  const scores = Object.entries(pick.component_scores || {}).filter(([, value]) => value != null);
+  const rows = scores.map(([role, value]) => `<span class="pick-contribution"><b>${esc(decisionComponentLabel(role))}</b><em>${fixed(value,1)}</em><i style="--component-score:${Math.max(0,Math.min(100,+value || 0))}%"></i></span>`).join('');
+  const reasons = (pick.reasons || []).map(esc).join(' · ');
+  return `<details class="pick-evidence"><summary>查看贡献</summary><div class="pick-contributions">${rows || '<span>仅规则基线</span>'}</div><div class="pick-reasons">${reasons || '暂无补充说明'}</div></details>`;
+}
+
+const DECISION_KLINE_CHART_ID = 'decision-kline';
+const DECISION_KLINE_FREQUENCIES = [
+  ['1d','日线'], ['60m','60分'], ['15m','15分'], ['5m','5分'], ['1m','1分'],
+];
+const decisionKlineState = {
+  symbol:'', name:'', frequency:'1d', request:0, loading:false,
+  data:null, error:'', assetMessage:'', assetError:'',
+};
+const decisionAssetBusy = new Set();
+const decisionAssetLabels = {favorites:'自选', following:'关注'};
+
+function assetListContains(listName, symbol) {
+  return (assetListsData[listName] || []).some(item => item.symbol === symbol);
+}
+
+function decisionKlineBodyMarkup() {
+  if (decisionKlineState.loading) {
+    return `<div class="decision-kline-loading" role="status"><span>正在加载${esc(klineFrequencyName(decisionKlineState.frequency))}行情…</span><i></i><i></i><i></i></div>`;
+  }
+  if (decisionKlineState.error) {
+    return `<div class="decision-kline-error" role="alert"><div><strong>行情图未加载</strong><p>${esc(decisionKlineState.error)}。可切换周期或稍后重试。</p></div><button class="decision-inline-retry" type="button" data-decision-kline-retry>重新加载行情</button></div>`;
+  }
+  return `<div class="decision-kline-canvas" id="${DECISION_KLINE_CHART_ID}" role="img" aria-label="${esc(decisionKlineState.name)} ${esc(klineFrequencyName(decisionKlineState.frequency))} K 线与成交量"></div>`;
+}
+
+function decisionKlineDetailMarkup() {
+  const frequencies = DECISION_KLINE_FREQUENCIES.map(([value, label]) => {
+    const active = decisionKlineState.frequency === value;
+    return `<button type="button" data-decision-frequency="${value}" class="${active ? 'active' : ''}" aria-pressed="${active}">${label}</button>`;
+  }).join('');
+  return `<tr class="decision-detail-row" data-decision-detail="${esc(decisionKlineState.symbol)}"><td colspan="9">
+    <div class="decision-detail-shell" id="decision-kline-detail">
+      <div class="decision-detail-toolbar">
+        <div class="decision-detail-title"><span class="eyebrow">行情核查</span><strong>${esc(decisionKlineState.name)}</strong><span class="badge">${esc(decisionKlineState.symbol)}</span></div>
+        <div class="decision-detail-tools">
+          <div class="segmented decision-frequency" aria-label="行情周期">${frequencies}</div>
+          <div class="decision-list-actions" aria-label="自选与关注">
+            <button class="decision-list-toggle" type="button" data-decision-asset-toggle="favorites" aria-pressed="false">读取状态…</button>
+            <button class="decision-list-toggle" type="button" data-decision-asset-toggle="following" aria-pressed="false">读取状态…</button>
+          </div>
+          <button class="decision-detail-close" type="button" data-decision-kline-close aria-label="收起 ${esc(decisionKlineState.name)} 行情">收起</button>
+        </div>
+      </div>
+      <div class="decision-detail-feedback" data-decision-asset-feedback role="status" aria-live="polite"><span></span><button class="decision-inline-retry" type="button" data-decision-assets-retry hidden>重试列表状态</button></div>
+      ${decisionKlineBodyMarkup()}
+    </div></td></tr>`;
+}
+
+function updateDecisionAssetButtons() {
+  const root = document.querySelector('.decision-detail-row');
+  if (!root || !decisionKlineState.symbol) return;
+  const pending = decisionAssetBusy.size > 0;
+  root.querySelectorAll('[data-decision-asset-toggle]').forEach(button => {
+    const listName = button.dataset.decisionAssetToggle;
+    const label = decisionAssetLabels[listName];
+    const active = assetListsLoaded && assetListContains(listName, decisionKlineState.symbol);
+    button.disabled = pending || !assetListsLoaded;
+    button.classList.toggle('loading', pending);
+    button.setAttribute('aria-pressed', String(active));
+    button.textContent = pending && decisionAssetBusy.has(listName)
+      ? '处理中…' : !assetListsLoaded ? '读取状态…' : active ? `已${label}` : `加入${label}`;
+    button.setAttribute('aria-label', !assetListsLoaded
+      ? `${label}状态尚未读取`
+      : `${active ? '移出' : '加入'}${label}：${decisionKlineState.name}`);
+    button.title = active ? `再次点击移出${label}` : `加入${label}`;
+  });
+  const feedback = root.querySelector('[data-decision-asset-feedback]');
+  const text = feedback?.querySelector('span');
+  const retry = feedback?.querySelector('[data-decision-assets-retry]');
+  if (!feedback || !text || !retry) return;
+  feedback.classList.remove('success','error');
+  retry.hidden = true;
+  if (decisionKlineState.assetError) {
+    feedback.classList.add('error');
+    text.textContent = decisionKlineState.assetError;
+  } else if (assetListsError) {
+    feedback.classList.add('error');
+    text.textContent = `自选与关注状态读取失败：${assetListsError}`;
+    retry.hidden = false;
+  } else if (!assetListsLoaded) {
+    text.textContent = '正在读取自选与关注状态…';
+  } else if (decisionKlineState.assetMessage) {
+    feedback.classList.add('success');
+    text.textContent = decisionKlineState.assetMessage;
+  } else {
+    text.textContent = '快捷操作会同步到市场页“我的股票”。';
+  }
+}
+
+function mountDecisionKline({scroll = false} = {}) {
+  disposeChart(DECISION_KLINE_CHART_ID);
+  document.querySelectorAll('#decision-out .decision-detail-row').forEach(row => row.remove());
+  const triggers = Array.from(document.querySelectorAll('#decision-out [data-decision-kline-trigger]'));
+  triggers.forEach(trigger => {
+    const active = Boolean(decisionKlineState.symbol)
+      && trigger.dataset.decisionKlineTrigger === decisionKlineState.symbol;
+    trigger.setAttribute('aria-expanded', String(active));
+    trigger.closest('tr')?.classList.toggle('is-expanded', active);
+  });
+  if (!decisionKlineState.symbol) return;
+  const trigger = triggers.find(item => item.dataset.decisionKlineTrigger === decisionKlineState.symbol);
+  if (!trigger) return;
+  const row = trigger.closest('tr');
+  row.insertAdjacentHTML('afterend', decisionKlineDetailMarkup());
+  updateDecisionAssetButtons();
+  if (decisionKlineState.data && !decisionKlineState.loading && !decisionKlineState.error) {
+    const chart = mkChart(DECISION_KLINE_CHART_ID, false);
+    if (chart) {
+      renderKlineSeries(chart, decisionKlineState.data);
+      queueMicrotask(() => chart.resize());
+    }
+  }
+  if (scroll) row.nextElementSibling?.scrollIntoView({
+    behavior:REDUCED_MOTION ? 'auto' : 'smooth', block:'nearest',
+  });
+}
+
+function closeDecisionKline() {
+  decisionKlineState.request += 1;
+  Object.assign(decisionKlineState, {
+    symbol:'', name:'', frequency:'1d', loading:false, data:null,
+    error:'', assetMessage:'', assetError:'',
+  });
+  mountDecisionKline();
+}
+
+async function loadDecisionKline({scroll = false} = {}) {
+  if (!decisionKlineState.symbol) return;
+  const symbol = decisionKlineState.symbol, frequency = decisionKlineState.frequency;
+  const request = decisionKlineState.request + 1;
+  Object.assign(decisionKlineState, {request, loading:true, data:null, error:''});
+  mountDecisionKline({scroll});
+  try {
+    const data = await loadKlineSeries(symbol, frequency);
+    if (request !== decisionKlineState.request
+        || symbol !== decisionKlineState.symbol || frequency !== decisionKlineState.frequency) return;
+    Object.assign(decisionKlineState, {loading:false, data, error:''});
+  } catch (error) {
+    if (request !== decisionKlineState.request
+        || symbol !== decisionKlineState.symbol || frequency !== decisionKlineState.frequency) return;
+    Object.assign(decisionKlineState, {
+      loading:false, data:null, error:error.message || '无法读取行情',
+    });
+  }
+  mountDecisionKline();
+}
+
+function openDecisionKline(row) {
+  const symbol = row?.dataset.symbol;
+  if (!symbol) return;
+  if (decisionKlineState.symbol === symbol) {
+    closeDecisionKline();
+    return;
+  }
+  decisionKlineState.request += 1;
+  Object.assign(decisionKlineState, {
+    symbol, name:row.dataset.name || symbol, frequency:'1d', loading:false,
+    data:null, error:'', assetMessage:'', assetError:'',
+  });
+  if (!assetListsLoaded && !assetListsLoading) void loadAssetLists(false);
+  void loadDecisionKline({scroll:true});
+}
+
+async function toggleDecisionAsset(listName) {
+  if (!decisionKlineState.symbol || !assetListsLoaded || decisionAssetBusy.size) return;
+  if (!Object.prototype.hasOwnProperty.call(decisionAssetLabels, listName)) return;
+  const symbol = decisionKlineState.symbol, name = decisionKlineState.name;
+  const label = decisionAssetLabels[listName];
+  const active = assetListContains(listName, symbol);
+  const previous = assetListsData;
+  const items = active
+    ? (assetListsData[listName] || []).filter(item => item.symbol !== symbol)
+    : [{symbol, name}, ...(assetListsData[listName] || [])];
+  assetListsData = {...assetListsData, [listName]:items};
+  decisionAssetBusy.add(listName);
+  decisionKlineState.assetError = '';
+  decisionKlineState.assetMessage = active ? `已移出${label}` : `已加入${label}`;
+  renderAssetList();
+  updateDecisionAssetButtons();
+  try {
+    const data = active
+      ? await api(`/api/assets/lists/${listName}/${encodeURIComponent(symbol)}`, {method:'DELETE'})
+      : await post(`/api/assets/lists/${listName}`, {symbol, name});
+    acceptAssetLists(data);
+    queueMarketReload();
+  } catch (error) {
+    assetListsData = previous;
+    renderAssetList();
+    if (decisionKlineState.symbol === symbol) {
+      decisionKlineState.assetMessage = '';
+      decisionKlineState.assetError = `${active ? '移出' : '加入'}${label}未完成：${error.message || '请稍后重试'}`;
+    }
+  } finally {
+    decisionAssetBusy.delete(listName);
+    updateDecisionAssetButtons();
+  }
+}
 
 const REGIME_WINDOWS = {
   '7d':{label:'7D', days:7}, '14d':{label:'14D', days:14},
@@ -2016,24 +2823,31 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
   const validation = Object.fromEntries((market.forecast_validation || []).map(v => [v.horizon_days, v]));
   const tone = current.trend_score > .2 ? 'up' : current.trend_score < -.2 ? 'down' : '';
   const picks = selection.picks || [];
+  const snapshot = selection.model_snapshot || data.model_snapshot || data.policy || null;
+  const profile = selection.profile || snapshot?.profile || 'risk_adjusted';
+  const modelFallback = Boolean(snapshot?.fallback_active || (snapshot?.components || []).some(item => item.status === 'fallback'));
+  const activeComponents = (snapshot?.components || []).filter(item => item.status !== 'fallback').map(item => decisionComponentLabel(item.role));
+  const validationSummary = selection.validation_summary || {};
   out.innerHTML = `
     <div class="decision-summary reveal">
       <div class="regime-block">
         <div><div class="eyebrow">${esc(current.as_of)} · ${current.universe_size} 只标的</div>
-          <div class="regime-name ${tone}">${esc(current.state_label)}</div></div>
+          <div class="regime-name ${tone}">${esc(current.state_label)}</div>
+          <div class="decision-strategy-line"><span class="state-pill">${esc(selection.profile_label || snapshot?.profile_label || decisionProfileLabel(profile))}</span><span class="state-pill model-health ${modelFallback ? 'fallback' : ''}">${modelFallback ? '模型已回退' : '模型运行正常'}</span></div></div>
         <div class="regime-score"><strong class="${tone}">${fixed(current.bull_score, 1)}</strong><span class="hint">牛熊分 / 100</span></div>
       </div>
       <div class="metric-strip">
         <div class="metric-cell"><div class="k">建议仓位</div><div class="v">${pct(selection.recommended_exposure)}</div></div>
-        <div class="metric-cell"><div class="k">趋势分</div><div class="v ${cls(current.trend_score)}">${fixed(current.trend_score, 3)}</div></div>
+        <div class="metric-cell"><div class="k">有效组件</div><div class="v">${esc(activeComponents.join(' + ') || '规则')}</div></div>
         <div class="metric-cell"><div class="k">上涨宽度</div><div class="v">${pct(current.advance_ratio)}</div></div>
         <div class="metric-cell"><div class="k">站上 MA20</div><div class="v">${pct(current.above_ma20_ratio)}</div></div>
-        <div class="metric-cell"><div class="k">MACD 柱</div><div class="v ${cls(current.macd_hist)}">${fixed(current.macd_hist, 4)}</div></div>
-        <div class="metric-cell"><div class="k">成交额 5/20 日</div><div class="v">${fixed(current.amount_ratio, 2)}</div></div>
+        <div class="metric-cell"><div class="k">校准 Brier</div><div class="v">${fixed(validationSummary.brier_score, 3)}</div></div>
+        <div class="metric-cell"><div class="k">校准样本</div><div class="v">${validationSummary.samples ?? '—'}</div></div>
         <div class="metric-cell"><div class="k">20 日波动</div><div class="v">${pct(current.volatility_20d)}</div></div>
         <div class="metric-cell"><div class="k">决策周期</div><div class="v">${selectionReady ? `${selection.holding_horizon_days} 日` : '计算中'}</div></div>
       </div>
     </div>
+    ${decisionModelEvidenceMarkup(snapshot, selection)}
     <div class="decision-grid reveal reveal-delay">
       <div class="panel"><div class="panel-heading regime-heading">
         <div class="regime-heading-title"><h3>牛熊分与市场宽度</h3><span class="state-pill" id="regime-window-count">3M</span></div>
@@ -2055,14 +2869,14 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
     </div>
     <div class="panel reveal reveal-delay">
       <div class="panel-heading"><h3>今日入选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
-      <div class="table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>现价</th><th>资金量</th><th>预期</th><th>止损 / 止盈</th><th>依据</th></tr></thead>
-      <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击查看K线">
-        <td>${p.rank}</td><td><strong>${esc(p.name || '名称待同步')}</strong><div class="reason">${esc(p.symbol)} · ${esc(p.industry)}</div></td>
+      <div class="table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead>
+      <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击展开行情">
+        <td>${p.rank}</td><td><button class="decision-symbol-trigger" type="button" data-decision-kline-trigger="${esc(p.symbol)}" aria-expanded="false" aria-controls="decision-kline-detail"><strong>${esc(p.name || '名称待同步')}</strong><span class="reason">${esc(p.symbol)} · ${esc(p.industry)} · ${fixed(p.last_close,2)}</span></button></td>
         <td>${fixed(p.score, 1)}<div class="score-track"><div class="score-fill" style="--score:${Math.max(0,Math.min(1,p.score/100))}"></div></div></td>
-        <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${fixed(p.last_close, 2)}</td>
-        <td>${fixed(p.money_ratio, 2)}</td><td class="${cls(p.expected_return)}">${pct(p.expected_return)}</td>
+        <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${pct(p.probability_up)}</td>
+        <td class="${cls(p.expected_return_net ?? p.expected_return)}">${pct(p.expected_return_net ?? p.expected_return)}</td><td>${pct(p.confidence)}<div class="reason">一致 ${pct(p.model_agreement)}</div></td>
         <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td>
-        <td class="reason">${(p.reasons || []).map(esc).join(' · ')}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前条件下没有标的入选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
+        <td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前条件下没有标的入选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
       <div class="hint">${esc(selection.risk_note || '决策结果生成后将在此显示依据与风控位。')}</div>
     </div>
     <div class="decision-grid reveal reveal-delay">
@@ -2072,16 +2886,17 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         </tbody></table></div>
       <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
         <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
-        ${(data.history || []).map(h => `<tr><td class="snapshot-date">${esc(h.signal_date)}</td><td class="snapshot-period">${h.holding_horizon_days} 日</td><td class="snapshot-exposure">${pct(h.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(h.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
+        ${(data.history || []).map(h => `<tr><td class="snapshot-date">${esc(h.signal_date)}</td><td class="snapshot-period">${h.holding_horizon_days} 日<div class="reason">${esc(decisionProfileLabel(h.profile))}</div></td><td class="snapshot-exposure">${pct(h.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(h.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
         </tbody></table></div></div>
     </div>`;
 
   regimeHistory = market.past || [];
   renderRegimeChart(activeRegimeWindow);
+  mountDecisionKline();
 }
 
 function createDecisionStreamRenderer(root) {
-  const state = {market:null, sectors:null, selection:null, history:null};
+  const state = {market:null, sectors:null, policy:null, selection:null, history:null};
   let completed = 0, total = 0, successful = 0, preview = null, symbols = null, count = null;
   const ensurePreview = () => {
     if (preview) return;
@@ -2096,7 +2911,7 @@ function createDecisionStreamRenderer(root) {
   const render = () => {
     if (!state.market) return;
     if (state.sectors) state.market.sectors = state.sectors;
-    renderDecision({market:state.market, selection:state.selection, history:state.history}, root);
+    renderDecision({market:state.market, policy:state.policy, model_snapshot:state.policy, selection:state.selection, history:state.history}, root);
   };
   return {
     partial(partial) {
@@ -2116,6 +2931,7 @@ function createDecisionStreamRenderer(root) {
       }
       if (partial.kind === 'decision_market') state.market = partial.market;
       if (partial.kind === 'decision_sectors') state.sectors = partial.sectors;
+      if (partial.kind === 'decision_policy') state.policy = partial.policy;
       if (partial.kind === 'decision_selection') state.selection = partial.selection;
       if (partial.kind === 'decision_history') state.history = partial.history;
       render();
@@ -2131,6 +2947,7 @@ function createDecisionStreamRenderer(root) {
 async function loadDecision(form) {
   if (decisionLoading) return;
   decisionLoading = true;
+  closeDecisionKline();
   const out = document.getElementById('decision-out');
   busy(form, true, '生成中…');
   const tracker = createLoadProgress(out, '准备每日决策', 'decision');
@@ -2139,7 +2956,7 @@ async function loadDecision(form) {
     const fd = new FormData(form);
     const body = {
       universe:fd.get('universe'), start:fd.get('start'), horizon:+fd.get('horizon'),
-      top_n:+fd.get('top_n'), sector_top:10, history:2600, save:true,
+      profile:fd.get('profile') || 'risk_adjusted', top_n:+fd.get('top_n'), sector_top:10, history:2600, save:true,
     };
     const data = await streamJson('/api/decision/dashboard/stream', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
@@ -2152,7 +2969,7 @@ async function loadDecision(form) {
     });
     renderer.finish(data);
     tracker.reveal();
-    tracker.finish(`决策已完成 · ${data.selection?.picks?.length || 0} 只入选`);
+    tracker.finish(`决策已完成 · ${decisionProfileLabel(data.selection?.profile)} · ${data.selection?.picks?.length || 0} 只入选`);
     decisionLoaded = true;
   } catch (err) {
     tracker.fail(err.message);
@@ -2166,7 +2983,16 @@ async function loadDecision(form) {
   decisionLoading = false;
   busy(form, false);
 }
-document.getElementById('decision-form').onsubmit = e => { e.preventDefault(); loadDecision(e.target); };
+const decisionForm = document.getElementById('decision-form');
+const storedDecisionProfile = localStorage.getItem(DECISION_PROFILE_STORAGE_KEY);
+if (storedDecisionProfile && DECISION_PROFILES[storedDecisionProfile]) {
+  const storedProfileInput = decisionForm.querySelector(`input[name="profile"][value="${storedDecisionProfile}"]`);
+  if (storedProfileInput) storedProfileInput.checked = true;
+}
+decisionForm.addEventListener('change', event => {
+  if (event.target.name === 'profile') localStorage.setItem(DECISION_PROFILE_STORAGE_KEY, event.target.value);
+});
+decisionForm.onsubmit = e => { e.preventDefault(); loadDecision(e.target); };
 document.getElementById('decision-out').addEventListener('click', e => {
   const preview = e.target.closest('[data-preview-symbol]');
   if (preview) {
@@ -2176,10 +3002,32 @@ document.getElementById('decision-out').addEventListener('click', e => {
   }
   const windowButton = e.target.closest('[data-regime-window]');
   if (windowButton) { renderRegimeChart(windowButton.dataset.regimeWindow); return; }
+  const assetToggle = e.target.closest('[data-decision-asset-toggle]');
+  if (assetToggle) { void toggleDecisionAsset(assetToggle.dataset.decisionAssetToggle); return; }
+  if (e.target.closest('[data-decision-assets-retry]')) {
+    decisionKlineState.assetError = '';
+    void loadAssetLists(false);
+    return;
+  }
+  if (e.target.closest('[data-decision-kline-retry]')) {
+    void loadDecisionKline();
+    return;
+  }
+  if (e.target.closest('[data-decision-kline-close]')) { closeDecisionKline(); return; }
+  const frequencyButton = e.target.closest('[data-decision-frequency]');
+  if (frequencyButton) {
+    const frequency = frequencyButton.dataset.decisionFrequency;
+    if (frequency !== decisionKlineState.frequency) {
+      decisionKlineState.frequency = frequency;
+      void loadDecisionKline();
+    }
+    return;
+  }
+  const trigger = e.target.closest('[data-decision-kline-trigger]');
+  if (trigger) { openDecisionKline(trigger.closest('tr[data-symbol]')); return; }
   const row = e.target.closest('tr[data-symbol]');
   if (!row) return;
-  document.querySelector('nav button[data-tab="market"]').click();
-  showKline(row.dataset.symbol, row.dataset.name || row.dataset.symbol, '1d');
+  if (!e.target.closest('button,a,input,select,textarea,details,summary')) openDecisionKline(row);
 });
 
 /* ---------- 因子 ---------- */
@@ -2264,21 +3112,65 @@ document.getElementById('validate-form').onsubmit = async e => {
 };
 
 /* ---------- 回测 ---------- */
+function backtestQualityMarkup(data) {
+  const quality = data?.data_quality;
+  if (!quality) return '';
+  const partial = quality.status === 'partial';
+  const warnings = (data.warnings || []).map(value => normalizeProblem(value, {
+    severity:'warning', source:'策略回测', title:'数据注意事项',
+  }));
+  const benchmark = {
+    complete:'已加载', unavailable:'不可用', not_requested:'未选择', not_checked:'未检查',
+  }[quality.benchmark_status] || quality.benchmark_status || '—';
+  const range = quality.actual_start && quality.actual_end
+    ? `${quality.actual_start} — ${quality.actual_end}` : '—';
+  const cells = [
+    ['可用标的', `${quality.usable_symbol_count ?? 0} / ${quality.requested_symbol_count ?? 0}`],
+    ['实际区间', range],
+    ['有效交易日', `${quality.trading_days ?? 0} 天`],
+    ['可成交信号日', `${quality.executable_signal_dates ?? 0} / ${quality.valid_signal_dates ?? 0}`],
+    ['基准', benchmark],
+  ].map(([label, value]) => `<div><span>${esc(label)}</span><strong title="${esc(value)}">${esc(value)}</strong></div>`).join('');
+  const warningList = warnings.length
+    ? `<ul class="quality-warning-list">${warnings.map(item => `<li>${esc(item.title)}：${esc(item.message)}</li>`).join('')}</ul>` : '';
+  return `<section class="quality-summary" data-status="${partial ? 'partial' : 'complete'}" aria-label="回测数据质量">
+    <div class="quality-summary-head"><strong>数据质量</strong><span class="quality-state">${partial ? '部分数据' : '完整'}</span></div>
+    <div class="quality-summary-grid">${cells}</div>${warningList}</section>`;
+}
+
 document.getElementById('bt-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   const out = document.getElementById('bt-out');
   out.innerHTML = '<div class="msg">回测中…</div>';
   try {
     const fd = new FormData(form);
-    const data = await post('/api/backtest/run', {
+    const body = {
       strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
       top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark'),
       holding_days:+fd.get('holding_days'),
       stop_loss: fd.get('stop_loss') ? +fd.get('stop_loss') : null,
       take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null,
-      weighting: fd.get('weighting') });
+      weighting: fd.get('weighting'), allow_partial:false,
+    };
+    let data;
+    while (!data) {
+      try {
+        data = await post('/api/backtest/run', body);
+      } catch (error) {
+        if (error?.problem) {
+          const continueWithPartial = await operationProblemDialog.open(error.problem, error.dataQuality);
+          if (continueWithPartial && error.problem.can_continue && !body.allow_partial) {
+            body.allow_partial = true;
+            out.innerHTML = '<div class="msg">正在用可用数据重新计算…</div>';
+            continue;
+          }
+        }
+        throw error;
+      }
+    }
     const m = data.metrics;
     out.innerHTML = `
+      ${backtestQualityMarkup(data)}
       <div class="cards">
         <div class="card"><div class="k">累计收益</div><div class="v ${cls(m.total_return)}">${pct(m.total_return)}</div></div>
         <div class="card"><div class="k">年化收益</div><div class="v ${cls(m.annual_return)}">${pct(m.annual_return)}</div></div>
@@ -2315,8 +3207,8 @@ document.getElementById('bt-form').onsubmit = async e => {
       series: [{ name: '回撤', type: 'line', data: data.drawdown, showSymbol: false,
         lineStyle: { width: 2, color: '#d55181' }, areaStyle: { opacity: 0.25, color: '#d55181' } }],
     }));
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
+  } catch (err) { out.innerHTML = `<div class="err" role="alert">${esc(err.message)}</div>`; }
+  finally { busy(form, false); }
 };
 
 function yearlyTable(rows) {
@@ -2541,5 +3433,6 @@ document.getElementById('cash-form').onsubmit = async e => {
 <script src="/static/news.js"></script>
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>
+<script src="/static/trading.js"></script>
 </body>
 </html>

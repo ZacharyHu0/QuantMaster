@@ -45,3 +45,27 @@ def test_asset_lists_api_includes_cached_quotes_and_holdings():
     response = client.delete("/api/assets/lists/favorites/600519.SH")
     assert response.status_code == 200
     assert response.json()["favorites"] == []
+
+
+def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
+    from quantmaster.server import app as app_module
+
+    AssetListStore().add("favorites", "600519", "贵州茅台")
+    AssetListStore().add("following", "600519", "贵州茅台")
+    Ledger().add_trade(TradeRecord(
+        date="2026-07-20", symbol="600519.SH", side="buy", price=1500.0, shares=10,
+    ))
+    dates = pd.bdate_range("2026-07-20", periods=3)
+    bars = pd.DataFrame({"close": [1500.0, 1515.0, 1530.0]}, index=dates)
+    monkeypatch.setattr("quantmaster.data.load_history", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(app_module, "_market_groups", dict)
+
+    result = app_module._market_overview_data("2026-07-01")
+
+    items = result["groups"][app_module.PERSONAL_MARKET_GROUP]
+    assert result["group_counts"][app_module.PERSONAL_MARKET_GROUP] == 1
+    assert len(items) == 1
+    assert items[0]["symbol"] == "600519.SH"
+    assert items[0]["name"] == "贵州茅台"
+    assert items[0]["memberships"] == ["favorites", "following", "holdings"]
+    assert items[0]["nav"]

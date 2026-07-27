@@ -14,8 +14,15 @@ from quantmaster.lab.dataset import (
     create_snapshot,
     load_csi800_members_as_of,
 )
-from quantmaster.lab.ml import engineer_features, make_samples, train
+from quantmaster.lab.ml import (
+    artifact_sha256,
+    engineer_features,
+    make_samples,
+    predict_panel,
+    train,
+)
 from quantmaster.lab.models import FactorSpec
+from quantmaster.lab.service import LabService
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.validation import benjamini_hochberg, validate_factor_values
 
@@ -174,6 +181,106 @@ def test_feature_engineering_and_ridge_training(tmp_path):
     assert (tmp_path / "model" / "ridge.npz").is_file()
 
 
+def test_ridge_artifact_inference_and_integrity_check(tmp_path):
+    _config(tmp_path)
+    panel = _panel(days=240, symbols=6)
+    samples, targets, metadata, names = make_samples(panel, sequence_length=10)
+    model_dir = tmp_path / "lab_artifacts" / "test"
+    result = train(
+        "ridge", samples, targets, metadata, artifact_dir=model_dir,
+        config={"alpha": 1.0},
+    )
+    result.pop("_predicted")
+    result.pop("_actual")
+    result.pop("_validation_metadata")
+    artifact = model_dir / "ridge.npz"
+    manifest = {
+        "schema_version": 1,
+        "kind": "ridge",
+        "features": names,
+        "sequence_length": 10,
+        "minimum_feature_coverage": 0.80,
+        "artifact": artifact.relative_to(tmp_path).as_posix(),
+        "artifact_sha256": artifact_sha256(artifact),
+    }
+    manifest_path = model_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    predicted = predict_panel(panel, {
+        "manifest": manifest_path.relative_to(tmp_path).as_posix(),
+    })
+    assert predicted.shape == panel["close"].shape
+    assert predicted.iloc[-1].notna().any()
+
+    artifact.write_bytes(artifact.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="完整性"):
+        predict_panel(panel, {"manifest": manifest_path.relative_to(tmp_path).as_posix()})
+
+
+def test_learned_model_is_shadow_candidate_until_manual_champion_promotion(
+    tmp_path, monkeypatch,
+):
+    _config(tmp_path)
+    panel = _panel(days=260, symbols=8)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    snapshot = store.save_snapshot({
+        "snapshot_hash": "training-snapshot",
+        "research_quality": "sandbox",
+        "universe": "demo",
+    })
+    monkeypatch.setattr(
+        service, "_context",
+        lambda universe, start, end, progress=None: (panel, None, snapshot),
+    )
+    report = {
+        "coverage": 0.96,
+        "best_horizon": 3,
+        "candidate_score": 78.0,
+        "max_existing_correlation": 0.31,
+        "horizons": {"3": {
+            "horizon": 3, "oos_rank_ic": 0.052, "oos_icir": 0.61,
+            "q_value": 0.03, "folds": [],
+        }},
+        "gates": {
+            "passed": True, "hard_failures": [], "soft_failures": [],
+            "override_allowed": True,
+        },
+    }
+    monkeypatch.setattr(
+        "quantmaster.lab.validation.validate_factor_values",
+        lambda *args, **kwargs: json.loads(json.dumps(report)),
+    )
+
+    result = service.train_model(
+        model="ridge", universe="demo", start="2023-01-01", end="2024-01-01",
+        horizon=3, sequence_length=10, config={"alpha": 1.0},
+    )
+    version = store.version(result["version_id"])
+    assert version["spec"]["kind"] == "learned"
+    assert version["status"] == "candidate"
+    assert (tmp_path / result["manifest"]).is_file()
+    manifest = json.loads((tmp_path / result["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["fit_through"] < manifest["validation_start"]
+    assert store.active_deployments() == []
+
+    store.approve(version["id"], actor="tester")
+    deployed = store.deploy(
+        version["id"], universe="demo", horizon=3, actor="tester",
+        profile="stable", scope="exact",
+    )
+    assert deployed["role"] == "ml"
+    from quantmaster.decision import hybrid_daily_selection, resolve_policy
+
+    policy = resolve_policy("demo", 3, "stable", symbols=list(panel["close"]), store=store)
+    assert any(item["role"] == "ml" for item in policy["components"])
+    selection = hybrid_daily_selection(
+        panel, top_n=3, horizon=3, profile="stable", universe="demo",
+        policy_snapshot=policy,
+    )
+    assert selection["model_snapshot"]["effective_weights"]["ml"] <= 0.15
+    assert selection["shadow_model"] is None
+
+
 def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     _config(tmp_path)
     panel = _panel(days=620, symbols=25)
@@ -233,4 +340,7 @@ def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
     assert "qm lab doctor" in script
     assert "qm lab worker" in script
     assert "aria-disabled" in script
+    assert "data-deploy-profile" in script
+    assert "data-deploy-scope" in script
+    assert "产出版本" in script
     assert "quantmaster:settings-applied" in script
