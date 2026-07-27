@@ -177,5 +177,12 @@ Web 界面「实盘」页也可以逐笔录入。
 不扣成本的回测才是骗人的。
 
 **Q: Mac / Windows 都能用？**
-是。纯 Python + 浏览器界面，无平台绑定。后续计划提供 Tauri 桌面壳与
-PyInstaller 单文件包。
+是。纯 Python + 浏览器界面，无平台绑定。桌面模式：`qm app`（启动服务并自动
+打开浏览器）。也可自行打包单文件可执行程序：
+
+```bash
+pip install pyinstaller
+cd packaging && pyinstaller quantmaster.spec
+# 产物 dist/QuantMaster(.exe)，双击即用；仓库打 v* tag 时 CI 会自动
+# 构建 Mac/Windows/Linux 三平台版本并附到 GitHub Release
+```

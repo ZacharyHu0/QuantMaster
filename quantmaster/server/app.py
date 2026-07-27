@@ -312,6 +312,63 @@ def news_recent(limit: int = 50) -> dict:
     return {"items": NewsStore().recent(limit=limit)}
 
 
+# ---------- 模拟盘 ----------
+
+class PaperRunRequest(BaseModel):
+    factor: str = "mom_20d"
+    universe: str = "demo"
+    top_n: int = 5
+    rebalance: str = "W"
+    initial_capital: float = 1_000_000.0
+
+
+@app.post("/api/paper/run")
+def paper_run(req: PaperRunRequest) -> dict:
+    """按策略最新信号执行一次模拟盘调仓（行情走缓存，缺失才触网）。"""
+    from quantmaster.backtest.paper import PaperTrader
+    from quantmaster.backtest.strategy import FactorStrategy
+    from quantmaster.data.universe import load_universe
+    from quantmaster.factors.fundamental import resolve_factor
+
+    try:
+        symbols = load_universe(req.universe)
+        end = str(pd.Timestamp.now().date())
+        start = str((pd.Timestamp.now() - pd.Timedelta(days=400)).date())
+        trader = PaperTrader(initial_capital=req.initial_capital)
+        strategy = FactorStrategy(resolve_factor(req.factor, symbols, start, end),
+                                  top_n=req.top_n, rebalance=req.rebalance)
+        return trader.run_once(strategy, symbols)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/paper/report")
+def paper_report() -> dict:
+    """模拟盘报告 + TWR 净值序列（行情只走本地缓存，不触网）。"""
+    from quantmaster.data.storage import BarStore
+    from quantmaster.portfolio import Ledger, daily_nav, ledger_report, nav_warnings
+
+    ledger = Ledger(name="paper")
+    trades = ledger.trades()
+    store = BarStore()
+    prices: dict[str, pd.Series] = {}
+    price_map: dict[str, float] = {}
+    for symbol in (sorted(trades["symbol"].unique()) if len(trades) else []):
+        cached = store.get(symbol)
+        if cached is not None and not cached.empty:
+            prices[symbol] = cached["close"]
+            price_map[symbol] = float(cached["close"].dropna().iloc[-1])
+    report = ledger_report(ledger, prices=price_map)
+    payload: dict = {"report": report, "dates": [], "twr": [], "warnings": []}
+    if len(trades) and prices:
+        nav = daily_nav(ledger, pd.DataFrame(prices))
+        if not nav.empty:
+            payload["dates"] = [str(d.date()) for d in nav.index]
+            payload["twr"] = [round(float(v), 6) for v in nav["twr_nav"]]
+            payload["warnings"] = nav_warnings(nav)
+    return payload
+
+
 # ---------- 实盘账本 ----------
 
 class TradeIn(BaseModel):

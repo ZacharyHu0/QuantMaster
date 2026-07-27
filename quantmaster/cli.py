@@ -46,6 +46,16 @@ def _load_panel(universe: str, start: str, end: str):
 def cmd_serve(args) -> None:
     from quantmaster.server.app import serve
 
+    if getattr(args, "open_browser", False):
+        import threading
+        import webbrowser
+
+        from quantmaster.config import get_config
+
+        cfg = get_config().server
+        threading.Timer(
+            1.5, webbrowser.open, args=(f"http://{cfg.host}:{cfg.port}",)
+        ).start()
     serve()
 
 
@@ -334,7 +344,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--start", default="2022-01-01")
         p.add_argument("--end", default=None)
 
-    sub.add_parser("serve", help="启动 Web 界面").set_defaults(func=cmd_serve)
+    p = sub.add_parser("serve", help="启动 Web 界面")
+    p.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
+    p.set_defaults(func=cmd_serve, open_browser=True)
 
     p = sub.add_parser("fetch", help="预取行情到本地缓存")
     common(p)

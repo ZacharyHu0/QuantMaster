@@ -2,6 +2,17 @@
 
 自动化开发过程的阶段性记录（新条目在上）。
 
+## 2026-07-27 · 模拟盘 Web 界面 + 桌面化
+
+- 仪表盘新增「模拟盘」标签页：选因子一键调仓、TWR 净值曲线、持仓明细、
+  成交回执；API 新增 /api/paper/run 与 /api/paper/report
+- 桌面模式 `qm app`：启动服务并自动打开浏览器
+- PyInstaller 打包配置（packaging/），本地实测单文件可执行程序 CLI/服务/
+  静态资源全部正常；GitHub Actions release 工作流：打 v* tag 自动构建
+  Mac/Windows/Linux 三平台产物
+- ⏳ 待用户提供：DeepSeek 分享链接内容（CloudFront 拦截数据中心访问，
+  无法直接抓取），拿到后逐条核对做专项优化
+
 ## 2026-07-26 · 基本面因子全面接入（Web/CLI 统一入口）
 
 - 新增 `resolve_factor` 统一因子入口：表达式 / 内置量价 / 基本面（ep/bp/
