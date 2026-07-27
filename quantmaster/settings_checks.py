@@ -175,6 +175,7 @@ def check_data_sources(timeout: float = 8.0) -> dict[str, Any]:
             package, result = future.result()
             sources[package] = result
 
+    from quantmaster.data.instruments import instrument_diagnostics
     from quantmaster.data.resilience import PROVIDER_HEALTH
 
     proxies: dict[str, str] = {}
@@ -193,6 +194,7 @@ def check_data_sources(timeout: float = 8.0) -> dict[str, Any]:
     return _result(
         overall, "数据源依赖、真实行情端点与熔断状态检测完成", started,
         sources=sources, circuits=PROVIDER_HEALTH.status(), proxies=proxies,
+        security_master=instrument_diagnostics(),
     )
 
 

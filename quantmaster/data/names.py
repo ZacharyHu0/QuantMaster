@@ -1,4 +1,8 @@
-"""股票名称缓存：内置名称优先，缺失项由 AKShare 补全并长期复用。"""
+"""证券名称兼容入口。
+
+名称现由 ``security_master.sqlite`` 统一维护；保留这些函数以兼容旧调用方。
+读取永不隐式联网，显式刷新失败时也始终退回随包快照和本地历史。
+"""
 
 from __future__ import annotations
 
@@ -10,86 +14,93 @@ import time
 from pathlib import Path
 
 from quantmaster.config import get_config
-from quantmaster.data.universe import DEMO_STOCK_NAMES
+from quantmaster.data.instruments import InstrumentStore
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL_DAYS = 7
 
-
-def _cache_path() -> Path:
+def _legacy_cache_path() -> Path:
     return get_config().data_root / "stock_names.json"
 
 
 def _read_cache() -> tuple[dict[str, str], float]:
-    path = _cache_path()
-    if not path.exists():
-        return {}, 0.0
+    """保留旧扩展的私有兼容接口；运行时检索仍以 SQLite 为准。"""
+    path = _legacy_cache_path()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        names = data.get("names", {})
-        return ({str(k): str(v) for k, v in names.items() if v}, float(data.get("updated_at", 0)))
-    except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        return {}, 0.0
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return ({str(key): str(value) for key, value in payload.get("names", {}).items() if value},
+                float(payload.get("updated_at") or 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}, 0
 
 
-def save_stock_names(names: dict[str, str]) -> None:
-    """原子保存名称映射，避免服务中断留下半份 JSON。"""
-    path = _cache_path()
+def _write_legacy_cache(names: dict[str, str]) -> None:
+    path = _legacy_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temp = Path(temp_name)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump({"updated_at": time.time(), "names": names}, handle, ensure_ascii=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
+        os.replace(temporary, path)
     finally:
-        temp.unlink(missing_ok=True)
+        Path(temporary).unlink(missing_ok=True)
 
 
 def cached_stock_names(symbols: list[str]) -> dict[str, str]:
-    """只读内置名称和本地缓存；候选浏览不会隐式触网。"""
-    requested = list(dict.fromkeys(str(symbol) for symbol in symbols))
-    cached, _ = _read_cache()
-    available = {**DEMO_STOCK_NAMES, **cached}
-    return {symbol: available[symbol] for symbol in requested if symbol in available}
+    return InstrumentStore().names(symbols)
 
 
 def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover - 网络
-    """一次 AKShare 全市场快照补齐指定代码；底层已统一重试。"""
+    """从独立的 A 股快照补齐缺失名称，并写回证券主数据。"""
     from quantmaster.data.akshare_source import AkshareSource
 
-    requested_by_code = {symbol.split(".")[0]: symbol for symbol in symbols}
-    snapshot = AkshareSource().spot(symbols)
-    result: dict[str, str] = {}
+    store = InstrumentStore()
+    requested = {str(symbol).upper() for symbol in symbols}
+    snapshot = AkshareSource().spot(list(requested))
+    records = []
     for _, row in snapshot.iterrows():
-        symbol = requested_by_code.get(str(row.get("code", "")).zfill(6))
+        code = str(row.get("code", "")).zfill(6)
+        matches = [symbol for symbol in requested if symbol.partition(".")[0] == code]
         name = str(row.get("name", "")).strip()
-        if symbol and name and name.lower() != "nan":
-            result[symbol] = name
-    return result
+        for symbol in matches:
+            current = store.get(symbol)
+            if current and name and name.lower() != "nan":
+                value = current.to_dict()
+                value.update({"name": name, "source": "akshare:spot", "source_priority": 40})
+                records.append(value)
+    store.upsert(records, source="akshare:spot", source_priority=40)
+    store.update_sync_state("akshare:spot", status="success", record_count=len(records))
+    return store.names(requested)
 
 
 def load_stock_names(symbols: list[str], refresh: bool = False) -> dict[str, str]:
-    """返回指定代码的名称；任何联网失败都退回内置/旧缓存。"""
-    requested = list(dict.fromkeys(str(symbol) for symbol in symbols))
-    cached, updated_at = _read_cache()
-    available = {**DEMO_STOCK_NAMES, **cached}
-    missing = [symbol for symbol in requested if symbol not in available]
-    fresh = time.time() - updated_at < CACHE_TTL_DAYS * 86400
-    if not refresh and not missing and (fresh or all(s in DEMO_STOCK_NAMES for s in requested)):
-        return {symbol: available[symbol] for symbol in requested if symbol in available}
+    requested = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    store = InstrumentStore()
+    cached = store.names(requested)
+    if refresh:
+        try:
+            cached.update(fetch_stock_names(requested))
+        except Exception as exc:
+            store.update_sync_state("akshare:spot", status="error", error=str(exc))
+            logger.warning("证券名称刷新失败，继续使用本地主数据: %s", exc)
+    _write_legacy_cache(cached)
+    return cached
 
-    targets = requested if refresh or not fresh else missing
-    try:
-        fetched = fetch_stock_names(targets)
-        if fetched:
-            cached.update(fetched)
-            save_stock_names(cached)
-            available.update(fetched)
-    except Exception as exc:
-        logger.warning("股票名称补全失败，使用本地缓存: %s", exc)
-    return {symbol: available[symbol] for symbol in requested if symbol in available}
+
+def save_stock_names(names: dict[str, str]) -> None:
+    """把旧名称映射并入主数据；未知代码不会被虚构成可交易标的。"""
+    store = InstrumentStore()
+    records = []
+    for symbol, name in names.items():
+        current = store.get(symbol)
+        if current and str(name).strip():
+            value = current.to_dict()
+            value.update({"name": str(name).strip(), "source": "legacy", "source_priority": 20})
+            records.append(value)
+    store.upsert(records, source="legacy", source_priority=20)
+    cached, _ = _read_cache()
+    cached.update({str(symbol).upper(): str(name) for symbol, name in names.items() if name})
+    _write_legacy_cache(cached)

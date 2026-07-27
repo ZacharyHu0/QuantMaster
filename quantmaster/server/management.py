@@ -418,10 +418,16 @@ class UniversePreview(BaseModel):
     kind: Literal["manual", "index"] = "manual"
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
     index_symbol: str = "000300.SH"
+    selections: dict[str, str] = Field(default_factory=dict)
 
 
 class UniverseNameRefresh(BaseModel):
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
+
+
+class InstrumentResolveBody(BaseModel):
+    queries: list[str] = Field(default_factory=list, max_length=10_000)
+    selections: dict[str, str] = Field(default_factory=dict)
 
 
 def _universe_references(name: str) -> list[dict[str, str]]:
@@ -449,11 +455,40 @@ def _fixed_universe_metadata(item: dict) -> dict:
     }
 
 
-def _universe_members(symbols: list[str]) -> list[dict[str, str | None]]:
-    from quantmaster.data.names import cached_stock_names
+def _universe_members(symbols: list[str]) -> list[dict[str, Any]]:
+    from quantmaster.data.instruments import InstrumentStore
 
-    names = cached_stock_names(symbols)
-    return [{"symbol": symbol, "name": names.get(symbol)} for symbol in symbols]
+    store = InstrumentStore()
+    result = []
+    for symbol in symbols:
+        instrument = store.get(symbol)
+        result.append({
+            "symbol": symbol, "name": instrument.name if instrument else None,
+            "market": instrument.market if instrument else None,
+            "exchange": instrument.exchange if instrument else None,
+            "asset_type": instrument.asset_type if instrument else None,
+            "status": instrument.status if instrument else None,
+            "source": instrument.source if instrument else None,
+        })
+    return result
+
+
+@router.get("/instruments/search")
+def instrument_search(
+    request: Request, q: str = "", limit: int = 20, online: bool = True,
+) -> dict:
+    _require_local(request)
+    from quantmaster.data.instruments import search_instruments
+
+    return {"query": q, "items": search_instruments(q, limit=limit, online=online)}
+
+
+@router.post("/instruments/resolve")
+def instrument_resolve(request: Request, value: InstrumentResolveBody) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.instruments import resolve_instruments
+
+    return resolve_instruments(value.queries, selections=value.selections)
 
 
 def _rewrite_universe_references(old_name: str, new_name: str) -> tuple[list[str], dict | None]:
@@ -548,32 +583,24 @@ def universe_detail(name: str, request: Request, as_of: date | None = None) -> d
 @router.post("/settings/universes/preview")
 def preview_universe(request: Request, value: UniversePreview) -> dict:
     _require_csrf(request)
-    from quantmaster.data.universe import index_universe, normalize_symbol
+    from quantmaster.data.instruments import resolve_instruments
+    from quantmaster.data.universe import index_universe
 
     try:
         symbols = index_universe(value.index_symbol) if value.kind == "index" else value.symbols
-        normalized: list[str] = []
-        seen: set[str] = set()
-        duplicates: list[dict[str, str]] = []
-        errors: list[dict[str, str]] = []
-        for raw in symbols:
-            candidate = str(raw).strip()
-            if not candidate:
-                continue
-            try:
-                symbol = normalize_symbol(candidate)
-            except ValueError as exc:
-                errors.append({"value": candidate, "message": str(exc)})
-                continue
-            if symbol in seen:
-                duplicates.append({"value": candidate, "symbol": symbol})
-                continue
-            seen.add(symbol)
-            normalized.append(symbol)
+        resolution = resolve_instruments(symbols, selections=value.selections)
+        normalized = [item["instrument"]["symbol"] for item in resolution["resolved"]]
+        errors = [
+            {"value": item["query"], "message": item["message"]}
+            for item in resolution["unresolved"]
+        ]
         return {
             "symbols": normalized, "members": _universe_members(normalized),
             "count": len(normalized), "preview": normalized[:100],
-            "duplicates": duplicates, "errors": errors,
+            "duplicates": resolution["duplicates"], "errors": errors,
+            "ambiguous": resolution["ambiguous"],
+            "unresolved": resolution["unresolved"],
+            "corrections": resolution["corrections"],
         }
     except Exception as exc:
         raise HTTPException(400, str(exc)) from None
@@ -610,6 +637,7 @@ def create_universe(request: Request, value: UniverseBody) -> dict:
             pass
         else:
             raise ValueError("候选已存在")
+        _validate_universe_instruments(value.symbols)
         save_universe(value.name, value.symbols)
         return {"status": "ok", "name": value.name}
     except ValueError as exc:
@@ -623,12 +651,34 @@ def update_universe(name: str, request: Request, value: UniverseBody) -> dict:
 
     try:
         load_universe(name)
+        _validate_universe_instruments(value.symbols)
         save_universe(name, value.symbols)
         return {"status": "ok", "name": name}
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+def _validate_universe_instruments(symbols: list[str]) -> None:
+    """拒绝未知、歧义和没有可验证日线能力的标的。"""
+    from quantmaster.data.instruments import resolve_instruments, validate_bar_capability
+
+    resolution = resolve_instruments(symbols)
+    if resolution["ambiguous"] or resolution["unresolved"]:
+        detail = {
+            "message": "候选包含尚未确认的证券",
+            "ambiguous": resolution["ambiguous"],
+            "unresolved": resolution["unresolved"],
+        }
+        raise HTTPException(422, detail)
+    for item in resolution["resolved"]:
+        try:
+            validate_bar_capability(item["instrument"]["symbol"], verify_foreign=True)
+        except ValueError as exc:
+            raise HTTPException(422, {
+                "message": str(exc), "symbol": item["instrument"]["symbol"],
+            }) from None
 
 
 @router.post("/settings/universes/{name}/rename")

@@ -4,7 +4,10 @@
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = [("../quantmaster/server/static", "quantmaster/server/static")]
+datas = [
+    ("../quantmaster/server/static", "quantmaster/server/static"),
+    ("../quantmaster/data/security_master.json.gz", "quantmaster/data"),
+]
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
     collect_submodules("apscheduler") + collect_submodules("lark_oapi") +

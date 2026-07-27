@@ -308,7 +308,10 @@
       .map(([name, item]) => `${name} ${item.state}`) : [];
     const proxies = kind === 'data-sources' ? Object.entries(data.details?.proxies || {})
       .map(([name, value]) => `${name}=${value}`) : [];
+    const master = kind === 'data-sources' ? data.details?.security_master : null;
+    const coverage = master?.coverage?.map(item => `${item.market}/${item.asset_type} ${item.count}`).join('、');
     const details = [...labChecks, ...sourceChecks,
+      ...(master ? [`证券主数据：${master.record_count || 0} 条${coverage ? `（${coverage}）` : ''}`] : []),
       ...(openCircuits.length ? [`熔断：${openCircuits.join('、')}`] : []),
       ...(proxies.length ? [`代理：${proxies.join('、')}`] : [])];
     el.textContent = `${data.message}${details.length ? ` · ${details.join('；')}` : ''}` +
@@ -762,6 +765,24 @@
     const resume = document.getElementById('data-refresh-resume');
     resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
     resume.dataset.jobId = task.id;
+    const runtimeKey = `persistent:health:refresh:${task.id}`;
+    if (['running', 'cancelling'].includes(task.status)) {
+      window.QuantMasterRunInfo.add('info', '数据刷新', '全量数据正在刷新', {
+        detail:`进度 ${task.progress || 0}%，当前 ${task.current_symbol || '准备中'}`,
+        action:'任务会在后台继续，可正常浏览其他页面。',
+        key:runtimeKey, scope:'health', persistent:true,
+        revision:`${task.status}:${task.progress || 0}:${task.current_symbol || ''}`,
+      });
+    } else if (['interrupted', 'completed_with_errors'].includes(task.status)) {
+      window.QuantMasterRunInfo.add('warning', '数据刷新', '最近的数据刷新未完整完成', {
+        detail:`${task.failed || failures.length} 个标的失败或任务被中断。`,
+        action:'在设置中心查看失败项并重试。',
+        key:runtimeKey, scope:'health', persistent:true,
+        revision:`${task.status}:${task.failed || failures.length}`,
+      });
+    } else {
+      window.QuantMasterRunInfo.resolve(runtimeKey);
+    }
   }
 
   async function pollDataRefresh(id) {

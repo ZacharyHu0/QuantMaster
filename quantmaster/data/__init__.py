@@ -1,4 +1,11 @@
 from quantmaster.data.base import Bar, DataSource, Market
+from quantmaster.data.instruments import (
+    Instrument,
+    InstrumentStore,
+    resolve_instrument,
+    resolve_instruments,
+    search_instruments,
+)
 from quantmaster.data.names import load_stock_names
 from quantmaster.data.registry import (
     RefreshMode,
@@ -11,6 +18,7 @@ from quantmaster.data.registry import (
 )
 
 __all__ = [
-    "Bar", "DataSource", "Market", "RefreshMode", "get_source", "load_bar_panel", "load_bars",
-    "load_history", "load_intraday", "load_panel", "load_stock_names",
+    "Bar", "DataSource", "Instrument", "InstrumentStore", "Market", "RefreshMode", "get_source",
+    "load_bar_panel", "load_bars", "load_history", "load_intraday", "load_panel",
+    "load_stock_names", "resolve_instrument", "resolve_instruments", "search_instruments",
 ]

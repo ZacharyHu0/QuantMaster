@@ -43,17 +43,25 @@ class AkshareSource(DataSource):
         code, suffix = _split(symbol)
         market = guess_market(symbol)
         start_c, end_c = start.replace("-", ""), end.replace("-", "")
+        instrument_type = _instrument_type(symbol)
 
         # A 股指数判断：SH 后缀 000 开头是指数（股票为 6/9 开头）；SZ 后缀 399 开头是指数
         is_index = (
             symbol in A_SHARE_INDEXES
             or (suffix == "SH" and code.startswith("000"))
             or (suffix == "SZ" and code.startswith("399"))
+            or instrument_type == "index"
         )
         if market == Market.CN and is_index:
             raw = akshare_call(
                 f"index_zh_a_hist({symbol})", ak.index_zh_a_hist,
                 symbol=code, period="daily", start_date=start_c, end_date=end_c,
+            )
+        elif market == Market.CN and instrument_type in {"etf", "fund"}:
+            raw = akshare_call(
+                f"fund_etf_hist_em({symbol})", ak.fund_etf_hist_em,
+                symbol=code, period="daily", start_date=start_c, end_date=end_c,
+                adjust="qfq",
             )
         elif market == Market.CN:
             raw = akshare_call(
@@ -94,10 +102,12 @@ class AkshareSource(DataSource):
         period = frequency[:-1]
         code, suffix = _split(symbol)
         market = guess_market(symbol)
+        instrument_type = _instrument_type(symbol)
         is_index = (
             symbol in A_SHARE_INDEXES
             or (suffix == "SH" and code.startswith("000"))
             or (suffix == "SZ" and code.startswith("399"))
+            or instrument_type == "index"
         )
         if market == Market.CN and is_index:
             raw = akshare_call(
@@ -163,6 +173,16 @@ A_SHARE_INDEXES = {
     "399006.SZ": "创业板指",
     "000688.SH": "科创50",
 }
+
+
+def _instrument_type(symbol: str) -> str:
+    try:
+        from quantmaster.data.instruments import InstrumentStore
+
+        instrument = InstrumentStore().get(symbol)
+        return instrument.asset_type if instrument else ""
+    except Exception:
+        return ""
 
 # 商品期货主力连续（新浪接口代码）
 FUTURES_MAIN = {

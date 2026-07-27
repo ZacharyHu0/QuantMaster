@@ -32,6 +32,13 @@
     guard: null,
     originTab: null,
     notice: null,
+    addAmbiguity: null,
+    bulkAmbiguous: [],
+    bulkSelections: {},
+    searchItems: [],
+    searchActive: -1,
+    searchTimer: null,
+    searchSequence: 0,
   };
 
   function html(value) {
@@ -41,7 +48,23 @@
   }
 
   function cloneMembers(members) {
-    return (members || []).map(item => ({symbol: item.symbol, name: item.name || null}));
+    return (members || []).map(item => ({...item, symbol:item.symbol, name:item.name || null}));
+  }
+
+  function assetLabel(value) {
+    return ({stock:'股票', etf:'ETF', fund:'基金', index:'指数', future:'期货'})[value] || value || '标的';
+  }
+
+  function marketLabel(item) {
+    return item?.market_label || ({CN:'中国内地', HK:'中国香港', US:'美国', JP:'日本', KR:'韩国', FUT:'期货'})[item?.market] || item?.market || '未知市场';
+  }
+
+  function choiceMarkup(item, query, scope) {
+    return `<button class="candidate-resolution-choice" type="button" data-candidate-choice="${html(item.symbol)}"
+      data-candidate-query="${html(query)}" data-candidate-scope="${scope}">
+      <span><strong>${html(item.name || item.en_name || item.symbol)}</strong><small>${html(item.symbol)}</small></span>
+      <span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em><em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em></span>
+    </button>`;
   }
 
   function sourceLabel(value) {
@@ -268,17 +291,29 @@
 
   function renderModePanel() {
     if (state.guard) return renderGuard();
-    if (state.mode === 'add') return `<section class="candidate-tool-panel">
-      <div class="candidate-tool-head"><div><h4>添加一只标的</h4><p>支持 600519、600519.SH、SZ000001 等常见 A 股写法。</p></div>
+    if (state.mode === 'add') {
+      const ambiguity = state.addAmbiguity ? `<div class="candidate-resolution" role="group" aria-label="请选择具体标的">
+        <strong>${html(state.addAmbiguity.message)}</strong>${state.addAmbiguity.candidates.map(item =>
+          choiceMarkup(item, state.addAmbiguity.query, 'add')).join('')}</div>` : '';
+      return `<section class="candidate-tool-panel">
+      <div class="candidate-tool-head"><div><h4>添加一只标的</h4><p>可输入中美港代码、中英文名称或拼音；跨市场重码会请你确认。</p></div>
         <button class="candidate-origin" type="button" data-candidate-action="close-tool">收起</button></div>
-      <label>证券代码<input id="candidate-add-symbol" autocomplete="off" placeholder="600519"></label>
+      <label>代码或名称<input id="candidate-add-symbol" autocomplete="off" placeholder="600519、腾讯控股、NASDAQ:AAPL"
+        role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="candidate-instrument-options"></label>
+      <small class="candidate-field-hint">↑↓ 浏览，Enter 选择，Esc 关闭搜索结果</small>${ambiguity}
       <div class="candidate-tool-actions"><button class="primary" type="button" data-candidate-action="add-symbol">添加到草稿</button></div></section>`;
-    if (state.mode === 'bulk') return `<section class="candidate-tool-panel">
+    }
+    if (state.mode === 'bulk') {
+      const ambiguous = state.bulkAmbiguous.length ? `<div class="candidate-resolution candidate-resolution-bulk">
+        <strong>以下输入对应多个市场，请逐项确认</strong>${state.bulkAmbiguous.map(group =>
+          `<div><span>${html(group.query)}</span>${group.candidates.map(item => choiceMarkup(item, group.query, 'bulk')).join('')}</div>`).join('')}</div>` : '';
+      return `<section class="candidate-tool-panel">
       <div class="candidate-tool-head"><div><h4>批量编辑</h4><p>每行或逗号分隔；应用后只更新草稿，仍需保存才会生效。</p></div>
         <button class="candidate-origin" type="button" data-candidate-action="close-tool">收起</button></div>
-      <label>候选代码<textarea id="candidate-bulk-text" rows="12" placeholder="600519&#10;000858.SZ">${html(state.bulkText)}</textarea></label>
+      <label>代码或名称<textarea id="candidate-bulk-text" rows="12" placeholder="600519&#10;腾讯控股&#10;NASDAQ:AAPL">${html(state.bulkText)}</textarea></label>
       <div id="candidate-bulk-errors" class="candidate-tool-errors"></div>
-      <div class="candidate-tool-actions"><button class="primary" type="button" data-candidate-action="apply-bulk">应用到草稿</button></div></section>`;
+      ${ambiguous}<div class="candidate-tool-actions"><button class="primary" type="button" data-candidate-action="apply-bulk">应用到草稿</button></div></section>`;
+    }
     if (state.mode === 'import') {
       const lists = state.importData || {};
       const sources = [
@@ -366,9 +401,9 @@
         <span>${state.memberQuery ? '换个代码或名称试试。' : editable ? '添加代码或切换到批量编辑，建立第一版候选。' : '当前日期没有可显示的成分。'}</span></div>`;
       return;
     }
-    root.innerHTML = `<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>证券名称</th><th>代码</th><th>操作</th></tr></thead><tbody>${rows.map(item =>
+    root.innerHTML = `<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>证券名称</th><th>代码</th><th>市场 / 类型</th><th>操作</th></tr></thead><tbody>${rows.map(item =>
       `<tr><td class="candidate-member-name${item.name ? '' : ' pending'}">${html(item.name || '名称待同步')}</td>
-        <td class="candidate-member-symbol">${html(item.symbol)}</td><td class="candidate-member-action">${editable ?
+        <td class="candidate-member-symbol">${html(item.symbol)}</td><td class="candidate-member-meta">${html(item.exchange || item.market || '—')} · ${html(assetLabel(item.asset_type))}</td><td class="candidate-member-action">${editable ?
           `<button type="button" data-candidate-remove="${html(item.symbol)}" aria-label="从候选移除 ${html(item.symbol)}">移除</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
       <div class="candidate-pagination"><span>第 ${state.page} / ${pages} 页 · ${members.length} 只</span><div>
         <button class="ghost" type="button" data-candidate-page="${state.page - 1}" ${state.page <= 1 ? 'disabled' : ''}>上一页</button>
@@ -400,10 +435,96 @@
     else if (pending.type === 'action' && pending.value === 'import') await openImport();
   }
 
-  async function previewSymbols(symbols) {
+  async function previewSymbols(symbols, selections = {}) {
     return request('/api/settings/universes/preview', {
-      method:'POST', body:{kind:'manual', symbols},
+      method:'POST', body:{kind:'manual', symbols, selections},
     });
+  }
+
+  function searchPopover() {
+    let root = document.getElementById('candidate-instrument-options');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'candidate-instrument-options';
+      root.className = 'candidate-instrument-options';
+      root.setAttribute('role', 'listbox');
+      root.hidden = true;
+      document.body.appendChild(root);
+    }
+    return root;
+  }
+
+  function closeInstrumentSearch() {
+    const root = searchPopover();
+    root.hidden = true;
+    root.innerHTML = '';
+    state.searchItems = [];
+    state.searchActive = -1;
+    document.getElementById('candidate-add-symbol')?.setAttribute('aria-expanded', 'false');
+  }
+
+  function positionInstrumentSearch(root, input) {
+    const rect = input.getBoundingClientRect();
+    root.style.left = `${Math.max(8, rect.left)}px`;
+    root.style.top = `${Math.min(window.innerHeight - 240, rect.bottom + 4)}px`;
+    root.style.width = `${Math.min(rect.width, window.innerWidth - 16)}px`;
+  }
+
+  function renderInstrumentSearch(items, query) {
+    const input = document.getElementById('candidate-add-symbol');
+    if (!input || input.value.trim() !== query) return;
+    const root = searchPopover();
+    state.searchItems = items || [];
+    state.searchActive = state.searchItems.length ? 0 : -1;
+    root.innerHTML = state.searchItems.length ? state.searchItems.map((item, index) =>
+      `<button id="candidate-instrument-option-${index}" type="button" role="option" aria-selected="${index === 0}"
+        data-instrument-option="${index}"><span><strong>${html(item.name || item.en_name || item.symbol)}</strong>
+        <small>${html(item.symbol)}</small></span><span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em>
+        <em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em></span></button>`
+    ).join('') : '<div class="candidate-instrument-empty">本地主数据和可用在线目录中均未找到匹配项</div>';
+    positionInstrumentSearch(root, input);
+    root.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-activedescendant', state.searchActive >= 0 ? `candidate-instrument-option-${state.searchActive}` : '');
+  }
+
+  function setInstrumentSearchActive(index) {
+    const root = searchPopover();
+    if (!state.searchItems.length) return;
+    state.searchActive = Math.max(0, Math.min(index, state.searchItems.length - 1));
+    root.querySelectorAll('[role="option"]').forEach((item, itemIndex) => {
+      item.setAttribute('aria-selected', itemIndex === state.searchActive ? 'true' : 'false');
+    });
+    const active = root.querySelector(`[data-instrument-option="${state.searchActive}"]`);
+    active?.scrollIntoView({block:'nearest'});
+    document.getElementById('candidate-add-symbol')?.setAttribute('aria-activedescendant', active?.id || '');
+  }
+
+  function chooseInstrument(index) {
+    const item = state.searchItems[index];
+    const input = document.getElementById('candidate-add-symbol');
+    if (!item || !input) return;
+    input.value = item.symbol;
+    input.dataset.selectedSymbol = item.symbol;
+    state.addAmbiguity = null;
+    closeInstrumentSearch();
+    input.focus();
+  }
+
+  function scheduleInstrumentSearch(input) {
+    clearTimeout(state.searchTimer);
+    const query = input.value.trim();
+    const sequence = ++state.searchSequence;
+    delete input.dataset.selectedSymbol;
+    if (!query) return closeInstrumentSearch();
+    state.searchTimer = setTimeout(async () => {
+      try {
+        const data = await request(`/api/instruments/search?q=${encodeURIComponent(query)}&limit=12`);
+        if (sequence === state.searchSequence) renderInstrumentSearch(data.items || [], query);
+      } catch (error) {
+        if (sequence === state.searchSequence) renderInstrumentSearch([], query);
+      }
+    }, 300);
   }
 
   async function addSymbol() {
@@ -412,10 +533,17 @@
     if (!value) return setNotice('error', '请输入要添加的证券代码。');
     try {
       const result = await previewSymbols([value]);
+      if (result.ambiguous?.length) {
+        state.addAmbiguity = result.ambiguous[0];
+        renderDetail();
+        document.getElementById('candidate-add-symbol')?.focus();
+        return;
+      }
       if (result.errors.length) return setNotice('error', result.errors[0].message);
       const member = result.members[0];
       if (state.draft.some(item => item.symbol === member.symbol)) return setNotice('error', `${member.symbol} 已经在当前候选中。`);
       state.draft.push(member);
+      state.addAmbiguity = null;
       state.mode = null;
       state.page = Math.ceil(state.draft.length / PAGE_SIZE);
       updateDirty();
@@ -428,14 +556,21 @@
     const values = state.bulkText.split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
     const errorsRoot = document.getElementById('candidate-bulk-errors');
     try {
-      const result = await previewSymbols(values);
+      const result = await previewSymbols(values, state.bulkSelections);
       if (result.errors.length) {
         errorsRoot.innerHTML = `<strong>请修正以下代码后再应用</strong><ul>${result.errors.slice(0, 12).map(item =>
           `<li>${html(item.value)}：${html(item.message)}</li>`).join('')}</ul>`;
         return;
       }
+      if (result.ambiguous?.length) {
+        state.bulkAmbiguous = result.ambiguous;
+        renderDetail();
+        return;
+      }
       state.draft = cloneMembers(result.members);
       state.validationErrors = [];
+      state.bulkAmbiguous = [];
+      state.bulkSelections = {};
       state.mode = null;
       state.page = 1;
       updateDirty();
@@ -661,7 +796,12 @@
       state.memberQuery = event.target.value;
       state.page = 1;
       renderMembers();
-    } else if (event.target.id === 'candidate-bulk-text') state.bulkText = event.target.value;
+    } else if (event.target.id === 'candidate-add-symbol') scheduleInstrumentSearch(event.target);
+    else if (event.target.id === 'candidate-bulk-text') {
+      state.bulkText = event.target.value;
+      state.bulkSelections = {};
+      state.bulkAmbiguous = [];
+    }
     else if (event.target.id === 'candidate-new-name') {
       state.draftName = event.target.value;
       updateDirty();
@@ -686,6 +826,19 @@
     }
     const source = event.target.closest('[data-candidate-import-source]');
     if (source && !source.disabled) return importSource(source.dataset.candidateImportSource);
+    const choice = event.target.closest('[data-candidate-choice]');
+    if (choice) {
+      if (choice.dataset.candidateScope === 'add') {
+        const input = document.getElementById('candidate-add-symbol');
+        if (input) input.value = choice.dataset.candidateChoice;
+        state.addAmbiguity = null;
+        await addSymbol();
+      } else {
+        state.bulkSelections[choice.dataset.candidateQuery] = choice.dataset.candidateChoice;
+        await applyBulk();
+      }
+      return;
+    }
     const button = event.target.closest('[data-candidate-action]');
     if (!button || button.disabled) return;
     const action = button.dataset.candidateAction;
@@ -696,9 +849,9 @@
     } else if (action === 'clone') cloneCurrent();
     else if (action === 'rename') { state.mode = 'rename'; renderDetail(); }
     else if (action === 'delete') { state.mode = 'delete'; renderDetail(); }
-    else if (action === 'add') { state.mode = 'add'; renderDetail(); document.getElementById('candidate-add-symbol')?.focus(); }
-    else if (action === 'bulk') { state.mode = 'bulk'; state.bulkText = state.draft.map(item => item.symbol).join('\n'); renderDetail(); }
-    else if (action === 'close-tool') { state.mode = null; renderDetail(); }
+    else if (action === 'add') { state.mode = 'add'; state.addAmbiguity = null; renderDetail(); document.getElementById('candidate-add-symbol')?.focus(); }
+    else if (action === 'bulk') { state.mode = 'bulk'; state.bulkText = state.draft.map(item => item.symbol).join('\n'); state.bulkSelections = {}; state.bulkAmbiguous = []; renderDetail(); }
+    else if (action === 'close-tool') { closeInstrumentSearch(); state.mode = null; renderDetail(); }
     else if (action === 'clear-search') { state.memberQuery = ''; state.page = 1; renderDetail(); }
     else if (action === 'add-symbol') await addSymbol();
     else if (action === 'apply-bulk') await applyBulk();
@@ -728,6 +881,40 @@
   workspace.addEventListener('click', event => {
     const settings = event.target.closest('[data-candidate-settings]');
     if (settings) window.QuantMasterManagement.open(settings.dataset.candidateSettings);
+  });
+
+  workspace.addEventListener('keydown', event => {
+    if (event.target.id !== 'candidate-add-symbol') return;
+    if (event.key === 'ArrowDown') {
+      setInstrumentSearchActive(state.searchActive + 1);
+      event.preventDefault();
+    } else if (event.key === 'ArrowUp') {
+      setInstrumentSearchActive(state.searchActive - 1);
+      event.preventDefault();
+    } else if (event.key === 'Enter' && !searchPopover().hidden && state.searchActive >= 0) {
+      chooseInstrument(state.searchActive);
+      event.preventDefault();
+    } else if (event.key === 'Escape') {
+      closeInstrumentSearch();
+      event.preventDefault();
+    }
+  });
+
+  document.addEventListener('click', event => {
+    const option = event.target.closest('[data-instrument-option]');
+    if (option) {
+      chooseInstrument(Number(option.dataset.instrumentOption));
+      return;
+    }
+    if (!event.target.closest('#candidate-add-symbol') && !event.target.closest('#candidate-instrument-options')) {
+      closeInstrumentSearch();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    const root = document.getElementById('candidate-instrument-options');
+    const input = document.getElementById('candidate-add-symbol');
+    if (root && input && !root.hidden) positionInstrumentSearch(root, input);
   });
 
   document.querySelector('header').addEventListener('click', event => {

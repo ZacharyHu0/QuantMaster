@@ -40,11 +40,23 @@ def _require_tushare():
     return ts.pro_api(token)
 
 
+def _instrument_type(symbol: str) -> str:
+    try:
+        from quantmaster.data.instruments import InstrumentStore
+
+        instrument = InstrumentStore().get(symbol)
+        return instrument.asset_type if instrument else ""
+    except Exception:
+        return ""
+
+
 def _is_a_share_index(symbol: str) -> bool:
     code, _, suffix = symbol.partition(".")
     return (
-        (suffix.upper() == "SH" and code.startswith("000"))
+        suffix.upper() == "CSI"
+        or (suffix.upper() == "SH" and code.startswith("000"))
         or (suffix.upper() == "SZ" and code.startswith("399"))
+        or _instrument_type(symbol) == "index"
     )
 
 
@@ -125,6 +137,13 @@ class TushareSource(DataSource):
             )
             return self._normalize_market_frame(raw).loc[start:end]
 
+        if _instrument_type(symbol) in {"etf", "fund"}:
+            raw = self._call(
+                "fund_daily", ttl, ts_code=symbol, start_date=start_c,
+                end_date=end_c, fields=fields,
+            )
+            return self._normalize_market_frame(raw).loc[start:end]
+
         raw = self._call(
             "daily", ttl, ts_code=symbol, start_date=start_c,
             end_date=end_c, fields=fields,
@@ -167,6 +186,73 @@ class TushareSource(DataSource):
         frame.index.name = "date"
         fields = [c for c in ("pe", "pe_ttm", "pb", "dv_ratio", "total_mv") if c in frame]
         return frame[fields].apply(pd.to_numeric, errors="coerce")
+
+    def instrument_catalog(self) -> list[dict]:
+        """读取内地股票/场内基金/指数及港股目录，供证券主数据增量更新。"""
+        records: list[dict] = []
+
+        def text(value) -> str:
+            return "" if pd.isna(value) else str(value).strip()
+
+        stocks = self._call(
+            "stock_basic", 7, exchange="", list_status="L",
+            fields=("ts_code,symbol,name,fullname,enname,exchange,curr_type,"
+                    "list_status,list_date,delist_date"),
+        )
+        for row in stocks.to_dict("records"):
+            symbol = text(row.get("ts_code")).upper()
+            if symbol:
+                records.append({
+                    "symbol": symbol, "provider_symbol": symbol,
+                    "name": text(row.get("name")), "full_name": text(row.get("fullname")),
+                    "en_name": text(row.get("enname")), "market": "CN",
+                    "exchange": symbol.rsplit(".", 1)[-1], "asset_type": "stock",
+                    "currency": text(row.get("curr_type")) or "CNY",
+                    "status": text(row.get("list_status")) or "L",
+                    "list_date": text(row.get("list_date")),
+                    "delist_date": text(row.get("delist_date")),
+                })
+        funds = self._call("fund_basic", 7, market="E", status="L")
+        for row in funds.to_dict("records"):
+            symbol = text(row.get("ts_code")).upper()
+            name, fund_type = text(row.get("name")), text(row.get("fund_type")).upper()
+            if symbol and name:
+                records.append({
+                    "symbol": symbol, "name": name, "market": "CN",
+                    "exchange": symbol.rsplit(".", 1)[-1],
+                    "asset_type": (
+                        "etf" if "ETF" in fund_type or "ETF" in name.upper()
+                        or "交易型" in fund_type else "fund"
+                    ),
+                    "currency": "CNY", "status": "L",
+                    "list_date": text(row.get("list_date")),
+                })
+        for market in ("CSI", "SSE", "SZSE"):
+            indexes = self._call("index_basic", 7, market=market)
+            for row in indexes.to_dict("records"):
+                symbol, name = text(row.get("ts_code")).upper(), text(row.get("name"))
+                if symbol and name:
+                    records.append({
+                        "symbol": symbol, "name": name,
+                        "full_name": text(row.get("fullname")), "market": "CN",
+                        "exchange": symbol.rsplit(".", 1)[-1], "asset_type": "index",
+                        "currency": "CNY", "status": "listed",
+                    })
+        hong_kong = self._call("hk_basic", 7, list_status="L")
+        for row in hong_kong.to_dict("records"):
+            provider = text(row.get("ts_code")).upper()
+            code = (text(row.get("symbol")) or provider.partition(".")[0]).zfill(5)
+            name = text(row.get("name"))
+            if code and name:
+                records.append({
+                    "symbol": f"{code}.HK", "provider_symbol": provider,
+                    "name": name, "full_name": text(row.get("fullname")),
+                    "en_name": text(row.get("enname")), "market": "HK",
+                    "exchange": "HKEX", "asset_type": "stock", "currency": "HKD",
+                    "status": "L", "list_date": text(row.get("list_date")),
+                    "delist_date": text(row.get("delist_date")),
+                })
+        return records
 
     def quarterly_roe(self, symbol: str, start_year: str = "2018") -> pd.DataFrame:
         """2000 积分 ``fina_indicator``：季度 ROE，按报告期返回。"""

@@ -53,25 +53,40 @@ def validate_universe_name(name: str, *, allow_demo: bool = False) -> str:
 
 
 def normalize_symbol(symbol: str) -> str:
-    value = re.sub(r"\s+", "", str(symbol)).upper()
-    prefix = re.fullmatch(r"(SH|SZ|BJ)(\d{6})", value)
-    if prefix:
-        value = f"{prefix.group(2)}.{prefix.group(1)}"
-    plain = re.fullmatch(r"\d{6}", value)
-    if plain:
-        code = plain.group(0)
-        if code.startswith(("4", "8", "92")):
-            suffix = "BJ"
-        elif code.startswith(("0", "2", "3")):
-            suffix = "SZ"
-        elif code.startswith(("5", "6", "9")):
-            suffix = "SH"
+    """兼容旧调用的单值规范化。
+
+    新增交互应使用 ``resolve_instrument(s)`` 暴露歧义。这里仅对历史上明确约定
+    为 A 股的六位裸代码保留交易所推断，避免已有配置升级后无法读取。
+    """
+    from quantmaster.data.instruments import InstrumentStore
+
+    raw = str(symbol).strip()
+    store = InstrumentStore()
+    result = store.resolve(raw)
+    if result["status"] == "resolved":
+        return result["instrument"]["symbol"]
+
+    value = re.sub(r"\s+", "", raw).upper()
+    if re.fullmatch(r"\d{6}", value) and result["status"] in {"ambiguous", "unresolved"}:
+        if value.startswith(("4", "8", "92")):
+            preferred = f"{value}.BJ"
+        elif value.startswith(("0", "2", "3")):
+            preferred = f"{value}.SZ"
         else:
-            raise ValueError(f"无法推断 A 股市场后缀: {symbol}")
-        value = f"{code}.{suffix}"
-    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", value):
-        raise ValueError(f"股票代码格式非法: {symbol}")
-    return value
+            preferred = f"{value}.SH"
+        if result["status"] == "unresolved" or any(
+            item["symbol"] == preferred for item in result["candidates"]
+        ):
+            return preferred
+
+    # 旧版曾把所有 9xxxxx 指数误写为 .SH；有且只有一个同码 CSI 指数时迁移。
+    wrong_csi = re.fullmatch(r"(\d{6})\.SH", value)
+    if wrong_csi:
+        corrected = store.get(f"{wrong_csi.group(1)}.CSI")
+        if corrected and corrected.asset_type == "index":
+            return corrected.symbol
+    message = result.get("message") or f"证券代码或名称无法识别: {symbol}"
+    raise ValueError(message)
 
 
 def normalize_symbols(symbols: list[str]) -> list[str]:

@@ -201,7 +201,7 @@ def _factories() -> dict[Market, list]:
         Market.JP: [yf],
         Market.KR: [yf],
         Market.FUTURES: [ak, yf],
-        Market.INDEX: [ak, yf],
+        Market.INDEX: [tu, ak, yf],
     }
 
 

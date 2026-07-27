@@ -61,6 +61,7 @@ include = ["quantmaster*"]
 
 [tool.setuptools.package-data]
 "quantmaster.server" = ["static/*"]
+"quantmaster.data" = ["security_master.json.gz"]
 
 [tool.setuptools.dynamic]
 version = {attr = "quantmaster.__version__"}
