@@ -162,7 +162,10 @@ class BotCommandRouter:
             if text.startswith(("运行", "执行", "立即")):
                 self.service.require_owner(actor, private=task == "paper_rebalance_proposal")
                 result = self.service.run_task(task, actor=actor.actor_key)
-                return f"任务已受理，run_id={result['run_id']}；完成后会另行推送。"
+                return (
+                    f"任务已受理，run_id={result['run_id']}；"
+                    "结果会按当前会话的推送内容设置发送。"
+                )
 
         trade = re.fullmatch(
             r"(?:记一笔|记录)?\s*(买入|卖出)\s+(\d{6}(?:\.(?:SH|SZ|BJ))?)\s+"

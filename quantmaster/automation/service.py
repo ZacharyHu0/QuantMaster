@@ -28,6 +28,7 @@ ALLOWED_TASKS = {
     "daily_close_pipeline", "news_digest", "paper_rebalance_proposal",
 }
 UNFILTERED_KINDS = {"task_failure", "task_report"}
+NEWS_TASKS = {"fast_news_scan", "official_news_scan", "periodic_news_scan", "news_digest"}
 CONVERSATION_RAW_CHARACTER_LIMIT = 14_000
 CONVERSATION_RAW_MESSAGE_LIMIT = 60
 CONVERSATION_RECENT_TURNS = 10
@@ -248,7 +249,8 @@ class AutomationService:
             raise ValueError("action 仅支持 pause/resume/reschedule")
         return self.store.update_job(name, enabled, value, actor)
 
-    def process_event(self, event: AlertEvent, target_ids: set[str] | None = None) -> dict:
+    def process_event(self, event: AlertEvent, target_ids: set[str] | None = None,
+                      *, force_delivery: bool = False) -> dict:
         stored, created = self.store.save_event(event)
         if not created:
             return {"event": stored, "created": False, "enqueued": 0}
@@ -257,9 +259,16 @@ class AutomationService:
         for target in self.store.targets():
             if target_ids is not None and target["id"] not in target_ids:
                 continue
-            if not target["enabled"] or not target["target"] or target["status"] == "paused":
+            if not target["target"]:
+                continue
+            if force_delivery:
+                count += int(self.store.enqueue(event.id, target["id"]))
+                continue
+            if not target["enabled"] or target["status"] == "paused":
                 continue
             policy = resolved_policy(target["preset"], target["overrides"])
+            if event.kind not in policy["event_types"]:
+                continue
             bypass = event.kind in UNFILTERED_KINDS or event.score >= 95
             if not bypass and not policy_allows(stored, policy):
                 continue
@@ -286,7 +295,7 @@ class AutomationService:
             dedupe_key=stable_hash({"test": target_id, "at": datetime.now().isoformat()}),
             payload={"title": f"{target['label']} 测试推送"},
         )
-        result = self.process_event(event, {target_id})
+        result = self.process_event(event, {target_id}, force_delivery=True)
         result["dispatch"] = self.dispatcher.dispatch()
         return result
 
@@ -519,13 +528,15 @@ class AutomationService:
         try:
             result = getattr(self, f"_task_{name}")()
             self.store.finish_run(run_id, result=result)
-            report = AlertEvent(
-                kind="task_report", score=0, severity="info", data_as_of=datetime.now().isoformat(),
-                evidence=[f"任务 {name} 已完成", f"运行编号 {run_id[:10]}"],
-                dedupe_key=stable_hash({"task": name, "run": run_id}),
-                payload={"title": f"任务完成：{name}", "result": result},
-            )
-            self.process_event(report)
+            if name not in NEWS_TASKS:
+                report = AlertEvent(
+                    kind="task_report", score=0, severity="info",
+                    data_as_of=datetime.now().isoformat(),
+                    evidence=[f"任务 {name} 已完成", f"运行编号 {run_id[:10]}"],
+                    dedupe_key=stable_hash({"task": name, "run": run_id}),
+                    payload={"title": f"任务完成：{name}", "result": result},
+                )
+                self.process_event(report)
         except Exception as exc:  # pragma: no cover - 网络任务错误路径
             logger.exception("自动化任务 %s 失败", name)
             self.store.finish_run(run_id, error=str(exc))
@@ -655,13 +666,52 @@ class AutomationService:
                 "picks": len(selection["picks"]), "market": current}
 
     def _task_news_digest(self) -> dict:
-        items = [item for item in self.store.recent_events(100) if item["kind"] == "important_news"][:10]
+        items = [
+            item for item in self.store.recent_events(100)
+            if item["kind"] == "important_news" and not item.get("payload", {}).get("digest")
+        ][:10]
+        if not items:
+            return {"items": 0}
+        compact_items = []
+        direction_counts = {"up": 0, "down": 0, "neutral": 0}
+        for item in items:
+            payload = item.get("payload", {})
+            direction = item.get("direction") if item.get("direction") in direction_counts else "neutral"
+            direction_counts[direction] += 1
+            compact_items.append({
+                "title": str(payload.get("title") or "消息"),
+                "summary": str(payload.get("summary") or ""),
+                "sentiment": float(payload.get("sentiment") or 0),
+                "direction": direction,
+                "score": float(item.get("score") or 0),
+                "symbols": list(item.get("symbols") or [])[:6],
+                "data_as_of": str(item.get("data_as_of") or ""),
+                "url": str((item.get("source_urls") or [""])[0]),
+            })
+        strongest = max(items, key=lambda value: float(value.get("score") or 0))
+        digest_direction = (
+            "up" if direction_counts["up"] > direction_counts["down"]
+            else "down" if direction_counts["down"] > direction_counts["up"]
+            else "neutral"
+        )
         event = AlertEvent(
-            kind="task_report", score=0, severity="info", data_as_of=datetime.now().isoformat(),
-            evidence=[f"本期汇总 {len(items)} 条重要消息"] +
-                     [str(item.get("payload", {}).get("title", "消息")) for item in items[:5]],
+            kind="important_news", score=float(strongest.get("score") or 0),
+            severity=str(strongest.get("severity") or "info"), direction=digest_direction,
+            relevance=str(strongest.get("relevance") or "market"),
+            data_as_of=datetime.now().isoformat(),
+            evidence=[
+                f"本期汇总 {len(items)} 条重要资讯",
+                (f"利好 {direction_counts['up']} · 利空 {direction_counts['down']} · "
+                 f"中性 {direction_counts['neutral']}"),
+            ],
             dedupe_key=stable_hash({"digest": datetime.now().strftime("%Y%m%d%H")}),
-            payload={"title": "重要消息摘要", "items": items},
+            payload={
+                "title": "重要资讯摘要",
+                "summary": f"本期共 {len(items)} 条重要资讯",
+                "digest": True,
+                "counts": direction_counts,
+                "items": compact_items,
+            },
         )
         self.process_event(event)
         return {"items": len(items)}

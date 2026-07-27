@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import socket
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -131,19 +134,66 @@ def check_storage(data: DataSettings) -> dict[str, Any]:
 def check_data_sources(timeout: float = 8.0) -> dict[str, Any]:
     started = time.perf_counter()
     sources: dict[str, Any] = {}
-    for package, url in (("akshare", "https://www.akshare.xyz"),
-                         ("yfinance", "https://query1.finance.yahoo.com")):
-        if importlib.util.find_spec(package) is None:
-            sources[package] = {"status": "error", "message": "依赖未安装"}
-            continue
+    probes = {
+        "akshare": (
+            "akshare:eastmoney",
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+            "?secid=1.000001&klt=101&fqt=1&lmt=1&fields1=f1&fields2=f51,f52",
+        ),
+        "yfinance": (
+            "yahoo",
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
+            "?range=1d&interval=1d",
+        ),
+    }
+
+    def probe(package: str, lane: str, url: str) -> tuple[str, dict[str, str]]:
         try:
-            response = httpx.get(url, timeout=timeout, follow_redirects=True)
-            sources[package] = {"status": "success" if response.status_code < 500 else "warning",
-                                "message": f"网络 HTTP {response.status_code}"}
-        except httpx.HTTPError:
-            sources[package] = {"status": "warning", "message": "依赖已安装，但网络不可达"}
+            from quantmaster.data.resilience import provider_call
+
+            response = provider_call(
+                lane, "settings-connectivity-probe",
+                lambda: httpx.get(url, timeout=timeout, follow_redirects=True),
+                probe=True,
+            )
+            status = "success" if response.status_code < 500 else "warning"
+            return package, {"status": status, "message": f"真实行情端点 HTTP {response.status_code}"}
+        except Exception as exc:
+            return package, {
+                "status": "warning",
+                "message": f"依赖已安装，但行情端点不可达（{type(exc).__name__}）",
+            }
+
+    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
+        futures = []
+        for package, (lane, url) in probes.items():
+            if importlib.util.find_spec(package) is None:
+                sources[package] = {"status": "error", "message": "依赖未安装"}
+            else:
+                futures.append(pool.submit(probe, package, lane, url))
+        for future in as_completed(futures):
+            package, result = future.result()
+            sources[package] = result
+
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+
+    proxies: dict[str, str] = {}
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        raw = os.environ.get(name) or os.environ.get(name.lower())
+        if not raw:
+            continue
+        parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+        host = parsed.hostname or "已配置"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        proxies[name] = f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
     overall = "success" if all(v["status"] == "success" for v in sources.values()) else "warning"
-    return _result(overall, "数据源依赖与网络检测完成", started, sources=sources)
+    return _result(
+        overall, "数据源依赖、真实行情端点与熔断状态检测完成", started,
+        sources=sources, circuits=PROVIDER_HEALTH.status(), proxies=proxies,
+    )
 
 
 def check_server(settings: ServerSettings) -> dict[str, Any]:

@@ -294,3 +294,96 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
             '.runtime-entry[data-level="error"]', has_text="服务端处理失败"
         ).count() == 0
         browser.close()
+
+
+def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
+    url, _ = live_server
+    target = {
+        "id": "feishu_owner", "channel": "feishu", "label": "飞书管理员私聊",
+        "target": "oc_test", "account_id": "cli_app", "chat_type": "direct",
+        "enabled": True, "preset": "balanced", "overrides": {}, "status": "healthy",
+        "last_error": "", "owner_actor": "feishu:cli_app:ou_owner", "has_context": False,
+        "updated_at": "2026-07-27T10:00:00+00:00",
+    }
+    overview = {
+        "enabled": True, "timezone": "Asia/Shanghai", "runtime": "running",
+        "bot_accounts": [], "jobs": [], "recent_events": [], "targets": [target],
+        "inbound": {
+            "feishu": {
+                "total": 0, "last_received_at": "",
+                "direct": {"total": 0, "last_received_at": ""},
+                "group": {"total": 0, "last_received_at": ""},
+            },
+            "weixin": {"total": 0, "last_received_at": ""},
+        },
+    }
+    source = {
+        "id": "sse", "name": "上海证券交易所", "kind": "builtin",
+        "group_name": "official", "url": "https://www.sse.com.cn/",
+        "item_limit": 30, "factor_weight": 1, "enabled": True, "is_official": True,
+        "built_in": True, "auth_type": "none", "auth_header": "",
+        "auth_configured": False, "parser": {}, "last_error": "", "last_run": "",
+    }
+    audit_requests = {"count": 0}
+
+    def policy_handler(route):
+        body = route.request.post_data_json
+        target["preset"] = body["preset"]
+        target["overrides"] = body.get("overrides") or {}
+        if body.get("enabled") is not None:
+            target["enabled"] = body["enabled"]
+        route.fulfill(status=200, json=target)
+
+    def audit_handler(route):
+        audit_requests["count"] += 1
+        route.fulfill(status=200, json={"items": [{
+            "created_at": "2026-07-27T10:00:00+00:00", "actor": "web",
+            "action": "update_policy", "object_type": "target",
+            "object_id": "feishu_owner", "result": "ok",
+        }]})
+
+    def source_handler(route):
+        if route.request.method == "GET":
+            route.fulfill(status=200, json={"items": [source]})
+        else:
+            route.fulfill(status=200, json=source)
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route("**/api/automation/overview", lambda route: route.fulfill(json=overview))
+        page.route("**/api/automation/audit*", audit_handler)
+        page.route("**/api/automation/targets/*/policy", policy_handler)
+        page.route("**/api/news/sources*", source_handler)
+        page.goto(url)
+
+        page.get_by_role("button", name="自动化", exact=True).click()
+        page.locator('[data-target-card="feishu_owner"]').wait_for()
+        assert not page.locator("#automation-audit-panel").evaluate("element => element.open")
+        assert audit_requests["count"] == 0
+
+        for kind in ("important_news", "market_turn", "market_close", "task_report", "task_failure"):
+            page.locator(f'[data-target="feishu_owner"][data-event-type="{kind}"]').uncheck()
+            page.wait_for_function(
+                "document.querySelector('[data-target-card=\"feishu_owner\"] .target-feedback')"
+                ".classList.contains('success')"
+            )
+        assert target["overrides"]["event_types"] == []
+        assert "自动化与 Bot 监听仍会继续运行" in page.locator(
+            '[data-target-card="feishu_owner"] .target-content-note'
+        ).inner_text()
+
+        page.locator("#automation-audit-panel summary").click()
+        page.get_by_text("update_policy", exact=True).wait_for()
+        assert audit_requests["count"] == 1
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.locator('[data-settings-section="sources"]').click()
+        page.locator('[data-source-id="sse"]').click()
+        page.locator('#news-source-editor button[type="submit"]').click()
+        page.wait_for_function(
+            "document.querySelector('#news-source-feedback').classList.contains('success')"
+        )
+        assert "已保存" in page.locator("#news-source-feedback").inner_text()
+        browser.close()

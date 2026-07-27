@@ -21,7 +21,13 @@ PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
-EVENT_KINDS = {"market_turn", "market_close", "important_news", "task_failure", "task_report"}
+EVENT_KINDS = (
+    "important_news",
+    "market_turn",
+    "market_close",
+    "task_report",
+    "task_failure",
+)
 
 
 def resolved_policy(preset: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -46,10 +52,17 @@ def resolved_policy(preset: str, overrides: dict[str, Any] | None = None) -> dic
     for number in [value["regime_threshold"], *value["news_thresholds"].values()]:
         if not 0 <= float(number) <= 100:
             raise ValueError("推送阈值必须为 0–100")
-    if "event_types" in value:
-        invalid = set(value["event_types"]) - EVENT_KINDS
+    if "event_types" not in value:
+        value["event_types"] = list(EVENT_KINDS)
+    else:
+        event_types = value["event_types"]
+        if not isinstance(event_types, (list, tuple, set)) or isinstance(event_types, str):
+            raise ValueError("推送内容必须为事件类型列表")
+        invalid = set(event_types) - set(EVENT_KINDS)
         if invalid:
             raise ValueError(f"未知事件类型: {', '.join(sorted(invalid))}")
+        selected = set(event_types)
+        value["event_types"] = [kind for kind in EVENT_KINDS if kind in selected]
     return value
 
 

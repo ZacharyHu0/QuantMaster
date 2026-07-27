@@ -68,7 +68,8 @@ def fetch_daily_indicators(symbol: str) -> pd.DataFrame:  # pragma: no cover - �
     try:
         ak = _require_akshare()
         raw = akshare_call(
-            f"stock_a_indicator_lg({symbol})", ak.stock_a_indicator_lg, symbol=code)
+            f"stock_a_indicator_lg({symbol})", ak.stock_a_indicator_lg,
+            symbol=code, lane="akshare:other")
         if raw is None or raw.empty:
             raise RuntimeError("AKShare 返回空数据")
     except Exception as ak_error:
@@ -100,6 +101,7 @@ def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame: 
         raw = akshare_call(
             f"stock_financial_analysis_indicator({symbol})",
             ak.stock_financial_analysis_indicator, symbol=code, start_year=start_year,
+            lane="akshare:other",
         )
         if raw is None or raw.empty:
             raise RuntimeError("AKShare 返回空数据")

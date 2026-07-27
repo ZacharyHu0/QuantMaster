@@ -483,9 +483,10 @@ def configure_logging(
 
         for name in (
             "apscheduler", "httpx", "httpcore", "websockets",
-            "watchfiles", "python_multipart", "multipart",
+            "watchfiles", "python_multipart", "multipart", "yfinance",
         ):
-            logging.getLogger(name).setLevel(logging.WARNING)
+            logging.getLogger(name).setLevel(
+                logging.CRITICAL if name == "yfinance" else logging.WARNING)
         for name in ("uvicorn", "uvicorn.error", "uvicorn.asgi"):
             normalize_third_party_logger(name, logging.WARNING)
         access_logger = logging.getLogger("uvicorn.access")

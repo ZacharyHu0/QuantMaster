@@ -1,7 +1,9 @@
 (() => {
   'use strict';
 
-  const state = {loaded:false, loading:false, data:null, expanded:new Set(), bindings:new Map(), qrSession:'', qrPolling:false};
+  const state = {loaded:false, loading:false, data:null, expanded:new Set(), bindings:new Map(),
+    targetFeedback:new Map(), targetSaving:new Set(), auditLoaded:false, auditLoading:false,
+    qrSession:'', qrPolling:false};
   const presets = {
     conservative:{regime_threshold:80, confirmation_bars:3, cooldown_minutes:60,
       news_thresholds:{holding:75, watchlist:85, market:90}, hourly_cap:3},
@@ -11,6 +13,11 @@
       news_thresholds:{holding:50, watchlist:60, market:70}, hourly_cap:12},
   };
   const presetLabels = {conservative:'保守', balanced:'均衡', sensitive:'敏感'};
+  const eventTypeLabels = {
+    important_news:'重要资讯', market_turn:'盘中变盘', market_close:'收盘状态',
+    task_report:'任务结果', task_failure:'任务失败',
+  };
+  const allEventTypes = Object.keys(eventTypeLabels);
   const jobLabels = {
     intraday_monitor:'盘中变盘监控', fast_news_scan:'财经快讯扫描',
     official_news_scan:'官方公告扫描', periodic_news_scan:'定期资讯扫描',
@@ -85,6 +92,18 @@
     return base;
   }
 
+  function selectedEventTypes(target) {
+    const configured = target.overrides?.event_types;
+    return Array.isArray(configured)
+      ? allEventTypes.filter(kind => configured.includes(kind))
+      : [...allEventTypes];
+  }
+
+  function feedbackMarkup(targetId) {
+    const feedback = state.targetFeedback.get(targetId);
+    return `<div class="target-feedback ${esc(feedback?.kind || '')}" role="status" aria-live="polite">${esc(feedback?.message || '')}</div>`;
+  }
+
   function bindingMarkup(target, session) {
     if (!session) return '';
     const command = `绑定 QuantMaster ${session.code}`;
@@ -117,6 +136,8 @@
       const expanded = state.expanded.has(target.id);
       const bound = Boolean(target.target && target.account_id);
       const binding = state.bindings.get(target.id);
+      const eventTypes = selectedEventTypes(target);
+      const saving = state.targetSaving.has(target.id);
       const groupBlocked = target.id === 'feishu_group' && !ownerBound;
       const bindLabel = bound ? '重新绑定' : groupBlocked ? '需先绑定管理员' : target.id === 'feishu_owner' ? '开始绑定管理员' : '开始绑定群聊';
       return `<article class="target-card" data-target-card="${esc(target.id)}">
@@ -124,23 +145,31 @@
           <span class="status-label ${esc(target.status)}">${statusText(target.status)}</span></div>
         <div class="target-controls">
           <div class="segmented" aria-label="${esc(target.label)}推送强度">
-            ${Object.entries(presetLabels).map(([key,label]) => `<button type="button" data-policy="${key}" data-target="${esc(target.id)}" class="${target.preset === key ? 'active' : ''}" aria-pressed="${target.preset === key}">${label}</button>`).join('')}
+            ${Object.entries(presetLabels).map(([key,label]) => `<button type="button" data-policy="${key}" data-target="${esc(target.id)}" class="${target.preset === key ? 'active' : ''}" aria-pressed="${target.preset === key}" ${saving ? 'disabled' : ''}>${label}</button>`).join('')}
           </div>
           <div class="target-tools">
             <button class="ghost" type="button" data-policy-more="${esc(target.id)}">${expanded ? '收起高级' : '高级设置'}</button>
             ${target.channel === 'feishu' ? `<button class="ghost" type="button" data-bind-target="${esc(target.id)}" data-bind-blocked="${groupBlocked}">${bindLabel}</button>` : ''}
             <button class="ghost" type="button" data-test-target="${esc(target.id)}" data-bound="${bound}">${bound ? '测试' : '测试（先绑定）'}</button>
-            <button class="ghost" type="button" data-toggle-target="${esc(target.id)}">${target.enabled ? '关闭推送' : '开启推送'}</button>
+            <button class="ghost" type="button" data-toggle-target="${esc(target.id)}" ${saving ? 'disabled' : ''}>${target.enabled ? '关闭推送' : '开启推送'}</button>
           </div>
         </div>
+        <fieldset class="target-content" ${saving ? 'disabled' : ''}>
+          <legend>推送内容</legend>
+          <div class="target-content-options">
+            ${Object.entries(eventTypeLabels).map(([key,label]) => `<label><input type="checkbox" data-event-type="${key}" data-target="${esc(target.id)}" ${eventTypes.includes(key) ? 'checked' : ''}><span>${label}</span></label>`).join('')}
+          </div>
+          <p class="target-content-note ${eventTypes.length ? '' : 'muted-warning'}">${eventTypes.length ? '各会话独立订阅；取消某类后，高优先级事件也不会绕过。' : '未订阅任何内容；自动化与 Bot 监听仍会继续运行。'}</p>
+        </fieldset>
         <div class="policy-details" ${expanded ? '' : 'hidden'}>
           <label>变盘阈值<input data-policy-field="regime_threshold" type="number" min="0" max="100" value="${policy.regime_threshold}"></label>
           <label>确认 K 线<input data-policy-field="confirmation_bars" type="number" min="1" max="3" value="${policy.confirmation_bars}"></label>
           <label>冷却分钟<input data-policy-field="cooldown_minutes" type="number" min="15" max="120" value="${policy.cooldown_minutes}"></label>
           <label>重要消息阈值<input data-policy-field="news_market" type="number" min="0" max="100" value="${policy.news_thresholds.market}"></label>
           <label>每小时上限<input data-policy-field="hourly_cap" type="number" min="1" max="30" value="${policy.hourly_cap}"></label>
-          <div class="policy-save"><button class="primary" type="button" data-save-policy="${esc(target.id)}">保存高级设置</button></div>
+          <div class="policy-save"><button class="primary" type="button" data-save-policy="${esc(target.id)}" ${saving ? 'disabled' : ''}>${saving ? '保存中…' : '保存高级设置'}</button></div>
         </div>
+        ${feedbackMarkup(target.id)}
         <div data-binding-result="${esc(target.id)}">${bindingMarkup(target, binding)}</div>
       </article>`;
     }).join('') || '<div class="automation-empty">暂无推送目标</div>';
@@ -163,14 +192,20 @@
     </div>`).join('') || '<div class="automation-empty">暂无事件</div>';
   }
 
-  async function renderAudit() {
+  async function renderAudit(force = false) {
+    const panel = document.getElementById('automation-audit-panel');
+    if (!panel.open || state.auditLoading || (state.auditLoaded && !force)) return;
     const root = document.getElementById('automation-audit');
+    state.auditLoading = true;
+    if (!state.auditLoaded) root.innerHTML = '<div class="automation-empty">正在读取操作记录…</div>';
     try {
       const data = await api('/api/automation/audit?limit=30');
       root.innerHTML = `<table class="automation-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>结果</th></tr></thead><tbody>
         ${data.items.map(item => `<tr><td class="muted">${dateText(item.created_at)}</td><td>${esc(item.actor)}</td><td>${esc(item.action)}</td><td>${esc(item.object_type)} / ${esc(item.object_id)}</td><td>${esc(item.result)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无记录</td></tr>'}
       </tbody></table>`;
+      state.auditLoaded = true;
     } catch (error) { root.innerHTML = `<div class="err">${esc(error.message)}</div>`; }
+    finally { state.auditLoading = false; }
   }
 
   function render() {
@@ -181,7 +216,8 @@
       : state.data?.runtime === 'standby'
         ? `自动化已启用 · 等待调度租约 · ${state.data.timezone}`
         : '自动化未开启 · 可在设置中心即时启用';
-    renderChannels(); renderJobs(); renderTargets(); renderEvents(); renderAudit();
+    renderChannels(); renderJobs(); renderTargets(); renderEvents();
+    if (document.getElementById('automation-audit-panel').open) renderAudit(true);
   }
 
   window.loadAutomation = async function(force = false) {
@@ -196,11 +232,27 @@
     } finally { state.loading = false; }
   };
 
-  async function updateTarget(targetId, body) {
-    await secureApi(`/api/automation/targets/${encodeURIComponent(targetId)}/policy`, {
-      method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
-    });
-    state.loaded = false; await loadAutomation(true);
+  async function updateTarget(targetId, body, successMessage = '推送设置已保存') {
+    if (state.targetSaving.has(targetId)) return null;
+    state.targetSaving.add(targetId);
+    state.targetFeedback.set(targetId, {kind:'saving', message:'正在保存…'});
+    renderTargets();
+    try {
+      const saved = await secureApi(`/api/automation/targets/${encodeURIComponent(targetId)}/policy`, {
+        method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
+      });
+      const index = state.data.targets.findIndex(item => item.id === targetId);
+      if (index >= 0) state.data.targets[index] = saved;
+      const time = new Date().toLocaleTimeString('zh-CN', {hour12:false, hour:'2-digit', minute:'2-digit'});
+      state.targetFeedback.set(targetId, {kind:'success', message:`${successMessage} · ${time}`});
+      return saved;
+    } catch (error) {
+      state.targetFeedback.set(targetId, {kind:'error', message:`保存失败：${error.message}`});
+      return null;
+    } finally {
+      state.targetSaving.delete(targetId);
+      renderTargets();
+    }
   }
 
   async function pollBinding(targetId, session) {
@@ -277,6 +329,11 @@
   }
 
   document.getElementById('automation-refresh').addEventListener('click', () => loadAutomation(true));
+  document.getElementById('automation-audit-panel').addEventListener('toggle', event => {
+    const panel = event.currentTarget;
+    panel.querySelector('.automation-audit-toggle').textContent = panel.open ? '收起' : '展开查看';
+    if (panel.open) renderAudit();
+  });
   document.getElementById('automation-channels').addEventListener('click', event => {
     const manage = event.target.closest('[data-manage-channel]');
     if (manage) {
@@ -314,7 +371,12 @@
         setTimeout(() => { copy.textContent = '复制命令'; }, 1500);
         return;
       }
-      if (policy) return await updateTarget(policy.dataset.target, {preset:policy.dataset.policy, overrides:{}});
+      if (policy) {
+        const target = state.data.targets.find(item => item.id === policy.dataset.target);
+        const overrides = {event_types:selectedEventTypes(target)};
+        return await updateTarget(target.id, {preset:policy.dataset.policy, overrides},
+          `推送强度已设为${presetLabels[policy.dataset.policy]}`);
+      }
       if (more) {
         state.expanded.has(more.dataset.policyMore) ? state.expanded.delete(more.dataset.policyMore) : state.expanded.add(more.dataset.policyMore);
         renderTargets(); return;
@@ -348,7 +410,9 @@
       }
       if (toggle) {
         const target = state.data.targets.find(item => item.id === toggle.dataset.toggleTarget);
-        return await updateTarget(target.id, {preset:target.preset, overrides:target.overrides, enabled:!target.enabled});
+        return await updateTarget(target.id, {
+          preset:target.preset, overrides:target.overrides, enabled:!target.enabled,
+        }, target.enabled ? '主动推送已关闭' : '主动推送已开启');
       }
       if (save) {
         const target = state.data.targets.find(item => item.id === save.dataset.savePolicy);
@@ -356,11 +420,25 @@
         const number = name => Number(card.querySelector(`[data-policy-field="${name}"]`).value);
         const overrides = {regime_threshold:number('regime_threshold'), confirmation_bars:number('confirmation_bars'),
           cooldown_minutes:number('cooldown_minutes'), hourly_cap:number('hourly_cap'),
-          news_thresholds:{market:number('news_market')}};
-        return await updateTarget(target.id, {preset:target.preset, overrides});
+          news_thresholds:{market:number('news_market')}, event_types:selectedEventTypes(target)};
+        return await updateTarget(target.id, {preset:target.preset, overrides}, '高级设置已保存');
       }
     } catch (error) { alert(error.message); }
     finally { if (test) test.disabled = false; }
+  });
+
+  document.getElementById('automation-targets').addEventListener('change', async event => {
+    const input = event.target.closest('[data-event-type]');
+    if (!input) return;
+    const target = state.data.targets.find(item => item.id === input.dataset.target);
+    const card = input.closest('[data-target-card]');
+    const eventTypes = [...card.querySelectorAll('[data-event-type]:checked')]
+      .map(item => item.dataset.eventType);
+    const overrides = {...target.overrides, event_types:eventTypes};
+    const message = eventTypes.length
+      ? `推送内容已保存（${eventTypes.length} 类）`
+      : '已保存：当前目标不接收主动推送';
+    await updateTarget(target.id, {preset:target.preset, overrides}, message);
   });
 
   document.getElementById('automation-jobs').addEventListener('click', async event => {

@@ -289,8 +289,12 @@ class MigrationCreate(BaseModel):
 @router.post("/settings/migration")
 def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
+    from quantmaster.data.maintenance import data_refresh_manager
     from quantmaster.lab.worker import get_worker
 
+    if data_refresh_manager.active:
+        raise HTTPException(
+            409, "行情数据库正在全量刷新；请先完成或取消刷新，再迁移数据目录")
     active_job = get_worker().status().get("active_job_id")
     if active_job:
         raise HTTPException(
@@ -324,6 +328,81 @@ def cancel_migration(task_id: str, request: Request) -> dict:
         return migration_manager.cancel(task_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
+
+
+class DataRefreshRequest(BaseModel):
+    scope: Literal["market", "universe", "all_cached"] = "market"
+    universe: str = Field(default="", max_length=80)
+    start: str = Field(default="", max_length=10)
+
+
+@router.post("/settings/data-refresh/preview")
+def preview_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        return data_refresh_manager.preview(value.scope, value.universe, value.start)
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/settings/data-refresh")
+def create_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        return data_refresh_manager.create(value.scope, value.universe, value.start)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (RuntimeError, FileNotFoundError) as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.get("/settings/data-refresh/latest")
+def latest_data_refresh(request: Request) -> dict:
+    _require_local(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    return {"job": data_refresh_manager.latest()}
+
+
+@router.get("/settings/data-refresh/{job_id}")
+def get_data_refresh(job_id: str, request: Request) -> dict:
+    _require_local(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        return data_refresh_manager.get(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+
+
+@router.post("/settings/data-refresh/{job_id}/cancel")
+def cancel_data_refresh(job_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        return data_refresh_manager.cancel(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.post("/settings/data-refresh/{job_id}/resume")
+def resume_data_refresh(job_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        return data_refresh_manager.resume(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 class UniverseBody(BaseModel):

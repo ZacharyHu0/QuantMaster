@@ -42,7 +42,7 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 }
 .group-heading h3 { font-size: 20px; font-weight: 650; line-height: 1.2; }
 .group-heading p { color: var(--muted); margin-top: 5px; max-width: 68ch; }
-.group-heading h4, .migration-box h4 { font-size: 14px; color: var(--ink-2); }
+.group-heading h4, .migration-box h4, .maintenance-box h4 { font-size: 14px; color: var(--ink-2); }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
 .field-grid label {
   display: flex; flex-direction: column; gap: 6px; color: var(--ink-2); font-size: 12px;
@@ -109,6 +109,25 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .migration-progress > div:first-child { display: flex; justify-content: space-between; grid-column: 1 / -1; }
 .migration-progress .load-track { margin: 0; }
 .migration-progress .load-fill { transform: scaleX(var(--migration-progress, 0)); }
+.maintenance-box {
+  display: grid; gap: 14px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border);
+}
+.maintenance-box p, .maintenance-progress small { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.maintenance-controls {
+  display: grid; grid-template-columns: 160px minmax(160px, 1fr) 160px auto; gap: 8px;
+}
+.maintenance-confirm {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 11px 12px; border: 1px solid color-mix(in oklch, var(--s4) 36%, var(--axis));
+  border-radius: 8px; color: var(--ink-2); font-size: 12px;
+}
+.maintenance-progress { display: grid; grid-template-columns: 1fr auto; gap: 9px 12px; align-items: center; }
+.maintenance-confirm[hidden], .maintenance-progress[hidden] { display: none; }
+.maintenance-progress > div:first-child { display: flex; justify-content: space-between; grid-column: 1 / -1; }
+.maintenance-progress .load-track { margin: 0; }
+.maintenance-progress .load-fill { transform: scaleX(var(--data-refresh-progress, 0)); }
+.maintenance-actions { display: flex; gap: 8px; }
+.maintenance-progress small { grid-column: 1 / -1; min-height: 17px; }
 .save-dock {
   position: sticky; bottom: 68px; z-index: 5; display: flex; align-items: center; gap: 16px;
   margin-top: 32px; padding: 11px 12px; background: color-mix(in oklch, var(--surface) 94%, var(--page));
@@ -202,7 +221,8 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
   .settings-content { padding-top: 14px; }
   .field-grid, .channel-grid { grid-template-columns: 1fr; }
   .check-stack { grid-template-columns: 1fr; }
-  .migration-controls { grid-template-columns: 1fr; }
+  .migration-controls, .maintenance-controls { grid-template-columns: 1fr; }
+  .maintenance-confirm { align-items: stretch; flex-direction: column; }
   .save-dock { flex-wrap: wrap; bottom: 60px; }
   #settings-save-state { flex-basis: 100%; }
   .autosave-note { display: none; }

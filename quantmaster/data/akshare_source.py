@@ -71,7 +71,7 @@ class AkshareSource(DataSource):
             # 期货主力连续合约，如 AU0 -> 沪金主力
             raw = akshare_call(
                 f"futures_zh_daily_sina({symbol})", ak.futures_zh_daily_sina,
-                symbol=code,
+                symbol=code, lane="akshare:sina",
             )
         else:
             raise NotImplementedError(f"akshare 不支持该市场: {symbol}")
@@ -144,7 +144,7 @@ class AkshareSource(DataSource):
         code, _ = _split(index_symbol)
         raw = akshare_call(
             f"index_stock_cons_csindex({index_symbol})",
-            ak.index_stock_cons_csindex, symbol=code,
+            ak.index_stock_cons_csindex, symbol=code, lane="akshare:csindex",
         )
         result = []
         for c in raw["成分券代码"].astype(str).str.zfill(6):

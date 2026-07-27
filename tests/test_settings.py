@@ -216,6 +216,53 @@ def test_settings_api_requires_local_csrf_and_never_returns_secret(monkeypatch, 
     assert remote.get("/api/settings").status_code == 403
 
 
+def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monkeypatch):
+    from quantmaster.data import maintenance
+
+    class FakeRefreshManager:
+        active = False
+
+        def preview(self, scope, universe, start):
+            return {"scope": scope, "universe": universe, "start": start or "2024-01-01",
+                    "end": "2026-07-27", "total": 2, "unhealthy_sources": []}
+
+        def create(self, scope, universe, start):
+            return {"id": "job-1", "status": "running", "scope": scope}
+
+        def latest(self):
+            return {"id": "job-1", "status": "interrupted"}
+
+        def get(self, job_id):
+            return {"id": job_id, "status": "interrupted"}
+
+        def cancel(self, job_id):
+            return {"id": job_id, "status": "cancelling"}
+
+        def resume(self, job_id):
+            return {"id": job_id, "status": "running"}
+
+    monkeypatch.setattr(maintenance, "data_refresh_manager", FakeRefreshManager())
+    client = TestClient(app)
+    assert client.post(
+        "/api/settings/data-refresh/preview", json={"scope": "market"}).status_code == 403
+    settings = client.get("/api/settings").json()
+    headers = {"X-CSRF-Token": settings["csrf_token"]}
+
+    preview = client.post(
+        "/api/settings/data-refresh/preview", json={"scope": "universe", "universe": "demo"},
+        headers=headers,
+    )
+    assert preview.status_code == 200
+    assert preview.json()["total"] == 2
+    assert client.post(
+        "/api/settings/data-refresh", json={"scope": "market"}, headers=headers,
+    ).json()["status"] == "running"
+    assert client.get("/api/settings/data-refresh/latest").json()["job"]["status"] == "interrupted"
+    assert client.post(
+        "/api/settings/data-refresh/job-1/resume", headers=headers,
+    ).json()["status"] == "running"
+
+
 def test_automation_channel_credentials_require_local_csrf():
     client = TestClient(app)
     rejected = client.post(

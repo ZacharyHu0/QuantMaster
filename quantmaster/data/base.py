@@ -109,6 +109,12 @@ class DataSource(ABC):
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         """标准化日线。"""
 
+    def daily_many(
+        self, symbols: list[str], start: str, end: str,
+    ) -> dict[str, pd.DataFrame]:  # pragma: no cover - 默认兼容实现
+        """批量日线；支持批量接口的数据源应覆盖此方法。"""
+        return {symbol: self.daily(symbol, start, end) for symbol in symbols}
+
     def intraday(
         self, symbol: str, start: str, end: str, frequency: str = "5m"
     ) -> pd.DataFrame:  # pragma: no cover - 依赖网络

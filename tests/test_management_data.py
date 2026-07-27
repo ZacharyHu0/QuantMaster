@@ -125,3 +125,52 @@ def test_switch_only_accepts_existing_data_directory(tmp_path):
         time.sleep(0.01)
     assert result["status"] == "completed"
     assert switcher.target == str(target.resolve())
+
+
+def test_full_refresh_job_is_persistent_and_retries_only_failures(
+    isolated_config, monkeypatch,
+):
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.data.registry import RefreshMode
+
+    manager = DataRefreshManager()
+    symbols = ["600000.SH", "000001.SZ"]
+    monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: symbols)
+    monkeypatch.setattr(manager, "_start", lambda job_id: None)
+    calls = []
+
+    def fake_load(symbol, start, end, **kwargs):
+        calls.append((symbol, start, end, kwargs))
+
+    monkeypatch.setattr("quantmaster.data.maintenance.load_history", fake_load)
+    job = manager.create("market")
+    assert job["status"] == "running"
+    assert manager.latest()["id"] == job["id"]
+
+    manager._run(job["id"])
+    completed = manager.get(job["id"])
+    assert completed["status"] == "completed"
+    assert [item[0] for item in calls] == symbols
+    assert all(item[3]["refresh"] == RefreshMode.FULL for item in calls)
+    assert all(item[3]["priority"] == "maintenance" for item in calls)
+
+    # 已结束任务中的失败项续跑时只重排失败标的，不重复成功标的。
+    with manager._conn() as conn:
+        conn.execute(
+            "UPDATE refresh_jobs SET status='completed_with_errors',failed=1,"
+            "failures_json=?,next_index=total WHERE id=?",
+            ('[{"symbol":"000001.SZ","error":"offline"}]', job["id"]),
+        )
+    resumed = manager.resume(job["id"])
+    assert resumed["status"] == "running"
+    assert resumed["total"] == 1
+    assert resumed["next_index"] == 0
+
+
+def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, tmp_path):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    isolated_config.data.root = str(tmp_path / "switched")
+    assert manager.latest() is None
+    assert (isolated_config.data_root / "data_refresh.sqlite").exists()

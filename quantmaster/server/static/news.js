@@ -45,6 +45,12 @@
     live.innerHTML = `<i></i>${html(detail ? `${message}：${detail}` : message)}`;
   }
 
+  function sourceFeedback(kind = '', message = '') {
+    const target = document.getElementById('news-source-feedback');
+    target.className = `source-feedback ${kind}`;
+    target.textContent = message;
+  }
+
   async function api(path, options = {}) {
     return window.QuantMasterAPI(path, options);
   }
@@ -383,6 +389,7 @@
     showSourceFields();
     renderSourceList();
     document.getElementById('news-source-preview').innerHTML = '<span class="news-muted">保存前可先测试解析结果。</span>';
+    sourceFeedback();
   }
 
   async function loadSources(selectFirst = false) {
@@ -433,6 +440,8 @@
     event.preventDefault();
     const submit = sourceForm.querySelector('[type="submit"]');
     submit.disabled = true;
+    submit.textContent = '保存中…';
+    sourceFeedback('saving', '正在校验并保存来源设置…');
     try {
       const token = sourceForm.elements.token.value;
       let saved;
@@ -455,8 +464,17 @@
       state.selectedSource = saved;
       await loadSources();
       fillSource(state.sources.find(source => source.id === saved.id));
-    } catch (error) { report('保存来源失败', error); }
-    finally { submit.disabled = false; }
+      const time = new Date().toLocaleTimeString('zh-CN', {
+        hour12:false, hour:'2-digit', minute:'2-digit',
+      });
+      sourceFeedback('success', `来源“${saved.name}”已保存 · ${time}`);
+    } catch (error) {
+      report('保存来源失败', error);
+      sourceFeedback('error', `保存失败：${error.message}`);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = '保存来源';
+    }
   };
 
   sourceForm.querySelector('[data-source-test]').onclick = async () => {

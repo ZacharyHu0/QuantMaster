@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 
 from quantmaster.data.base import DataSource, Market, normalize_daily
+from quantmaster.data.resilience import provider_call
 
 
 def _require_yfinance():
@@ -44,12 +47,57 @@ class YFinanceSource(DataSource):
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         yf = _require_yfinance()
         ticker = to_yahoo_symbol(symbol)
-        raw = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-        if raw is None or raw.empty:
-            return pd.DataFrame()
+        inclusive_end = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
+        key = f"history:{ticker}:{start}:{inclusive_end}"
+
+        def fetch():
+            return yf.Ticker(ticker).history(
+                start=start, end=inclusive_end, auto_adjust=True, actions=False,
+                raise_errors=True,
+            )
+
+        raw = provider_call("yahoo", key, fetch, empty_opens=True)
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         return normalize_daily(raw)
+
+    def daily_many(
+        self, symbols: list[str], start: str, end: str,
+    ) -> dict[str, pd.DataFrame]:
+        """用一次 Yahoo 批量下载完成全球参考标的同步。"""
+        if not symbols:
+            return {}
+        yf = _require_yfinance()
+        mapping = {symbol: to_yahoo_symbol(symbol) for symbol in symbols}
+        inclusive_end = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
+        digest = hashlib.sha256(
+            "|".join(sorted(mapping.values())).encode("utf-8")).hexdigest()[:16]
+        key = f"batch:{digest}:{start}:{inclusive_end}"
+
+        def fetch():
+            return yf.download(
+                list(mapping.values()), start=start, end=inclusive_end,
+                progress=False, auto_adjust=True, actions=False, threads=False,
+                group_by="ticker",
+            )
+
+        raw = provider_call("yahoo", key, fetch, empty_opens=True)
+        result: dict[str, pd.DataFrame] = {}
+        for symbol, ticker in mapping.items():
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    first = set(map(str, raw.columns.get_level_values(0)))
+                    frame = raw[ticker] if ticker in first else raw.xs(ticker, axis=1, level=1)
+                elif len(mapping) == 1:
+                    frame = raw
+                else:
+                    continue
+                normalized = normalize_daily(frame.dropna(how="all"))
+                if not normalized.empty:
+                    result[symbol] = normalized.loc[start:end]
+            except (KeyError, TypeError, ValueError):
+                continue
+        return result
 
 
 # 全球参考标的：统一符号 -> (yahoo 符号, 中文名)

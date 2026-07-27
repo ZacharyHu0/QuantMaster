@@ -10,10 +10,10 @@ from quantmaster.ai.crawler import NewsItem
 from quantmaster.automation.channels.feishu import FeishuBotClient
 from quantmaster.automation.channels.weixin import WeixinClawBotClient
 from quantmaster.automation.commands import BotCommandRouter
-from quantmaster.automation.delivery import OutboxDispatcher, format_feishu_card
+from quantmaster.automation.delivery import OutboxDispatcher, format_alert, format_feishu_card
 from quantmaster.automation.models import ActorContext, AlertEvent
-from quantmaster.automation.news import importance_score
-from quantmaster.automation.policy import policy_allows, resolved_policy
+from quantmaster.automation.news import importance_score, news_event
+from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
 from quantmaster.automation.service import AutomationService
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
@@ -57,6 +57,41 @@ def test_policy_presets_and_overrides():
     })
     assert custom["regime_threshold"] == 72
     assert custom["news_thresholds"] == {"holding": 55, "watchlist": 75, "market": 80}
+    assert custom["event_types"] == list(EVENT_KINDS)
+    silent = resolved_policy("balanced", {"event_types": []})
+    assert silent["event_types"] == []
+    assert not policy_allows({"kind": "task_failure", "score": 100}, silent)
+    with pytest.raises(ValueError, match="事件类型列表"):
+        resolved_policy("balanced", {"event_types": "important_news"})
+
+
+def test_content_subscription_is_absolute_but_explicit_test_bypasses_it(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.bind_target(
+        "feishu_owner", target="oc_chat", account_id="cli_app",
+        owner_actor="feishu:cli_app:ou_owner", actor="test",
+    )
+    store.update_target_policy(
+        "feishu_owner", preset="balanced", overrides={"event_types": []}, actor="test",
+    )
+    gateway = RecordingGateway()
+    service = AutomationService(store, OutboxDispatcher(store, gateway))
+
+    critical = AlertEvent(
+        kind="important_news", score=100, severity="critical",
+        dedupe_key="critical-unsubscribed", payload={"title": "重大资讯"},
+    )
+    failure = AlertEvent(
+        kind="task_failure", score=100, severity="critical",
+        dedupe_key="failure-unsubscribed", payload={"title": "任务失败"},
+    )
+    assert service.process_event(critical, {"feishu_owner"})["enqueued"] == 0
+    assert service.process_event(failure, {"feishu_owner"})["enqueued"] == 0
+
+    result = service.test_target("feishu_owner")
+    assert result["enqueued"] == 1
+    assert result["dispatch"]["delivered"] == 1
+    assert gateway.items[0]["kind"] == "task_report"
 
 
 def test_store_binding_outbox_and_delivery(tmp_path):
@@ -327,6 +362,67 @@ def test_feishu_primary_alert_uses_structured_card():
     assert "https://example.com/source" in content
 
 
+def test_news_alert_surfaces_summary_and_bullish_bearish_judgement():
+    event = news_event(NewsItem(
+        source="sse", title="公司上调业绩预告", content="预计净利润同比增长",
+        url="https://example.com/news", published_at="2026-07-27T10:00:00+08:00",
+        symbols=["600000.SH"], event_type="业绩", sentiment=0.72,
+        summary="盈利预测上修，业绩增速超预期", is_official=True,
+    ), {"600000.SH"}, set()).to_dict()
+
+    text = format_alert(event, "weixin")
+    assert "研判 利好 (+0.72)" in text
+    assert "摘要：盈利预测上修，业绩增速超预期" in text
+    assert "核查依据" in text
+
+    card = format_feishu_card(event)
+    content = card["elements"][0]["text"]["content"]
+    assert "**研判**  利好 (+0.72)" in content
+    assert "**摘要**" in content
+    assert "盈利预测上修" in content
+
+
+def test_news_digest_contains_compact_directional_summaries(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    for index, (direction, sentiment, summary) in enumerate((
+        ("up", 0.6, "需求回暖带动盈利预期上修"),
+        ("down", -0.5, "监管调查增加短期不确定性"),
+    )):
+        store.save_event(AlertEvent(
+            kind="important_news", score=88 - index, severity="high",
+            direction=direction, relevance="market", dedupe_key=f"digest-source-{index}",
+            payload={
+                "title": f"资讯 {index + 1}", "summary": summary, "sentiment": sentiment,
+            },
+        ))
+
+    assert service._task_news_digest() == {"items": 2}
+    digest = next(
+        item for item in store.recent_events(10) if item.get("payload", {}).get("digest")
+    )
+    assert digest["kind"] == "important_news"
+    assert digest["payload"]["counts"] == {"up": 1, "down": 1, "neutral": 0}
+    text = format_alert(digest, "weixin")
+    assert "利好 1 · 利空 1 · 中性 0" in text
+    assert "[利好] 资讯 1" in text
+    assert "需求回暖带动盈利预期上修" in text
+
+
+def test_news_task_does_not_emit_generic_completion_report(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    emitted = []
+    monkeypatch.setattr(service, "_task_fast_news_scan", lambda: {"saved": 0, "events": 0})
+    monkeypatch.setattr(
+        service, "process_event", lambda event, *args, **kwargs: emitted.append(event) or {},
+    )
+    run_id = store.start_run("fast_news_scan", "test")
+    service._run_task(run_id, "fast_news_scan", "test")
+    assert emitted == []
+    assert store.recent_runs(1)[0]["status"] == "succeeded"
+
+
 def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
     import sys
     import threading
@@ -513,9 +609,16 @@ def test_automation_api_and_ui_contract():
     assert "feishu-config-form" not in automation_script
     assert "data-feishu-diagnose" in automation_script
     assert "feishuStageLabels" in settings_script
+    assert "function parseSymbols(value)" in settings_script
     script = client.get("/static/automation.js").text
     assert "conservative:'保守'" in script
     assert "balanced:'均衡'" in script
     assert "sensitive:'敏感'" in script
+    assert "important_news:'重要资讯'" in script
+    assert "未订阅任何内容；自动化与 Bot 监听仍会继续运行" in script
+    assert "targetFeedback" in script
+    assert "automation-audit-panel" in page
+    assert '<details class="panel automation-log"' in page
+    assert "news-source-feedback" in page
     assert "长连接正常，但尚未收到消息事件" in script
     assert "测试（先绑定）" in script

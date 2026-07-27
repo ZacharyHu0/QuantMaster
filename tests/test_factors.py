@@ -113,8 +113,8 @@ class TestAnalysis:
 
 
 class TestCacheReplaceSemantics:
-    def test_refetch_replaces_mixed_adjustment_bases(self, tmp_path, monkeypatch):
-        """前复权数据触网必须整段重拉替换缓存，不得与旧复权基准增量合并。"""
+    def test_increment_calibrates_mixed_adjustment_bases(self, tmp_path, monkeypatch):
+        """前复权增量通过重叠窗口校准旧缓存，不需要整段重拉。"""
         import pandas as pd
 
         from quantmaster.data import registry
@@ -149,10 +149,11 @@ class TestCacheReplaceSemantics:
             conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
 
         registry.load_history("600000.SH", "2024-07-01", "2024-12-31", store=store)
-        # 触网请求必须放宽到旧缓存起点（整段重拉）
-        assert FakeSource.calls[0][0] <= "2024-01-02"
-        # 缓存整体替换成新基准：不存在 100 与 80 的接缝跳空
+        # 只请求尾部重叠窗口，不再反复重拉半年历史。
+        assert FakeSource.calls[0][0] == "2024-06-24"
+        # 价格列整体校准成新基准：不存在 100 与 80 的接缝跳空。
         cached = store.get("600000.SH")
+        assert cached.loc["2024-02-01", "close"] == 80.0
         returns = cached["close"].pct_change().dropna()
         assert float(returns.abs().max()) < 1e-9, "缓存中出现复权基准接缝跳变"
 
@@ -186,8 +187,8 @@ class TestCacheReplaceSemantics:
         df = registry.load_history("600000.SH", "2024-01-02", "2024-06-28", store=store)
         assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
 
-    def test_partial_refetch_preserves_complete_cached_chunks(self, tmp_path, monkeypatch):
-        """AKShare 缺头的有效响应要合并保存，不能把旧缓存完整分块冲掉。"""
+    def test_partial_refetch_calibrates_prices_and_preserves_old_volume(self, tmp_path, monkeypatch):
+        """价格按新复权基准校准，但旧成交量不应被比例缩放。"""
         import pandas as pd
 
         from quantmaster.data import registry
@@ -222,11 +223,12 @@ class TestCacheReplaceSemantics:
         cached = store.get("600000.SH")
         assert str(result.index.min().date()) == "2024-01-02"
         assert str(result.index.max().date()) == "2024-12-31"
-        assert cached.loc["2024-02-01", "close"] == 100.0
+        assert cached.loc["2024-02-01", "close"] == 80.0
         assert cached.loc["2024-05-02", "close"] == 80.0
+        assert cached.loc["2024-02-01", "volume"] == 1e6
 
-    def test_sparse_response_is_saved_even_when_no_fallback_succeeds(self, tmp_path, monkeypatch):
-        """边界齐全但内部大面积缺行时仍落盘，备用源失败后返回已取得部分。"""
+    def test_sparse_response_is_rejected_when_no_fallback_succeeds(self, tmp_path, monkeypatch):
+        """内部大面积缺行的响应不得污染本地数据库。"""
         import pandas as pd
 
         from quantmaster.data import registry
@@ -256,12 +258,10 @@ class TestCacheReplaceSemantics:
 
         monkeypatch.setattr(
             registry, "_factories", lambda: {Market.CN: [SparseSource, BrokenFallback]})
-        result = registry.load_history(
-            "600000.SH", "2024-01-02", "2024-06-28", store=store)
-
-        assert not result.empty
-        assert len(result) == len(store.get("600000.SH"))
-        assert str(result.index.max().date()) == "2024-06-28"
+        with pytest.raises(RuntimeError, match="响应内部过于稀疏"):
+            registry.load_history(
+                "600000.SH", "2024-01-02", "2024-06-28", store=store)
+        assert store.get("600000.SH") is None
 
 
 class TestQuantilePeriods:

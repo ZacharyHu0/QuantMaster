@@ -7,6 +7,8 @@
     config: null,
     secretActions: { llm: 'keep', tushare: 'keep' },
     migrationTimer: null,
+    dataRefreshTimer: null,
+    dataRefreshPreview: null,
     modelCheckSignature: '',
     modelCheckTimer: null,
     autoSaveTimer: null,
@@ -50,6 +52,10 @@
 
   function getPath(object, path) {
     return path.split('.').reduce((value, key) => value?.[key], object);
+  }
+
+  function parseSymbols(value) {
+    return String(value).split(/[\s,，;；]+/).map(item => item.trim()).filter(Boolean);
   }
 
   function markDirty(message = '有未保存改动') {
@@ -157,6 +163,7 @@
       state.config = data;
       state.loaded = true;
       fillForm(data);
+      await loadDataRefreshControls();
     } catch (error) {
       document.getElementById('settings-config-path').textContent = `设置不可用：${error.message}`;
       form.querySelectorAll('input, select, textarea, button').forEach(item => { item.disabled = true; });
@@ -294,7 +301,17 @@
     const time = data.checked_at ? new Date(data.checked_at).toLocaleTimeString('zh-CN', {hour12: false}) : '';
     const labChecks = kind === 'lab' ? Object.values(data.details?.checks || {})
       .map(item => item.message).filter(Boolean) : [];
-    el.textContent = `${data.message}${labChecks.length ? ` · ${labChecks.join('；')}` : ''}` +
+    const sourceChecks = kind === 'data-sources' ? Object.entries(data.details?.sources || {})
+      .map(([name, item]) => `${name}: ${item.message}`) : [];
+    const openCircuits = kind === 'data-sources' ? Object.entries(data.details?.circuits || {})
+      .filter(([, item]) => item.state !== 'closed')
+      .map(([name, item]) => `${name} ${item.state}`) : [];
+    const proxies = kind === 'data-sources' ? Object.entries(data.details?.proxies || {})
+      .map(([name, value]) => `${name}=${value}`) : [];
+    const details = [...labChecks, ...sourceChecks,
+      ...(openCircuits.length ? [`熔断：${openCircuits.join('、')}`] : []),
+      ...(proxies.length ? [`代理：${proxies.join('、')}`] : [])];
+    el.textContent = `${data.message}${details.length ? ` · ${details.join('；')}` : ''}` +
       `${data.latency_ms != null ? ` · ${data.latency_ms}ms` : ''}${time ? ` · ${time}` : ''}`;
     if (kind === 'llm-models' && Array.isArray(data.details?.models)) {
       const list = document.getElementById('settings-model-list');
@@ -678,6 +695,151 @@
       await loadSnapshots();
       document.getElementById('snapshot-diff').hidden = true;
     } catch (error) { button.textContent = `回滚失败：${error.message}`; button.disabled = false; }
+  });
+
+  function dataRefreshPayload() {
+    const scope = document.getElementById('data-refresh-scope').value;
+    return {
+      scope,
+      universe: scope === 'universe' ? document.getElementById('data-refresh-universe').value : '',
+      start: scope === 'universe' ? document.getElementById('data-refresh-start').value : '',
+    };
+  }
+
+  function resetDataRefreshPreview() {
+    state.dataRefreshPreview = null;
+    document.getElementById('data-refresh-confirm').hidden = true;
+    const scope = document.getElementById('data-refresh-scope').value;
+    document.getElementById('data-refresh-universe').disabled = scope !== 'universe';
+    document.getElementById('data-refresh-start').disabled = scope !== 'universe';
+  }
+
+  async function loadDataRefreshControls() {
+    const start = document.getElementById('data-refresh-start');
+    if (!start.value) start.value = state.config?.lab?.start || '';
+    try {
+      const data = await request('/api/settings/universes');
+      const select = document.getElementById('data-refresh-universe');
+      const current = select.value || state.config?.lab?.universe || '';
+      select.innerHTML = (data.universes || []).map(item =>
+        `<option value="${html(item.name)}">${html(item.name)}${item.count == null ? '' : ` · ${item.count} 只`}</option>`
+      ).join('');
+      if ([...select.options].some(option => option.value === current)) select.value = current;
+    } catch (_) {
+      // 候选管理区域仍可独立报告加载错误；全量刷新保留市场页与已缓存范围。
+    }
+    resetDataRefreshPreview();
+    try {
+      const latest = await request('/api/settings/data-refresh/latest');
+      if (latest.job) {
+        renderDataRefresh(latest.job);
+        if (['running', 'cancelling'].includes(latest.job.status)) pollDataRefresh(latest.job.id);
+      }
+    } catch (_) { /* 首次使用时没有任务是正常状态。 */ }
+  }
+
+  function renderDataRefresh(task) {
+    const root = document.getElementById('data-refresh-progress');
+    root.hidden = false;
+    root.style.setProperty('--data-refresh-progress', (task.progress || 0) / 100);
+    const labels = {
+      running: '全量刷新中', cancelling: '正在完成当前标的', cancelled: '已取消，可继续',
+      interrupted: '服务重启中断，可继续', completed: '全量刷新完成',
+      completed_with_errors: '刷新完成，部分标的失败',
+    };
+    const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
+    root.querySelector('[data-refresh-phase]').textContent =
+      `${labels[task.status] || task.status} · ${task.next_index}/${task.total}${current}`;
+    root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
+    const failures = task.failures || [];
+    root.querySelector('[data-refresh-failures]').textContent = failures.length
+      ? `${task.failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
+      : `${task.succeeded || 0} 个标的已成功替换缓存`;
+    const cancel = document.getElementById('data-refresh-cancel');
+    cancel.hidden = !['running', 'cancelling'].includes(task.status);
+    cancel.disabled = task.status === 'cancelling';
+    cancel.dataset.jobId = task.id;
+    const resume = document.getElementById('data-refresh-resume');
+    resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
+    resume.dataset.jobId = task.id;
+  }
+
+  async function pollDataRefresh(id) {
+    clearTimeout(state.dataRefreshTimer);
+    try {
+      const task = await request(`/api/settings/data-refresh/${id}`);
+      renderDataRefresh(task);
+      if (['running', 'cancelling'].includes(task.status)) {
+        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
+      }
+    } catch (error) {
+      const root = document.getElementById('data-refresh-progress');
+      root.hidden = false;
+      root.querySelector('[data-refresh-phase]').textContent = error.message;
+    }
+  }
+
+  document.getElementById('data-refresh-scope').addEventListener('change', resetDataRefreshPreview);
+  document.getElementById('data-refresh-universe').addEventListener('change', resetDataRefreshPreview);
+  document.getElementById('data-refresh-start').addEventListener('change', resetDataRefreshPreview);
+
+  document.getElementById('data-refresh-preview').addEventListener('click', async event => {
+    event.target.disabled = true;
+    try {
+      const preview = await request('/api/settings/data-refresh/preview', {
+        method: 'POST', body: dataRefreshPayload(),
+      });
+      state.dataRefreshPreview = preview;
+      const warning = preview.unhealthy_sources?.length
+        ? `；当前冷却：${preview.unhealthy_sources.join('、')}` : '';
+      document.querySelector('[data-refresh-preview-text]').textContent =
+        `${preview.message}（${preview.start} 至 ${preview.end}）${warning}`;
+      document.getElementById('data-refresh-confirm').hidden = false;
+    } catch (error) {
+      state.dataRefreshPreview = null;
+      document.querySelector('[data-refresh-preview-text]').textContent = error.message;
+      document.getElementById('data-refresh-confirm').hidden = false;
+      document.getElementById('data-refresh-start-button').disabled = true;
+    } finally {
+      event.target.disabled = false;
+      if (state.dataRefreshPreview) document.getElementById('data-refresh-start-button').disabled = false;
+    }
+  });
+
+  document.getElementById('data-refresh-start-button').addEventListener('click', async event => {
+    if (!state.dataRefreshPreview) return;
+    if (!window.confirm(`确认全量拉取并重建 ${state.dataRefreshPreview.total} 个标的的日线缓存？`)) return;
+    event.target.disabled = true;
+    try {
+      const task = await request('/api/settings/data-refresh', {
+        method: 'POST', body: dataRefreshPayload(),
+      });
+      document.getElementById('data-refresh-confirm').hidden = true;
+      renderDataRefresh(task);
+      pollDataRefresh(task.id);
+    } catch (error) {
+      event.target.disabled = false;
+      document.querySelector('[data-refresh-preview-text]').textContent = error.message;
+    }
+  });
+
+  document.getElementById('data-refresh-cancel').addEventListener('click', async event => {
+    const id = event.target.dataset.jobId;
+    if (!id) return;
+    const task = await request(`/api/settings/data-refresh/${id}/cancel`, {method: 'POST'});
+    renderDataRefresh(task);
+    pollDataRefresh(id);
+  });
+
+  document.getElementById('data-refresh-resume').addEventListener('click', async event => {
+    const id = event.target.dataset.jobId;
+    if (!id) return;
+    event.target.disabled = true;
+    try {
+      const task = await request(`/api/settings/data-refresh/${id}/resume`, {method: 'POST'});
+      renderDataRefresh(task);
+      pollDataRefresh(id);
+    } finally { event.target.disabled = false; }
   });
 
   async function pollMigration(id) {

@@ -399,6 +399,10 @@
 .source-preview-item + .source-preview-item { padding-top: 8px; margin-top: 8px; border-top: 1px solid var(--border); }
 .source-preview-item strong { display: block; color: var(--ink-2); font-size: 11px; }
 .source-preview-item p { color: var(--muted); font-size: 10px; }
+.source-feedback { min-height: 18px; margin-top: 9px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.source-feedback.saving { color: var(--ink-2); }
+.source-feedback.success { color: var(--s3); }
+.source-feedback.error { color: var(--bad); }
 .source-editor.is-builtin [name="name"],
 .source-editor.is-builtin [name="kind"],
 .source-editor.is-builtin [name="url"],

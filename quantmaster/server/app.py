@@ -10,8 +10,10 @@ import json
 import logging
 import queue
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -257,76 +259,255 @@ def release_info() -> dict:
 
 # ---------- 市场 ----------
 
+
+def _market_groups() -> dict[str, dict[str, str]]:
+    from quantmaster.data.akshare_source import A_SHARE_INDEXES, FUTURES_MAIN
+    from quantmaster.data.yfinance_source import GLOBAL_REFS
+
+    return {
+        "A股指数": dict(A_SHARE_INDEXES),
+        "全球市场": {key: value[1] for key, value in GLOBAL_REFS.items()
+                     if "=" not in key and "-" not in key},
+        "商品与汇率": {
+            **{key: value for key, value in FUTURES_MAIN.items() if not key.startswith("IF")},
+            **{key: value[1] for key, value in GLOBAL_REFS.items()
+               if "=" in key or "-" in key},
+        },
+    }
+
+
+def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None) -> dict | None:
+    if frame is None or frame.empty or "close" not in frame:
+        return None
+    close = frame["close"].dropna()
+    if close.empty:
+        return None
+    checked_at = (meta or {}).get("checked_at")
+    return {
+        "symbol": symbol,
+        "name": name,
+        "last": round(float(close.iloc[-1]), 3),
+        "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
+        if len(close) > 1 else 0.0,
+        "nav": _series_to_points(close / close.iloc[0]),
+        "as_of": str(close.index[-1].date()),
+        "checked_at": (
+            pd.Timestamp.fromtimestamp(float(checked_at)).isoformat()
+            if checked_at else ""
+        ),
+        "cache_status": str((meta or {}).get("last_status") or "ready"),
+    }
+
+
+def _needs_market_sync(meta: dict | None, start: str, end: str, refresh: str) -> bool:
+    if not meta:
+        return True
+    coverage_start = str(meta.get("coverage_start") or meta.get("start") or "")
+    coverage_end = str(meta.get("coverage_end") or meta.get("end") or "")
+    if not coverage_start or coverage_start > start or not coverage_end or coverage_end < end:
+        return True
+    if refresh == "incremental":
+        return True
+    checked_at = float(meta.get("checked_at") or 0)
+    return time.time() - checked_at >= get_config().data.cache_days * 86400
+
+
+def _sync_yahoo_market(
+    symbols: list[str], start: str, end: str, refresh: str, store,
+) -> dict[str, pd.DataFrame]:
+    """按相同缺口起点批量同步 Yahoo 标的，并逐标的校准落盘。"""
+    from quantmaster.data.registry import _align_increment, _covers_requested_range
+    from quantmaster.data.resilience import data_priority
+    from quantmaster.data.yfinance_source import YFinanceSource
+
+    plans: dict[str, tuple[str, str]] = {}
+    for symbol in symbols:
+        meta = store.metadata(symbol)
+        if not _needs_market_sync(meta, start, end, refresh):
+            continue
+        cached = store.get(symbol)
+        if cached is None or cached.empty:
+            plans[symbol] = (start, "initial")
+        elif str((meta or {}).get("coverage_start") or (meta or {}).get("start") or "") > start:
+            plans[symbol] = (start, "right")
+        else:
+            plans[symbol] = (
+                str(cached.index[max(0, len(cached) - 5)].date()), "right")
+
+    source = YFinanceSource()
+    grouped: dict[str, list[str]] = {}
+    for symbol, (fetch_start, _direction) in plans.items():
+        grouped.setdefault(fetch_start, []).append(symbol)
+    for fetch_start, batch_symbols in grouped.items():
+        try:
+            with data_priority("interactive"):
+                frames = source.daily_many(batch_symbols, fetch_start, end)
+        except Exception as exc:
+            logger.debug("Yahoo 批量同步失败 %s: %s", batch_symbols, exc)
+            for symbol in batch_symbols:
+                store.mark_status(symbol, "stale", source=source.name)
+            continue
+        for symbol in batch_symbols:
+            frame = frames.get(symbol)
+            if frame is None or frame.empty or not _covers_requested_range(frame, fetch_start, end):
+                store.mark_status(symbol, "stale", source=source.name)
+                continue
+            with store.lock(symbol):
+                cached = store.get(symbol)
+                try:
+                    merged = frame if cached is None or cached.empty else _align_increment(
+                        cached, frame, plans[symbol][1])
+                except Exception as exc:
+                    logger.debug("Yahoo 增量校准失败 %s: %s", symbol, exc)
+                    store.mark_status(symbol, "stale", source=source.name)
+                    continue
+                store.put(symbol, merged, replace=True)
+                store.mark_checked(symbol, fetch_start, end, source=source.name)
+
+    result: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        cached = store.get(symbol)
+        if cached is not None and not cached.empty:
+            sliced = cached.loc[start:end]
+            if not sliced.empty:
+                result[symbol] = sliced
+    return result
+
+
 def _market_overview_data(
-    start: str | None = None, progress: ProgressEmitter | None = None,
+    start: str | None = None,
+    progress: ProgressEmitter | None = None,
+    refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
     """全球参考市场概览：A股/港股/美日韩指数 + 商品期货的近一年走势。"""
     from quantmaster.data import load_history
-    from quantmaster.data.akshare_source import A_SHARE_INDEXES, FUTURES_MAIN
+    from quantmaster.data.storage import BarStore
     from quantmaster.data.yfinance_source import GLOBAL_REFS
 
     end = pd.Timestamp.now().normalize()
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
-
-    groups = {
-        "A股指数": {k: v for k, v in A_SHARE_INDEXES.items()},
-        "全球市场": {k: v[1] for k, v in GLOBAL_REFS.items() if "=" not in k and "-" not in k},
-        "商品与汇率": {**{k: v for k, v in FUTURES_MAIN.items() if not k.startswith("IF")},
-                     **{k: v[1] for k, v in GLOBAL_REFS.items() if "=" in k or "-" in k}},
-    }
-    result: dict[str, list] = {}
+    start_value, end_value = str(start_ts.date()), str(end.date())
+    groups = _market_groups()
+    store = BarStore()
+    items: dict[tuple[str, str], dict] = {}
     total = sum(len(symbols) for symbols in groups.values())
     completed = 0
+
+    # 第一阶段只读本地缓存。即使所有上游均不可用，用户也能立即使用已有卡片。
     for group, symbols in groups.items():
-        rows = []
         for symbol, name in symbols.items():
-            success = False
-            item = None
-            try:
-                df = load_history(symbol, str(start_ts.date()), str(end.date()))
-                if df.empty:
+            cached = store.get(symbol, columns=["close"])
+            if cached is None:
+                continue
+            item = _market_item(
+                symbol, name, cached.loc[start_value:end_value], store.metadata(symbol))
+            if item is None:
+                continue
+            items[(group, symbol)] = item
+            if progress:
+                progress(
+                    2, "读取本地市场缓存", f"{name} · 已显示本地数据",
+                    {"kind": "market_item", "stage": "cache", "group": group, "item": item},
+                )
+
+    yahoo_symbols = set(GLOBAL_REFS)
+
+    def one(group: str, symbol: str, name: str):
+        frame = load_history(
+            symbol, start_value, end_value, store=store,
+            refresh=refresh, priority="interactive",
+        )
+        return group, symbol, name, frame
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-sync") as executor:
+        batch = [symbol for symbol in yahoo_symbols
+                 if any(symbol in values for values in groups.values())]
+        futures[executor.submit(
+            _sync_yahoo_market, batch, start_value, end_value, refresh, store
+        )] = ("__yahoo__", "", "")
+        for group, symbols in groups.items():
+            for symbol, name in symbols.items():
+                if symbol in yahoo_symbols:
                     continue
-                close = df["close"].dropna()
-                item = {
-                    "symbol": symbol,
-                    "name": name,
-                    "last": round(float(close.iloc[-1]), 3),
-                    "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
-                    if len(close) > 1 else 0.0,
-                    "nav": _series_to_points(close / close.iloc[0]),
+                futures[executor.submit(one, group, symbol, name)] = (group, symbol, name)
+
+        for future in as_completed(futures):
+            group, symbol, name = futures[future]
+            if group == "__yahoo__":
+                try:
+                    frames = future.result()
+                except Exception as exc:
+                    logger.debug("Yahoo 市场批量同步失败: %s", exc)
+                    frames = {}
+                batch_lookup = {
+                    symbol: (candidate_group, candidate_name)
+                    for candidate_group, values in groups.items()
+                    for symbol, candidate_name in values.items()
+                    if symbol in yahoo_symbols
                 }
-                rows.append(item)
-                success = True
-            except Exception as e:
-                logger.warning("市场概览跳过 %s: %s", symbol, e)
-            finally:
-                completed += 1
-                if progress:
-                    progress(
-                        3 + round(94 * completed / max(1, total)),
-                        "同步全球市场",
-                        f"{completed}/{total} · {name} · {'已就绪' if success else '已跳过'}",
-                        {"kind": "market_item", "group": group, "item": item}
-                        if item is not None else None,
-                        "info" if success else "warning",
-                    )
-        result[group] = rows
+                for batch_symbol in batch:
+                    completed += 1
+                    batch_group, batch_name = batch_lookup[batch_symbol]
+                    frame = frames.get(batch_symbol)
+                    item = _market_item(
+                        batch_symbol, batch_name, frame, store.metadata(batch_symbol))
+                    if item is not None:
+                        items[(batch_group, batch_symbol)] = item
+                    if progress:
+                        progress(
+                            3 + round(94 * completed / max(1, total)), "同步全球市场",
+                            f"{completed}/{total} · {batch_name} · "
+                            f"{'已更新' if item else '沿用缓存或跳过'}",
+                            {"kind": "market_item", "stage": "updated", "group": batch_group,
+                             "item": item} if item else None,
+                            "info" if item else "warning",
+                        )
+                continue
+            completed += 1
+            try:
+                _group, _symbol, _name, frame = future.result()
+                item = _market_item(symbol, name, frame, store.metadata(symbol))
+            except Exception as exc:
+                logger.debug("市场概览跳过 %s: %s", symbol, exc)
+                item = items.get((group, symbol))
+            if item is not None:
+                items[(group, symbol)] = item
+            if progress:
+                progress(
+                    3 + round(94 * completed / max(1, total)), "同步全球市场",
+                    f"{completed}/{total} · {name} · {'已更新' if item else '已跳过'}",
+                    {"kind": "market_item", "stage": "updated", "group": group, "item": item}
+                    if item is not None else None,
+                    "info" if item else "warning",
+                )
+
+    result = {
+        group: [items[(group, symbol)] for symbol in symbols if (group, symbol) in items]
+        for group, symbols in groups.items()
+    }
     return {"groups": result}
 
 
 @app.get("/api/market/overview")
-def market_overview(start: str | None = None) -> dict:
+def market_overview(
+    start: str | None = None, refresh: Literal["auto", "incremental"] = "auto",
+) -> dict:
     """全球参考市场概览：A股/港股/美日韩指数 + 商品期货的近一年走势。"""
-    return _market_overview_data(start)
+    return _market_overview_data(start, refresh=refresh)
 
 
 @app.get("/api/market/overview/stream")
-def market_overview_stream(request: Request, start: str | None = None) -> StreamingResponse:
+def market_overview_stream(
+    request: Request,
+    start: str | None = None,
+    refresh: Literal["auto", "incremental"] = "auto",
+) -> StreamingResponse:
     """市场概览流式进度；每完成一个标的就发送一行 NDJSON。"""
 
     def task(emit: ProgressEmitter) -> dict:
         emit(1, "准备市场清单", "检查本地缓存与数据源")
-        result = _market_overview_data(start, emit)
+        result = _market_overview_data(start, emit, refresh)
         emit(100, "市场数据已就绪", "正在绘制行情卡片")
         return result
 

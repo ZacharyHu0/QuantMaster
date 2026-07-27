@@ -61,6 +61,9 @@ class TestBasics:
         assert 'data-regime-window="10y"' in resp.text
         assert "名称 / 代码 / 板块" in resp.text
         assert 'id="runtime-info"' in resp.text
+        assert 'id="data-refresh-preview"' in resp.text
+        assert 'id="data-refresh-start-button"' in resp.text
+        assert 'id="data-refresh-resume"' in resp.text
         assert 'id="runtime-drawer-frame"' in resp.text
         assert "window.QuantMasterRunInfo" in resp.text
         assert 'data-runtime-filter="problem"' in resp.text
@@ -128,6 +131,10 @@ class TestBasics:
         dates = pd.bdate_range("2026-07-20", periods=3)
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
         monkeypatch.setattr("quantmaster.data.load_history", lambda *args, **kwargs: frame)
+        monkeypatch.setattr(
+            "quantmaster.data.yfinance_source.YFinanceSource.daily_many",
+            lambda self, symbols, start, end: {symbol: frame for symbol in symbols},
+        )
         events = []
 
         result = app_module._market_overview_data(
@@ -138,6 +145,29 @@ class TestBasics:
         assert len(partials) == final_count
         assert all(partial["kind"] == "market_item" for partial in partials)
         assert all(partial["item"]["nav"] for partial in partials)
+
+    def test_market_overview_emits_local_cache_before_failed_sync(self, monkeypatch):
+        from quantmaster.data.storage import BarStore
+        from quantmaster.server import app as app_module
+
+        symbol = "^GSPC.US"
+        dates = pd.bdate_range("2026-07-20", periods=3)
+        BarStore().put(symbol, pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates))
+        monkeypatch.setattr(app_module, "_market_groups", lambda: {
+            "全球市场": {symbol: "标普500"},
+        })
+        monkeypatch.setattr(
+            "quantmaster.data.yfinance_source.YFinanceSource.daily_many",
+            lambda *args, **kwargs: (_ for _ in ()).throw(ConnectionError("offline")),
+        )
+        events = []
+        result = app_module._market_overview_data(
+            "2026-07-01", lambda *args: events.append(args))
+
+        partials = [event[3] for event in events if len(event) > 3 and event[3]]
+        assert partials[0]["stage"] == "cache"
+        assert result["groups"]["全球市场"][0]["symbol"] == symbol
+        assert result["groups"]["全球市场"][0]["cache_status"] == "stale"
 
     def test_decision_dashboard_contract(self, panel, monkeypatch):
         symbols = list(panel["close"].columns)

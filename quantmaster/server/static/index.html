@@ -91,6 +91,7 @@
   .mkt-item.stream-enter { animation:stream-in 180ms var(--ease-out-quart) both; }
   .mkt-item .nm { color: var(--ink-2); font-size: 13px; }
   .mkt-item .px { font-size: 18px; font-weight: 600; }
+  .mkt-item .mkt-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .mkt-item .spark { height: 42px; margin-top: 4px; }
   .market-detail-panel { margin-top:var(--space-2xl); scroll-margin-top:88px; }
   .asset-workbench { padding:14px 16px; }
@@ -346,7 +347,7 @@
 <!-- ================= 市场 ================= -->
 <section class="tab active" id="tab-market">
   <form class="controls" id="mkt-refresh">
-    <button class="primary" type="submit">刷新行情</button>
+    <button class="primary" type="submit">同步最新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
   </form>
   <div class="panel asset-workbench" id="asset-workbench">
@@ -366,7 +367,7 @@
     <div class="table-scroll" id="asset-list"><div class="msg">正在读取本地列表…</div></div>
     <div class="hint">自选与关注保存在本地；持有来自实盘账本。报价只读本地缓存，不额外请求数据源。</div>
   </div>
-  <div id="mkt-groups"><div class="msg">加载全球市场概览中…（首次会逐个拉取并缓存，可能需要 1-2 分钟）</div></div>
+  <div id="mkt-groups"><div class="msg">正在读取本地市场缓存…</div></div>
   <div class="panel market-detail-panel" id="kline-panel" style="display:none">
     <div class="panel-heading">
       <h3 id="kline-title">K线</h3>
@@ -863,10 +864,10 @@
       </section>
     </aside>
   </div>
-  <section class="panel automation-log">
-    <div class="automation-panel-head"><div><h3>操作审计</h3><p>绑定、强度调整、任务变更与二次确认均留痕。</p></div></div>
-    <div class="table-scroll" id="automation-audit"><div class="automation-empty">暂无操作记录</div></div>
-  </section>
+  <details class="panel automation-log" id="automation-audit-panel">
+    <summary class="automation-panel-head"><div><h3>操作审计</h3><p>绑定、强度调整、任务变更与二次确认均留痕。</p></div><span class="automation-audit-toggle">展开查看</span></summary>
+    <div class="table-scroll" id="automation-audit"><div class="automation-empty">展开后读取操作记录</div></div>
+  </details>
 </section>
 
 <!-- ================= 设置 ================= -->
@@ -918,6 +919,22 @@
             <label>基本面缓存（天）<input name="data.fundamental_cache_days" type="number" min="0" required></label>
           </div>
           <div class="check-stack"><div class="check-result" data-check-result="storage">目录尚未检测</div><div class="check-result" data-check-result="data-sources">数据源尚未检测</div><div class="check-result" data-check-result="tushare">Tushare 尚未检测</div></div>
+          <div class="maintenance-box">
+            <div><h4>手动全量刷新行情库</h4><p>日常启动只读取本地缓存并同步缺失边界。仅在历史库需要重建或修复时使用这里；旧缓存会保留到单标的校验成功。</p></div>
+            <div class="maintenance-controls">
+              <select id="data-refresh-scope" aria-label="刷新范围"><option value="market">市场页标的</option><option value="universe">指定候选</option><option value="all_cached">全部已缓存标的</option></select>
+              <select id="data-refresh-universe" aria-label="候选" disabled><option value="">选择候选</option></select>
+              <input id="data-refresh-start" type="date" aria-label="起始日期" disabled>
+              <button class="ghost" id="data-refresh-preview" type="button">预览影响</button>
+            </div>
+            <div class="maintenance-confirm" id="data-refresh-confirm" hidden><span data-refresh-preview-text></span><button class="primary" id="data-refresh-start-button" type="button">确认全量刷新</button></div>
+            <div class="maintenance-progress" id="data-refresh-progress" hidden aria-live="polite">
+              <div><span data-refresh-phase>准备中</span><strong data-refresh-percent>0%</strong></div>
+              <div class="load-track"><div class="load-fill"></div></div>
+              <div class="maintenance-actions"><button class="ghost" id="data-refresh-cancel" type="button">完成当前标的后取消</button><button class="ghost" id="data-refresh-resume" type="button" hidden>继续任务</button></div>
+              <small data-refresh-failures></small>
+            </div>
+          </div>
           <div class="migration-box">
             <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
             <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
@@ -1040,6 +1057,7 @@
             <fieldset class="source-auth"><legend>接口鉴权</legend><div class="field-grid"><label>鉴权方式<select name="auth_type"><option value="none">无需鉴权</option><option value="bearer">Bearer Token</option><option value="header">自定义 Header</option></select></label><label data-auth-header hidden>Header 名称<input name="auth_header" placeholder="X-API-Key"></label><label class="field-wide">API Token<input name="token" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><small>凭据只进入系统凭据库，不写入配置或响应。</small></label></div></fieldset>
             <div id="news-source-preview" class="source-preview"><span class="news-muted">保存前可先测试解析结果。</span></div>
             <div class="editor-actions"><button class="primary" type="submit">保存来源</button><button class="ghost" data-source-test type="button">测试解析</button><button class="ghost" data-source-run type="button">立即采集</button><button class="ghost" data-source-clear-token type="button">清除凭据</button><button class="ghost danger" data-source-delete type="button">删除来源</button></div>
+            <div class="source-feedback" id="news-source-feedback" role="status" aria-live="polite"></div>
           </form>
         </div>
       </section>
@@ -1789,12 +1807,44 @@ function marketChangeSeries(nav) {
 }
 
 function createMarketStreamRenderer(root) {
-  const cycle = ++marketStreamCycle, groups = new Map(), seen = new Set();
+  const cycle = ++marketStreamCycle, groups = new Map(), entries = new Map();
   let index = 0, count = 0;
+  function draw(entry, item) {
+    entry.item = item;
+    entry.element.querySelector('.nm').innerHTML =
+      `${esc(item.name)} <span class="badge">${esc(item.symbol)}</span>`;
+    entry.element.querySelector('.px').className = `px ${cls(item.change_pct)}`;
+    entry.element.querySelector('.px').innerHTML =
+      `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
+    const status = item.cache_status === 'stale' || item.cache_status === 'refresh_failed'
+      ? '本地缓存 · 数据源暂不可用' : '数据截至';
+    entry.element.querySelector('.mkt-meta').textContent =
+      `${status}${item.as_of ? ` ${item.as_of}` : ''}`;
+    entry.element.onclick = () => showKline(item.symbol, item.name);
+    queueMicrotask(() => {
+      if (!document.getElementById(entry.sparkId)) return;
+      const chart = mkChart(entry.sparkId);
+      const changeSeries = marketChangeSeries(item.nav);
+      chart.setOption({backgroundColor:'transparent', animation:!REDUCED_MOTION,
+        grid:{left:0,right:0,top:2,bottom:2}, xAxis:{type:'time',show:false},
+        yAxis:{type:'value',show:false,scale:true,boundaryGap:['12%','12%'],
+          min:value => Math.min(value.min,0),max:value => Math.max(value.max,0)},
+        tooltip:{show:false},
+        series:[{type:'line',data:changeSeries,showSymbol:false,
+          lineStyle:{width:2,color:item.change_pct >= 0 ? '#e66767' : '#0ca30c'},
+          markLine:{silent:true,symbol:'none',label:{show:false},
+            lineStyle:{color:'rgba(195,194,183,.36)',width:1,type:'dashed'},
+            data:[{yAxis:0}]}}]}, {notMerge:true});
+    });
+  }
   return {
     add(group, item) {
-      if (!item || seen.has(`${group}\u0000${item.symbol}`)) return false;
-      seen.add(`${group}\u0000${item.symbol}`);
+      if (!item) return false;
+      const key = `${group}\u0000${item.symbol}`;
+      if (entries.has(key)) {
+        draw(entries.get(key), item);
+        return false;
+      }
       if (!groups.has(group)) {
         const title = document.createElement('div');
         title.className = 'group-title'; title.textContent = group;
@@ -1804,26 +1854,10 @@ function createMarketStreamRenderer(root) {
       const sparkId = `spark-stream-${cycle}-${index++}`;
       const element = document.createElement('div');
       element.className = 'mkt-item stream-enter';
-      element.innerHTML = `<div class="nm">${esc(item.name)} <span class="badge">${esc(item.symbol)}</span></div>
-        <div class="px ${cls(item.change_pct)}">${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small></div>
+      element.innerHTML = `<div class="nm"></div><div class="px"></div><div class="mkt-meta"></div>
         <div class="spark" id="${sparkId}"></div>`;
-      element.onclick = () => showKline(item.symbol, item.name);
       groups.get(group).appendChild(element); count += 1;
-      queueMicrotask(() => {
-        if (!document.getElementById(sparkId)) return;
-        const chart = mkChart(sparkId);
-        const changeSeries = marketChangeSeries(item.nav);
-        chart.setOption({backgroundColor:'transparent', animation:!REDUCED_MOTION,
-          grid:{left:0,right:0,top:2,bottom:2}, xAxis:{type:'time',show:false},
-          yAxis:{type:'value',show:false,scale:true,boundaryGap:['12%','12%'],
-            min:value => Math.min(value.min,0),max:value => Math.max(value.max,0)},
-          tooltip:{show:false},
-          series:[{type:'line',data:changeSeries,showSymbol:false,
-            lineStyle:{width:2,color:item.change_pct >= 0 ? '#e66767' : '#0ca30c'},
-            markLine:{silent:true,symbol:'none',label:{show:false},
-              lineStyle:{color:'rgba(195,194,183,.36)',width:1,type:'dashed'},
-              data:[{yAxis:0}]}}]});
-      });
+      const entry = {element, sparkId, item}; entries.set(key, entry); draw(entry, item);
       return true;
     },
     addAll(data) {
@@ -1835,7 +1869,7 @@ function createMarketStreamRenderer(root) {
   };
 }
 
-async function loadMarket() {
+async function loadMarket(refresh = 'auto') {
   if (marketLoading) return;
   marketLoading = true;
   disposeMarketSparks();
@@ -1843,7 +1877,7 @@ async function loadMarket() {
   const tracker = createLoadProgress(container, '准备市场数据', 'market');
   const renderer = createMarketStreamRenderer(tracker.results);
   try {
-    const data = await streamJson('/api/market/overview/stream', {}, event => {
+    const data = await streamJson(`/api/market/overview/stream?refresh=${encodeURIComponent(refresh)}`, {}, event => {
       tracker.update(event);
       const partial = event.partial;
       if (partial?.kind === 'market_item') {
@@ -1855,7 +1889,7 @@ async function loadMarket() {
     if (renderer.count) tracker.reveal();
     tracker.finish(`已加载 ${renderer.count} 个市场标的，可点击查看 K 线`);
     document.getElementById('mkt-stamp').textContent =
-      '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+      '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
     tracker.fail(e.message);
     tracker.reveal().insertAdjacentHTML('beforeend',
@@ -1866,7 +1900,7 @@ async function loadMarket() {
 }
 document.getElementById('mkt-refresh').onsubmit = async e => {
   e.preventDefault(); busy(e.target, true, '同步中…');
-  await loadMarket();
+  await loadMarket('incremental');
   busy(e.target, false);
 };
 let activeKline = { symbol: '', name: '', frequency: '1d' };

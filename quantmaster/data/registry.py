@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
 
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.base import DataSource, Market, guess_market, validate_frequency
+from quantmaster.data.resilience import data_priority
 from quantmaster.data.storage import BarStore, IntradayBarStore
 
 logger = logging.getLogger(__name__)
@@ -23,25 +26,29 @@ logger = logging.getLogger(__name__)
 _SOURCE_FACTORIES: dict[str, list] = {}
 
 
+class RefreshMode(str, Enum):
+    AUTO = "auto"
+    INCREMENTAL = "incremental"
+    FULL = "full"
+
+
+class AdjustmentMismatch(RuntimeError):
+    pass
+
+
 def _covers_requested_range(df: pd.DataFrame, start: str, end: str) -> bool:
-    """判断日线是否覆盖请求边界且没有明显的大面积缺行。"""
+    """判断响应自身是否连续；上市前和退市后的自然空白不算缺行。"""
     if df is None or df.empty:
         return False
     first = pd.Timestamp(df.index.min()).normalize()
     last = pd.Timestamp(df.index.max()).normalize()
-    boundaries_ok = (
-        first <= pd.Timestamp(start).normalize() + pd.Timedelta(days=14)
-        and last >= pd.Timestamp(end).normalize() - pd.Timedelta(days=14)
-    )
-    if not boundaries_ok:
-        return False
-    # 中国市场节假日会少于工作日，但正常年份交易日密度约九成以上。
-    # 低于 80% 可确定是接口缺了较大分块；短区间受长假影响大，不做密度判断。
-    expected = len(pd.bdate_range(start, end))
+    # 只在实际有数据的边界内判断密度。请求起点早于上市日、终点晚于退市日
+    # 都是合法情况；已有缓存日期是否丢失由 _is_complete_refresh 单独校验。
+    expected = len(pd.bdate_range(first, last))
     if expected < 10:
         return True
     index = pd.DatetimeIndex(df.index).normalize()
-    actual = index[(index >= pd.Timestamp(start)) & (index <= pd.Timestamp(end))].nunique()
+    actual = index[(index >= first) & (index <= last)].nunique()
     return actual / expected >= 0.8
 
 
@@ -59,9 +66,126 @@ def _is_complete_refresh(
         return True
     fresh_index = pd.DatetimeIndex(fresh.index).normalize()
     cached_index = pd.DatetimeIndex(cached.index).normalize()
-    if fresh_index.min() > cached_index.min() or fresh_index.max() < cached_index.max():
-        return False
-    return cached_index.difference(fresh_index).empty
+    known = cached_index[
+        (cached_index >= pd.Timestamp(start).normalize())
+        & (cached_index <= pd.Timestamp(end).normalize())
+    ]
+    return known.difference(fresh_index).empty
+
+
+def _mode(use_cache: bool, refresh: RefreshMode | str | None) -> RefreshMode:
+    if refresh is None:
+        return RefreshMode.AUTO if use_cache else RefreshMode.FULL
+    return refresh if isinstance(refresh, RefreshMode) else RefreshMode(refresh)
+
+
+def _cached_slice(cached: pd.DataFrame | None, start: str, end: str) -> pd.DataFrame | None:
+    if cached is None or cached.empty:
+        return None
+    result = cached.loc[start:end]
+    return result if not result.empty else None
+
+
+def _align_increment(
+    cached: pd.DataFrame,
+    fresh: pd.DataFrame,
+    direction: str,
+) -> pd.DataFrame:
+    """用重叠交易日对齐动态前复权基准，再合并边界增量。"""
+    cached = cached.sort_index()
+    fresh = fresh.sort_index()
+    common = cached.index.intersection(fresh.index)
+    if common.empty or "close" not in cached or "close" not in fresh:
+        raise AdjustmentMismatch("增量响应没有可用于校准的重叠交易日")
+    ratios = (fresh.loc[common, "close"] / cached.loc[common, "close"]).replace(
+        [float("inf"), float("-inf")], pd.NA).dropna()
+    ratios = ratios[ratios > 0]
+    if ratios.empty:
+        raise AdjustmentMismatch("重叠交易日价格无效")
+    ratio = float(ratios.median())
+    if len(ratios) >= 2 and float((ratios / ratio - 1).abs().max()) > 0.005:
+        raise AdjustmentMismatch("重叠交易日无法形成稳定的复权比例")
+    ohlc = [column for column in ("open", "high", "low", "close")
+            if column in cached.columns and column in fresh.columns]
+    if direction == "left":
+        aligned = fresh.copy()
+        aligned[ohlc] = aligned[ohlc] / ratio
+        merged = pd.concat([aligned, cached])
+    else:
+        aligned = cached.copy()
+        aligned[ohlc] = aligned[ohlc] * ratio
+        merged = pd.concat([aligned, fresh])
+    return merged[~merged.index.duplicated(keep="last")].sort_index()
+
+
+def _full_refresh(
+    symbol: str,
+    start: str,
+    end: str,
+    cached: pd.DataFrame | None,
+    store: BarStore,
+    priority: str,
+) -> pd.DataFrame:
+    market = guess_market(symbol)
+    errors: list[str] = []
+    for factory in _factories().get(market, []):
+        try:
+            source = factory()
+            with data_priority(priority):
+                frame = source.daily(symbol, start, end)
+            if frame is None or frame.empty:
+                errors.append(f"{factory.__name__}: 返回空数据")
+                continue
+            if not _is_complete_refresh(frame, cached, start, end):
+                errors.append(f"{factory.__name__}: 响应缺失已有交易日或内部过于稀疏")
+                continue
+            store.put(symbol, frame, replace=True)
+            store.mark_checked(
+                symbol, start, end, source=source.name, replace_coverage=True)
+            return store.get(symbol).loc[start:end]
+        except Exception as exc:
+            errors.append(f"{factory.__name__}: {exc}")
+            logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
+    if cached is not None and not cached.empty:
+        store.mark_status(symbol, "refresh_failed")
+        logger.warning("全量刷新失败，保留本地缓存: %s", symbol)
+        return cached.loc[start:end]
+    raise RuntimeError(f"获取 {symbol} 日线失败: {errors}")
+
+
+def _fetch_segment(
+    symbol: str,
+    start: str,
+    end: str,
+    direction: str,
+    cached: pd.DataFrame | None,
+    store: BarStore,
+    priority: str,
+) -> tuple[pd.DataFrame | None, list[str], bool]:
+    market = guess_market(symbol)
+    errors: list[str] = []
+    for factory in _factories().get(market, []):
+        try:
+            source = factory()
+            with data_priority(priority):
+                frame = source.daily(symbol, start, end)
+            if frame is None or frame.empty:
+                errors.append(f"{factory.__name__}: 返回空数据")
+                continue
+            if not _covers_requested_range(frame, start, end):
+                errors.append(f"{factory.__name__}: 响应内部过于稀疏")
+                continue
+            merged = frame if cached is None or cached.empty else _align_increment(
+                cached, frame, direction)
+            store.put(symbol, merged, replace=True)
+            store.mark_checked(symbol, start, end, source=source.name)
+            return store.get(symbol), errors, True
+        except AdjustmentMismatch as exc:
+            errors.append(f"{factory.__name__}: {exc}")
+        except Exception as exc:
+            errors.append(f"{factory.__name__}: {exc}")
+            logger.debug("数据源 %s 增量获取 %s 失败: %s", factory.__name__, symbol, exc)
+    return cached, errors, False
 
 
 def _factories() -> dict[Market, list]:
@@ -92,77 +216,92 @@ def get_source(market: Market) -> DataSource:
     raise RuntimeError(f"市场 {market.value} 无可用数据源: {errors}")
 
 
+def _load_history_locked(
+    symbol: str,
+    start: str,
+    end: str,
+    use_cache: bool = True,
+    store: BarStore | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
+) -> pd.DataFrame:
+    """已持有单标的锁时加载标准化日线。"""
+    store = store or BarStore()
+    cfg = get_config()
+    cached = store.get(symbol)
+    mode = _mode(use_cache, refresh)
+    if mode == RefreshMode.FULL:
+        fetch_start, fetch_end = start, end
+        if cached is not None and not cached.empty:
+            fetch_start = min(start, str(cached.index.min().date()))
+            fetch_end = max(end, str(cached.index.max().date()))
+        return _full_refresh(
+            symbol, fetch_start, fetch_end, cached, store, priority).loc[start:end]
+
+    meta = store.metadata(symbol) or {}
+    requested_end = pd.Timestamp(end).normalize()
+    near_current = requested_end >= pd.Timestamp.now().normalize() - pd.Timedelta(days=7)
+    coverage_start = str(meta.get("coverage_start") or meta.get("start") or "")
+    coverage_end = str(meta.get("coverage_end") or meta.get("end") or "")
+    covers_start = bool(coverage_start and coverage_start <= start)
+    covers_end = bool(coverage_end and coverage_end >= end)
+    checked = store.check_freshness(symbol)
+    ttl_fresh = checked is not None and checked < cfg.data.cache_days * 86400
+    sliced = _cached_slice(cached, start, end)
+    if sliced is not None and covers_start and covers_end:
+        if not near_current or (mode == RefreshMode.AUTO and ttl_fresh):
+            return sliced
+
+    segments: list[tuple[str, str, str]] = []
+    if cached is None or cached.empty:
+        segments.append((start, end, "initial"))
+    else:
+        if not covers_start:
+            overlap_end = str(cached.index[min(4, len(cached) - 1)].date())
+            segments.append((start, overlap_end, "left"))
+        force_tail = near_current and (
+            mode == RefreshMode.INCREMENTAL or not ttl_fresh)
+        if not covers_end or force_tail:
+            overlap_start = str(cached.index[max(0, len(cached) - 5)].date())
+            segments.append((overlap_start, end, "right"))
+
+    errors: list[str] = []
+    all_segments_succeeded = True
+    for fetch_start, fetch_end, direction in segments:
+        cached, segment_errors, succeeded = _fetch_segment(
+            symbol, fetch_start, fetch_end, direction, cached, store, priority)
+        errors.extend(segment_errors)
+        all_segments_succeeded = all_segments_succeeded and succeeded
+        if cached is None or cached.empty:
+            break
+
+    available = store.get(symbol)
+    sliced = _cached_slice(available, start, end)
+    if sliced is not None:
+        if segments and not all_segments_succeeded:
+            store.mark_status(symbol, "stale")
+        return sliced
+    raise RuntimeError(f"获取 {symbol} 日线失败: {errors or ['没有可用数据']}")
+
+
 def load_history(
     symbol: str,
     start: str,
     end: str,
     use_cache: bool = True,
     store: BarStore | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
 ) -> pd.DataFrame:
-    """加载单只标的的标准化日线，命中缓存则不请求网络。"""
+    """加载标准化日线；普通请求只补边界增量，全量重拉必须显式指定。"""
     store = store or BarStore()
-    cfg = get_config()
-    cached = store.get(symbol)
-    if use_cache:
-        fresh = store.freshness(symbol)
-        if cached is not None and not cached.empty and fresh is not None:
-            covers = str(cached.index.min().date()) <= start and str(cached.index.max().date()) >= end
-            # 「新鲜」只保证 end 端接近今天，还必须覆盖 start 端，
-            # 否则长区间请求会被无声截断成缓存里的短区间
-            requested_end = pd.Timestamp(end).normalize()
-            cached_end = pd.Timestamp(cached.index.max()).normalize()
-            end_close_enough = cached_end >= requested_end - pd.Timedelta(days=7)
-            fresh_enough = (
-                fresh < cfg.data.cache_days * 86400
-                and str(cached.index.min().date()) <= start
-                and end_close_enough
-            )
-            if covers or fresh_enough:
-                sliced = cached.loc[start:end]
-                if not sliced.empty:
-                    return sliced
-
-    # 触网时把请求区间放宽到与旧缓存的并集。确认响应完整时整体替换，
-    # 以保持 A 股前复权基准一致；不完整响应则增量合并，不能丢掉已经取得的
-    # 完整历史分块。
-    fetch_start, fetch_end = start, end
-    if cached is not None and not cached.empty:
-        fetch_start = min(start, str(cached.index.min().date()))
-        fetch_end = max(end, str(cached.index.max().date()))
-
-    market = guess_market(symbol)
-    errors = []
-    for factory in _factories().get(market, []):
-        try:
-            source = factory()
-            df = source.daily(symbol, fetch_start, fetch_end)
-            if df is not None and not df.empty:
-                complete = _is_complete_refresh(df, cached, fetch_start, fetch_end)
-                store.put(symbol, df, replace=complete)
-                available = store.get(symbol)
-                if not complete:
-                    logger.warning(
-                        "数据源 %s 返回 %s 的部分日线（%s 至 %s），已合并保留，不覆盖旧缓存",
-                        factory.__name__, symbol, df.index.min(), df.index.max(),
-                    )
-                if available is not None and _covers_requested_range(available, start, end):
-                    return available.loc[start:end]
-                errors.append(f"{factory.__name__}: 部分数据已保留，但未覆盖请求区间")
-                # 当前来源只取得部分区间时，再尝试下一来源补齐；已经写入的部分
-                # 不会因后续来源失败而丢失。
-                cached = available
-                continue
-            errors.append(f"{factory.__name__}: 返回空数据")
-        except Exception as e:
-            errors.append(f"{factory.__name__}: {e}")
-            logger.debug("数据源 %s 获取 %s 失败: %s", factory.__name__, symbol, e)
-
-    # 全部失败但缓存有部分数据时，退回缓存
-    cached = store.get(symbol)
-    if cached is not None and not cached.empty:
-        logger.warning("全部数据源失败，使用本地缓存: %s", symbol)
-        return cached.loc[start:end]
-    raise RuntimeError(f"获取 {symbol} 日线失败: {errors}")
+    with store.lock(symbol):
+        return _load_history_locked(
+            symbol, start, end, use_cache=use_cache, store=store,
+            refresh=refresh, priority=priority,
+        )
 
 
 def load_intraday(
@@ -172,6 +311,8 @@ def load_intraday(
     frequency: str = "5m",
     use_cache: bool = True,
     store: IntradayBarStore | None = None,
+    *,
+    priority: str = "normal",
 ) -> pd.DataFrame:
     """加载分钟线并持久化。
 
@@ -180,7 +321,7 @@ def load_intraday(
     """
     frequency = validate_frequency(frequency)
     if frequency == "1d":
-        return load_history(symbol, start, end, use_cache=use_cache)
+        return load_history(symbol, start, end, use_cache=use_cache, priority=priority)
     store = store or IntradayBarStore(frequency)
     start_is_date = len(str(start).strip()) <= 10
     end_is_date = len(str(end).strip()) <= 10
@@ -215,7 +356,8 @@ def load_intraday(
     for factory in _factories().get(market, []):
         try:
             source = factory()
-            df = source.intraday(symbol, fetch_start, fetch_end, frequency)
+            with data_priority(priority):
+                df = source.intraday(symbol, fetch_start, fetch_end, frequency)
             if df is not None and not df.empty:
                 # 分钟线不采用日线的整段前复权替换语义：免费接口回溯有限，
                 # 每日归档必须合并才能形成可长期复用的本地历史。
@@ -232,13 +374,22 @@ def load_intraday(
 
 
 def load_bars(
-    symbol: str, start: str, end: str, frequency: str = "1d", use_cache: bool = True
+    symbol: str,
+    start: str,
+    end: str,
+    frequency: str = "1d",
+    use_cache: bool = True,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
 ) -> pd.DataFrame:
     """日线/分钟线统一入口。"""
     frequency = validate_frequency(frequency)
     if frequency == "1d":
-        return load_history(symbol, start, end, use_cache=use_cache)
-    return load_intraday(symbol, start, end, frequency, use_cache=use_cache)
+        return load_history(
+            symbol, start, end, use_cache=use_cache, refresh=refresh, priority=priority)
+    return load_intraday(
+        symbol, start, end, frequency, use_cache=use_cache, priority=priority)
 
 
 def load_bar_panel(
@@ -249,6 +400,10 @@ def load_bar_panel(
     field: str | None = None,
     use_cache: bool = True,
     progress: Callable[[int, int, str, bool], None] | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
+    max_workers: int = 8,
 ) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """加载日线或分钟线多标的面板数据。
 
@@ -261,27 +416,40 @@ def load_bar_panel(
     )
     frames: dict[str, pd.DataFrame] = {}
     total = len(symbols)
-    for completed, symbol in enumerate(symbols, start=1):
-        success = False
-        try:
-            if frequency == "1d":
-                frames[symbol] = load_history(
-                    symbol, start, end, use_cache=use_cache, store=store)
-            else:
-                frames[symbol] = load_intraday(
-                    symbol, start, end, frequency=frequency, use_cache=use_cache, store=store)
-            success = not frames[symbol].empty
-        except Exception as e:
-            logger.warning("跳过 %s: %s", symbol, e)
-        finally:
+
+    def one(symbol: str) -> pd.DataFrame:
+        if frequency == "1d":
+            return load_history(
+                symbol, start, end, use_cache=use_cache, store=store,
+                refresh=refresh, priority=priority,
+            )
+        return load_intraday(
+            symbol, start, end, frequency=frequency, use_cache=use_cache,
+            store=store, priority=priority,
+        )
+
+    workers = min(max(1, int(max_workers)), 8, max(1, total))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-panel") as executor:
+        futures = {executor.submit(one, symbol): symbol for symbol in symbols}
+        for completed, future in enumerate(as_completed(futures), start=1):
+            symbol = futures[future]
+            success = False
+            try:
+                frame = future.result()
+                if frame is not None and not frame.empty:
+                    frames[symbol] = frame
+                    success = True
+            except Exception as exc:
+                logger.warning("跳过 %s: %s", symbol, exc)
             if progress:
                 try:
                     progress(completed, total, symbol, success)
-                except Exception as e:
-                    logger.warning("行情进度回调失败（不影响数据加载）: %s", e)
+                except Exception as exc:
+                    logger.warning("行情进度回调失败（不影响数据加载）: %s", exc)
     if not frames:
         raise RuntimeError("没有任何标的成功加载数据")
 
+    frames = {symbol: frames[symbol] for symbol in symbols if symbol in frames}
     fields = sorted({c for df in frames.values() for c in df.columns})
     panel = {
         f: pd.DataFrame({s: df[f] for s, df in frames.items() if f in df.columns}).sort_index()
@@ -299,9 +467,13 @@ def load_panel(
     field: str | None = None,
     use_cache: bool = True,
     progress: Callable[[int, int, str, bool], None] | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
+    max_workers: int = 8,
 ) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """向后兼容的日线面板入口。"""
     return load_bar_panel(
         symbols, start, end, frequency="1d", field=field, use_cache=use_cache,
-        progress=progress,
+        progress=progress, refresh=refresh, priority=priority, max_workers=max_workers,
     )

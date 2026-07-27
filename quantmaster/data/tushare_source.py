@@ -20,8 +20,8 @@ from quantmaster.config import get_config
 from quantmaster.data.base import DataSource, Market, normalize_daily
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
-    TUSHARE_REQUEST_LOCK,
     EndpointFrameCache,
+    provider_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,14 +78,15 @@ class TushareSource(DataSource):
         cached = self.cache.get(endpoint, clean, ttl_days)
         if cached is not None:
             return cached.copy()
-        # 并发任务可能同时 miss；串行区内二次检查，确保同一参数只触网一次。
-        with TUSHARE_REQUEST_LOCK:
+        key = endpoint + ":" + self.cache._digest(endpoint, clean)
+
+        def fetch() -> pd.DataFrame:
+            # 任务进入提供商队列后再次检查，确保排队期间已完成的相同响应直接复用。
             cached = self.cache.get(endpoint, clean, ttl_days)
             if cached is not None:
                 return cached.copy()
             method = getattr(self._pro(), endpoint)
             TUSHARE_LIMITER.wait()
-            # 其他服务进程可能在排队期间已写入相同响应。
             cached = self.cache.get(endpoint, clean, ttl_days)
             if cached is not None:
                 return cached.copy()
@@ -93,6 +94,8 @@ class TushareSource(DataSource):
             frame = result if isinstance(result, pd.DataFrame) else pd.DataFrame(result)
             self.cache.put(endpoint, clean, frame)
             return frame.copy()
+
+        return provider_call("tushare", key, fetch)
 
     @staticmethod
     def _normalize_market_frame(raw: pd.DataFrame) -> pd.DataFrame:

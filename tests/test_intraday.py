@@ -78,10 +78,11 @@ def test_multisymbol_intraday_panel(monkeypatch):
     )
     assert set(panel) >= {"open", "high", "low", "close", "volume"}
     assert panel["close"].shape == (3, 2)
-    assert updates == [
-        (1, 2, "600000.SH", True),
-        (2, 2, "000001.SZ", True),
-    ]
+    # 并发加载按实际完成顺序回调，但进度编号连续且每只标的只报告一次。
+    assert [item[:2] for item in updates] == [(1, 2), (2, 2)]
+    assert {(item[2], item[3]) for item in updates} == {
+        ("600000.SH", True), ("000001.SZ", True),
+    }
     close = registry.load_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02 09:30", "2024-01-02 09:40",
         "5m", field="close")

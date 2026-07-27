@@ -28,22 +28,74 @@ def _lark_md(value: Any) -> str:
     return text
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _news_direction(value: Any) -> str:
+    return {"up": "利好", "down": "利空", "neutral": "中性"}.get(str(value), "中性")
+
+
+def _digest_counts(payload: dict[str, Any]) -> dict[str, int]:
+    configured = payload.get("counts") or {}
+    if configured:
+        return {
+            "up": int(configured.get("up") or 0),
+            "down": int(configured.get("down") or 0),
+            "neutral": int(configured.get("neutral") or 0),
+        }
+    result = {"up": 0, "down": 0, "neutral": 0}
+    for child in payload.get("items") or []:
+        direction = child.get("direction")
+        result[direction if direction in result else "neutral"] += 1
+    return result
+
+
 def format_alert(item: dict[str, Any], channel: str) -> str:
     labels = {
         "market_turn": "盘中变盘", "market_close": "收盘状态变化",
-        "important_news": "重要消息", "task_failure": "自动化任务失败",
+        "important_news": "重要资讯", "task_failure": "自动化任务失败",
         "task_report": "自动化报告",
     }
+    kind = item.get("kind")
+    payload = item.get("payload", {})
     direction = {"up": "偏强", "down": "偏弱", "neutral": "中性"}.get(
         item.get("direction"), "中性")
-    title = item.get("payload", {}).get("title") or labels.get(item.get("kind"), item.get("kind"))
+    title = payload.get("title") or labels.get(kind, kind)
     lines = [f"【QuantMaster · {labels.get(item.get('kind'), '提醒')}】", str(title)]
-    lines.append(
-        f"强度 {float(item.get('score', 0)):.0f}/100 · {direction} · "
-        f"数据截至 {item.get('data_as_of') or '未知'}")
+    if kind == "important_news" and payload.get("digest"):
+        counts = _digest_counts(payload)
+        lines.append(
+            f"共 {len(payload.get('items') or [])} 条 · 利好 {counts['up']} · "
+            f"利空 {counts['down']} · 中性 {counts['neutral']}")
+        for index, child in enumerate((payload.get("items") or [])[:5], 1):
+            lines.append(
+                f"{index}. [{_news_direction(child.get('direction'))}] "
+                f"{_trim(child.get('title') or '消息', 100)}")
+            if child.get("summary"):
+                lines.append(f"   摘要：{_trim(child['summary'], 180)}")
+            if child.get("symbols"):
+                lines.append("   标的：" + "、".join(child["symbols"][:6]))
+            if str(child.get("url") or "").startswith(("https://", "http://")):
+                lines.append(f"   原文：{child['url']}")
+    elif kind == "important_news":
+        sentiment = _number(payload.get("sentiment"))
+        lines.append(
+            f"研判 {_news_direction(item.get('direction'))} ({sentiment:+.2f}) · "
+            f"重要度 {_number(item.get('score')):.0f}/100")
+        if payload.get("summary"):
+            lines.append("摘要：" + _trim(payload["summary"], 200))
+        lines.append(f"数据截至：{item.get('data_as_of') or '未知'}")
+    else:
+        lines.append(
+            f"强度 {_number(item.get('score')):.0f}/100 · {direction} · "
+            f"数据截至 {item.get('data_as_of') or '未知'}")
     evidence = item.get("evidence") or []
-    if evidence:
-        lines.append("依据：" + "；".join(_trim(value) for value in evidence[:4]))
+    if evidence and not (kind == "important_news" and payload.get("digest")):
+        lines.append("核查依据：" + "；".join(_trim(value) for value in evidence[:4]))
     symbols = item.get("symbols") or []
     if symbols:
         lines.append("相关标的：" + "、".join(symbols[:12]))
@@ -58,9 +110,11 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
     """飞书主通道使用结构化卡片，便于在群聊中快速核查证据。"""
     labels = {
         "market_turn": "盘中变盘", "market_close": "收盘状态变化",
-        "important_news": "重要消息", "task_failure": "自动化任务失败",
+        "important_news": "重要资讯", "task_failure": "自动化任务失败",
         "task_report": "自动化报告",
     }
+    kind = item.get("kind")
+    payload = item.get("payload", {})
     direction = {"up": "偏强", "down": "偏弱", "neutral": "中性"}.get(
         item.get("direction"), "中性")
     template = (
@@ -68,15 +122,45 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
         else "green" if item.get("direction") == "down" else "blue"
     )
     title = _trim(
-        item.get("payload", {}).get("title") or labels.get(item.get("kind"), "QuantMaster 提醒"),
+        payload.get("title") or labels.get(kind, "QuantMaster 提醒"),
         80,
     )
-    lines = [
-        f"**强度**  {float(item.get('score', 0)):.0f}/100    **方向**  {direction}",
-        f"**数据截至**  {item.get('data_as_of') or '未知'}",
-    ]
+    if kind == "important_news" and payload.get("digest"):
+        counts = _digest_counts(payload)
+        lines = [
+            (f"**本期**  {len(payload.get('items') or [])} 条    **利好**  {counts['up']}    "
+             f"**利空**  {counts['down']}    **中性**  {counts['neutral']}"),
+            f"**数据截至**  {item.get('data_as_of') or '未知'}",
+        ]
+        for index, child in enumerate((payload.get("items") or [])[:5], 1):
+            child_title = _lark_md(child.get("title") or "消息")
+            url = str(child.get("url") or "")
+            if url.startswith(("https://", "http://")):
+                child_title = f"[{child_title}]({url})"
+            lines.extend([
+                "",
+                f"**{index} · {_news_direction(child.get('direction'))}**  {child_title}",
+            ])
+            if child.get("summary"):
+                lines.append(f"摘要：{_lark_md(child['summary'])}")
+            if child.get("symbols"):
+                lines.append("标的：" + "、".join(child["symbols"][:6]))
+    elif kind == "important_news":
+        sentiment = _number(payload.get("sentiment"))
+        lines = [
+            (f"**研判**  {_news_direction(item.get('direction'))} ({sentiment:+.2f})    "
+             f"**重要度**  {_number(item.get('score')):.0f}/100"),
+            f"**数据截至**  {item.get('data_as_of') or '未知'}",
+        ]
+        if payload.get("summary"):
+            lines.extend(["", "**摘要**", _lark_md(payload["summary"])])
+    else:
+        lines = [
+            f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}",
+            f"**数据截至**  {item.get('data_as_of') or '未知'}",
+        ]
     evidence = item.get("evidence") or []
-    if evidence:
+    if evidence and not (kind == "important_news" and payload.get("digest")):
         lines.extend(["", "**核查依据**", *[f"• {_lark_md(value)}" for value in evidence[:5]]])
     symbols = item.get("symbols") or []
     if symbols:

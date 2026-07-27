@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from typing import ClassVar
 
 import httpx
 
 from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
-from quantmaster.settings_checks import check_lab, list_llm_models
+from quantmaster.settings_checks import check_data_sources, check_lab, list_llm_models
 
 
 class FakeClient:
@@ -89,3 +90,32 @@ def test_lab_check_reports_demo_and_missing_custom_pool(tmp_path):
     missing = check_lab(LabSettings(universe="research_pool", device="cpu"), data, "")
     assert missing["status"] == "error"
     assert "不存在" in missing["details"]["checks"]["universe"]["message"]
+
+
+def test_data_source_checks_use_real_endpoints_in_parallel_and_mask_proxy(monkeypatch):
+    barrier = threading.Barrier(2, timeout=2)
+    calls = []
+
+    class ProbeResponse:
+        status_code = 200
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        barrier.wait()
+        return ProbeResponse()
+
+    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fake_get)
+    monkeypatch.setattr(
+        "quantmaster.data.resilience.provider_call",
+        lambda lane, key, func, **kwargs: func(),
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://secret-user:secret-pass@proxy.example:8080")
+    result = check_data_sources(2)
+
+    assert result["status"] == "success"
+    assert len(calls) == 2
+    assert any("eastmoney.com/api/qt/stock/kline/get" in url for url in calls)
+    assert any("finance.yahoo.com/v8/finance/chart" in url for url in calls)
+    assert result["details"]["proxies"]["HTTPS_PROXY"] == "http://proxy.example:8080"
+    assert "secret-user" not in str(result) and "secret-pass" not in str(result)

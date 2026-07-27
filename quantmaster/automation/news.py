@@ -52,10 +52,12 @@ def news_event(item: NewsItem, holdings: set[str], watchlist: set[str],
         severity="critical" if score >= 95 else ("high" if score >= 80 else "medium"),
         direction="up" if item.sentiment > 0.15 else "down" if item.sentiment < -0.15 else "neutral",
         data_as_of=item.published_at, symbols=list(item.symbols), relevance=relevance,
-        evidence=reasons + ([item.summary] if item.summary else []),
+        evidence=reasons,
         source_urls=[item.url] if item.url else [], dedupe_key=fingerprint,
         payload={"source": item.source, "title": item.title,
-                 "summary": item.summary or item.content[:160], "event_type": item.event_type},
+                 "summary": item.summary or item.content[:160],
+                 "sentiment": float(item.sentiment or 0),
+                 "event_type": item.event_type},
     )
 
 
