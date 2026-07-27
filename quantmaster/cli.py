@@ -111,9 +111,18 @@ def cmd_backtest(args) -> None:
 
     end = args.end or _today()
     panel = _load_panel(args.universe, args.start, end)
-    strategy = FactorStrategy(
-        resolve_factor(args.factor, load_universe(args.universe), args.start, end),
-        top_n=args.top, rebalance=args.rebalance)
+    symbols = load_universe(args.universe)
+    names = [n.strip() for n in args.factor.split(",") if n.strip()]
+    if len(names) > 1:
+        from quantmaster.backtest.strategy import MultiFactorStrategy
+
+        strategy = MultiFactorStrategy(
+            [resolve_factor(n, symbols, args.start, end) for n in names],
+            top_n=args.top, rebalance=args.rebalance, weighting=args.weighting)
+    else:
+        strategy = FactorStrategy(
+            resolve_factor(names[0], symbols, args.start, end),
+            top_n=args.top, rebalance=args.rebalance)
     benchmark = None
     try:
         benchmark = load_history(args.benchmark, args.start, end)["close"]
@@ -278,6 +287,34 @@ def cmd_daily(args) -> None:
     _print_json(result)
 
 
+def cmd_universe(args) -> None:
+    from quantmaster.data.universe import index_universe, load_universe, save_universe
+
+    if args.universe_cmd == "create":
+        if args.index:
+            symbols = index_universe(args.index)
+        elif args.symbols:
+            symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        else:
+            print("需要 --index（指数成分）或 --symbols（逗号分隔代码）", file=sys.stderr)
+            raise SystemExit(1)
+        save_universe(args.name, symbols)
+        print(f"股票池 {args.name} 已保存：{len(symbols)} 只")
+    elif args.universe_cmd == "show":
+        symbols = load_universe(args.name)
+        print(f"{args.name}: {len(symbols)} 只")
+        for s in symbols:
+            print(f"  {s}")
+    else:
+        from quantmaster.config import get_config
+
+        pool_dir = get_config().data_root / "universe"
+        names = ["demo（内置）"]
+        if pool_dir.exists():
+            names += sorted(p.stem for p in pool_dir.glob("*.json"))
+        print("\n".join(names))
+
+
 def cmd_ledger(args) -> None:
     from quantmaster.portfolio import Ledger, TradeRecord, ledger_report
 
@@ -364,9 +401,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quantiles", type=int, default=5)
     p.set_defaults(func=cmd_factor_test)
 
-    p = sub.add_parser("backtest", help="因子选股回测")
+    p = sub.add_parser("backtest", help="因子选股回测（--factor 逗号分隔多个名字 = 多因子组合）")
     common(p)
-    p.add_argument("--factor", default="mom_20d")
+    p.add_argument("--factor", default="mom_20d",
+                   help="因子名/表达式；逗号分隔多个则做多因子合成，如 mom_20d,rev_5d,ep")
+    p.add_argument("--weighting", default="equal", choices=["equal", "ic"],
+                   help="多因子合成方式：等权 或 滚动IC动态加权")
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
@@ -438,6 +478,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capital", type=float, default=1_000_000)
     p.add_argument("--skip-llm", action="store_true", help="快讯不做 LLM 标注")
     p.set_defaults(func=cmd_daily)
+
+    p = sub.add_parser("universe", help="股票池管理")
+    usub = p.add_subparsers(dest="universe_cmd", required=True)
+    uc = usub.add_parser("create", help="创建股票池（指数成分或手动列表）")
+    uc.add_argument("name")
+    uc.add_argument("--index", default=None, help="指数代码，如 000300.SH（沪深300成分）")
+    uc.add_argument("--symbols", default=None, help="逗号分隔的代码列表")
+    us = usub.add_parser("show", help="查看股票池")
+    us.add_argument("name")
+    usub.add_parser("list", help="列出全部股票池")
+    p.set_defaults(func=cmd_universe)
 
     p = sub.add_parser("ledger", help="实盘账本")
     lsub = p.add_subparsers(dest="ledger_cmd", required=True)

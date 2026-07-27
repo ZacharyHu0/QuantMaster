@@ -67,6 +67,59 @@ class FactorStrategy(Strategy):
         return weights
 
 
+class MultiFactorStrategy(Strategy):
+    """多因子选股：多个因子合成一个综合分后取前 top_n。
+
+    weighting:
+        "equal"  各因子标准化后等权相加（稳健默认）
+        "ic"     滚动 RankIC 动态加权（ic_weighted_combine，权重已 shift
+                 防未来函数；负 IC 因子自动反向）
+    """
+
+    def __init__(
+        self,
+        factors: list[Factor],
+        top_n: int = 5,
+        rebalance: str = "W",
+        cap_weight: float = 0.35,
+        weighting: str = "equal",
+        ic_lookback: int = 60,
+    ):
+        if not factors:
+            raise ValueError("factors 不能为空")
+        if weighting not in ("equal", "ic"):
+            raise ValueError(f"weighting 只支持 equal/ic，实际: {weighting!r}")
+        self.factors = factors
+        self.top_n = top_n
+        self.rebalance = rebalance
+        self.cap_weight = cap_weight
+        self.weighting = weighting
+        self.ic_lookback = ic_lookback
+        names = "+".join(f.name for f in factors)[:60]
+        self.name = f"multi[{names}]_{weighting}_top{top_n}_{rebalance}"
+
+    def target_weights(self, panel: PanelDict) -> pd.DataFrame:
+        from quantmaster.factors.composite import ic_weighted_combine
+        from quantmaster.factors.engine import combine_factors, compute_factors
+
+        values = compute_factors(self.factors, panel, standardize=True)
+        if self.weighting == "ic":
+            combined, _ = ic_weighted_combine(values, panel["close"],
+                                              lookback=self.ic_lookback)
+        else:
+            combined = combine_factors(values)
+
+        close = panel["close"]
+        combined = combined.reindex(index=close.index, columns=close.columns)
+        ranks = combined.rank(axis=1, ascending=False)
+        selected = (ranks <= self.top_n).astype(float).where(combined.notna(), 0.0)
+        counts = selected.sum(axis=1).replace(0, pd.NA)
+        weights = selected.div(counts, axis=0).clip(upper=self.cap_weight).fillna(0.0)
+
+        mask = rebalance_mask(close.index, self.rebalance)
+        return weights.where(mask, other=float("nan"))
+
+
 class BuyAndHold(Strategy):
     """基准：首日等权买入并持有。"""
 

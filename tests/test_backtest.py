@@ -222,3 +222,41 @@ class TestNoLookahead:
         result = run_backtest(panel_a, weights)
         assert result.trades
         assert min(t.date for t in result.trades) == str(dates[11].date())
+
+
+class TestMultiFactorStrategy:
+    def test_equal_weighting(self, panel):
+        from quantmaster.backtest.strategy import MultiFactorStrategy
+        from quantmaster.factors import BUILTIN_FACTORS
+
+        strategy = MultiFactorStrategy(
+            [BUILTIN_FACTORS["mom_20d"], BUILTIN_FACTORS["rev_5d"]],
+            top_n=3, rebalance="W")
+        weights = strategy.target_weights(panel)
+        active = weights.dropna(how="all")
+        assert len(active) > 0
+        row = active.iloc[-1].fillna(0)
+        assert (row > 0).sum() <= 3
+        assert row.sum() <= 1.0 + 1e-9
+        result = run_backtest(panel, weights)
+        assert (result.nav > 0).all()
+
+    def test_ic_weighting_runs(self, panel):
+        from quantmaster.backtest.strategy import MultiFactorStrategy
+        from quantmaster.factors import BUILTIN_FACTORS
+
+        strategy = MultiFactorStrategy(
+            [BUILTIN_FACTORS["mom_20d"], BUILTIN_FACTORS["rev_5d"]],
+            top_n=3, rebalance="W", weighting="ic", ic_lookback=30)
+        weights = strategy.target_weights(panel)
+        # IC 冷启动期后应有信号
+        assert weights.dropna(how="all").iloc[-1].fillna(0).sum() > 0
+
+    def test_rejects_bad_args(self, panel):
+        from quantmaster.backtest.strategy import MultiFactorStrategy
+        from quantmaster.factors import BUILTIN_FACTORS
+
+        with pytest.raises(ValueError):
+            MultiFactorStrategy([], top_n=3)
+        with pytest.raises(ValueError):
+            MultiFactorStrategy([BUILTIN_FACTORS["mom_20d"]], weighting="magic")

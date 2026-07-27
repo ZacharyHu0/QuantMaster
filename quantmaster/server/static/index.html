@@ -123,7 +123,10 @@
 <!-- ================= 回测 ================= -->
 <section class="tab" id="tab-backtest">
   <form class="controls" id="bt-form">
-    <label>因子<input name="factor" list="factor-list" value="mom_20d" style="min-width:260px"></label>
+    <label>因子（逗号分隔=多因子组合）<input name="factor" list="factor-list" value="mom_20d" style="min-width:260px" placeholder="mom_20d,rev_5d,ep"></label>
+    <label>合成
+      <select name="weighting"><option value="equal">等权</option><option value="ic">IC加权</option></select>
+    </label>
     <label>股票池<input name="universe" value="demo"></label>
     <label>开始<input name="start" type="date" value="2022-01-01"></label>
     <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50"></label>
@@ -338,12 +341,20 @@ async function showKline(symbol, name) {
   try {
     const data = await api('/api/market/history/' + encodeURIComponent(symbol));
     c.hideLoading();
+    const closes = data.kline.map(k => k[2]);
+    const ma = n => closes.map((_, i) =>
+      i + 1 < n ? null : +(closes.slice(i + 1 - n, i + 1).reduce((a, b) => a + b, 0) / n).toFixed(3));
     c.setOption(baseOpt({
+      legend: { textStyle: { color: INK2 }, top: 0, data: ['MA5', 'MA20'] },
       xAxis: { type: 'category', data: data.kline.map(k => k[0]), axisLabel: { color: MUTED }, axisLine: { lineStyle: { color: AXIS } } },
       yAxis: valAxis(),
       dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 6, borderColor: AXIS, textStyle: { color: MUTED } }],
-      series: [{ type: 'candlestick', data: data.kline.map(k => k.slice(1, 5)),
-        itemStyle: { color: '#e66767', color0: '#0ca30c', borderColor: '#e66767', borderColor0: '#0ca30c' } }],
+      series: [
+        { type: 'candlestick', data: data.kline.map(k => k.slice(1, 5)),
+          itemStyle: { color: '#e66767', color0: '#0ca30c', borderColor: '#e66767', borderColor0: '#0ca30c' } },
+        { name: 'MA5', type: 'line', data: ma(5), showSymbol: false, lineStyle: { width: 1.5 } },
+        { name: 'MA20', type: 'line', data: ma(20), showSymbol: false, lineStyle: { width: 1.5 } },
+      ],
     }));
     document.getElementById('kline-panel').scrollIntoView({ behavior: 'smooth' });
   } catch (e) { c.hideLoading(); alert('K线加载失败: ' + e.message); }
@@ -438,7 +449,8 @@ document.getElementById('bt-form').onsubmit = async e => {
       factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
       top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark'),
       stop_loss: fd.get('stop_loss') ? +fd.get('stop_loss') : null,
-      take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null });
+      take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null,
+      weighting: fd.get('weighting') });
     const m = data.metrics;
     out.innerHTML = `
       <div class="cards">

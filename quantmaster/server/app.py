@@ -159,11 +159,13 @@ class BacktestRequest(BaseModel):
     initial_capital: float = 1_000_000.0
     stop_loss: float | None = None
     take_profit: float | None = None
+    weighting: str = "equal"          # 多因子合成方式：equal | ic
 
 
 @app.post("/api/backtest/run")
 def backtest_run(req: BacktestRequest) -> dict:
     from quantmaster.backtest import BacktestConfig, FactorStrategy, full_report, run_backtest
+    from quantmaster.backtest.strategy import MultiFactorStrategy
     from quantmaster.data import load_history, load_panel
     from quantmaster.data.universe import load_universe
     from quantmaster.factors.fundamental import resolve_factor
@@ -172,8 +174,14 @@ def backtest_run(req: BacktestRequest) -> dict:
     try:
         symbols = load_universe(req.universe)
         panel = load_panel(symbols, req.start, end)
-        strategy = FactorStrategy(resolve_factor(req.factor, symbols, req.start, end),
-                                  top_n=req.top_n, rebalance=req.rebalance)
+        names = [n.strip() for n in req.factor.split(",") if n.strip()]
+        if len(names) > 1:
+            strategy = MultiFactorStrategy(
+                [resolve_factor(n, symbols, req.start, end) for n in names],
+                top_n=req.top_n, rebalance=req.rebalance, weighting=req.weighting)
+        else:
+            strategy = FactorStrategy(resolve_factor(names[0], symbols, req.start, end),
+                                      top_n=req.top_n, rebalance=req.rebalance)
         weights = strategy.target_weights(panel)
         benchmark = None
         try:
