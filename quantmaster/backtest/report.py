@@ -150,4 +150,99 @@ def full_report(result: BacktestResult) -> dict:
         "yearly": yearly_records,
         "monthly": monthly_records,
         "trade_stats": trade_stats(result.trades),
+        "risk_diagnostics": risk_diagnostics(result),
+        "stress_tests": stress_tests(result),
+        "trade_lifecycle": trade_lifecycle(result),
     })
+
+
+def risk_diagnostics(result: BacktestResult) -> dict:
+    """固定种子的区块 bootstrap 区间与基准市场状态拆解。"""
+    returns = result.returns.dropna()
+    if returns.empty:
+        return {}
+    rng = np.random.default_rng(42)
+    block = min(20, len(returns))
+    annualized = []
+    values = returns.to_numpy(float)
+    for _ in range(300):
+        pieces = []
+        while sum(len(item) for item in pieces) < len(values):
+            start = int(rng.integers(0, max(1, len(values) - block + 1)))
+            pieces.append(values[start:start + block])
+        sampled = np.concatenate(pieces)[:len(values)]
+        base = float(np.prod(1 + np.clip(sampled, -0.999, None)))
+        annualized.append(base ** (TRADING_DAYS / len(sampled)) - 1 if base > 0 else -1.0)
+    regimes: dict[str, dict] = {}
+    if result.benchmark_nav is not None:
+        benchmark = result.benchmark_nav.reindex(returns.index).ffill()
+        trend = benchmark / benchmark.rolling(60, min_periods=20).mean() - 1
+        volatility = benchmark.pct_change(fill_method=None).rolling(20).std()
+        threshold = volatility.expanding(min_periods=20).median()
+        labels = pd.Series(
+            np.where(trend >= 0, "uptrend", "downtrend"), index=returns.index,
+        ).str.cat(pd.Series(np.where(volatility > threshold, "high_vol", "normal_vol"),
+                            index=returns.index), sep="/")
+        for name, group in returns.groupby(labels):
+            regimes[str(name)] = {
+                "days": len(group), "return": float((1 + group).prod() - 1),
+                "win_rate": float((group > 0).mean()),
+            }
+    return {
+        "annual_return_confidence_95": [
+            float(np.quantile(annualized, 0.025)), float(np.quantile(annualized, 0.975)),
+        ],
+        "market_regimes": regimes,
+    }
+
+
+def stress_tests(result: BacktestResult) -> list[dict]:
+    """按实际成交费用提高后的组合压力结果。"""
+    base_return = float(result.nav.iloc[-1] - 1) if not result.nav.empty else 0.0
+    paid = sum(float(trade.cost) for trade in result.trades)
+    rows = []
+    for multiplier in (1.0, 1.5, 2.0, 3.0):
+        extra = paid * (multiplier - 1) / max(result.initial_capital, 1.0)
+        rows.append({
+            "cost_multiplier": multiplier,
+            "stressed_total_return": base_return - extra,
+            "additional_cost": paid * (multiplier - 1),
+        })
+    return rows
+
+
+def trade_lifecycle(result: BacktestResult) -> dict:
+    """按完整开平仓周期估算持有期、MFE 与 MAE。"""
+    if result.close_prices is None or result.close_prices.empty:
+        return {"round_trips": 0, "items": []}
+    opened: dict[str, dict] = {}
+    items = []
+    for trade in result.trades:
+        if trade.side == "buy":
+            state = opened.setdefault(trade.symbol, {
+                "date": trade.date, "amount": 0.0, "shares": 0.0,
+            })
+            state["amount"] += trade.amount
+            state["shares"] += trade.shares
+        elif trade.symbol in opened:
+            state = opened[trade.symbol]
+            entry = state["amount"] / max(state["shares"], 1e-12)
+            closed_shares = min(float(trade.shares), float(state["shares"]))
+            path = result.close_prices.loc[state["date"]:trade.date, trade.symbol].dropna()
+            returns = path / entry - 1 if not path.empty else pd.Series(dtype=float)
+            items.append({
+                "symbol": trade.symbol, "entry_date": state["date"], "exit_date": trade.date,
+                "shares": closed_shares,
+                "holding_days": max(0, len(path) - 1),
+                "mfe": float(returns.max()) if not returns.empty else None,
+                "mae": float(returns.min()) if not returns.empty else None,
+            })
+            state["shares"] -= closed_shares
+            state["amount"] -= closed_shares * entry
+            if state["shares"] <= 1e-9:
+                opened.pop(trade.symbol)
+    return {
+        "round_trips": len(items),
+        "average_holding_days": float(np.mean([item["holding_days"] for item in items])) if items else 0,
+        "items": items[-200:],
+    }

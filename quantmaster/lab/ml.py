@@ -27,6 +27,20 @@ Cancelled = Callable[[], bool]
 def capabilities() -> dict[str, Any]:
     torch_available = importlib.util.find_spec("torch") is not None
     sklearn_available = importlib.util.find_spec("sklearn") is not None
+    cuda = torch_available and _cuda_available()
+    gpu: dict[str, Any] = {"available": cuda}
+    if cuda:
+        try:
+            import torch
+
+            properties = torch.cuda.get_device_properties(0)
+            gpu.update({
+                "name": properties.name,
+                "memory_gb": round(properties.total_memory / (1024 ** 3), 2),
+                "mixed_precision": True,
+            })
+        except Exception:
+            pass
     return {
         "available_models": [
             name for name in MODEL_KINDS
@@ -34,7 +48,13 @@ def capabilities() -> dict[str, Any]:
         ],
         "torch": torch_available,
         "sklearn": sklearn_available,
-        "device": "cuda" if torch_available and _cuda_available() else "cpu",
+        "device": "cuda" if cuda else "cpu",
+        "gpu": gpu,
+        "optuna": importlib.util.find_spec("optuna") is not None,
+        "multi_horizon_models": [
+            name for name in ("multi-transformer", "multi-tcn", "multi-gru", "ridge")
+            if (name == "ridge" and sklearn_available) or (name != "ridge" and torch_available)
+        ],
     }
 
 
@@ -541,9 +561,23 @@ def _artifact_manifest(model: dict[str, Any]) -> tuple[dict[str, Any], Path]:
 
 
 def predict_panel(
-    panel: dict[str, pd.DataFrame], model: dict[str, Any],
+    panel: dict[str, pd.DataFrame], model: dict[str, Any], horizon: int | None = None,
 ) -> pd.DataFrame:
     """Load a versioned Lab artifact and return date×symbol predictions."""
+    manifest_name = str(model.get("manifest") or "")
+    if manifest_name:
+        root = Path(get_config().data_root).resolve()
+        candidate = (root / manifest_name).resolve()
+        if candidate.is_relative_to(root) and candidate.is_file():
+            preview = json.loads(candidate.read_text(encoding="utf-8"))
+            if int(preview.get("schema_version", 1)) == 2:
+                from quantmaster.lab.multihorizon import predict_multi_bundle
+
+                available = [int(value) for value in preview.get("horizons") or []]
+                selected = horizon or (3 if 3 in available else available[0])
+                return predict_multi_bundle(
+                    panel, model, horizon=selected,
+                ).expected_excess[selected]
     manifest, artifact_path = _artifact_manifest(model)
     sequence_length = int(manifest.get("sequence_length", 20))
     samples, metadata, feature_names = make_inference_samples(

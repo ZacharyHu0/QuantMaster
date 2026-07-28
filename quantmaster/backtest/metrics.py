@@ -47,6 +47,15 @@ def performance_metrics(
     sharpe = (annual_return - RISK_FREE) / volatility if volatility > 0 else 0.0
     calmar = annual_return / mdd if mdd > 0 else 0.0
     win_rate = float((clean > 0).mean())
+    downside = float(clean.clip(upper=0).std() * np.sqrt(TRADING_DAYS))
+    sortino = (annual_return - RISK_FREE) / downside if downside > 0 else 0.0
+    gains = float(clean[clean > 0].sum())
+    losses = abs(float(clean[clean < 0].sum()))
+    profit_factor = gains / losses if losses > 0 else (float("inf") if gains > 0 else 0.0)
+    expectancy = float(clean.mean())
+    var_95 = float(clean.quantile(0.05))
+    cvar_values = clean.loc[clean <= var_95]
+    cvar_95 = float(cvar_values.mean()) if not cvar_values.empty else var_95
 
     metrics = {
         "total_return": round(total_return, 4),
@@ -57,6 +66,11 @@ def performance_metrics(
         "max_drawdown_peak": peak,
         "max_drawdown_trough": trough,
         "calmar": round(calmar, 3),
+        "sortino": round(sortino, 3),
+        "profit_factor": round(profit_factor, 3) if np.isfinite(profit_factor) else None,
+        "expectancy": round(expectancy, 6),
+        "var_95": round(var_95, 6),
+        "cvar_95": round(cvar_95, 6),
         "daily_win_rate": round(win_rate, 4),
         "days": n,
     }

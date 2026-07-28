@@ -88,12 +88,45 @@ class LabStore:
                     FOREIGN KEY(version_id) REFERENCES factor_versions(id));
                 CREATE TABLE IF NOT EXISTS lab_schedule_slots (
                     slot TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS optimization_studies (
+                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL DEFAULT '',
+                    experiment_id TEXT NOT NULL DEFAULT '', config_hash TEXT NOT NULL,
+                    status TEXT NOT NULL, config_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}', storage_url TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS bias_audits (
+                    id TEXT PRIMARY KEY, version_id TEXT NOT NULL,
+                    dataset_hash TEXT NOT NULL, status TEXT NOT NULL,
+                    report_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(version_id) REFERENCES factor_versions(id));
+                CREATE TABLE IF NOT EXISTS mining_runs (
+                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL, config_json TEXT NOT NULL,
+                    split_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}',
+                    snapshot_hash TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS mining_candidates (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, candidate_key TEXT NOT NULL,
+                    status TEXT NOT NULL, pareto_rank INTEGER,
+                    proposal_json TEXT NOT NULL, metrics_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_json TEXT NOT NULL DEFAULT '{}', version_id TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, UNIQUE(run_id,candidate_key),
+                    FOREIGN KEY(run_id) REFERENCES mining_runs(id));
                 CREATE INDEX IF NOT EXISTS idx_factor_versions_status
                     ON factor_versions(status,updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lab_jobs_status
                     ON lab_jobs(status,created_at);
                 CREATE INDEX IF NOT EXISTS idx_job_events
                     ON lab_job_events(job_id,seq);
+                CREATE INDEX IF NOT EXISTS idx_studies_status
+                    ON optimization_studies(status,updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_bias_audits_version
+                    ON bias_audits(version_id,created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_mining_runs_updated
+                    ON mining_runs(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_mining_candidates_run
+                    ON mining_candidates(run_id,pareto_rank,created_at);
             """)
             deployment_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(deployments)")
@@ -109,7 +142,7 @@ class LabStore:
                 "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
                 "ON deployments(status,universe,horizon,profile,role)"
             )
-            conn.execute("PRAGMA user_version=2")
+            conn.execute("PRAGMA user_version=4")
 
     @staticmethod
     def _decode(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -323,6 +356,10 @@ class LabStore:
         gates = report.get("gates") or {}
         if gates.get("hard_failures"):
             raise ValueError("当前验证存在硬门槛失败，不能设为 champion")
+        if gates.get("bias_audit_required"):
+            audit = self.latest_bias_audit(version_id)
+            if audit is None or audit.get("status") != "passed":
+                raise ValueError("候选尚未通过防前视/PIT 偏差审计，不能设为 champion")
         has_horizon_evidence = bool(report.get("horizons")) or report.get("best_horizon") is not None
         if (has_horizon_evidence and str(horizon) not in (report.get("horizons") or {})
                 and report.get("best_horizon") != horizon):
@@ -430,6 +467,219 @@ class LabStore:
                 (max(1, min(limit, 500)),),
             ).fetchall()
         return [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
+
+    def create_study(self, config: dict, *, storage_url: str = "") -> dict:
+        study_id, now = uuid.uuid4().hex, utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO optimization_studies "
+                "(id,config_hash,status,config_json,storage_url,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (study_id, content_hash(config), "queued", canonical_json(config),
+                 storage_url, now, now),
+            )
+        return self.study(study_id) or {}
+
+    def study(self, study_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM optimization_studies WHERE id=?", (study_id,),
+            ).fetchone()
+        value = self._decode(row, ("config_json", "result_json"))
+        if value is not None:
+            value["config"] = value.pop("config_json")
+            value["result"] = value.pop("result_json")
+        return value
+
+    def studies(self, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM optimization_studies ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = self._decode(row, ("config_json", "result_json")) or {}
+            value["config"] = value.pop("config_json")
+            value["result"] = value.pop("result_json")
+            result.append(value)
+        return result
+
+    def update_study(
+        self, study_id: str, *, status: str | None = None,
+        result: dict | None = None, job_id: str | None = None,
+        experiment_id: str | None = None, storage_url: str | None = None,
+    ) -> dict:
+        if self.study(study_id) is None:
+            raise KeyError("优化 Study 不存在")
+        assignments, params = ["updated_at=?"], [utc_now()]
+        for column, value in (
+            ("status", status), ("job_id", job_id), ("experiment_id", experiment_id),
+            ("storage_url", storage_url),
+        ):
+            if value is not None:
+                assignments.append(f"{column}=?")
+                params.append(value)
+        if result is not None:
+            assignments.append("result_json=?")
+            params.append(canonical_json(result))
+        params.append(study_id)
+        with self._conn() as conn:
+            conn.execute(
+                f"UPDATE optimization_studies SET {','.join(assignments)} WHERE id=?",
+                tuple(params),
+            )
+        return self.study(study_id) or {}
+
+    def save_bias_audit(
+        self, version_id: str, dataset_hash: str, report: dict,
+    ) -> dict:
+        if self.version(version_id) is None:
+            raise KeyError("因子版本不存在")
+        audit_id, now = uuid.uuid4().hex, utc_now()
+        status = "passed" if report.get("passed") else "failed"
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO bias_audits VALUES (?,?,?,?,?,?)",
+                (audit_id, version_id, dataset_hash, status, canonical_json(report), now),
+            )
+        return self.bias_audit(audit_id) or {}
+
+    def bias_audit(self, audit_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM bias_audits WHERE id=?", (audit_id,)).fetchone()
+        value = self._decode(row, ("report_json",))
+        if value is not None:
+            value["report"] = value.pop("report_json")
+        return value
+
+    def latest_bias_audit(self, version_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM bias_audits WHERE version_id=? ORDER BY created_at DESC LIMIT 1",
+                (version_id,),
+            ).fetchone()
+        value = self._decode(row, ("report_json",))
+        if value is not None:
+            value["report"] = value.pop("report_json")
+        return value
+
+    def create_mining_run(self, config: dict) -> dict:
+        run_id, now = uuid.uuid4().hex, utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO mining_runs (id,status,config_json,created_at,updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (run_id, "queued", canonical_json(config), now, now),
+            )
+        return self.mining_run(run_id) or {}
+
+    def mining_run(self, run_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM mining_runs WHERE id=?", (run_id,)).fetchone()
+        value = self._decode(row, ("config_json", "split_json", "result_json"))
+        if value is not None:
+            value["config"] = value.pop("config_json")
+            value["split"] = value.pop("split_json")
+            value["result"] = value.pop("result_json")
+            value["candidates"] = self.mining_candidates(run_id)
+        return value
+
+    def mining_runs(self, limit: int = 30) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM mining_runs ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = self._decode(row, ("config_json", "split_json", "result_json")) or {}
+            value["config"] = value.pop("config_json")
+            value["split"] = value.pop("split_json")
+            value["result"] = value.pop("result_json")
+            result.append(value)
+        return result
+
+    def update_mining_run(
+        self, run_id: str, *, status: str | None = None, job_id: str | None = None,
+        split: dict | None = None, result: dict | None = None,
+        snapshot_hash: str | None = None,
+    ) -> dict:
+        assignments, params = ["updated_at=?"], [utc_now()]
+        for column, value in (("status", status), ("job_id", job_id),
+                              ("snapshot_hash", snapshot_hash)):
+            if value is not None:
+                assignments.append(f"{column}=?")
+                params.append(value)
+        for column, value in (("split_json", split), ("result_json", result)):
+            if value is not None:
+                assignments.append(f"{column}=?")
+                params.append(canonical_json(value))
+        params.append(run_id)
+        with self._conn() as conn:
+            changed = conn.execute(
+                f"UPDATE mining_runs SET {','.join(assignments)} WHERE id=?", tuple(params),
+            ).rowcount
+        if not changed:
+            raise KeyError("AutoMiner 运行不存在")
+        return self.mining_run(run_id) or {}
+
+    def save_mining_candidate(self, run_id: str, candidate: dict) -> dict:
+        now = utc_now()
+        key = str(candidate["id"])
+        proposal = {name: candidate.get(name) for name in (
+            "id", "name", "hypothesis", "objective", "required_features", "warmup",
+            "parameters", "code", "selected_params", "audit",
+        )}
+        metrics = {name: candidate.get(name) or {} for name in (
+            "train_metrics", "valid_metrics", "test_metrics",
+        )}
+        row_id = content_hash({"run_id": run_id, "candidate": key})[:32]
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO mining_candidates "
+                "(id,run_id,candidate_key,status,pareto_rank,proposal_json,metrics_json,"
+                "artifact_json,version_id,error,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,candidate_key) DO UPDATE SET "
+                "status=excluded.status,pareto_rank=excluded.pareto_rank,"
+                "proposal_json=excluded.proposal_json,metrics_json=excluded.metrics_json,"
+                "artifact_json=excluded.artifact_json,version_id=excluded.version_id,"
+                "error=excluded.error,updated_at=excluded.updated_at",
+                (row_id, run_id, key, candidate.get("status", "proposed"),
+                 candidate.get("pareto_rank"), canonical_json(proposal), canonical_json(metrics),
+                 canonical_json(candidate.get("artifact") or {}),
+                 candidate.get("factor_version_id", ""), candidate.get("error", ""), now, now),
+            )
+        return self.mining_candidate(row_id) or {}
+
+    def mining_candidate(self, candidate_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM mining_candidates WHERE id=? OR candidate_key=? "
+                "ORDER BY updated_at DESC LIMIT 1", (candidate_id, candidate_id),
+            ).fetchone()
+        value = self._decode(row, ("proposal_json", "metrics_json", "artifact_json"))
+        if value is not None:
+            value["proposal"] = value.pop("proposal_json")
+            value["metrics"] = value.pop("metrics_json")
+            value["artifact"] = value.pop("artifact_json")
+        return value
+
+    def mining_candidates(self, run_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM mining_candidates WHERE run_id=? "
+                "ORDER BY CASE WHEN pareto_rank IS NULL THEN 999 ELSE pareto_rank END,created_at",
+                (run_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = self._decode(row, ("proposal_json", "metrics_json", "artifact_json")) or {}
+            value["proposal"] = value.pop("proposal_json")
+            value["metrics"] = value.pop("metrics_json")
+            value["artifact"] = value.pop("artifact_json")
+            result.append(value)
+        return result
 
     def enqueue(self, kind: str, params: dict) -> dict:
         job_id, now = uuid.uuid4().hex, utc_now()
@@ -568,15 +818,16 @@ class LabStore:
         warnings = payload.get("warnings") if isinstance(payload, dict) else []
         warnings = warnings if isinstance(warnings, list) else []
         partial = bool(warnings)
+        paused = bool(isinstance(payload, dict) and payload.get("paused"))
         status = (
-            "cancelled" if cancelled else "failed" if error
+            "cancelled" if cancelled else "failed" if error else "paused" if paused
             else "completed_with_warnings" if partial else "completed"
         )
-        progress = int(current.get("progress") or 0) if cancelled or error else 100
+        progress = int(current.get("progress") or 0) if cancelled or error or paused else 100
         warning = warnings[0] if warnings else ""
         warning_text = str(warning.get("message") if isinstance(warning, dict) else warning)
         phase = (
-            "已取消" if cancelled else "执行失败" if error
+            "已取消" if cancelled else "执行失败" if error else "等待恢复" if paused
             else "部分完成" if partial else "执行完成"
         )
         detail = (error if error else warning_text)[:1000]
@@ -600,7 +851,7 @@ class LabStore:
         if source is None:
             raise KeyError("任务不存在")
         if source["status"] not in {
-            "completed", "completed_with_warnings", "failed", "cancelled",
+            "paused", "completed", "completed_with_warnings", "failed", "cancelled",
         }:
             raise ValueError("只能按相同参数重新运行已结束的任务")
         params = dict(source.get("params") or {})
@@ -714,9 +965,13 @@ class LabStore:
             deployments = conn.execute(
                 "SELECT COUNT(*) FROM deployments WHERE status='active'"
             ).fetchone()[0]
+            studies = conn.execute("SELECT COUNT(*) FROM optimization_studies").fetchone()[0]
+            mining_runs = conn.execute("SELECT COUNT(*) FROM mining_runs").fetchone()[0]
         return {
             "factor_statuses": statuses,
             "active_jobs": running,
             "experiments": experiments,
             "deployments": deployments,
+            "studies": studies,
+            "mining_runs": mining_runs,
         }

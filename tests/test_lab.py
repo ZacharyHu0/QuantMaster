@@ -11,6 +11,13 @@ from fastapi.testclient import TestClient
 from quantmaster.ai.llm import LLMError
 from quantmaster.config import Config, set_config
 from quantmaster.factors.mining.llm_miner import LLMFactorMiner
+from quantmaster.factors.mining.python_miner import PythonFactorMiner
+from quantmaster.factors.python_artifact import (
+    PythonFactorPolicyError,
+    RestrictedPythonRunner,
+    validate_python_factor,
+    write_python_factor_artifact,
+)
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     build_membership_mask,
@@ -25,6 +32,11 @@ from quantmaster.lab.ml import (
     train,
 )
 from quantmaster.lab.models import FactorSpec
+from quantmaster.lab.research import sealed_three_way_split
+from quantmaster.lab.robustness import (
+    expression_parameter_variants,
+    monte_carlo_block_bootstrap,
+)
 from quantmaster.lab.service import LabService
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.validation import benjamini_hochberg, validate_factor_values
@@ -373,8 +385,94 @@ def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     assert report["best_horizon"] in {1, 3, 5, 7}
     assert len(report["horizons"]) == 4
     assert all(len(item["folds"]) == 4 for item in report["horizons"].values())
+    assert set(report["robustness"]["failed_tests"]).issubset({
+        "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
+    })
+    assert report["robustness"]["schema_version"] == 1
+    assert report["robustness"]["parameter_sensitivity"]["passed"]
+    assert not report["robustness"]["parameter_sensitivity"]["applicable"]
+    assert all(
+        "train_rank_ic" in fold and "retention" in fold
+        for item in report["horizons"].values() for fold in item["folds"]
+    )
     assert report["gates"]["override_allowed"]
     assert benjamini_hochberg([0.01, 0.04, 0.03]) == pytest.approx([0.03, 0.04, 0.04])
+
+
+def test_robustness_bootstrap_is_deterministic_and_expression_variants_are_safe():
+    dates = pd.bdate_range("2022-01-01", periods=260)
+    rng = np.random.default_rng(17)
+    daily_ic = pd.Series(rng.normal(0.035, 0.08, len(dates)), index=dates)
+    net = pd.Series(rng.normal(0.0008, 0.006, len(dates)), index=dates)
+    first = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
+    second = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
+    assert first == second
+    assert first["method"] == "circular_moving_block_bootstrap"
+    assert first["probability_positive_ic"] > 0.95
+
+    expression = "rank(-ts_mean(pct_change(close, 5), 20) * 0.5)"
+    variants = expression_parameter_variants(expression)
+    assert len(variants) == 4
+    assert all("0.5" in item for item in variants.values())
+    assert any("pct_change(close, 4)" in item for item in variants.values())
+    assert any("ts_mean(pct_change(close, 5), 24)" in item for item in variants.values())
+
+
+def test_validation_executes_parameter_and_penetration_layers(tmp_path):
+    _config(tmp_path)
+    panel = _panel(days=620, symbols=25)
+    close = panel["close"]
+    report = validate_factor_values(
+        close.pct_change(5, fill_method=None),
+        close,
+        name="momentum-neighborhood",
+        horizons=(3,),
+        panel=panel,
+        parameter_variants={
+            "window=4": close.pct_change(4, fill_method=None),
+            "window=6": close.pct_change(6, fill_method=None),
+        },
+    )
+    robustness = report["robustness"]
+    assert robustness["parameter_sensitivity"]["applicable"]
+    assert robustness["parameter_sensitivity"]["tested_variants"] == 2
+    assert robustness["penetration"]["liquidity"]["available"]
+    assert {item["bucket"] for item in robustness["penetration"]["liquidity"]["buckets"]} == {
+        "high", "low",
+    }
+
+
+def test_expression_version_validation_builds_safe_parameter_neighborhood(tmp_path, monkeypatch):
+    _config(tmp_path)
+    panel = _panel(days=620, symbols=25)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    snapshot = store.save_snapshot({
+        "snapshot_hash": "robustness-snapshot",
+        "research_quality": "production",
+        "universe": "demo",
+    })
+    monkeypatch.setattr(
+        service,
+        "_context",
+        lambda universe, start, end, progress=None: (panel, None, snapshot),
+    )
+    spec = FactorSpec(
+        slug="safe_window_test",
+        name="窗口鲁棒性",
+        expression="rank(-pct_change(close, 5))",
+        horizons=(3,),
+    )
+    _factor, version, _created = store.create_factor(spec)
+    result = service.validate_version(
+        version["id"], universe="demo", start="2020-01-01", end="2025-01-01",
+    )
+    sensitivity = result["report"]["robustness"]["parameter_sensitivity"]
+    assert sensitivity["applicable"]
+    assert sensitivity["tested_variants"] == 2
+    assert {item["variant"] for item in sensitivity["variants"]} == {
+        "pct_change#1:5→4", "pct_change#1:5→6",
+    }
 
 
 def test_lab_api_catalog_create_and_queue(tmp_path):
@@ -446,3 +544,111 @@ def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
     assert "data-deploy-scope" in script
     assert "产出版本" in script
     assert "quantmaster:settings-applied" in script
+    assert 'value="python"' in page
+    assert 'name="lab.ai_python_mining_enabled"' in page
+    assert 'id="lab-split-preview"' in page
+    assert "discover_python" in script
+    assert "refreshMiningRuns" in script
+    assert "ROBUSTNESS GATE" in script
+    assert ".lab-robustness-grid" in styles
+
+
+def test_restricted_python_policy_and_subprocess_contract():
+    panel = _panel(days=80, symbols=5)
+    source = (
+        "def compute(features, params):\n"
+        "    return features['close'].pct_change(params['window'])\n"
+    )
+    result = RestrictedPythonRunner(timeout_seconds=15).execute(
+        source, {"close": panel["close"]}, {"window": 5},
+    )
+    assert result.index.equals(panel["close"].index)
+    assert result.columns.equals(panel["close"].columns)
+    for unsafe in (
+        "import os\ndef compute(features, params):\n    return features['close']",
+        "def compute(features, params):\n    return features['close'].shift(-1)",
+        "def compute(features, params):\n    open('leak')\n    return features['close']",
+    ):
+        with pytest.raises(PythonFactorPolicyError):
+            validate_python_factor(unsafe)
+
+
+def test_python_artifact_and_mining_ledger_are_content_addressed(tmp_path):
+    _config(tmp_path)
+    source = "def compute(features, params):\n    return features['close'].pct_change(5)\n"
+    artifact = write_python_factor_artifact(
+        tmp_path, source=source, params={}, manifest={"split": {"test": "sealed"}},
+    )
+    repeated = write_python_factor_artifact(
+        tmp_path, source=source, params={}, manifest={"split": {"test": "sealed"}},
+    )
+    assert repeated == artifact
+    spec = FactorSpec(slug="python_demo", name="代码因子", kind="python", artifact=artifact)
+    assert spec.to_dict()["artifact"]["hash"] == artifact["hash"]
+
+    store = LabStore(tmp_path / "ledger.sqlite")
+    run = store.create_mining_run({"candidate_limit": 24})
+    store.save_mining_candidate(run["id"], {
+        "id": "candidate-1", "name": "动量", "status": "validated",
+        "train_metrics": {"rank_ic": 0.03}, "valid_metrics": {"rank_ic": 0.02},
+    })
+    loaded = store.mining_run(run["id"])
+    assert loaded["candidates"][0]["proposal"]["name"] == "动量"
+    assert loaded["candidates"][0]["metrics"]["valid_metrics"]["rank_ic"] == 0.02
+
+
+def test_sealed_three_way_split_has_purges_and_minimum_holdouts():
+    dates = pd.bdate_range("2018-01-01", periods=1200)
+    split = sealed_three_way_split(dates, purge_gap=7)
+    assert split["train"]["days"] >= 504
+    assert split["valid"]["days"] >= 252
+    assert split["test"]["days"] >= 252
+    assert pd.Timestamp(split["train"]["end"]) < pd.Timestamp(split["valid"]["start"])
+    assert pd.Timestamp(split["valid"]["end"]) < pd.Timestamp(split["test"]["start"])
+
+
+def test_python_miner_freezes_order_before_sealed_test():
+    panel = _panel(days=1100, symbols=6)
+    source = "def compute(features, params):\n    return features['close'].pct_change(5)\n"
+    client = _SequenceLLMClient([{"candidates": [{
+        "name": "五日动量", "hypothesis": "短期趋势延续", "objective": "稳定 RankIC",
+        "required_features": ["close"], "warmup": 20, "parameters": [], "code": source,
+    }]}])
+    catalog = [{
+        "name": "close", "group": "price_volume_v2", "description": "收盘价",
+        "pit_grade": "derived", "coverage": 1.0, "available": True,
+    }]
+    report = PythonFactorMiner(client=client).mine_report(
+        {"close": panel["close"]}, catalog, rounds=1, candidate_limit=1, finalists=1,
+    )
+    assert report.llm_calls == 1
+    assert len(report.finalists) == 1
+    assert report.finalists[0].pareto_rank == 1
+    assert report.finalists[0].test_metrics["days"] > 200
+
+
+def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path):
+    cfg = _config(tmp_path, enabled=False)
+    from quantmaster.server.app import app
+
+    with TestClient(app) as client:
+        preview = client.post("/api/lab/mining/preview", json={
+            "start": "2018-01-01", "end": "2026-01-01", "horizon": 3,
+        })
+        assert preview.status_code == 200
+        assert preview.json()["test_policy"] == "sealed_until_finalist_order_frozen"
+        disabled = client.post("/api/lab/jobs", json={
+            "kind": "discover_python", "params": {
+                "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",
+            },
+        })
+        assert disabled.status_code == 400
+        cfg.lab.ai_python_mining_enabled = True
+        queued = client.post("/api/lab/jobs", json={
+            "kind": "discover_python", "params": {
+                "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",
+            },
+        })
+        assert queued.status_code == 202
+        runs = client.get("/api/lab/mining/runs").json()["items"]
+        assert runs and runs[0]["job_id"] == queued.json()["id"]

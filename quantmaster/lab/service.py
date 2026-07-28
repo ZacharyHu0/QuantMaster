@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from dataclasses import asdict
@@ -38,6 +39,11 @@ class LabService:
             "catalog_size": 48,
             "safe_dsl": True,
             "arbitrary_python": False,
+            "restricted_python": True,
+            "python_mining_enabled": bool(get_config().lab.ai_python_mining_enabled),
+            "python_mining_limits": {"llm_calls": 3, "candidates": 24, "finalists": 3},
+            "optuna": bool(importlib.util.find_spec("optuna")),
+            "research_protocol": "756/20/252",
         }
 
     def overview(self) -> dict[str, Any]:
@@ -52,9 +58,11 @@ class LabService:
                 "daily_budget_hours": cfg.daily_budget_hours,
                 "window": [cfg.window_start, cfg.window_end],
                 "weekly_days": cfg.weekly_days,
+                "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
             },
             "recent_jobs": self.store.jobs(8),
             "recent_experiments": self.store.list_experiments(6),
+            "recent_studies": self.store.studies(6),
         }
 
     def create_expression(
@@ -80,10 +88,58 @@ class LabService:
         return self.store.version(version["id"]) or version
 
     def enqueue(self, kind: str, params: dict[str, Any]) -> dict:
-        allowed = {"prepare_data", "validate", "discover_genetic", "discover_llm", "train"}
+        allowed = {
+            "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+            "optimize", "bias_audit", "discover_python",
+        }
         if kind not in allowed:
             raise ValueError(f"未知研究任务: {kind}")
+        if kind == "discover_python":
+            if not get_config().lab.ai_python_mining_enabled:
+                raise ValueError("受限 Python AutoMiner 尚未在设置中心启用")
+            clean = dict(params)
+            clean["rounds"] = min(3, max(1, int(clean.get("rounds", 3))))
+            clean["candidate_limit"] = min(24, max(1, int(clean.get("candidate_limit", 24))))
+            clean["finalists"] = min(3, max(1, int(clean.get("finalists", 3))))
+            run = self.store.create_mining_run(clean)
+            clean["run_id"] = run["id"]
+            job = self.store.enqueue(kind, clean)
+            self.store.update_mining_run(run["id"], job_id=job["id"])
+            return job
         return self.store.enqueue(kind, params)
+
+    def preview_python_mining(self, *, start: str, end: str, horizon: int = 3) -> dict:
+        from quantmaster.lab.research import sealed_three_way_split
+
+        dates = pd.bdate_range(start, end)
+        return {
+            "split": sealed_three_way_split(dates, purge_gap=max(7, int(horizon))),
+            "limits": {"llm_calls": 3, "candidates": 24, "finalists": 3},
+            "test_policy": "sealed_until_finalist_order_frozen",
+            "data_policy": "feature_registry_metadata_only; no raw sample leaves this process",
+        }
+
+    def create_study(self, payload: dict[str, Any]) -> dict:
+        """校验配置、登记 Study，再把长任务放入统一可恢复队列。"""
+        from datetime import date
+
+        from quantmaster.lab.research import OptimizationSpec
+
+        config = dict(payload)
+        config["end"] = config.get("end") or date.today().isoformat()
+        spec = OptimizationSpec.from_dict(config)
+        study = self.store.create_study(spec.to_dict())
+        job = self.enqueue("optimize", {"study_id": study["id"]})
+        return self.store.update_study(study["id"], job_id=job["id"], status="queued")
+
+    def resume_study(self, study_id: str) -> dict:
+        study = self.store.study(study_id)
+        if study is None:
+            raise KeyError("优化 Study 不存在")
+        if study["status"] not in {"paused", "failed", "interrupted"}:
+            raise ValueError("只有暂停、失败或中断的 Study 可以恢复")
+        job = self.enqueue("optimize", {"study_id": study_id, "resume": True})
+        return self.store.update_study(study_id, job_id=job["id"], status="queued")
 
     def _context(
         self, universe: str, start: str, end: str,
@@ -128,16 +184,62 @@ class LabService:
         if version is None:
             raise KeyError("因子版本不存在")
         spec = FactorSpec.from_dict(version["spec"])
-        panel, membership, snapshot = self._context(universe, start, end, progress)
+        python_features: dict[str, pd.DataFrame] | None = None
+        parameter_variants: dict[str, pd.DataFrame] = {}
+        python_manifest: dict | None = None
+        if spec.kind == "python":
+            python_features, _catalog, snapshot, _bundle_hash = self._python_mining_context(
+                universe, start, end, progress,
+            )
+            panel = {"close": python_features["close"]}
+            membership = (
+                python_features.get("membership", pd.DataFrame()).astype(bool)
+                if "membership" in python_features else None
+            )
+        else:
+            panel, membership, snapshot = self._context(universe, start, end, progress)
         if spec.kind == "learned":
             from quantmaster.lab.ml import predict_panel
 
             if progress:
                 progress(58, "加载学习模型并校验工件完整性")
             values = predict_panel(panel, spec.model)
+        elif spec.kind == "python":
+            from quantmaster.factors.python_artifact import (
+                RestrictedPythonRunner,
+                execute_python_factor_artifact,
+            )
+
+            if progress:
+                progress(58, "校验受限 Python 工件与内容哈希")
+            values = execute_python_factor_artifact(
+                get_config().data_root, spec.artifact, python_features or {},
+            )
+            artifact_root = Path(get_config().data_root).resolve()
+            manifest_path = (artifact_root / str(spec.artifact.get("manifest") or "")).resolve()
+            source_path = (artifact_root / str(spec.artifact.get("source") or "")).resolve()
+            if artifact_root not in manifest_path.parents or artifact_root not in source_path.parents:
+                raise ValueError("Python 因子工件路径越界")
+            python_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source = source_path.read_text(encoding="utf-8")
+            selected_params = spec.artifact.get("parameters") or {}
+            plateau = python_manifest.get("audit", {}).get("parameter_plateau", {})
+            runner = RestrictedPythonRunner()
+            for item in plateau.get("variants", [])[:8]:
+                params = item.get("params") or {}
+                if params == selected_params:
+                    continue
+                try:
+                    label = json.dumps(params, ensure_ascii=False, sort_keys=True)
+                    parameter_variants[label] = runner.execute(
+                        source, python_features or {}, params,
+                    )
+                except Exception:
+                    continue
         elif spec.kind == "expression":
             from quantmaster.factors import compute_factor
             from quantmaster.factors.fundamental import resolve_factor
+            from quantmaster.lab.robustness import expression_parameter_variants
 
             symbols = list(panel["close"].columns)
             expression = spec.expression or spec.slug
@@ -147,6 +249,16 @@ class LabService:
                 progress(58, "计算因子并执行统一标准化")
             factor = resolve_factor(expression, symbols, start, end)
             values = compute_factor(factor, panel)
+            try:
+                expressions = expression_parameter_variants(expression)
+            except Exception:
+                expressions = {}
+            for label, candidate_expression in expressions.items():
+                try:
+                    candidate = resolve_factor(candidate_expression, symbols, start, end)
+                    parameter_variants[label] = compute_factor(candidate, panel)
+                except Exception:
+                    continue
         else:
             raise ValueError(f"{spec.kind} 类型尚未提供可复验的运行时")
         if progress:
@@ -162,7 +274,31 @@ class LabService:
             horizons=validation_horizons,
             membership=membership,
             research_quality=snapshot["payload"]["research_quality"],
+            panel=python_features if spec.kind == "python" else panel,
+            parameter_variants=parameter_variants,
         )
+        if spec.kind == "python":
+            artifact_root = Path(get_config().data_root).resolve()
+            manifest_path = (artifact_root / str(spec.artifact.get("manifest") or "")).resolve()
+            if artifact_root not in manifest_path.parents:
+                raise ValueError("Python 因子清单路径越界")
+            manifest = python_manifest or json.loads(manifest_path.read_text(encoding="utf-8"))
+            blockers = []
+            if manifest.get("non_pit_features"):
+                blockers.append(
+                    "使用非 PIT 特征: " + ", ".join(manifest["non_pit_features"])
+                )
+            if manifest.get("runtime_incompatible_features"):
+                blockers.append(
+                    "Champion 运行时不可复现特征: "
+                    + ", ".join(manifest["runtime_incompatible_features"])
+                )
+            report["gates"]["hard_failures"].extend(blockers)
+            report["gates"]["passed"] = not (
+                report["gates"]["hard_failures"] or report["gates"]["soft_failures"]
+            )
+            report["gates"]["override_allowed"] = not report["gates"]["hard_failures"]
+            report["gates"]["bias_audit_required"] = True
         report["dataset_snapshot"] = snapshot["snapshot_hash"]
         updated = self.store.save_validation(version_id, snapshot["snapshot_hash"], report)
         if progress:
@@ -302,6 +438,244 @@ class LabService:
             "warnings": report.warnings,
         }
 
+    def _python_mining_context(
+        self, universe: str, start: str, end: str, progress=None,
+    ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]], dict, str]:
+        from quantmaster.data.research import ResearchDataBundle, load_research_bundle
+        from quantmaster.data.research_features import registered_features
+
+        panel, membership, snapshot = self._context(universe, start, end, progress)
+        quality = str(snapshot["payload"].get("research_quality") or "sandbox")
+        symbols = list(panel["close"].columns)
+        if quality == "production":
+            def relay(done: int, total: int, symbol: str, success: bool) -> None:
+                if progress:
+                    progress(20 + int(30 * done / max(1, total)),
+                             f"PIT 研究包 {done}/{total} · {symbol}",
+                             "" if success else "严格数据门禁失败")
+
+            bundle = load_research_bundle(
+                symbols, start, end, membership=membership, progress=relay,
+            )
+            bundle.fundamentals = self._pit_fundamentals(
+                symbols, start, end, production=True,
+            )
+        else:
+            bundle = ResearchDataBundle.from_legacy_panel(panel, membership=membership)
+            bundle.fundamentals = self._pit_fundamentals(
+                symbols, start, end, production=False,
+            )
+        close = bundle.signal["close"]
+        bundle.signal.setdefault("returns", close.pct_change())
+        if "amount" in bundle.signal and "volume" in bundle.signal:
+            bundle.signal.setdefault("vwap", bundle.signal["amount"].div(
+                bundle.signal["volume"].replace(0, pd.NA)))
+        try:
+            from quantmaster.ai.sentiment import quality_sentiment_panel
+
+            bundle.signal["news_sentiment"] = quality_sentiment_panel(
+                close.index, symbols,
+            ).reindex(index=close.index, columns=close.columns)
+        except Exception as exc:
+            bundle.warnings.append({
+                "code": "news_feature_unavailable", "level": "warning",
+                "message": str(exc)[:300],
+            })
+        from quantmaster.data.industry import load_cached_industry_map
+
+        industry = load_cached_industry_map()
+        names = sorted({industry.get(symbol, "") for symbol in symbols} - {""})
+        for number, name in enumerate(names, start=1):
+            key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(number)
+            values = [1.0 if industry.get(symbol) == name else 0.0 for symbol in symbols]
+            bundle.context[f"industry_{key[:48]}"] = pd.DataFrame(
+                [values] * len(close.index), index=close.index, columns=symbols,
+            )
+        values, descriptors = registered_features(bundle)
+        return values, [item.to_dict() for item in descriptors], snapshot, bundle.manifest_hash
+
+    def discover_python(
+        self, *, run_id: str, universe: str, start: str, end: str, horizon: int = 3,
+        rounds: int = 3, candidate_limit: int = 24, finalists: int = 3,
+        progress=None, cancelled=None,
+    ) -> dict:
+        from quantmaster.factors.mining import PythonFactorMiner
+        from quantmaster.factors.python_artifact import write_python_factor_artifact
+        from quantmaster.lab.validation import validate_factor_values
+
+        if not get_config().lab.ai_python_mining_enabled:
+            raise ValueError("受限 Python AutoMiner 尚未启用")
+        self.store.update_mining_run(run_id, status="running")
+        try:
+            features, feature_catalog, snapshot, bundle_hash = self._python_mining_context(
+                universe, start, end, progress,
+            )
+
+            def checkpoint(candidate) -> None:
+                self.store.save_mining_candidate(run_id, candidate.to_dict())
+
+            miner = PythonFactorMiner()
+            report = miner.mine_report(
+                features, feature_catalog, horizon=horizon, rounds=rounds,
+                candidate_limit=candidate_limit, finalists=finalists, progress=progress,
+                cancelled=cancelled, on_candidate=checkpoint,
+            )
+            if cancelled and cancelled():
+                result = {
+                    "method": "python", "run_id": run_id, "cancelled": True,
+                    "split": report.split, "candidate_count": len(report.candidates),
+                    "finalist_count": 0, "warnings": [],
+                }
+                self.store.update_mining_run(
+                    run_id, status="cancelled", split=report.split, result=result,
+                    snapshot_hash=snapshot["snapshot_hash"],
+                )
+                return result
+            quality = str(snapshot["payload"].get("research_quality") or "sandbox")
+            grades = {item["name"]: item["pit_grade"] for item in feature_catalog}
+            runtime_compatible = {
+                item["name"]: bool(item.get("runtime_compatible", True))
+                for item in feature_catalog
+            }
+            versions = []
+            for order, candidate in enumerate(report.finalists, start=1):
+                non_pit_features = sorted(
+                    name for name in candidate.required_features
+                    if grades.get(name) == "research_only"
+                )
+                runtime_only_features = sorted(
+                    name for name in candidate.required_features
+                    if not runtime_compatible.get(name, True)
+                )
+                artifact = write_python_factor_artifact(
+                    get_config().data_root, source=candidate.code,
+                    params=candidate.selected_params, manifest={
+                        "kind": "restricted-python-factor", "name": candidate.name,
+                        "hypothesis": candidate.hypothesis, "objective": candidate.objective,
+                        "required_features": candidate.required_features,
+                        "warmup": candidate.warmup, "horizon": horizon,
+                        "split": report.split, "finalist_order": order,
+                        "dataset_snapshot": snapshot["snapshot_hash"],
+                        "research_bundle_hash": bundle_hash, "research_quality": quality,
+                        "non_pit_features": non_pit_features,
+                        "runtime_incompatible_features": runtime_only_features,
+                        "audit": candidate.audit,
+                    },
+                )
+                candidate.artifact = artifact
+                spec = FactorSpec(
+                    slug=_slug("python", f"{candidate.code}\n{candidate.selected_params}"),
+                    name=candidate.name, kind="python",
+                    description="AI 提出受限 Python，已完成本地三段验证，待人工审批。",
+                    category="AI 自动挖掘", rationale=candidate.hypothesis,
+                    required_features=tuple(candidate.required_features), horizons=(horizon,),
+                    artifact=artifact, tags=("python", "autominer", quality),
+                )
+                _factor, version, _created = self.store.create_factor(
+                    spec, source="python-autominer", actor="worker",
+                )
+                test = candidate.test_metrics
+                full_values = miner.runner.execute(
+                    candidate.code, features, candidate.selected_params,
+                )
+                sensitivity_variants = {}
+                plateau = candidate.audit.get("parameter_plateau", {})
+                for item in plateau.get("variants", [])[:8]:
+                    params = item.get("params") or {}
+                    if params == candidate.selected_params:
+                        continue
+                    try:
+                        label = json.dumps(params, ensure_ascii=False, sort_keys=True)
+                        sensitivity_variants[label] = miner.runner.execute(
+                            candidate.code, features, params,
+                        )
+                    except Exception:
+                        continue
+                membership = features.get("membership")
+                validation = validate_factor_values(
+                    full_values,
+                    features["close"],
+                    name=candidate.name,
+                    horizons=(horizon,),
+                    membership=membership.astype(bool) if membership is not None else None,
+                    research_quality=quality,
+                    panel=features,
+                    parameter_variants=sensitivity_variants,
+                )
+                hard_failures = validation["gates"]["hard_failures"]
+                if quality != "production":
+                    failure = "候选不是 point-in-time 生产级快照"
+                    if failure not in hard_failures:
+                        hard_failures.append(failure)
+                if non_pit_features:
+                    hard_failures.append(
+                        f"使用非 PIT 特征，仅限研究: {', '.join(non_pit_features)}"
+                    )
+                if runtime_only_features:
+                    hard_failures.append(
+                        "特征仅用于研究回放，当前 Champion 运行时不可复现: "
+                        + ", ".join(runtime_only_features)
+                    )
+                if not candidate.audit.get("lookahead", {}).get("passed"):
+                    hard_failures.append("前视审计未通过")
+                if not candidate.audit.get("recursive", {}).get("passed"):
+                    hard_failures.append("递归稳定性审计未通过")
+                soft_failures = validation["gates"]["soft_failures"]
+                if abs(float(test.get("rank_ic", 0))) < 0.02:
+                    soft_failures.append("密封 TEST |RankIC| 低于 0.02")
+                if float(candidate.valid_metrics.get("q_value", 1)) > 0.10:
+                    soft_failures.append("候选族 BH-FDR q-value 高于 0.10")
+                horizon_report = validation["horizons"][str(horizon)]
+                horizon_report.update({
+                    "train": candidate.train_metrics,
+                    "valid": candidate.valid_metrics,
+                    "sealed_test": test,
+                    "q_value": candidate.valid_metrics.get("q_value", 1),
+                })
+                validation.update({
+                    "sealed_holdout": report.split["test"],
+                    "dataset_snapshot": snapshot["snapshot_hash"],
+                    "research_quality": quality,
+                    "family_fdr": True,
+                })
+                validation["gates"].update({
+                    "passed": not hard_failures and not soft_failures,
+                    "override_allowed": not hard_failures,
+                    "bias_audit_required": True,
+                })
+                version = self.store.save_validation(
+                    version["id"], snapshot["snapshot_hash"], validation,
+                )
+                self.store.save_bias_audit(version["id"], snapshot["snapshot_hash"], {
+                    "passed": not hard_failures, "checks": candidate.audit,
+                    "version_id": version["id"],
+                })
+                candidate.factor_version_id = version["id"]
+                checkpoint(candidate)
+                versions.append(version)
+            result = {
+                "method": "python", "run_id": run_id,
+                "snapshot": snapshot["snapshot_hash"], "research_quality": quality,
+                "split": report.split, "rounds_requested": report.rounds_requested,
+                "rounds_completed": report.rounds_completed, "llm_calls": report.llm_calls,
+                "candidate_count": len(report.candidates),
+                "finalist_count": len(report.finalists), "versions": versions,
+                "warnings": report.warnings,
+            }
+            status = "completed_with_warnings" if report.warnings else "completed"
+            self.store.update_mining_run(
+                run_id, status=status, split=report.split, result=result,
+                snapshot_hash=snapshot["snapshot_hash"],
+            )
+            if progress:
+                progress(97, f"AutoMiner 完成 · {len(versions)} 个候选待人工审批")
+            return result
+        except Exception as exc:
+            self.store.update_mining_run(
+                run_id, status="failed", result={"error": str(exc)[:1000]},
+            )
+            raise
+
     def train_model(
         self, *, model: str, universe: str, start: str, end: str, horizon: int = 3,
         sequence_length: int = 20, config: dict | None = None, progress=None,
@@ -348,6 +722,7 @@ class LabService:
                 horizons=(horizon,),
                 membership=membership,
                 research_quality=snapshot["payload"]["research_quality"],
+                panel=panel,
             )
             report["model_metrics"] = result.get("metrics", {})
             report["dataset_snapshot"] = snapshot["snapshot_hash"]
@@ -430,6 +805,376 @@ class LabService:
             self.store.update_experiment(
                 experiment["id"], status="failed", result={"error": str(exc)[:1000]})
             raise
+
+    def optimize_study(
+        self, study_id: str, *, progress=None, cancelled=None, resume: bool = False,
+    ) -> dict:
+        """执行持久化多目标研究；密封集通过后仅生成 Shadow Candidate。"""
+        from quantmaster.lab.ml import artifact_sha256
+        from quantmaster.lab.models import utc_now
+        from quantmaster.lab.optimization import OptimizationRunner
+        from quantmaster.lab.research import OptimizationSpec
+
+        study = self.store.study(study_id)
+        if study is None:
+            raise KeyError("优化 Study 不存在")
+        spec = OptimizationSpec.from_dict(study["config"])
+        self.store.update_study(study_id, status="running")
+        experiment = self.store.create_experiment(
+            f"Multi-horizon · {spec.universe} · {study_id[:8]}",
+            "multi-objective", spec.to_dict(),
+        )
+        self.store.update_study(study_id, experiment_id=experiment["id"])
+        try:
+            if spec.research_tier == "production":
+                from quantmaster.data.research import load_research_bundle
+
+                if progress:
+                    progress(5, "加载 point-in-time 中证800成分")
+                membership = load_csi800_membership(spec.start, spec.end)
+                symbols = sorted(
+                    symbol for symbol in membership if membership[symbol].any()
+                )
+
+                def research_progress(done: int, total: int, symbol: str, success: bool) -> None:
+                    if progress:
+                        progress(
+                            20 + int(30 * done / max(1, total)),
+                            f"原始成交/PIT约束 {done}/{total} · {symbol}",
+                            "" if success else "数据门禁失败",
+                        )
+
+                research_bundle = load_research_bundle(
+                    symbols, spec.start, spec.end, membership=membership,
+                    progress=research_progress,
+                )
+                panel = research_bundle.signal
+                payload = create_snapshot(
+                    spec.universe, spec.start, spec.end,
+                    panel=panel, membership=membership,
+                ).to_dict()
+                payload.pop("snapshot_hash", None)
+                payload["research_bundle"] = {
+                    **research_bundle.manifest,
+                    "manifest_hash": research_bundle.manifest_hash,
+                }
+                snapshot = self.store.save_snapshot(payload)
+            else:
+                panel, membership, snapshot = self._context(
+                    spec.universe, spec.start, spec.end, progress,
+                )
+            fundamentals: dict[str, pd.DataFrame] = {}
+            if "pit_fundamental_v1" in spec.features.groups:
+                if progress:
+                    progress(54, "加载 PIT 基本面")
+                fundamentals = self._pit_fundamentals(
+                    list(panel["close"].columns), spec.start, spec.end,
+                    production=spec.research_tier == "production",
+                    progress=progress,
+                )
+                from quantmaster.data.research import frame_fingerprint
+
+                payload = dict(snapshot["payload"])
+                payload.pop("snapshot_hash", None)
+                payload["feature_input_hashes"] = {
+                    name: frame_fingerprint(frame) for name, frame in fundamentals.items()
+                }
+                snapshot = self.store.save_snapshot(payload)
+
+            def checkpoint(result: dict[str, Any]) -> None:
+                self.store.update_study(
+                    study_id, status=str(result.get("status") or "running"), result=result,
+                    storage_url=str(result.get("storage") or ""),
+                )
+
+            runner = OptimizationRunner(Path(get_config().data_root) / "lab_artifacts")
+            result = runner.run(
+                study_id, spec, panel, membership=membership, fundamentals=fundamentals,
+                progress=progress, cancelled=cancelled, checkpoint=checkpoint,
+            )
+            result["dataset_snapshot"] = snapshot["snapshot_hash"]
+            result["research_tier"] = spec.research_tier
+            if result.get("candidate"):
+                root = Path(get_config().data_root).resolve()
+
+                def relative(value: str) -> str:
+                    return Path(value).resolve().relative_to(root).as_posix()
+
+                manifest_path = root / "lab_artifacts" / study_id / "manifest-v2.json"
+                manifest = {
+                    "schema_version": 2,
+                    "kind": str(result["recommended"]["params"]["model"]),
+                    "horizons": list(spec.protocol.horizons),
+                    "features": spec.features.to_dict(),
+                    "feature_names": result.get("feature_names", []),
+                    "sequence_length": spec.sequence_length,
+                    "training_universe": spec.universe,
+                    "protocol": spec.protocol.to_dict(),
+                    "snapshot_hash": snapshot["snapshot_hash"],
+                    "research_quality": spec.research_tier,
+                    "prediction_artifact": relative(result["prediction_artifact"]),
+                    "prediction_sha256": result["prediction_sha256"],
+                    "fold_artifacts": [
+                        {**item, "artifact": relative(item["artifact"])}
+                        for item in result["fold_artifacts"]
+                    ],
+                    "live_artifact": {
+                        **result["live_artifact"],
+                        "artifact": relative(result["live_artifact"]["artifact"]),
+                    },
+                    "model_config": {
+                        key: value for key, value in result["recommended"]["params"].items()
+                        if key != "model"
+                    },
+                    "calibration": result["calibration"],
+                    "calibration_models": result["calibration_models"],
+                    "trained_through": result["live_artifact"]["fold"]["train_end"],
+                    "maximum_age_trading_days": 25,
+                    "created_at": utc_now(),
+                }
+                manifest_path.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
+                )
+                learned = FactorSpec(
+                    slug=f"ml_multi_{study_id[:12]}",
+                    name=f"共享多周期 · {spec.universe} · {study_id[:8]}",
+                    kind="learned", category="学习模型",
+                    description="756/20 滚动训练并经 252 日密封留出评估的共享多周期模型。",
+                    required_features=tuple(manifest.get("feature_names") or ()),
+                    horizons=tuple(spec.protocol.horizons),
+                    rationale="开发期 Pareto 选参、锁参后一次性密封评估；仅生成 Shadow 候选。",
+                    model={
+                        "manifest": relative(str(manifest_path)),
+                        "manifest_sha256": artifact_sha256(manifest_path),
+                        "study_id": study_id, "experiment_id": experiment["id"],
+                        "training_universe": spec.universe,
+                        "research_quality": spec.research_tier,
+                    },
+                    tags=("ml", "multi-horizon", "rolling-oof", "shadow"),
+                )
+                _factor, version, _created = self.store.create_factor(
+                    learned, source="optimization", actor="worker",
+                )
+                horizons = {}
+                for key, item in result["sealed_metrics"]["horizons"].items():
+                    horizons[key] = {
+                        "horizon": item["horizon"], "oos_rank_ic": item["rank_ic"],
+                        "oos_icir": item["icir"], "q_value": item["q_value"],
+                        "net_information_ratio": item["net_information_ratio"],
+                        "net_annual_return": item["net_annual_return"],
+                        "max_drawdown": item["max_drawdown"],
+                        "turnover_daily": item["turnover"], "folds": [],
+                    }
+                report = {
+                    "coverage": result["sealed_metrics"]["coverage"],
+                    "best_horizon": max(
+                        horizons.values(), key=lambda item: item["net_information_ratio"]
+                    )["horizon"],
+                    "candidate_score": round(
+                        50 + 10 * result["sealed_metrics"]["net_information_ratio"], 2,
+                    ),
+                    "horizons": horizons,
+                    "gates": {
+                        "passed": spec.research_tier == "production",
+                        "hard_failures": (
+                            [] if spec.research_tier == "production"
+                            else ["sandbox_research_tier"]
+                        ),
+                        "soft_failures": [],
+                        "override_allowed": False, "bias_audit_required": True,
+                    },
+                    "sealed_holdout": result["sealed_holdout"],
+                    "research_protocol": spec.protocol.to_dict(),
+                    "family_fdr": True, "model_metrics": result["sealed_metrics"],
+                    "calibration": result["calibration"],
+                    "dataset_snapshot": snapshot["snapshot_hash"],
+                }
+                version = self.store.save_validation(
+                    version["id"], snapshot["snapshot_hash"], report,
+                )
+                result["version_id"] = version["id"]
+                result["version_status"] = version["status"]
+                result["manifest"] = relative(str(manifest_path))
+            final_status = "paused" if result.get("paused") else "completed"
+            self.store.update_study(study_id, status=final_status, result=result)
+            self.store.update_experiment(
+                experiment["id"], status=final_status, result=result, dataset_id=snapshot["id"],
+            )
+            return result
+        except InterruptedError:
+            self.store.update_study(
+                study_id, status="interrupted", result={"message": "研究已安全中断，可恢复"},
+            )
+            self.store.update_experiment(
+                experiment["id"], status="interrupted",
+                result={"message": "研究已安全中断，可恢复"},
+            )
+            raise
+        except Exception as exc:
+            self.store.update_study(study_id, status="failed", result={"error": str(exc)[:1000]})
+            self.store.update_experiment(
+                experiment["id"], status="failed", result={"error": str(exc)[:1000]},
+            )
+            raise
+
+    @staticmethod
+    def _pit_fundamentals(
+        symbols: list[str], start: str, end: str, *, production: bool, progress=None,
+    ) -> dict[str, pd.DataFrame]:
+        if not production:
+            from quantmaster.data.fundamentals import fundamental_panel
+
+            return fundamental_panel(symbols, start, end)
+        from quantmaster.data.fundamentals import quarterly_to_daily
+        from quantmaster.data.tushare_source import TushareSource
+
+        source = TushareSource()
+        dates = pd.bdate_range(start, end)
+        daily: dict[str, pd.DataFrame] = {}
+        roe: dict[str, pd.DataFrame] = {}
+        missing_daily, missing_roe = [], []
+        for number, symbol in enumerate(symbols, start=1):
+            indicators = source.daily_indicators(symbol, start, end)
+            if not indicators.empty:
+                daily[symbol] = indicators
+            else:
+                missing_daily.append(symbol)
+            values = source.quarterly_roe(symbol, str(max(1990, int(start[:4]) - 1)))
+            if not values.empty:
+                roe[symbol] = quarterly_to_daily(values, dates)
+            else:
+                missing_roe.append(symbol)
+            if progress:
+                progress(
+                    54 + int(10 * number / max(1, len(symbols))),
+                    f"PIT 基本面 {number}/{len(symbols)} · {symbol}",
+                )
+        if missing_daily or missing_roe:
+            detail = []
+            if missing_daily:
+                detail.append(
+                    f"每日指标缺失 {len(missing_daily)} 只: {', '.join(missing_daily[:5])}"
+                )
+            if missing_roe:
+                detail.append(
+                    f"公告日 ROE 缺失 {len(missing_roe)} 只: {', '.join(missing_roe[:5])}"
+                )
+            raise RuntimeError("production PIT 基本面门禁未通过；" + "；".join(detail))
+        result: dict[str, pd.DataFrame] = {}
+        for field in ("pe_ttm", "pb", "dv_ratio", "total_mv"):
+            result[field] = pd.DataFrame({
+                symbol: frame[field].reindex(dates)
+                for symbol, frame in daily.items() if field in frame
+            })
+        result["roe"] = pd.DataFrame({
+            symbol: frame["roe"].reindex(dates) for symbol, frame in roe.items()
+        })
+        if not result.get("roe", pd.DataFrame()).notna().any().any():
+            raise RuntimeError("production 研究缺少按真实公告日对齐的 ROE")
+        return result
+
+    def bias_audit(
+        self, version_id: str, *, universe: str, start: str, end: str, progress=None,
+    ) -> dict:
+        """对新研究协议运行前缀、warm-up、标签成熟度和 PIT 清单审计。"""
+        from quantmaster.lab.ml import artifact_sha256
+        from quantmaster.lab.research import compare_prefixes, recursive_stability
+
+        version = self.store.version(version_id)
+        if version is None:
+            raise KeyError("因子版本不存在")
+        panel, membership, snapshot = self._context(universe, start, end, progress)
+        spec = FactorSpec.from_dict(version["spec"])
+        checks: dict[str, Any] = {}
+        learned_manifest: dict[str, Any] = {}
+        if spec.kind == "expression":
+            from quantmaster.factors import compute_factor
+            from quantmaster.factors.fundamental import resolve_factor
+
+            factor = resolve_factor(spec.expression or spec.slug, list(panel["close"]), start, end)
+            full = compute_factor(factor, panel)
+            prefix_checks = []
+            for ratio in (0.55, 0.70, 0.85):
+                length = max(120, int(len(panel["close"]) * ratio))
+                truncated = {key: value.iloc[:length] for key, value in panel.items()}
+                prefix_checks.append(compare_prefixes(full.iloc[:length], compute_factor(factor, truncated)))
+            checks["lookahead"] = {
+                "passed": all(item["passed"] for item in prefix_checks), "prefixes": prefix_checks,
+            }
+            warmups = {}
+            for length in (60, 120, 240, 480):
+                if len(panel["close"]) >= length:
+                    computed = compute_factor(
+                        factor, {key: value.iloc[-length:] for key, value in panel.items()},
+                    )
+                    warmups[length] = computed.iloc[-1]
+            checks["recursive"] = (
+                recursive_stability(warmups, tolerance=1e-5)
+                if len(warmups) >= 2 else {
+                    "passed": False,
+                    "reason": "历史长度不足，无法比较至少两个 warm-up 窗口",
+                }
+            )
+        elif spec.kind == "python":
+            root = Path(get_config().data_root).resolve()
+            manifest_path = (root / str(spec.artifact.get("manifest") or "")).resolve()
+            source_path = (root / str(spec.artifact.get("source") or "")).resolve()
+            if root not in manifest_path.parents or root not in source_path.parents:
+                raise ValueError("Python 因子工件路径越界")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            import hashlib
+            integrity = hashlib.sha256(source_path.read_bytes()).hexdigest() == str(
+                spec.artifact.get("source_sha256") or ""
+            )
+            audit = manifest.get("audit") or {}
+            checks["lookahead"] = audit.get("lookahead") or {"passed": False}
+            checks["recursive"] = audit.get("recursive") or {"passed": False}
+            checks["artifact_integrity"] = {"passed": integrity}
+        else:
+            manifest_relative = str((spec.model or {}).get("manifest") or "")
+            root = Path(get_config().data_root).resolve()
+            manifest_path = (root / manifest_relative).resolve()
+            if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
+                raise ValueError("学习模型 manifest 不存在或越出数据目录")
+            expected_manifest = str((spec.model or {}).get("manifest_sha256") or "")
+            if expected_manifest and artifact_sha256(manifest_path) != expected_manifest:
+                raise ValueError("学习模型 manifest 完整性校验失败")
+            learned_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            folds = learned_manifest.get("fold_artifacts") or []
+            temporal = all(
+                item.get("fold", {}).get("train_end", "")
+                < item.get("fold", {}).get("test_start", "") for item in folds
+            )
+            integrity = True
+            for item in folds:
+                artifact = (root / str(item.get("artifact") or "")).resolve()
+                if (
+                    not artifact.is_relative_to(root) or not artifact.is_file()
+                    or artifact_sha256(artifact) != item.get("artifact_sha256")
+                ):
+                    integrity = False
+                    break
+            checks["lookahead"] = {"passed": temporal, "fold_count": len(folds)}
+            checks["recursive"] = {"passed": True, "reason": "模型由固定长度序列清单约束"}
+            checks["artifact_integrity"] = {"passed": integrity}
+        protocol = learned_manifest.get("protocol") or {}
+        maximum_horizon = max(spec.horizons)
+        checks["target_maturity"] = {
+            "passed": not learned_manifest or int(protocol.get("purge_gap", 0)) >= maximum_horizon,
+            "maximum_horizon": maximum_horizon,
+            "purge_gap": protocol.get("purge_gap") if learned_manifest else None,
+        }
+        checks["pit_membership"] = {
+            "passed": membership is not None and snapshot["payload"]["research_quality"] == "production",
+        }
+        checks["dataset_manifest"] = {
+            "passed": bool(snapshot.get("snapshot_hash")), "snapshot_hash": snapshot.get("snapshot_hash"),
+        }
+        report = {
+            "passed": all(item.get("passed", False) for item in checks.values()),
+            "checks": checks, "version_id": version_id,
+        }
+        return self.store.save_bias_audit(version_id, snapshot["snapshot_hash"], report)
 
     def suggest_revision(
         self, version_id: str, *, use_cloud: bool = False,
@@ -538,8 +1283,14 @@ class LabService:
             return self.discover_genetic(progress=progress, **params)
         if kind == "discover_llm":
             return self.discover_llm(progress=progress, cancelled=cancelled, **params)
+        if kind == "discover_python":
+            return self.discover_python(progress=progress, cancelled=cancelled, **params)
         if kind == "train":
             return self.train_model(progress=progress, cancelled=cancelled, **params)
+        if kind == "optimize":
+            return self.optimize_study(progress=progress, cancelled=cancelled, **params)
+        if kind == "bias_audit":
+            return self.bias_audit(progress=progress, **params)
         raise ValueError(f"无法执行任务: {kind}")
 
 

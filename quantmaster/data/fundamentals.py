@@ -183,14 +183,20 @@ def quarterly_to_daily(
         columns = list(quarterly_df.columns) if quarterly_df is not None else []
         return pd.DataFrame(index=dates, columns=columns, dtype=float)
     published = quarterly_df.copy()
-    report_dates = pd.to_datetime(published.index)
-    # 显式滞后：报告期 -> 可见日（防未来函数的关键一步）
-    if lag_days is None:
-        lags = pd.Series(report_dates.month, index=report_dates).map(
-            DISCLOSURE_LAG_DAYS).fillna(120).astype(int)
-        published.index = report_dates + pd.to_timedelta(lags.to_numpy(), unit="D")
+    # Tushare PIT 数据以真实公告日为索引，并保留 report_date/update_flag。
+    # 其他数据源仍按报告期和法定截止日做保守对齐。
+    pit_announcements = published.index.name == "ann_date" or "report_date" in published.columns
+    if pit_announcements:
+        published.index = pd.to_datetime(published.index)
+        published = published.drop(columns=["report_date", "update_flag"], errors="ignore")
     else:
-        published.index = report_dates + pd.Timedelta(days=int(lag_days))
+        report_dates = pd.to_datetime(published.index)
+        if lag_days is None:
+            lags = pd.Series(report_dates.month, index=report_dates).map(
+                DISCLOSURE_LAG_DAYS).fillna(120).astype(int)
+            published.index = report_dates + pd.to_timedelta(lags.to_numpy(), unit="D")
+        else:
+            published.index = report_dates + pd.Timedelta(days=int(lag_days))
     published = published.sort_index()
     published = published[~published.index.duplicated(keep="last")]
     combined = published.reindex(published.index.union(dates)).ffill()

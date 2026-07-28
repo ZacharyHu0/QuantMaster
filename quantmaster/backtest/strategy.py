@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -18,6 +21,22 @@ class Strategy(ABC):
     @abstractmethod
     def target_weights(self, panel: PanelDict) -> pd.DataFrame:
         ...
+
+    def signal_bundle(self, panel: PanelDict) -> SignalBundle:
+        weights = self.target_weights(panel)
+        return SignalBundle(weights=weights)
+
+
+@dataclass
+class SignalBundle:
+    """兼容旧权重接口的可归因信号载体。"""
+
+    weights: pd.DataFrame
+    scores: pd.DataFrame | None = None
+    confidence: pd.DataFrame | None = None
+    degraded: pd.DataFrame | None = None
+    contributions: dict[str, pd.DataFrame] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def rebalance_mask(dates: pd.DatetimeIndex, freq: str = "W") -> pd.Series:
@@ -159,3 +178,109 @@ class SwingStrategy(Strategy):
         mask = pd.Series(False, index=scores.index)
         mask.iloc[::self.holding_days] = True
         return weights.where(mask, other=float("nan"))
+
+
+class LabVersionStrategy(Strategy):
+    """固定 Quant Lab 版本；学习模型历史回测只读取滚动 OOF 预测。"""
+
+    def __init__(
+        self, version: dict[str, Any], *, horizon: int, top_n: int,
+        rebalance_days: int, cap_weight: float,
+    ):
+        self.version = version
+        self.horizon = horizon
+        self.top_n = top_n
+        self.rebalance_days = rebalance_days
+        self.cap_weight = cap_weight
+        self.name = f"lab_{version.get('slug', version.get('id', 'version'))}_{horizon}d"
+        self._model_metadata: dict[str, Any] = {}
+
+    def _learned_scores(self, panel: PanelDict) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+        import hashlib
+        import json
+
+        from quantmaster.config import get_config
+
+        model = (self.version.get("spec") or {}).get("model") or {}
+        root = Path(get_config().data_root).resolve()
+        manifest_path = (root / str(model.get("manifest") or "")).resolve()
+        if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
+            raise FileNotFoundError("学习模型 manifest 不存在或越出数据目录")
+        manifest_bytes = manifest_path.read_bytes()
+        expected_manifest = str(model.get("manifest_sha256") or "")
+        if expected_manifest and hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest:
+            raise ValueError("学习模型 manifest 完整性校验失败")
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        if int(manifest.get("schema_version", 0)) < 2:
+            raise ValueError("LabVersionStrategy 只接受带滚动 OOF 的 schema v2 模型")
+        prediction_path = (root / str(manifest.get("prediction_artifact") or "")).resolve()
+        if not prediction_path.is_relative_to(root) or not prediction_path.is_file():
+            raise FileNotFoundError("滚动 OOF 预测工件不存在")
+        digest = hashlib.sha256(prediction_path.read_bytes()).hexdigest()
+        if digest != manifest.get("prediction_sha256"):
+            raise ValueError("滚动 OOF 预测工件完整性校验失败")
+        rows = pd.read_parquet(prediction_path)
+        rows = rows.loc[pd.to_numeric(rows["horizon"], errors="coerce") == self.horizon]
+        if rows.empty:
+            raise ValueError(f"OOF 工件没有 {self.horizon} 日预测")
+
+        def pivot(column: str) -> pd.DataFrame:
+            result = rows.pivot(index="date", columns="symbol", values=column)
+            result.index = pd.to_datetime(result.index)
+            return result.rename_axis(None, axis=1)
+
+        scores = pivot("expected_excess")
+        contributions = {
+            "expected_return": pivot("expected_return"),
+            "probability_up": pivot("probability_up"),
+            "probability_net_positive": pivot("probability_net_positive"),
+            "uncertainty": pivot("q90") - pivot("q10"),
+        }
+        self._model_metadata = {
+            "research_quality": manifest.get("research_quality"),
+            "snapshot_hash": manifest.get("snapshot_hash"),
+            "protocol": manifest.get("protocol"),
+        }
+        return scores, contributions
+
+    def signal_bundle(self, panel: PanelDict) -> SignalBundle:
+        spec = self.version.get("spec") or {}
+        close = panel["close"]
+        contributions: dict[str, pd.DataFrame] = {}
+        if spec.get("kind") == "learned":
+            scores, contributions = self._learned_scores(panel)
+        else:
+            from quantmaster.factors import compute_factor
+            from quantmaster.factors.fundamental import resolve_factor
+
+            expression = spec.get("expression") or self.version.get("slug")
+            factor = resolve_factor(
+                expression, list(close.columns), str(close.index.min().date()),
+                str(close.index.max().date()),
+            )
+            scores = compute_factor(factor, panel)
+        scores = scores.reindex(index=close.index, columns=close.columns)
+        ranks = scores.rank(axis=1, ascending=False)
+        selected = (ranks <= self.top_n).astype(float).where(scores.notna(), 0.0)
+        counts = selected.sum(axis=1).replace(0, float("nan"))
+        weights = selected.div(counts, axis=0).clip(upper=self.cap_weight).fillna(0.0)
+        mask = pd.Series(False, index=close.index)
+        mask.iloc[::self.rebalance_days] = True
+        weights = weights.where(mask, other=float("nan"))
+        confidence = contributions.get("probability_net_positive")
+        uncertainty = contributions.get("uncertainty")
+        degraded = (
+            uncertainty.gt(uncertainty.quantile(0.95, axis=1), axis=0)
+            if uncertainty is not None else None
+        )
+        return SignalBundle(
+            weights=weights, scores=scores, confidence=confidence, degraded=degraded,
+            contributions=contributions,
+            metadata={
+                "version_id": self.version.get("id"), "horizon": self.horizon,
+                "prediction_source": "rolling_oof", **self._model_metadata,
+            },
+        )
+
+    def target_weights(self, panel: PanelDict) -> pd.DataFrame:
+        return self.signal_bundle(panel).weights

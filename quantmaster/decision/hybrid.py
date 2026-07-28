@@ -255,6 +255,7 @@ def _component_summary(deployment: dict[str, Any], version: dict[str, Any]) -> d
         "kind": spec.get("kind", version.get("kind", "expression")),
         "status": version.get("status", "unknown"),
         "profile": deployment.get("profile", "all"),
+        "horizon": deployment.get("horizon"),
         "scope": deployment.get("scope", "exact"),
         "universe": deployment.get("universe", ""),
         "deployed_at": deployment.get("created_at", ""),
@@ -392,7 +393,46 @@ def _learned_component(
     from quantmaster.lab.ml import predict_panel
 
     spec = component.get("spec") or {}
-    values = predict_panel(panel, spec.get("model") or {})
+    values = predict_panel(
+        panel, spec.get("model") or {}, horizon=int(component.get("horizon") or 3),
+    )
+    return 100 * _rank(values * int(spec.get("direction", 1) or 1))
+
+
+def _python_component(
+    panel: dict[str, pd.DataFrame], component: dict[str, Any],
+) -> pd.DataFrame:
+    from quantmaster.config import get_config
+    from quantmaster.data.research import ResearchDataBundle
+    from quantmaster.data.research_features import registered_features
+    from quantmaster.factors.python_artifact import execute_python_factor_artifact
+
+    spec = component.get("spec") or {}
+    bundle = ResearchDataBundle.from_legacy_panel(panel)
+    bundle.signal.setdefault("returns", panel["close"].pct_change())
+    required = set(spec.get("required_features") or [])
+    fundamental_fields = {"pe_ttm", "pb", "dv_ratio", "total_mv", "roe"}
+    if required & fundamental_fields:
+        from quantmaster.data.fundamentals import fundamental_panel
+
+        close = panel["close"]
+        bundle.fundamentals = fundamental_panel(
+            list(close.columns), str(close.index.min().date()), str(close.index.max().date()),
+        )
+    if "news_sentiment" in required:
+        from quantmaster.ai.sentiment import quality_sentiment_panel
+
+        close = panel["close"]
+        bundle.signal["news_sentiment"] = quality_sentiment_panel(
+            close.index, list(close.columns),
+        ).reindex_like(close)
+    if "membership" in required:
+        close = panel["close"]
+        bundle.membership = pd.DataFrame(True, index=close.index, columns=close.columns)
+    features, _catalog = registered_features(bundle)
+    values = execute_python_factor_artifact(
+        get_config().data_root, spec.get("artifact") or {}, features,
+    )
     return 100 * _rank(values * int(spec.get("direction", 1) or 1))
 
 
@@ -420,9 +460,11 @@ def hybrid_score_bundle(
             active_components.append(component)
             continue
         try:
+            spec_kind = str((component.get("spec") or {}).get("kind") or "expression")
             values = (
-                _learned_component(panel, component)
-                if role == "ml" else _expression_component(panel, component)
+                _learned_component(panel, component) if role == "ml"
+                else _python_component(panel, component) if spec_kind == "python"
+                else _expression_component(panel, component)
             ).reindex_like(close)
             if values.dropna(how="all").empty:
                 raise ValueError("没有满足覆盖率的有效预测")

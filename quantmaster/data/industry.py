@@ -131,3 +131,16 @@ def load_industry_map(refresh: bool = False) -> dict[str, str]:
     except Exception as e:
         logger.warning("行业映射抓取失败: %s", e)
     return cached
+
+
+def load_cached_industry_map() -> dict[str, str]:
+    """只读本地白名单缓存；AutoMiner 构造特征时绝不隐式触网。"""
+    path = _cache_path()
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        mapping = payload.get("mapping", {}) if isinstance(payload, dict) else {}
+        return {str(key): str(value) for key, value in mapping.items() if value}
+    except (json.JSONDecodeError, OSError):
+        return {}

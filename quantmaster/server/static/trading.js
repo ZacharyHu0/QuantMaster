@@ -23,6 +23,7 @@
   };
   const orderReason = {
     missing_open: '缺少开盘价', limit_up: '涨停无法买入', limit_down: '跌停无法卖出',
+    suspended: '停牌无法成交', missing_actual_limit: '缺少真实涨跌停价',
     insufficient_cash: '现金不足', t_plus_one: 'T+1 可卖数量不足', newer_cycle: '被新提案替代',
   };
   const strategyLabel = strategy => {
@@ -33,6 +34,7 @@
       return `Hybrid v2 · ${profile} · ${strategy.holding_days} 日`;
     }
     if (strategy?.kind === 'swing') return `${strategy.holding_days} 日短线`;
+    if (strategy?.kind === 'lab_version') return `Lab OOF · ${strategy.horizon} 日 · ${String(strategy.version_id).slice(0, 8)}`;
     return strategy?.factor || '因子策略';
   };
 
@@ -100,6 +102,7 @@
       field.querySelectorAll('input,select').forEach(input => {
         input.disabled = !visible;
         if (input.name === 'factor') input.required = visible;
+        if (input.name === 'version_id') input.required = visible;
       });
     });
   }
@@ -111,6 +114,10 @@
       kind:'decision', profile:String(fd.get('profile') || 'risk_adjusted'),
       top_n:Number(fd.get('top_n')), holding_days:Number(fd.get('holding_days')),
       cap_weight:0.25, policy_snapshot:{},
+    } : kind === 'lab_version' ? {
+      kind:'lab_version', version_id:String(fd.get('version_id') || '').trim(),
+      horizon:Number(fd.get('holding_days')), top_n:Number(fd.get('top_n')),
+      rebalance_days:Number(fd.get('holding_days')), cap_weight:0.10,
     } : kind === 'swing' ? {
       kind: 'swing', top_n: Number(fd.get('top_n')),
       holding_days: Number(fd.get('holding_days')), cap_weight: 0.25,
@@ -130,6 +137,7 @@
       benchmark: String(fd.get('benchmark') || '') || null,
       initial_capital: Number(fd.get('initial_capital')),
       stop_loss: optionalNumber('stop_loss'), take_profit: optionalNumber('take_profit'),
+      research_tier: String(fd.get('research_tier') || 'auto'),
     };
   }
 
@@ -154,6 +162,8 @@
       ['最大回撤', percent(-Math.abs(Number(metrics.max_drawdown || 0))), -Math.abs(Number(metrics.max_drawdown || 0))],
       ['夏普', number(metrics.sharpe), metrics.sharpe],
       ['信息比率', number(metrics.information_ratio), metrics.information_ratio],
+      ['Sortino', number(metrics.sortino), metrics.sortino],
+      ['Profit Factor', number(metrics.profit_factor), metrics.profit_factor],
       ['交易成本', number(metrics.total_trade_cost), null],
     ];
     return `<div class="trading-metrics" aria-label="核心绩效">${cells.map(([label, value, signed]) =>
@@ -170,12 +180,30 @@
       <dt>应用版本</dt><dd>${escapeHtml(manifest.app_version || '—')}</dd>
       <dt>策略快照</dt><dd>${escapeHtml(JSON.stringify(manifest.strategy_snapshot || {}))}</dd>
       <dt>候选质量</dt><dd>${manifest.universe_quality === 'production' ? 'PIT 历史成分' : '固定候选 / 沙盒'} · ${number(manifest.symbol_count)} 只</dd>
+      <dt>研究等级</dt><dd>${manifest.research_tier === 'production' ? 'PRODUCTION · RAW EXECUTION' : 'SANDBOX · APPROXIMATION'}</dd>
       <dt>实际区间</dt><dd>${escapeHtml((range.actual || []).join(' 至 ') || '—')}</dd>
       <dt>可用标的</dt><dd>${number(quality.usable_symbol_count)} / ${number(quality.requested_symbol_count)} 只</dd>
       <dt>可成交信号</dt><dd>${number(quality.executable_signals)} / ${number(quality.selected_signals)}</dd>
       <dt>基准状态</dt><dd>${escapeHtml({complete:'已加载', unavailable:'不可用', not_requested:'未选择'}[quality.benchmark_status] || quality.benchmark_status || '—')}</dd>
       <dt>成员哈希</dt><dd><code>${escapeHtml(dataset.manifest?.membership_hash || '—')}</code></dd>
+      <dt>成交数据哈希</dt><dd><code>${escapeHtml(manifest.research_data?.manifest_hash || '—')}</code></dd>
       <dt>成交语义</dt><dd>${escapeHtml(manifest.execution || '—')}</dd>
+    </dl></details>`;
+  }
+
+  function renderRiskDiagnostics(artifact) {
+    const risk = artifact.risk_diagnostics || {};
+    const interval = risk.annual_return_confidence_95 || [];
+    const stress = artifact.stress_tests || [];
+    const lifecycle = artifact.trade_lifecycle || {};
+    const attribution = artifact.attribution || {};
+    if (!interval.length && !stress.length && !Object.keys(attribution).length) return '';
+    return `<details class="trading-manifest"><summary>风险、成本压力与信号归因</summary><dl>
+      <dt>年化收益 95% 区间</dt><dd>${interval.length ? `${percent(interval[0])} 至 ${percent(interval[1])}` : '—'}</dd>
+      <dt>完整开平仓周期</dt><dd>${number(lifecycle.round_trips)} 次 · 平均 ${number(lifecycle.average_holding_days)} 个交易日</dd>
+      <dt>容量参与率 P95</dt><dd>${percent(artifact.metrics?.capacity_p95_participation)}</dd>
+      <dt>成本压力</dt><dd>${stress.map(item => `${number(item.cost_multiplier)}× → ${percent(item.stressed_total_return)}`).join(' · ') || '—'}</dd>
+      <dt>信号归因</dt><dd>${Object.keys(attribution).map(escapeHtml).join(' · ') || '传统策略仅输出目标权重'}</dd>
     </dl></details>`;
   }
 
@@ -267,11 +295,12 @@
       <div class="trading-result-actions">
         <a class="trading-secondary" href="/api/backtests/${run.id}/export?format=json">导出完整 JSON</a>
         <a class="trading-secondary" href="/api/backtests/${run.id}/export?format=trades_csv">导出成交 CSV</a>
-        <button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>
+        ${run.config?.strategy?.kind === 'lab_version' ? '<span class="trading-secondary">OOF 回测不可直接提升模拟账户</span>' : '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>'}
         <form class="trading-promote" data-bt-promote hidden><input name="name" maxlength="40" required value="${escapeHtml(run.name.slice(0, 34))} 验证" aria-label="模拟账户名称"><button class="trading-primary" type="submit">确认创建</button></form>
       </div>
       <div class="trading-chart-grid"><div class="trading-chart-block"><h4>策略净值与基准</h4><div class="trading-chart" id="bt-workbench-nav"></div></div><div class="trading-chart-block"><h4>回撤路径</h4><div class="trading-chart small" id="bt-workbench-dd"></div></div></div>
       ${renderManifest(artifact.manifest || {})}
+      ${renderRiskDiagnostics(artifact)}
       <div class="trading-history-head"><h3>成交明细</h3><span>展示最近 100 笔，共 ${number((artifact.trades || []).length)} 笔</span></div>
       ${renderTrades(artifact.trades)}${renderBlockedOrders(artifact.blocked_orders)}`;
     drawBacktestCharts(artifact);

@@ -23,8 +23,8 @@
 | 📡 多市场数据 | 约 3.4 万条内地/香港/美国证券主数据随包离线可用，支持代码、名称和拼音智能解析；日线及 1/5/15/30/60 分钟线按频率本地 Parquet 归档，断网复用、自动降级 |
 | 🧭 市场状态 | 候选与行业板块的牛熊分、上行/下行/震荡、市场宽度、MACD、资金量；分当前、历史和未来 1/3/5/7 日概率展望，历史图支持 7D–10Y 观察窗口 |
 | 🎯 Hybrid v2 决策 | 自适应规则 + Quant Lab 因子 / ML Champion；提供三种策略画像、扣费后预期、概率校准、模型贡献、连续仓位和异常回退，面向 1 / 3 / 5 / 7 个交易日 |
-| 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、purged walk-forward、FDR 与交易成本门槛；学习模型先影子运行，统一验证和人工批准后才能按候选 / 周期 / 画像设为 Champion |
-| ⛏️ 因子挖掘 | 遗传规划自动搜索因子表达式；LLM 因子挖掘（大模型提出候选 → 本地数据严格验证）；**样本外验证工具**（train/test IC、walk-forward、网格扫描）把防过拟合做成流程 |
+| 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、purged walk-forward、FDR、交易成本与 Monte Carlo / 参数敏感性 / 穿透性门禁；学习模型先影子运行，统一验证和人工批准后才能按候选 / 周期 / 画像设为 Champion |
+| ⛏️ 因子挖掘 | 遗传规划与 LLM 安全 DSL 保持可用；可选 Python AutoMiner 让模型提出受限 pandas/numpy 代码，由本地 TRAIN/VALID、参数平台、WFA、穿透测试、Pareto 和密封 TEST 筛选；代码工件、审计和人工批准全程可追溯 |
 | 🧬 多因子合成 | 因子相关性矩阵、IC/ICIR 动态加权合成（防未来函数）、截面正交化、贪心去冗余 |
 | 📰 资讯研究 | 内置快讯/官方来源与 RSS、JSON、HTML 声明式来源；原始响应短期缓存、结构化资讯长期归档，去重标注后形成可回测的质量加权消息面因子 |
 | 🤖 AI 能力 | 统一 LLM 客户端，兼容 **Anthropic / OpenAI / 任何 OpenAI 协议网关**（DeepSeek、通义、Kimi、GLM、本地 Ollama）；资讯标注失败会退避重试，不阻塞原文入库 |
@@ -32,6 +32,7 @@
 | 💰 实盘记录 | 自选、重点关注与实盘持有统一工作台；交易账本支持券商 CSV 导入、FIFO 成本、TWR / XIRR 与基准对比 |
 | 🔔 Bot 自动化 | 以飞书企业自建应用 Bot 为主通道（群聊/私聊命令、结构化告警卡片），腾讯微信 ClawBot iLink 为轻量文本提醒；定时扫描变盘/重要消息/收盘任务，按会话选择推送强度 |
 | 🖥️ 本地 Web 界面 | FastAPI + ECharts 决策工作台；顶层候选页集中查看与编辑研究范围，行情卡片逐标的呈现，决策按牛熊/板块/候选分阶段可用，不必等待整次任务结束 |
+| 📖 内置帮助 | 页头“帮助”提供量化研究与 A 股交易系统手册、全文搜索、章节深链、项目页面跳转，以及复利、成本、仓位、回撤、夏普和 RankIC 六个本地计算器 |
 
 ## 快速开始
 
@@ -43,6 +44,10 @@ pip install -e ".[data,dev]"     # data = akshare + yfinance（推荐）
 
 qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
+
+启动后点击页头的“帮助”，可在应用内阅读完整手册；也可以直接打开
+`http://127.0.0.1:8686/#help/start`。手册中的市场规则标有核验日期，实盘前仍应以
+交易所与开户券商的最新文件为准。
 
 ### 日志与诊断
 
@@ -72,7 +77,10 @@ qm ledger report                                     # 实盘收益报告
 qm automation doctor                                # 检查 Bot、任务、依赖与绑定状态
 qm lab doctor                                       # Quant Lab 能力、预算与队列状态
 qm lab discover --method genetic --universe demo    # 提交可恢复的因子发现任务
+qm lab discover --method python --rounds 3 --candidates 24 --finalists 3 --universe csi800
 qm lab train --model ridge --universe demo           # Ridge 基线；ml 依赖支持五种深度模型
+qm lab optimize --universe csi800 --budget-hours 10 # 共享 1/3/5/7 日 Pareto 滚动优化
+qm lab studies                                      # 查看 Study、Pareto 与密封评估状态
 qm lab worker                                       # 独立研究 Worker（Web 进程外运行）
 ```
 
@@ -124,6 +132,18 @@ data:
 检查统一验证证据并人工批准后，选择生效周期、画像及“仅当前候选 / 全部 A 股候选”，
 再设为 Champion。回测任务和模拟账户会在创建时固化当时的策略快照；之后切换 Champion
 不会改写旧结果。模拟盘只生成提案并按 T+1 开盘规则撮合，不连接真实券商。
+
+「滚动优化」使用锁定的 756 / 20 / 252 协议：开发期每 20 个交易日滚动重训，最长标签前
+留 7 日 purge，最后 252 个交易日直到模型、参数和 Pareto 推荐冻结后才开启。共享模型同时
+输出 1 / 3 / 5 / 7 日收益、概率和预测区间；概率校准只读取开发期 OOF。Production 还要求
+PIT 中证800成分、官方交易日历、真实公告日基本面和未复权成交约束完整，否则任务明确失败，
+不会降级成看似成功的近似回测。中断后的 Optuna Trial 和已完成密封块可直接恢复。
+
+Python AutoMiner 默认关闭，需先在「设置 → Quant Lab」显式启用。模型只会收到版本化
+特征目录、经济假设和本地汇总指标，不会收到原始行情；候选代码禁止导入、I/O、网络、
+反射和循环，并在独立子进程中执行。TRAIN 用于参数搜索，VALID 用于 Pareto 入围，
+TEST 在入围顺序冻结后才读取一次且不回流选参。非 PIT 特征可以研究，但会形成不可覆盖的
+生产审批硬门槛。
 
 日常启动优先显示本地行情：已完整覆盖的历史区间不会因 TTL 过期反复联网，近期行情
 只请求缺失边界和 5 个交易日的校准窗口。动态前复权发生变化时会用重叠窗口统一价格
@@ -234,6 +254,9 @@ python tools/release_sync.py push
 1. **站在巨人肩膀上**：数据层直接复用 [AKShare](https://github.com/akfamily/akshare)
    （A 股免费数据事实标准）与 yfinance；因子研究流程借鉴
    [Microsoft Qlib](https://github.com/microsoft/qlib) 的「表达式因子 + IC 分析」范式；
+   可恢复的多目标优化、滚动模型与工件化工作流参考
+   [Freqtrade](https://github.com/freqtrade/freqtrade) 的 Hyperopt / FreqAI 思路，并按
+   PIT 股票候选、T+1 与 A 股成交制度重新实现；
    表达式算子命名沿用 WorldQuant Alpha101 惯例，社区因子可直接迁移。
 2. **回测必须像 A 股**：T+1、涨跌停买卖限制、印花税单边征收、整手交易——
    这些规则不建模，回测收益就是自欺欺人。
@@ -252,7 +275,7 @@ quantmaster/
 ├── market/              牛熊/趋势/市场宽度/板块状态与概率展望
 ├── decision/            1–7 日每日选股、仓位与风险决策
 ├── factors/             因子：算子库、表达式引擎、内置因子、IC/分层分析
-│   └── mining/          因子挖掘：遗传规划 + LLM
+│   └── mining/          因子挖掘：遗传规划 + LLM DSL + 受限 Python AutoMiner
 ├── lab/                 AI Quant Lab：版本账本、PIT 快照、验证、ML 与 Worker
 ├── ai/                  统一 LLM 客户端、AI 爬虫、舆情因子
 ├── backtest/            回测引擎（A 股规则）、策略、绩效指标、模拟盘

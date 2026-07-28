@@ -7,6 +7,10 @@
     factors: [],
     jobs: [],
     experiments: [],
+    studies: [],
+    miningRuns: [],
+    selectedMiningRun: '',
+    selectedStudyId: '',
     selectedVersion: '',
     status: '',
     search: '',
@@ -40,7 +44,9 @@
 
   const kindLabel = {
     prepare_data: '冻结数据快照', validate: '统一因子验证', discover_genetic: '遗传因子发现',
-    discover_llm: 'AI 因子发现', train: '模型训练',
+    discover_llm: 'AI 因子发现', discover_python: 'Python AutoMiner',
+    train: '模型训练', optimize: '共享多周期优化',
+    bias_audit: '防偏差审计',
   };
 
   const activeJobStatuses = new Set(['queued', 'running', 'paused', 'interrupted']);
@@ -53,6 +59,9 @@
     count: '目标候选数', rounds: '反馈轮数', top_n: '保留候选数', population: '种群规模',
     generations: '进化代数', version_id: '因子版本', model: '模型',
     sequence_length: '序列长度', epochs: '训练轮数', device: '计算设备',
+    study_id: 'Study 编号', budget_hours: '预算小时', max_trials: '最大 Trials',
+    research_tier: '研究等级', models: '候选模型',
+    candidate_limit: '代码候选上限', finalists: 'Pareto 入围数',
   };
 
   const eventLabel = {
@@ -266,6 +275,8 @@
       panel.classList.toggle('active', panel.dataset.labPanel === view);
     });
     if (view === 'automation') refreshJobs();
+    if (view === 'optimization') refreshStudies();
+    if (view === 'discover') refreshMiningRuns();
   }
 
   function renderCapabilities() {
@@ -278,6 +289,7 @@
       ['ridge', 'RIDGE', available.has('ridge')],
       ['torch', 'DEEP LEARNING', capabilities.models?.torch],
       ['llm', `AI · ${capabilities.llm?.provider || 'OFFLINE'}`, capabilities.llm?.configured],
+      ['python-miner', 'PYTHON AUTOMINER', capabilities.python_mining_enabled],
       ['worker', 'RECOVERABLE WORKER', true],
     ];
     document.getElementById('lab-capabilities').innerHTML = items.map(item =>
@@ -323,7 +335,7 @@
     const research = state.overview?.research || {};
     const horizons = (research.horizons || [3]).map(Number);
     const preferred = horizons.includes(3) ? 3 : horizons[0];
-    for (const id of ['lab-discovery-form', 'lab-train-form']) {
+    for (const id of ['lab-discovery-form', 'lab-train-form', 'lab-optimize-form']) {
       const form = document.getElementById(id);
       if (!form) continue;
       if (research.universe) form.elements.universe.value = research.universe;
@@ -490,8 +502,14 @@
     if (candidates.length) resultItems.push(['候选产出', `${candidates.length} 个`]);
     if (result.rounds_requested) resultItems.push(['完成轮次', `${result.rounds_completed || 0} / ${result.rounds_requested}`]);
     if (Number.isFinite(Number(result.attempts))) resultItems.push(['模型调用', `${result.attempts} 次`]);
+    if (Number.isFinite(Number(result.llm_calls))) resultItems.push(['模型调用', `${result.llm_calls} / 3 次`]);
+    if (Number.isFinite(Number(result.candidate_count))) resultItems.push(['代码候选', `${result.candidate_count} 个`]);
+    if (Number.isFinite(Number(result.finalist_count))) resultItems.push(['Pareto 入围', `${result.finalist_count} 个`]);
     if (result.experiment_id) resultItems.push(['实验编号', String(result.experiment_id).slice(0, 16)]);
     if (result.version_id) resultItems.push(['产出版本', String(result.version_id).slice(0, 16)]);
+    if (result.study_id) resultItems.push(['优化 Study', String(result.study_id).slice(0, 16)]);
+    if (Array.isArray(result.trials)) resultItems.push(['已完成 Trials', `${result.trials.length} 个`]);
+    if (result.sealed_metrics?.net_information_ratio != null) resultItems.push(['密封净 IR', number(result.sealed_metrics.net_information_ratio, 3)]);
     if (result.metrics?.correlation != null) resultItems.push(['相关性', number(result.metrics.correlation, 4)]);
     if (result.metrics?.mse != null) resultItems.push(['验证 MSE', number(result.metrics.mse, 6)]);
     if (result.snapshot?.snapshot_hash) resultItems.push(['数据快照', String(result.snapshot.snapshot_hash).slice(0, 16)]);
@@ -649,6 +667,20 @@
       [...(gates?.hard_failures || []), ...(gates?.soft_failures || [])].join('；') || '待人工复核';
     const horizonCards = Object.values(horizons).map(item => `<div class="lab-horizon"><span>${item.horizon}D · OOS RANK IC</span>
       <b>${number(item.oos_rank_ic, 4)}</b><small>ICIR ${number(item.oos_icir, 3)} · Q ${number(item.q_value, 3)}</small></div>`).join('');
+    const robustness = report?.robustness;
+    const robustnessTests = robustness ? [
+      ['MONTE CARLO', robustness.monte_carlo,
+        `${number((robustness.monte_carlo?.probability_positive_ic || 0) * 100, 0)}% 正向 IC`],
+      ['参数敏感性', robustness.parameter_sensitivity,
+        robustness.parameter_sensitivity?.applicable === false ? '无显式窗口参数' : `${number((robustness.parameter_sensitivity?.same_sign_ratio || 0) * 100, 0)}% 邻域同号`],
+      ['WFA', robustness.walk_forward,
+        `${number((robustness.walk_forward?.sign_consistency || 0) * 100, 0)}% 折叠同号`],
+      ['穿透测试', robustness.penetration,
+        `${number(robustness.penetration?.concentration?.effective_names, 1)} 有效个股`],
+    ] : [];
+    const robustnessCards = robustnessTests.map(([label, item, detailText]) =>
+      `<div class="lab-robustness-item ${item?.passed ? 'pass' : 'fail'}"><i></i><span>${h(label)}</span><b>${item?.passed ? 'PASS' : 'FAIL'}</b><small>${h(detailText)}</small></div>`
+    ).join('');
     const canApprove = detail.status === 'candidate';
     const canDeploy = ['approved', 'degraded', 'production'].includes(detail.status);
     const researchHorizons = (state.overview?.research?.horizons || [3]).map(Number);
@@ -660,8 +692,10 @@
       <div class="lab-evidence-meta"><div><span>CANDIDATE SCORE</span><b>${number(report?.candidate_score, 1)}</b></div><div><span>COVERAGE</span><b>${report ? number(report.coverage * 100, 1) + '%' : '—'}</b></div><div><span>MAX CORR</span><b>${number(report?.max_existing_correlation, 2)}</b></div></div>
       <div class="lab-gate ${gates?.passed ? 'pass' : ''}"><i></i><span>${h(gateText)}</span></div>
       <div class="lab-horizon-grid">${horizonCards || '<div class="lab-empty">验证后显示 1 / 3 / 5 / 7 日证据</div>'}</div>
+      ${robustness ? `<div class="lab-robustness"><div class="lab-robustness-head"><span>ROBUSTNESS GATE</span><b>${robustness.tests_passed}/${robustness.tests_applicable}</b></div><div class="lab-robustness-grid">${robustnessCards}</div></div>` : ''}
       <div class="lab-evidence-actions">
         <button class="primary" type="button" data-validate-version="${h(detail.id)}">运行统一验证</button>
+        ${report?.gates?.bias_audit_required ? `<button type="button" data-audit-version="${h(detail.id)}">运行防偏差审计</button>` : ''}
         ${canApprove ? `<button type="button" data-approve-version="${h(detail.id)}">人工批准</button>` : ''}
         ${canDeploy ? `<div class="lab-deploy-config" aria-label="Champion 生效范围">
           <label>周期<select data-deploy-horizon>${deployHorizons.map(value => `<option value="${value}" ${value === preferredHorizon ? 'selected' : ''}>${value} 日</option>`).join('')}</select></label>
@@ -695,14 +729,138 @@
       <td>${number(item.result_json?.metrics?.correlation, 4)}</td><td>${number(item.result_json?.metrics?.mse, 6)}</td><td>${item.result_json?.version_id ? `<button type="button" data-factor-version="${h(item.result_json.version_id)}">${h(statusLabel[item.result_json.version_status] || item.result_json.version_status || '影子候选')}</button>` : '—'}</td><td>${h((item.updated_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
+  function renderStudyList() {
+    const target = document.getElementById('lab-study-list');
+    if (!target) return;
+    if (!state.studies.length) {
+      target.innerHTML = '<div class="lab-empty">尚无 Study。默认协议会在开发期选参，并将末尾 252 日保持密封。</div>';
+      return;
+    }
+    target.innerHTML = `<div class="table-scroll"><table class="lab-study-table"><thead><tr><th>Study</th><th>状态</th><th>候选</th><th>Trials</th><th>密封集</th><th>更新</th><th></th></tr></thead><tbody>${state.studies.map(item => {
+      const result = item.result || {};
+      const candidate = result.version_id ? 'Shadow Candidate' : result.candidate === false ? '未晋级' : '—';
+      return `<tr><td><button type="button" data-study-id="${h(item.id)}">${h(item.config?.universe || '—')} · ${h(String(item.id).slice(0, 8))}</button></td><td><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span></td><td>${h(candidate)}</td><td>${(result.trials || []).length}</td><td>${result.sealed_metrics ? '已锁定评估' : '未完成'}</td><td>${h(formatDate(item.updated_at))}</td><td>${['paused','failed','interrupted'].includes(item.status) ? `<button type="button" data-resume-study="${h(item.id)}">恢复</button>` : ''}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+
+  function renderStudyDetail() {
+    const target = document.getElementById('lab-study-detail');
+    if (!target) return;
+    const study = state.studies.find(item => item.id === state.selectedStudyId) || state.studies[0];
+    if (!study) {
+      target.innerHTML = '<div class="lab-empty">创建或选择一个 Study，查看折线时间轴、Pareto 推荐和密封证据。</div>';
+      return;
+    }
+    state.selectedStudyId = study.id;
+    const result = study.result || {};
+    const protocol = result.protocol || study.config?.protocol || {};
+    const sealed = result.sealed_holdout || {};
+    const folds = ['DEV 01','DEV 02','DEV 03','DEV 04'].map((name, index) => `<div><span>${name}</span><b>Purged fold</b><small>${protocol.fold_test_days || 63} 交易日 · ${index + 1}/4</small></div>`).join('');
+    const sealedMetrics = result.sealed_metrics || {};
+    const recommended = result.recommended || null;
+    const feasible = (result.trials || []).filter(item => item.feasible);
+    const pareto = feasible.filter(item => item.pareto !== false);
+    const trials = pareto.sort((a,b) => Number(b.metrics?.net_information_ratio || -999) - Number(a.metrics?.net_information_ratio || -999)).slice(0, 6);
+    target.innerHTML = `<div class="lab-study-hero"><div><span>STUDY · ${h(String(study.id).slice(0, 12).toUpperCase())}</span><h4>${h(study.config?.universe || '—')} 共享多周期研究</h4><p>${h(study.config?.start || '—')} → ${h(study.config?.end || '—')} · 最长 ${number(study.config?.budget_hours, 1)} 小时</p></div><span class="lab-status ${h(study.status)}">${h(statusLabel[study.status] || study.status)}</span></div>
+      <div class="lab-fold-timeline">${folds}<div><span>SEALED</span><b>${sealed.test_start ? `${h(sealed.test_start)} → ${h(sealed.test_end)}` : '等待锁参'}</b><small>只评估一次 · 不回流选参</small></div></div>
+      <div class="lab-study-evidence"><div><span>可行 / Pareto</span><b>${feasible.length} / ${pareto.length}</b></div><div><span>净信息比率</span><b>${number(sealedMetrics.net_information_ratio, 2)}</b></div><div><span>RankIC</span><b>${number(sealedMetrics.rank_ic, 4)}</b></div><div><span>最大回撤</span><b>${sealedMetrics.max_drawdown == null ? '—' : number(sealedMetrics.max_drawdown * 100, 1) + '%'}</b></div></div>
+      <div class="pareto-heading lab-block-head"><div><span>FEASIBLE FRONT</span><h4>锁参依据</h4></div><span class="lab-beta">${recommended ? h(String(recommended.params?.model || '').toUpperCase()) : 'WAITING'}</span></div>
+      <div class="lab-pareto-list">${trials.length ? trials.map(item => `<div class="${recommended?.number === item.number ? 'recommended' : ''}"><span>#${item.number}</span><b>${h(item.params?.model || '—')}</b><span>IR ${number(item.metrics?.net_information_ratio, 2)}</span><span>IC ${number(item.metrics?.rank_ic, 3)}</span><span>DD ${number((item.metrics?.max_drawdown || 0) * 100, 1)}%</span></div>`).join('') : '<div><span>—</span><b>尚无满足 FDR、稳定性与成本门槛的 Trial</b><span></span><span></span><span></span></div>'}</div>
+      <div class="lab-study-actions">${result.version_id ? `<button type="button" data-factor-version="${h(result.version_id)}">查看 Shadow 候选</button>` : ''}${['paused','failed','interrupted'].includes(study.status) ? `<button type="button" data-resume-study="${h(study.id)}">从检查点恢复</button>` : ''}${study.job_id ? `<button type="button" data-job-detail="${h(study.job_id)}">打开任务时间线</button>` : ''}</div>`;
+  }
+
+  async function refreshStudies() {
+    try {
+      const response = await request('/api/lab/studies?limit=100');
+      state.studies = response.items || [];
+      renderStudyList();
+      renderStudyDetail();
+    } catch (error) {
+      if (isLabActive()) showError('Study 账本刷新失败', error);
+    }
+  }
+
+  function renderMiningRuns() {
+    const target = document.getElementById('lab-mining-runs');
+    if (!target) return;
+    if (!state.miningRuns.length) {
+      target.innerHTML = '<div class="lab-empty">尚无 AutoMiner 批次。启用开关后可发起首次受限代码挖掘。</div>';
+      return;
+    }
+    target.innerHTML = state.miningRuns.slice(0, 8).map(item => {
+      const result = item.result || {};
+      return `<div class="lab-mining-run"><button type="button" data-mining-run="${h(item.id)}">${h(String(item.id).slice(0, 12).toUpperCase())}</button><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span><span>${h(result.research_quality || '等待数据门禁')}</span><span>${Number(result.candidate_count || 0)} 候选 / ${Number(result.finalist_count || 0)} 入围</span><span>${h(formatDate(item.updated_at))}</span></div>`;
+    }).join('');
+  }
+
+  function renderMiningCandidates(run) {
+    const target = document.getElementById('lab-mining-candidates');
+    if (!target) return;
+    const candidates = run?.candidates || [];
+    if (!candidates.length) {
+      target.innerHTML = '<div class="lab-empty">该批次尚未产生可比较候选</div>';
+      return;
+    }
+    target.innerHTML = `<div class="table-scroll"><table class="lab-mining-table"><thead><tr><th>候选</th><th>状态</th><th>Pareto</th><th>TRAIN IC</th><th>VALID IC / q</th><th>SEALED TEST IC</th><th>版本</th></tr></thead><tbody>${candidates.map(item => {
+      const proposal = item.proposal || {}, metrics = item.metrics || {};
+      return `<tr><td>${h(proposal.name || item.candidate_key)}</td><td>${h(item.status)}</td><td>${item.pareto_rank == null ? '—' : '#' + Number(item.pareto_rank)}</td><td>${number(metrics.train_metrics?.rank_ic, 4)}</td><td>${number(metrics.valid_metrics?.rank_ic, 4)} / ${number(metrics.valid_metrics?.q_value, 3)}</td><td>${number(metrics.test_metrics?.rank_ic, 4)}</td><td>${item.version_id ? `<button type="button" data-factor-version="${h(item.version_id)}">查看候选</button>` : '—'}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+
+  async function loadMiningRun(runId) {
+    if (!runId) return;
+    state.selectedMiningRun = runId;
+    try {
+      renderMiningCandidates(await request(`/api/lab/mining/runs/${encodeURIComponent(runId)}`));
+    } catch (error) {
+      if (isLabActive()) showError('AutoMiner 候选对比加载失败', error);
+    }
+  }
+
+  async function refreshMiningRuns() {
+    try {
+      const response = await request('/api/lab/mining/runs?limit=20');
+      state.miningRuns = response.items || [];
+      renderMiningRuns();
+      const selected = state.miningRuns.some(item => item.id === state.selectedMiningRun)
+        ? state.selectedMiningRun : state.miningRuns[0]?.id;
+      if (selected) await loadMiningRun(selected);
+    } catch (error) {
+      if (isLabActive()) showError('AutoMiner 账本刷新失败', error);
+    }
+  }
+
+  async function previewPythonSplit() {
+    const form = document.getElementById('lab-discovery-form');
+    const target = document.getElementById('lab-split-preview');
+    if (!form || !target || form.elements.method.value !== 'python') return;
+    target.hidden = false;
+    target.innerHTML = '<span>正在计算 TRAIN / VALID / TEST 边界…</span>';
+    try {
+      const value = await request('/api/lab/mining/preview', {method:'POST', body:JSON.stringify({
+        start:form.elements.start.value, end:new Date().toISOString().slice(0,10),
+        horizon:+form.elements.horizon.value,
+      })});
+      target.innerHTML = ['train','valid','test'].map(name => {
+        const item = value.split?.[name] || {};
+        return `<span><b>${name.toUpperCase()} · ${Number(item.days || 0)}D</b><small>${h(item.start || '—')} → ${h(item.end || '—')}${name === 'test' ? '<br>入围顺序冻结后只读一次' : ''}</small></span>`;
+      }).join('');
+    } catch (error) {
+      target.innerHTML = `<span>无法生成切分预览：${h(error.message || error)}</span>`;
+    }
+  }
+
   async function refreshOverview() {
     state.overview = await request('/api/lab/overview');
     state.jobs = state.overview.recent_jobs || [];
     state.experiments = state.overview.recent_experiments || [];
+    state.studies = state.overview.recent_studies || state.studies;
     renderCapabilities();
     renderOverview();
     renderExperiments();
     renderJobTable();
+    renderStudyList();
+    renderStudyDetail();
     renderTaskTray();
     syncResearchForms();
   }
@@ -724,6 +882,7 @@
       const experiments = await request('/api/lab/experiments?limit=50');
       state.experiments = experiments.items || [];
       renderExperiments();
+      if (state.jobs.some(job => job.kind === 'optimize')) await refreshStudies();
       if (state.selectedJobId) await refreshJobDetail();
     } catch (error) {
       if (isLabActive()) showError('任务状态刷新失败', error);
@@ -785,6 +944,17 @@
         if (!factor.closest('#lab-factor-list')) setView('library');
         selectFactor(factor.dataset.factorVersion);
       }
+      const studyButton = event.target.closest('[data-study-id]');
+      if (studyButton) {
+        state.selectedStudyId = studyButton.dataset.studyId;
+        renderStudyDetail();
+      }
+      const resumeStudy = event.target.closest('[data-resume-study]');
+      if (resumeStudy) try {
+        resumeStudy.disabled = true;
+        await request(`/api/lab/studies/${encodeURIComponent(resumeStudy.dataset.resumeStudy)}/resume`, {method:'POST'});
+        await Promise.all([refreshStudies(), refreshJobs()]);
+      } catch (error) { showError('Study 恢复失败', error); } finally { resumeStudy.disabled = false; }
       const model = event.target.closest('[data-model]');
       if (model) {
         if (model.getAttribute('aria-disabled') === 'true') {
@@ -823,6 +993,16 @@
           await Promise.all([refreshOverview(), refreshFactors()]);
         } catch (error) { showError('候选未能批准', error); }
       }
+      const audit = event.target.closest('[data-audit-version]');
+      if (audit) try {
+        const research = state.overview?.research || {};
+        await request('/api/lab/audits', {method:'POST', body:JSON.stringify({
+          version_id:audit.dataset.auditVersion, universe:research.universe || 'csi800',
+          start:research.start || '2015-01-01', end:new Date().toISOString().slice(0,10),
+        })});
+        await refreshJobs();
+        setView('automation');
+      } catch (error) { showError('偏差审计任务未能创建', error); }
       const deploy = event.target.closest('[data-deploy-version]');
       if (deploy && window.confirm('设为研究 Champion？这不会连接真实券商。')) try {
         const research = state.overview?.research || {};
@@ -831,7 +1011,7 @@
         const profile = config?.querySelector('[data-deploy-profile]')?.value || 'all';
         const scope = config?.querySelector('[data-deploy-scope]')?.value || 'exact';
         await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
-        await Promise.all([refreshOverview(), refreshFactors()]);
+        await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
       } catch (error) { showError('Champion 切换失败', error); }
       const suggest = event.target.closest('[data-suggest-version]');
       if (suggest) try {
@@ -854,7 +1034,7 @@
       const retry = event.target.closest('[data-retry-job]');
       if (retry) {
         const source = state.jobDetail;
-        const costly = ['discover_llm', 'train'].includes(source?.kind);
+        const costly = ['discover_llm', 'discover_python', 'train'].includes(source?.kind);
         const confirmed = !costly || window.confirm(
           `${kindLabel[source.kind] || source.kind} 会重新消耗模型或训练资源。确定按完全相同的参数重跑吗？`
         );
@@ -879,9 +1059,22 @@
 
     document.querySelectorAll('#lab-discovery-form [name=method]').forEach(input => input.addEventListener('change', event => {
       const llm = event.target.value === 'llm';
-      document.querySelectorAll('[data-genetic-field]').forEach(item => item.hidden = llm);
-      document.querySelectorAll('[data-llm-field]').forEach(item => item.hidden = !llm);
+      const python = event.target.value === 'python';
+      document.querySelectorAll('[data-genetic-field]').forEach(item => item.hidden = llm || python);
+      document.querySelectorAll('[data-dsl-field]').forEach(item => item.hidden = python);
+      document.querySelectorAll('[data-llm-field]').forEach(item => item.hidden = !(llm || python));
+      document.querySelectorAll('[data-python-field]').forEach(item => item.hidden = !python);
+      const rounds = document.querySelector('#lab-discovery-form [name=rounds]');
+      if (rounds) {
+        rounds.max = python ? '3' : '5';
+        rounds.value = python ? '3' : Math.min(2, Number(rounds.value) || 2);
+      }
+      document.getElementById('lab-split-preview').hidden = !python;
+      if (python) previewPythonSplit();
     }));
+    for (const name of ['start','horizon']) {
+      document.querySelector(`#lab-discovery-form [name=${name}]`)?.addEventListener('change', previewPythonSplit);
+    }
 
     document.getElementById('lab-discovery-form').addEventListener('submit', async event => {
       event.preventDefault();
@@ -890,6 +1083,7 @@
       const base = {universe:form.get('universe'), start:form.get('start'), end:new Date().toISOString().slice(0,10), horizon:+form.get('horizon')};
       try {
         if (method === 'llm') await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
+        else if (method === 'python') await enqueue('discover_python', {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')});
         else await enqueue('discover_genetic', {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')});
         state.formsDirty = false;
         setView('automation');
@@ -915,6 +1109,28 @@
       } catch (error) { showError('训练任务未能创建', error); }
     });
 
+    document.getElementById('lab-optimize-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const models = form.getAll('models');
+      if (!models.length) {
+        showError('Study 配置不完整', new Error('至少选择一个模型'));
+        return;
+      }
+      const universe = String(form.get('universe'));
+      try {
+        const study = await request('/api/lab/studies', {method:'POST', body:JSON.stringify({
+          universe, start:form.get('start'), end:new Date().toISOString().slice(0,10), models,
+          budget_hours:+form.get('budget_hours'), max_trials:+form.get('max_trials'),
+          top_n:+form.get('top_n'), sequence_length:+form.get('sequence_length'),
+          research_tier:universe === 'csi800' ? 'production' : 'sandbox',
+        })});
+        state.formsDirty = false;
+        state.selectedStudyId = study.id;
+        await Promise.all([refreshStudies(), refreshJobs()]);
+      } catch (error) { showError('优化 Study 未能创建', error); }
+    });
+
     document.getElementById('lab-factor-create-form').addEventListener('submit', async event => {
       event.preventDefault();
       const form = new FormData(event.target);
@@ -931,6 +1147,11 @@
     });
 
     document.getElementById('lab-refresh-jobs').addEventListener('click', refreshJobs);
+    document.getElementById('lab-refresh-studies').addEventListener('click', refreshStudies);
+    document.getElementById('lab-mining-runs')?.addEventListener('click', event => {
+      const button = event.target.closest('[data-mining-run]');
+      if (button) loadMiningRun(button.dataset.miningRun);
+    });
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && state.selectedJobId) closeJobDetail();
     });
@@ -941,7 +1162,7 @@
       state.initialized = true;
       bindEvents();
       try {
-        await Promise.all([refreshOverview(), refreshFactors()]);
+        await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
       } catch (error) {
         showError('研究工作台加载失败', error);
       }

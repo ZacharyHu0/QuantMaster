@@ -180,6 +180,7 @@ class LabSettings(StrictModel):
     daily_budget_hours: float = Field(default=10.0, gt=0, le=24)
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     allow_cloud_sample: bool = False
+    ai_python_mining_enabled: bool = False
 
     @field_validator("universe")
     @classmethod

@@ -6,6 +6,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from quantmaster import __version__
+from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.release import RELEASE_DATE
 from quantmaster.server.app import app
 
@@ -71,6 +72,12 @@ class TestBasics:
         assert 'id="candidate-workspace"' in resp.text
         assert 'href="/static/candidates.css"' in resp.text
         assert 'src="/static/candidates.js"' in resp.text
+        assert 'id="tab-help"' in resp.text
+        assert 'class="header-help" data-tab="help"' in resp.text
+        assert 'href="/static/help.css"' in resp.text
+        assert 'src="/static/help.js"' in resp.text
+        assert f'data-trading-days="{TRADING_DAYS}"' in resp.text
+        assert f'data-risk-free="{RISK_FREE}"' in resp.text
         assert 'data-regime-window="10y"' in resp.text
         assert "名称 / 代码 / 板块" in resp.text
         assert 'id="runtime-info"' in resp.text
@@ -97,6 +104,8 @@ class TestBasics:
         assert f'data-version="{__version__}"' in resp.text
         assert f'data-release-date="{RELEASE_DATE}"' in resp.text
         assert "%%QM_VERSION%%" not in resp.text
+        assert "%%QM_TRADING_DAYS%%" not in resp.text
+        assert "%%QM_RISK_FREE%%" not in resp.text
         nav_markup = resp.text.split('<nav id="nav"', 1)[1].split("</nav>", 1)[0]
         assert 'data-tab="settings"' not in nav_markup
         assert [
@@ -109,11 +118,20 @@ class TestBasics:
                         "paper", "ledger", "automation")
         ])
         assert 'class="header-settings" data-tab="settings"' in resp.text
+        assert resp.text.index('class="header-help"') < resp.text.index('class="header-settings"')
         settings_markup = resp.text.split('class="header-settings"', 1)[1].split("</button>", 1)[0]
         assert "header-settings-label" not in settings_markup
         assert settings_markup.count("<rect x=\"10.65\"") == 8
         assert client.get("/static/candidates.css").status_code == 200
         assert client.get("/static/candidates.js").status_code == 200
+        assert client.get("/static/help.css").status_code == 200
+        assert client.get("/static/help.js").status_code == 200
+        help_content = client.get("/static/help-content.html")
+        assert help_content.status_code == 200
+        assert 'data-help-topic="start"' in help_content.text
+        assert 'data-help-topic="checklist"' in help_content.text
+        assert help_content.text.count('data-calculator="') == 6
+        assert "2026-07-28" in help_content.text
 
     def test_validation_error_has_request_id(self):
         resp = client.post("/api/decision/dashboard/stream", json={

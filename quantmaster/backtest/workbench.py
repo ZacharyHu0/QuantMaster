@@ -298,6 +298,11 @@ class BacktestService:
         spec = BacktestSpec.model_validate(run["config"])
         end = spec.end or str(pd.Timestamp.now().date())
         warnings: list[dict[str, str]] = []
+        resolved_tier = (
+            "production" if spec.research_tier == "auto" and spec.universe.lower() == "csi800"
+            else "sandbox" if spec.research_tier == "auto" else spec.research_tier
+        )
+        research_manifest: dict[str, Any] = {}
 
         def checkpoint(value: int, phase: str, detail: str = "") -> None:
             if cancelled():
@@ -324,7 +329,37 @@ class BacktestService:
         checkpoint(18, "加载行情", f"读取 {len(symbols)} 只标的的历史行情")
         provided_panel = panel is not None
         if panel is None:
-            panel = load_panel(symbols, spec.start, end)
+            if resolved_tier == "production":
+                from quantmaster.data.research import load_research_bundle
+
+                def research_progress(done: int, total: int, symbol: str, success: bool) -> None:
+                    checkpoint(
+                        18 + int(18 * done / max(1, total)), "加载原始成交/PIT约束",
+                        f"{done}/{total} · {symbol}{'' if success else ' 失败'}",
+                    )
+
+                research_bundle = load_research_bundle(
+                    symbols, spec.start, end, membership=membership, progress=research_progress,
+                )
+                panel = research_bundle.backtest_panel()
+                research_manifest = {
+                    **research_bundle.manifest,
+                    "manifest_hash": research_bundle.manifest_hash,
+                }
+            else:
+                panel = load_panel(symbols, spec.start, end)
+                warnings.append({
+                    "code": "sandbox_execution_approximation", "level": "warning",
+                    "message": "Sandbox 使用旧前复权缓存与代码板涨跌停近似，不能作为生产晋升证据。",
+                })
+        elif resolved_tier == "production":
+            required = {
+                "execution_open", "execution_close", "adj_factor",
+                "up_limit", "down_limit", "suspended",
+            }
+            missing = sorted(required - set(panel))
+            if missing:
+                raise ValueError("production 回测缺少真实成交字段：" + "、".join(missing))
         quality_symbols = list(panel.get("close", pd.DataFrame()).columns) if provided_panel else symbols
         data_quality, panel_warnings = assess_panel_quality(
             panel,
@@ -340,7 +375,14 @@ class BacktestService:
         strategy = build_strategy(
             spec.strategy, symbols, spec.start, end, universe=spec.universe,
         )
-        weights = strategy.target_weights(panel)
+        signal_bundle = strategy.signal_bundle(panel)
+        if (
+            resolved_tier == "production"
+            and signal_bundle.metadata.get("prediction_source") == "rolling_oof"
+            and signal_bundle.metadata.get("research_quality") != "production"
+        ):
+            raise ValueError("production 回测拒绝使用 Sandbox 训练的学习模型")
+        weights = signal_bundle.weights
         if membership is not None:
             member_mask = membership.reindex(index=weights.index, columns=weights.columns).fillna(False)
             active = weights.notna().any(axis=1)
@@ -376,6 +418,7 @@ class BacktestService:
                 initial_capital=spec.initial_capital,
                 stop_loss=spec.stop_loss,
                 take_profit=spec.take_profit,
+                research_tier=resolved_tier,
             ),
             benchmark_close=benchmark_close,
         )
@@ -409,6 +452,7 @@ class BacktestService:
             "strategy_snapshot": spec.strategy.model_dump(mode="json"),
             "universe": spec.universe,
             "universe_quality": universe_quality,
+            "research_tier": resolved_tier,
             "date_range": {"requested": [spec.start, end], "actual": [
                 pd.Timestamp(close.index.min()).strftime("%Y-%m-%d"),
                 pd.Timestamp(close.index.max()).strftime("%Y-%m-%d"),
@@ -418,6 +462,7 @@ class BacktestService:
             "execution": "T close signal -> T+1 open execution",
             "trade_config": trade_config,
             "dataset": snapshot,
+            "research_data": research_manifest,
             "data_quality": data_quality,
             "warnings": warnings,
         }
@@ -447,6 +492,16 @@ class BacktestService:
             "yearly": report["yearly"],
             "monthly": report["monthly"],
             "trade_stats": report["trade_stats"],
+            "risk_diagnostics": report.get("risk_diagnostics", {}),
+            "stress_tests": report.get("stress_tests", []),
+            "trade_lifecycle": report.get("trade_lifecycle", {}),
+            "attribution": {
+                name: self._points(
+                    values.reindex_like(weights).mul(weights.fillna(0.0)).sum(axis=1)
+                )
+                for name, values in signal_bundle.contributions.items()
+            },
+            "signal_metadata": signal_bundle.metadata,
         }
         summary = {
             "strategy": strategy.name,

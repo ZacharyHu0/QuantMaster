@@ -396,7 +396,13 @@ class PaperService:
         return load_universe(name), {"as_of": as_of, "quality": "sandbox"}
 
     def create_account(self, spec: PaperAccountSpec) -> dict:
-        from quantmaster.backtest.spec import pin_decision_strategy
+        from quantmaster.backtest.spec import LabVersionStrategySpec, pin_decision_strategy
+
+        if isinstance(spec.strategy, LabVersionStrategySpec):
+            raise ValueError(
+                "Lab 版本历史回测使用滚动 OOF，不能直接提升模拟账户；"
+                "请先完成偏差审计、人工批准和 Champion 部署，再使用 Decision 策略。"
+            )
 
         symbols, meta = self._resolve_universe(
             spec.universe, str(pd.Timestamp.now().date()),
@@ -513,6 +519,8 @@ class PaperService:
             from quantmaster.backtest.spec import DecisionStrategySpec
 
             parsed_strategy = DecisionStrategySpec.model_validate(strategy_spec)
+        elif strategy_spec.get("kind") == "lab_version":
+            raise ValueError("Lab OOF 回测策略不能生成实时模拟提案")
         else:
             parsed_strategy = FactorStrategySpec.model_validate(strategy_spec)
         if not signal_is_due(parsed_strategy, close.index, len(close.index) - 1):

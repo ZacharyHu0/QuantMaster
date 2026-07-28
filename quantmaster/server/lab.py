@@ -42,8 +42,40 @@ class FactorCreate(BaseModel):
 
 
 class JobCreate(BaseModel):
-    kind: Literal["prepare_data", "validate", "discover_genetic", "discover_llm", "train"]
+    kind: Literal[
+        "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+        "optimize", "bias_audit", "discover_python",
+    ]
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class StudyCreate(BaseModel):
+    universe: str = Field(default="csi800", min_length=1, max_length=40)
+    start: str = "2015-01-01"
+    end: str = ""
+    models: list[Literal["multi-transformer", "multi-tcn", "multi-gru", "ridge"]] = Field(
+        default_factory=lambda: ["multi-transformer", "multi-tcn", "multi-gru", "ridge"],
+    )
+    budget_hours: float = Field(default=10.0, gt=0, le=10)
+    max_trials: int = Field(default=40, ge=1, le=500)
+    top_n: int = Field(default=20, ge=1, le=200)
+    sequence_length: int = Field(default=20, ge=1, le=240)
+    research_tier: Literal["production", "sandbox"] = "production"
+    protocol: dict[str, Any] = Field(default_factory=dict)
+    features: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditCreate(BaseModel):
+    version_id: str = Field(min_length=1, max_length=64)
+    universe: str = Field(default="csi800", min_length=1, max_length=40)
+    start: str = "2015-01-01"
+    end: str
+
+
+class MiningPreview(BaseModel):
+    start: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    horizon: Literal[1, 3, 5, 7] = 3
 
 
 class Decision(BaseModel):
@@ -164,6 +196,80 @@ def enqueue_job(body: JobCreate) -> dict:
         return get_lab_service().enqueue(body.kind, body.params)
     except Exception as exc:
         raise _fail(exc) from exc
+
+
+@router.post("/mining/preview")
+def mining_preview(body: MiningPreview) -> dict:
+    try:
+        return get_lab_service().preview_python_mining(**body.model_dump())
+    except Exception as exc:
+        raise _fail(exc) from exc
+
+
+@router.get("/mining/runs")
+def mining_runs(limit: int = Query(30, ge=1, le=200)) -> dict:
+    return {"items": get_lab_service().store.mining_runs(limit)}
+
+
+@router.get("/mining/runs/{run_id}")
+def mining_run(run_id: str) -> dict:
+    value = get_lab_service().store.mining_run(run_id)
+    if value is None:
+        raise HTTPException(404, "AutoMiner 运行不存在")
+    return value
+
+
+@router.get("/mining/candidates/{candidate_id}")
+def mining_candidate(candidate_id: str) -> dict:
+    value = get_lab_service().store.mining_candidate(candidate_id)
+    if value is None:
+        raise HTTPException(404, "AutoMiner 候选不存在")
+    return value
+
+
+@router.post("/studies", status_code=202)
+def create_study(body: StudyCreate) -> dict:
+    try:
+        return get_lab_service().create_study(body.model_dump())
+    except Exception as exc:
+        raise _fail(exc) from exc
+
+
+@router.get("/studies")
+def studies(limit: int = Query(50, ge=1, le=500)) -> dict:
+    return {"items": get_lab_service().store.studies(limit)}
+
+
+@router.get("/studies/{study_id}")
+def study(study_id: str) -> dict:
+    value = get_lab_service().store.study(study_id)
+    if value is None:
+        raise HTTPException(404, "优化 Study 不存在")
+    return value
+
+
+@router.post("/studies/{study_id}/resume", status_code=202)
+def resume_study(study_id: str) -> dict:
+    try:
+        return get_lab_service().resume_study(study_id)
+    except Exception as exc:
+        raise _fail(exc) from exc
+
+
+@router.post("/audits", status_code=202)
+def create_audit(body: AuditCreate) -> dict:
+    try:
+        return get_lab_service().enqueue("bias_audit", body.model_dump())
+    except Exception as exc:
+        raise _fail(exc) from exc
+
+
+@router.get("/audits/{audit_id}")
+def audit(audit_id: str) -> dict:
+    value = get_lab_service().store.bias_audit(audit_id)
+    if value is None:
+        raise HTTPException(404, "偏差审计不存在")
+    return value
 
 
 @router.get("/jobs")

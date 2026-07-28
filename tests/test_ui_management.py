@@ -157,6 +157,142 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         browser.close()
 
 
+def test_help_handbook_search_routes_and_calculators(live_server):
+    url, _ = live_server
+    trade_settings = {
+        "commission_rate": 0.00025,
+        "commission_min": 5.0,
+        "stamp_tax_rate": 0.0005,
+        "transfer_fee_rate": 0.00001,
+        "slippage": 0.001,
+        "lot_size": 100,
+    }
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1360, "height": 900})
+        page.route(
+            "**/api/settings",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"trade": trade_settings}),
+            ),
+        )
+        page.goto(url)
+
+        help_button = page.get_by_role("button", name="帮助", exact=True)
+        settings_button = page.get_by_role("button", name="设置", exact=True)
+        assert help_button.bounding_box()["x"] < settings_button.bounding_box()["x"]
+        help_button.click()
+        page.locator("#help-start").wait_for(state="visible")
+        page.wait_for_function(
+            "document.querySelector('#help-settings-status').innerText.startsWith('已载入')"
+        )
+        assert page.locator("#help-settings-status").inner_text().startswith("已载入")
+        assert page.locator("#help-article h2").count() == 13
+        assert page.evaluate("location.hash") == "#help/start"
+
+        page.reload()
+        page.locator("#help-start").wait_for(state="visible")
+        assert page.locator("#tab-help").evaluate("el => el.classList.contains('active')")
+
+        page.goto(f"{url}/#help/validation")
+        page.locator("#help-validation").wait_for(state="visible")
+        page.wait_for_function(
+            "document.querySelector('[data-help-link=\"validation\"]')"
+            ".getAttribute('aria-current') === 'location'"
+        )
+        assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
+
+        search = page.locator("#help-search-input")
+        search.fill("T+1")
+        page.locator(".help-search-result").first.wait_for()
+        assert "T+1" in page.locator("#help-search-results").inner_text()
+        search.fill("RankIC")
+        assert "RankIC" in page.locator("#help-search-results").inner_text()
+        search.fill("完全不存在的量化词条xyz")
+        assert "没有找到" in page.locator("#help-search-results").inner_text()
+        page.locator("#help-search-clear").click()
+        assert page.locator("#help-search-results").is_hidden()
+
+        page.goto(f"{url}/#help/calculators")
+        page.locator("#calc-compound").wait_for(state="visible")
+        assert page.locator('#calc-compound [data-output="annual"]').inner_text() == "10.00%"
+        assert page.locator('#calc-drawdown [data-output="recovery"]').inner_text() == "25.00%"
+        assert page.locator('#calc-sharpe [data-output="sharpe"]').inner_text() == "0.512"
+        assert page.locator('#calc-rankic [data-output="rankic"]').inner_text() == "1.0000"
+
+        rank_pairs = page.locator('#calc-rankic [name="pairs"]')
+        rank_pairs.fill("1, 3\n2, 2\n3, 1")
+        assert page.locator('#calc-rankic [data-output="rankic"]').inner_text() == "-1.0000"
+        rank_pairs.fill("1, 1\n1, 2\n2, 3")
+        assert page.locator('#calc-rankic [data-output="rankic"]').inner_text() == "0.8660"
+        rank_pairs.fill("1, 1\n1, 2\n1, 3")
+        assert "常数" in page.locator("#calc-rankic [data-error]").inner_text()
+
+        assert page.locator('#calc-cost [data-output="buy_total"]').inner_text() == "¥10,015.10"
+        assert page.locator('#calc-cost [data-output="sell_net"]').inner_text() == "¥10,179.60"
+        assert page.locator('#calc-cost [data-output="pnl"]').inner_text() == "¥164.50"
+        assert page.locator('#calc-cost [data-output="breakeven"]').inner_text() == "10.0352 元"
+        assert page.locator('#calc-position [data-output="shares"]').inner_text() == "700 股"
+        page.locator('#calc-position [name="stop"]').fill("21")
+        assert "止损报价必须低于入场报价" in page.locator("#calc-position [data-error]").inner_text()
+
+        page.goto(f"{url}/#help/models")
+        page.locator('#help-models [data-help-tab="decision"]').click()
+        assert page.locator("#tab-decision").evaluate("el => el.classList.contains('active')")
+
+        for width, height in ((1360, 900), (900, 900), (390, 844)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.goto(f"{url}/#help/start")
+            page.locator("#help-start").wait_for(state="visible")
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page.locator(".help-mobile-toc").is_visible()
+        browser.close()
+
+
+def test_help_settings_failure_keeps_manual_calculators(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+        page.route("**/api/settings", lambda route: route.fulfill(status=503, body="unavailable"))
+        page.goto(f"{url}/#help/calculators")
+        page.locator("#calc-cost").wait_for(state="visible")
+        page.wait_for_function(
+            "document.querySelector('#help-settings-status').innerText.includes('未能读取项目设置')"
+        )
+        assert "未能读取项目设置" in page.locator("#help-settings-status").inner_text()
+        assert page.locator('#calc-cost [data-trade-key="commission_rate"]').is_editable()
+        assert page.locator('#calc-cost [data-output="buy_total"]').inner_text() != "—"
+        browser.close()
+
+
+def test_help_content_retry(live_server):
+    url, _ = live_server
+    attempts = 0
+
+    def route_help_content(route):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            route.fulfill(status=503, body="temporarily unavailable")
+        else:
+            route.continue_()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 900, "height": 800})
+        page.route("**/static/help-content.html", route_help_content)
+        page.goto(f"{url}/#help/start")
+        page.locator("#help-retry").wait_for(state="visible")
+        assert "手册暂时没有载入" in page.locator("#help-root").inner_text()
+        page.locator("#help-retry").click()
+        page.locator("#help-start").wait_for(state="visible")
+        assert attempts == 2
+        browser.close()
+
+
 def test_decision_chart_survives_progressive_rerender(live_server):
     url, _ = live_server
     decision = {

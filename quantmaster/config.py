@@ -105,6 +105,7 @@ class LabConfig:
     daily_budget_hours: float = 10.0
     device: str = "auto"
     allow_cloud_sample: bool = False
+    ai_python_mining_enabled: bool = False
 
 
 @dataclass

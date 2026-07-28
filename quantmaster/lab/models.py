@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-FactorKind = Literal["expression", "learned", "latent", "composite"]
+FactorKind = Literal["expression", "python", "learned", "latent", "composite"]
 FactorStatus = Literal[
     "draft", "validating", "candidate", "approved", "production", "degraded", "archived"
 ]
@@ -55,18 +55,21 @@ class FactorSpec:
     horizons: tuple[int, ...] = (1, 3, 5, 7)
     rationale: str = ""
     model: dict[str, Any] = field(default_factory=dict)
+    artifact: dict[str, Any] = field(default_factory=dict)
     components: tuple[dict[str, Any], ...] = ()
     tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.slug or len(self.slug) > 120:
             raise ValueError("因子标识必须为 1–120 个字符")
-        if self.kind not in {"expression", "learned", "latent", "composite"}:
+        if self.kind not in {"expression", "python", "learned", "latent", "composite"}:
             raise ValueError(f"未知因子类型: {self.kind}")
         if self.kind == "expression" and not self.expression and self.slug not in {
             "ep", "bp", "dividend_yield", "small_cap", "roe", "news_sentiment",
         }:
             raise ValueError("表达式因子必须提供 expression")
+        if self.kind == "python" and not self.artifact.get("manifest"):
+            raise ValueError("Python 因子必须引用不可变工件清单")
         if self.direction not in {-1, 1}:
             raise ValueError("direction 只允许 -1 或 1")
         if not self.horizons or any(value not in {1, 3, 5, 7} for value in self.horizons):

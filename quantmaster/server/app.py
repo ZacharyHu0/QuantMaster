@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from quantmaster import __version__
+from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.config import get_config
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASES
@@ -317,8 +318,12 @@ def _progress_stream(
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    page = template.replace("%%QM_VERSION%%", __version__).replace(
-        "%%QM_RELEASE_DATE%%", RELEASE_DATE)
+    page = (
+        template.replace("%%QM_VERSION%%", __version__)
+        .replace("%%QM_RELEASE_DATE%%", RELEASE_DATE)
+        .replace("%%QM_TRADING_DAYS%%", str(TRADING_DAYS))
+        .replace("%%QM_RISK_FREE%%", str(RISK_FREE))
+    )
     return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
 

@@ -2,7 +2,8 @@
 
 当前只使用仓库 ``docs/tushare_2000_guide.md`` 明确列为 2000 积分可用的接口：
 ``daily``、``adj_factor``、``index_daily``、``daily_basic``、
-``fina_indicator``、``index_classify``、``index_member_all`` 与 ``index_weight``。
+``fina_indicator``、``stk_limit``、``suspend_d``、``trade_cal``、
+``index_classify``、``index_member_all`` 与 ``index_weight``。
 
 Tushare 是 AKShare 连续重试失败后的 A 股日线备用源；每次接口响应还会按
 ``endpoint + params`` 缓存在 ``data/api_cache/tushare``，避免研究/回测重复
@@ -167,6 +168,111 @@ class TushareSource(DataSource):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
         return self._normalize_market_frame(merged).loc[start:end]
 
+    def research_daily(self, symbol: str, start: str, end: str) -> dict[str, pd.DataFrame]:
+        """返回不可变总收益信号流与真实成交约束，供 production 研究使用。
+
+        与 ``daily`` 不同，总收益价格直接使用 ``raw_price * adj_factor``，不会因
+        请求结束日变化而重写历史。成交始终使用未复权价格。
+        """
+        if _is_a_share_index(symbol) or _instrument_type(symbol) in {"etf", "fund"}:
+            raise ValueError("research_daily 首版只支持 A 股股票")
+        start_c, end_c = start.replace("-", ""), end.replace("-", "")
+        ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
+        raw = self._call(
+            "daily", ttl, ts_code=symbol, start_date=start_c, end_date=end_c,
+            fields="ts_code,trade_date,open,high,low,close,vol,amount",
+        )
+        factors = self._call(
+            "adj_factor", ttl, ts_code=symbol, start_date=start_c, end_date=end_c,
+            fields="ts_code,trade_date,adj_factor",
+        )
+        limits = self._call(
+            "stk_limit", ttl, ts_code=symbol, start_date=start_c, end_date=end_c,
+            fields="ts_code,trade_date,pre_close,up_limit,down_limit",
+        )
+        suspensions = self._call(
+            "suspend_d", ttl, ts_code=symbol, start_date=start_c, end_date=end_c,
+            fields="ts_code,trade_date,suspend_timing,suspend_type",
+        )
+        if raw.empty or factors.empty or limits.empty:
+            raise RuntimeError(f"{symbol} 缺少原始日线、复权因子或真实涨跌停价")
+        merged = raw.merge(
+            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
+        ).merge(
+            limits[["trade_date", "up_limit", "down_limit"]], on="trade_date", how="left",
+        )
+        merged["trade_date"] = pd.to_datetime(merged["trade_date"])
+        merged = merged.sort_values("trade_date").set_index("trade_date")
+        merged.index.name = "date"
+        numeric = ("open", "high", "low", "close", "vol", "amount", "adj_factor",
+                   "up_limit", "down_limit")
+        for column in numeric:
+            merged[column] = pd.to_numeric(merged[column], errors="coerce")
+        raw_frame = pd.DataFrame({
+            "open": merged["open"], "high": merged["high"],
+            "low": merged["low"], "close": merged["close"],
+            "volume": merged["vol"] * 100, "amount": merged["amount"] * 1000,
+        })
+        signal = raw_frame.copy()
+        for column in ("open", "high", "low", "close"):
+            signal[column] = raw_frame[column] * merged["adj_factor"]
+        suspension_index = pd.bdate_range(start, end).union(merged.index).sort_values()
+        suspended = pd.Series(False, index=suspension_index, name="suspended")
+        if not suspensions.empty and "trade_date" in suspensions:
+            suspension_types = (
+                suspensions["suspend_type"].astype(str).str.upper()
+                if "suspend_type" in suspensions
+                else pd.Series("S", index=suspensions.index)
+            )
+            stopped = suspensions.loc[
+                suspension_types != "R"
+            ].copy()
+            if "suspend_timing" in stopped:
+                timing = stopped["suspend_timing"].fillna("").astype(str).str.strip()
+                stopped = stopped.loc[timing.eq("") | timing.str.contains("09:30", regex=False)]
+            suspension_dates = pd.to_datetime(
+                stopped["trade_date"], errors="coerce",
+            ).dropna().dt.normalize()
+            suspended.loc[suspended.index.normalize().isin(suspension_dates)] = True
+        elif not suspensions.empty and "suspend_date" in suspensions:
+            # 兼容注入的区间型数据源；Tushare 官方 suspend_d 使用上面的逐日 trade_date。
+            for _, event in suspensions.iterrows():
+                suspended_at = pd.to_datetime(event.get("suspend_date"), errors="coerce")
+                if pd.isna(suspended_at):
+                    continue
+                resumed_at = pd.to_datetime(event.get("resume_date"), errors="coerce")
+                event_type = str(event.get("suspend_type") or "").upper()
+                if event_type.startswith("R"):
+                    continue
+                stop = (
+                    pd.Timestamp(resumed_at).normalize() - pd.Timedelta(days=1)
+                    if pd.notna(resumed_at) else pd.Timestamp(end).normalize()
+                )
+                mask = (
+                    (suspended.index.normalize() >= pd.Timestamp(suspended_at).normalize())
+                    & (suspended.index.normalize() <= stop)
+                )
+                suspended.loc[mask] = True
+        return {
+            "signal": signal.loc[start:end],
+            "raw": raw_frame.loc[start:end],
+            "adj_factor": merged[["adj_factor"]].loc[start:end],
+            "limits": merged[["up_limit", "down_limit"]].loc[start:end],
+            "suspended": suspended.loc[start:end].to_frame(),
+        }
+
+    def trade_calendar(self, start: str, end: str, exchange: str = "SSE") -> pd.DatetimeIndex:
+        """读取官方交易日历；production 数据包禁止用普通工作日替代。"""
+        ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
+        frame = self._call(
+            "trade_cal", ttl, exchange=exchange, start_date=start.replace("-", ""),
+            end_date=end.replace("-", ""), fields="exchange,cal_date,is_open,pretrade_date",
+        )
+        if frame.empty or "cal_date" not in frame:
+            raise RuntimeError("交易日历为空")
+        enabled = frame.loc[pd.to_numeric(frame.get("is_open"), errors="coerce") == 1]
+        return pd.DatetimeIndex(pd.to_datetime(enabled["cal_date"])).normalize().sort_values()
+
     def daily_indicators(
         self, symbol: str, start: str | None = None, end: str | None = None,
     ) -> pd.DataFrame:
@@ -255,7 +361,7 @@ class TushareSource(DataSource):
         return records
 
     def quarterly_roe(self, symbol: str, start_year: str = "2018") -> pd.DataFrame:
-        """2000 积分 ``fina_indicator``：季度 ROE，按报告期返回。"""
+        """2000 积分 ``fina_indicator``：保留公告日与修订序列的 PIT ROE。"""
         ttl = max(1, int(get_config().data.fundamental_cache_days))
         raw = self._call(
             "fina_indicator", ttl, ts_code=symbol,
@@ -263,15 +369,21 @@ class TushareSource(DataSource):
             fields="ts_code,ann_date,end_date,roe,update_flag",
         )
         if raw.empty or "roe" not in raw:
-            return pd.DataFrame(columns=["roe"])
+            return pd.DataFrame(columns=["report_date", "roe", "update_flag"])
         frame = raw.copy()
-        frame["end_date"] = pd.to_datetime(frame["end_date"])
-        if "ann_date" in frame:
-            frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
-            frame = frame.sort_values(["end_date", "ann_date"])
-        frame = frame.drop_duplicates("end_date", keep="last").set_index("end_date")
-        frame.index.name = "report_date"
-        return pd.DataFrame({"roe": pd.to_numeric(frame["roe"], errors="coerce")})
+        frame["report_date"] = pd.to_datetime(frame["end_date"], errors="coerce")
+        frame["ann_date"] = pd.to_datetime(frame.get("ann_date"), errors="coerce")
+        frame["roe"] = pd.to_numeric(frame["roe"], errors="coerce")
+        update_flag = frame.get("update_flag")
+        frame["update_flag"] = (
+            update_flag.fillna("").astype(str) if update_flag is not None else ""
+        )
+        frame = frame.dropna(subset=["ann_date", "report_date", "roe"])
+        frame = frame.sort_values(["ann_date", "report_date", "update_flag"])
+        frame = frame.drop_duplicates(["ann_date", "report_date"], keep="last")
+        frame = frame.set_index("ann_date")
+        frame.index.name = "ann_date"
+        return frame[["report_date", "roe", "update_flag"]]
 
     def industry_map(self) -> dict[str, str]:
         """2000 积分申万 2021 一级行业映射，原始响应缓存 30 天。

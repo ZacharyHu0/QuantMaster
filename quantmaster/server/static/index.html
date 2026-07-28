@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="/static/news.css">
 <link rel="stylesheet" href="/static/lab.css">
 <link rel="stylesheet" href="/static/trading.css">
+<link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
 <style>
@@ -55,12 +56,15 @@
   .release-section + .release-section { margin-top:12px; }
   .release-section h3 { color:var(--ink-2); font-size:12px; font-weight:500; margin-bottom:5px; }
   .release-section ul { display:grid; gap:5px; padding-left:17px; color:var(--muted); font-size:12px; line-height:1.55; }
+  .header-actions { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+  .header-help { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-width:66px; height:40px; background:none; color:var(--ink-2); border:1px solid var(--axis); border-radius:8px; padding:0 12px; cursor:pointer; font:inherit; transition:background-color 180ms var(--ease-out-quart),border-color 180ms var(--ease-out-quart),color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
+  .header-help svg { width:18px; height:18px; flex:0 0 auto; }
   .header-settings { display:grid; place-items:center; flex:0 0 auto; width:40px; height:40px; background:none; color:var(--ink-2); border:1px solid var(--axis); border-radius:8px; padding:0; cursor:pointer; transition:background-color 180ms var(--ease-out-quart),border-color 180ms var(--ease-out-quart),color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart); }
   .header-settings svg { display:block; width:20px; height:20px; }
-  .header-settings:hover { color:var(--ink); border-color:color-mix(in oklch,var(--axis) 55%,var(--ink-2)); }
-  .header-settings.active { color:var(--ink); background:var(--surface); border-color:var(--border); }
-  .header-settings:active { transform:scale(.97); }
-  .release-trigger:focus-visible,.header-settings:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
+  .header-help:hover,.header-settings:hover { color:var(--ink); border-color:color-mix(in oklch,var(--axis) 55%,var(--ink-2)); }
+  .header-help.active,.header-settings.active { color:var(--ink); background:var(--surface); border-color:var(--border); }
+  .header-help:active,.header-settings:active { transform:scale(.97); }
+  .release-trigger:focus-visible,.header-help:focus-visible,.header-settings:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
   main { padding: 20px 24px 88px; max-width: 1280px; margin: 0 auto; }
   .tab { display: none; }
   .tab.active { display: block; animation:tab-in 220ms var(--ease-out-quart) both; }
@@ -467,8 +471,17 @@
     <span id="release-version">版本</span>
     <time class="release-date" id="release-date" hidden><span class="release-year"></span><span class="release-day"></span></time>
   </button>
-  <button class="header-settings" data-tab="settings" type="button" aria-label="设置" title="设置">
-    <svg class="settings-gear" viewBox="0 0 24 24" aria-hidden="true">
+  <div class="header-actions">
+    <button class="header-help" data-tab="help" type="button" aria-label="帮助" title="量化研究与交易手册">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M9.7 9a2.45 2.45 0 0 1 4.75.78c0 1.85-2.45 2.05-2.45 3.72" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <circle cx="12" cy="17" r="1" fill="currentColor"/>
+      </svg>
+      <span>帮助</span>
+    </button>
+    <button class="header-settings" data-tab="settings" type="button" aria-label="设置" title="设置">
+      <svg class="settings-gear" viewBox="0 0 24 24" aria-hidden="true">
       <mask id="settings-gear-cutout">
         <rect width="24" height="24" fill="white"/>
         <circle cx="12" cy="12" r="2.6" fill="black"/>
@@ -484,8 +497,9 @@
         <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(270 12 12)"/>
         <rect x="10.65" y="1.5" width="2.7" height="5.2" rx=".7" transform="rotate(315 12 12)"/>
       </g>
-    </svg>
-  </button>
+      </svg>
+    </button>
+  </div>
   <aside class="release-popover" id="release-popover" role="dialog" aria-modal="false" aria-labelledby="release-popover-title" hidden>
     <div class="release-popover-head">
       <h2 id="release-popover-title">更新日志</h2>
@@ -624,8 +638,9 @@
       <button class="active" type="button" data-lab-view="overview"><span>01</span>总览</button>
       <button type="button" data-lab-view="discover"><span>02</span>AI 发现</button>
       <button type="button" data-lab-view="experiments"><span>03</span>模型实验</button>
-      <button type="button" data-lab-view="library"><span>04</span>因子库</button>
-      <button type="button" data-lab-view="automation"><span>05</span>研究自动化</button>
+      <button type="button" data-lab-view="optimization"><span>04</span>滚动优化</button>
+      <button type="button" data-lab-view="library"><span>05</span>因子库</button>
+      <button type="button" data-lab-view="automation"><span>06</span>研究自动化</button>
       <div class="lab-rail-foot">
         <span>APPROVAL MODE</span>
         <strong>Human gated</strong>
@@ -670,29 +685,38 @@
             <div class="lab-method-switch" role="radiogroup" aria-label="发现方法">
               <label><input type="radio" name="method" value="genetic" checked><span><b>遗传规划</b><small>本机演化安全 DSL</small></span></label>
               <label><input type="radio" name="method" value="llm"><span><b>AI Copilot</b><small>结构提案，本地验证</small></span></label>
+              <label><input type="radio" name="method" value="python"><span><b>Python AutoMiner</b><small>受限代码 · 密封测试</small></span></label>
             </div>
             <div class="lab-form-grid">
               <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all" required><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
               <label>研究起点<input name="start" type="date" value="2022-01-01" required></label>
               <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
-              <label>保留候选<input name="top" type="number" value="10" min="2" max="50"></label>
+              <label data-dsl-field>保留候选<input name="top" type="number" value="10" min="2" max="50"></label>
               <label data-genetic-field>种群<input name="population" type="number" value="60" min="10" max="500"></label>
               <label data-genetic-field>进化代数<input name="generations" type="number" value="8" min="1" max="50"></label>
               <label data-llm-field hidden>反馈轮数<input name="rounds" type="number" value="2" min="1" max="5"></label>
+              <label data-python-field hidden>代码候选上限<input name="candidates" type="number" value="24" min="1" max="24"></label>
+              <label data-python-field hidden>Pareto 入围数<input name="finalists" type="number" value="3" min="1" max="3"></label>
             </div>
-            <div class="lab-form-note"><span>DATA POLICY</span><p>自动任务仅共享指标和因子结构。匿名样本必须在单次请求中再次确认。</p></div>
+            <div class="lab-split-preview" id="lab-split-preview" hidden aria-live="polite"><span>正在计算 TRAIN / VALID / TEST 边界…</span></div>
+            <div class="lab-form-note"><span>DATA POLICY</span><p>AutoMiner 只向模型发送特征目录和本地指标，不发送原始样本；TEST 在入围顺序冻结前不可见。</p></div>
             <button class="lab-button lab-button-primary" type="submit">加入发现队列</button>
           </form>
           <div class="lab-block lab-graph-block">
             <div class="lab-block-head"><div><span>VISUAL PIPELINE · FOUNDATION</span><h4>研究图谱</h4></div><span class="lab-beta">FRAMEWORK</span></div>
             <div class="lab-node-graph" aria-label="发现任务处理顺序">
               <div class="lab-node"><span>01</span><strong>GENERATE</strong><small>AI / GP 提案</small></div><i>→</i>
-              <div class="lab-node"><span>02</span><strong>DSL CHECK</strong><small>AST 白名单</small></div><i>→</i>
-              <div class="lab-node"><span>03</span><strong>LOCAL TEST</strong><small>PIT 数据验证</small></div><i>→</i>
+              <div class="lab-node"><span>02</span><strong>POLICY CHECK</strong><small>AST / 子进程白名单</small></div><i>→</i>
+              <div class="lab-node"><span>03</span><strong>SEALED TEST</strong><small>训练验证后一次开启</small></div><i>→</i>
               <div class="lab-node"><span>04</span><strong>REVIEW</strong><small>人工批准</small></div>
             </div>
-            <div class="lab-guardrails"><div><b>禁止</b><span>任意 Python 执行</span></div><div><b>默认</b><span>不上传原始行情</span></div><div><b>必须</b><span>重新验证修订版本</span></div></div>
+            <div class="lab-guardrails"><div><b>禁止</b><span>导入 / I/O / 网络 / 循环</span></div><div><b>上限</b><span>3 次调用 · 24 个候选</span></div><div><b>必须</b><span>PIT 门禁与人工批准</span></div></div>
           </div>
+        </div>
+        <div class="lab-block lab-mining-ledger">
+          <div class="lab-block-head"><div><span>AUTOMINER LEDGER</span><h4>最近代码挖掘批次</h4></div><span class="lab-beta">IMMUTABLE</span></div>
+          <div id="lab-mining-runs"><div class="lab-empty">尚无 AutoMiner 批次</div></div>
+          <div id="lab-mining-candidates"><div class="lab-empty">选择批次查看 TRAIN / VALID / 密封 TEST 对比</div></div>
         </div>
       </section>
 
@@ -717,6 +741,47 @@
         <div class="lab-block">
           <div class="lab-block-head"><div><span>EXPERIMENT LEDGER</span><h4>最近实验</h4></div></div>
           <div id="lab-experiment-list"><div class="lab-empty">尚无模型实验</div></div>
+        </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="optimization">
+        <div class="lab-view-head">
+          <div><span class="lab-overline">WALK-FORWARD RESEARCH</span><h3>共享多周期滚动优化</h3><p>开发折选择 Pareto 解，锁参后只评估一次末尾 252 日；历史回测始终使用当时可获得的 OOF 预测。</p></div>
+          <span class="lab-asof">756 TRAIN · 20 RETRAIN · 252 SEALED</span>
+        </div>
+        <div class="lab-protocol-strip" aria-label="固定研究协议">
+          <div><span>预测头</span><b>1 · 3 · 5 · 7 日</b></div>
+          <div><span>搜索目标</span><b>净 IR · RankIC · 回撤</b></div>
+          <div><span>数据门禁</span><b>RAW EXECUTION · PIT</b></div>
+          <div><span>晋升方式</span><b>SHADOW → HUMAN GATE</b></div>
+        </div>
+        <div class="lab-study-layout">
+          <form class="lab-block lab-form lab-study-form" id="lab-optimize-form">
+            <div class="lab-block-head"><div><span>NEW STUDY</span><h4>优化预算与候选</h4></div><span class="lab-beta">NSGA-III</span></div>
+            <div class="lab-form-grid">
+              <label>候选池<select name="universe"><option value="csi800" selected>csi800 · PIT</option><option value="demo">demo · sandbox</option></select></label>
+              <label>研究起点<input name="start" type="date" value="2015-01-01" required></label>
+              <label>最长预算<input name="budget_hours" type="number" value="10" min="0.1" max="10" step="0.1"></label>
+              <label>最大 Trials<input name="max_trials" type="number" value="40" min="1" max="500"></label>
+              <label>组合 Top N<input name="top_n" type="number" value="20" min="1" max="200"></label>
+              <label>序列长度<input name="sequence_length" type="number" value="20" min="1" max="240"></label>
+            </div>
+            <fieldset class="lab-model-checks"><legend>参与比较的模型</legend>
+              <label><input type="checkbox" name="models" value="multi-transformer" checked><span>Transformer</span></label>
+              <label><input type="checkbox" name="models" value="multi-tcn" checked><span>TCN</span></label>
+              <label><input type="checkbox" name="models" value="multi-gru" checked><span>GRU</span></label>
+              <label><input type="checkbox" name="models" value="ridge" checked><span>Ridge 基线</span></label>
+            </fieldset>
+            <div class="lab-form-note"><span>TIME BUDGET</span><p>到时停止发起新 Trial 并保存 Pareto 前沿；密封评估未完成时进入暂停，不会产生候选。</p></div>
+            <button class="lab-button lab-button-primary" type="submit">创建 Shadow Study</button>
+          </form>
+          <article class="lab-block lab-study-detail" id="lab-study-detail">
+            <div class="lab-empty">创建或选择一个 Study，查看折线时间轴、Pareto 推荐和密封证据。</div>
+          </article>
+        </div>
+        <div class="lab-block lab-study-ledger">
+          <div class="lab-block-head"><div><span>OPTIMIZATION LEDGER</span><h4>Study 账本</h4></div><button type="button" id="lab-refresh-studies">刷新</button></div>
+          <div id="lab-study-list"><div class="lab-empty">尚无多目标优化 Study</div></div>
         </div>
       </section>
 
@@ -832,12 +897,14 @@
       <div class="trading-block-head"><h3 id="bt-config-title">实验配置</h3><span>保存为不可变快照</span></div>
       <form id="bt-form" class="trading-form">
         <label class="wide">实验名称<span>可选</span><input name="name" maxlength="80" placeholder="例如：动量周频 · 低成本假设"></label>
-        <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="factor">因子策略</option><option value="swing">旧版 1–7 日短线</option></select></label>
+        <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="lab_version">Quant Lab OOF 版本</option><option value="factor">因子策略</option><option value="swing">旧版 1–7 日短线</option></select></label>
         <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
+        <label>研究等级<select name="research_tier"><option value="auto">自动 · CSI800 生产门禁</option><option value="production">强制 production</option><option value="sandbox">sandbox 近似</option></select></label>
+        <label class="wide" data-bt-field="lab_version" hidden>Quant Lab 版本 ID<span>仅使用该版本滚动 OOF 预测</span><input name="version_id" maxlength="64" placeholder="从 Quant Lab 候选证据复制版本 ID"></label>
         <label class="wide" data-bt-field="factor">因子<span>逗号分隔可组合</span><input name="factor" list="factor-list" value="mom_20d" placeholder="mom_20d,rev_5d,ep" required></label>
         <label data-bt-field="factor">合成<select name="weighting"><option value="equal">等权</option><option value="ic">滚动 IC 加权</option></select></label>
         <label data-bt-field="factor">调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
-        <label data-bt-field="swing decision" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-bt-field="swing decision lab_version" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
         <label data-bt-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
         <label>开始日期<input name="start" type="date" value="2022-01-01" required></label>
@@ -848,7 +915,7 @@
           <label>止损比例<input name="stop_loss" type="number" step="0.01" min="0.01" max="0.5" placeholder="例如 0.08"></label>
           <label>止盈比例<input name="take_profit" type="number" step="0.01" min="0.01" max="2" placeholder="例如 0.25"></label>
         </div></details>
-        <div class="trading-form-note wide">Hybrid v2 会在创建时固化 Champion 与权重；固定候选会标注幸存者偏差，csi800 使用历史成分快照。</div>
+        <div class="trading-form-note wide">CSI800 的 auto 模式要求原始成交价、真实涨跌停/停牌和 PIT 成分完整；Lab 版本历史回测只读取滚动 OOF，不能直接提升为模拟账户。</div>
         <button class="trading-primary wide" type="submit">创建并运行回测</button>
       </form>
     </aside>
@@ -1072,6 +1139,18 @@
   </details>
 </section>
 
+<!-- ================= 帮助 ================= -->
+<section class="tab" id="tab-help" data-trading-days="%%QM_TRADING_DAYS%%" data-risk-free="%%QM_RISK_FREE%%">
+  <div id="help-root" class="help-loading-shell" aria-live="polite" aria-busy="true">
+    <div class="help-loading-copy">
+      <span class="eyebrow">KNOWLEDGE BASE</span>
+      <h2>正在打开量化研究与交易手册</h2>
+      <p>正在载入目录、项目口径与计算工具…</p>
+    </div>
+    <div class="help-loading-lines" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  </div>
+</section>
+
 <!-- ================= 设置 ================= -->
 <section class="tab" id="tab-settings">
   <div class="settings-heading">
@@ -1223,6 +1302,7 @@
               <label>每日重型研究预算（小时）<input name="lab.daily_budget_hours" type="number" min="0.5" max="24" step="0.5" required></label>
               <label>计算设备<select name="lab.device" required><option value="auto">自动选择</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
               <label class="toggle-field field-wide"><span><strong>允许匿名云端样本</strong><small>高风险开关；实际发送前仍需每次单独确认。</small></span><input name="lab.allow_cloud_sample" data-confirm-cloud type="checkbox" role="switch"></label>
+              <label class="toggle-field field-wide"><span><strong>启用受限 Python AutoMiner</strong><small>启用后允许手动运行，并在每周首个研究日自动运行一次；候选仍须人工批准。</small></span><input name="lab.ai_python_mining_enabled" type="checkbox" role="switch"></label>
             </div>
           </details>
           <div class="check-result" data-check-result="lab">研究环境尚未检测</div>
@@ -2137,6 +2217,7 @@ function loadActiveTab(tab) {
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
   if (tab === 'paper') loadPaper();
+  if (tab === 'help' && typeof window.loadHelp === 'function') window.loadHelp();
   if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
   if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
   if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
@@ -2151,6 +2232,9 @@ function activateTab(control, {persist = true, load = true} = {}) {
   document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
   document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
   if (persist) rememberActiveTab(tab);
+  if (tab !== 'help' && location.hash.startsWith('#help')) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   if (control.closest('#nav')) control.scrollIntoView({block:'nearest', inline:'nearest'});
   Object.values(charts).forEach(c => c.resize());
   if (load) loadActiveTab(tab);
@@ -2163,7 +2247,7 @@ document.querySelector('header').addEventListener('click', e => {
   activateTab(control);
 });
 
-const restoredTab = storedActiveTab();
+const restoredTab = location.hash.startsWith('#help') ? 'help' : storedActiveTab();
 const restoredControl = tabControl(restoredTab);
 if (restoredControl) {
   activateTab(restoredControl, {persist:false, load:false});
@@ -3468,5 +3552,6 @@ document.getElementById('cash-form').onsubmit = async e => {
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>
 <script src="/static/trading.js"></script>
+<script src="/static/help.js"></script>
 </body>
 </html>

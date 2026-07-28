@@ -162,21 +162,33 @@ class LabWorker:
         cfg = get_config().lab
         now = datetime.now(ZoneInfo(get_config().automation.timezone))
         day = now.date().isoformat()
-        if now.isoweekday() not in cfg.weekly_days:
+        weekly_day = min(cfg.weekly_days) if cfg.weekly_days else 1
+        if now.isoweekday() != weekly_day:
             return
-        if not self.service.store.reserve_schedule(f"heavy:{day}"):
-            return
-        base = {
-            "universe": cfg.universe, "start": cfg.start, "end": day,
-            "horizon": 3 if 3 in cfg.horizons else cfg.horizons[0], "_scheduled": True,
-        }
-        self.service.store.enqueue("discover_genetic", {
-            **base, "population": 60, "generations": 8, "top_n": 10,
-        })
-        self.service.store.enqueue("train", {
-            **base, "model": "ridge", "sequence_length": 20,
-            "config": {"seed": 42},
-        })
+        week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+        if self.service.store.reserve_schedule(f"optimize:{week}"):
+            from quantmaster.lab.research import OptimizationSpec, WalkForwardSpec
+
+            protocol = WalkForwardSpec(horizons=tuple(cfg.horizons))
+            spec = OptimizationSpec(
+                universe=cfg.universe, start=cfg.start, end=day,
+                budget_hours=min(10.0, max(0.1, self._budget_remaining())),
+                protocol=protocol,
+                research_tier="production" if cfg.universe.lower() == "csi800" else "sandbox",
+            )
+            study = self.service.store.create_study(spec.to_dict())
+            job = self.service.store.enqueue(
+                "optimize", {"study_id": study["id"], "_scheduled": True},
+            )
+            self.service.store.update_study(study["id"], job_id=job["id"], status="queued")
+        if (cfg.ai_python_mining_enabled
+                and self.service.store.reserve_schedule(f"python:{week}")):
+            self.service.enqueue("discover_python", {
+                "universe": cfg.universe, "start": cfg.start, "end": day,
+                "horizon": 3 if 3 in cfg.horizons else cfg.horizons[0],
+                "rounds": 3, "candidate_limit": 24, "finalists": 3,
+                "_scheduled": True,
+            })
 
     def _start_scheduler_locked(self) -> None:
         try:
@@ -277,7 +289,7 @@ def run_standalone() -> None:
                 "lab.enabled", "lab.window_start", "automation.timezone",
                 "lab.universe", "lab.start", "lab.horizons", "lab.weekly_days",
                 "lab.window_end", "lab.daily_budget_hours", "lab.device",
-                "lab.allow_cloud_sample",
+                "lab.allow_cloud_sample", "lab.ai_python_mining_enabled",
             ])
     except KeyboardInterrupt:
         worker.stop()

@@ -16,6 +16,13 @@ from quantmaster.factors.analysis import (
     quantile_backtest,
     top_quantile_turnover,
 )
+from quantmaster.lab.robustness import (
+    monte_carlo_block_bootstrap,
+    parameter_sensitivity,
+    penetration_analysis,
+    robustness_summary,
+    walk_forward_robustness,
+)
 
 
 def _finite(value: float, default: float = 0.0) -> float:
@@ -64,6 +71,9 @@ def _walk_forward_ic(
         test_start = int(positions[0])
         train = oriented.iloc[: max(0, test_start - horizon)]
         test = oriented.iloc[positions]
+        train_mean = float(train.mean()) if len(train) else 0.0
+        test_mean = float(test.mean()) if len(test) else 0.0
+        retention = abs(test_mean) / abs(train_mean) if abs(train_mean) > 1e-12 else 0.0
         oos.append(test)
         reports.append({
             "fold": number,
@@ -73,8 +83,10 @@ def _walk_forward_ic(
             "test_end": str(test.index[-1].date()),
             "train_days": len(train),
             "test_days": len(test),
-            "rank_ic": _finite(test.mean()),
+            "train_rank_ic": _finite(train_mean),
+            "rank_ic": _finite(test_mean),
             "icir": _finite(test.mean() / test.std()) if test.std() > 0 else 0.0,
+            "retention": _finite(retention),
         })
     return pd.concat(oos), reports, direction, discovery * direction
 
@@ -105,6 +117,9 @@ def validate_factor_values(
     membership: pd.DataFrame | None = None,
     approved_values: dict[str, pd.DataFrame] | None = None,
     research_quality: str = "production",
+    panel: dict[str, pd.DataFrame] | None = None,
+    parameter_variants: dict[str, pd.DataFrame] | None = None,
+    robustness_seed: int = 42,
 ) -> dict[str, Any]:
     """对表达式、遗传、LLM 和学习型因子使用同一套验证口径。"""
     values, prices = factor_values.align(close, join="inner")
@@ -131,6 +146,7 @@ def validate_factor_values(
         long_short = daily["Q5"] - daily["Q1"]
         turnover = top_quantile_turnover(oriented, quantiles=5) / max(1, horizon)
         estimated_cost = turnover * (2 * one_way_cost + sell_extra)
+        net_long_short = long_short - estimated_cost
         gross_edge = max(0.0, float(long_short.mean()))
         edge_cost_ratio = gross_edge / estimated_cost if estimated_cost > 0 else 999.0
         mean, std = float(oos.mean()), float(oos.std())
@@ -143,6 +159,34 @@ def validate_factor_values(
         monotonicity = (
             float(np.corrcoef(np.arange(1, len(annual_values) + 1), annual_values)[0, 1])
             if np.std(annual_values) > 0 else 0.0
+        )
+        monte_carlo = monte_carlo_block_bootstrap(
+            oos,
+            net_long_short,
+            horizon=horizon,
+            seed=robustness_seed,
+        )
+        parameter_report = parameter_sensitivity(
+            values,
+            parameter_variants,
+            prices,
+            horizon=horizon,
+            direction=direction,
+            oos_index=oos.index,
+        )
+        wfa = walk_forward_robustness(fold_reports)
+        penetration = penetration_analysis(
+            oriented,
+            prices,
+            oos,
+            horizon=horizon,
+            panel=panel,
+        )
+        robustness = robustness_summary(
+            monte_carlo=monte_carlo,
+            parameter_report=parameter_report,
+            walk_forward=wfa,
+            penetration=penetration,
         )
         horizon_reports[str(horizon)] = {
             "horizon": horizon,
@@ -163,6 +207,7 @@ def validate_factor_values(
             "top_annual": _finite(quantile_annual.get("Q5", 0.0)),
             "monotonicity": _finite(monotonicity),
             "folds": fold_reports,
+            "robustness": robustness,
         }
 
     q_values = benjamini_hochberg([item["p_value"] for item in horizon_reports.values()])
@@ -207,6 +252,15 @@ def validate_factor_values(
         soft_failures.append("估算毛收益不足交易成本的 2 倍")
     if abs(max_corr) >= 0.70:
         soft_failures.append(f"与生产因子 {max_corr_name} 的相关性达到 {max_corr:.2f}")
+    best_robustness = best["robustness"]
+    robustness_labels = {
+        "monte_carlo": "Monte Carlo 区块重采样",
+        "parameter_sensitivity": "参数敏感性",
+        "walk_forward": "WFA 稳定性",
+        "penetration": "穿透性测试",
+    }
+    for failed_test in best_robustness["failed_tests"]:
+        soft_failures.append(f"{robustness_labels.get(failed_test, failed_test)}未通过")
 
     return {
         "factor": name,
@@ -216,6 +270,7 @@ def validate_factor_values(
         "best_horizon": best["horizon"],
         "candidate_score": best["candidate_score"],
         "horizons": horizon_reports,
+        "robustness": best_robustness,
         "gates": {
             "passed": not hard_failures and not soft_failures,
             "hard_failures": hard_failures,

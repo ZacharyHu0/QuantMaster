@@ -62,8 +62,19 @@ class DecisionStrategySpec(BaseModel):
     policy_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
+class LabVersionStrategySpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["lab_version"] = "lab_version"
+    version_id: str = Field(min_length=1, max_length=64)
+    horizon: Literal[1, 3, 5, 7] = 3
+    top_n: int = Field(20, ge=1, le=200)
+    rebalance_days: int = Field(3, ge=1, le=20)
+    cap_weight: float = Field(0.10, gt=0, le=1)
+
+
 StrategySpec = Annotated[
-    FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec,
+    FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     Field(discriminator="kind"),
 ]
 
@@ -81,6 +92,7 @@ class BacktestSpec(BaseModel):
     stop_loss: float | None = Field(None, gt=0, le=0.5)
     take_profit: float | None = Field(None, gt=0, le=2)
     allow_partial: bool = False
+    research_tier: Literal["auto", "production", "sandbox"] = "auto"
 
     @model_validator(mode="after")
     def validate_dates(self):
@@ -117,11 +129,11 @@ class PaperAccountSpec(BaseModel):
 
 
 def pin_decision_strategy(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec,
+    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     universe: str,
     *,
     symbols: list[str] | None = None,
-) -> FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec:
+) -> FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec:
     """Resolve or verify the immutable Hybrid policy used by a stored experiment."""
     if not isinstance(spec, DecisionStrategySpec):
         return spec
@@ -156,7 +168,7 @@ def pin_decision_strategy(
 
 
 def build_strategy(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec,
+    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     symbols: list[str],
     start: str,
     end: str,
@@ -164,7 +176,25 @@ def build_strategy(
     universe: str = "demo",
 ):
     """把稳定快照解析成当前运行时策略对象。"""
-    from quantmaster.backtest.strategy import FactorStrategy, MultiFactorStrategy, SwingStrategy
+    from quantmaster.backtest.strategy import (
+        FactorStrategy,
+        LabVersionStrategy,
+        MultiFactorStrategy,
+        SwingStrategy,
+    )
+
+    if isinstance(spec, LabVersionStrategySpec):
+        from quantmaster.lab.store import LabStore
+
+        version = LabStore().version(spec.version_id)
+        if version is None:
+            raise KeyError("Quant Lab 版本不存在")
+        if spec.horizon not in tuple((version.get("spec") or {}).get("horizons") or ()):
+            raise ValueError(f"Quant Lab 版本没有 {spec.horizon} 日预测头")
+        return LabVersionStrategy(
+            version, horizon=spec.horizon, top_n=spec.top_n,
+            rebalance_days=spec.rebalance_days, cap_weight=spec.cap_weight,
+        )
 
     if isinstance(spec, SwingStrategySpec):
         return SwingStrategy(
@@ -198,7 +228,7 @@ def build_strategy(
 
 
 def signal_is_due(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec,
+    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     dates,
     position: int,
 ) -> bool:
@@ -209,7 +239,9 @@ def signal_is_due(
     if position < 0 or position >= len(index):
         return False
     current = index[position]
-    if isinstance(spec, (SwingStrategySpec, DecisionStrategySpec)):
+    if isinstance(spec, (SwingStrategySpec, DecisionStrategySpec, LabVersionStrategySpec)):
+        if isinstance(spec, LabVersionStrategySpec):
+            return position % spec.rebalance_days == 0
         return position % spec.holding_days == 0
     if spec.rebalance == "D":
         return True

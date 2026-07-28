@@ -109,7 +109,10 @@ class TestFullReport:
         result = run_backtest(panel, weights)
 
         report = full_report(result)
-        assert set(report) == {"metrics", "yearly", "monthly", "trade_stats"}
+        assert set(report) == {
+            "metrics", "yearly", "monthly", "trade_stats",
+            "risk_diagnostics", "stress_tests", "trade_lifecycle",
+        }
         # allow_nan=False：任何残留 NaN/Inf 都会让 dumps 直接报错
         text = json.dumps(report, allow_nan=False, ensure_ascii=False)
         assert "NaN" not in text

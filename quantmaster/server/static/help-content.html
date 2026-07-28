@@ -1,0 +1,564 @@
+<div class="help-handbook" data-help-handbook>
+  <div class="help-masthead">
+    <div class="help-masthead-copy">
+      <span class="eyebrow">QUANTMASTER HANDBOOK · 2026</span>
+      <h1>量化研究与股市交易基础手册</h1>
+      <p class="help-deck">从市场规则、数据与统计，到因子验证、回测、组合风控和 QuantMaster 工作流。面向已开户、会写代码，但希望把研究口径系统补齐的 A 股个人投资者。</p>
+    </div>
+    <dl class="help-meta">
+      <div><dt>规则核验</dt><dd>2026-07-28</dd></div>
+      <div><dt>主要市场</dt><dd>沪 · 深 · 北</dd></div>
+      <div><dt>研究周期</dt><dd>1–7 交易日</dd></div>
+    </dl>
+    <div class="help-notice" role="note">
+      <strong>先读风险边界</strong>
+      <p>本手册用于解释研究方法与软件口径，不构成投资建议、收益承诺或交易所规则的替代文本。规则、费率和券商执行方式会变化；实盘前请再次核对交易所、登记结算机构与开户券商的最新文件。</p>
+    </div>
+    <form class="help-search" id="help-search-form" role="search">
+      <label for="help-search-input">搜索手册</label>
+      <div class="help-search-control">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="help-search-input" type="search" autocomplete="off" placeholder="例如：T+1、RankIC、前复权、最大回撤" aria-describedby="help-search-hint">
+        <button type="button" id="help-search-clear" aria-label="清空搜索" hidden>清空</button>
+      </div>
+      <p id="help-search-hint">支持概念、公式、项目页面与交易规则；按 Esc 清空结果。</p>
+    </form>
+    <section class="help-search-results" id="help-search-results" aria-live="polite" hidden></section>
+  </div>
+
+  <div class="help-layout">
+    <aside class="help-sidebar">
+      <nav aria-label="手册目录">
+        <p class="help-nav-label">目录</p>
+        <ol>
+          <li><a href="#help/start" data-help-link="start"><span>01</span>导读与风险边界</a></li>
+          <li><a href="#help/market" data-help-link="market"><span>02</span>市场、证券与交易所</a></li>
+          <li><a href="#help/trading" data-help-link="trading"><span>03</span>A 股交易规则</a></li>
+          <li><a href="#help/data" data-help-link="data"><span>04</span>行情数据基础</a></li>
+          <li><a href="#help/statistics" data-help-link="statistics"><span>05</span>收益与统计</a></li>
+          <li><a href="#help/factors" data-help-link="factors"><span>06</span>因子是什么</a></li>
+          <li><a href="#help/validation" data-help-link="validation"><span>07</span>因子验证</a></li>
+          <li><a href="#help/backtest" data-help-link="backtest"><span>08</span>可信回测</a></li>
+          <li><a href="#help/risk" data-help-link="risk"><span>09</span>组合与风控</a></li>
+          <li><a href="#help/models" data-help-link="models"><span>10</span>项目模型口径</a></li>
+          <li><a href="#help/workflow" data-help-link="workflow"><span>11</span>研究到执行</a></li>
+          <li><a href="#help/checklist" data-help-link="checklist"><span>12</span>清单、术语与附录</a></li>
+        </ol>
+        <a class="help-tool-link" href="#help/calculators" data-help-link="calculators">计算工具 <span>6 个</span></a>
+      </nav>
+    </aside>
+
+    <div class="help-reading-column">
+      <details class="help-mobile-toc">
+        <summary>展开手册目录 <span>12 章 · 6 个工具</span></summary>
+        <nav aria-label="移动端手册目录">
+          <a href="#help/start">01 导读与风险边界</a><a href="#help/market">02 市场、证券与交易所</a>
+          <a href="#help/trading">03 A 股交易规则</a><a href="#help/data">04 行情数据基础</a>
+          <a href="#help/statistics">05 收益与统计</a><a href="#help/factors">06 因子是什么</a>
+          <a href="#help/validation">07 因子验证</a><a href="#help/backtest">08 可信回测</a>
+          <a href="#help/risk">09 组合与风控</a><a href="#help/models">10 项目模型口径</a>
+          <a href="#help/workflow">11 研究到执行</a><a href="#help/checklist">12 清单、术语与附录</a>
+          <a href="#help/calculators">计算工具</a>
+        </nav>
+      </details>
+
+      <article class="help-article" id="help-article" tabindex="-1">
+        <section class="help-chapter" id="help-start" data-help-topic="start" data-help-title="导读与风险边界">
+          <div class="help-chapter-number">01 / ORIENTATION</div>
+          <h2>导读与风险边界</h2>
+          <p class="help-lead">量化不是把判断交给公式，而是把“我为什么买、在什么条件下可能错、错了损失多少”写成可复查的规则。它减少随意性，却不能消除市场、模型和执行风险。</p>
+
+          <section data-search-unit data-search-title="量化研究的五层结构">
+            <h3>先把问题拆成五层</h3>
+            <ol class="help-steps">
+              <li><strong>市场事实</strong><span>交易时间、可成交证券、费用、涨跌幅与结算约束。</span></li>
+              <li><strong>可得数据</strong><span>在决策时点真正已经公开且能稳定获取的信息。</span></li>
+              <li><strong>预测信号</strong><span>因子、规则或模型对未来收益与风险的有限估计。</span></li>
+              <li><strong>组合约束</strong><span>仓位、集中度、换手、流动性和最大可承受损失。</span></li>
+              <li><strong>执行与复盘</strong><span>订单是否成交、成本是否偏离、结论是否可重复。</span></li>
+            </ol>
+            <div class="concept-flow">
+              <p><b>直觉</b>一条高胜率信号，如果只能买到涨停板、需要频繁换手或一笔就占满账户，仍不是可用策略。</p>
+              <p><b>简单例子</b>合成策略预测下期毛收益 0.35%，往返成本与滑点合计 0.28%，净优势只剩 0.07%；一次开盘跳空就可能抹平。</p>
+              <p><b>项目位置</b>市场与决策页观察状态，Quant Lab 检验信号，回测页纳入执行规则，模拟盘核对实际可成交性。</p>
+              <p><b>局限</b>历史样本只能告诉你过去在相似数据生成过程中发生过什么，不能证明未来仍同分布。</p>
+            </div>
+          </section>
+
+          <section data-search-unit data-search-title="三类必须接受的不确定性">
+            <h3>三类不确定性不能被“优化”掉</h3>
+            <dl class="help-definitions">
+              <div><dt>市场风险</dt><dd>系统性下跌、流动性消失、停牌、跳空和极端事件会让相关资产同时失效。</dd></div>
+              <div><dt>模型风险</dt><dd>样本选择、参数、标签、数据修订或制度变化会使历史关系衰减甚至反转。</dd></div>
+              <div><dt>操作风险</dt><dd>数据源异常、时钟错位、重复下单、费用配置错误和人工误操作会把正确研究变成错误成交。</dd></div>
+            </dl>
+            <p>正确目标不是“找到永不亏损的公式”，而是让每个假设有证据、每次失败有边界、每个结果能追溯。任何只展示收益、不展示回撤、换手、样本外结果和失败条件的研究都不完整。</p>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-market" data-help-topic="market" data-help-title="市场、证券、指数、ETF 与交易所">
+          <div class="help-chapter-number">02 / MARKET STRUCTURE</div>
+          <h2>市场、证券、指数、ETF 与交易所</h2>
+          <p class="help-lead">交易所提供撮合和规则，证券是可交易权利，指数是测量尺，ETF 则是尽量跟踪某个指数或资产篮子的交易工具。不要把四者混为一谈。</p>
+
+          <section data-search-unit data-search-title="股票、指数与 ETF 的区别">
+            <h3>你买到的究竟是什么</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>对象</th><th>含义</th><th>主要收益来源</th><th>常见误区</th></tr></thead><tbody>
+              <tr><td>股票</td><td>公司所有权份额</td><td>盈利增长、估值变化、分红</td><td>把代码走势当作公司基本面本身</td></tr>
+              <tr><td>指数</td><td>按规则计算的市场测量值</td><td>本身通常不可直接持有</td><td>忽略全收益指数与价格指数差异</td></tr>
+              <tr><td>ETF</td><td>交易所上市的基金份额</td><td>底层篮子收益减费用与跟踪偏差</td><td>认为成交价永远等于基金净值</td></tr>
+              <tr><td>可转债</td><td>含转股选择权的债券</td><td>债底、正股、波动率与条款</td><td>套用普通股票涨跌与估值逻辑</td></tr>
+            </tbody></table></div>
+            <div class="concept-flow">
+              <p><b>直觉</b>沪深 300 点位是一把“尺”，跟踪它的 ETF 才是可下单的“商品”；不同 ETF 会因费率、规模、申赎与流动性产生跟踪差异。</p>
+              <p><b>规则</b>研究基准应与策略可投资范围匹配。大盘股策略可比较沪深 300，中小盘策略若只比较上证指数，结论可能失真。</p>
+              <p><b>合成例子</b>策略收益 12%，宽基指数收益 15%，绝对赚钱但相对落后 3%；若承担更高波动与回撤，不能称为有效超额。</p>
+              <p><b>项目位置</b>回测页选择基准；市场页将指数、ETF 和自选证券分组展示。</p>
+            </div>
+          </section>
+
+          <section data-search-unit data-search-title="沪深北交易所与板块">
+            <h3>沪、深、北不是同一套微观结构</h3>
+            <p>上海证券交易所覆盖主板与科创板；深圳证券交易所覆盖主板与创业板；北京证券交易所服务创新型中小企业。上市标准、投资者适当性、涨跌幅、申报单位和特殊交易安排可能不同。同一市场内，风险警示股票、退市整理证券、首发上市初期证券、存托凭证、基金和债券也可能适用不同条款。</p>
+            <aside class="help-callout"><strong>研究纪律</strong><p>证券代码只能作为默认规则的粗略线索，不能代替逐日、逐证券的状态数据。严谨回测应保存板块、上市日期、风险警示状态、停复牌和当日价格限制。</p></aside>
+          </section>
+
+          <section data-search-unit data-search-title="发行、二级交易、公司行动与指数成分">
+            <h3>证券会变化，研究对象不是静止代码</h3>
+            <p>公司在一级市场发行证券，投资者在二级市场转让已发行份额。增发、配股、回购、注销、拆并股、分红、换股合并和退市都会改变股本、价格与持有人权利。量化数据若只保留一列价格，常会把公司行动造成的机械变化误判为供需信号。</p>
+            <p>指数也会定期或临时调整样本与权重。今天看到的成分名单不能回填到过去；否则被后续剔除的弱公司消失，被后续纳入的强公司提前出现。正确做法是保存每次成分生效区间，并在信号日使用当时名单。指数权重还可能因自由流通市值、权重上限和缓冲规则而不同于简单总市值排序。</p>
+            <div class="concept-flow"><p><b>合成例子</b>某股票在 2025 年 12 月才进入指数。如果用 2026 年成分回测 2024 年，它会被错误纳入早期截面，因子排名、行业权重和基准收益都会改变。</p><p><b>项目位置</b>候选页定义研究范围，Quant Lab 的 PIT 快照按日期冻结历史成分；自定义固定候选更适合沙盒验证，不能代表历史可投资总体。</p><p><b>局限</b>成分正确仍不等于可交易：还要结合上市天数、停牌、价格限制、成交额和账户准入。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-trading" data-help-topic="trading" data-help-title="A 股交易规则与执行">
+          <div class="help-chapter-number">03 / EXECUTION</div>
+          <h2>A 股交易规则与执行</h2>
+          <p class="help-lead">研究收益只有在订单能成交时才存在。以下规则以 2026-07-28 可查公开文件为核验基准；具体证券与账户权限以交易所和券商当日提示为准。</p>
+
+          <section data-search-unit data-search-title="交易时段、集合竞价与连续竞价">
+            <h3>交易日的一天</h3>
+            <div class="help-timeline" aria-label="A股典型交易时段">
+              <div><time>09:15–09:25</time><p><strong>开盘集合竞价</strong><br>集中形成开盘价；不同分钟的撤单约束应按交易所规则核对。</p></div>
+              <div><time>09:30–11:30</time><p><strong>上午连续竞价</strong><br>订单按价格优先、时间优先等规则撮合。</p></div>
+              <div><time>13:00–14:57</time><p><strong>下午连续竞价</strong><br>午间休市不是一个新的交易日。</p></div>
+              <div><time>14:57–15:00</time><p><strong>收盘集合竞价</strong><br>形成收盘价；部分品种另有盘后安排。</p></div>
+            </div>
+            <p>限价委托指定最差可接受价格，控制力较强但不保证成交；市场类订单追求成交概率，却可能在流动性差或快速波动时产生明显冲击。撮合规则、有效申报价格范围与不同订单类型的适用证券并不完全相同。</p>
+          </section>
+
+          <section data-search-unit data-search-title="T+1、整手、涨跌停与流动性">
+            <h3>T+1 不等于次日一定能卖</h3>
+            <div class="concept-flow">
+              <p><b>直觉</b>A 股普通股票当日买入的份额通常不能当日卖出；到下一个交易日取得可卖资格，也仍可能因停牌、跌停封单或流动性不足无法成交。</p>
+              <p><b>规则</b>买入申报通常按 100 股整数倍；零股卖出、ETF、北交所及其他品种应以对应规则为准。普通主板常见 10% 涨跌幅，科创板/创业板常见 20%，北交所常见 30%，但首发初期、风险警示与特殊证券存在例外。</p>
+              <p><b>合成例子</b>周五买入 600 股，周一才进入可卖集合；若周一一字跌停且卖盘远大于买盘，“允许卖”不等于“卖得掉”。</p>
+              <p><b>局限</b>只用收盘价是否触及涨跌停判断可成交，会忽略开板时间、队列、成交量和盘中临停。</p>
+            </div>
+          </section>
+
+          <section data-search-unit data-search-title="费用、佣金、印花税、过户费与滑点">
+            <h3>费用不是回测最后减一个常数</h3>
+            <p>项目默认口径包含佣金（买卖双边、每笔最低收费）、印花税（股票卖出单边）、过户费（买卖双边）和滑点（以成交报价的比例近似）。买入成交价按 <code>报价 × (1 + 滑点)</code>，卖出成交价按 <code>报价 × (1 − 滑点)</code>；费用再基于滑点后的成交金额计算。</p>
+            <p>最低佣金使小额交易的实际费率很高。合成例：买入金额 2,000 元，若最低佣金 5 元，仅买入佣金已经是 0.25%，远高于“万 2.5”的名义比例。冲击成本还会随订单规模、盘口深度和参与率非线性增加，固定滑点只是一阶近似。</p>
+          </section>
+
+          <section data-search-unit data-search-title="真实市场规则与 QuantMaster 回测近似">
+            <h3>真实市场与当前执行引擎的边界</h3>
+            <div class="help-table-wrap"><table class="help-table help-boundary-table"><thead><tr><th>主题</th><th>市场真实情况</th><th>QuantMaster 当前近似</th></tr></thead><tbody>
+              <tr><td>信号时点</td><td>决策必须使用当时已经可得的信息</td><td>T 日收盘形成信号，T+1 日开盘尝试成交</td></tr>
+              <tr><td>涨跌幅</td><td>受板块、上市阶段、证券状态和当日规则影响</td><td>按代码推断：主板 10%，688/689/300/301 为 20%，以 8/4 开头且 .BJ 为 30%</td></tr>
+              <tr><td>封板成交</td><td>取决于盘中开板、队列、申报时刻与可用流动性</td><td>仅以开盘价近似；买入阈值乘 0.998，卖出阈值乘 1.002</td></tr>
+              <tr><td>特殊安排</td><td>可能含首发无价格限制、有效申报价格范围、盘中临停、盘后固定价格、风险警示等</td><td>尚未逐项建模，回测结果不应视作券商成交回放</td></tr>
+              <tr><td>费用与冲击</td><td>券商费率、规费和市场冲击因账户、时间与订单而异</td><td>可配置佣金、最低佣金、印花税、过户费和固定比例滑点</td></tr>
+            </tbody></table></div>
+            <aside class="help-callout warning"><strong>不能据此下单</strong><p>代码推断适合快速研究，不足以覆盖逐日证券状态。准备实盘前，应把券商成交回报与模拟盘逐笔对照，并为停牌、开盘跳空、跌停无法退出和数据延迟预留风险。</p></aside>
+          </section>
+
+          <section data-search-unit data-search-title="委托生命周期、成交回报、清算与结算">
+            <h3>下单、成交、清算和结算是四件事</h3>
+            <p>委托先经过券商前端的资金、持仓、价格与权限校验，再报送交易所。交易所接受申报不代表已经成交；部分成交后剩余数量仍可能排队、撤销或失效。成交回报确定价格与数量，清算计算各参与方应收应付，结算才完成证券和资金交收。T+1 的“T”通常指成交日，不是委托创建日或资金转入日。</p>
+            <p>价格优先、时间优先意味着同价位越早进入有效队列通常越有利，但你看见的盘口不是全部订单，网络延迟和券商路由也会改变排队位置。用当日最高价判断“卖单一定成交”、用最低价判断“买单一定成交”都过度乐观，因为极值可能只有极少成交量。</p>
+            <ul class="help-checks"><li>保留本地订单编号、券商合同号、申报时间、成交时间和撤单结果。</li><li>区分拒单、未成交、部分成交与成交后结算中的异常，不把它们统一记成零收益。</li><li>盘后按成交回报而非计划委托更新仓位，次日再核对可用与可取资金。</li><li>回测至少报告订单数量、未成交比例和被涨跌停/现金/整手约束拦截的原因。</li></ul>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-data" data-help-topic="data" data-help-title="行情数据基础">
+          <div class="help-chapter-number">04 / MARKET DATA</div>
+          <h2>行情数据基础</h2>
+          <p class="help-lead">数据表看似客观，但时间戳、复权、缺失值和样本范围中的一个小选择，就能改变整个回测结论。</p>
+
+          <section data-search-unit data-search-title="OHLCV、成交额、换手率与 VWAP">
+            <h3>一根 K 线压缩了什么</h3>
+            <dl class="help-definitions compact">
+              <div><dt>Open / High / Low / Close</dt><dd>某周期的开、高、低、收；只保留边界与极值，不保留价格经过的路径。</dd></div>
+              <div><dt>Volume</dt><dd>成交数量，需确认单位是股、手还是份。</dd></div>
+              <div><dt>Amount</dt><dd>成交金额；不同来源对币种和单位可能有差异。</dd></div>
+              <div><dt>Turnover</dt><dd>换手率通常为成交量除以可流通份额，但分母口径可能不同。</dd></div>
+              <div><dt>VWAP</dt><dd>成交额 / 成交量，是按成交量加权的平均成交价，不等于任何一笔可保证成交的价格。</dd></div>
+            </dl>
+            <div class="concept-flow"><p><b>合成例子</b>某日开 10.00、最高 10.80、最低 9.90、收 10.70。只看日线无法知道先跌后涨还是先涨后跌，因此不能可靠判断盘中止损和止盈谁先触发。</p><p><b>项目位置</b>行情页日线与分钟线分频率展示；回测开盘执行主要使用 open，研究因子常使用 close、volume、amount。</p><p><b>局限</b>日频回测处理盘中条件单时必须声明路径假设，或改用足够细的分钟数据。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="前复权、后复权、除权除息与收益">
+            <h3>复权价格是分析坐标，不是历史成交价</h3>
+            <p>现金分红、送转和配股会让原始价格机械跳变。前复权通常调整历史价格，使最新价接近真实现价；后复权把调整累积到后期，便于观察长期增长；不复权保留当时真实报价。价格收益若忽略分红会低估股东回报，而直接把复权价当成交价又会产生虚构成交。</p>
+            <div class="concept-flow"><p><b>公式</b>简单价格收益 <code>rₜ = Pₜ / Pₜ₋₁ − 1</code>；全收益还应计入现金分红与其他分配。</p><p><b>合成例子</b>除息前收盘 10 元，每股派息 0.5 元，次日理论除息价约 9.5 元。原始价格看似跌 5%，股东财富在忽略税费与波动时并未因此减少 5%。</p><p><b>项目限制</b>跨数据源拼接前必须统一复权口径；任何“自动修复”都应留下来源与时间记录。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="缺失值、停牌、幸存者偏差与数据质量">
+            <h3>空值不是零收益</h3>
+            <p>缺失可能表示停牌、尚未上市、已经退市、数据源失败或字段不适用。把缺失价格直接前向填充再计算收益，会把未知状态伪造成零收益；把缺失因子填成零，则会把“没有信息”伪造成“中性判断”。</p>
+            <ul class="help-checks"><li>检查交易日历、时区和时间戳所代表的区间起点或终点。</li><li>记录数据首次可得时间，不用公告期末日期代替真实发布日期。</li><li>检查重复行、价格非正、high/low 边界冲突、成交量单位突变。</li><li>保留退市与历史成分，避免只拿今天还活着的股票回测过去。</li><li>对源切换、复权更新和历史修订建立快照或哈希。</li></ul>
+          </section>
+
+          <section data-search-unit data-search-title="多频率数据、交易日历与可得时间对齐">
+            <h3>时间戳正确，信息仍可能穿越</h3>
+            <p>日线的 2026-07-28 通常代表该交易日完整区间，只有收盘后才完整可得；分钟线标记 09:35，可能代表 09:30–09:35 的区间终点，也可能代表起点，取决于数据源。若没有确认定义，把日成交量或 09:35 分钟线用于 09:31 下单，就是未来函数。</p>
+            <p>财报有报告期、公告日、数据源入库日和策略实际获取日四个时间。新闻也有事件发生、媒体发布、抓取入库与完成标注的时刻。PIT 研究通常取策略能够稳定消费该字段的最早时刻，并可加入保守延迟，而不是选择最有利的时间戳。</p>
+            <div class="concept-flow"><p><b>合成例子</b>半年报覆盖截至 6 月 30 日的数据，但公司 8 月 25 日晚间才披露。7 月回测若已经使用该利润值，虽然“报告期”更早，仍属于信息泄漏。</p><p><b>项目位置</b>资讯因子按首次入库时间构造，Quant Lab 数据集快照冻结成分和特征版本；分钟线按频率分开归档，不能与日线无声明混用。</p><p><b>局限</b>数据供应商可能回补更早的时间戳，却不保留首次可见版本；此时应承认 PIT 证据不完整并降低结论等级。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-statistics" data-help-topic="statistics" data-help-title="收益、风险与统计基础">
+          <div class="help-chapter-number">05 / STATISTICS</div>
+          <h2>收益、风险与统计基础</h2>
+          <p class="help-lead">统计量不是标签，而是带口径的压缩描述。先问“用什么频率、什么样本、是否扣费、与谁比较”，再看数字大小。</p>
+
+          <section data-search-unit data-search-title="简单收益、对数收益、复利与年化">
+            <h3>收益不能直接跨期相加</h3>
+            <div class="concept-flow"><p><b>公式</b>简单收益 <code>rₜ=Pₜ/Pₜ₋₁−1</code>；多期总收益 <code>∏(1+rₜ)−1</code>；年化收益 <code>(期末净值/期初净值)^(244/交易日数)−1</code>。</p><p><b>合成例子</b>先涨 10% 再跌 10%，净值从 1 到 1.1 再到 0.99，总收益是 −1%，不是 0%。</p><p><b>项目位置</b>回测指标以 244 个交易日年化；页末计算器直接复用这个运行时常量。</p><p><b>局限</b>把很短样本年化会放大偶然波动。20 日赚 5% 并不意味着全年能稳定复刻。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="波动率、相关性、概率与样本误差">
+            <h3>波动描述分散，不等于最坏损失</h3>
+            <p>年化波动率通常是日收益标准差乘 <code>√244</code>，隐含收益相对稳定、样本有代表性等假设。它不直接描述跳空、厚尾、连续跌停或流动性枯竭。相关系数衡量线性共同变化，取值 −1 到 1；相关为零不代表独立，历史低相关也可能在危机中同时上升。</p>
+            <p>样本均值本身有误差。尝试的因子、参数和子样本越多，偶然找到“显著结果”的概率越大。置信区间、置换检验和多重检验修正的意义，是明确结果可能由抽样噪声造成，而不是给策略盖一个“科学认证章”。</p>
+          </section>
+
+          <section data-search-unit data-search-title="最大回撤、夏普比率、卡玛与信息比率">
+            <h3>绩效指标必须成组阅读</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>指标</th><th>项目口径</th><th>回答的问题</th><th>不能回答</th></tr></thead><tbody>
+              <tr><td>最大回撤</td><td>净值相对历史峰值的最大跌幅</td><td>历史最深的峰谷损失</td><td>未来最坏损失与恢复时间</td></tr>
+              <tr><td>夏普比率</td><td>(复利年化收益 − 无风险利率) / 年化波动</td><td>每单位波动获得多少超额收益</td><td>尾部风险、容量和成交难度</td></tr>
+              <tr><td>卡玛比率</td><td>年化收益 / 最大回撤</td><td>收益相对历史回撤是否划算</td><td>回撤持续期与路径痛苦</td></tr>
+              <tr><td>信息比率</td><td>年化超额收益 / 跟踪误差</td><td>相对基准的稳定性</td><td>绝对亏损是否可承受</td></tr>
+            </tbody></table></div>
+          </section>
+
+          <section data-search-unit data-search-title="条件概率、基准率、校准与置信区间">
+            <h3>60% 上涨概率不等于“很确定”</h3>
+            <p>概率必须对应明确事件，例如“从 T+1 开盘到 T+4 开盘的扣费后收益大于 0”。如果标签、起点或候选范围不同，两个 60% 不能直接比较。还要看基准率：若同一时期所有股票本来就有 58% 上涨，模型的 60% 增量很小。</p>
+            <p>校准关注预测为 60% 的样本长期是否约有 60% 发生，而区分度关注高预测组是否比低预测组更常发生。模型可以排序很好但概率偏高，也可以整体校准却几乎无法区分个体。Brier 分数、可靠性曲线与分箱命中率应结合样本量阅读。</p>
+            <div class="concept-flow"><p><b>合成例子</b>20 次预测中有 12 次上涨，观察命中率是 60%，但样本很小，真实成功率的不确定区间仍然很宽。不能因一次 12/20 就把仓位按“确定的 60%”放大。</p><p><b>项目位置</b>市场与决策页的未来概率按周期展示，验证报告记录校准和覆盖；置信度同时受样本、数据质量与证据一致性影响。</p><p><b>局限</b>历史校准在制度或市场状态变化后可能失效，应按时间滚动复核，不能只看全样本平均。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-factors" data-help-topic="factors" data-help-title="因子是什么">
+          <div class="help-chapter-number">06 / FACTORS</div>
+          <h2>因子是什么</h2>
+          <p class="help-lead">因子是在同一时点为一组证券生成的可比较数值。它可以表达预期收益、风险暴露或交易约束，但高分本身不是买入指令。</p>
+
+          <section data-search-unit data-search-title="量价、估值、质量、资讯与截面因子">
+            <h3>常见因子的经济直觉</h3>
+            <dl class="help-definitions">
+              <div><dt>量价</dt><dd>动量、反转、波动、成交量变化和流动性。假设价格行为包含持续性、过度反应或风险补偿。</dd></div>
+              <div><dt>估值</dt><dd>市盈率、市净率、自由现金流收益率等。分母为负或行业差异会让直接比较失真。</dd></div>
+              <div><dt>质量</dt><dd>盈利稳定、资产负债、现金流与资本效率。财报发布时间和后续修订必须做 PIT 对齐。</dd></div>
+              <div><dt>资讯</dt><dd>事件情绪、重要度、来源质量和时间衰减。采集时间不等于事件发生或市场首次知晓时间。</dd></div>
+              <div><dt>截面</dt><dd>同一天在股票之间排名、标准化或中性化；回答“相对谁更高”，不直接预测大盘方向。</dd></div>
+            </dl>
+          </section>
+
+          <section data-search-unit data-search-title="因子方向、标准化与可交易标签">
+            <h3>先定义方向，再定义未来收益</h3>
+            <div class="concept-flow"><p><b>规则</b>写清楚“数值越大越看多还是越看空”、计算窗口、缺失处理、截面范围、信号时间与标签区间。</p><p><b>合成例子</b>20 日动量以 T 日收盘计算，标签定义为 T+1 开盘买入至 T+4 开盘卖出的扣费后收益。若标签却从 T 日收盘起算，就把不可执行的价格放进结果。</p><p><b>项目位置</b>因子表达式引擎产生日×证券面板，Quant Lab 保存数据集、因子版本、标签和验证报告。</p><p><b>局限</b>表达式越复杂，自由度越高；经济含义不清的复杂因子更容易拟合噪声。</p></div>
+            <button class="help-project-link" type="button" data-help-tab="lab">前往 Quant Lab 检查因子版本</button>
+          </section>
+
+          <section data-search-unit data-search-title="去极值、排名、标准化、中性化与缺失处理">
+            <h3>预处理也是模型的一部分</h3>
+            <p>原始财务比率可能因分母接近零产生极端值，成交量因公司规模跨越多个数量级。常用处理包括分位数缩尾、横截面排名、z-score、行业/市值中性化与缺失指示。每一种都会改变因子含义，必须在训练和线上用完全相同的代码与参数。</p>
+            <p>排名保留次序、丢失距离；z-score 保留相对距离、容易受厚尾影响；中性化用回归剔除指定暴露，但结果依赖暴露定义和当日有效样本。对缺失值用行业中位数填充，比填零更温和，却仍假设缺失机制近似随机；若停牌或未披露本身有信息，应另建缺失指示或直接排除。</p>
+            <div class="concept-flow"><p><b>合成例子</b>四只股票原始估值收益率为 2%、3%、4%、40%。极端值可能来自真实便宜，也可能来自一次性利润。缩尾后排序仍最高，但它对回归权重的支配会减弱。</p><p><b>研究纪律</b>只用训练区间估计缩尾点、均值、标准差和中性化系数；若用全时期分布计算，就让未来样本参与了今天的变换。</p><p><b>局限</b>过度清洗会删除真正的尾部机会。应同时保存原始值、处理后值与被修改比例，报告结果对预处理选择的敏感性。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-validation" data-help-topic="validation" data-help-title="因子验证">
+          <div class="help-chapter-number">07 / VALIDATION</div>
+          <h2>因子验证</h2>
+          <p class="help-lead">一个可信因子不只要平均相关性为正，还要方向稳定、分层单调、换手可承受、与已有信号不重复，并在未参与选择的时期继续有效。</p>
+
+          <section data-search-unit data-search-title="IC、RankIC 与 ICIR">
+            <h3>RankIC：先排名，再看相关</h3>
+            <div class="concept-flow"><p><b>公式</b>某日 RankIC 是该日因子横截面排名与未来收益排名的 Pearson 相关，也就是 Spearman 相关。<code>ICIR = IC 均值 / IC 标准差</code>。</p><p><b>合成例子</b>四只股票因子排序 A&gt;B&gt;C&gt;D，未来收益排序也完全相同，RankIC 为 +1；完全相反则为 −1。</p><p><b>直觉</b>RankIC 降低极端值的影响，衡量排序能力，不要求因子值与收益呈严格线性关系。</p><p><b>局限</b>少量股票、并列值、行业集中和多次试验会让结果不稳定；高 IC 不自动等于高可实现收益。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="分层、换手、中性化、相关矩阵与因子合成">
+            <h3>从统计关联走到组合可用性</h3>
+            <ul class="help-checks"><li><strong>分层单调：</strong>按因子分组后，收益应大体随组别有序变化，而不是只靠一两只极端股票。</li><li><strong>换手率：</strong>排名每天剧烈变化会放大成本；比较扣费前后结果和不同调仓频率。</li><li><strong>行业/市值中性化：</strong>去除已知暴露后再看剩余预测力，但不要把真正的经济来源也机械消掉。</li><li><strong>相关矩阵：</strong>找出与已有因子高度同质的候选，防止“十个名字其实一个信号”。</li><li><strong>因子合成：</strong>等权是强基线；IC/ICIR 动态加权只能使用当时已经形成的历史窗口。</li></ul>
+            <p>合成例：两个因子 RankIC 均为 0.04，但相关 0.95，组合后不一定增加有效信息；若另一因子 RankIC 0.025、相关 0.1 且在不同市场状态有效，反而可能提升稳定性。</p>
+          </section>
+
+          <section data-search-unit data-search-title="因子稳定性、覆盖率、滞后与失效诊断">
+            <h3>平均 IC 会隐藏时间上的坏消息</h3>
+            <p>除全样本均值外，应按年、市场状态、板块、规模组和预测周期拆分 IC，并画滚动均值与覆盖率。正负抵消后的低均值可能表示信号无效，也可能表示机制在不同状态下反转；后者只有预先定义且样本外可识别时才有利用价值。</p>
+            <p>因子还应做滞后检验：将信号推迟一日或两日，观察效果是否平滑衰减。如果只有一个精确时点异常尖锐，需排查收盘数据提前使用、公告时间错位或不可成交价格。覆盖率骤变可能来自数据源或财务字段定义变化，不能直接解释为市场风格切换。</p>
+            <ul class="help-checks"><li>同时报告 IC 均值、中位数、标准差、正 IC 比例、有效日期数与每日证券数。</li><li>查看 top/bottom 组合贡献是否由极少数证券、行业或涨停日驱动。</li><li>比较原始、行业中性、市值中性和扣费后结果，说明预测力来自哪里。</li><li>预先规定失效阈值与观察窗口，避免看到近期变差后随意换口径。</li></ul>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-backtest" data-help-topic="backtest" data-help-title="可信回测">
+          <div class="help-chapter-number">08 / BACKTESTING</div>
+          <h2>可信回测</h2>
+          <p class="help-lead">回测是对一组明确假设的历史模拟。最有价值的结果不是最高收益曲线，而是当假设变差时，结论如何失效。</p>
+
+          <section data-search-unit data-search-title="基准、成本、成交与时间对齐">
+            <h3>最小可审计回测</h3>
+            <ol class="help-steps"><li><strong>冻结研究问题</strong><span>投资范围、周期、基准、调仓规则和评价门槛。</span></li><li><strong>按时点构造数据</strong><span>只使用当时可得的行情、财报、成分和资讯。</span></li><li><strong>分离信号与成交</strong><span>T 日信号到 T+1 或更晚的可执行价格，加入停牌与限制。</span></li><li><strong>逐笔计入成本</strong><span>最低佣金、税费、滑点、整手和现金约束。</span></li><li><strong>报告失败面</strong><span>回撤、换手、容量、子区间、参数敏感性和未成交订单。</span></li></ol>
+          </section>
+
+          <section data-search-unit data-search-title="未来函数、幸存者偏差、PIT 与 walk-forward">
+            <h3>四个最常见的“漂亮错误”</h3>
+            <dl class="help-definitions">
+              <div><dt>Look-ahead</dt><dd>使用未来价格、修订后财报、完整日成交量或当日收盘后才知道的信息。</dd></div>
+              <div><dt>Survivorship</dt><dd>用今天仍上市、仍在指数里的证券重建过去，删除了失败样本。</dd></div>
+              <div><dt>非 PIT 数据</dt><dd>按报告期而非真实披露时点对齐，或让历史成分回填到尚未生效的日期。</dd></div>
+              <div><dt>反复看测试集</dt><dd>每次失败后都根据测试结果改参数，测试集最终也变成训练集。</dd></div>
+            </dl>
+            <p>Walk-forward 在时间上滚动训练、验证和测试；purge/embargo 用于减少标签区间重叠造成的信息泄漏。QuantMaster 的 Champion 必须经过统一验证和人工批准，影子运行结果不能直接替代样本外证据。</p>
+          </section>
+
+          <section data-search-unit data-search-title="多重检验、FDR 与参数敏感性">
+            <h3>试得越多，越容易偶然赢</h3>
+            <p>若对 1,000 个纯噪声因子各做一次 5% 显著性检验，理论上就可能出现约 50 个“显著”结果。FDR 控制关注被选结果中的预期错误发现比例；它不能修复数据泄漏，也不能证明经济机制。</p>
+            <p>稳健策略应在相邻参数、不同子区间、略高成本和延迟成交下仍保留方向。若持有 5 日收益很好，4 日和 6 日完全崩溃，应先怀疑选择偏差或微小数据错位。</p>
+            <button class="help-project-link" type="button" data-help-tab="backtest">前往回测页核对成本与基准</button>
+          </section>
+
+          <section data-search-unit data-search-title="容量、市场冲击、现金拖累与压力测试">
+            <h3>小资金能成交，不代表规模可以复制</h3>
+            <p>策略容量受标的成交额、盘口深度、调仓集中度和持有期约束。固定滑点没有表达订单参与率：同样买入 10 万元，对日成交额 50 亿元的 ETF 与 500 万元的小盘股影响完全不同。可用“订单金额 / 近期日均成交额”做粗筛，并测试更保守的成交比例和延迟。</p>
+            <p>整手、最低佣金和无法刚好分配的余额会产生现金拖累；涨停买不到时，组合不应把资金自动分给事后表现最好的替代股。退市、长期停牌和连续跌停情景要保留在净值里，不能在数据消失当天按最后价格无摩擦退出。</p>
+            <div class="concept-flow"><p><b>压力组合</b>把佣金与滑点提高 1–3 倍、成交推迟一日、成交量上限减半、信号随机丢失 5%，再观察收益方向和最大回撤。</p><p><b>合成例子</b>毛年化 18% 的高换手策略，在双倍滑点下变为 4%，推迟一日后变为 −2%。这说明优势集中在难以捕捉的短暂价格，而非稳定预测力。</p><p><b>项目限制</b>当前固定比例滑点适合一致性比较，不是订单簿仿真；模拟盘与真实成交偏差应反向更新压力参数。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-risk" data-help-topic="risk" data-help-title="组合构建与风险管理">
+          <div class="help-chapter-number">09 / PORTFOLIO RISK</div>
+          <h2>组合构建与风险管理</h2>
+          <p class="help-lead">预测决定“更想持有什么”，风控决定“错了还能不能继续”。仓位、暴露和流动性约束应在下单前完成，而不是亏损后补写。</p>
+
+          <section data-search-unit data-search-title="仓位、单笔风险与风险预算">
+            <h3>先定损失预算，再反推股数</h3>
+            <div class="concept-flow"><p><b>近似公式</b><code>风险股数 = 账户允许损失 / (入场成交价 − 止损成交价)</code>，再受最大仓位、整手和费用约束。</p><p><b>合成例子</b>账户 200,000 元，单笔风险 0.5% 即 1,000 元；入场 20 元、止损 19 元，忽略费用时上限 1,000 股。若最大仓位 8%，资金约束只允许约 800 股，最终再向下取整手。</p><p><b>项目位置</b>决策页给出连续仓位建议，计算工具用配置中的费用与滑点反推可承受数量。</p><p><b>局限</b>止损不是保证成交价。跳空或连续跌停会使实际损失显著超过预算。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="暴露、集中度、相关性与流动性">
+            <h3>十只股票不一定是十份分散</h3>
+            <p>同属一个行业、共享相同风格或供应链的持仓可能在压力期同时下跌。应检查单股、行业、板块、规模、贝塔、因子和流动性暴露；限制订单占日均成交额的比例，并为卖出所需天数留缓冲。</p>
+            <p>风险预算可以按波动或边际风险分配，但估计依赖历史协方差。极端行情中相关性上升、波动跳变，模型给出的“均衡”组合仍可能集中暴露于同一风险源。</p>
+          </section>
+
+          <section data-search-unit data-search-title="止损、止盈、最大回撤与恢复收益">
+            <h3>回撤越深，回本要求越陡</h3>
+            <p>从净值 1 跌到 0.8 是 20% 回撤；要从 0.8 回到 1，需要上涨 <code>20% / (1−20%) = 25%</code>。50% 回撤需要 100% 收益才能回本。最大回撤还应配合持续时间与水下曲线阅读，因为同样 20%，两周恢复和两年恢复的体验完全不同。</p>
+            <p>止损控制单笔路径，但可能在噪声中频繁触发；止盈降低暴露，也可能截断右尾。二者都要纳入同一历史模拟，不能先看完走势图再挑“刚好”的阈值。</p>
+          </section>
+
+          <section data-search-unit data-search-title="组合再平衡、风险上限与降杠杆顺序">
+            <h3>风控规则需要说明先后顺序</h3>
+            <p>新信号、止损、行业上限、单股上限、现金约束和整手取整可能同时发生。系统必须规定优先级，例如先处理必须退出的持仓，再按风险预算分配新仓，最后把取整后的剩余现金保留，而不是反复归一化到满仓。否则代码实现顺序会悄悄决定实际策略。</p>
+            <p>再平衡过频会付出成本，过慢则让暴露偏离。可设置容忍带：目标权重变化小于阈值时不交易；也可将换手惩罚直接加入优化。无论哪种方式，都要用调仓后的真实权重计算风险，而不是只展示未取整的理论权重。</p>
+            <div class="concept-flow"><p><b>合成例子</b>五只股票理论各 20%，其中一只次日涨停买不到。真实组合应保留相应现金或按预先规则处理，不能在回测结束后把它假定为成交，也不能临时挑选当日涨得最好的替代品。</p><p><b>应急顺序</b>数据异常时暂停新增风险；成交异常时撤销未确认订单；暴露超限时优先降低流动性较好且可卖的仓位；连续跌停则记录不可执行缺口而非假装已止损。</p><p><b>局限</b>任何静态上限都无法覆盖全部联合尾部风险，仍需保留现金缓冲、人工停机和券商侧核对。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-models" data-help-topic="models" data-help-title="QuantMaster 模型与页面口径">
+          <div class="help-chapter-number">10 / PROJECT SEMANTICS</div>
+          <h2>QuantMaster 模型与页面口径</h2>
+          <p class="help-lead">页面指标是研究证据的摘要，不是交易命令。理解输入、时间范围、回退条件和置信度，比记住某个分数阈值更重要。</p>
+
+          <section data-search-unit data-search-title="牛熊分、市场宽度、概率与置信度">
+            <h3>市场状态不是一个神奇数字</h3>
+            <dl class="help-definitions">
+              <div><dt>牛熊分</dt><dd>将趋势、宽度、量能、波动等证据压缩为状态刻度；用于描述相对环境，不是上涨概率的同义词。</dd></div>
+              <div><dt>市场宽度</dt><dd>上涨家数占比、站上均线比例等截面参与度；指数上涨但宽度收缩，说明行情可能由少数权重推动。</dd></div>
+              <div><dt>未来概率</dt><dd>针对 1/3/5/7 个交易日标签的历史条件概率或校准模型输出；只在对应候选、周期与版本内解释。</dd></div>
+              <div><dt>置信度</dt><dd>描述证据完整度、一致性或模型校准程度，不等于保证正确，也不是仓位的唯一输入。</dd></div>
+            </dl>
+            <button class="help-project-link" type="button" data-help-tab="market">前往市场页对照宽度与趋势</button>
+          </section>
+
+          <section data-search-unit data-search-title="Hybrid v2、Champion、回退与快照">
+            <h3>Hybrid v2 如何组织证据</h3>
+            <p>Hybrid v2 把自适应规则、市场状态、Quant Lab 因子或学习模型 Champion、成本与风险画像放在统一决策流程中。Champion 不是“全项目永远最佳模型”，而是在特定候选范围、预测周期、策略画像和版本条件下，经验证并人工批准的当前生产候选。</p>
+            <div class="concept-flow"><p><b>快照</b>保存当时实际使用的候选成分、行情截点、模型版本、参数和输出，使复盘不被后续数据更新改写。</p><p><b>回退</b>当 Champion 不可用、输入质量不足或版本不匹配时，系统回到可解释规则，而不是静默输出伪精确结果。</p><p><b>模型贡献</b>展示不同证据对综合结果的影响，帮助发现单一信号支配、异常输入和方向冲突。</p><p><b>局限</b>概率校准依赖历史覆盖；制度切换、极端行情或新标的可能落在训练分布之外。</p></div>
+          </section>
+
+          <section data-search-unit data-search-title="如何阅读决策页">
+            <h3>建议的阅读顺序</h3>
+            <ol class="help-steps"><li><strong>先看数据质量</strong><span>截至日期、候选覆盖、缺失与回退警告。</span></li><li><strong>再看市场状态</strong><span>趋势和宽度是否一致，未来概率对应哪个周期。</span></li><li><strong>检查个股证据</strong><span>模型贡献、成本后预期、波动与板块集中。</span></li><li><strong>最后看仓位</strong><span>用账户风险、相关持仓和可成交性覆盖模型建议。</span></li></ol>
+            <button class="help-project-link" type="button" data-help-tab="decision">前往决策页按此顺序复核</button>
+          </section>
+
+          <section data-search-unit data-search-title="数据质量警告、模型分歧与回退输出">
+            <h3>警告比精确小数更重要</h3>
+            <p>当候选覆盖不足、行情截至日期不一致、特征缺失或模型版本不匹配时，页面可能给出部分结果、降低置信度或回退到规则。此时应先处理警告，再看概率与排名。一个带有明确“不完整”标记的 0.61，比来源不明的 0.6137 更诚实。</p>
+            <p>规则与模型方向分歧不是自动取平均的理由。先检查二者使用的周期和目标：趋势规则可能描述当前环境，Champion 预测未来三日相对收益，它们可以同时正确。若作用域一致仍强烈冲突，应降低仓位或进入观察，而不是选择更符合主观观点的一方。</p>
+            <ul class="help-checks"><li>确认页面“截至”日期等于你以为的信号日，且没有跨频率混用。</li><li>确认 Champion 的候选、周期和画像与当前请求一致；否则读取回退说明。</li><li>展开模型贡献，检查是否由单个异常特征或缺失填充值主导。</li><li>复制或保存诊断编号；复盘时用同一快照重放，不用今天的数据重算过去。</li></ul>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-workflow" data-help-topic="workflow" data-help-title="从研究到执行的工作流">
+          <div class="help-chapter-number">11 / WORKFLOW</div>
+          <h2>从研究到执行的工作流</h2>
+          <p class="help-lead">把每一次策略变化当成一个可审计实验：明确问题、冻结版本、留出样本、模拟执行、小规模观察，再决定是否扩大使用。</p>
+
+          <section data-search-unit data-search-title="候选到 Quant Lab 到回测到模拟盘到实盘账本">
+            <h3>一条不跳步的路径</h3>
+            <div class="help-workflow" aria-label="项目研究工作流">
+              <button type="button" data-help-tab="candidates"><span>01</span><strong>候选</strong><small>定义可投资范围与历史成分</small></button>
+              <button type="button" data-help-tab="lab"><span>02</span><strong>Quant Lab</strong><small>冻结数据、因子、标签和验证报告</small></button>
+              <button type="button" data-help-tab="backtest"><span>03</span><strong>回测</strong><small>加入基准、成本和执行限制</small></button>
+              <button type="button" data-help-tab="paper"><span>04</span><strong>模拟盘</strong><small>观察实时信号与可成交偏差</small></button>
+              <button type="button" data-help-tab="ledger"><span>05</span><strong>实盘账本</strong><small>记录成交、现金流、TWR 与 XIRR</small></button>
+            </div>
+            <p>候选范围改变会改变横截面排名；标签或周期改变会改变研究目标；费用改变会改变可行换手。任何一个环节变化，都应生成新版本而不是覆盖旧结果。</p>
+          </section>
+
+          <section data-search-unit data-search-title="上线门槛与停止条件">
+            <h3>在开始之前写下停止条件</h3>
+            <ul class="help-checks"><li>样本外 RankIC、分层与扣费后收益没有达到预先设定的最低门槛。</li><li>表现高度依赖单一年份、少数股票或一个精确参数。</li><li>换手、容量或未成交比例使理论优势不可实现。</li><li>实时候选、数据质量或模型版本与验证时不一致。</li><li>模拟盘成交偏差持续超过假设，或实盘回撤突破风险预算。</li></ul>
+            <p>停止不是研究失败，而是控制证据不足时的损失。记录“为什么没有上线”与记录成功模型同样重要，它能阻止团队以后重复踩坑。</p>
+          </section>
+
+          <section data-search-unit data-search-title="实验日志、版本冻结与实盘归因">
+            <h3>一次实验至少留下这些证据</h3>
+            <p>记录研究问题、负责人、创建时间、代码提交、数据快照、候选版本、特征与标签定义、训练/验证/测试区间、随机种子、参数搜索空间、成本假设、通过门槛和最终决定。失败实验也要保留摘要，因为删除失败记录会让之后的人低估尝试次数和过拟合风险。</p>
+            <p>从模拟盘进入实盘时冻结策略规格，不要一边交易一边根据当天盈亏改模型。实盘归因至少拆成市场/基准、选股、仓位、交易成本、未成交与人工覆盖；若真实表现偏离回测，先判断是信号衰减、数据差异还是执行偏差，再决定暂停、回滚或重新研究。</p>
+            <div class="concept-flow"><p><b>合成例子</b>实盘少赚 2%，其中 1.2% 来自涨停未成交，0.5% 来自滑点高估不足，0.3% 才是持仓收益差异。若不拆分，可能错误地重训一个本来没有明显失效的模型。</p><p><b>版本原则</b>改变候选、标签、特征、成本、组合或执行中的任何一项，都创建新实验或新策略版本；旧快照保持不可变。</p><p><b>项目位置</b>Quant Lab 保存版本账本和验证报告，模拟盘记录订单过程，实盘账本用 TWR/XIRR 与基准对照实际结果。</p></div>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-checklist" data-help-topic="checklist" data-help-title="每日清单、术语与市场附录">
+          <div class="help-chapter-number">12 / FIELD GUIDE</div>
+          <h2>每日清单、术语与市场附录</h2>
+          <p class="help-lead">最有效的风险控制通常不是更复杂的模型，而是一张每天都真正执行的短清单。</p>
+
+          <section data-search-unit data-search-title="盘前盘后研究清单">
+            <h3>每日 10 项检查</h3>
+            <div class="help-checklist-grid">
+              <div><span>盘前</span><ol><li>确认交易日、停复牌与账户可用资金。</li><li>确认数据截至时间和自动任务状态。</li><li>查看持仓集中、可卖数量与重大公告。</li><li>核对计划订单的价格限制、整手和流动性。</li><li>写明最大允许损失与取消条件。</li></ol></div>
+              <div><span>盘后</span><ol><li>对比计划、模拟与真实成交价格。</li><li>核对费用、未成交和异常回退。</li><li>确认快照使用的候选与模型版本。</li><li>分离市场收益、信号收益与执行偏差。</li><li>记录偏差，避免依据单日结果临时调参。</li></ol></div>
+            </div>
+          </section>
+
+          <section data-search-unit data-search-title="常用术语表">
+            <h3>常用术语</h3>
+            <div class="help-glossary">
+              <dl><dt>Alpha</dt><dd>相对基准或风险模型无法解释的收益；估计依赖所选模型。</dd></dl>
+              <dl><dt>Beta</dt><dd>资产对市场共同波动的敏感度，不等于全部风险。</dd></dl>
+              <dl><dt>PIT</dt><dd>Point-in-time，只使用当时已经可得的数据版本。</dd></dl>
+              <dl><dt>Universe</dt><dd>研究或可投资证券集合；历史成分必须按日期处理。</dd></dl>
+              <dl><dt>Label</dt><dd>模型要预测的未来结果及其起止时间。</dd></dl>
+              <dl><dt>Exposure</dt><dd>组合对行业、风格、市场或单一风险源的敏感度。</dd></dl>
+              <dl><dt>Turnover</dt><dd>组合持仓变化程度；定义需说明单边还是双边。</dd></dl>
+              <dl><dt>Slippage</dt><dd>预期报价与实际成交的偏差；固定比例只是近似。</dd></dl>
+              <dl><dt>Drawdown</dt><dd>净值相对此前峰值的下跌幅度。</dd></dl>
+              <dl><dt>Champion</dt><dd>在明确作用域内经统一验证和批准的当前生产模型。</dd></dl>
+              <dl><dt>Shadow</dt><dd>仅旁路观察、不影响正式决策的模型运行方式。</dd></dl>
+              <dl><dt>FDR</dt><dd>多重检验中控制所选发现里预期错误比例的方法。</dd></dl>
+            </div>
+          </section>
+
+          <section data-search-unit data-search-title="港股与美股差异简表">
+            <h3>港股与美股：不能直接复制 A 股假设</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>主题</th><th>香港市场</th><th>美国市场</th></tr></thead><tbody>
+              <tr><td>结算</td><td>截至本手册核验日现行为 T+2；港交所已提出 2027 年第四季度转为 T+1 的目标，落地前须查最新安排</td><td>多数适用证券自 2024 年起采用 T+1 结算</td></tr>
+              <tr><td>交易单位</td><td>每手股数因证券而异，并非统一 100 股</td><td>可按股交易，部分券商支持碎股</td></tr>
+              <tr><td>价格机制</td><td>有市场波动调节、开收市竞价等安排</td><td>交易所、盘前盘后、熔断与订单路由结构不同</td></tr>
+              <tr><td>账户与税费</td><td>印花税、交易费、结算费和汇率影响需单独建模</td><td>监管费、券商路由、卖空和日内交易账户规则需单独核对</td></tr>
+            </tbody></table></div>
+            <p>跨市场研究还要处理时区、节假日、币种、公司行动、存托凭证、数据授权与税务。项目可以解析多市场证券并归档行情，但当前回测执行规则以 A 股为核心，不能自动代表港美真实成交。</p>
+          </section>
+
+          <section data-search-unit data-search-title="交易所与监管官方来源">
+            <h3>优先核对官方来源</h3>
+            <ul class="help-sources">
+              <li><a href="https://big5.sse.com.cn/site/cht/www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml" target="_blank" rel="noopener noreferrer">上海证券交易所交易规则（2026）</a><span>沪市交易制度原文</span></li>
+              <li><a href="https://docs.static.szse.cn/www/lawrules/rule/trade/current/W020260424690713155663.pdf" target="_blank" rel="noopener noreferrer">深圳证券交易所交易规则（2026 PDF）</a><span>深市交易制度原文</span></li>
+              <li><a href="https://www.bse.cn/jygl_list/200028217.html" target="_blank" rel="noopener noreferrer">北京证券交易所交易规则</a><span>北交所现行规则入口</span></li>
+              <li><a href="https://one.sse.com.cn/onething/gptz/" target="_blank" rel="noopener noreferrer">上交所股票交易与费用指引</a><span>面向投资者的办理说明</span></li>
+              <li><a href="https://xj.mof.gov.cn/zcfagui/202311/t20231108_3915476.htm" target="_blank" rel="noopener noreferrer">财政部证券交易印花税政策</a><span>印花税政策依据</span></li>
+              <li><a href="https://www.hkex.com.hk/Global/Exchange/FAQ/Securities-Market/Trading/Securities-Market-Operations?sc_lang=zh-CN" target="_blank" rel="noopener noreferrer">香港交易所证券市场运作问答</a><span>现行交易与结算说明</span></li>
+              <li><a href="https://www.hkex.com.hk/news/market-communications/2026/260417news?sc_lang=zh-hk" target="_blank" rel="noopener noreferrer">香港市场缩短结算周期公告</a><span>T+1 目标时间表</span></li>
+              <li><a href="https://www.sec.gov/compliance/risk-alerts/shortening-securities-transaction-settlement-cycle" target="_blank" rel="noopener noreferrer">美国 SEC：证券结算周期缩短至 T+1</a><span>美国市场监管说明</span></li>
+            </ul>
+          </section>
+        </section>
+
+        <section class="help-chapter help-calculators" id="help-calculators" data-help-topic="calculators" data-help-title="研究计算工具">
+          <div class="help-chapter-number">TOOLS / LOCAL ONLY</div>
+          <h2>研究计算工具</h2>
+          <p class="help-lead">所有计算只在当前浏览器中完成，不保存、不下单。交易参数会只读载入“设置 → 交易成本”；你在这里的临时修改不会写回配置。</p>
+          <div class="help-settings-status" id="help-settings-status" role="status">正在读取项目交易参数…</div>
+
+          <div class="calculator-list">
+            <section class="calculator" data-calculator="compound" data-search-unit data-search-title="复利与年化收益计算器">
+              <div class="calculator-head"><div><span>01</span><h3>复利与年化收益</h3></div><p>按项目的年交易日口径折算。</p></div>
+              <form id="calc-compound" novalidate>
+                <div class="calculator-fields"><label>期初净值或资金<input name="start" type="number" min="0" step="any" value="100"></label><label>期末净值或资金<input name="end" type="number" min="0" step="any" value="121"></label><label>经过交易日<input name="days" type="number" min="1" step="1" value="488"></label></div>
+                <p class="calculator-error" data-error aria-live="polite"></p>
+                <output><span>累计收益<strong data-output="total">—</strong></span><span>复利年化<strong data-output="annual">—</strong></span><small data-formula></small></output>
+              </form>
+            </section>
+
+            <section class="calculator" data-calculator="cost" data-search-unit data-search-title="往返交易成本与盈亏平衡计算器">
+              <div class="calculator-head"><div><span>02</span><h3>往返成本与盈亏平衡</h3></div><p>佣金、最低佣金、税费与双边滑点。</p></div>
+              <form id="calc-cost" novalidate>
+                <div class="calculator-fields"><label>买入报价（元）<input name="buy_price" type="number" min="0" step="any" value="10"></label><label>计划卖出报价（元）<input name="sell_price" type="number" min="0" step="any" value="10.2"></label><label>股数<input name="shares" type="number" min="1" step="1" value="1000"></label></div>
+                <details class="calculator-parameters"><summary>本次计算参数</summary><div class="calculator-fields trade-parameter-fields"></div></details>
+                <p class="calculator-error" data-error aria-live="polite"></p>
+                <output><span>买入总支出<strong data-output="buy_total">—</strong></span><span>卖出净收入<strong data-output="sell_net">—</strong></span><span>预计净收益<strong data-output="pnl">—</strong></span><span>盈亏平衡卖出报价<strong data-output="breakeven">—</strong></span><small data-formula>滑点先调整成交价，费用按成交金额计算。</small></output>
+              </form>
+            </section>
+
+            <section class="calculator" data-calculator="position" data-search-unit data-search-title="风险仓位与整手计算器">
+              <div class="calculator-head"><div><span>03</span><h3>风险仓位</h3></div><p>由损失预算和最大仓位共同约束。</p></div>
+              <form id="calc-position" novalidate>
+                <div class="calculator-fields"><label>账户权益（元）<input name="equity" type="number" min="0" step="any" value="200000"></label><label>单笔风险（%）<input name="risk_pct" type="number" min="0" max="100" step="any" value="0.5"></label><label>入场报价（元）<input name="entry" type="number" min="0" step="any" value="20"></label><label>止损报价（元）<input name="stop" type="number" min="0" step="any" value="19"></label><label>最大仓位（%）<input name="cap_pct" type="number" min="0" max="100" step="any" value="8"></label></div>
+                <details class="calculator-parameters"><summary>本次计算参数</summary><div class="calculator-fields trade-parameter-fields"></div></details>
+                <p class="calculator-error" data-error aria-live="polite"></p>
+                <output><span>建议上限<strong data-output="shares">—</strong></span><span>预计买入总额<strong data-output="cost">—</strong></span><span>止损情景预计损失<strong data-output="loss">—</strong></span><span>实际权益风险<strong data-output="actual_risk">—</strong></span><small data-formula>止损价不保证成交；跳空或连续跌停可能突破预算。</small></output>
+              </form>
+            </section>
+
+            <section class="calculator" data-calculator="drawdown" data-search-unit data-search-title="回撤恢复收益计算器">
+              <div class="calculator-head"><div><span>04</span><h3>回撤恢复</h3></div><p>回撤越深，回本所需涨幅越大。</p></div>
+              <form id="calc-drawdown" novalidate><div class="calculator-fields"><label>当前回撤（%）<input name="drawdown" type="number" min="0" max="99.99" step="any" value="20"></label></div><p class="calculator-error" data-error aria-live="polite"></p><output><span>回到前高所需收益<strong data-output="recovery">—</strong></span><small data-formula>恢复收益 = 回撤 / (1 − 回撤)</small></output></form>
+            </section>
+
+            <section class="calculator" data-calculator="sharpe" data-search-unit data-search-title="夏普比率计算器">
+              <div class="calculator-head"><div><span>05</span><h3>夏普比率</h3></div><p>复用项目的复利年化与年化波动口径。</p></div>
+              <form id="calc-sharpe" novalidate><div class="calculator-fields"><label>区间累计收益（%）<input name="total_return" type="number" min="-99.99" step="any" value="10"></label><label>区间交易日<input name="days" type="number" min="1" step="1" value="244"></label><label>日收益波动率（%）<input name="daily_vol" type="number" min="0" step="any" value="1"></label><label>年无风险利率（%）<input name="risk_free" type="number" step="any"></label></div><p class="calculator-error" data-error aria-live="polite"></p><output><span>年化收益<strong data-output="annual_return">—</strong></span><span>年化波动<strong data-output="annual_vol">—</strong></span><span>夏普比率<strong data-output="sharpe">—</strong></span><small data-formula></small></output></form>
+            </section>
+
+            <section class="calculator" data-calculator="rankic" data-search-unit data-search-title="RankIC Spearman 排名相关计算器">
+              <div class="calculator-head"><div><span>06</span><h3>RankIC</h3></div><p>每行输入“因子值, 未来收益”，支持并列平均排名。</p></div>
+              <form id="calc-rankic" novalidate><label class="calculator-textarea-label">因子值与未来收益（3–50 对）<textarea name="pairs" rows="7" spellcheck="false">4, 0.08
+3, 0.05
+2, 0.01
+1, -0.03</textarea></label><p class="calculator-error" data-error aria-live="polite"></p><output><span>有效样本<strong data-output="count">—</strong></span><span>RankIC<strong data-output="rankic">—</strong></span><span>方向解释<strong data-output="meaning">—</strong></span><small data-formula>先对两列分别做平均排名，再计算排名的 Pearson 相关。</small></output></form>
+            </section>
+          </div>
+        </section>
+
+        <footer class="help-footer">
+          <p><strong>最后提醒：</strong>把手册当作检查假设的入口，而不是固定答案。每次实盘前核对最新规则、账户权限、费用和证券状态。</p>
+          <a href="#help/start">返回手册开头</a>
+        </footer>
+      </article>
+    </div>
+  </div>
+</div>

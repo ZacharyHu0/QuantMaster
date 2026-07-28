@@ -124,6 +124,12 @@ def cmd_lab(args) -> None:
     if args.lab_cmd == "jobs":
         _print_json({"items": service.store.jobs(args.limit)})
         return
+    if args.lab_cmd == "studies":
+        _print_json({"items": service.store.studies(args.limit)})
+        return
+    if args.lab_cmd == "resume":
+        _print_json(service.resume_study(args.study_id))
+        return
     if args.lab_cmd == "approve":
         _print_json(service.store.approve(
             args.version_id, actor="cli", reason=args.reason))
@@ -131,6 +137,26 @@ def cmd_lab(args) -> None:
     if args.lab_cmd == "deploy":
         _print_json(service.store.deploy(
             args.version_id, universe=args.universe, horizon=args.horizon, actor="cli"))
+        return
+    if args.lab_cmd == "optimize":
+        study = service.create_study({
+            "universe": args.universe, "start": args.start, "end": args.end or _today(),
+            "models": [item.strip() for item in args.models.split(",") if item.strip()],
+            "budget_hours": args.budget_hours, "max_trials": args.max_trials,
+            "top_n": args.top, "sequence_length": args.sequence_length,
+            "research_tier": args.research_tier,
+        })
+        _print_json({
+            "study": study,
+            "hint": "Study 已进入可恢复队列；只会产出 Shadow 候选，不会自动晋升 Champion",
+        })
+        return
+    if args.lab_cmd == "audit":
+        job = service.enqueue("bias_audit", {
+            "version_id": args.version_id, "universe": args.universe,
+            "start": args.start, "end": args.end or _today(),
+        })
+        _print_json({"job": job, "hint": "偏差审计已进入研究队列"})
         return
 
     end = args.end or _today()
@@ -140,10 +166,17 @@ def cmd_lab(args) -> None:
     elif args.lab_cmd in {"validate", "score"}:
         job = service.enqueue("validate", {"version_id": args.version_id, **base})
     elif args.lab_cmd == "discover":
-        kind = "discover_llm" if args.method == "llm" else "discover_genetic"
+        kind = {
+            "llm": "discover_llm", "python": "discover_python",
+        }.get(args.method, "discover_genetic")
         params = {**base, "horizon": args.horizon, "top_n": args.top}
         if args.method == "llm":
             params = {**base, "horizon": args.horizon, "count": args.top, "rounds": args.rounds}
+        elif args.method == "python":
+            params = {
+                **base, "horizon": args.horizon, "rounds": args.rounds,
+                "candidate_limit": args.candidates, "finalists": args.finalists,
+            }
         else:
             params.update({"population": args.population, "generations": args.generations})
         job = service.enqueue(kind, params)
@@ -670,6 +703,10 @@ def build_parser() -> argparse.ArgumentParser:
     llist.add_argument("--limit", type=int, default=100)
     ljobs = lq.add_parser("jobs", help="查看研究任务")
     ljobs.add_argument("--limit", type=int, default=50)
+    lstudies = lq.add_parser("studies", help="查看多目标优化 Study")
+    lstudies.add_argument("--limit", type=int, default=50)
+    lresume = lq.add_parser("resume", help="恢复暂停或中断的优化 Study")
+    lresume.add_argument("study_id")
 
     def lab_common(parser):
         parser.add_argument("--universe", default="demo")
@@ -682,14 +719,16 @@ def build_parser() -> argparse.ArgumentParser:
         item = lq.add_parser(command, help="提交统一样本外验证任务")
         item.add_argument("version_id")
         lab_common(item)
-    ldiscover = lq.add_parser("discover", help="提交遗传或 LLM 因子发现任务")
+    ldiscover = lq.add_parser("discover", help="提交遗传、DSL LLM 或 Python AutoMiner 任务")
     lab_common(ldiscover)
-    ldiscover.add_argument("--method", choices=["genetic", "llm"], default="genetic")
+    ldiscover.add_argument("--method", choices=["genetic", "llm", "python"], default="genetic")
     ldiscover.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
     ldiscover.add_argument("--top", type=int, default=10)
     ldiscover.add_argument("--population", type=int, default=60)
     ldiscover.add_argument("--generations", type=int, default=8)
-    ldiscover.add_argument("--rounds", type=int, default=2)
+    ldiscover.add_argument("--rounds", type=int, default=3)
+    ldiscover.add_argument("--candidates", type=int, default=24)
+    ldiscover.add_argument("--finalists", type=int, default=3)
     ltrain = lq.add_parser("train", help="提交 Ridge/深度学习实验")
     lab_common(ltrain)
     ltrain.add_argument(
@@ -698,6 +737,26 @@ def build_parser() -> argparse.ArgumentParser:
     ltrain.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
     ltrain.add_argument("--sequence-length", type=int, default=20)
     ltrain.add_argument("--epochs", type=int, default=30)
+    loptimize = lq.add_parser("optimize", help="提交共享多周期 Pareto 优化")
+    loptimize.add_argument("--universe", default="csi800")
+    loptimize.add_argument("--start", default="2015-01-01")
+    loptimize.add_argument("--end", default=None)
+    loptimize.add_argument(
+        "--models", default="multi-transformer,multi-tcn,multi-gru,ridge",
+        help="逗号分隔的共享模型；Ridge 始终可作 CPU 基线",
+    )
+    loptimize.add_argument("--budget-hours", type=float, default=10.0)
+    loptimize.add_argument("--max-trials", type=int, default=40)
+    loptimize.add_argument("--top", type=int, default=20)
+    loptimize.add_argument("--sequence-length", type=int, default=20)
+    loptimize.add_argument(
+        "--research-tier", choices=["production", "sandbox"], default="production",
+    )
+    laudit = lq.add_parser("audit", help="提交防前视、递归稳定性与 PIT 审计")
+    laudit.add_argument("version_id")
+    laudit.add_argument("--universe", default="csi800")
+    laudit.add_argument("--start", default="2015-01-01")
+    laudit.add_argument("--end", default=None)
     lapprove = lq.add_parser("approve", help="人工批准候选版本")
     lapprove.add_argument("version_id")
     lapprove.add_argument("--reason", default="")
@@ -908,6 +967,9 @@ def main(argv: list[str] | None = None) -> int:
     from quantmaster.logging_config import configure_logging
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if len(raw_argv) == 3 and raw_argv[0] == "__factor-runner":
+        from quantmaster.factors.python_artifact import _worker
+        return _worker(raw_argv[1], raw_argv[2])
     parsed_argv, verbose = _extract_verbose(raw_argv)
     configure_logging(verbose=verbose)
     args = build_parser().parse_args(parsed_argv)

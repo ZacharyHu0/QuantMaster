@@ -35,6 +35,7 @@ class BacktestConfig:
     allow_fractional: bool = False   # True 时忽略 100 股整手限制（研究用）
     stop_loss: float | None = None   # 止损线：开盘价较持仓成本跌幅 ≥ 该比例则清仓（如 0.08）
     take_profit: float | None = None # 止盈线：开盘价较持仓成本涨幅 ≥ 该比例则清仓（如 0.25）
+    research_tier: str = "sandbox"  # production 必须提供真实涨跌停/停牌/复权因子
 
 
 @dataclass
@@ -67,6 +68,8 @@ class BacktestResult:
     metrics: dict
     benchmark_nav: pd.Series | None = None
     blocked_orders: list[BlockedOrder] = field(default_factory=list)
+    initial_capital: float = 1_000_000.0
+    close_prices: pd.DataFrame | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +92,33 @@ def _sell_cost(amount: float, t: TradeConfig) -> float:
     return sell_cost(amount, t)
 
 
+def _execution_reason(
+    symbol: str, side: str, date, price: float, previous_close: float | None,
+    *, up_limit: pd.DataFrame | None, down_limit: pd.DataFrame | None,
+    suspended: pd.DataFrame | None, config: BacktestConfig,
+) -> str | None:
+    if suspended is not None:
+        value = suspended.reindex(index=[date], columns=[symbol]).iloc[0, 0]
+        if pd.notna(value) and bool(value):
+            return "suspended"
+    frame = up_limit if side == "buy" else down_limit
+    limit_value = np.nan
+    if frame is not None:
+        limit_value = frame.reindex(index=[date], columns=[symbol]).iloc[0, 0]
+    if pd.notna(limit_value) and float(limit_value) > 0:
+        tolerance = max(1e-6, abs(float(limit_value)) * 1e-6)
+        if side == "buy" and price >= float(limit_value) - tolerance:
+            return "limit_up"
+        if side == "sell" and price <= float(limit_value) + tolerance:
+            return "limit_down"
+        return None
+    if config.research_tier == "production":
+        return "missing_actual_limit"
+    return limit_reason(
+        symbol, side, price, previous_close, enabled=config.limit_check,
+    )
+
+
 def run_backtest(
     panel: dict[str, pd.DataFrame],
     target_weights: pd.DataFrame,
@@ -108,10 +138,27 @@ def run_backtest(
 
     config = config or BacktestConfig()
     tcfg = config.trade
-    open_px = panel["open"]
-    close_px = panel["close"]
-    dates = close_px.index
-    symbols = list(close_px.columns)
+    signal_close = panel["close"]
+    open_px = panel.get("execution_open", panel["open"]).reindex_like(signal_close)
+    close_px = panel.get("execution_close", signal_close).reindex_like(signal_close)
+    up_limit = panel.get("up_limit")
+    down_limit = panel.get("down_limit")
+    suspended = panel.get("suspended")
+    adj_factor = panel.get("adj_factor")
+    dates = signal_close.index
+    symbols = list(signal_close.columns)
+
+    if config.research_tier == "production":
+        missing = [
+            name for name, value in (
+                ("up_limit", up_limit), ("down_limit", down_limit),
+                ("suspended", suspended), ("adj_factor", adj_factor),
+                ("execution_open", panel.get("execution_open")),
+                ("execution_close", panel.get("execution_close")),
+            ) if value is None
+        ]
+        if missing:
+            raise ValueError("production 回测缺少真实成交字段：" + "、".join(missing))
 
     target_weights = target_weights.reindex(index=dates, columns=symbols)
     prev_close = close_px.shift(1)
@@ -120,6 +167,7 @@ def run_backtest(
     shares: dict[str, float] = {s: 0.0 for s in symbols}
     entry_cost: dict[str, float] = {s: 0.0 for s in symbols}   # 持仓的加权平均成本
     last_close: dict[str, float] = {}   # 最近一个有效收盘价（停牌估值用）
+    last_factor: dict[str, float] = {}
     trades: list[Trade] = []
     blocked_orders: list[BlockedOrder] = []
     nav_values: list[float] = []
@@ -130,6 +178,20 @@ def run_backtest(
     for i, date in enumerate(dates):
         date_str = str(date.date())
         stopped_today: set[str] = set()
+
+        # 用复权因子把持仓维持在总收益单位；历史回放中不会因请求结束日重写。
+        if adj_factor is not None:
+            factors = adj_factor.reindex(index=[date], columns=symbols).iloc[0]
+            for symbol in symbols:
+                value = factors.get(symbol, np.nan)
+                if pd.isna(value) or float(value) <= 0:
+                    continue
+                previous = last_factor.get(symbol)
+                if previous and shares[symbol] > 0:
+                    ratio = float(value) / previous
+                    shares[symbol] *= ratio
+                    entry_cost[symbol] /= ratio
+                last_factor[symbol] = float(value)
 
         # ---- 开盘：止损/止盈检查（先于调仓信号执行）----
         if config.stop_loss is not None or config.take_profit is not None:
@@ -153,10 +215,11 @@ def run_backtest(
                 # 但仍要冻结当日对该票的加仓——否则调仓信号会继续买入摊低均价，
                 # 止损线随之下移，可能永远触发不了。
                 pc = day_prev_close_sl.get(symbol, np.nan)
-                blocked = limit_reason(
-                    symbol, "sell", float(px),
+                blocked = _execution_reason(
+                    symbol, "sell", date, float(px),
                     float(pc) if not np.isnan(pc) else None,
-                    enabled=config.limit_check,
+                    up_limit=up_limit, down_limit=down_limit,
+                    suspended=suspended, config=config,
                 )
                 if blocked:
                     blocked_orders.append(BlockedOrder(
@@ -219,9 +282,11 @@ def run_backtest(
 
                 if diff_value < 0 and shares[symbol] > 0:
                     # 跌停无法卖出
-                    blocked = limit_reason(
-                        symbol, "sell", px, float(pc) if not np.isnan(pc) else None,
-                        enabled=config.limit_check,
+                    blocked = _execution_reason(
+                        symbol, "sell", date, px,
+                        float(pc) if not np.isnan(pc) else None,
+                        up_limit=up_limit, down_limit=down_limit,
+                        suspended=suspended, config=config,
                     )
                     if blocked:
                         blocked_orders.append(BlockedOrder(
@@ -250,9 +315,11 @@ def run_backtest(
                     if symbol in stopped_today:
                         continue   # 当日刚止损/止盈的股票不立即回补
                     # 涨停无法买入
-                    blocked = limit_reason(
-                        symbol, "buy", px, float(pc) if not np.isnan(pc) else None,
-                        enabled=config.limit_check,
+                    blocked = _execution_reason(
+                        symbol, "buy", date, px,
+                        float(pc) if not np.isnan(pc) else None,
+                        up_limit=up_limit, down_limit=down_limit,
+                        suspended=suspended, config=config,
                     )
                     if blocked:
                         blocked_orders.append(BlockedOrder(
@@ -316,8 +383,24 @@ def run_backtest(
 
     metrics = performance_metrics(returns, benchmark_nav=benchmark_nav, trades=trades)
     metrics["blocked_order_count"] = len(blocked_orders)
+    volume = panel.get("volume")
+    if volume is not None and not volume.empty and trades:
+        adv = volume.reindex_like(close_px).mul(close_px).rolling(20, min_periods=5).mean()
+        participation = []
+        for trade in trades:
+            timestamp = pd.Timestamp(trade.date)
+            if timestamp in adv.index and trade.symbol in adv.columns:
+                value = adv.at[timestamp, trade.symbol]
+                if pd.notna(value) and float(value) > 0:
+                    participation.append(float(trade.amount) / float(value))
+        if participation:
+            metrics["capacity_max_participation"] = round(max(participation), 6)
+            metrics["capacity_p95_participation"] = round(
+                float(np.quantile(participation, 0.95)), 6,
+            )
     return BacktestResult(
         nav=nav, returns=returns, positions=positions,
         trades=trades, metrics=metrics, benchmark_nav=benchmark_nav,
-        blocked_orders=blocked_orders,
+        blocked_orders=blocked_orders, initial_capital=config.initial_capital,
+        close_prices=close_px,
     )
