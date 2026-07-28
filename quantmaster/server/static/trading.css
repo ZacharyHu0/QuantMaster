@@ -290,7 +290,17 @@
 }
 
 .trading-history-row:hover { background: var(--trade-soft); }
-.trading-history-row input { width: 18px; height: 18px; accent-color: var(--trade-accent); }
+.trading-history-row input[type="checkbox"] {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  justify-self: center;
+  accent-color: var(--trade-accent);
+  cursor: pointer;
+}
+.trading-history-row input[type="checkbox"]:disabled { cursor: not-allowed; }
 .trading-history-name { min-width: 0; overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
 .trading-history-row button { min-height: 36px; border: 0; background: transparent; color: var(--trade-accent); cursor: pointer; font: inherit; }
 .trading-status { width: max-content; border: 1px solid var(--axis); border-radius: 999px; padding: 2px 7px; color: var(--muted); font-size: 10px; }

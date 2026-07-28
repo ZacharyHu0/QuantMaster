@@ -376,3 +376,11 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert 'data-paper-field="decision"' in page
     assert "生成调仓提案" in page
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
+
+    css = client.get("/static/trading.css").text
+    checkbox_rule = css.split(
+        '.trading-history-row input[type="checkbox"]', 1,
+    )[1].split("}", 1)[0]
+    assert "min-width: 18px" in checkbox_rule
+    assert "padding: 0" in checkbox_rule
+    assert "justify-self: center" in checkbox_rule

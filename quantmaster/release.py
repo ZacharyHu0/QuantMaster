@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.10"
+VERSION = "0.8.11"
 RELEASE_DATE = "2026-07-28"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "回测实验历史布局修复",
+                "items": (
+                    (
+                        "实验比较复选框不再继承普通输入框的最小宽度与内边距，"
+                        "每行选择框会固定在独立网格列中，不再遮挡实验名称。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.10",
+        "date": "2026-07-28",
         "sections": (
             {
                 "title": "AI 因子发现稳定性与进度反馈",
