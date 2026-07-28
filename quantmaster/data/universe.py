@@ -31,6 +31,47 @@ DEMO_STOCK_NAMES = {
 }
 DEMO_UNIVERSE = list(DEMO_STOCK_NAMES)
 
+# 新建候选时可直接读取的常用指数。科技成长方向优先排列；这些条目只是
+# 当前成分的快捷入口，保存后仍会成为普通的本地固定候选。
+INDEX_UNIVERSE_PRESETS = (
+    {
+        "name": "科创50", "symbol": "000688.SH", "category": "科技成长",
+        "description": "科创板大市值核心", "preferred": True,
+    },
+    {
+        "name": "科创100", "symbol": "000698.SH", "category": "科技成长",
+        "description": "科创板中盘成长", "preferred": True,
+    },
+    {
+        "name": "科创创业50", "symbol": "931643.CSI", "category": "科技成长",
+        "description": "科创板与创业板龙头", "preferred": True,
+    },
+    {
+        "name": "半导体材料设备", "symbol": "931743.CSI", "category": "科技成长",
+        "description": "半导体材料与设备", "preferred": True,
+    },
+    {
+        "name": "创业板指", "symbol": "399006.SZ", "category": "科技成长",
+        "description": "创业板核心成长", "preferred": True,
+    },
+    {
+        "name": "创业板50", "symbol": "399673.SZ", "category": "科技成长",
+        "description": "创业板高流动性龙头", "preferred": True,
+    },
+    {
+        "name": "沪深300", "symbol": "000300.SH", "category": "主流宽基",
+        "description": "沪深大盘核心", "preferred": False,
+    },
+    {
+        "name": "中证500", "symbol": "000905.SH", "category": "主流宽基",
+        "description": "中盘代表", "preferred": False,
+    },
+    {
+        "name": "中证1000", "symbol": "000852.SH", "category": "主流宽基",
+        "description": "小盘成长代表", "preferred": False,
+    },
+)
+
 
 def _universe_dir() -> Path:
     p = get_config().data_root / "universe"

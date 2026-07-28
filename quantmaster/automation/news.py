@@ -45,6 +45,7 @@ def news_event(item: NewsItem, holdings: set[str], watchlist: set[str],
     normalized = re.sub(r"\W+", "", item.title.casefold())
     fingerprint = stable_hash({
         "title": normalized, "symbols": sorted(item.symbols),
+        "sectors": sorted(item.sectors),
         "event_type": item.event_type or "其他", "day": (item.published_at or "")[:10],
     })
     return AlertEvent(
@@ -57,7 +58,8 @@ def news_event(item: NewsItem, holdings: set[str], watchlist: set[str],
         payload={"source": item.source, "title": item.title,
                  "summary": item.summary or item.content[:160],
                  "sentiment": float(item.sentiment or 0),
-                 "event_type": item.event_type},
+                 "event_type": item.event_type,
+                 "sectors": list(item.sectors)},
     )
 
 

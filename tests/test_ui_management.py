@@ -99,6 +99,11 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.get_by_role("button", name="候选", exact=True).click()
         page.locator(".candidate-detail").wait_for()
         page.locator("#candidate-new").click()
+        preset_buttons = page.locator("[data-candidate-index-preset]")
+        assert preset_buttons.count() == 9
+        assert preset_buttons.nth(0).get_attribute("data-candidate-index-preset") == "000688.SH"
+        assert "科创50" in preset_buttons.nth(0).inner_text()
+        assert "中证1000" in preset_buttons.nth(8).inner_text()
         page.locator("#candidate-new-name").fill("ui_candidate")
         page.get_by_role("button", name="添加代码", exact=True).click()
         instrument_input = page.locator("#candidate-add-symbol")
@@ -613,7 +618,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         browser.close()
 
 
-def test_personal_market_group_is_first_and_shows_memberships(live_server):
+def test_major_indexes_are_first_and_personal_group_shows_memberships(live_server):
     url, _ = live_server
     personal = {
         "symbol": "600519.SH", "name": "贵州茅台", "last": 1530.0,
@@ -654,9 +659,13 @@ def test_personal_market_group_is_first_and_shows_memberships(live_server):
         index_section.wait_for()
 
         assert personal_section.locator(".market-section-title").inner_text() == "我的股票"
+        assert index_section.locator(".market-section-title").inner_text() == "主要指数"
         assert personal_section.locator(".mkt-memberships").inner_text() == "自选 · 持有"
         assert personal_section.locator(".mkt-item").count() == 1
-        assert personal_section.bounding_box()["y"] < index_section.bounding_box()["y"]
+        assert index_section.locator(".mkt-item").count() == 1
+        assert index_section.locator("canvas").is_visible()
+        assert index_section.locator(".spark").bounding_box()["height"] >= 70
+        assert index_section.bounding_box()["y"] < personal_section.bounding_box()["y"]
 
         page.set_viewport_size({"width": 390, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")

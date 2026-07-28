@@ -18,6 +18,7 @@ data_root/fundamentals，与行情 bars 缓存互相隔离。
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from functools import partial
 
@@ -57,7 +58,11 @@ def _roe_key(symbol: str) -> str:
     return f"{symbol}#roe"
 
 
-def fetch_daily_indicators(symbol: str) -> pd.DataFrame:  # pragma: no cover - 网络
+def fetch_daily_indicators(
+    symbol: str,
+    start: str | None = None,
+    end: str | None = None,
+) -> pd.DataFrame:  # pragma: no cover - 网络
     """拉取每日估值指标（akshare stock_a_indicator_lg，数据源为乐咕乐股）。
 
     返回 index=DatetimeIndex 的 DataFrame，列为 pe / pe_ttm / pb / dv_ratio /
@@ -65,6 +70,12 @@ def fetch_daily_indicators(symbol: str) -> pd.DataFrame:  # pragma: no cover - �
     适合整体写入缓存后按日期切片使用。
     """
     code = _six_digit(symbol)
+    from quantmaster.data.tushare_source import TushareSource
+
+    tushare = TushareSource()
+    cached_tushare = tushare.cached_daily_indicators(symbol, start=start, end=end)
+    if cached_tushare is not None:
+        return cached_tushare
     try:
         ak = _require_akshare()
         raw = akshare_call(
@@ -76,9 +87,9 @@ def fetch_daily_indicators(symbol: str) -> pd.DataFrame:  # pragma: no cover - �
         if not get_config().data.tushare_token:
             raise
         logger.warning("AKShare 每日指标失败，降级 Tushare daily_basic: %s", ak_error)
-        from quantmaster.data.tushare_source import TushareSource
-
-        return TushareSource().daily_indicators(symbol)
+        if start or end:
+            return tushare.daily_indicators(symbol, start=start, end=end)
+        return tushare.daily_indicators(symbol)
     df = raw.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
     date_col = "trade_date" if "trade_date" in df.columns else df.columns[0]
@@ -96,6 +107,12 @@ def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame: 
     是「报告期」而非「公布日」，使用前必须经过 quarterly_to_daily() 加滞后。
     """
     code = _six_digit(symbol)
+    from quantmaster.data.tushare_source import TushareSource
+
+    tushare = TushareSource()
+    cached_tushare = tushare.cached_quarterly_roe(symbol, start_year=start_year)
+    if cached_tushare is not None:
+        return cached_tushare
     try:
         ak = _require_akshare()
         raw = akshare_call(
@@ -110,9 +127,7 @@ def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame: 
         if not get_config().data.tushare_token:
             raise
         logger.warning("AKShare ROE 失败，降级 Tushare fina_indicator: %s", ak_error)
-        from quantmaster.data.tushare_source import TushareSource
-
-        return TushareSource().quarterly_roe(symbol, start_year=start_year)
+        return tushare.quarterly_roe(symbol, start_year=start_year)
 
 
 def extract_roe(raw: pd.DataFrame) -> pd.DataFrame:
@@ -207,8 +222,34 @@ def _load_cached_or_fetch(
     key: str,
     store: BarStore,
     fetch: Callable[[], pd.DataFrame],
+    start: str,
     end: str,
     cache_days: int | None = None,
+    *,
+    columns: list[str] | None = None,
+) -> pd.DataFrame | None:
+    """以单标的共享锁保护缓存检查与 API 拉取，避免并行任务重复触网。"""
+    with store.lock(key):
+        return _load_cached_or_fetch_locked(
+            key,
+            store,
+            fetch,
+            start,
+            end,
+            cache_days,
+            columns=columns,
+        )
+
+
+def _load_cached_or_fetch_locked(
+    key: str,
+    store: BarStore,
+    fetch: Callable[[], pd.DataFrame],
+    start: str,
+    end: str,
+    cache_days: int | None = None,
+    *,
+    columns: list[str] | None = None,
 ) -> pd.DataFrame | None:
     """缓存优先的加载：缓存覆盖到 end 或仍新鲜就直接用，否则才触网。
 
@@ -216,11 +257,24 @@ def _load_cached_or_fetch(
     """
     cfg = get_config()
     max_age_days = cfg.data.cache_days if cache_days is None else cache_days
-    cached = store.get(key)
-    fresh = store.freshness(key)
-    if cached is not None and not cached.empty and fresh is not None:
-        covers = str(cached.index.max().date()) >= end
-        if covers or fresh < max_age_days * 86400:
+    cached = store.get(key, columns=columns)
+    # 锁内读取元信息，确保并发请求能看到另一个任务刚落盘的覆盖范围和检查时间。
+    meta = store.metadata(key) or {}
+    checked_at = meta.get("checked_at") or meta.get("updated_at")
+    fresh = time.time() - float(checked_at) if checked_at is not None else None
+    if cached is not None and not cached.empty:
+        # 即使旧 parquet 的 SQLite 元信息遗失，只要文件本身已经覆盖目标结束日，
+        # 也应直接使用本地数据，不能因为 freshness=None 再次请求提供商。
+        file_covers_end = str(cached.index.max().date()) >= end
+        checked_covers_range = bool(
+            meta.get("coverage_start")
+            and str(meta["coverage_start"]) <= start
+            and meta.get("coverage_end")
+            and str(meta["coverage_end"]) >= end
+        )
+        if file_covers_end or checked_covers_range or (
+            fresh is not None and fresh < max_age_days * 86400
+        ):
             return cached
     try:
         df = fetch()
@@ -228,9 +282,19 @@ def _load_cached_or_fetch(
         logger.warning("获取基本面数据失败 %s: %s", key, e)
         return cached
     if df is None or df.empty:
+        if cached is not None and not cached.empty and meta:
+            # 提供商确认当前没有增量时刷新“已检查”时间，避免同一份旧缓存被每个
+            # 排队任务反复触发相同 API 请求；不虚构实际数据覆盖范围。
+            cached_start = str(cached.index.min().date())
+            cached_end = str(cached.index.max().date())
+            store.mark_checked(
+                key, cached_start, cached_end,
+                source="fundamentals", status="stale",
+            )
         return cached
     store.put(key, df)
-    merged = store.get(key)
+    store.mark_checked(key, start, end, source="fundamentals")
+    merged = store.get(key, columns=columns)
     return merged if merged is not None else df
 
 
@@ -241,6 +305,8 @@ def fundamental_panel(
     fields: Sequence[str] = DEFAULT_FIELDS,
     lag_days: int | None = None,
     store: BarStore | None = None,
+    progress=None,
+    cancelled=None,
 ) -> dict[str, pd.DataFrame]:
     """多标的基本面面板：{字段: DataFrame(date × symbol)}。
 
@@ -251,7 +317,8 @@ def fundamental_panel(
       logger.warning 并跳过，不影响其余标的（与行情 load_panel 风格一致）。
     """
     store = store or fundamental_store()
-    fields = list(fields)
+    fields = list(dict.fromkeys(fields))
+    symbols = list(dict.fromkeys(symbols))
     for f in fields:
         if f != "roe" and f not in DAILY_FIELDS:
             logger.warning("未知基本面字段，忽略: %s", f)
@@ -262,11 +329,23 @@ def fundamental_panel(
 
     daily_frames: dict[str, pd.DataFrame] = {}
     roe_frames: dict[str, pd.DataFrame] = {}
-    for symbol in symbols:
+    total = len(symbols)
+    for number, symbol in enumerate(symbols, start=1):
+        if cancelled and cancelled():
+            raise InterruptedError("基本面数据加载已取消")
+        loaded = False
         if daily_fields:
-            df = _load_cached_or_fetch(symbol, store, partial(fetch_daily_indicators, symbol), end)
+            df = _load_cached_or_fetch(
+                symbol,
+                store,
+                partial(fetch_daily_indicators, symbol, start, end),
+                start,
+                end,
+                columns=daily_fields,
+            )
             if df is not None and not df.empty:
                 daily_frames[symbol] = df.loc[start:end]
+                loaded = True
             else:
                 logger.warning("跳过 %s 的每日估值指标：无缓存且获取失败", symbol)
         if want_roe:
@@ -274,13 +353,17 @@ def fundamental_panel(
                 _roe_key(symbol),
                 store,
                 partial(fetch_quarterly_roe, symbol, start_year=roe_start_year),
+                start,
                 end,
                 cache_days=get_config().data.fundamental_cache_days,
             )
             if q is not None and not q.empty:
                 roe_frames[symbol] = q
+                loaded = True
             else:
                 logger.warning("跳过 %s 的季度 ROE：无缓存且获取失败", symbol)
+        if progress:
+            progress(number, total, symbol, loaded)
 
     all_dates: pd.DatetimeIndex | None = None
     for df in daily_frames.values():

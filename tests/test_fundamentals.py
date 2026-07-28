@@ -1,6 +1,8 @@
 """基本面数据层与价值/质量因子的测试（全部离线，合成数据，不触网）。"""
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -15,7 +17,7 @@ from quantmaster.data.fundamentals import (
 )
 from quantmaster.factors.analysis import analyze_factor
 from quantmaster.factors.engine import compute_factor
-from quantmaster.factors.fundamental import make_fundamental_factors
+from quantmaster.factors.fundamental import make_fundamental_factors, resolve_factor
 
 DATES = pd.bdate_range("2023-01-02", "2023-12-29")
 
@@ -302,6 +304,84 @@ class TestResolveFactor:
         values = factor.compute({"close": close})
         # ep = 1 / pe_ttm = 0.1
         assert values["600000.SH"].dropna().iloc[-1] == pytest.approx(0.1)
+
+    def test_daily_factors_share_cache_without_requesting_roe(self, monkeypatch):
+        """日频基本面因子只拉一次每日指标，且绝不能顺带请求季度 ROE。"""
+        dates = pd.bdate_range(self.START, self.END)
+        calls = {"daily": 0, "roe": 0}
+
+        def daily(symbol, start=None, end=None):
+            calls["daily"] += 1
+            return pd.DataFrame({
+                "pe": 15.0,
+                "pe_ttm": 10.0,
+                "pb": 2.0,
+                "dv_ratio": 3.0,
+                "total_mv": 1e10,
+            }, index=dates)
+
+        def roe(*args, **kwargs):
+            calls["roe"] += 1
+            raise AssertionError("股息率/EP 不应请求季度 ROE")
+
+        monkeypatch.setattr(fundamentals, "fetch_daily_indicators", daily)
+        monkeypatch.setattr(fundamentals, "fetch_quarterly_roe", roe)
+
+        resolve_factor("dividend_yield", ["600000.SH"], self.START, self.END)
+        resolve_factor("ep", ["600000.SH"], self.START, self.END)
+
+        assert calls == {"daily": 1, "roe": 0}
+
+    def test_covered_parquet_without_metadata_still_stays_offline(self, monkeypatch):
+        """旧缓存元信息即使遗失，覆盖目标日期的 parquet 仍优先于 API。"""
+        self._seed()
+        store = fundamental_store()
+        with store._conn() as conn:
+            conn.execute("DELETE FROM bar_meta WHERE symbol=?", ("600000.SH",))
+        calls = []
+
+        def forbidden(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("已覆盖的本地 parquet 不应重新触网")
+
+        monkeypatch.setattr(fundamentals, "fetch_daily_indicators", forbidden)
+        result = fundamental_panel(
+            ["600000.SH"], self.START, self.END,
+            fields=["dv_ratio"], store=store,
+        )
+
+        assert not calls
+        assert result["dv_ratio"].iloc[-1, 0] == pytest.approx(3.0)
+
+    def test_parallel_factors_coalesce_the_same_api_request(self, monkeypatch):
+        """并行任务对同一标的的首次加载只允许一个请求进入提供商。"""
+        dates = pd.bdate_range(self.START, self.END)
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def daily(symbol, start=None, end=None):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            assert release.wait(timeout=3)
+            return pd.DataFrame({
+                "pe_ttm": 10.0, "pb": 2.0, "dv_ratio": 3.0, "total_mv": 1e10,
+            }, index=dates)
+
+        monkeypatch.setattr(fundamentals, "fetch_daily_indicators", daily)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    resolve_factor, name, ["600000.SH"], self.START, self.END,
+                )
+                for name in ("dividend_yield", "ep")
+            ]
+            assert entered.wait(timeout=3)
+            release.set()
+            [future.result(timeout=3) for future in futures]
+
+        assert calls == 1
 
     def test_names_listing(self):
         from quantmaster.factors.fundamental import (

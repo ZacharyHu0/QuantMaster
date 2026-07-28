@@ -26,7 +26,12 @@ class LabWorker:
         self._thread: threading.Thread | None = None
         self._scheduler = None
         self._lock = threading.RLock()
-        self._active_job_id = ""
+        self._task_threads: dict[str, threading.Thread] = {}
+        self._active_job_ids: set[str] = set()
+
+    @staticmethod
+    def _worker_limit() -> int:
+        return min(4, max(1, int(get_config().lab.max_workers)))
 
     def start(self) -> None:
         with self._lock:
@@ -37,9 +42,12 @@ class LabWorker:
                 return
             self._stop.clear()
             self._accepting.set()
-            self.service.store.interrupt_stale()
+            # drain 后重新启用时，旧任务可能仍在正常收尾；此时不能把它们误判为
+            # 上一进程遗留任务。只有当前实例确实没有活动任务时才恢复 stale 任务。
+            if not self._active_job_ids:
+                self.service.store.interrupt_stale()
             self._thread = threading.Thread(
-                target=self.run_forever, name="quant-lab-worker", daemon=True)
+                target=self.run_forever, name="quant-lab-dispatcher", daemon=True)
             self._thread.start()
             self._start_scheduler_locked()
 
@@ -59,6 +67,15 @@ class LabWorker:
             self._scheduler = None
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
+        deadline = time.monotonic() + 5
+        with self._lock:
+            task_threads = list(self._task_threads.values())
+        for thread in task_threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if thread.is_alive():
+                thread.join(timeout=remaining)
         self.service.store.interrupt_stale(self.worker_id)
         self._thread = None
 
@@ -66,17 +83,50 @@ class LabWorker:
         while not self._stop.is_set():
             if not self._accepting.is_set():
                 break
-            allow_scheduled = self._within_window() and self._budget_remaining() > 0
-            job = self.service.store.claim_next(
-                self.worker_id, allow_scheduled=allow_scheduled)
-            if job is None:
+            # 多进程 Worker 可以并存；只恢复心跳真正过期的任务，不能在第二个
+            # Worker 启动时把第一个 Worker 的正常任务改成 interrupted。
+            self.service.store.interrupt_stale()
+            claimed = False
+            while not self._stop.is_set() and self._accepting.is_set():
+                limit = self._worker_limit()
+                with self._lock:
+                    capacity = limit - len(self._active_job_ids)
+                if capacity <= 0:
+                    break
+                allow_scheduled = self._within_window() and self._budget_remaining() > 0
+                job = self.service.store.claim_next(
+                    self.worker_id,
+                    allow_scheduled=allow_scheduled,
+                    max_running=limit,
+                )
+                if job is None:
+                    break
+                self._launch(job)
+                claimed = True
+            if not claimed:
                 self._stop.wait(self.poll_seconds)
-                continue
-            self._active_job_id = str(job.get("id") or "")
-            try:
-                self.run_one(job)
-            finally:
-                self._active_job_id = ""
+
+    def _launch(self, job: dict) -> None:
+        job_id = str(job.get("id") or "")
+        thread = threading.Thread(
+            target=self._run_claimed,
+            args=(job,),
+            name=f"quant-lab-job-{job_id[:8]}",
+            daemon=True,
+        )
+        with self._lock:
+            self._active_job_ids.add(job_id)
+            self._task_threads[job_id] = thread
+        thread.start()
+
+    def _run_claimed(self, job: dict) -> None:
+        job_id = str(job.get("id") or "")
+        try:
+            self.run_one(job)
+        finally:
+            with self._lock:
+                self._active_job_ids.discard(job_id)
+                self._task_threads.pop(job_id, None)
 
     def run_one(self, job: dict) -> None:
         job_id = job["id"]
@@ -228,7 +278,7 @@ class LabWorker:
                 self.start()
                 return {"status": "applied"}
             self.drain()
-            return {"status": "draining" if self._active_job_id else "disabled"}
+            return {"status": "draining" if self._active_job_ids else "disabled"}
         if changed & {"lab.window_start", "automation.timezone"}:
             return {"status": self.rebuild_scheduler()}
         lab_changed = any(field.startswith("lab.") for field in changed)
@@ -236,17 +286,21 @@ class LabWorker:
 
     def status(self) -> dict:
         alive = bool(self._thread and self._thread.is_alive())
-        if not get_config().lab.enabled and alive and self._active_job_id:
+        with self._lock:
+            active_job_ids = sorted(self._active_job_ids)
+        if not get_config().lab.enabled and active_job_ids:
             state = "draining"
         elif alive and self._accepting.is_set():
             state = "running"
-        elif alive:
+        elif alive or active_job_ids:
             state = "draining"
         else:
             state = "disabled"
         return {
             "status": state,
-            "active_job_id": self._active_job_id,
+            "active_job_id": active_job_ids[0] if active_job_ids else "",
+            "active_job_ids": active_job_ids,
+            "max_workers": self._worker_limit(),
             "accepting": self._accepting.is_set(),
             "scheduler": bool(self._scheduler),
         }
@@ -288,7 +342,7 @@ def run_standalone() -> None:
             worker.apply_config([
                 "lab.enabled", "lab.window_start", "automation.timezone",
                 "lab.universe", "lab.start", "lab.horizons", "lab.weekly_days",
-                "lab.window_end", "lab.daily_budget_hours", "lab.device",
+                "lab.window_end", "lab.daily_budget_hours", "lab.max_workers", "lab.device",
                 "lab.allow_cloud_sample", "lab.ai_python_mining_enabled",
             ])
     except KeyboardInterrupt:

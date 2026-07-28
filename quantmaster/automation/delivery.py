@@ -79,6 +79,8 @@ def format_alert(item: dict[str, Any], channel: str) -> str:
                 lines.append(f"   摘要：{_trim(child['summary'], 180)}")
             if child.get("symbols"):
                 lines.append("   标的：" + "、".join(child["symbols"][:6]))
+            if child.get("sectors"):
+                lines.append("   板块：" + "、".join(child["sectors"][:5]))
             if str(child.get("url") or "").startswith(("https://", "http://")):
                 lines.append(f"   原文：{child['url']}")
     elif kind == "important_news":
@@ -88,6 +90,8 @@ def format_alert(item: dict[str, Any], channel: str) -> str:
             f"重要度 {_number(item.get('score')):.0f}/100")
         if payload.get("summary"):
             lines.append("摘要：" + _trim(payload["summary"], 200))
+        if payload.get("sectors"):
+            lines.append("相关板块：" + "、".join(payload["sectors"][:5]))
         lines.append(f"数据截至：{item.get('data_as_of') or '未知'}")
     else:
         lines.append(
@@ -145,6 +149,8 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
                 lines.append(f"摘要：{_lark_md(child['summary'])}")
             if child.get("symbols"):
                 lines.append("标的：" + "、".join(child["symbols"][:6]))
+            if child.get("sectors"):
+                lines.append("板块：" + "、".join(child["sectors"][:5]))
     elif kind == "important_news":
         sentiment = _number(payload.get("sentiment"))
         lines = [
@@ -154,6 +160,8 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
         ]
         if payload.get("summary"):
             lines.extend(["", "**摘要**", _lark_md(payload["summary"])])
+        if payload.get("sectors"):
+            lines.extend(["", "**相关板块**  " + "、".join(payload["sectors"][:5])])
     else:
         lines = [
             f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}",

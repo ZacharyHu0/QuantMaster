@@ -366,13 +366,14 @@ def test_news_alert_surfaces_summary_and_bullish_bearish_judgement():
     event = news_event(NewsItem(
         source="sse", title="公司上调业绩预告", content="预计净利润同比增长",
         url="https://example.com/news", published_at="2026-07-27T10:00:00+08:00",
-        symbols=["600000.SH"], event_type="业绩", sentiment=0.72,
+        symbols=["600000.SH"], sectors=["银行"], event_type="业绩", sentiment=0.72,
         summary="盈利预测上修，业绩增速超预期", is_official=True,
     ), {"600000.SH"}, set()).to_dict()
 
     text = format_alert(event, "weixin")
     assert "研判 利好 (+0.72)" in text
     assert "摘要：盈利预测上修，业绩增速超预期" in text
+    assert "相关板块：银行" in text
     assert "核查依据" in text
 
     card = format_feishu_card(event)
@@ -380,6 +381,7 @@ def test_news_alert_surfaces_summary_and_bullish_bearish_judgement():
     assert "**研判**  利好 (+0.72)" in content
     assert "**摘要**" in content
     assert "盈利预测上修" in content
+    assert "**相关板块**  银行" in content
 
 
 def test_news_digest_contains_compact_directional_summaries(tmp_path):

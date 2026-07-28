@@ -166,15 +166,53 @@ def test_llm_annotations_are_constrained():
 
     AICrawler._apply_result(item, {
         "symbols": ["600519.sh", "DROP TABLE", "600519.SH"],
+        "sectors": ["电子", "DROP TABLE", "化工", "电子"],
         "event_type": "任意代码", "sentiment": "nan", "confidence": "inf",
         "scope": "private", "urgency": "now", "summary": "摘要",
-    })
+    }, {"600519.SH": "食品饮料"})
     assert item.symbols == ["600519.SH"]
+    assert item.sectors == ["电子", "基础化工", "食品饮料"]
     assert item.event_type == "其他"
     assert item.sentiment == 0
     assert item.confidence == 0
     assert item.scope == "market"
     assert item.urgency == "normal"
+
+
+def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    store._industry_map = {}
+    store.save([
+        NewsItem(
+            source="test", title="电子需求回暖", content="电子需求回暖", sectors=["电子"],
+            sentiment=0.8, confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="test", title="电子成本上升", content="电子成本上升", sectors=["电子"],
+            sentiment=-0.2, confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="test", title="银行息差承压", content="银行息差承压", sectors=["银行"],
+            sentiment=-0.5, confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="mirror", title="电子需求回暖转载", content="电子需求回暖", sectors=["电子"],
+            sentiment=-1, confidence=0.9, importance_score=100, analysis_status="complete",
+        ),
+    ])
+
+    assert next(item for item in store.recent(10) if item["title"] == "银行息差承压")["sectors"] == ["银行"]
+    stats = store.stats(30)
+    assert stats["total"] == 4
+    assert stats["market_sentiment"]["score"] == pytest.approx(3.33, abs=0.02)
+    assert stats["market_sentiment"]["label"] == "中性"
+    assert stats["market_sentiment"]["event_count"] == 3
+    sectors = {item["sector"]: item for item in stats["sector_scores"]}
+    assert sectors["电子"]["score"] == pytest.approx(30.0, abs=0.02)
+    assert sectors["电子"]["event_count"] == 2
+    assert sectors["电子"]["positive"] == 1
+    assert sectors["银行"]["score"] == pytest.approx(-50.0, abs=0.02)
+    assert sectors["银行"]["label"] == "明显偏空"
 
 
 def test_annotation_stream_yields_each_persisted_batch(tmp_path):
@@ -184,7 +222,7 @@ def test_annotation_stream_yields_each_persisted_batch(tmp_path):
         def chat_json(self, prompt, system=""):
             count = int(prompt.split("分析以下 ", 1)[1].split(" 条", 1)[0])
             return [{
-                "symbols": ["600519.SH"], "event_type": "业绩",
+                "symbols": ["600519.SH"], "sectors": ["食品饮料"], "event_type": "业绩",
                 "sentiment": 0.4, "summary": f"批次标注 {index + 1}",
                 "scope": "market", "urgency": "normal", "confidence": 0.8,
             } for index in range(count)]
@@ -208,6 +246,7 @@ def test_annotation_stream_yields_each_persisted_batch(tmp_path):
     assert first_batch["processed"] == 3
     assert first_batch["completed"] == 3
     assert len(first_batch["updated_items"]) == 3
+    assert first_batch["updated_items"][0]["sectors"] == ["食品饮料"]
     assert len(store.query(status="complete", limit=20)["items"]) == 3
     assert len(store.query(status="pending", limit=20)["items"]) == 4
 
@@ -268,6 +307,8 @@ def test_news_api_csrf_and_ui_contract():
 
     page = client.get("/").text
     assert 'id="news-factor-chart"' in page
+    assert 'id="news-market-label"' in page
+    assert 'id="news-sector-scores"' in page
     assert 'id="news-annotation-progress"' in page
     assert 'data-settings-section="sources"' in page
     assert "/static/news.js" in page

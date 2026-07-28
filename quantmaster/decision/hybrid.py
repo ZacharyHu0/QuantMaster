@@ -418,6 +418,7 @@ def _python_component(
         close = panel["close"]
         bundle.fundamentals = fundamental_panel(
             list(close.columns), str(close.index.min().date()), str(close.index.max().date()),
+            fields=sorted(required & fundamental_fields),
         )
     if "news_sentiment" in required:
         from quantmaster.ai.sentiment import quality_sentiment_panel

@@ -11,6 +11,7 @@
     loading: false,
     catalogPromise: null,
     catalog: [],
+    indexPresets: [],
     conflicts: [],
     currentName: null,
     lastExistingName: null,
@@ -152,6 +153,7 @@
       try {
         const data = await request('/api/settings/universes');
         state.catalog = data.universes || [];
+        state.indexPresets = data.index_presets || [];
         state.conflicts = data.conflicts || [];
         state.loaded = true;
         syncCandidateSelects(mapping);
@@ -272,9 +274,17 @@
     const errors = state.validationErrors.length ? `<div class="candidate-tool-errors"><strong>未加入的代码</strong><ul>${
       state.validationErrors.slice(0, 8).map(item => `<li>${html(item.value)}：${html(item.message)}</li>`).join('')
     }</ul>${state.validationErrors.length > 8 ? `<span>另有 ${state.validationErrors.length - 8} 项</span>` : ''}</div>` : '';
+    const presets = state.indexPresets.length ? `<div class="candidate-index-preset-block">
+      <div class="candidate-index-preset-head"><strong>常用指数预置</strong><span>科技方向优先</span></div>
+      <div class="candidate-index-presets">${state.indexPresets.map(item =>
+        `<button type="button" data-candidate-index-preset="${html(item.symbol)}" data-candidate-index-name="${html(item.name)}"
+          data-preferred="${item.preferred ? 'true' : 'false'}" title="读取 ${html(item.name)} 当前成分">
+          <span><strong>${html(item.name)}</strong><small>${html(item.description)}</small></span>
+          <em>${html(item.symbol)}</em></button>`).join('')}</div></div>` : '';
     return `<section class="candidate-tool-panel" aria-label="新候选设置">
       <div class="candidate-tool-head"><div><h4>新建候选</h4><p>先命名，再逐只添加、批量粘贴，或读取某个指数的当前成分。</p></div></div>
       <label>名称<input id="candidate-new-name" value="${html(state.draftName)}" maxlength="40" placeholder="例如 核心观察"></label>
+      ${presets}
       <div class="candidate-date-row"><label>指数代码<input id="candidate-index-symbol" value="${html(state.indexSymbol)}" placeholder="000300.SH"></label>
         <button class="ghost" type="button" data-candidate-action="index-preview">读取指数成分</button></div>
       ${errors}</section>`;
@@ -585,6 +595,7 @@
     const name = document.getElementById('candidate-new-name')?.value.trim();
     const indexSymbol = document.getElementById('candidate-index-symbol')?.value.trim();
     if (!indexSymbol) return setNotice('error', '请输入指数代码，例如 000300.SH。');
+    const originalMarkup = button.innerHTML;
     button.disabled = true;
     button.textContent = '正在读取…';
     try {
@@ -601,7 +612,7 @@
     } catch (error) {
       setNotice('error', error.message);
       button.disabled = false;
-      button.textContent = '读取指数成分';
+      button.innerHTML = originalMarkup;
     }
   }
 
@@ -826,6 +837,20 @@
     }
     const source = event.target.closest('[data-candidate-import-source]');
     if (source && !source.disabled) return importSource(source.dataset.candidateImportSource);
+    const preset = event.target.closest('[data-candidate-index-preset]');
+    if (preset && !preset.disabled) {
+      state.indexSymbol = preset.dataset.candidateIndexPreset;
+      const symbolInput = document.getElementById('candidate-index-symbol');
+      if (symbolInput) symbolInput.value = state.indexSymbol;
+      if (!state.draftName.trim()) {
+        state.draftName = `${preset.dataset.candidateIndexName}成分`;
+        const nameInput = document.getElementById('candidate-new-name');
+        if (nameInput) nameInput.value = state.draftName;
+      }
+      updateDirty();
+      await previewIndex(preset);
+      return;
+    }
     const choice = event.target.closest('[data-candidate-choice]');
     if (choice) {
       if (choice.dataset.candidateScope === 'add') {

@@ -103,6 +103,7 @@ class LabConfig:
     window_start: str = "19:00"
     window_end: str = "07:00"
     daily_budget_hours: float = 10.0
+    max_workers: int = 2
     device: str = "auto"
     allow_cloud_sample: bool = False
     ai_python_mining_enabled: bool = False
@@ -171,6 +172,7 @@ def _apply_env(cfg: Config) -> None:
     enabled_lab = env.get("QM_LAB_ENABLED")
     if enabled_lab is not None:
         cfg.lab.enabled = enabled_lab.strip().lower() in {"1", "true", "yes", "on"}
+    cfg.lab.max_workers = int(env.get("QM_LAB_MAX_WORKERS", cfg.lab.max_workers))
     cfg.lab.device = env.get("QM_LAB_DEVICE", cfg.lab.device)
 
 

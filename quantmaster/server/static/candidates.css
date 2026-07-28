@@ -137,6 +137,25 @@
 .candidate-tool-errors ul { margin:0; padding-inline-start:18px; }
 .candidate-import-sources { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
 .candidate-import-sources button { min-height:52px; }
+.candidate-index-preset-block { display:grid; gap:8px; }
+.candidate-index-preset-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.candidate-index-preset-head strong { color:var(--ink-2); font-size:11px; font-weight:600; }
+.candidate-index-preset-head span { color:var(--muted); font-size:10px; }
+.candidate-index-presets { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:7px; }
+.candidate-index-presets button {
+  display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:0; min-height:54px;
+  padding:8px 9px; border:1px solid var(--axis); border-radius:7px; background:var(--page);
+  color:var(--ink-2); text-align:left; cursor:pointer;
+  transition:border-color 160ms var(--ease-out-quart),background-color 160ms var(--ease-out-quart),transform 120ms var(--ease-out-quart);
+}
+.candidate-index-presets button:hover { border-color:var(--s1); background:color-mix(in oklch,var(--s1) 7%,var(--page)); }
+.candidate-index-presets button:active { transform:scale(.99); }
+.candidate-index-presets button:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
+.candidate-index-presets button > span { min-width:0; display:grid; gap:1px; }
+.candidate-index-presets button strong { overflow:hidden; color:var(--ink); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.candidate-index-presets button small { overflow:hidden; color:var(--muted); font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+.candidate-index-presets button em { flex:0 0 auto; color:var(--muted); font-size:9px; font-style:normal; font-variant-numeric:tabular-nums; }
+.candidate-index-presets button[data-preferred="true"] em { color:var(--s1); }
 
 .candidate-instrument-options {
   position:fixed; z-index:1000; max-height:min(360px,50vh); overflow:auto;
@@ -226,6 +245,7 @@
 @media (max-width:640px) {
   .nav-group + .nav-group { margin-inline-start:2px; padding-inline-start:7px; }
   .candidate-import-sources { grid-template-columns:1fr; }
+  .candidate-index-presets { grid-template-columns:1fr; }
   .candidate-heading-actions { width:100%; }
   .candidate-heading-actions button { flex:1 1 auto; }
   .candidate-date-row { grid-template-columns:1fr; }

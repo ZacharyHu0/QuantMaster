@@ -80,6 +80,9 @@ _FACTOR_SPECS: tuple[tuple[str, str, Callable[[pd.DataFrame], pd.DataFrame], str
 
 # 全部基本面因子名（无需数据即可判断某个名字是不是基本面因子）
 FUNDAMENTAL_FACTOR_NAMES: tuple[str, ...] = tuple(spec[0] for spec in _FACTOR_SPECS)
+FUNDAMENTAL_FIELD_BY_FACTOR: dict[str, str] = {
+    name: field for name, field, _transform, _description in _FACTOR_SPECS
+}
 
 
 def list_fundamental_factors() -> list[dict]:
@@ -90,7 +93,15 @@ def list_fundamental_factors() -> list[dict]:
     ]
 
 
-def resolve_factor(name_or_expr: str, symbols: list[str], start: str, end: str) -> Factor:
+def resolve_factor(
+    name_or_expr: str,
+    symbols: list[str],
+    start: str,
+    end: str,
+    *,
+    progress=None,
+    cancelled=None,
+) -> Factor:
     """统一因子入口：内置量价因子 / 表达式 / 基本面因子（自动拉数）。
 
     基本面因子首次使用会触网拉取估值/财务数据（此后走本地缓存）；
@@ -105,7 +116,18 @@ def resolve_factor(name_or_expr: str, symbols: list[str], start: str, end: str) 
     if name_or_expr in FUNDAMENTAL_FACTOR_NAMES:
         from quantmaster.data.fundamentals import fundamental_panel
 
-        fund = fundamental_panel(symbols, start, end)
+        # 每日估值接口会一次返回全部估值列，但季度 ROE 是另一条昂贵的 API
+        # 链路。按因子声明精确加载字段，既让同一份每日指标缓存供 EP/BP/股息率/
+        # 小市值复用，也避免验证这些因子时无谓地为全市场请求 ROE。
+        required_field = FUNDAMENTAL_FIELD_BY_FACTOR[name_or_expr]
+        fund = fundamental_panel(
+            symbols,
+            start,
+            end,
+            fields=(required_field,),
+            progress=progress,
+            cancelled=cancelled,
+        )
         factors = make_fundamental_factors(fund)
         if name_or_expr not in factors:
             raise ValueError(

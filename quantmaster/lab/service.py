@@ -56,6 +56,7 @@ class LabService:
                 "start": cfg.start,
                 "horizons": cfg.horizons,
                 "daily_budget_hours": cfg.daily_budget_hours,
+                "max_workers": cfg.max_workers,
                 "window": [cfg.window_start, cfg.window_end],
                 "weekly_days": cfg.weekly_days,
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
@@ -176,7 +177,7 @@ class LabService:
 
     def validate_version(
         self, version_id: str, *, universe: str, start: str, end: str,
-        progress=None,
+        progress=None, cancelled=None,
     ) -> dict:
         from quantmaster.lab.validation import validate_factor_values
 
@@ -198,6 +199,8 @@ class LabService:
             )
         else:
             panel, membership, snapshot = self._context(universe, start, end, progress)
+        if cancelled and cancelled():
+            raise InterruptedError("因子验证已取消")
         if spec.kind == "learned":
             from quantmaster.lab.ml import predict_panel
 
@@ -247,13 +250,34 @@ class LabService:
                 raise ValueError("消息面因子需先完成新闻标注；当前快照没有 news_sentiment 字段")
             if progress:
                 progress(58, "计算因子并执行统一标准化")
-            factor = resolve_factor(expression, symbols, start, end)
+
+            def fundamental_progress(
+                done: int, total: int, symbol: str, success: bool,
+            ) -> None:
+                if progress:
+                    progress(
+                        58 + int(6 * done / max(1, total)),
+                        f"基本面 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
+                    )
+
+            factor = resolve_factor(
+                expression,
+                symbols,
+                start,
+                end,
+                progress=fundamental_progress,
+                cancelled=cancelled,
+            )
+            if cancelled and cancelled():
+                raise InterruptedError("因子验证已取消")
             values = compute_factor(factor, panel)
             try:
                 expressions = expression_parameter_variants(expression)
             except Exception:
                 expressions = {}
             for label, candidate_expression in expressions.items():
+                if cancelled and cancelled():
+                    raise InterruptedError("因子验证已取消")
                 try:
                     candidate = resolve_factor(candidate_expression, symbols, start, end)
                     parameter_variants[label] = compute_factor(candidate, panel)
@@ -263,6 +287,8 @@ class LabService:
             raise ValueError(f"{spec.kind} 类型尚未提供可复验的运行时")
         if progress:
             progress(65, "运行 purged walk-forward 与多重检验")
+        if cancelled and cancelled():
+            raise InterruptedError("因子验证已取消")
         configured_horizons = tuple(get_config().lab.horizons)
         validation_horizons = tuple(
             item for item in spec.horizons if item in configured_horizons
@@ -1278,7 +1304,7 @@ class LabService:
             _panel, _membership, snapshot = self._context(progress=progress, **params)
             return {"snapshot": snapshot}
         if kind == "validate":
-            return self.validate_version(progress=progress, **params)
+            return self.validate_version(progress=progress, cancelled=cancelled, **params)
         if kind == "discover_genetic":
             return self.discover_genetic(progress=progress, **params)
         if kind == "discover_llm":

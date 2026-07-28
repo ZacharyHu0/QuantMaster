@@ -523,7 +523,7 @@ def _validate_replacement(name: str, references: list[dict[str, str]]) -> str:
 @router.get("/settings/universes")
 def universes(request: Request) -> dict:
     _require_local(request)
-    from quantmaster.data.universe import list_universes
+    from quantmaster.data.universe import INDEX_UNIVERSE_PRESETS, list_universes
 
     fixed = [_fixed_universe_metadata(item) for item in list_universes()]
     dynamic = {
@@ -540,7 +540,11 @@ def universes(request: Request) -> dict:
             "message": "检测到与系统动态候选同名的旧文件；文件已保留，请先改名再使用。",
         })
     ordered = ([fixed[0], dynamic, *fixed[1:]] if fixed else [dynamic])
-    return {"universes": ordered, "conflicts": conflicts}
+    return {
+        "universes": ordered,
+        "index_presets": [dict(item) for item in INDEX_UNIVERSE_PRESETS],
+        "conflicts": conflicts,
+    }
 
 
 @router.get("/settings/universes/{name}")

@@ -692,10 +692,22 @@ class LabStore:
         self.append_event(job_id, {"type": "queued", "progress": 0, "phase": "等待执行"})
         return self.job(job_id) or {}
 
-    def claim_next(self, worker: str, *, allow_scheduled: bool = True) -> dict | None:
+    def claim_next(
+        self,
+        worker: str,
+        *,
+        allow_scheduled: bool = True,
+        max_running: int | None = None,
+    ) -> dict | None:
         now = utc_now()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if max_running is not None:
+                running = int(conn.execute(
+                    "SELECT COUNT(*) FROM lab_jobs WHERE status='running'"
+                ).fetchone()[0])
+                if running >= max(1, int(max_running)):
+                    return None
             row = conn.execute(
                 "SELECT id FROM lab_jobs WHERE status IN ('queued','interrupted') "
                 "AND (? OR params_json NOT LIKE '%\"_scheduled\":true%') "
@@ -867,7 +879,7 @@ class LabStore:
         })
         return self.job(created["id"]) or created
 
-    def interrupt_stale(self, worker: str = "") -> int:
+    def interrupt_stale(self, worker: str = "", stale_after_seconds: int = 30) -> int:
         with self._conn() as conn:
             if worker:
                 cursor = conn.execute(
@@ -876,7 +888,10 @@ class LabStore:
                 )
             else:
                 cursor = conn.execute(
-                    "UPDATE lab_jobs SET status='interrupted',worker='' WHERE status='running'"
+                    "UPDATE lab_jobs SET status='interrupted',worker='' "
+                    "WHERE status='running' AND (heartbeat_at='' OR "
+                    "julianday(heartbeat_at)<julianday('now',?))",
+                    (f"-{max(1, int(stale_after_seconds))} seconds",),
                 )
         return cursor.rowcount
 

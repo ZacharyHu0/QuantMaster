@@ -278,12 +278,23 @@ class TushareSource(DataSource):
     ) -> pd.DataFrame:
         """2000 积分 ``daily_basic``：估值、股息率和市值。"""
         ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
-        raw = self._call(
-            "daily_basic", ttl, ts_code=symbol,
-            start_date=start.replace("-", "") if start else None,
-            end_date=end.replace("-", "") if end else None,
-            fields="ts_code,trade_date,pe,pe_ttm,pb,dv_ratio,total_mv",
-        )
+        params = self._daily_indicator_params(symbol, start, end)
+        raw = self._call("daily_basic", ttl, **params)
+        return self._normalize_daily_indicators(raw)
+
+    @staticmethod
+    def _daily_indicator_params(
+        symbol: str, start: str | None, end: str | None,
+    ) -> dict[str, str | None]:
+        return {
+            "ts_code": symbol,
+            "start_date": start.replace("-", "") if start else None,
+            "end_date": end.replace("-", "") if end else None,
+            "fields": "ts_code,trade_date,pe,pe_ttm,pb,dv_ratio,total_mv",
+        }
+
+    @staticmethod
+    def _normalize_daily_indicators(raw: pd.DataFrame) -> pd.DataFrame:
         if raw.empty:
             return pd.DataFrame()
         frame = raw.copy()
@@ -292,6 +303,19 @@ class TushareSource(DataSource):
         frame.index.name = "date"
         fields = [c for c in ("pe", "pe_ttm", "pb", "dv_ratio", "total_mv") if c in frame]
         return frame[fields].apply(pd.to_numeric, errors="coerce")
+
+    def cached_daily_indicators(
+        self, symbol: str, start: str | None = None, end: str | None = None,
+    ) -> pd.DataFrame | None:
+        """只读取已有接口缓存；缓存未命中时绝不连接 Tushare。"""
+        ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
+        params = {
+            key: value
+            for key, value in self._daily_indicator_params(symbol, start, end).items()
+            if value not in (None, "")
+        }
+        raw = self.cache.get("daily_basic", params, ttl)
+        return None if raw is None else self._normalize_daily_indicators(raw)
 
     def instrument_catalog(self) -> list[dict]:
         """读取内地股票/场内基金/指数及港股目录，供证券主数据增量更新。"""
@@ -363,11 +387,20 @@ class TushareSource(DataSource):
     def quarterly_roe(self, symbol: str, start_year: str = "2018") -> pd.DataFrame:
         """2000 积分 ``fina_indicator``：保留公告日与修订序列的 PIT ROE。"""
         ttl = max(1, int(get_config().data.fundamental_cache_days))
-        raw = self._call(
-            "fina_indicator", ttl, ts_code=symbol,
-            start_date=f"{start_year}0101",
-            fields="ts_code,ann_date,end_date,roe,update_flag",
-        )
+        params = self._quarterly_roe_params(symbol, start_year)
+        raw = self._call("fina_indicator", ttl, **params)
+        return self._normalize_quarterly_roe(raw)
+
+    @staticmethod
+    def _quarterly_roe_params(symbol: str, start_year: str) -> dict[str, str]:
+        return {
+            "ts_code": symbol,
+            "start_date": f"{start_year}0101",
+            "fields": "ts_code,ann_date,end_date,roe,update_flag",
+        }
+
+    @staticmethod
+    def _normalize_quarterly_roe(raw: pd.DataFrame) -> pd.DataFrame:
         if raw.empty or "roe" not in raw:
             return pd.DataFrame(columns=["report_date", "roe", "update_flag"])
         frame = raw.copy()
@@ -384,6 +417,16 @@ class TushareSource(DataSource):
         frame = frame.set_index("ann_date")
         frame.index.name = "ann_date"
         return frame[["report_date", "roe", "update_flag"]]
+
+    def cached_quarterly_roe(
+        self, symbol: str, start_year: str = "2018",
+    ) -> pd.DataFrame | None:
+        """只读取已有公告日 ROE 接口缓存；未命中时不触发 API。"""
+        ttl = max(1, int(get_config().data.fundamental_cache_days))
+        raw = self.cache.get(
+            "fina_indicator", self._quarterly_roe_params(symbol, start_year), ttl,
+        )
+        return None if raw is None else self._normalize_quarterly_roe(raw)
 
     def industry_map(self) -> dict[str, str]:
         """2000 积分申万 2021 一级行业映射，原始响应缓存 30 天。

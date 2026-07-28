@@ -100,6 +100,10 @@
   .market-section-description { color:var(--muted); font-size:11px; text-align:right; }
   .market-section-empty { color:var(--muted); padding:var(--space-lg) 0; font-size:12px; }
   .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+  .market-index-section { margin-bottom:var(--space-xl); padding-bottom:var(--space-xl); border-bottom:1px solid var(--border); }
+  .market-index-section .mkt-grid { grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+  .market-index-section .mkt-item .spark { height:72px; margin-top:var(--space-sm); }
+  .market-index-section .market-section-title { color:var(--ink); font-size:16px; }
   .mkt-item { width:100%; background: var(--surface); color:inherit; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; text-align:left; font:inherit; }
   .mkt-item:hover { border-color: var(--s1); }
   .mkt-item:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
@@ -516,6 +520,13 @@
     <button class="primary" type="submit">同步最新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
   </form>
+  <section class="market-section market-index-section" id="major-indexes" data-market-group="A股指数" data-market-order="0" aria-labelledby="major-indexes-title">
+    <div class="market-section-head"><div class="market-section-heading">
+      <h2 class="market-section-title" id="major-indexes-title">主要指数</h2><span class="market-section-count">正在读取</span></div>
+      <p class="market-section-description">宽基与科技成长基准 · 点击查看 K 线</p></div>
+    <div class="mkt-grid"></div>
+    <div class="market-section-empty">正在读取本地指数行情…</div>
+  </section>
   <div class="panel asset-workbench" id="asset-workbench">
     <div class="asset-toolbar">
       <div class="segmented" id="asset-tabs" aria-label="我的标的分类">
@@ -1041,7 +1052,8 @@
       <button class="news-load-more" id="news-load-more" type="button" hidden>加载更早资讯</button>
     </section>
     <aside class="news-analysis" aria-label="资讯量化摘要">
-      <section><div class="news-panel-head"><div><h3>消息面因子</h3><p>质量加权 · 3 日半衰期</p></div><span class="state-pill">news_sentiment</span></div><div class="sentiment-number" id="news-factor-value">—</div><div class="sentiment-axis"><span>偏空</span><i><b id="news-factor-marker"></b></i><span>偏多</span></div><svg id="news-factor-chart" class="news-factor-chart" viewBox="0 0 320 92" role="img" aria-label="近 30 日消息面因子走势"></svg></section>
+      <section><div class="news-panel-head"><div><h3>大盘情绪</h3><p>质量加权 · <span id="news-halflife-days">3</span> 日半衰期</p></div><span class="state-pill">MARKET</span></div><div class="market-sentiment-readout"><div class="sentiment-number" id="news-factor-value">—</div><div class="market-sentiment-context"><strong id="news-market-label">待计算</strong><span id="news-market-meta">等待已标注事件</span></div></div><div class="sentiment-axis"><span>-100 偏空</span><i><b id="news-factor-marker"></b></i><span>偏多 +100</span></div><svg id="news-factor-chart" class="news-factor-chart" viewBox="0 0 320 92" role="img" aria-label="近 30 日大盘情绪走势"></svg></section>
+      <section><div class="news-panel-head"><div><h3>板块情绪分</h3><p>申万一级 · 绝对影响排序</p></div><span class="state-pill">-100—+100</span></div><div id="news-sector-scores" class="news-sector-list"><span class="news-muted">暂无板块标注</span></div></section>
       <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
       <section><div class="news-panel-head"><div><h3>来源运行状态</h3><p>最近一次采集结果</p></div><button class="text-action" id="news-open-sources" type="button">管理来源</button></div><div id="news-source-health" class="news-source-health"><span class="news-muted">正在读取…</span></div></section>
     </aside>
@@ -1304,6 +1316,7 @@
               <label>窗口开始<input name="lab.window_start" type="time" required></label>
               <label>窗口结束<input name="lab.window_end" type="time" required></label>
               <label>每日重型研究预算（小时）<input name="lab.daily_budget_hours" type="number" min="0.5" max="24" step="0.5" required></label>
+              <label>并行研究任务数<input name="lab.max_workers" type="number" min="1" max="4" step="1" required><small>默认 2；重型模型较多时可降为 1。</small></label>
               <label>计算设备<select name="lab.device" required><option value="auto">自动选择</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
               <label class="toggle-field field-wide"><span><strong>允许匿名云端样本</strong><small>高风险开关；实际发送前仍需每次单独确认。</small></span><input name="lab.allow_cloud_sample" data-confirm-cloud type="checkbox" role="switch"></label>
               <label class="toggle-field field-wide"><span><strong>启用受限 Python AutoMiner</strong><small>启用后允许手动运行，并在每周首个研究日自动运行一次；候选仍须人工批准。</small></span><input name="lab.ai_python_mining_enabled" type="checkbox" role="switch"></label>
@@ -2375,7 +2388,7 @@ let marketStreamCycle = 0;
 const PERSONAL_MARKET_GROUP = '我的股票';
 const marketGroupMeta = {
   [PERSONAL_MARKET_GROUP]: {order:0, description:'自选、关注与实盘持有'},
-  'A股指数': {order:1, description:'A股主要基准'},
+  'A股指数': {order:0, description:'宽基与科技成长基准'},
   '全球市场': {order:2, description:'港股、美股与亚太指数'},
   '商品与汇率': {order:3, description:'主要商品期货与货币'},
 };
@@ -2394,23 +2407,26 @@ function marketChangeSeries(nav) {
   return (nav || []).map(point => [point[0], +((Number(point[1]) - 1) * 100).toFixed(4)]);
 }
 
-function createMarketStreamRenderer(root) {
+function createMarketStreamRenderer(root, pinnedGroups = {}) {
   const cycle = ++marketStreamCycle, groups = new Map(), entries = new Map();
   let index = 0, count = 0;
   root.classList.add('market-groups');
   function ensureGroup(group) {
     if (groups.has(group)) return groups.get(group);
     const meta = marketGroupMeta[group] || {order:99, description:''};
-    const section = document.createElement('section');
-    section.className = 'market-section';
-    section.dataset.marketGroup = group;
-    section.dataset.marketOrder = String(meta.order);
-    section.style.order = String(meta.order);
-    section.innerHTML = `<div class="market-section-head"><div class="market-section-heading">
-      <h2 class="market-section-title">${esc(group)}</h2><span class="market-section-count">0 只</span></div>
-      ${meta.description ? `<p class="market-section-description">${esc(meta.description)}</p>` : ''}</div>
-      <div class="mkt-grid"></div><div class="market-section-empty" hidden></div>`;
-    root.appendChild(section);
+    let section = pinnedGroups[group] || null;
+    if (!section) {
+      section = document.createElement('section');
+      section.className = 'market-section';
+      section.dataset.marketGroup = group;
+      section.dataset.marketOrder = String(meta.order);
+      section.style.order = String(meta.order);
+      section.innerHTML = `<div class="market-section-head"><div class="market-section-heading">
+        <h2 class="market-section-title">${esc(group)}</h2><span class="market-section-count">0 只</span></div>
+        ${meta.description ? `<p class="market-section-description">${esc(meta.description)}</p>` : ''}</div>
+        <div class="mkt-grid"></div><div class="market-section-empty" hidden></div>`;
+      root.appendChild(section);
+    }
     const entry = {section, grid:section.querySelector('.mkt-grid'),
       count:section.querySelector('.market-section-count'),
       empty:section.querySelector('.market-section-empty'), size:0};
@@ -2475,19 +2491,34 @@ function createMarketStreamRenderer(root) {
     addAll(data) {
       for (const [group, items] of Object.entries(data.groups || {})) {
         for (const item of items) this.add(group, item);
-        if (group !== PERSONAL_MARKET_GROUP) continue;
         const entry = ensureGroup(group);
         const configured = Number(data.group_counts?.[group] ?? items.length);
         if (configured > entry.size) {
           entry.count.textContent = `${entry.size} / ${configured} 只`;
+          const subject = group === PERSONAL_MARKET_GROUP ? '股票' : '标的';
           entry.empty.textContent = entry.size
-            ? `另有 ${configured - entry.size} 只股票暂无可绘制行情，可点击“同步最新行情”重试。`
-            : `已添加 ${configured} 只股票，但暂无可绘制行情；请同步最新行情或检查数据源。`;
+            ? `另有 ${configured - entry.size} 只${subject}暂无可绘制行情，可点击“同步最新行情”重试。`
+            : `${configured} 只${subject}暂时都没有可绘制行情；区块会保留，请同步最新行情或检查数据源。`;
           entry.empty.hidden = false;
-        } else if (!configured) {
+        } else if (!configured && group === PERSONAL_MARKET_GROUP) {
           entry.empty.textContent = '暂无自选、关注或持有股票；在上方添加后，这里会显示对应走势图。';
           entry.empty.hidden = false;
+        } else {
+          entry.count.textContent = `${entry.size} 只`;
+          entry.empty.hidden = true;
         }
+      }
+    },
+    failPinned(message) {
+      for (const [group, section] of Object.entries(pinnedGroups)) {
+        const entry = groups.get(group) || {
+          count:section.querySelector('.market-section-count'),
+          empty:section.querySelector('.market-section-empty'), size:0,
+        };
+        if (entry.size) continue;
+        entry.count.textContent = '暂不可用';
+        entry.empty.textContent = `${message}；主要指数区块已保留，可点击“同步最新行情”重试。`;
+        entry.empty.hidden = false;
       }
     },
     get count() { return count; },
@@ -2506,9 +2537,14 @@ async function loadMarket(refresh = 'auto') {
   if (marketLoading) return;
   marketLoading = true;
   disposeMarketSparks();
+  const majorIndexes = document.getElementById('major-indexes');
+  majorIndexes.querySelector('.mkt-grid').replaceChildren();
+  majorIndexes.querySelector('.market-section-count').textContent = '正在读取';
+  majorIndexes.querySelector('.market-section-empty').textContent = '正在读取本地指数行情…';
+  majorIndexes.querySelector('.market-section-empty').hidden = false;
   const container = document.getElementById('mkt-groups');
   const tracker = createLoadProgress(container, '准备市场数据', 'market');
-  const renderer = createMarketStreamRenderer(tracker.results);
+  const renderer = createMarketStreamRenderer(tracker.results, {'A股指数':majorIndexes});
   try {
     const data = await streamJson(`/api/market/overview/stream?refresh=${encodeURIComponent(refresh)}`, {}, event => {
       tracker.update(event);
@@ -2524,6 +2560,7 @@ async function loadMarket(refresh = 'auto') {
     document.getElementById('mkt-stamp').textContent =
       '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
+    renderer.failPinned('指数行情加载失败');
     tracker.fail(e.message);
     tracker.reveal().insertAdjacentHTML('beforeend',
       `<div class="err">市场数据加载失败：${esc(e.message)}\n已完成的卡片仍可继续使用。</div>`);

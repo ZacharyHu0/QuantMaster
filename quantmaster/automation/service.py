@@ -607,7 +607,7 @@ class AutomationService:
             item = NewsItem(
                 source=row["source_id"], title=row["title"], content=row["content"],
                 url=row["url"], published_at=row["published_at"],
-                symbols=row["symbols"], event_type=row["event_type"],
+                symbols=row["symbols"], sectors=row["sectors"], event_type=row["event_type"],
                 sentiment=float(row["sentiment"] or 0), summary=row["summary"],
                 confidence=float(row["confidence"] or 0),
                 is_official=bool(row["is_official"]), db_id=int(row["id"]),
@@ -688,6 +688,7 @@ class AutomationService:
                 "direction": direction,
                 "score": float(item.get("score") or 0),
                 "symbols": list(item.get("symbols") or [])[:6],
+                "sectors": list(payload.get("sectors") or [])[:5],
                 "data_as_of": str(item.get("data_as_of") or ""),
                 "url": str((item.get("source_urls") or [""])[0]),
             })

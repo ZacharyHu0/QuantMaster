@@ -40,6 +40,21 @@ from quantmaster.config import get_config
 
 USER_AGENT = "Mozilla/5.0 (compatible; QuantMaster/0.1; +https://github.com/ZacharyHu0/QuantMaster)"
 
+# 与行情、因子模块使用的申万 2021 一级行业口径保持一致。模型输出只接受该白名单，
+# 避免“新能源 / AI / 大消费”等主题概念与一级行业混在同一评分维度。
+SECTOR_NAMES = (
+    "农林牧渔", "基础化工", "钢铁", "有色金属", "电子", "家用电器", "食品饮料",
+    "纺织服饰", "轻工制造", "医药生物", "公用事业", "交通运输", "房地产",
+    "商贸零售", "社会服务", "综合", "建筑材料", "建筑装饰", "电力设备",
+    "国防军工", "计算机", "传媒", "通信", "银行", "非银金融", "汽车",
+    "机械设备", "煤炭", "石油石化", "环保", "美容护理",
+)
+SECTOR_NAME_SET = frozenset(SECTOR_NAMES)
+SECTOR_ALIASES = {
+    "化工": "基础化工", "商业贸易": "商贸零售", "休闲服务": "社会服务",
+    "电气设备": "电力设备", "纺织服装": "纺织服饰",
+}
+
 
 @dataclass
 class NewsItem:
@@ -50,6 +65,7 @@ class NewsItem:
     published_at: str = ""
     # LLM 结构化结果
     symbols: list[str] = field(default_factory=list)
+    sectors: list[str] = field(default_factory=list)  # 申万 2021 一级行业，最多 5 个
     event_type: str = ""      # 政策/业绩/并购/行业/宏观/其他
     sentiment: float = 0.0    # -1(极度利空) ~ +1(极度利好)
     summary: str = ""
@@ -177,12 +193,39 @@ SOURCES = {
 
 EXTRACT_SYSTEM = """你是A股财经新闻分析师。对每条新闻输出：
 - symbols: 直接相关的A股代码数组（格式 600519.SH / 000001.SZ，无法确定则空数组）
+- sectors: 直接受影响的申万2021一级行业数组，最多5个，无法确定则空数组；只可从以下名称选择：
+  农林牧渔|基础化工|钢铁|有色金属|电子|家用电器|食品饮料|纺织服饰|轻工制造|医药生物|公用事业|交通运输|房地产|商贸零售|社会服务|综合|建筑材料|建筑装饰|电力设备|国防军工|计算机|传媒|通信|银行|非银金融|汽车|机械设备|煤炭|石油石化|环保|美容护理
 - event_type: 政策|业绩|并购|行业|宏观|其他
 - sentiment: -1到1的数值，对相关股票（无个股则对A股整体）的利空/利好程度
 - summary: 不超过40字的摘要
 - scope: holding|watchlist|market
 - urgency: critical|high|normal
 - confidence: 0到1"""
+
+
+def _normalize_sectors(values: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    for raw_value in values:
+        value = SECTOR_ALIASES.get(str(raw_value).strip(), str(raw_value).strip())
+        if value in SECTOR_NAME_SET and value not in normalized:
+            normalized.append(value)
+    return normalized[:5]
+
+
+def _sentiment_snapshot(values: list[tuple[float, float]]) -> dict[str, Any]:
+    total_weight = sum(weight for _score, weight in values)
+    if total_weight <= 0:
+        return {"value": 0.0, "score": 0.0, "label": "暂无数据", "event_count": 0}
+    value = sum(score * weight for score, weight in values) / total_weight
+    label = (
+        "明显偏多" if value >= 0.35 else "偏多" if value >= 0.1
+        else "明显偏空" if value <= -0.35 else "偏空" if value <= -0.1
+        else "中性"
+    )
+    return {
+        "value": round(value, 4), "score": round(value * 100, 2),
+        "label": label, "event_count": len(values),
+    }
 
 
 def _safe_analysis_error(exc: Exception) -> str:
@@ -199,12 +242,15 @@ def _safe_analysis_error(exc: Exception) -> str:
 class NewsStore:
     """长期结构化资讯库；原始响应由 :class:`NewsSourceStore` 分层缓存。"""
 
-    ANALYSIS_VERSION = 1
+    ANALYSIS_VERSION = 2
 
     def __init__(self, path: Path | None = None):
         self.path = path or get_config().data_root / "news.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sources = NewsSourceStore(self.path)
+        from quantmaster.data.industry import load_cached_industry_map
+
+        self._industry_map = load_cached_industry_map()
         self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
@@ -230,7 +276,8 @@ class NewsStore:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS news ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,title TEXT,content TEXT,"
-                "url TEXT,published_at TEXT,symbols TEXT,event_type TEXT,sentiment REAL,summary TEXT,"
+                "url TEXT,published_at TEXT,symbols TEXT,sectors TEXT,event_type TEXT,"
+                "sentiment REAL,summary TEXT,"
                 "created_at REAL,importance_score REAL DEFAULT 0,scope TEXT DEFAULT '',"
                 "urgency TEXT DEFAULT '',confidence REAL DEFAULT 0,fingerprint TEXT DEFAULT '',"
                 "is_official INTEGER DEFAULT 0,source_id TEXT DEFAULT '',"
@@ -244,6 +291,7 @@ class NewsStore:
             additions = {
                 "importance_score": "REAL DEFAULT 0", "scope": "TEXT DEFAULT ''",
                 "urgency": "TEXT DEFAULT ''", "confidence": "REAL DEFAULT 0",
+                "sectors": "TEXT DEFAULT '[]'",
                 "fingerprint": "TEXT DEFAULT ''", "is_official": "INTEGER DEFAULT 0",
                 "source_id": "TEXT DEFAULT ''", "content_hash": "TEXT DEFAULT ''",
                 "first_seen_at": "REAL DEFAULT 0", "last_seen_at": "REAL DEFAULT 0",
@@ -290,13 +338,16 @@ class NewsStore:
                 CREATE INDEX IF NOT EXISTS idx_news_seen ON news(first_seen_at DESC);
             """)
 
-    @staticmethod
-    def _decode(row: sqlite3.Row) -> dict:
+    def _decode(self, row: sqlite3.Row) -> dict:
         value = dict(row)
-        try:
-            value["symbols"] = json.loads(value.get("symbols") or "[]")
-        except (TypeError, json.JSONDecodeError):
-            value["symbols"] = []
+        for field_name in ("symbols", "sectors"):
+            try:
+                decoded = json.loads(value.get(field_name) or "[]")
+                value[field_name] = decoded if isinstance(decoded, list) else []
+            except (TypeError, json.JSONDecodeError):
+                value[field_name] = []
+        inferred = [self._industry_map.get(str(symbol), "") for symbol in value["symbols"]]
+        value["sectors"] = _normalize_sectors([*value["sectors"], *inferred])
         value["is_official"] = bool(value.get("is_official"))
         epoch = float(value.get("first_seen_at") or value.get("created_at") or 0)
         value["first_seen_epoch"] = epoch
@@ -310,6 +361,7 @@ class NewsStore:
         now = time.time()
         with self._conn() as conn:
             for item in items:
+                item.sectors = _normalize_sectors(item.sectors)
                 item.fingerprint = item.fingerprint or self.fingerprint(item)
                 content_hash = self.content_hash(item)
                 status = (
@@ -327,11 +379,12 @@ class NewsStore:
                     analysis_params: list[Any] = []
                     if status == "complete" and row["analysis_status"] != "complete":
                         analysis_sql = (
-                            ",symbols=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
+                            ",symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
                             "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error=''"
                         )
                         analysis_params = [
-                            json.dumps(item.symbols, ensure_ascii=False), item.event_type,
+                            json.dumps(item.symbols, ensure_ascii=False),
+                            json.dumps(item.sectors, ensure_ascii=False), item.event_type,
                             item.sentiment, item.summary, item.importance_score, item.scope,
                             item.urgency, item.confidence,
                         ]
@@ -347,13 +400,14 @@ class NewsStore:
                 try:
                     conn.execute(
                         "INSERT INTO news "
-                        "(source,title,content,url,published_at,symbols,event_type,sentiment,summary,"
+                        "(source,title,content,url,published_at,symbols,sectors,event_type,sentiment,summary,"
                         "created_at,importance_score,scope,urgency,confidence,fingerprint,is_official,"
                         "source_id,content_hash,first_seen_at,last_seen_at,raw_cache_key,analysis_status,"
                         "analysis_version,parser_version) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (item.source, item.title, item.content, item.url, item.published_at,
-                         json.dumps(item.symbols, ensure_ascii=False), item.event_type, item.sentiment,
+                         json.dumps(item.symbols, ensure_ascii=False),
+                         json.dumps(item.sectors, ensure_ascii=False), item.event_type, item.sentiment,
                          item.summary, now, item.importance_score, item.scope, item.urgency,
                          item.confidence, item.fingerprint, int(item.is_official), item.source,
                          content_hash, now, now, item.raw_cache_key, status,
@@ -379,14 +433,16 @@ class NewsStore:
         return [self._decode(row) for row in rows]
 
     def update_analysis(self, item_id: int, item: NewsItem) -> None:
+        item.sectors = _normalize_sectors(item.sectors)
         with self._conn() as conn:
             conn.execute(
-                "UPDATE news SET symbols=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
+                "UPDATE news SET symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
                 "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error='',"
                 "analysis_version=?,next_retry_at=0 WHERE id=?",
-                (json.dumps(item.symbols, ensure_ascii=False), item.event_type, item.sentiment,
-                 item.summary, item.importance_score, item.scope, item.urgency, item.confidence,
-                 self.ANALYSIS_VERSION, item_id),
+                (json.dumps(item.symbols, ensure_ascii=False),
+                 json.dumps(item.sectors, ensure_ascii=False), item.event_type,
+                 item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
+                 item.confidence, self.ANALYSIS_VERSION, item_id),
             )
 
     def analysis_failure(self, item_ids: list[int], error: str) -> None:
@@ -569,27 +625,69 @@ class NewsStore:
                 "FROM news WHERE first_seen_at>=?", (cutoff,),
             ).fetchone()
             rows = conn.execute(
-                "SELECT n.first_seen_at,n.sentiment,n.confidence,n.importance_score,n.symbols,"
+                "SELECT n.id,n.content_hash,n.first_seen_at,n.sentiment,n.confidence,"
+                "n.importance_score,n.symbols,n.sectors,"
                 "COALESCE(s.factor_weight,1) AS source_weight FROM news n "
                 "LEFT JOIN news_sources s ON s.id=n.source_id "
                 "WHERE n.first_seen_at>=? AND n.analysis_status='complete'",
                 (cutoff,),
             ).fetchall()
         daily: dict[str, list[tuple[float, float]]] = {}
+        market_values: list[tuple[float, float]] = []
+        sector_values: dict[str, list[tuple[float, float]]] = {}
+        sector_counts: dict[str, dict[str, int]] = {}
         symbol_counts: dict[str, int] = {}
-        minimum = get_config().news.factor_min_confidence
+        news_config = get_config().news
+        minimum = news_config.factor_min_confidence
+        halflife_days = max(0.01, float(news_config.factor_halflife_days))
+        now = time.time()
+        deduped_rows: dict[str, tuple[sqlite3.Row, float]] = {}
         for row in rows:
             confidence = float(row["confidence"] or 0)
             if confidence < minimum:
                 continue
-            weight = float(row["source_weight"] or 1) * confidence * float(row["importance_score"] or 0) / 100
-            if weight <= 0:
+            quality_weight = (
+                float(row["source_weight"] or 1) * confidence
+                * float(row["importance_score"] or 0) / 100
+            )
+            if quality_weight <= 0:
                 continue
+            dedupe_key = str(row["content_hash"] or row["id"])
+            previous = deduped_rows.get(dedupe_key)
+            if previous is None or quality_weight > previous[1]:
+                deduped_rows[dedupe_key] = (row, quality_weight)
+        for row, quality_weight in deduped_rows.values():
+            sentiment = max(-1.0, min(1.0, float(row["sentiment"] or 0)))
             day = datetime.fromtimestamp(
                 float(row["first_seen_at"]), tz=timezone.utc,
             ).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-            daily.setdefault(day, []).append((float(row["sentiment"] or 0), weight))
-            for symbol in json.loads(row["symbols"] or "[]"):
+            daily.setdefault(day, []).append((sentiment, quality_weight))
+            age_days = max(0.0, (now - float(row["first_seen_at"] or now)) / 86400)
+            current_weight = quality_weight * 0.5 ** (age_days / halflife_days)
+            market_values.append((sentiment, current_weight))
+            try:
+                symbols = json.loads(row["symbols"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                symbols = []
+            try:
+                stored_sectors = json.loads(row["sectors"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                stored_sectors = []
+            sectors = _normalize_sectors([
+                *(stored_sectors if isinstance(stored_sectors, list) else []),
+                *(self._industry_map.get(str(symbol), "") for symbol in symbols),
+            ])
+            for sector in sectors:
+                sector_values.setdefault(sector, []).append((sentiment, current_weight))
+                counts_for_sector = sector_counts.setdefault(
+                    sector, {"event_count": 0, "positive": 0, "negative": 0},
+                )
+                counts_for_sector["event_count"] += 1
+                if sentiment > 0.15:
+                    counts_for_sector["positive"] += 1
+                elif sentiment < -0.15:
+                    counts_for_sector["negative"] += 1
+            for symbol in symbols:
                 symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
         series = [
             [day, round(sum(score * weight for score, weight in values) /
@@ -599,6 +697,16 @@ class NewsStore:
         data = dict(counts) if counts else {}
         data["coverage"] = round(int(data.get("annotated") or 0) / max(1, int(data.get("total") or 0)), 4)
         data["sentiment_series"] = series
+        data["halflife_days"] = halflife_days
+        data["market_sentiment"] = _sentiment_snapshot(market_values)
+        data["sector_scores"] = sorted((
+            {
+                "sector": sector,
+                **_sentiment_snapshot(values),
+                **sector_counts[sector],
+            }
+            for sector, values in sector_values.items()
+        ), key=lambda item: (-abs(float(item["score"])), str(item["sector"])))
         data["top_symbols"] = [
             {"symbol": symbol, "count": count}
             for symbol, count in sorted(symbol_counts.items(), key=lambda item: item[1], reverse=True)[:8]
@@ -622,7 +730,9 @@ class AICrawler:
         return self._client
 
     @staticmethod
-    def _apply_result(item: NewsItem, result: dict) -> None:
+    def _apply_result(
+        item: NewsItem, result: dict, industry_map: dict[str, str] | None = None,
+    ) -> None:
         symbols = result.get("symbols", [])
         if not isinstance(symbols, list):
             symbols = []
@@ -630,6 +740,13 @@ class AICrawler:
             value for symbol in symbols
             if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", value := str(symbol).strip().upper())
         ))[:30]
+        sectors = result.get("sectors", [])
+        if not isinstance(sectors, list):
+            sectors = []
+        mapping = industry_map or {}
+        item.sectors = _normalize_sectors([
+            *sectors, *(mapping.get(symbol, "") for symbol in item.symbols),
+        ])
         event_type = str(result.get("event_type", "其他"))
         allowed_event_types = {"政策", "业绩", "并购", "行业", "宏观", "其他"}
         item.event_type = event_type if event_type in allowed_event_types else "其他"
@@ -656,7 +773,7 @@ class AICrawler:
             numbered = "\n".join(f"{j + 1}. {it.content[:300]}" for j, it in enumerate(batch))
             prompt = (
                 f"分析以下 {len(batch)} 条新闻，输出 JSON 数组（与输入同序等长）：\n"
-                '[{"symbols": [], "event_type": "", "sentiment": 0.0, "summary": "", '
+                '[{"symbols": [], "sectors": [], "event_type": "", "sentiment": 0.0, "summary": "", '
                 '"scope": "market", "urgency": "normal", "confidence": 0.5}]\n\n'
                 + numbered
             )
@@ -669,7 +786,7 @@ class AICrawler:
             for item, result in zip(batch, parsed, strict=False):
                 if not isinstance(result, dict):
                     continue
-                self._apply_result(item, result)
+                self._apply_result(item, result, self.store._industry_map)
         return items
 
     @staticmethod
@@ -739,7 +856,7 @@ class AICrawler:
         )
         return (
             f"分析以下 {len(items)} 条新闻，输出 JSON 数组（与输入同序等长）：\n"
-            '[{"symbols": [], "event_type": "其他", "sentiment": 0.0, "summary": "", '
+            '[{"symbols": [], "sectors": [], "event_type": "其他", "sentiment": 0.0, "summary": "", '
             '"scope": "market", "urgency": "normal", "confidence": 0.5}]\n\n'
             + numbered
         )
@@ -789,7 +906,7 @@ class AICrawler:
                 from quantmaster.automation.news import importance_score
 
                 for item, result in zip(items, parsed, strict=True):
-                    self._apply_result(item, result)
+                    self._apply_result(item, result, self.store._industry_map)
                     item.importance_score, item.scope, _ = importance_score(item, set(), set())
                     self.store.update_analysis(int(item.db_id), item)
                     completed += 1

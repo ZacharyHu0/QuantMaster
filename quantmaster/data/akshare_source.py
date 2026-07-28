@@ -152,14 +152,41 @@ class AkshareSource(DataSource):
         """指数成分股。支持 000300.SH(沪深300)、000905.SH(中证500) 等。"""
         ak = _require_akshare()
         code, _ = _split(index_symbol)
-        raw = akshare_call(
-            f"index_stock_cons_csindex({index_symbol})",
-            ak.index_stock_cons_csindex, symbol=code, lane="akshare:csindex",
+        raw = None
+        try:
+            raw = akshare_call(
+                f"index_stock_cons_csindex({index_symbol})",
+                ak.index_stock_cons_csindex, symbol=code, lane="akshare:csindex",
+            )
+        except Exception:
+            # 深交所自编指数未必出现在中证目录，继续尝试通用成分接口。
+            pass
+        if raw is None or raw.empty:
+            raw = akshare_call(
+                f"index_stock_cons({index_symbol})",
+                ak.index_stock_cons, symbol=code, lane="akshare:index-cons",
+            )
+        member_column = next(
+            (column for column in ("成分券代码", "品种代码", "证券代码", "代码")
+             if column in raw),
+            None,
         )
+        if member_column is None:
+            raise RuntimeError(f"{index_symbol} 成分响应缺少证券代码列")
         result = []
-        for c in raw["成分券代码"].astype(str).str.zfill(6):
-            suffix = "SH" if c.startswith(("6", "9")) else ("BJ" if c.startswith(("4", "8")) else "SZ")
+        seen = set()
+        for value in raw[member_column].dropna():
+            c = str(value).strip().split(".", 1)[0].zfill(6)
+            if not c.isdigit() or len(c) != 6 or c in seen:
+                continue
+            seen.add(c)
+            suffix = (
+                "BJ" if c.startswith(("4", "8", "92"))
+                else ("SH" if c.startswith(("6", "9")) else "SZ")
+            )
             result.append(f"{c}.{suffix}")
+        if not result:
+            raise RuntimeError(f"{index_symbol} 没有可用成分")
         return result
 
 
@@ -171,7 +198,9 @@ A_SHARE_INDEXES = {
     "000852.SH": "中证1000",
     "399001.SZ": "深证成指",
     "399006.SZ": "创业板指",
+    "399673.SZ": "创业板50",
     "000688.SH": "科创50",
+    "000698.SH": "科创100",
 }
 
 

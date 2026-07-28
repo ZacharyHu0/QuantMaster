@@ -47,6 +47,9 @@ class TestBasics:
         assert 'data-tab="decision"' in resp.text
         assert 'id="kline-frequency"' in resp.text
         assert 'class="panel market-detail-panel" id="kline-panel"' in resp.text
+        assert 'id="major-indexes" data-market-group="A股指数"' in resp.text
+        assert "{'A股指数':majorIndexes}" in resp.text
+        assert "主要指数区块已保留" in resp.text
         assert "function marketChangeSeries" in resp.text
         assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text
         assert "market-section-title" in resp.text
@@ -259,6 +262,16 @@ class TestBasics:
         assert len(partials) == final_count
         assert all(partial["kind"] == "market_item" for partial in partials)
         assert all(partial["item"]["nav"] for partial in partials)
+
+    def test_market_overview_includes_tech_focused_major_indexes(self):
+        from quantmaster.server import app as app_module
+
+        indexes = app_module._market_groups()["A股指数"]
+
+        assert indexes["000688.SH"] == "科创50"
+        assert indexes["000698.SH"] == "科创100"
+        assert indexes["399006.SZ"] == "创业板指"
+        assert indexes["399673.SZ"] == "创业板50"
 
     def test_market_overview_emits_local_cache_before_failed_sync(self, monkeypatch):
         from quantmaster.data.storage import BarStore

@@ -181,6 +181,29 @@ def test_fundamentals_fall_back_to_tushare(isolated_config, monkeypatch):
     pd.testing.assert_frame_equal(fundamentals.fetch_daily_indicators("600000.SH"), expected)
 
 
+def test_fundamentals_reuse_tushare_disk_cache_before_any_api(isolated_config, monkeypatch):
+    """规范化基本面缓存缺失时，已有 Tushare 接口缓存仍优先于 AKShare 请求。"""
+    from quantmaster.data import fundamentals
+
+    expected = pd.DataFrame(
+        {"dv_ratio": [3.2]}, index=pd.DatetimeIndex(["2024-01-02"], name="date"))
+    monkeypatch.setattr(
+        TushareSource,
+        "cached_daily_indicators",
+        lambda self, symbol, start=None, end=None: expected,
+    )
+    monkeypatch.setattr(
+        fundamentals,
+        "_require_akshare",
+        lambda: (_ for _ in ()).throw(AssertionError("命中本地接口缓存后不应访问 AKShare")),
+    )
+
+    result = fundamentals.fetch_daily_indicators(
+        "600000.SH", start="2024-01-01", end="2024-01-31",
+    )
+    pd.testing.assert_frame_equal(result, expected)
+
+
 def test_fresh_cache_does_not_hide_missing_end(tmp_path, isolated_config, monkeypatch):
     """刚写入但只覆盖旧区间的缓存，不能阻止后续区间增量拉取。"""
     store = BarStore(root=tmp_path / "bars")

@@ -178,6 +178,7 @@ class LabSettings(StrictModel):
     window_start: str = Field(default="19:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     window_end: str = Field(default="07:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     daily_budget_hours: float = Field(default=10.0, gt=0, le=24)
+    max_workers: int = Field(default=2, ge=1, le=4)
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
     allow_cloud_sample: bool = False
     ai_python_mining_enabled: bool = False

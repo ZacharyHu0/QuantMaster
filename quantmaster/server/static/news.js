@@ -137,10 +137,13 @@
     const sentiment = Number(item.sentiment || 0);
     const sentimentClass = sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
     const score = Math.round(Number(item.importance_score || 0));
+    const sectors = Array.isArray(item.sectors) ? item.sectors : [];
     const tags = [
       item.is_official ? '<span class="news-tag official">官方</span>' : '',
       item.event_type ? `<span class="news-tag">${html(item.event_type)}</span>` : '',
       `<span class="news-tag ${html(item.analysis_status)}">${html(statusLabel(item.analysis_status))}</span>`,
+      ...sectors.slice(0, 3).map(sector => `<span class="news-tag sector">${html(sector)}</span>`),
+      sectors.length > 3 ? `<span class="news-tag sector">+${sectors.length - 3}</span>` : '',
       ...(item.symbols || []).slice(0, 4).map(symbol => `<span class="news-tag symbol">${html(symbol)}</span>`),
     ].join('');
     const link = safeUrl(item.url);
@@ -158,6 +161,7 @@
         <div class="news-detail-copy">${html(item.content || item.summary || '暂无正文')}</div>
         <div class="news-detail-metric"><span>置信度</span><strong>${Math.round(Number(item.confidence || 0) * 100)}%</strong></div>
         <div class="news-detail-metric"><span>影响范围</span><strong>${html(item.scope || '待判断')}</strong></div>
+        <div class="news-detail-metric"><span>相关板块</span><strong>${html(sectors.join('、') || '未映射')}</strong></div>
         <div class="news-detail-metric"><span>首次获取</span><strong>${html(item.first_seen_at || '—')}</strong></div>
         ${link ? `<a class="news-detail-link" href="${link}" target="_blank" rel="noopener noreferrer">查看原始来源 ↗</a>` : ''}
       </div>
@@ -264,14 +268,33 @@
     document.getElementById('news-stat-coverage').textContent = `${Math.round(Number(data.coverage || 0) * 100)}%`;
     document.getElementById('news-stat-pending').textContent = `${Number(data.pending || 0)} / ${Number(data.failed || 0)}`;
     document.getElementById('news-stat-important').textContent = Number(data.important || 0).toLocaleString();
+    document.getElementById('news-halflife-days').textContent = Number(data.halflife_days || 3).toLocaleString();
     const series = data.sentiment_series || [];
-    const current = series.length ? Number(series.at(-1)[1] || 0) : null;
+    const market = data.market_sentiment || {};
+    const hasMarket = Number(market.event_count || 0) > 0;
+    const current = hasMarket ? Number(market.score || 0) : null;
     const number = document.getElementById('news-factor-value');
-    number.textContent = current === null ? '—' : `${current > 0 ? '+' : ''}${current.toFixed(3)}`;
-    number.className = `sentiment-number ${current > .05 ? 'positive' : current < -.05 ? 'negative' : ''}`;
+    number.textContent = current === null ? '—' : `${current > 0 ? '+' : ''}${current.toFixed(1)}`;
+    number.className = `sentiment-number ${current > 5 ? 'positive' : current < -5 ? 'negative' : ''}`;
+    document.getElementById('news-market-label').textContent = hasMarket ? market.label : '暂无数据';
+    document.getElementById('news-market-meta').textContent = hasMarket
+      ? `${Number(market.event_count).toLocaleString()} 条有效事件 · 当前加权值`
+      : '等待达到置信度门槛的事件';
     const marker = document.getElementById('news-factor-marker');
-    marker.style.left = `${current === null ? 50 : Math.max(0, Math.min(100, (current + 1) * 50))}%`;
+    marker.style.left = `${current === null ? 50 : Math.max(0, Math.min(100, (current + 100) / 2))}%`;
     factorChart(series);
+    const sectors = data.sector_scores || [];
+    document.getElementById('news-sector-scores').innerHTML = sectors.length ? sectors.map(item => {
+      const score = Number(item.score || 0);
+      const direction = score > 5 ? 'positive' : score < -5 ? 'negative' : 'neutral';
+      const signed = `${score > 0 ? '+' : ''}${score.toFixed(1)}`;
+      const magnitude = Math.min(1, Math.abs(score) / 100).toFixed(4);
+      return `<div class="news-sector-row" title="利好 ${Number(item.positive || 0)} 条 · 利空 ${Number(item.negative || 0)} 条">
+        <span><strong>${html(item.sector)}</strong><small>${Number(item.event_count || 0)} 条 · ${html(item.label)}</small></span>
+        <i><b class="${direction}" style="--sector-magnitude:${magnitude}"></b></i>
+        <em class="${direction}">${signed}</em>
+      </div>`;
+    }).join('') : '<span class="news-muted">暂无达到质量门槛的板块标注</span>';
     const symbols = data.top_symbols || [];
     const max = Math.max(1, ...symbols.map(item => item.count));
     document.getElementById('news-top-symbols').innerHTML = symbols.length ? symbols.map(item =>

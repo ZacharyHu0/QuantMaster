@@ -95,6 +95,29 @@ def test_tushare_routes_etf_and_csi_index(monkeypatch):
     assert calls == [("fund_daily", "589160.SH"), ("index_daily", "931743.CSI")]
 
 
+def test_index_members_falls_back_for_exchange_managed_indexes(monkeypatch):
+    from quantmaster.data import akshare_source
+
+    class Source:
+        @staticmethod
+        def index_stock_cons_csindex(**_params):
+            raise RuntimeError("not in csindex catalog")
+
+        @staticmethod
+        def index_stock_cons(**_params):
+            return pd.DataFrame({"品种代码": ["300750", "688981", "920128", "300750"]})
+
+    def direct_call(_label, function, *, lane=None, **params):
+        return function(**params)
+
+    monkeypatch.setattr(akshare_source, "_require_akshare", lambda: Source())
+    monkeypatch.setattr(akshare_source, "akshare_call", direct_call)
+
+    assert akshare_source.AkshareSource().index_members("399006.SZ") == [
+        "300750.SZ", "688981.SH", "920128.BJ",
+    ]
+
+
 def test_snapshot_is_declared_as_package_data():
     project = Path("pyproject.toml").read_text(encoding="utf-8")
     spec = Path("packaging/quantmaster.spec").read_text(encoding="utf-8")

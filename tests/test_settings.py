@@ -304,15 +304,35 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
             "snapshot_dates": {"000300.SH": "2026-07-01", "000905.SH": "2026-07-02"},
         },
     )
+    monkeypatch.setattr(
+        "quantmaster.data.universe.index_universe",
+        lambda symbol: ["688981.SH", "300750.SZ"] if symbol == "000688.SH" else [],
+    )
     set_config(manager.load())
     client = TestClient(app)
     settings = client.get("/api/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
 
-    catalog = client.get("/api/settings/universes").json()["universes"]
+    catalog_payload = client.get("/api/settings/universes").json()
+    catalog = catalog_payload["universes"]
     assert [(item["name"], item["kind"]) for item in catalog[:2]] == [
         ("demo", "fixed"), ("csi800", "dynamic"),
     ]
+    presets = catalog_payload["index_presets"]
+    assert [item["name"] for item in presets[:6]] == [
+        "科创50", "科创100", "科创创业50", "半导体材料设备", "创业板指", "创业板50",
+    ]
+    assert all(item["preferred"] for item in presets[:6])
+    assert {(item["name"], item["symbol"]) for item in presets[-3:]} == {
+        ("沪深300", "000300.SH"), ("中证500", "000905.SH"),
+        ("中证1000", "000852.SH"),
+    }
+    preset_preview = client.post(
+        "/api/settings/universes/preview",
+        json={"kind": "index", "index_symbol": presets[0]["symbol"]}, headers=headers,
+    )
+    assert preset_preview.status_code == 200
+    assert preset_preview.json()["symbols"] == ["688981.SH", "300750.SZ"]
     dynamic = client.get("/api/settings/universes/csi800?as_of=2026-07-27")
     assert dynamic.status_code == 200
     assert dynamic.json()["snapshot_dates"]["000300.SH"] == "2026-07-01"
