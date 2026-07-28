@@ -41,7 +41,7 @@ class TestLLMClient:
         captured = {}
 
         def fake_post(url, headers=None, json=None, timeout=None):
-            captured.update(url=url, headers=headers, payload=json)
+            captured.update(url=url, headers=headers, payload=json, timeout=timeout)
             return httpx.Response(
                 200, json={"content": [{"type": "text", "text": "回复"}]},
                 request=httpx.Request("POST", url),
@@ -55,6 +55,23 @@ class TestLLMClient:
         assert captured["headers"]["x-api-key"] == "sk-test"
         assert captured["payload"]["system"] == "系统提示"
         assert captured["payload"]["messages"][0]["role"] == "user"
+        assert captured["timeout"].read == 60
+
+    def test_per_request_read_timeout_and_timeout_error_are_structured(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["timeout"] = kwargs["timeout"]
+            raise httpx.ReadTimeout("slow", request=httpx.Request("POST", url))
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        client = LLMClient(LLMConfig(provider="openai", api_key="sk", timeout=60))
+        with pytest.raises(LLMError) as caught:
+            client.chat("hi", timeout=180)
+        assert captured["timeout"].read == 180
+        assert caught.value.code == "read_timeout"
+        assert caught.value.retryable is True
+        assert "180 秒" in str(caught.value)
 
     def test_openai_compatible_base_url(self, monkeypatch):
         captured = {}
@@ -79,5 +96,7 @@ class TestLLMClient:
 
         monkeypatch.setattr(httpx, "post", fake_post)
         client = LLMClient(LLMConfig(provider="openai", api_key="sk"))
-        with pytest.raises(LLMError, match="429"):
+        with pytest.raises(LLMError, match="429") as caught:
             client.chat("hi")
+        assert caught.value.retryable is True
+        assert caught.value.status_code == 429

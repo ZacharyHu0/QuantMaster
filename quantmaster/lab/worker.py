@@ -81,12 +81,33 @@ class LabWorker:
     def run_one(self, job: dict) -> None:
         job_id = job["id"]
 
-        def progress(value: int, phase: str) -> None:
-            self.service.store.update_job(job_id, value, phase)
+        def progress(
+            value: int,
+            phase: str,
+            detail: str = "",
+            *,
+            event_type: str = "progress",
+            metadata: dict | None = None,
+        ) -> None:
+            self.service.store.update_job(
+                job_id, value, phase, detail,
+                event_type=event_type, metadata=metadata,
+            )
 
         def cancelled() -> bool:
             return self._stop.is_set() or self.service.store.is_cancel_requested(job_id)
 
+        heartbeat_stop = threading.Event()
+
+        def heartbeat() -> None:
+            self.service.store.heartbeat_job(job_id)
+            while not heartbeat_stop.wait(5.0):
+                self.service.store.heartbeat_job(job_id)
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat, name=f"lab-heartbeat-{job_id[:8]}", daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             result = self.service.run_job(job, progress=progress, cancelled=cancelled)
             self.service.store.finish_job(job_id, result=result)
@@ -96,6 +117,9 @@ class LabWorker:
         except Exception as exc:
             logger.exception("Quant Lab 任务失败 job=%s kind=%s", job_id, job["kind"])
             self.service.store.finish_job(job_id, error=str(exc))
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=0.5)
 
     def _budget_remaining(self) -> float:
         return max(

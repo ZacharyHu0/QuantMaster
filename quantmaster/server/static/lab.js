@@ -14,6 +14,12 @@
     suggestion: null,
     timer: null,
     formsDirty: false,
+    selectedJobId: '',
+    jobDetail: null,
+    jobEvents: [],
+    jobLastSeq: 0,
+    jobDetailLoading: false,
+    jobDrawerOpener: null,
   };
 
   const modelMeta = {
@@ -29,12 +35,34 @@
     draft: '草稿', validating: '验证中', candidate: '待审', approved: '已批准',
     production: '生产', degraded: '降级', archived: '归档', queued: '排队',
     running: '运行', interrupted: '恢复中', completed: '完成', failed: '失败',
-    cancelled: '取消', paused: '暂停',
+    completed_with_warnings: '部分完成', cancelled: '取消', paused: '暂停',
   };
 
   const kindLabel = {
     prepare_data: '冻结数据快照', validate: '统一因子验证', discover_genetic: '遗传因子发现',
     discover_llm: 'AI 因子发现', train: '模型训练',
+  };
+
+  const activeJobStatuses = new Set(['queued', 'running', 'paused', 'interrupted']);
+  const terminalJobStatuses = new Set([
+    'completed', 'completed_with_warnings', 'failed', 'cancelled',
+  ]);
+
+  const paramLabel = {
+    universe: '候选池', start: '研究起点', end: '研究终点', horizon: '预测周期',
+    count: '目标候选数', rounds: '反馈轮数', top_n: '保留候选数', population: '种群规模',
+    generations: '进化代数', version_id: '因子版本', model: '模型',
+    sequence_length: '序列长度', epochs: '训练轮数', device: '计算设备',
+  };
+
+  const eventLabel = {
+    queued: '进入队列', started: '开始执行', progress: '阶段更新', completed: '执行完成',
+    completed_with_warnings: '部分完成', failed: '执行失败', cancelled: '已取消',
+    cancel_requested: '请求安全停止', interrupted: '执行中断', retry_of: '重新运行',
+    retried_as: '已创建重跑任务', llm_attempt_started: '模型请求开始',
+    llm_response_received: '模型已响应', llm_attempt_failed: '模型请求未完成',
+    llm_retry_scheduled: '准备重试', llm_candidate_checked: '候选本地校验',
+    llm_round_completed: '本轮完成',
   };
 
   function h(value) {
@@ -46,6 +74,55 @@
   function number(value, digits = 2) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed.toFixed(digits) : '—';
+  }
+
+  function formatDate(value, includeSeconds = false) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).replace('T', ' ').slice(0, 19);
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+      second: includeSeconds ? '2-digit' : undefined, hour12: false,
+    }).format(date);
+  }
+
+  function formatDuration(start, end) {
+    const startAt = new Date(start || '').getTime();
+    const endAt = new Date(end || '').getTime();
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt < startAt) return '—';
+    const seconds = Math.round((endAt - startAt) / 1000);
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    if (minutes < 60) return `${minutes} 分 ${rest} 秒`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours} 小时 ${minutes % 60} 分`;
+  }
+
+  function jobPhase(job) {
+    if (!job) return '—';
+    if (job.status === 'failed') return job.detail || job.error || '执行失败';
+    if (job.status === 'completed_with_warnings') return job.detail || '已保留可用结果';
+    return job.detail || job.phase || statusLabel[job.status] || job.status;
+  }
+
+  function redactObject(value) {
+    if (Array.isArray(value)) return value.map(redactObject);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      /(?:api.?key|token|secret|password|authorization|credential)/i.test(key)
+        ? '[已隐藏]'
+        : redactObject(item),
+    ]));
+  }
+
+  function displayValue(key, value) {
+    if (key === 'horizon' && Number.isFinite(Number(value))) return `${value} 日`;
+    if (typeof value === 'boolean') return value ? '是' : '否';
+    if (value == null || value === '') return '—';
+    if (typeof value === 'object') return JSON.stringify(redactObject(value));
+    return String(value);
   }
 
   async function request(path, options = {}) {
@@ -316,9 +393,9 @@
       target.innerHTML = '<div class="lab-empty">暂无研究任务</div>';
       return;
     }
-    target.innerHTML = jobs.map(job => `<div class="lab-job-row ${h(job.status)}">
-      <div><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(job.phase || statusLabel[job.status] || job.status)} · ${h((job.created_at || '').slice(0, 16).replace('T', ' '))}</small></div>
-      <span>${job.progress || 0}%</span></div>`).join('');
+    target.innerHTML = jobs.map(job => `<button type="button" class="lab-job-row ${h(job.status)}" data-job-detail="${h(job.id)}">
+      <span><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(jobPhase(job))} · ${h(formatDate(job.created_at))}</small></span>
+      <strong>${job.progress || 0}%</strong></button>`).join('');
   }
 
   function renderJobTable() {
@@ -328,22 +405,203 @@
       target.innerHTML = '<div class="lab-empty">暂无任务。可从 AI 发现或模型实验创建。</div>';
       return;
     }
-    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>进度</th><th>创建</th><th></th></tr></thead><tbody>${state.jobs.map(job => `<tr>
-      <td>${h(kindLabel[job.kind] || job.kind)}</td><td><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span></td>
-      <td>${h(job.phase || '—')}</td><td>${job.progress || 0}%</td><td>${h((job.created_at || '').slice(0, 16).replace('T', ' '))}</td>
-      <td>${['queued','running','paused','interrupted'].includes(job.status) ? `<button data-cancel-job="${h(job.id)}">取消</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>进度</th><th>创建</th><th>操作</th></tr></thead><tbody>${state.jobs.map(job => `<tr>
+      <td><button class="lab-job-link" type="button" data-job-detail="${h(job.id)}">${h(kindLabel[job.kind] || job.kind)}</button></td><td><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span></td>
+      <td title="${h(jobPhase(job))}">${h(jobPhase(job))}</td><td>${job.progress || 0}%</td><td>${h(formatDate(job.created_at))}</td>
+      <td class="lab-job-actions"><button type="button" data-job-detail="${h(job.id)}">查看</button>${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">取消</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function renderTaskTray() {
-    const active = state.jobs.find(job => ['running', 'queued', 'interrupted', 'paused'].includes(job.status));
+    const active = state.jobs.find(job => activeJobStatuses.has(job.status));
     const tray = document.getElementById('lab-task-tray');
     if (!tray) return;
     tray.hidden = !active;
     if (!active) return;
     document.getElementById('lab-task-title').textContent = kindLabel[active.kind] || active.kind;
-    document.getElementById('lab-task-phase').textContent = active.phase || statusLabel[active.status] || active.status;
+    document.getElementById('lab-task-phase').textContent = jobPhase(active);
     document.getElementById('lab-task-percent').textContent = `${active.progress || 0}%`;
     document.getElementById('lab-task-fill').style.setProperty('--progress', (active.progress || 0) / 100);
+    document.getElementById('lab-task-open').dataset.jobDetail = active.id;
+  }
+
+  function compactJobEvents(events) {
+    const compacted = [];
+    for (const event of events) {
+      const phase = String(event.phase || '');
+      const compactKey = event.type === 'llm_candidate_checked'
+        ? `${event.type}:${event.round || 0}`
+        : event.type === 'progress' && /^(读取|下载|准备|计算|行情)/.test(phase)
+          ? `${event.type}:${phase.replace(/\d+(?:\.\d+)?%?/g, '#')}`
+          : '';
+      const previous = compacted[compacted.length - 1];
+      if (compactKey && previous?._compactKey === compactKey) {
+        previous._count += 1;
+        previous._lastCreatedAt = event.created_at;
+        Object.assign(previous, event, {
+          _compactKey: compactKey,
+          _count: previous._count,
+          _firstCreatedAt: previous._firstCreatedAt,
+          _lastCreatedAt: event.created_at,
+        });
+      } else {
+        compacted.push({
+          ...event, _compactKey: compactKey, _count: 1,
+          _firstCreatedAt: event.created_at, _lastCreatedAt: event.created_at,
+        });
+      }
+    }
+    return compacted;
+  }
+
+  function renderJobParams(params) {
+    const clean = redactObject(params || {});
+    const config = clean.config && typeof clean.config === 'object' ? clean.config : {};
+    const entries = [
+      ...Object.entries(clean).filter(([key]) => key !== 'config' && !key.startsWith('_')),
+      ...Object.entries(config),
+    ];
+    if (!entries.length) return '<div class="lab-job-empty-line">本任务没有额外参数</div>';
+    return `<dl class="lab-job-param-grid">${entries.map(([key, value]) => `
+      <div><dt>${h(paramLabel[key] || key)}</dt><dd>${h(displayValue(key, value))}</dd></div>`).join('')}</dl>`;
+  }
+
+  function jobErrorCopy(job) {
+    const raw = String(job.error || job.detail || '任务未能完成');
+    const timeout = /timed?\s*out|timeout|read operation|超时/i.test(raw);
+    if (timeout) return {
+      what: '模型服务在本轮最长等待时间内没有返回完整响应。',
+      why: '网络、模型排队或生成时间过长都可能触发；系统已按 180 / 240 / 360 / 480 秒窗口自动尝试。',
+      how: '确认模型服务可用后可按原参数重跑。若已有前序轮次结果，任务会以“部分完成”保留它们。',
+    };
+    return {
+      what: raw,
+      why: '执行器已保存停止前的阶段、参数与事件，可从下方时间线定位最后一个成功步骤。',
+      how: '先检查错误与最后事件；修复数据或模型配置后，按原参数重新运行。',
+    };
+  }
+
+  function renderJobResult(job) {
+    const result = job.result && typeof job.result === 'object' ? job.result : {};
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    const candidates = Array.isArray(result.candidates) ? result.candidates : [];
+    const resultItems = [];
+    if (result.snapshot) resultItems.push(['数据快照', String(result.snapshot).slice(0, 16)]);
+    if (result.method) resultItems.push(['研究方法', String(result.method).toUpperCase()]);
+    if (candidates.length) resultItems.push(['候选产出', `${candidates.length} 个`]);
+    if (result.rounds_requested) resultItems.push(['完成轮次', `${result.rounds_completed || 0} / ${result.rounds_requested}`]);
+    if (Number.isFinite(Number(result.attempts))) resultItems.push(['模型调用', `${result.attempts} 次`]);
+    if (result.experiment_id) resultItems.push(['实验编号', String(result.experiment_id).slice(0, 16)]);
+    if (result.version_id) resultItems.push(['产出版本', String(result.version_id).slice(0, 16)]);
+    if (result.metrics?.correlation != null) resultItems.push(['相关性', number(result.metrics.correlation, 4)]);
+    if (result.metrics?.mse != null) resultItems.push(['验证 MSE', number(result.metrics.mse, 6)]);
+    if (result.snapshot?.snapshot_hash) resultItems.push(['数据快照', String(result.snapshot.snapshot_hash).slice(0, 16)]);
+    if (!Object.keys(result).length && job.status !== 'failed') {
+      return '<div class="lab-job-empty-line">任务结束后将在这里显示候选、指标或数据快照。</div>';
+    }
+    return `${warnings.length ? `<div class="lab-job-warning"><b>结果已保留，但有未完成项</b>${warnings.map(item => `<p>${h(typeof item === 'object' ? item.message || JSON.stringify(item) : item)}</p>`).join('')}</div>` : ''}
+      ${resultItems.length ? `<dl class="lab-job-result-grid">${resultItems.map(item => `<div><dt>${h(item[0])}</dt><dd>${h(item[1])}</dd></div>`).join('')}</dl>` : ''}
+      ${candidates.length ? `<div class="lab-job-candidates"><span>候选版本</span>${candidates.map((item, index) => `<button type="button" data-factor-version="${h(item.id || item.version_id || '')}">${h(item.name || `候选 ${index + 1}`)}</button>`).join('')}</div>` : ''}
+      ${result.version_id ? `<div class="lab-job-candidates"><span>模型版本</span><button type="button" data-factor-version="${h(result.version_id)}">查看因子证据</button></div>` : ''}
+      <details class="lab-job-raw"><summary>查看原始结果 JSON</summary><pre>${h(JSON.stringify(redactObject(result), null, 2))}</pre></details>`;
+  }
+
+  function renderJobTimeline(events) {
+    if (!events.length) return '<div class="lab-job-empty-line">尚无执行事件</div>';
+    return `<ol class="lab-job-timeline">${compactJobEvents(events).map(event => {
+      const type = String(event.type || 'progress');
+      const description = event.detail || event.phase || event.message || eventLabel[type] || type;
+      const attempt = event.attempt ? ` · 尝试 ${event.attempt}/${event.max_attempts || 4}` : '';
+      const timeout = event.timeout_seconds ? ` · 最长 ${event.timeout_seconds} 秒` : '';
+      const merged = event._count > 1 ? ` · 合并 ${event._count} 条` : '';
+      return `<li class="${h(type)}"><i></i><div><span>${h(eventLabel[type] || type)}${h(attempt)}${h(timeout)}${h(merged)}</span><b>${h(description)}</b><small>${h(formatDate(event._lastCreatedAt, true))}${event.progress != null ? ` · ${h(event.progress)}%` : ''}</small></div></li>`;
+    }).join('')}</ol>`;
+  }
+
+  function renderJobDetail() {
+    const body = document.getElementById('lab-job-drawer-body');
+    const job = state.jobDetail;
+    if (!body || !job) return;
+    const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
+    const heartbeatAge = Date.now() - new Date(job.heartbeat_at || 0).getTime();
+    const heartbeatFresh = job.status === 'running' && heartbeatAge >= 0 && heartbeatAge < 15000;
+    const duration = formatDuration(job.started_at || job.created_at, job.finished_at || new Date().toISOString());
+    const title = kindLabel[job.kind] || job.kind;
+    document.getElementById('lab-job-drawer-title').textContent = title;
+    document.getElementById('lab-job-drawer-kicker').textContent = `RESEARCH JOB · ${String(job.id).slice(0, 8).toUpperCase()}`;
+    const errorCopy = job.status === 'failed' ? jobErrorCopy(job) : null;
+    body.innerHTML = `<div class="lab-job-summary">
+        <div class="lab-job-summary-row"><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span><strong>${progress}%</strong></div>
+        <div class="lab-job-detail-progress"><i style="--progress:${progress / 100}"></i></div>
+        <h4>${h(job.phase || statusLabel[job.status] || job.status)}</h4>
+        <p>${h(job.detail || (job.status === 'running' ? '执行器正在处理当前阶段。' : job.error || '任务记录已保存。'))}</p>
+        <div class="lab-job-runtime"><span class="${heartbeatFresh ? 'live' : ''}"><i></i>${heartbeatFresh ? '执行器心跳正常' : job.worker ? `执行器 ${h(job.worker)}` : '无活动执行器'}</span><span>耗时 ${h(duration)}</span></div>
+      </div>
+      ${errorCopy ? `<section class="lab-job-error"><span>FAILED</span><h4>${h(errorCopy.what)}</h4><dl><div><dt>可能原因</dt><dd>${h(errorCopy.why)}</dd></div><div><dt>下一步</dt><dd>${h(errorCopy.how)}</dd></div></dl></section>` : ''}
+      <div class="lab-job-drawer-actions">
+        ${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">安全停止</button>` : ''}
+        ${terminalJobStatuses.has(job.status) ? `<button class="primary" type="button" data-retry-job="${h(job.id)}">按原参数重跑</button>` : ''}
+      </div>
+      <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>INPUT</span><h4>研究参数</h4></div>${renderJobParams(job.params)}</section>
+      <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>OUTPUT</span><h4>任务产出</h4></div>${renderJobResult(job)}</section>
+      <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>EVENTS · ${state.jobEvents.length}</span><h4>执行时间线</h4></div>${renderJobTimeline(state.jobEvents)}</section>
+      <section class="lab-job-detail-section lab-job-identifiers"><div class="lab-job-section-head"><span>AUDIT</span><h4>审计标识</h4></div><dl><div><dt>任务 ID</dt><dd>${h(job.id)}</dd></div><div><dt>创建时间</dt><dd>${h(formatDate(job.created_at, true))}</dd></div><div><dt>最近心跳</dt><dd>${h(formatDate(job.heartbeat_at, true))}</dd></div></dl></section>`;
+  }
+
+  async function refreshJobDetail({reset = false} = {}) {
+    const jobId = state.selectedJobId;
+    if (!jobId || state.jobDetailLoading) return;
+    if (reset) {
+      state.jobEvents = [];
+      state.jobLastSeq = 0;
+    }
+    state.jobDetailLoading = true;
+    try {
+      const job = await request(`/api/lab/jobs/${encodeURIComponent(jobId)}`);
+      if (state.selectedJobId !== jobId) return;
+      const response = await request(`/api/lab/jobs/${encodeURIComponent(jobId)}/events?after=${state.jobLastSeq}&limit=2000`);
+      if (state.selectedJobId !== jobId) return;
+      const events = response.items || [];
+      if (events.length) {
+        state.jobEvents.push(...events);
+        state.jobLastSeq = Math.max(state.jobLastSeq, ...events.map(item => Number(item.seq) || 0));
+      }
+      state.jobDetail = job;
+      renderJobDetail();
+    } catch (error) {
+      if (state.selectedJobId === jobId) {
+        document.getElementById('lab-job-drawer-body').innerHTML = `<div class="lab-job-load-error"><b>任务详情读取失败</b><p>${h(error.message || error)}</p><button type="button" data-job-detail="${h(jobId)}">重试</button></div>`;
+      }
+    } finally {
+      state.jobDetailLoading = false;
+    }
+  }
+
+  function openJobDetail(jobId, opener = null) {
+    if (!jobId) return;
+    const changed = state.selectedJobId !== jobId;
+    state.selectedJobId = jobId;
+    state.jobDrawerOpener = opener || document.activeElement;
+    const drawer = document.getElementById('lab-job-drawer');
+    drawer.classList.add('is-open');
+    drawer.setAttribute('aria-hidden', 'false');
+    if (changed) {
+      state.jobDetail = state.jobs.find(job => job.id === jobId) || null;
+      state.jobEvents = [];
+      state.jobLastSeq = 0;
+      document.getElementById('lab-job-drawer-body').innerHTML = '<div class="lab-job-loading"><i></i><span>正在读取任务、事件与产出…</span></div>';
+    }
+    drawer.querySelector('[data-close-job-drawer]')?.focus({preventScroll:true});
+    refreshJobDetail({reset: changed});
+  }
+
+  function closeJobDetail() {
+    const drawer = document.getElementById('lab-job-drawer');
+    drawer.classList.remove('is-open');
+    drawer.setAttribute('aria-hidden', 'true');
+    state.selectedJobId = '';
+    const opener = state.jobDrawerOpener;
+    state.jobDrawerOpener = null;
+    if (opener?.isConnected) opener.focus({preventScroll:true});
   }
 
   function filteredFactors() {
@@ -466,6 +724,7 @@
       const experiments = await request('/api/lab/experiments?limit=50');
       state.experiments = experiments.items || [];
       renderExperiments();
+      if (state.selectedJobId) await refreshJobDetail();
     } catch (error) {
       if (isLabActive()) showError('任务状态刷新失败', error);
     }
@@ -487,6 +746,15 @@
       document.getElementById(id)?.addEventListener('input', () => { state.formsDirty = true; });
     }
     document.getElementById('tab-lab').addEventListener('click', async event => {
+      if (event.target.closest('[data-close-job-drawer]')) {
+        closeJobDetail();
+        return;
+      }
+      const jobDetail = event.target.closest('[data-job-detail]');
+      if (jobDetail) {
+        openJobDetail(jobDetail.dataset.jobDetail, jobDetail);
+        return;
+      }
       const viewButton = event.target.closest('[data-lab-view],[data-lab-go]');
       if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
       if (event.target.closest('[data-lab-action="create-factor"]')) {
@@ -513,6 +781,7 @@
       }
       const factor = event.target.closest('[data-factor-version]');
       if (factor) {
+        if (factor.closest('#lab-job-drawer')) closeJobDetail();
         if (!factor.closest('#lab-factor-list')) setView('library');
         selectFactor(factor.dataset.factorVersion);
       }
@@ -582,6 +851,25 @@
         await request(`/api/lab/jobs/${cancel.dataset.cancelJob}/cancel`, {method:'POST'});
         await refreshJobs();
       } catch (error) { showError('任务取消失败', error); }
+      const retry = event.target.closest('[data-retry-job]');
+      if (retry) {
+        const source = state.jobDetail;
+        const costly = ['discover_llm', 'train'].includes(source?.kind);
+        const confirmed = !costly || window.confirm(
+          `${kindLabel[source.kind] || source.kind} 会重新消耗模型或训练资源。确定按完全相同的参数重跑吗？`
+        );
+        if (!confirmed) return;
+        try {
+          retry.disabled = true;
+          const created = await request(`/api/lab/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
+          await refreshJobs();
+          openJobDetail(created.id, retry);
+        } catch (error) {
+          showError('任务重跑未能创建', error);
+        } finally {
+          retry.disabled = false;
+        }
+      }
     });
 
     document.getElementById('lab-factor-search').addEventListener('input', event => {
@@ -643,7 +931,9 @@
     });
 
     document.getElementById('lab-refresh-jobs').addEventListener('click', refreshJobs);
-    document.getElementById('lab-task-open').addEventListener('click', () => setView('automation'));
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && state.selectedJobId) closeJobDetail();
+    });
   }
 
   async function loadQuantLab() {
@@ -656,7 +946,7 @@
         showError('研究工作台加载失败', error);
       }
       state.timer = window.setInterval(() => {
-        if (isLabActive() && state.jobs.some(job => ['queued','running','interrupted','paused'].includes(job.status))) refreshJobs();
+        if (isLabActive() && (state.selectedJobId || state.jobs.some(job => activeJobStatuses.has(job.status)))) refreshJobs();
       }, 3000);
     } else {
       refreshJobs();

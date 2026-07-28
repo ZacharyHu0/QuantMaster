@@ -765,6 +765,16 @@
     <button type="button" id="lab-task-open">查看</button>
   </div>
 
+  <aside class="lab-job-drawer" id="lab-job-drawer" aria-labelledby="lab-job-drawer-title" aria-hidden="true">
+    <div class="lab-job-drawer-head">
+      <div><span id="lab-job-drawer-kicker">RESEARCH JOB</span><h3 id="lab-job-drawer-title">研究任务详情</h3></div>
+      <button type="button" data-close-job-drawer aria-label="关闭研究任务详情">×</button>
+    </div>
+    <div class="lab-job-drawer-body" id="lab-job-drawer-body">
+      <div class="lab-empty">选择任务后查看参数、阶段、事件与产出。</div>
+    </div>
+  </aside>
+
   <dialog class="lab-dialog" id="lab-factor-dialog">
     <form method="dialog" class="lab-dialog-card" id="lab-factor-create-form">
       <div class="lab-dialog-head"><div><span>SAFE DSL EDITOR</span><h3>新建人工因子</h3></div><button type="button" data-lab-close-dialog aria-label="关闭">×</button></div>

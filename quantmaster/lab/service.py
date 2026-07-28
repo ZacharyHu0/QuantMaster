@@ -204,14 +204,76 @@ class LabService:
 
     def discover_llm(
         self, *, universe: str, start: str, end: str, count: int = 8,
-        rounds: int = 2, horizon: int = 3, progress=None,
+        rounds: int = 2, horizon: int = 3, progress=None, cancelled=None,
     ) -> dict:
         from quantmaster.factors.mining import LLMFactorMiner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
-        if progress:
-            progress(58, "请求 AI 生成结构化因子表达式")
-        mined = LLMFactorMiner().mine(panel, n=count, rounds=rounds, periods=horizon)
+        rounds = max(1, int(rounds))
+
+        def relay(event: dict[str, Any]) -> None:
+            if not progress:
+                return
+            event_type = str(event.get("type") or "progress")
+            round_number = max(1, int(event.get("round") or 1))
+            total_rounds = max(1, int(event.get("rounds") or rounds))
+            span = 36.0 / total_rounds
+            start_value = 58.0 + span * (round_number - 1)
+            value = start_value
+            phase, detail = "AI 因子发现", ""
+            if event_type == "llm_attempt_started":
+                phase = (
+                    f"AI 第 {round_number}/{total_rounds} 轮 · "
+                    f"尝试 {event['attempt']}/{event['max_attempts']}"
+                )
+                provider = str(event.get("provider") or "模型服务")
+                model = str(event.get("model") or "当前模型")
+                detail = (
+                    f"等待 {provider} · {model}；本次最长 "
+                    f"{event['timeout_seconds']} 秒"
+                )
+            elif event_type == "llm_response_received":
+                value += span * 0.32
+                phase = f"AI 第 {round_number}/{total_rounds} 轮已响应"
+                detail = f"收到 {event.get('candidate_count', 0)} 个候选，开始本地校验"
+            elif event_type == "llm_candidate_checked":
+                total = max(1, int(event.get("candidate_count") or 1))
+                done = max(0, int(event.get("candidate") or 0))
+                value += span * (0.32 + 0.58 * done / total)
+                phase = f"本地校验第 {round_number}/{total_rounds} 轮候选"
+                detail = f"已校验 {done}/{total} 个安全 DSL 表达式"
+            elif event_type == "llm_round_completed":
+                value += span
+                phase = f"AI 第 {round_number}/{total_rounds} 轮完成"
+                detail = (
+                    f"安全表达式 {event.get('dsl_valid', 0)} 个 · "
+                    f"初筛达标 {event.get('threshold_passed', 0)} 个"
+                )
+            elif event_type == "llm_attempt_failed":
+                phase = f"AI 第 {round_number}/{total_rounds} 轮请求未完成"
+                detail = str(event.get("message") or "模型请求失败")
+            elif event_type == "llm_retry_scheduled":
+                phase = f"AI 第 {round_number}/{total_rounds} 轮准备重试"
+                detail = (
+                    f"{event.get('retry_in_seconds', 0):g} 秒后进行第 "
+                    f"{event.get('next_attempt')}/4 次尝试：{event.get('message', '')}"
+                )
+            metadata = {key: item for key, item in event.items() if key != "type"}
+            progress(
+                min(94, int(value)), phase, detail,
+                event_type=event_type, metadata=metadata,
+            )
+
+        report = LLMFactorMiner().mine_report(
+            panel,
+            n=count,
+            rounds=rounds,
+            periods=horizon,
+            max_retries=3,
+            on_event=relay,
+            cancelled=cancelled,
+        )
+        mined = [item for item in report.factors if not item.error]
         versions = []
         for rank, item in enumerate(mined, start=1):
             spec = FactorSpec(
@@ -228,10 +290,16 @@ class LabService:
                 spec, source="llm", actor="worker")
             versions.append(self.store.version(version["id"]) or version)
         if progress:
-            progress(96, f"保存 {len(versions)} 个候选")
+            detail = report.warnings[0]["message"] if report.warnings else "候选已写入版本账本"
+            progress(96, f"保存 {len(versions)} 个候选", detail)
         return {
             "method": "llm", "candidates": versions,
-            "raw": [asdict(item) for item in mined], "snapshot": snapshot["snapshot_hash"],
+            "raw": [asdict(item) for item in report.factors],
+            "snapshot": snapshot["snapshot_hash"],
+            "rounds_requested": report.rounds_requested,
+            "rounds_completed": report.rounds_completed,
+            "attempts": report.attempts,
+            "warnings": report.warnings,
         }
 
     def train_model(
@@ -469,7 +537,7 @@ class LabService:
         if kind == "discover_genetic":
             return self.discover_genetic(progress=progress, **params)
         if kind == "discover_llm":
-            return self.discover_llm(progress=progress, **params)
+            return self.discover_llm(progress=progress, cancelled=cancelled, **params)
         if kind == "train":
             return self.train_model(progress=progress, cancelled=cancelled, **params)
         raise ValueError(f"无法执行任务: {kind}")

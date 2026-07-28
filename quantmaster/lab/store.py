@@ -511,17 +511,37 @@ class LabStore:
             )
         return int(cursor.lastrowid)
 
-    def update_job(self, job_id: str, progress: int, phase: str, detail: str = "") -> None:
+    def update_job(
+        self,
+        job_id: str,
+        progress: int,
+        phase: str,
+        detail: str = "",
+        *,
+        event_type: str = "progress",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         now = utc_now()
         progress = max(0, min(100, int(progress)))
+        detail = str(detail)[:1000]
         with self._conn() as conn:
             conn.execute(
                 "UPDATE lab_jobs SET progress=?,phase=?,detail=?,heartbeat_at=? "
                 "WHERE id=? AND status='running'", (progress, phase, detail, now, job_id),
             )
-        self.append_event(job_id, {
-            "type": "progress", "progress": progress, "phase": phase, "detail": detail,
-        })
+        event = {
+            "progress": progress, "phase": phase, "detail": detail, **(metadata or {}),
+        }
+        event["type"] = event_type
+        self.append_event(job_id, event)
+
+    def heartbeat_job(self, job_id: str) -> None:
+        """只刷新执行器心跳，不向事件时间线写入高频噪声。"""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE lab_jobs SET heartbeat_at=? WHERE id=? AND status='running'",
+                (utc_now(), job_id),
+            )
 
     def request_cancel(self, job_id: str) -> dict:
         with self._conn() as conn:
@@ -542,22 +562,59 @@ class LabStore:
         return bool(row and row[0])
 
     def finish_job(self, job_id: str, *, result: dict | None = None, error: str = "") -> None:
-        current = self.job(job_id)
+        current = self.job(job_id) or {}
         cancelled = bool(current and current["cancel_requested"])
-        status = "cancelled" if cancelled else "failed" if error else "completed"
-        progress = current["progress"] if cancelled or error else 100
+        payload = result or {}
+        warnings = payload.get("warnings") if isinstance(payload, dict) else []
+        warnings = warnings if isinstance(warnings, list) else []
+        partial = bool(warnings)
+        status = (
+            "cancelled" if cancelled else "failed" if error
+            else "completed_with_warnings" if partial else "completed"
+        )
+        progress = int(current.get("progress") or 0) if cancelled or error else 100
+        warning = warnings[0] if warnings else ""
+        warning_text = str(warning.get("message") if isinstance(warning, dict) else warning)
+        phase = (
+            "已取消" if cancelled else "执行失败" if error
+            else "部分完成" if partial else "执行完成"
+        )
+        detail = (error if error else warning_text)[:1000]
         now = utc_now()
         with self._conn() as conn:
             conn.execute(
-                "UPDATE lab_jobs SET status=?,progress=?,result_json=?,error=?,"
+                "UPDATE lab_jobs SET status=?,progress=?,phase=?,detail=?,result_json=?,error=?,"
                 "finished_at=?,heartbeat_at=? WHERE id=?",
-                (status, progress, canonical_json(result or {}), error[:1000], now, now, job_id),
+                (
+                    status, progress, phase, detail, canonical_json(payload), error[:1000],
+                    now, now, job_id,
+                ),
             )
         self.append_event(job_id, {
             "type": status, "progress": progress,
-            "phase": "已取消" if cancelled else "执行失败" if error else "执行完成",
-            "detail": error[:300],
+            "phase": phase, "detail": detail[:300],
         })
+
+    def retry_job(self, job_id: str) -> dict:
+        source = self.job(job_id)
+        if source is None:
+            raise KeyError("任务不存在")
+        if source["status"] not in {
+            "completed", "completed_with_warnings", "failed", "cancelled",
+        }:
+            raise ValueError("只能按相同参数重新运行已结束的任务")
+        params = dict(source.get("params") or {})
+        params.pop("_scheduled", None)
+        created = self.enqueue(str(source["kind"]), params)
+        self.append_event(created["id"], {
+            "type": "retry_of", "source_job_id": job_id,
+            "phase": "按历史参数重新运行",
+        })
+        self.append_event(job_id, {
+            "type": "retried_as", "job_id": created["id"],
+            "phase": "已创建重新运行任务",
+        })
+        return self.job(created["id"]) or created
 
     def interrupt_stale(self, worker: str = "") -> int:
         with self._conn() as conn:

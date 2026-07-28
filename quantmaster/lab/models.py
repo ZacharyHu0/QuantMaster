@@ -17,14 +17,16 @@ FactorStatus = Literal[
     "draft", "validating", "candidate", "approved", "production", "degraded", "archived"
 ]
 JobStatus = Literal[
-    "queued", "running", "paused", "completed", "failed", "cancelled", "interrupted"
+    "queued", "running", "paused", "completed", "completed_with_warnings",
+    "failed", "cancelled", "interrupted",
 ]
 
 FACTOR_STATUSES = {
     "draft", "validating", "candidate", "approved", "production", "degraded", "archived",
 }
 JOB_STATUSES = {
-    "queued", "running", "paused", "completed", "failed", "cancelled", "interrupted",
+    "queued", "running", "paused", "completed", "completed_with_warnings",
+    "failed", "cancelled", "interrupted",
 }
 
 
@@ -115,4 +117,3 @@ class SuggestionPatch:
         value = asdict(self)
         value["risks"] = list(self.risks)
         return value
-

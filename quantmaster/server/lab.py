@@ -187,6 +187,14 @@ def cancel_job(job_id: str) -> dict:
         raise _fail(exc) from exc
 
 
+@router.post("/jobs/{job_id}/retry", status_code=202)
+def retry_job(job_id: str) -> dict:
+    try:
+        return get_lab_service().store.retry_job(job_id)
+    except Exception as exc:
+        raise _fail(exc) from exc
+
+
 @router.get("/jobs/{job_id}/events")
 def job_events(
     job_id: str, after: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000),

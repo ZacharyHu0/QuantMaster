@@ -434,6 +434,19 @@ def collect_health_report() -> dict[str, Any]:
                     action="打开 Quant Lab 查看任务事件并重新运行。",
                     problem_id=f"lab-job:{latest.get('id', 'latest')}",
                 ))
+            elif latest and latest.get("status") == "completed_with_warnings":
+                warnings = (latest.get("result") or {}).get("warnings") or []
+                warning = warnings[0] if warnings else {}
+                message = warning.get("message") if isinstance(warning, dict) else str(warning)
+                issues.append(make_problem(
+                    "lab_job_partial",
+                    severity="warning",
+                    source="Quant Lab",
+                    title="最近的研究任务部分完成",
+                    message=_clean(message) or "已保留完成部分，仍有研究轮次未完成。",
+                    action="打开 Quant Lab 查看已保存结果或按相同参数重新运行。",
+                    problem_id=f"lab-job:{latest.get('id', 'latest')}",
+                ))
     except Exception as exc:
         issues.append(_component_failure("Quant Lab", exc))
 
