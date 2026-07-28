@@ -530,7 +530,16 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         assert not page.locator("#runtime-info").evaluate(
             "element => element.classList.contains('expanded')"
         )
+        collapsed_box = page.locator("#runtime-info").bounding_box()
+        assert collapsed_box is not None
+        assert abs(collapsed_box["x"] - 16) < 1
+        assert abs(900 - collapsed_box["y"] - collapsed_box["height"] - 12) < 1
+        assert collapsed_box["width"] <= 360
         page.locator("#runtime-summary").click()
+        expanded_box = page.locator("#runtime-info").bounding_box()
+        assert expanded_box is not None
+        assert abs(expanded_box["x"] - 16) < 1
+        assert collapsed_box["width"] < expanded_box["width"] <= 520
         problem = page.locator('.runtime-entry[data-level="error"]', has_text="诊断测试")
         assert problem.is_visible()
         assert "稍后重试。" in problem.inner_text()

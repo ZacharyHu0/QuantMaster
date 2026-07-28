@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.8.11"
+VERSION = "0.8.12"
 RELEASE_DATE = "2026-07-28"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "后台状态条紧凑布局",
+                "items": (
+                    (
+                        "后台状态条移至页面左下角；收起时按内容缩窄，"
+                        "展开时限制为紧凑宽度，减少对工作区内容的遮挡。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.8.11",
+        "date": "2026-07-28",
         "sections": (
             {
                 "title": "回测实验历史布局修复",
