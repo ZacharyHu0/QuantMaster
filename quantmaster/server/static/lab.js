@@ -295,6 +295,18 @@
     document.getElementById('lab-capabilities').innerHTML = items.map(item =>
       `<span class="lab-capability ${item[2] ? 'ready' : 'warning'}" data-capability="${item[0]}"><i></i>${h(item[1])} · ${item[2] ? 'READY' : 'SETUP'}</span>`
     ).join('');
+    syncPythonMiningGate();
+  }
+
+  function syncPythonMiningGate() {
+    const form = document.getElementById('lab-discovery-form');
+    const gate = document.getElementById('lab-python-gate');
+    if (!form || !gate) return;
+    const selected = form.elements.method?.value === 'python';
+    const enabled = Boolean(state.overview?.capabilities?.python_mining_enabled);
+    gate.hidden = !selected || enabled;
+    const submit = form.querySelector('[type=submit]');
+    if (submit) submit.textContent = selected && !enabled ? '需要先启用 AutoMiner' : '加入发现队列';
   }
 
   function renderOverview() {
@@ -1070,6 +1082,7 @@
         rounds.value = python ? '3' : Math.min(2, Number(rounds.value) || 2);
       }
       document.getElementById('lab-split-preview').hidden = !python;
+      syncPythonMiningGate();
       if (python) previewPythonSplit();
     }));
     for (const name of ['start','horizon']) {
@@ -1081,6 +1094,12 @@
       const form = new FormData(event.target);
       const method = form.get('method');
       const base = {universe:form.get('universe'), start:form.get('start'), end:new Date().toISOString().slice(0,10), horizon:+form.get('horizon')};
+      if (method === 'python' && !state.overview?.capabilities?.python_mining_enabled) {
+        const gate = document.getElementById('lab-python-gate');
+        gate.hidden = false;
+        gate.focus();
+        return;
+      }
       try {
         if (method === 'llm') await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
         else if (method === 'python') await enqueue('discover_python', {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')});
@@ -1148,6 +1167,13 @@
 
     document.getElementById('lab-refresh-jobs').addEventListener('click', refreshJobs);
     document.getElementById('lab-refresh-studies').addEventListener('click', refreshStudies);
+    document.getElementById('lab-open-python-settings')?.addEventListener('click', () => {
+      document.querySelector('[data-tab="settings"]')?.click();
+      window.setTimeout(() => {
+        document.querySelector('[data-settings-section="lab"]')?.click();
+        document.querySelector('[name="lab.ai_python_mining_enabled"]')?.focus();
+      }, 0);
+    });
     document.getElementById('lab-mining-runs')?.addEventListener('click', event => {
       const button = event.target.closest('[data-mining-run]');
       if (button) loadMiningRun(button.dataset.miningRun);

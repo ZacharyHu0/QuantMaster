@@ -699,6 +699,10 @@
               <label data-python-field hidden>Pareto 入围数<input name="finalists" type="number" value="3" min="1" max="3"></label>
             </div>
             <div class="lab-split-preview" id="lab-split-preview" hidden aria-live="polite"><span>正在计算 TRAIN / VALID / TEST 边界…</span></div>
+            <div class="lab-python-gate" id="lab-python-gate" hidden tabindex="-1">
+              <div><b>AutoMiner 尚未启用</b><span>这是默认关闭的受限代码执行开关。启用后才能创建手动或每周任务。</span></div>
+              <button type="button" id="lab-open-python-settings">前往 Quant Lab 设置</button>
+            </div>
             <div class="lab-form-note"><span>DATA POLICY</span><p>AutoMiner 只向模型发送特征目录和本地指标，不发送原始样本；TEST 在入围顺序冻结前不可见。</p></div>
             <button class="lab-button lab-button-primary" type="submit">加入发现队列</button>
           </form>

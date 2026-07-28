@@ -189,7 +189,7 @@ def test_help_handbook_search_routes_and_calculators(live_server):
             "document.querySelector('#help-settings-status').innerText.startsWith('已载入')"
         )
         assert page.locator("#help-settings-status").inner_text().startswith("已载入")
-        assert page.locator("#help-article h2").count() == 13
+        assert page.locator("#help-article h2").count() == 17
         assert page.evaluate("location.hash") == "#help/start"
 
         page.reload()
@@ -204,16 +204,47 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         )
         assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
 
+        page.goto(f"{url}/#help/inference/help-inference-fdr")
+        page.locator("#help-inference-fdr").wait_for(state="visible")
+        assert page.locator("#help-inference-fdr h3").inner_text() == "候选越多，单个 p 值越不够"
+
         search = page.locator("#help-search-input")
         search.fill("T+1")
         page.locator(".help-search-result").first.wait_for()
         assert "T+1" in page.locator("#help-search-results").inner_text()
         search.fill("RankIC")
+        page.wait_for_function(
+            "document.querySelector('#help-search-results').innerText.includes('RankIC')"
+        )
         assert "RankIC" in page.locator("#help-search-results").inner_text()
+        search.fill("p=0.03")
+        page.wait_for_function(
+            "document.querySelector('#help-search-results').innerText.includes('97%')"
+        )
+        assert "97%" in page.locator("#help-search-results").inner_text()
+        search.fill("Python 区块 Bootstrap")
+        page.wait_for_function(
+            "document.querySelector('#help-search-results').innerText.includes('Python')"
+        )
+        assert page.locator(".help-search-result").count() <= 12
         search.fill("完全不存在的量化词条xyz")
+        page.wait_for_function(
+            "document.querySelector('#help-search-results').innerText.includes('没有找到')"
+        )
         assert "没有找到" in page.locator("#help-search-results").inner_text()
         page.locator("#help-search-clear").click()
         assert page.locator("#help-search-results").is_hidden()
+
+        page.goto(f"{url}/#help/inference/help-code-ols")
+        copy_button = page.locator("#help-code-ols [data-copy-code]")
+        copy_button.click()
+        assert copy_button.inner_text() in {"已复制", "已选中，请按 Ctrl+C"}
+
+        page.goto(f"{url}/#help/inference/help-inference-self-tests")
+        first_quiz = page.locator("#help-inference-self-tests details").first
+        first_quiz.locator("summary").click()
+        assert first_quiz.get_attribute("open") is not None
+        assert "零假设" in first_quiz.inner_text()
 
         page.goto(f"{url}/#help/calculators")
         page.locator("#calc-compound").wait_for(state="visible")
@@ -229,6 +260,28 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert page.locator('#calc-rankic [data-output="rankic"]').inner_text() == "0.8660"
         rank_pairs.fill("1, 1\n1, 2\n1, 3")
         assert "常数" in page.locator("#calc-rankic [data-error]").inner_text()
+
+        assert page.locator('#lab-ols [data-output="alpha"]').inner_text() == "0.0000"
+        assert page.locator('#lab-ols [data-output="beta"]').inner_text() == "2.1000"
+        assert page.locator('#lab-ols [data-output="r2"]').inner_text() == "0.8909"
+        assert page.locator('#lab-ols [data-output="residual_corr"]').inner_text() == "0.0000"
+
+        assert page.locator('#lab-fdr [data-output="passed"]').inner_text() == "1"
+        fdr_rows = page.locator("#lab-fdr [data-fdr-rows]").inner_text()
+        assert "0.0400" in fdr_rows
+        assert "0.0533" in fdr_rows
+        assert "0.2000" in fdr_rows
+
+        calibration_pairs = page.locator('#lab-calibration [name="pairs"]')
+        calibration_pairs.fill("0.1, 0\n0.2, 0\n0.8, 1\n0.9, 1")
+        assert page.locator('#lab-calibration [data-output="brier"]').inner_text() == "0.0250"
+        assert page.locator('#lab-calibration [data-output="ece"]').inner_text() == "0.1500"
+
+        assert page.locator('#lab-risk [data-output="covariance"]').inner_text() == "0.005000"
+        assert page.locator('#lab-risk [data-output="portfolio_vol"]').inner_text() == "13.56%"
+        assert page.locator('#lab-risk [data-output="diversification"]').inner_text() == "1.1795"
+        page.locator('#lab-risk [name="weight_b"]').fill("30")
+        assert "合计 100%" in page.locator("#lab-risk [data-error]").inner_text()
 
         assert page.locator('#calc-cost [data-output="buy_total"]').inner_text() == "¥10,015.10"
         assert page.locator('#calc-cost [data-output="sell_net"]').inner_text() == "¥10,179.60"

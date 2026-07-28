@@ -547,8 +547,12 @@ def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
     assert 'value="python"' in page
     assert 'name="lab.ai_python_mining_enabled"' in page
     assert 'id="lab-split-preview"' in page
+    assert 'id="lab-python-gate"' in page
+    assert 'id="lab-open-python-settings"' in page
     assert "discover_python" in script
     assert "refreshMiningRuns" in script
+    assert "syncPythonMiningGate" in script
+    assert "需要先启用 AutoMiner" in script
     assert "ROBUSTNESS GATE" in script
     assert ".lab-robustness-grid" in styles
 

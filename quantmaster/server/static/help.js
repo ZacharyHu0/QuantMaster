@@ -362,8 +362,171 @@
     output(form, 'meaning', strength);
   }
 
+  function parsePairLines(form, name, {min, max, label, validatePair}) {
+    const raw = String(new FormData(form).get(name) || '').trim();
+    const lines = raw ? raw.split(/\r?\n/).filter(line => line.trim()) : [];
+    const pairs = [];
+    for (const line of lines) {
+      const values = line.trim().split(/[\s,，;；]+/).filter(Boolean).map(Number);
+      if (values.length !== 2 || values.some(value => !Number.isFinite(value)) || !validatePair(values)) {
+        return {error: `“${line.trim().slice(0, 32)}”无法解析。${label}`, pairs: []};
+      }
+      pairs.push(values);
+    }
+    if (pairs.length < min || pairs.length > max) {
+      return {error: `请输入 ${min}–${max} 对有效数字。`, pairs: []};
+    }
+    return {error: '', pairs};
+  }
+
+  function calculateOLS(form) {
+    const parsed = parsePairLines(form, 'pairs', {
+      min: 3,
+      max: 50,
+      label: '每行请输入两个有限数字，例如：1.2, 3.4',
+      validatePair: () => true,
+    });
+    if (parsed.error) {
+      setError(form, parsed.error);
+      ['count', 'alpha', 'beta', 'r2', 'residual_corr'].forEach(key => output(form, key, '—'));
+      return;
+    }
+    const x = parsed.pairs.map(pair => pair[0]);
+    const y = parsed.pairs.map(pair => pair[1]);
+    const xMean = x.reduce((sum, value) => sum + value, 0) / x.length;
+    const yMean = y.reduce((sum, value) => sum + value, 0) / y.length;
+    const centeredX = x.map(value => value - xMean);
+    const centeredY = y.map(value => value - yMean);
+    const xSquares = centeredX.reduce((sum, value) => sum + value * value, 0);
+    const ySquares = centeredY.reduce((sum, value) => sum + value * value, 0);
+    if (!(xSquares > 1e-14) || !(ySquares > 1e-14)) {
+      setError(form, 'x 与 y 都必须包含变化；常数列无法估计有效回归与 R²。');
+      ['count', 'alpha', 'beta', 'r2', 'residual_corr'].forEach(key => output(form, key, '—'));
+      return;
+    }
+    const beta = centeredX.reduce((sum, value, index) => sum + value * centeredY[index], 0) / xSquares;
+    const alpha = yMean - beta * xMean;
+    const residuals = y.map((value, index) => value - alpha - beta * x[index]);
+    const residualSquares = residuals.reduce((sum, value) => sum + value * value, 0);
+    const residualCorrelation = residualSquares < 1e-20 ? 0 : pearson(x, residuals);
+    setError(form);
+    output(form, 'count', String(x.length));
+    output(form, 'alpha', decimal(Math.abs(alpha) < 5e-9 ? 0 : alpha, 4));
+    output(form, 'beta', decimal(beta, 4));
+    output(form, 'r2', decimal(1 - residualSquares / ySquares, 4));
+    const stableResidualCorrelation = Number.isFinite(residualCorrelation) && Math.abs(residualCorrelation) >= 5e-9
+      ? residualCorrelation : 0;
+    output(form, 'residual_corr', decimal(stableResidualCorrelation, 4));
+  }
+
+  function calculateFDR(form) {
+    const raw = String(new FormData(form).get('p_values') || '').trim();
+    const tokens = raw ? raw.split(/[\s,，;；]+/).filter(Boolean) : [];
+    const pValues = tokens.map(Number);
+    const threshold = number(form, 'threshold');
+    const rows = form.querySelector('[data-fdr-rows]');
+    if (pValues.length < 2 || pValues.length > 100 || pValues.some(value => !Number.isFinite(value) || value < 0 || value > 1)
+        || !(threshold > 0 && threshold <= 1)) {
+      setError(form, '请输入 2–100 个 0 到 1 之间的 p 值；FDR 阈值必须大于 0 且不超过 1。');
+      ['count', 'passed', 'cutoff'].forEach(key => output(form, key, '—'));
+      if (rows) rows.innerHTML = '';
+      return;
+    }
+    const sorted = pValues.map((value, index) => ({value, index})).sort((a, b) => a.value - b.value);
+    const qValues = Array(pValues.length);
+    let running = 1;
+    for (let index = sorted.length - 1; index >= 0; index -= 1) {
+      running = Math.min(running, sorted[index].value * sorted.length / (index + 1));
+      qValues[sorted[index].index] = Math.min(1, running);
+    }
+    const passed = qValues.map(value => value <= threshold + 1e-12);
+    const cutoffValues = pValues.filter((_, index) => passed[index]);
+    setError(form);
+    output(form, 'count', String(pValues.length));
+    output(form, 'passed', String(passed.filter(Boolean).length));
+    output(form, 'cutoff', cutoffValues.length ? decimal(Math.max(...cutoffValues), 4) : '无');
+    if (rows) {
+      rows.innerHTML = pValues.map((value, index) => `<tr><td>${index + 1}</td><td>${decimal(value, 4)}</td><td>${decimal(qValues[index], 4)}</td><td><span class="lab-verdict ${passed[index] ? 'pass' : 'hold'}">${passed[index] ? '通过' : '保留'}</span></td></tr>`).join('');
+    }
+  }
+
+  function calculateCalibration(form) {
+    const parsed = parsePairLines(form, 'pairs', {
+      min: 4,
+      max: 200,
+      label: '概率必须在 0 到 1 之间，结果只能是 0 或 1，例如：0.65, 1',
+      validatePair: ([probability, outcome]) => probability >= 0 && probability <= 1 && (outcome === 0 || outcome === 1),
+    });
+    const rows = form.querySelector('[data-calibration-rows]');
+    if (parsed.error) {
+      setError(form, parsed.error);
+      ['count', 'base_rate', 'brier', 'ece'].forEach(key => output(form, key, '—'));
+      if (rows) rows.innerHTML = '';
+      return;
+    }
+    const bins = Array.from({length: 10}, () => ({count: 0, probability: 0, outcome: 0}));
+    let outcomeSum = 0;
+    let squaredError = 0;
+    parsed.pairs.forEach(([probability, outcome]) => {
+      const bin = bins[Math.min(9, Math.floor(probability * 10))];
+      bin.count += 1;
+      bin.probability += probability;
+      bin.outcome += outcome;
+      outcomeSum += outcome;
+      squaredError += (probability - outcome) ** 2;
+    });
+    let ece = 0;
+    bins.forEach(bin => {
+      if (!bin.count) return;
+      const averageProbability = bin.probability / bin.count;
+      const eventRate = bin.outcome / bin.count;
+      ece += bin.count / parsed.pairs.length * Math.abs(averageProbability - eventRate);
+    });
+    setError(form);
+    output(form, 'count', String(parsed.pairs.length));
+    output(form, 'base_rate', percent(outcomeSum / parsed.pairs.length));
+    output(form, 'brier', decimal(squaredError / parsed.pairs.length, 4));
+    output(form, 'ece', decimal(ece, 4));
+    if (rows) {
+      rows.innerHTML = bins.map((bin, index) => {
+        const averageProbability = bin.count ? bin.probability / bin.count : NaN;
+        const eventRate = bin.count ? bin.outcome / bin.count : NaN;
+        const difference = bin.count ? Math.abs(averageProbability - eventRate) : NaN;
+        const upper = index === 9 ? '1.0]' : `${((index + 1) / 10).toFixed(1)})`;
+        return `<tr><td>[${(index / 10).toFixed(1)}, ${upper}</td><td>${bin.count}</td><td>${bin.count ? percent(averageProbability) : '—'}</td><td>${bin.count ? percent(eventRate) : '—'}</td><td>${bin.count ? percent(difference) : '—'}</td></tr>`;
+      }).join('');
+    }
+  }
+
+  function calculatePortfolioRisk(form) {
+    const weightA = number(form, 'weight_a') / 100;
+    const weightB = number(form, 'weight_b') / 100;
+    const volA = number(form, 'vol_a') / 100;
+    const volB = number(form, 'vol_b') / 100;
+    const correlation = number(form, 'correlation');
+    if (!(weightA >= 0 && weightA <= 1) || !(weightB >= 0 && weightB <= 1)
+        || Math.abs(weightA + weightB - 1) > 1e-6 || !(volA > 0) || !(volB > 0)
+        || !(correlation >= -1 && correlation <= 1)) {
+      setError(form, '两项权重必须在 0% 到 100% 之间且合计 100%；波动率必须大于 0，相关系数必须在 −1 到 1 之间。');
+      ['covariance', 'portfolio_vol', 'diversification', 'risk_a', 'risk_b'].forEach(key => output(form, key, '—'));
+      return;
+    }
+    const covariance = volA * volB * correlation;
+    const componentA = weightA * (weightA * volA * volA + weightB * covariance);
+    const componentB = weightB * (weightA * covariance + weightB * volB * volB);
+    const variance = Math.max(0, componentA + componentB);
+    const portfolioVol = Math.sqrt(variance);
+    setError(form);
+    output(form, 'covariance', decimal(covariance, 6));
+    output(form, 'portfolio_vol', percent(portfolioVol));
+    output(form, 'diversification', portfolioVol > 1e-12 ? decimal((weightA * volA + weightB * volB) / portfolioVol, 4) : '无法定义');
+    output(form, 'risk_a', variance > 1e-14 ? percent(componentA / variance) : '无法定义');
+    output(form, 'risk_b', variance > 1e-14 ? percent(componentB / variance) : '无法定义');
+  }
+
   function calculate(form) {
-    const calculator = form.closest('[data-calculator]')?.dataset.calculator;
+    const container = form.closest('[data-calculator], [data-lab]');
+    const calculator = container?.dataset.calculator || container?.dataset.lab;
     ({
       compound: calculateCompound,
       cost: calculateCost,
@@ -371,6 +534,10 @@
       drawdown: calculateDrawdown,
       sharpe: calculateSharpe,
       rankic: calculateRankIC,
+      ols: calculateOLS,
+      fdr: calculateFDR,
+      calibration: calculateCalibration,
+      risk: calculatePortfolioRisk,
     })[calculator]?.(form);
   }
 
@@ -394,6 +561,42 @@
     fetchTradeSettings();
   }
 
+  function selectCode(code) {
+    const selection = window.getSelection();
+    if (!selection) return false;
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return selection.toString().length > 0;
+  }
+
+  async function copyCode(button) {
+    const code = button.closest('.help-code')?.querySelector('code');
+    if (!code) return;
+    const original = '复制代码';
+    let message = '';
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(code.textContent);
+      message = '已复制';
+    } catch (_) {
+      message = selectCode(code) ? '已选中，请按 Ctrl+C' : '复制失败，请手动选择';
+    }
+    button.textContent = message;
+    button.dataset.copyState = message === '已复制' ? 'success' : 'fallback';
+    window.setTimeout(() => {
+      button.textContent = original;
+      delete button.dataset.copyState;
+    }, 1800);
+  }
+
+  function setupCodeCopy() {
+    root.querySelectorAll('[data-copy-code]').forEach(button => {
+      button.addEventListener('click', () => copyCode(button));
+    });
+  }
+
   function excerpt(text, terms) {
     const clean = text.replace(/\s+/g, ' ').trim();
     const lower = clean.toLocaleLowerCase('zh-CN');
@@ -414,8 +617,7 @@
     const input = document.getElementById('help-search-input');
     const clear = document.getElementById('help-search-clear');
     const results = document.getElementById('help-search-results');
-    const units = Array.from(root.querySelectorAll('[data-search-unit]')).map((element, index) => {
-      if (!element.id) element.id = `help-unit-${index + 1}`;
+    const units = Array.from(root.querySelectorAll('[data-search-unit]')).filter(element => element.id).map(element => {
       const chapter = element.closest('[data-help-topic]');
       return {
         element,
@@ -451,7 +653,11 @@
       }).join('')}</div>`;
     }
 
-    input.addEventListener('input', search);
+    let searchTimer = null;
+    input.addEventListener('input', () => {
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(search, 150);
+    });
     input.addEventListener('keydown', event => {
       if (event.key === 'Escape') {
         input.value = '';
@@ -501,6 +707,7 @@
     setupSearch();
     setupNavigation();
     setupCalculators();
+    setupCodeCopy();
   }
 
   window.loadHelp = function loadHelp() {

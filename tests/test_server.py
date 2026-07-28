@@ -1,6 +1,12 @@
 """FastAPI 服务测试（只测不依赖外部网络的端点）。"""
 
+import ast
+import html
 import json
+import re
+import subprocess
+import sys
+from html.parser import HTMLParser
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -131,7 +137,56 @@ class TestBasics:
         assert 'data-help-topic="start"' in help_content.text
         assert 'data-help-topic="checklist"' in help_content.text
         assert help_content.text.count('data-calculator="') == 6
+        assert help_content.text.count('data-lab="') == 4
         assert "2026-07-28" in help_content.text
+
+    def test_help_handbook_structure_and_examples(self):
+        text = client.get("/static/help-content.html").text
+        topics = re.findall(r'data-help-topic="([^"]+)"', text)
+        assert topics == [
+            "start", "market", "trading", "data", "statistics", "inference",
+            "factors", "validation", "composition", "backtest", "risk",
+            "machine-learning", "research-protocol", "models", "workflow",
+            "checklist", "calculators",
+        ]
+        assert len(topics[:-1]) == 16
+        assert text.count("<details data-self-test>") == 32
+        assert text.count('data-code-language="python"') == 8
+
+        ids = re.findall(r'\bid="([^"]+)"', text)
+        assert len(ids) == len(set(ids))
+        search_units = re.findall(r'<[^>]+data-search-unit[^>]*>', text)
+        assert search_units
+        assert all(re.search(r'\bid="[^"]+"', tag) for tag in search_units)
+
+        class VisibleText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+
+            def handle_data(self, data):
+                self.parts.append(data)
+
+        parser = VisibleText()
+        parser.feed(text)
+        assert len("".join("".join(parser.parts).split())) >= 30_000
+
+        for topic, anchor in re.findall(r'href="#help/([^/"#]+)(?:/([^"#]+))?"', text):
+            assert topic in topics
+            if anchor:
+                assert anchor in ids
+
+        code_blocks = re.findall(
+            r'<code data-code-language="python">(.*?)</code>', text, flags=re.DOTALL
+        )
+        assert len(code_blocks) == 8
+        for block in code_blocks:
+            code = html.unescape(block)
+            ast.parse(code)
+            subprocess.run(
+                [sys.executable, "-c", code], check=True, capture_output=True,
+                text=True, timeout=10,
+            )
 
     def test_validation_error_has_request_id(self):
         resp = client.post("/api/decision/dashboard/stream", json={
