@@ -32,6 +32,7 @@ from typing import Any, ClassVar, TypeVar
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -162,10 +163,7 @@ class ProviderHealthStore:
 
     def _conn(self) -> sqlite3.Connection:
         path = self._path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn = connect_sqlite(path, policy="cache")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS source_health ("
             "lane TEXT PRIMARY KEY,state TEXT NOT NULL DEFAULT 'closed',"
@@ -383,8 +381,7 @@ class TushareRateLimiter:
         interval = 60.0 / calls
         with self._lock:
             path = get_config().data_root / "tushare_rate.sqlite"
-            with sqlite3.connect(path, timeout=30.0) as conn:
-                conn.execute("PRAGMA busy_timeout=30000")
+            with connect_sqlite(path, policy="cache") as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS rate_state ("
                     "name TEXT PRIMARY KEY, next_call REAL NOT NULL)"

@@ -4,7 +4,6 @@ import ast
 import html
 import json
 import re
-import subprocess
 import sys
 from html.parser import HTMLParser
 
@@ -14,6 +13,7 @@ from fastapi.testclient import TestClient
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.release import RELEASE_DATE
+from quantmaster.runtime.process import run_process
 from quantmaster.server.app import app
 
 client = TestClient(app)
@@ -260,7 +260,7 @@ class TestBasics:
         for block in code_blocks:
             code = html.unescape(block)
             ast.parse(code)
-            subprocess.run(
+            run_process(
                 [sys.executable, "-c", code], check=True, capture_output=True,
                 text=True, timeout=10,
             )

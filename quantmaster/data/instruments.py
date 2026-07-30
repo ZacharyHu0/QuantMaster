@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +123,9 @@ class InstrumentStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=20)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        return connect_sqlite(
+            self.path, policy="cache", timeout=20.0, row_factory=True,
+        )
 
     @contextmanager
     def _connection(self):

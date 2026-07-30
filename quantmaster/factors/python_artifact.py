@@ -11,16 +11,18 @@ import hashlib
 import json
 import os
 import pickle
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import TimeoutExpired
 from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from quantmaster.runtime.process import run_process
 
 
 class PythonFactorPolicyError(ValueError):
@@ -211,11 +213,11 @@ class RestrictedPythonRunner:
                 "LC_ALL", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERPROFILE",
             }}
             try:
-                completed = subprocess.run(
+                completed = run_process(
                     command, capture_output=True, text=True, timeout=self.timeout_seconds,
                     env=env, check=False,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except TimeoutExpired as exc:
                 raise PythonFactorPolicyError(
                     f"候选执行超过 {self.timeout_seconds:g} 秒，已终止"
                 ) from exc

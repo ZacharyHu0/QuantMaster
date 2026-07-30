@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 
 class DecisionStore:
@@ -18,10 +19,7 @@ class DecisionStore:
         self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        return connect_sqlite(self.path)
 
     def _migrate(self) -> None:
         with self._conn() as conn:

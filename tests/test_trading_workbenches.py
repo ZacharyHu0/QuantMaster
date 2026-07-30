@@ -296,6 +296,36 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
     assert cancelled["cancel_requested"] is True
 
 
+def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_path):
+    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
+    spec = BacktestSpec.model_validate({
+        "name": "租约测试",
+        "strategy": {"kind": "factor", "factor": "rank(close)", "top_n": 1},
+        "universe": "demo", "start": "2023-01-02", "end": "2023-02-01",
+        "benchmark": None,
+    })
+    created = store.create(spec)
+    assert store.claim_next("worker-a")["id"] == created["id"]
+    assert store.heartbeat(created["id"], "worker-a")
+    assert store.interrupt_stale(stale_after_seconds=30) == 0
+
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE backtest_runs SET heartbeat_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (created["id"],),
+        )
+    assert store.interrupt_stale(stale_after_seconds=30) == 1
+    assert store.claim_next("worker-b")["id"] == created["id"]
+    assert not store.update(
+        created["id"], 50, "旧 worker", expected_worker="worker-a",
+    )
+    assert not store.finish(
+        created["id"], error="stale result", expected_worker="worker-a",
+    )
+    assert store.get(created["id"])["worker"] == "worker-b"
+    assert store.get(created["id"])["status"] == "running"
+
+
 def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
     tmp_path, panel, monkeypatch,
 ):

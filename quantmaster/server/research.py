@@ -95,6 +95,22 @@ def get_research_job(job_id: str, request: Request) -> dict:
         raise HTTPException(404, str(exc)) from None
 
 
+@router.get("/jobs/{job_id}/events")
+def get_research_job_events(
+    job_id: str,
+    request: Request,
+    after: int = 0,
+    limit: int = 500,
+) -> dict:
+    _require_local(request)
+    manager = get_research_job_manager()
+    try:
+        manager.get(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return {"items": manager.catalog.job_events(job_id, after, limit)}
+
+
 @router.post("/jobs/{job_id}/cancel")
 def cancel_research_job(job_id: str, request: Request) -> dict:
     _require_csrf(request)

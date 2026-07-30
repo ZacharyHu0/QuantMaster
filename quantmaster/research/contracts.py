@@ -308,7 +308,14 @@ class ExecutionPlan:
 
     @property
     def plan_hash(self) -> str:
-        return content_hash(self.to_dict(include_hash=False))
+        return content_hash(self._logical_payload())
+
+    def _logical_payload(self) -> dict[str, Any]:
+        """Content that changes execution semantics, excluding runtime identity."""
+        value = self.to_dict(include_hash=False)
+        value.pop("id", None)
+        value.pop("created_at", None)
+        return value
 
     def to_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
         value = {
@@ -329,7 +336,10 @@ class ExecutionPlan:
             "created_at": self.created_at,
         }
         if include_hash:
-            value["plan_hash"] = content_hash(value)
+            value["plan_hash"] = content_hash({
+                key: item for key, item in value.items()
+                if key not in {"id", "created_at"}
+            })
         return value
 
     @classmethod

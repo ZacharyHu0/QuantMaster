@@ -101,7 +101,8 @@ def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch
         "benchmark": None,
     })
     queued = store.create(spec)
-    run = store.claim_next("test-worker")
+    worker = BacktestWorker(service)
+    run = store.claim_next(worker.worker_id)
     problem = make_problem(
         "partial_market_data",
         severity="warning",
@@ -117,7 +118,7 @@ def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch
         raise OperationProblem(409, problem, data_quality={"status": "needs_confirmation"})
 
     monkeypatch.setattr(service, "run", blocked)
-    BacktestWorker(service).run_one(run)
+    worker.run_one(run)
 
     failed = store.get(queued["id"])
     assert failed["status"] == "failed"

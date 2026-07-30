@@ -24,6 +24,7 @@ from bs4 import BeautifulSoup
 
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError, CredentialStore
+from quantmaster.runtime.sqlite import connect_sqlite
 
 SOURCE_KINDS = {"builtin", "rss", "json", "html"}
 SOURCE_GROUPS = {"fast", "official", "periodic"}
@@ -172,11 +173,7 @@ class NewsSourceStore:
         self._seed_builtins()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
 
     def _migrate(self) -> None:
         with self._conn() as conn:

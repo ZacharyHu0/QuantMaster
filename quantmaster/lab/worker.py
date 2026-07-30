@@ -142,17 +142,29 @@ class LabWorker:
             self.service.store.update_job(
                 job_id, value, phase, detail,
                 event_type=event_type, metadata=metadata,
+                expected_worker=self.worker_id,
             )
 
+        lease_alive = threading.Event()
+        lease_alive.set()
+
         def cancelled() -> bool:
-            return self._stop.is_set() or self.service.store.is_cancel_requested(job_id)
+            return (
+                self._stop.is_set() or not lease_alive.is_set()
+                or self.service.store.is_cancel_requested(job_id)
+            )
 
         heartbeat_stop = threading.Event()
 
         def heartbeat() -> None:
-            self.service.store.heartbeat_job(job_id)
+            if not self.service.store.heartbeat_job(job_id, self.worker_id):
+                lease_alive.clear()
+                return
             while not heartbeat_stop.wait(5.0):
-                self.service.store.heartbeat_job(job_id)
+                if self.service.store.heartbeat_job(job_id, self.worker_id):
+                    continue
+                lease_alive.clear()
+                return
 
         heartbeat_thread = threading.Thread(
             target=heartbeat, name=f"lab-heartbeat-{job_id[:8]}", daemon=True,
@@ -160,13 +172,23 @@ class LabWorker:
         heartbeat_thread.start()
         try:
             result = self.service.run_job(job, progress=progress, cancelled=cancelled)
-            self.service.store.finish_job(job_id, result=result)
+            if lease_alive.is_set():
+                self.service.store.finish_job(
+                    job_id, result=result, expected_worker=self.worker_id,
+                )
         except InterruptedError:
+            if not lease_alive.is_set():
+                return
+            if self._stop.is_set() and not self.service.store.is_cancel_requested(job_id):
+                self.service.store.interrupt_stale(self.worker_id)
+                return
             self.service.store.request_cancel(job_id)
-            self.service.store.finish_job(job_id)
+            self.service.store.finish_job(job_id, expected_worker=self.worker_id)
         except Exception as exc:
             logger.exception("Quant Lab 任务失败 job=%s kind=%s", job_id, job["kind"])
-            self.service.store.finish_job(job_id, error=str(exc))
+            self.service.store.finish_job(
+                job_id, error=str(exc), expected_worker=self.worker_id,
+            )
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=0.5)

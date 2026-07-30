@@ -19,6 +19,7 @@ from quantmaster.lab.models import (
     normalize_factor_name,
     utc_now,
 )
+from quantmaster.runtime.sqlite import connect_sqlite
 
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
@@ -67,12 +68,7 @@ class LabStore:
         self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return connect_sqlite(self.path, row_factory=True)
 
     def _migrate(self) -> None:
         with self._conn() as conn:
@@ -956,28 +952,42 @@ class LabStore:
         *,
         event_type: str = "progress",
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+        expected_worker: str = "",
+    ) -> bool:
         now = utc_now()
         progress = max(0, min(100, int(progress)))
         detail = str(detail)[:1000]
         with self._conn() as conn:
-            conn.execute(
+            where = "id=? AND status='running'"
+            params: list[Any] = [progress, phase, detail, now, job_id]
+            if expected_worker:
+                where += " AND worker=?"
+                params.append(expected_worker)
+            changed = conn.execute(
                 "UPDATE lab_jobs SET progress=?,phase=?,detail=?,heartbeat_at=? "
-                "WHERE id=? AND status='running'", (progress, phase, detail, now, job_id),
-            )
+                f"WHERE {where}", params,
+            ).rowcount
+        if not changed:
+            return False
         event = {
             "progress": progress, "phase": phase, "detail": detail, **(metadata or {}),
         }
         event["type"] = event_type
         self.append_event(job_id, event)
+        return True
 
-    def heartbeat_job(self, job_id: str) -> None:
+    def heartbeat_job(self, job_id: str, worker: str = "") -> bool:
         """只刷新执行器心跳，不向事件时间线写入高频噪声。"""
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE lab_jobs SET heartbeat_at=? WHERE id=? AND status='running'",
-                (utc_now(), job_id),
-            )
+            where = "id=? AND status='running'"
+            params: list[Any] = [utc_now(), job_id]
+            if worker:
+                where += " AND worker=?"
+                params.append(worker)
+            changed = conn.execute(
+                f"UPDATE lab_jobs SET heartbeat_at=? WHERE {where}", params,
+            ).rowcount
+        return bool(changed)
 
     def request_cancel(self, job_id: str) -> dict:
         with self._conn() as conn:
@@ -997,7 +1007,14 @@ class LabStore:
             ).fetchone()
         return bool(row and row[0])
 
-    def finish_job(self, job_id: str, *, result: dict | None = None, error: str = "") -> None:
+    def finish_job(
+        self,
+        job_id: str,
+        *,
+        result: dict | None = None,
+        error: str = "",
+        expected_worker: str = "",
+    ) -> bool:
         current = self.job(job_id) or {}
         cancelled = bool(current and current["cancel_requested"])
         payload = result or {}
@@ -1019,18 +1036,25 @@ class LabStore:
         detail = (error if error else warning_text)[:1000]
         now = utc_now()
         with self._conn() as conn:
-            conn.execute(
+            where = "id=?"
+            params: list[Any] = [
+                status, progress, phase, detail, canonical_json(payload), error[:1000],
+                now, now, job_id,
+            ]
+            if expected_worker:
+                where += " AND worker=? AND status='running'"
+                params.append(expected_worker)
+            changed = conn.execute(
                 "UPDATE lab_jobs SET status=?,progress=?,phase=?,detail=?,result_json=?,error=?,"
-                "finished_at=?,heartbeat_at=? WHERE id=?",
-                (
-                    status, progress, phase, detail, canonical_json(payload), error[:1000],
-                    now, now, job_id,
-                ),
-            )
+                f"finished_at=?,heartbeat_at=? WHERE {where}", params,
+            ).rowcount
+        if not changed:
+            return False
         self.append_event(job_id, {
             "type": status, "progress": progress,
             "phase": phase, "detail": detail[:300],
         })
+        return True
 
     def retry_job(self, job_id: str) -> dict:
         source = self.job(job_id)

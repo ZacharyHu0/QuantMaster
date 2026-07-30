@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 
 @dataclass
@@ -83,7 +84,7 @@ class Ledger:
                 "ON cashflows(idempotency_key) WHERE idempotency_key IS NOT NULL")
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        return connect_sqlite(self.path)
 
     # ---- 写入 ----
 

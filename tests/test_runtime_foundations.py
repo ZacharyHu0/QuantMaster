@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -47,3 +48,41 @@ def test_schema_migration_rolls_back_version_and_content_together(tmp_path):
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM values_v1").fetchone()[0] == 0
 
+
+def test_process_start_retries_only_transient_windows_errors(monkeypatch):
+    from quantmaster.runtime import process
+
+    calls = 0
+
+    def flaky_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            error = PermissionError("temporarily denied")
+            error.winerror = 5
+            raise error
+        return subprocess.CompletedProcess(args[0], 0, stdout="ready")
+
+    monkeypatch.setattr(process.subprocess, "run", flaky_run)
+    monkeypatch.setattr(process.time, "sleep", lambda _: None)
+
+    result = process.run_process(["python", "-V"])
+
+    assert calls == 3
+    assert result.stdout == "ready"
+
+
+def test_process_start_does_not_retry_permanent_errors(monkeypatch):
+    from quantmaster.runtime import process
+
+    calls = 0
+
+    def missing_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise FileNotFoundError("missing executable")
+
+    monkeypatch.setattr(process.subprocess, "run", missing_run)
+    with pytest.raises(FileNotFoundError):
+        process.run_process(["missing"])
+    assert calls == 1

@@ -362,6 +362,23 @@ def get_data_refresh(job_id: str, request: Request) -> dict:
         raise HTTPException(404, str(exc)) from None
 
 
+@router.get("/settings/data-refresh/{job_id}/events")
+def get_data_refresh_events(
+    job_id: str,
+    request: Request,
+    after: int = 0,
+    limit: int = 500,
+) -> dict:
+    _require_local(request)
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    try:
+        data_refresh_manager.get(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from None
+    return {"items": data_refresh_manager.events(job_id, after, limit)}
+
+
 @router.post("/settings/data-refresh/{job_id}/cancel")
 def cancel_data_refresh(job_id: str, request: Request) -> dict:
     _require_csrf(request)
@@ -608,6 +625,15 @@ def refresh_universe_names(request: Request, value: UniverseNameRefresh) -> dict
         }
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/settings/instruments/refresh")
+def refresh_instruments(request: Request) -> dict:
+    """Refresh external security catalogs only after an explicit local request."""
+    _require_csrf(request)
+    from quantmaster.data.instruments import refresh_instrument_master
+
+    return refresh_instrument_master(force=True)
 
 
 @router.post("/settings/universes")

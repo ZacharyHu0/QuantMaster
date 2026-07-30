@@ -82,3 +82,28 @@ def test_claim_limit_is_global_across_workers(tmp_path):
     assert store.claim_next("worker-b", max_running=1) is None
     store.finish_job(first["id"], result={"ok": True})
     assert store.claim_next("worker-b", max_running=1)["id"] == second["id"]
+
+
+def test_reclaimed_lab_job_rejects_stale_worker_updates(tmp_path):
+    store = LabStore(tmp_path / "lab.sqlite")
+    job = store.enqueue("prepare_data", {"number": 1})
+    assert store.claim_next("worker-a")["id"] == job["id"]
+    assert store.heartbeat_job(job["id"], "worker-a")
+    assert store.interrupt_stale(stale_after_seconds=30) == 0
+
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE lab_jobs SET heartbeat_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (job["id"],),
+        )
+    assert store.interrupt_stale(stale_after_seconds=30) == 1
+    assert store.claim_next("worker-b")["id"] == job["id"]
+    assert not store.update_job(
+        job["id"], 80, "旧进程", expected_worker="worker-a",
+    )
+    assert not store.finish_job(
+        job["id"], result={"stale": True}, expected_worker="worker-a",
+    )
+    current = store.job(job["id"])
+    assert current["worker"] == "worker-b"
+    assert current["status"] == "running"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import ClassVar
 
 import numpy as np
@@ -19,6 +18,7 @@ from quantmaster.research import (
     ExecutionPlan,
     Frequency,
     KernelBackend,
+    PlanTask,
     ResearchSpec,
 )
 from quantmaster.research.adapters import DATASETS, TushareResearchAdapter
@@ -363,13 +363,71 @@ def test_empty_persistent_job_completes_and_keeps_manifest():
         frequency=Frequency.DAILY, datasets=(), selected_specs=(), tasks=(),
     )
     job = manager.create(plan)
-    for _ in range(100):
-        job = manager.get(job["id"])
-        if job["status"] != "running":
-            break
-        time.sleep(0.01)
+    job = manager.wait(job["id"], poll_seconds=0.01)
     assert job["status"] == "completed"
     assert job["manifest"]["plan_hash"]
+
+
+def test_execution_plan_hash_excludes_runtime_identity():
+    common = dict(
+        start="2024-01-02", end="2024-01-03", target_dates=("2024-01-02",),
+        asset_classes=(AssetClass.STOCK,), frequency=Frequency.DAILY,
+        datasets=("stock_bars",), selected_specs=(), tasks=(),
+    )
+    first = ExecutionPlan(id="first", created_at="2026-01-01T00:00:00+00:00", **common)
+    second = ExecutionPlan(id="second", created_at="2026-07-30T00:00:00+00:00", **common)
+    assert first.plan_hash == second.plan_hash
+    assert first.to_dict()["plan_hash"] == second.to_dict()["plan_hash"]
+
+
+def test_research_job_lease_is_atomic_and_only_expired_owner_is_recovered(tmp_path):
+    from quantmaster.research.catalog import ResearchCatalog
+
+    catalog = ResearchCatalog(tmp_path / "catalog.sqlite")
+    payload = ExecutionPlan(
+        id="leased", start="2024-01-02", end="2024-01-02",
+        target_dates=("2024-01-02",), asset_classes=(AssetClass.STOCK,),
+        frequency=Frequency.DAILY, datasets=(), selected_specs=(), tasks=(),
+    ).to_dict()
+    catalog.create_job("job-one", "historical", payload)
+    assert catalog.claim_job("job-one", "worker-a", lease_seconds=60)
+    assert not catalog.claim_job("job-one", "worker-b", lease_seconds=60)
+    assert catalog.recover_interrupted_jobs() == 0
+    assert catalog.job("job-one")["status"] == "running"
+
+    with catalog._connect() as connection:
+        connection.execute(
+            "UPDATE research_jobs SET lease_expires=0 WHERE id='job-one'"
+        )
+    assert catalog.recover_interrupted_jobs() == 1
+    assert catalog.job("job-one")["status"] == "interrupted"
+
+
+def test_research_retry_preserves_original_plan_and_records_attempt(tmp_path):
+    from quantmaster.research.catalog import ResearchCatalog
+
+    catalog = ResearchCatalog(tmp_path / "catalog.sqlite")
+    plan = ExecutionPlan(
+        id="immutable", start="2024-01-02", end="2024-01-02",
+        target_dates=("2024-01-02",), asset_classes=(AssetClass.STOCK,),
+        frequency=Frequency.DAILY, datasets=("stock_bars",), selected_specs=(),
+        tasks=(PlanTask(
+            "sync", "stock_bars", AssetClass.STOCK, Frequency.DAILY, "2024-01-02",
+        ),),
+    )
+    original = plan.to_dict()
+    catalog.create_job("retry-job", "historical", original)
+    catalog.update_job(
+        "retry-job", status="completed_with_errors", next_index=1, failed=1,
+        failures_json=[{"task_index": 0, "task": plan.tasks[0].to_dict(), "error": "x"}],
+    )
+    resumed = catalog.resume_job("retry-job")
+    assert resumed["plan"] == original
+    assert resumed["attempt"] == 2
+    assert resumed["task_indexes"] == [0]
+    assert [event["type"] for event in catalog.job_events("retry-job")] == [
+        "queued", "resumed",
+    ]
 
 
 def test_research_management_api_is_local_and_csrf_protected():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import ClassVar
@@ -179,7 +180,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
 
     monkeypatch.setattr("quantmaster.data.maintenance.load_history", fake_load)
     job = manager.create("market")
-    assert job["status"] == "running"
+    assert job["status"] == "queued"
     assert manager.latest()["id"] == job["id"]
 
     manager._run(job["id"])
@@ -197,9 +198,15 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
             ('[{"symbol":"000001.SZ","error":"offline"}]', job["id"]),
         )
     resumed = manager.resume(job["id"])
-    assert resumed["status"] == "running"
+    assert resumed["status"] == "queued"
     assert resumed["total"] == 1
     assert resumed["next_index"] == 0
+    assert resumed["attempt"] == 2
+    with manager._conn() as conn:
+        original = json.loads(conn.execute(
+            "SELECT original_symbols_json FROM refresh_jobs WHERE id=?", (job["id"],)
+        ).fetchone()[0])
+    assert original == symbols
 
 
 def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, tmp_path):
@@ -209,3 +216,30 @@ def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, t
     isolated_config.data.root = str(tmp_path / "switched")
     assert manager.latest() is None
     assert (isolated_config.data_root / "data_refresh.sqlite").exists()
+
+
+def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    first = DataRefreshManager()
+    second = DataRefreshManager()
+    monkeypatch.setattr(first, "_resolve_symbols", lambda *args: ["600000.SH"])
+    monkeypatch.setattr(first, "_start", lambda job_id: None)
+    job = first.create("market")
+    with first._conn() as conn:
+        conn.execute(
+            "UPDATE refresh_jobs SET status='running',owner=?,lease_expires=? WHERE id=?",
+            (first.identity.value, time.time() + 60, job["id"]),
+        )
+
+    second._initialized_roots.clear()
+    with second._conn():
+        pass
+    assert second.get(job["id"])["status"] == "running"
+
+    with first._conn() as conn:
+        conn.execute("UPDATE refresh_jobs SET lease_expires=0 WHERE id=?", (job["id"],))
+    second._initialized_roots.clear()
+    with second._conn():
+        pass
+    assert second.get(job["id"])["status"] == "interrupted"

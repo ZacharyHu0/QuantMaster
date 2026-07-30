@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 LIST_NAMES = {"favorites", "following"}
 
@@ -40,11 +41,7 @@ class AssetListStore:
             )
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        return connect_sqlite(self.path, row_factory=True)
 
     @staticmethod
     def _validate_list(list_name: str) -> str:

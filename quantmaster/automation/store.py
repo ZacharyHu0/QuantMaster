@@ -12,6 +12,7 @@ from typing import Any
 from quantmaster.automation.models import AlertEvent, utc_now
 from quantmaster.automation.policy import resolved_policy
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 DEFAULT_TARGETS = (
     ("weixin_owner", "weixin", "微信管理员私聊", "direct"),
@@ -41,12 +42,7 @@ class AutomationStore:
         self.ensure_defaults()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
 
     def _migrate(self) -> None:
         with self._conn() as conn:

@@ -21,6 +21,7 @@ import pandas as pd
 from quantmaster import __version__
 from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,7 @@ class BacktestStore:
         self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        return connect_sqlite(self.path, row_factory=True)
 
     def _migrate(self) -> None:
         with self._conn() as conn:
@@ -122,17 +119,41 @@ class BacktestStore:
                 return None
         return self.get(row["id"])
 
-    def update(self, run_id: str, progress: int, phase: str, detail: str = "") -> None:
+    def update(
+        self,
+        run_id: str,
+        progress: int,
+        phase: str,
+        detail: str = "",
+        *,
+        expected_worker: str = "",
+    ) -> bool:
         value = max(0, min(100, int(progress)))
         with self._conn() as conn:
-            conn.execute(
+            where = "id=? AND status='running'"
+            params: list[Any] = [value, phase, detail[:500], utc_now(), run_id]
+            if expected_worker:
+                where += " AND worker=?"
+                params.append(expected_worker)
+            changed = conn.execute(
                 "UPDATE backtest_runs SET progress=?,phase=?,detail=?,heartbeat_at=? "
-                "WHERE id=? AND status='running'",
-                (value, phase, detail[:500], utc_now(), run_id),
-            )
+                f"WHERE {where}", params,
+            ).rowcount
+        if not changed:
+            return False
         self.append_event(run_id, {
             "type": "progress", "progress": value, "phase": phase, "detail": detail[:300],
         })
+        return True
+
+    def heartbeat(self, run_id: str, worker: str) -> bool:
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE backtest_runs SET heartbeat_at=? "
+                "WHERE id=? AND worker=? AND status='running'",
+                (utc_now(), run_id, worker),
+            ).rowcount
+        return bool(changed)
 
     def finish(
         self,
@@ -142,7 +163,8 @@ class BacktestStore:
         result: dict | None = None,
         artifact_path: str = "",
         error: str = "",
-    ) -> None:
+        expected_worker: str = "",
+    ) -> bool:
         current = self.get(run_id)
         if current is None:
             raise KeyError("回测不存在")
@@ -151,20 +173,27 @@ class BacktestStore:
         progress = current["progress"] if cancelled or error else 100
         now = utc_now()
         with self._conn() as conn:
-            conn.execute(
+            where = "id=?"
+            params: list[Any] = [
+                status, progress, canonical_json(manifest or {}), canonical_json(result or {}),
+                artifact_path, error[:1500], now, now, run_id,
+            ]
+            if expected_worker:
+                where += " AND worker=? AND status='running'"
+                params.append(expected_worker)
+            changed = conn.execute(
                 "UPDATE backtest_runs SET status=?,progress=?,manifest_json=?,result_json=?,"
-                "artifact_path=?,error=?,finished_at=?,heartbeat_at=? WHERE id=?",
-                (
-                    status, progress, canonical_json(manifest or {}), canonical_json(result or {}),
-                    artifact_path, error[:1500], now, now, run_id,
-                ),
-            )
+                f"artifact_path=?,error=?,finished_at=?,heartbeat_at=? WHERE {where}", params,
+            ).rowcount
+        if not changed:
+            return False
         self.append_event(run_id, {
             "type": status,
             "progress": progress,
             "phase": "已取消" if cancelled else "执行失败" if error else "执行完成",
             "detail": error[:300],
         })
+        return True
 
     def cancel(self, run_id: str) -> dict:
         with self._conn() as conn:
@@ -189,7 +218,7 @@ class BacktestStore:
             ).fetchone()
         return bool(row and row[0])
 
-    def interrupt_running(self, worker: str = "") -> int:
+    def interrupt_stale(self, worker: str = "", stale_after_seconds: int = 30) -> int:
         with self._conn() as conn:
             if worker:
                 cursor = conn.execute(
@@ -198,9 +227,16 @@ class BacktestStore:
                 )
             else:
                 cursor = conn.execute(
-                    "UPDATE backtest_runs SET status='interrupted',worker='' WHERE status='running'"
+                    "UPDATE backtest_runs SET status='interrupted',worker='' "
+                    "WHERE status='running' AND (heartbeat_at='' OR "
+                    "julianday(heartbeat_at)<julianday('now',?))",
+                    (f"-{max(1, int(stale_after_seconds))} seconds",),
                 )
         return cursor.rowcount
+
+    def interrupt_running(self, worker: str = "") -> int:
+        """Backward-compatible name; never interrupts another live worker."""
+        return self.interrupt_stale(worker)
 
     def get(self, run_id: str, *, include_artifact: bool = False) -> dict | None:
         with self._conn() as conn:
@@ -550,7 +586,7 @@ class BacktestWorker:
             if self._thread and self._thread.is_alive():
                 return
             self._stop.clear()
-            self.service.store.interrupt_running()
+            self.service.store.interrupt_stale()
             self._thread = threading.Thread(
                 target=self.run_forever, name="backtest-worker", daemon=True,
             )
@@ -560,11 +596,12 @@ class BacktestWorker:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
-        self.service.store.interrupt_running(self.worker_id)
+        self.service.store.interrupt_stale(self.worker_id)
         self._thread = None
 
     def run_forever(self) -> None:
         while not self._stop.is_set():
+            self.service.store.interrupt_stale()
             run = self.service.store.claim_next(self.worker_id)
             if run is None:
                 self._stop.wait(self.poll_seconds)
@@ -575,21 +612,47 @@ class BacktestWorker:
         from quantmaster.server.problems import OperationProblem
 
         run_id = run["id"]
+        heartbeat_stop = threading.Event()
+        lease_alive = threading.Event()
+        lease_alive.set()
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(5.0):
+                if self.service.store.heartbeat(run_id, self.worker_id):
+                    continue
+                lease_alive.clear()
+                return
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat, name=f"backtest-heartbeat-{run_id[:8]}", daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             manifest, payload = self.service.run(
                 run,
                 progress=lambda value, phase, detail="": self.service.store.update(
-                    run_id, value, phase, detail,
+                    run_id, value, phase, detail, expected_worker=self.worker_id,
                 ),
-                cancelled=lambda: self._stop.is_set() or self.service.store.is_cancelled(run_id),
+                cancelled=lambda: (
+                    self._stop.is_set() or not lease_alive.is_set()
+                    or self.service.store.is_cancelled(run_id)
+                ),
             )
+            if not lease_alive.is_set():
+                return
             path = self.service.store.write_artifact(run_id, payload["artifact"])
             self.service.store.finish(
                 run_id, manifest=manifest, result=payload["summary"], artifact_path=str(path),
+                expected_worker=self.worker_id,
             )
         except InterruptedError:
+            if not lease_alive.is_set():
+                return
+            if self._stop.is_set() and not self.service.store.is_cancelled(run_id):
+                self.service.store.interrupt_stale(self.worker_id)
+                return
             self.service.store.cancel(run_id)
-            self.service.store.finish(run_id)
+            self.service.store.finish(run_id, expected_worker=self.worker_id)
         except OperationProblem as exc:
             logger.warning(
                 "回测任务被数据门禁阻止 run=%s code=%s",
@@ -602,10 +665,16 @@ class BacktestWorker:
                     "data_quality": exc.data_quality or {},
                 },
                 error=exc.problem["message"],
+                expected_worker=self.worker_id,
             )
         except Exception as exc:
             logger.exception("回测任务失败 run=%s", run_id)
-            self.service.store.finish(run_id, error=str(exc))
+            self.service.store.finish(
+                run_id, error=str(exc), expected_worker=self.worker_id,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
 
 
 _worker: BacktestWorker | None = None

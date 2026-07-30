@@ -12,11 +12,15 @@ from quantmaster.config import Config, set_config
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path):
     """每个测试用独立数据目录，避免污染真实数据。"""
+    from quantmaster.runtime.sqlite import reset_sqlite_runtime_for_tests
+
+    reset_sqlite_runtime_for_tests()
     cfg = Config()
     cfg.data.root = str(tmp_path / "data")
     set_config(cfg)
     yield cfg
     set_config(None)
+    reset_sqlite_runtime_for_tests()
 
 
 def make_panel(days: int = 150, n: int = 8, seed: int = 7) -> dict[str, pd.DataFrame]:
