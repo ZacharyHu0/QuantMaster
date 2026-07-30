@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -99,7 +100,7 @@ def _number(value: Any, label: str, *, positive: bool = True) -> float:
         number = float(raw)
     except ValueError as exc:
         raise ValueError(f"{label}不是数字") from exc
-    if not pd.notna(number) or (positive and number <= 0) or (not positive and number < 0):
+    if not math.isfinite(number) or (positive and number <= 0) or (not positive and number < 0):
         raise ValueError(f"{label}必须为{'正数' if positive else '非负数'}")
     return number
 

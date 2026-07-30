@@ -34,6 +34,7 @@ from quantmaster.research.kernel import Kernel
 from quantmaster.research.lake import ResearchLake
 from quantmaster.research.providers import build_future_continuous
 from quantmaster.research.registry import ProviderRegistry, built_in_registry
+from quantmaster.runtime.json import strict_json_dumps
 
 
 def _asset_dataset(asset_class: AssetClass) -> str:
@@ -541,7 +542,7 @@ class ResearchEngine:
             manifest_path = self.lake.root / "runs" / run_id / "diagnostics.json"
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             temp = manifest_path.with_suffix(".json.tmp")
-            temp.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.write_text(strict_json_dumps(summaries, indent=2), encoding="utf-8")
             temp.replace(manifest_path)
             self.lake.write_run_files(
                 run_id, {"run_id": run_id, "diagnostics": summaries},
@@ -581,7 +582,7 @@ class ResearchEngine:
 
 
 def save_plan(plan: ExecutionPlan, path: str | Path) -> None:
-    Path(path).write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(path).write_text(strict_json_dumps(plan.to_dict(), indent=2), encoding="utf-8")
 
 
 def load_plan(path: str | Path) -> ExecutionPlan:

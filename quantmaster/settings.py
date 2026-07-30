@@ -98,7 +98,7 @@ class ServerSettings(StrictModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
-        from quantmaster.server.security import validate_listen_host
+        from quantmaster.runtime.network import validate_listen_host
 
         return validate_listen_host(value)
 

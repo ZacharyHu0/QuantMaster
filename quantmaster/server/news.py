@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterator
 from datetime import datetime
@@ -11,17 +10,19 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field, SecretStr
 
 from quantmaster.ai.crawler import AICrawler, NewsStore
 from quantmaster.ai.news_sources import NewsSourceStore
 from quantmaster.credentials import CredentialError
+from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter(prefix="/api/news")
 
 
-class StrictModel(BaseModel):
+class StrictModel(ContractModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
@@ -255,12 +256,10 @@ def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> Streamin
             for event in crawler.enrich_pending_events(
                 ids=value.ids, limit=value.limit, batch_size=value.batch_size,
             ):
-                yield json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n"
+                yield strict_json_dumps(event) + "\n"
         except Exception as exc:
             error = _error(exc)
-            yield json.dumps(
-                {"type": "error", "message": error.detail}, ensure_ascii=False,
-            ) + "\n"
+            yield strict_json_dumps({"type": "error", "message": error.detail}) + "\n"
 
     return StreamingResponse(
         generate(), media_type="application/x-ndjson",

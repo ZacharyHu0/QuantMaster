@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
+
+from quantmaster.runtime.json import strict_json_dumps
 
 
 class _ValueEnum(str, enum.Enum):
@@ -61,7 +62,7 @@ def utc_now() -> str:
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return strict_json_dumps(value, sort_keys=True, default=str)
 
 
 def content_hash(value: Any) -> str:

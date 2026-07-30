@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
 from quantmaster.backtest.paper_accounts import get_paper_service
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec
 from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
+from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.management import _require_csrf
 
 router = APIRouter(prefix="/api")
@@ -67,7 +68,7 @@ def cancel_backtest(run_id: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-class CompareRequest(BaseModel):
+class CompareRequest(ContractModel):
     model_config = ConfigDict(extra="forbid")
     run_ids: list[str] = Field(..., min_length=2, max_length=4)
 
@@ -92,7 +93,7 @@ def export_backtest(run_id: str, format: Literal["json", "trades_csv"] = "json")
     filename = f"quantmaster-backtest-{run_id[:8]}"
     if format == "json":
         return Response(
-            json.dumps(artifact, ensure_ascii=False, indent=2),
+            strict_json_dumps(artifact, indent=2),
             media_type="application/json; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
         )
@@ -109,7 +110,7 @@ def export_backtest(run_id: str, format: Literal["json", "trades_csv"] = "json")
     )
 
 
-class PromoteRequest(BaseModel):
+class PromoteRequest(ContractModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(..., min_length=1, max_length=40)
     mode: Literal["manual", "auto"] = "manual"
@@ -160,7 +161,7 @@ def get_paper_account(account_id: str) -> dict:
     return account
 
 
-class PaperAccountUpdate(BaseModel):
+class PaperAccountUpdate(ContractModel):
     model_config = ConfigDict(extra="forbid")
     status: Literal["active", "paused", "archived"] | None = None
     mode: Literal["manual", "auto"] | None = None
@@ -179,7 +180,7 @@ def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: 
         raise _error(exc) from exc
 
 
-class CloneAccountRequest(BaseModel):
+class CloneAccountRequest(ContractModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(..., min_length=1, max_length=40)
     mode: Literal["manual", "auto"] = "manual"

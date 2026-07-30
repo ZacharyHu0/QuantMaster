@@ -5,9 +5,15 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import StrictJSONResponse, strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 
 
@@ -86,3 +92,33 @@ def test_process_start_does_not_retry_permanent_errors(monkeypatch):
     with pytest.raises(FileNotFoundError):
         process.run_process(["missing"])
     assert calls == 1
+
+
+def test_strict_json_boundary_converts_nonfinite_values_to_null():
+    app = FastAPI(default_response_class=StrictJSONResponse)
+
+    @app.get("/values")
+    def values():
+        return {"nan": float("nan"), "values": [float("inf"), float("-inf"), 1.0]}
+
+    response = TestClient(app).get("/values")
+
+    assert response.status_code == 200
+    assert response.json() == {"nan": None, "values": [None, None, 1.0]}
+    encoded = strict_json_dumps({
+        "value": float("nan"), "decimal": Decimal("Infinity"),
+        "overflow": Decimal("1e10000"), "finite": Decimal("1.25"),
+    })
+    assert encoded == '{"value":null,"decimal":null,"overflow":null,"finite":1.25}'
+    assert "NaN" not in encoded and "Infinity" not in encoded
+
+
+def test_contract_model_rejects_extra_and_nested_nonfinite_values():
+    class Payload(ContractModel):
+        options: dict
+
+    with pytest.raises(ValidationError) as nonfinite:
+        Payload.model_validate({"options": {"nested": [1, float("nan")]}})
+    assert nonfinite.value.errors()[0]["type"] == "value_error"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Payload.model_validate({"options": {}, "unknown": True})

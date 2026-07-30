@@ -6,17 +6,18 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from quantmaster.research import AssetClass, KernelBackend
 from quantmaster.research.engine import ResearchEngine
 from quantmaster.research.jobs import get_research_job_manager
+from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter(prefix="/api/research/data", tags=["research-data"])
 
 
-class ResearchPlanRequest(BaseModel):
+class ResearchPlanRequest(ContractModel):
     start: str = Field(default="2022-01-01", min_length=10, max_length=10)
     end: str | None = Field(default=None, min_length=10, max_length=10)
     assets: list[Literal["stock", "etf", "future"]] = Field(
@@ -36,7 +37,7 @@ class ResearchPlanRequest(BaseModel):
         )
 
 
-class MaterializeRequest(BaseModel):
+class MaterializeRequest(ContractModel):
     start: str = Field(default="2022-01-01", min_length=10, max_length=10)
     end: str | None = Field(default=None, min_length=10, max_length=10)
     asset: Literal["stock", "etf", "future"] = "stock"

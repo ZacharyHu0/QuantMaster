@@ -21,6 +21,7 @@ import pandas as pd
 from quantmaster import __version__
 from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
+from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
@@ -278,7 +279,7 @@ class BacktestStore:
         temp = Path(temp_name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.write(strict_json_dumps(payload))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp, destination)
@@ -319,17 +320,16 @@ class BacktestService:
         benchmark_close: pd.Series | None = None,
     ) -> tuple[dict, dict]:
         from quantmaster.backtest.engine import BacktestConfig, run_backtest
+        from quantmaster.backtest.quality import (
+            assess_panel_quality,
+            assess_signal_quality,
+        )
         from quantmaster.backtest.report import full_report
         from quantmaster.backtest.spec import build_strategy
         from quantmaster.data import load_history, load_panel
         from quantmaster.data.universe import load_universe
         from quantmaster.lab.dataset import create_snapshot, load_csi800_membership
-        from quantmaster.server.problems import (
-            OperationProblem,
-            assess_panel_quality,
-            assess_signal_quality,
-            make_problem,
-        )
+        from quantmaster.runtime.problems import OperationProblem, make_problem
 
         spec = BacktestSpec.model_validate(run["config"])
         end = spec.end or str(pd.Timestamp.now().date())
@@ -609,7 +609,7 @@ class BacktestWorker:
             self.run_one(run)
 
     def run_one(self, run: dict) -> None:
-        from quantmaster.server.problems import OperationProblem
+        from quantmaster.runtime.problems import OperationProblem
 
         run_id = run["id"]
         heartbeat_stop = threading.Event()

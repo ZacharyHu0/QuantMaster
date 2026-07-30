@@ -35,6 +35,27 @@ def price_panel(dates, first=(10.0, 11.0), second=None):
     }
 
 
+def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatch):
+    from quantmaster.server import trading
+
+    class Store:
+        @staticmethod
+        def get(run_id, include_artifact=False):
+            return {
+                "id": run_id, "status": "completed",
+                "artifact": {"metric": float("nan"), "values": [float("inf")]},
+            }
+
+    service = type("Service", (), {"store": Store()})()
+    monkeypatch.setattr(trading, "_service", lambda: service)
+
+    response = TestClient(app).get("/api/backtests/export-strict/export")
+
+    assert response.status_code == 200
+    assert response.json() == {"metric": None, "values": [None]}
+    assert b"NaN" not in response.content and b"Infinity" not in response.content
+
+
 def account_spec(name="日频验证", *, rebalance="D"):
     return PaperAccountSpec.model_validate({
         "name": name,
@@ -284,6 +305,15 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
     assert completed["status"] == "completed"
     assert completed["artifact"]["manifest"]["config_hash"] == spec.snapshot_hash
     assert store.events(run["id"])[-1]["type"] == "completed"
+
+    strict_path = store.write_artifact(
+        "strict-json", {"nan": float("nan"), "infinity": [float("inf")]},
+    )
+    assert json.loads(strict_path.read_text(encoding="utf-8")) == {
+        "nan": None, "infinity": [None],
+    }
+    assert "NaN" not in strict_path.read_text(encoding="utf-8")
+    assert "Infinity" not in strict_path.read_text(encoding="utf-8")
 
     second = store.create(spec.model_copy(update={"name": "对照"}))
     path2 = store.write_artifact(second["id"], payload["artifact"])

@@ -272,6 +272,25 @@ class TestBasics:
         assert resp.status_code == 422
         assert resp.json()["error_id"] == resp.headers["X-Request-ID"]
 
+    def test_api_contract_rejects_nonfinite_and_unknown_fields(self):
+        nonfinite = client.post(
+            "/api/ledger/trade",
+            content=(
+                b'{"date":"2024-01-02","symbol":"600519.SH","side":"buy",'
+                b'"price":NaN,"shares":100}'
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        assert nonfinite.status_code == 422
+        assert nonfinite.json()["problem"]["code"] == "request_validation_failed"
+
+        unknown = client.post("/api/research/data/plans", json={
+            "start": "2024-01-02", "end": "2024-01-03", "assets": ["stock"],
+            "unexpected": True,
+        })
+        assert unknown.status_code == 422
+        assert unknown.json()["error_id"] == unknown.headers["X-Request-ID"]
+
     def test_backtest_partial_data_returns_confirmation_problem(self, monkeypatch):
         dates = pd.bdate_range("2026-06-01", periods=25)
         panel = {
@@ -458,7 +477,7 @@ class TestLedgerAPI:
         resp = client.post("/api/ledger/trade", json={
             "date": "2024-01-02", "symbol": "600519.SH", "side": "hold",
             "price": 100.0, "shares": 100})
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
     def test_bad_factor_expression_400(self):
         resp = client.post("/api/factors/test",

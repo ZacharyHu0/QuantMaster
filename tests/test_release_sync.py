@@ -37,7 +37,7 @@ def test_repository_release_metadata_is_consistent():
     errors = validate_metadata(
         (ROOT / RELEASE_FILE).read_text(encoding="utf-8"),
         (ROOT / CHANGELOG_FILE).read_text(encoding="utf-8"),
-        today=date(2026, 7, 30),
+        today=date.today(),
     )
     assert errors == []
 

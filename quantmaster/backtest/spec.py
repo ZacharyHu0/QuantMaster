@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import date
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
+
+from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import strict_json_dumps
 
 
 def canonical_json(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return strict_json_dumps(value, sort_keys=True)
 
 
 def content_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-class FactorStrategySpec(BaseModel):
+class FactorStrategySpec(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["factor"] = "factor"
@@ -40,7 +42,7 @@ class FactorStrategySpec(BaseModel):
         return self
 
 
-class SwingStrategySpec(BaseModel):
+class SwingStrategySpec(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["swing"] = "swing"
@@ -49,7 +51,7 @@ class SwingStrategySpec(BaseModel):
     cap_weight: float = Field(0.25, gt=0, le=1)
 
 
-class DecisionStrategySpec(BaseModel):
+class DecisionStrategySpec(ContractModel):
     """Hybrid v2 决策策略；policy_snapshot 在进入任务账本前由服务端固化。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -62,7 +64,7 @@ class DecisionStrategySpec(BaseModel):
     policy_snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
-class LabVersionStrategySpec(BaseModel):
+class LabVersionStrategySpec(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["lab_version"] = "lab_version"
@@ -79,7 +81,7 @@ StrategySpec = Annotated[
 ]
 
 
-class BacktestSpec(BaseModel):
+class BacktestSpec(ContractModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field("", max_length=80)
@@ -110,7 +112,7 @@ class BacktestSpec(BaseModel):
         return content_hash(self.model_dump(mode="json"))
 
 
-class PaperAccountSpec(BaseModel):
+class PaperAccountSpec(ContractModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=40)

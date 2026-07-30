@@ -100,7 +100,7 @@ def run_uvicorn_foreground(app: Any, host: str, port: int, log_level: str = "war
     """运行 Uvicorn，并把终端、启动器与服务生命周期绑定在一起。"""
     import uvicorn
 
-    from quantmaster.server.security import validate_listen_host
+    from quantmaster.runtime.network import validate_listen_host
 
     host = validate_listen_host(host)
 

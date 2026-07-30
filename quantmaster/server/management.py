@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
 from quantmaster.data.migration import MigrationError, migration_manager
+from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.security import (
     attach_csrf_cookie,
     is_local_request,
@@ -230,7 +231,7 @@ def check_setting(kind: Literal[
     return check_server(document.server)
 
 
-class SnapshotCreate(BaseModel):
+class SnapshotCreate(ContractModel):
     name: str = Field(min_length=1, max_length=80)
 
 
@@ -281,7 +282,7 @@ def delete_snapshot(snapshot_id: str, request: Request) -> dict:
         raise HTTPException(400, str(exc)) from None
 
 
-class MigrationCreate(BaseModel):
+class MigrationCreate(ContractModel):
     target: str = Field(min_length=1, max_length=4096)
     mode: Literal["copy", "switch"] = "copy"
 
@@ -347,7 +348,7 @@ def cancel_migration(task_id: str, request: Request) -> dict:
         raise HTTPException(404, str(exc)) from None
 
 
-class DataRefreshRequest(BaseModel):
+class DataRefreshRequest(ContractModel):
     scope: Literal["market", "universe", "all_cached"] = "market"
     universe: str = Field(default="", max_length=80)
     start: str = Field(default="", max_length=10)
@@ -439,27 +440,27 @@ def resume_data_refresh(job_id: str, request: Request) -> dict:
         raise HTTPException(409, str(exc)) from None
 
 
-class UniverseBody(BaseModel):
+class UniverseBody(ContractModel):
     name: str | None = None
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
 
 
-class UniverseRename(BaseModel):
+class UniverseRename(ContractModel):
     new_name: str
 
 
-class UniversePreview(BaseModel):
+class UniversePreview(ContractModel):
     kind: Literal["manual", "index"] = "manual"
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
     index_symbol: str = "000300.SH"
     selections: dict[str, str] = Field(default_factory=dict)
 
 
-class UniverseNameRefresh(BaseModel):
+class UniverseNameRefresh(ContractModel):
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
 
 
-class InstrumentResolveBody(BaseModel):
+class InstrumentResolveBody(ContractModel):
     queries: list[str] = Field(default_factory=list, max_length=10_000)
     selections: dict[str, str] = Field(default_factory=dict)
 

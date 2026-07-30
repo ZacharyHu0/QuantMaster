@@ -15,14 +15,50 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite
+
+
+class LedgerIntegrityError(ValueError):
+    """Stored trades violate a ledger accounting invariant."""
+
+
+def _finite_number(
+    value: object,
+    label: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label}必须是有限数字") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{label}必须是有限数字")
+    if positive and number <= 0:
+        raise ValueError(f"{label}必须为正数")
+    if nonnegative and number < 0:
+        raise ValueError(f"{label}不能为负数")
+    return number
+
+
+def _normalized_date(value: object) -> str:
+    try:
+        timestamp = pd.to_datetime(value, errors="raise")
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("date 必须是有效日期") from exc
+    if pd.isna(timestamp):
+        raise ValueError("date 必须是有效日期")
+    return str(pd.Timestamp(timestamp).date())
 
 
 @dataclass
@@ -88,25 +124,80 @@ class Ledger:
 
     # ---- 写入 ----
 
-    def add_trade(self, trade: TradeRecord, idempotency_key: str | None = None) -> bool:
+    @staticmethod
+    def _validate_inventory(
+        connection: sqlite3.Connection, records: list[dict[str, Any]],
+    ) -> None:
+        """Reject any chronological prefix whose inventory becomes negative."""
+        symbols = sorted({str(record["symbol"]) for record in records})
+        if not symbols:
+            return
+        placeholders = ",".join("?" for _ in symbols)
+        rows = connection.execute(
+            "SELECT id,date,symbol,side,shares FROM trades "
+            f"WHERE symbol IN ({placeholders})",
+            symbols,
+        ).fetchall()
+        events: dict[str, list[tuple[str, int, int, str, float]]] = {
+            symbol: [] for symbol in symbols
+        }
+        for row in rows:
+            shares = _finite_number(row[4], "账本成交数量", positive=True)
+            side = str(row[3]).lower()
+            if side not in {"buy", "sell"}:
+                raise LedgerIntegrityError(f"账本包含非法方向: {side}")
+            events[str(row[2])].append((str(row[1]), 0, int(row[0]), side, shares))
+        for index, record in enumerate(records):
+            events[str(record["symbol"])].append((
+                str(record["date"]), 1, index, str(record["side"]), float(record["shares"]),
+            ))
+        for symbol, values in events.items():
+            balance = 0.0
+            for trade_date, _source, _order, side, shares in sorted(values):
+                balance += shares if side == "buy" else -shares
+                if balance < -1e-9:
+                    raise LedgerIntegrityError(
+                        f"{symbol} 在 {trade_date} 卖出超过可用持仓 "
+                        f"{abs(balance):g} 股；请先补录买入或修正成交数量"
+                    )
+
+    @staticmethod
+    def _normalize_trade(trade: TradeRecord | dict[str, Any]) -> dict[str, Any]:
         from quantmaster.data.universe import normalize_symbol
 
-        side = trade.side.lower()
+        value = trade.__dict__ if isinstance(trade, TradeRecord) else dict(trade)
+        side = str(value.get("side") or "").lower()
         if side not in ("buy", "sell"):
-            raise ValueError(f"side 必须是 buy/sell: {trade.side}")
-        if trade.price <= 0 or trade.shares <= 0 or trade.fee < 0:
-            raise ValueError("price/shares 必须为正数")
+            raise ValueError(f"side 必须是 buy/sell: {value.get('side')}")
         try:
-            date = str(pd.to_datetime(trade.date, errors="raise").date())
-            symbol = normalize_symbol(trade.symbol)
+            symbol = normalize_symbol(str(value.get("symbol") or ""))
         except (ValueError, TypeError) as exc:
             raise ValueError(str(exc)) from None
+        return {
+            **value,
+            "date": _normalized_date(value.get("date")),
+            "symbol": symbol,
+            "side": side,
+            "price": _finite_number(value.get("price"), "price", positive=True),
+            "shares": _finite_number(value.get("shares"), "shares", positive=True),
+            "fee": _finite_number(value.get("fee", 0), "fee", nonnegative=True),
+            "note": str(value.get("note") or "")[:1000],
+        }
+
+    def add_trade(self, trade: TradeRecord, idempotency_key: str | None = None) -> bool:
+        value = self._normalize_trade(trade)
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key and conn.execute(
+                "SELECT 1 FROM trades WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone():
+                return False
+            self._validate_inventory(conn, [value])
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO trades "
                 "(date,symbol,side,price,shares,fee,note,idempotency_key) VALUES (?,?,?,?,?,?,?,?)",
-                (date, symbol, side, trade.price, trade.shares, trade.fee, trade.note,
-                 idempotency_key),
+                (value["date"], value["symbol"], value["side"], value["price"],
+                 value["shares"], value["fee"], value["note"], idempotency_key),
             )
         return cursor.rowcount == 1
 
@@ -114,17 +205,15 @@ class Ledger:
                      idempotency_key: str | None = None) -> bool:
         if kind not in ("deposit", "withdraw", "dividend"):
             raise ValueError(f"kind 必须是 deposit/withdraw/dividend: {kind}")
-        if not amount:
+        normalized_amount = _finite_number(amount, "amount")
+        if normalized_amount == 0:
             raise ValueError("amount 必须为非零数")
-        try:
-            normalized_date = str(pd.to_datetime(date, errors="raise").date())
-        except (ValueError, TypeError) as exc:
-            raise ValueError(str(exc)) from None
+        normalized_date = _normalized_date(date)
         with self._conn() as conn:
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO cashflows "
                 "(date,amount,kind,note,idempotency_key) VALUES (?,?,?,?,?)",
-                (normalized_date, abs(amount), kind, note, idempotency_key),
+                (normalized_date, abs(normalized_amount), kind, note[:1000], idempotency_key),
             )
         return cursor.rowcount == 1
 
@@ -165,23 +254,25 @@ class Ledger:
 
         if not records:
             return 0
+        normalized = [self._normalize_trade(record) for record in records]
         batch_id = uuid.uuid4().hex
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._validate_inventory(conn, normalized)
             conn.executemany(
                 "INSERT INTO trades "
                 "(date,symbol,side,price,shares,fee,note,import_batch,fingerprint) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 [(record["date"], record["symbol"], record["side"],
-                  float(record["price"]), float(record["shares"]), float(record.get("fee", 0)),
+                  record["price"], record["shares"], record["fee"],
                   str(record.get("note", "")), batch_id, record.get("fingerprint"))
-                 for record in records],
+                 for record in normalized],
             )
             conn.execute(
                 "INSERT INTO import_batches (id,file_hash,filename,encoding,row_count) VALUES (?,?,?,?,?)",
-                (batch_id, file_hash, filename, encoding, len(records)),
+                (batch_id, file_hash, filename, encoding, len(normalized)),
             )
-        return len(records)
+        return len(normalized)
 
     # ---- 读取 ----
 
@@ -220,8 +311,10 @@ class Ledger:
                         if lot[0] <= 1e-9:
                             lots.pop(0)
                     if remaining > 1e-9:
-                        # 卖出超过持仓（可能有未录入的买入），按零成本计
-                        realized += remaining * proceeds_per_share
+                        raise LedgerIntegrityError(
+                            f"{symbol} 的历史成交卖出超过持仓 {remaining:g} 股；"
+                            "拒绝按零成本虚增已实现收益"
+                        )
             total_shares = sum(lot[0] for lot in lots)
             avg_cost = (
                 sum(lot[0] * lot[1] for lot in lots) / total_shares if total_shares > 0 else 0.0

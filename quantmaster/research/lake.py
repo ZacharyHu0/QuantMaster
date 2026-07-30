@@ -29,6 +29,7 @@ from quantmaster.research.contracts import (
     content_hash,
     utc_now,
 )
+from quantmaster.runtime.json import strict_json_dumps
 
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _KEY_COLUMNS = ("trade_date", "symbol")
@@ -505,7 +506,7 @@ class ResearchLake:
         run = self.root / "runs" / _safe(run_id)
         run.mkdir(parents=True, exist_ok=True)
         manifest_path = run / "manifest.json"
-        encoded = json.dumps(manifest, ensure_ascii=False, indent=2)
+        encoded = strict_json_dumps(manifest, indent=2)
         if commit and manifest_path.exists():
             current = json.loads(manifest_path.read_text(encoding="utf-8"))
             if current != manifest:

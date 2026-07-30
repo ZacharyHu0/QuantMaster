@@ -4,46 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import ipaddress
 import secrets
 import time
-from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, Response
+
+from quantmaster.runtime.network import hostname as _hostname
+from quantmaster.runtime.network import is_loopback_host
+from quantmaster.runtime.network import validate_listen_host as validate_listen_host
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_TTL_SECONDS = 8 * 60 * 60
 _CSRF_SECRET = secrets.token_bytes(32)
-_LOCAL_NAMES = frozenset({"localhost", "testserver", "testclient"})
-
-
-def _hostname(value: str) -> str:
-    """Extract and normalize a hostname from Host/Origin-like input."""
-    raw = value.strip()
-    if not raw:
-        return ""
-    parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
-    return (parsed.hostname or "").lower().rstrip(".")
-
-
-def is_loopback_host(value: str) -> bool:
-    host = _hostname(value)
-    if host in _LOCAL_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def validate_listen_host(value: str) -> str:
-    """Reject network-facing binds; QuantMaster contains private portfolio data."""
-    host = value.strip().lower()
-    if not is_loopback_host(host):
-        raise ValueError("QuantMaster 仅允许监听本机回环地址（127.0.0.1、::1 或 localhost）")
-    return host
-
-
 def is_local_request(request: Request) -> bool:
     client = request.client.host if request.client else ""
     return is_loopback_host(client)
@@ -119,4 +91,3 @@ def apply_security_headers(response: Response) -> None:
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
     )
-

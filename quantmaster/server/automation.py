@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import Field, SecretStr
 
 from quantmaster.automation.runtime import get_runtime
+from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter()
@@ -25,18 +26,18 @@ def _error(exc: Exception) -> HTTPException:
     return HTTPException(400, str(exc))
 
 
-class PolicyIn(BaseModel):
+class PolicyIn(ContractModel):
     preset: Literal["conservative", "balanced", "sensitive"] = "balanced"
     overrides: dict[str, Any] = Field(default_factory=dict)
     enabled: bool | None = None
 
 
-class ScheduleIn(BaseModel):
+class ScheduleIn(ContractModel):
     action: Literal["pause", "resume", "reschedule"]
     schedule: dict[str, Any] | None = None
 
 
-class FeishuConfigIn(BaseModel):
+class FeishuConfigIn(ContractModel):
     app_id: str = Field(..., min_length=3, max_length=200)
     app_secret: SecretStr
 

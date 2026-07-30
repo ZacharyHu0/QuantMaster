@@ -227,11 +227,10 @@ class OptimizationRunner:
         available_models = tuple(kind for kind in spec.models if kind in supported)
         if not available_models:
             raise RuntimeError("当前环境没有可用的共享模型后端；请至少安装 scikit-learn")
-        sampler_class = getattr(optuna.samplers, "NSGAIIISampler", optuna.samplers.NSGAIISampler)
         study = optuna.create_study(
             study_name=study_id, storage=f"sqlite:///{storage_path.as_posix()}", load_if_exists=True,
             directions=["maximize", "maximize", "minimize"],
-            sampler=sampler_class(seed=spec.seed),
+            sampler=optuna.samplers.NSGAIISampler(seed=spec.seed),
         )
         if not study.trials and "ridge" in available_models:
             study.enqueue_trial({"model": "ridge", "alpha": 1.0})

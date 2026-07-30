@@ -17,6 +17,7 @@ from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import create_snapshot, load_csi800_membership, readiness
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.store import LabStore
+from quantmaster.runtime.json import strict_json_dumps
 
 
 def _slug(prefix: str, expression: str) -> str:
@@ -781,7 +782,7 @@ class LabService:
                 "created_at": utc_now(),
             }
             manifest_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
+                strict_json_dumps(manifest, indent=2), encoding="utf-8",
             )
             manifest_relative = manifest_path.resolve().relative_to(root).as_posix()
             learned = FactorSpec(
@@ -978,7 +979,7 @@ class LabService:
                     "created_at": utc_now(),
                 }
                 manifest_path.write_text(
-                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8",
+                    strict_json_dumps(manifest, indent=2), encoding="utf-8",
                 )
                 learned = FactorSpec(
                     slug=f"ml_multi_{study_id[:12]}",

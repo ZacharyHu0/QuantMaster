@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from quantmaster.config import get_config
 from quantmaster.lab.service import LabService
+from quantmaster.runtime.contracts import ContractModel
 
 router = APIRouter(prefix="/api/lab", tags=["quant-lab"])
 _service: LabService | None = None
@@ -32,7 +33,7 @@ def _fail(exc: Exception) -> HTTPException:
     return HTTPException(500, "Quant Lab 操作失败")
 
 
-class FactorCreate(BaseModel):
+class FactorCreate(ContractModel):
     name: str = Field(min_length=1, max_length=120)
     expression: str = Field(min_length=1, max_length=2000)
     description: str = Field(default="", max_length=2000)
@@ -41,7 +42,7 @@ class FactorCreate(BaseModel):
     parent_id: str = Field(default="", max_length=64)
 
 
-class JobCreate(BaseModel):
+class JobCreate(ContractModel):
     kind: Literal[
         "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
         "optimize", "bias_audit", "discover_python",
@@ -49,7 +50,7 @@ class JobCreate(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class StudyCreate(BaseModel):
+class StudyCreate(ContractModel):
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     start: str = "2015-01-01"
     end: str = ""
@@ -65,25 +66,25 @@ class StudyCreate(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict)
 
 
-class AuditCreate(BaseModel):
+class AuditCreate(ContractModel):
     version_id: str = Field(min_length=1, max_length=64)
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     start: str = "2015-01-01"
     end: str
 
 
-class MiningPreview(BaseModel):
+class MiningPreview(ContractModel):
     start: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     horizon: Literal[1, 3, 5, 7] = 3
 
 
-class Decision(BaseModel):
+class Decision(ContractModel):
     actor: str = Field(default="web", min_length=1, max_length=120)
     reason: str = Field(default="", max_length=4000)
 
 
-class Deployment(BaseModel):
+class Deployment(ContractModel):
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     horizon: Literal[1, 3, 5, 7] = 3
     profile: Literal["all", "risk_adjusted", "short_term", "stable"] = "all"
@@ -91,7 +92,7 @@ class Deployment(BaseModel):
     actor: str = Field(default="web", min_length=1, max_length=120)
 
 
-class SuggestionRequest(BaseModel):
+class SuggestionRequest(ContractModel):
     use_cloud: bool = False
     sample_consent: bool = False
     anonymous_sample: dict[str, Any] | None = None

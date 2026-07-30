@@ -22,9 +22,12 @@ jobs:
       - name: Install
         run: |
           pip install -e ".[dev,rust]"
-          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release
-      - name: Rust format
-        run: cargo fmt --manifest-path rust/quantmaster-kernel/Cargo.toml --check
+          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked
+      - name: Rust quality
+        run: |
+          cargo fmt --manifest-path rust/quantmaster-kernel/Cargo.toml --check
+          cargo check --manifest-path rust/quantmaster-kernel/Cargo.toml --locked
+          cargo clippy --manifest-path rust/quantmaster-kernel/Cargo.toml --locked -- -D warnings
       - name: Lint
         run: ruff check quantmaster tests tools/release_sync.py
       - name: Test

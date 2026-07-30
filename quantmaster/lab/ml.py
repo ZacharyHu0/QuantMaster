@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.json import strict_json_dumps
 
 MODEL_KINDS = ("ridge", "mlp", "tcn", "gru", "transformer", "dae")
 Progress = Callable[[int, str], None]
@@ -514,7 +515,7 @@ def _train_torch(
         "input_size": x_train.shape[-1], "sequence_length": x_train.shape[1],
     }, model_file)
     (artifact_dir / "history.json").write_text(
-        json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
+        strict_json_dumps(history, indent=2), encoding="utf-8"
     )
     return {
         "kind": kind,

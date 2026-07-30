@@ -14,6 +14,7 @@ import pandas as pd
 
 from quantmaster.lab.ml import artifact_sha256, engineer_features, normalize_features
 from quantmaster.lab.research import HORIZONS, FeatureSetSpec, TimeFold
+from quantmaster.runtime.json import strict_json_dumps
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
@@ -835,5 +836,5 @@ def probability_diagnostics(frame: pd.DataFrame) -> dict[str, Any]:
 def write_manifest(path: str | Path, payload: dict[str, Any]) -> str:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    target.write_text(strict_json_dumps(payload, indent=2), encoding="utf-8")
     return str(target.resolve())

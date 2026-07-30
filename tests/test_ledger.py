@@ -1,5 +1,7 @@
 """实盘账本与收益统计测试。"""
 
+import math
+
 import pytest
 
 from quantmaster.portfolio import Ledger, TradeRecord, ledger_report
@@ -35,6 +37,42 @@ class TestFIFO:
         with pytest.raises(ValueError):
             ledger.add_trade(_trade("2024-01-02", "600519.SH", "short", 10.0, 100))
 
+    @pytest.mark.parametrize("field,value", [
+        ("price", math.nan), ("price", math.inf),
+        ("shares", math.nan), ("shares", math.inf),
+        ("fee", math.nan), ("fee", math.inf),
+    ])
+    def test_rejects_nonfinite_trade_numbers(self, tmp_path, field, value):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        trade = _trade("2024-01-02", "600519.SH", "buy", 10.0, 100)
+        setattr(trade, field, value)
+        with pytest.raises(ValueError, match="有限数字"):
+            ledger.add_trade(trade)
+        assert ledger.trades().empty
+
+    def test_sell_cannot_exceed_chronological_inventory(self, tmp_path):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_trade(_trade("2024-01-02", "600519.SH", "buy", 10.0, 100))
+        with pytest.raises(ValueError, match="卖出超过可用持仓"):
+            ledger.add_trade(_trade("2024-01-03", "600519.SH", "sell", 12.0, 101))
+        with pytest.raises(ValueError, match="卖出超过可用持仓"):
+            ledger.add_trade(_trade("2024-01-01", "600519.SH", "sell", 12.0, 1))
+        assert len(ledger.trades()) == 1
+
+    def test_duplicate_idempotent_sell_does_not_trigger_false_oversell(self, tmp_path):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_trade(_trade("2024-01-02", "600519.SH", "buy", 10.0, 100))
+        sell = _trade("2024-01-03", "600519.SH", "sell", 12.0, 100)
+        assert ledger.add_trade(sell, idempotency_key="sell-1") is True
+        assert ledger.add_trade(sell, idempotency_key="sell-1") is False
+
+    @pytest.mark.parametrize("amount", [math.nan, math.inf, -math.inf])
+    def test_rejects_nonfinite_cashflows(self, tmp_path, amount):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        with pytest.raises(ValueError, match="有限数字"):
+            ledger.add_cashflow("2024-01-02", amount)
+        assert ledger.cashflows().empty
+
 
 class TestCSVImport:
     def test_import(self, tmp_path):
@@ -57,6 +95,19 @@ class TestCSVImport:
         ledger = Ledger(path=tmp_path / "l.sqlite")
         with pytest.raises(ValueError, match="缺少列"):
             ledger.import_csv(csv)
+
+    def test_batch_oversell_rolls_back_all_rows(self, tmp_path):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        records = [
+            {"date": "2024-01-02", "symbol": "600519.SH", "side": "buy",
+             "price": 10, "shares": 100, "fee": 0},
+            {"date": "2024-01-03", "symbol": "600519.SH", "side": "sell",
+             "price": 12, "shares": 101, "fee": 0},
+        ]
+        with pytest.raises(ValueError, match="卖出超过可用持仓"):
+            ledger.import_records(records, "batch", "trades.csv", "utf-8")
+        assert ledger.trades().empty
+        assert not ledger.has_import_hash("batch")
 
 
 class TestReport:

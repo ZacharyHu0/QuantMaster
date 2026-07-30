@@ -2,6 +2,7 @@
 
 from typing import ClassVar
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -10,6 +11,7 @@ from quantmaster.factors import (
     ExpressionFactor,
     analyze_factor,
     compute_factor,
+    ops,
 )
 from quantmaster.factors.analysis import forward_returns, information_coefficient
 from quantmaster.factors.base import ExpressionError
@@ -82,6 +84,17 @@ class TestOps:
         pd.testing.assert_frame_equal(result, expected)
         assert pd.isna(result.iloc[10, 0])
         assert pd.isna(result.iloc[11, 0])
+
+    def test_cross_sectional_ops_treat_infinities_as_missing(self, panel):
+        values = panel["close"].iloc[:2].copy()
+        values.iloc[0, 0] = np.inf
+        values.iloc[1, 1] = -np.inf
+
+        for result in (
+            ops.rank(values), ops.zscore(values), ops.demean(values), ops.winsorize(values),
+        ):
+            assert pd.isna(result.iloc[0, 0])
+            assert pd.isna(result.iloc[1, 1])
 
 
 class TestBuiltinFactors:

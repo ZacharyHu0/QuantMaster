@@ -40,6 +40,15 @@ def test_bad_rows_and_duplicates_are_reported(tmp_path):
     assert ledger.has_import_hash(first.file_hash)
 
 
+@pytest.mark.parametrize("value", ["NaN", "Inf", "-Inf"])
+def test_nonfinite_csv_numbers_are_rejected(value):
+    parsed = parse_broker_csv(
+        f"date,symbol,side,price,shares\n2024-01-02,600519,buy,{value},100\n".encode()
+    )
+    assert parsed.rows[0].record is None
+    assert "必须为正数" in parsed.rows[0].errors[0]
+
+
 def test_import_records_rolls_back_whole_transaction(tmp_path):
     ledger = Ledger(path=tmp_path / "ledger.sqlite")
     with sqlite3.connect(ledger.path) as connection:

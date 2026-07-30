@@ -12,7 +12,7 @@ fn finite_row(row: &[Option<f64>]) -> Vec<f64> {
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(|left, right| left.total_cmp(right));
     let middle = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]
@@ -59,8 +59,11 @@ fn cross_section_rank(values: Matrix) -> Matrix {
 }
 
 #[pyfunction]
-fn robust_standardize(values: Matrix, k: f64) -> Matrix {
-    values
+fn robust_standardize(values: Matrix, k: f64) -> PyResult<Matrix> {
+    if !k.is_finite() || k <= 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err("k 必须是有限正数"));
+    }
+    Ok(values
         .into_par_iter()
         .map(|row| {
             let clean = finite_row(&row);
@@ -106,7 +109,7 @@ fn robust_standardize(values: Matrix, k: f64) -> Matrix {
                 })
                 .collect()
         })
-        .collect()
+        .collect())
 }
 
 #[pyfunction]
@@ -231,6 +234,11 @@ fn rolling_corr(left: Matrix, right: Matrix, window: usize) -> PyResult<Matrix> 
     }
     let rows = left.len();
     let columns = left[0].len();
+    if left.iter().any(|row| row.len() != columns) || right.iter().any(|row| row.len() != columns) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "rolling_corr 只接受规则矩阵",
+        ));
+    }
     let minimum = std::cmp::max(3, window / 2);
     let by_column: Vec<Vec<Option<f64>>> = (0..columns)
         .into_par_iter()

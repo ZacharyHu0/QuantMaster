@@ -14,7 +14,6 @@ venv/
 .coverage
 htmlcov/
 /rust/quantmaster-kernel/target/
-/rust/quantmaster-kernel/Cargo.lock
 
 # QuantMaster local data（仅仓库根目录的 data/，勿写成 data/ 以免误伤 quantmaster/data 源码包）
 /data/

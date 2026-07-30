@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import queue
 import secrets
@@ -24,21 +23,20 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
+from quantmaster.backtest.quality import assess_panel_quality, assess_signal_quality
 from quantmaster.config import get_config
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASES
-from quantmaster.server.problems import (
-    OperationProblem,
-    assess_panel_quality,
-    assess_signal_quality,
-    make_problem,
-)
+from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
+from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.problems import OperationProblem, make_problem
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +95,10 @@ async def lifespan(_: FastAPI):
         logger.info("QuantMaster 已停止")
 
 
-app = FastAPI(title="QuantMaster", version=__version__, lifespan=lifespan)
+app = FastAPI(
+    title="QuantMaster", version=__version__, lifespan=lifespan,
+    default_response_class=JSONResponse,
+)
 
 
 def _new_request_id() -> str:
@@ -327,8 +328,7 @@ def _progress_stream(
             event = events.get()
             if event is None:
                 break
-            yield json.dumps(
-                jsonable_encoder(event), ensure_ascii=False, allow_nan=False) + "\n"
+            yield strict_json_dumps(jsonable_encoder(event)) + "\n"
 
     return StreamingResponse(
         generate(), media_type="application/x-ndjson",
@@ -339,7 +339,7 @@ def _progress_stream(
     )
 
 
-class StockAnalysisIn(BaseModel):
+class StockAnalysisIn(ContractModel):
     query: str = Field(..., min_length=1, max_length=80)
 
 
@@ -769,7 +769,7 @@ def market_history(symbol: str, start: str = "2023-01-01", end: str | None = Non
     }
 
 
-class RegimeRequest(BaseModel):
+class RegimeRequest(ContractModel):
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
@@ -806,7 +806,7 @@ def market_regime(req: RegimeRequest) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
-class SelectionRequest(BaseModel):
+class SelectionRequest(ContractModel):
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
@@ -867,7 +867,7 @@ def selection_history(
     return {"snapshots": snapshots}
 
 
-class DecisionDashboardRequest(BaseModel):
+class DecisionDashboardRequest(ContractModel):
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
@@ -1031,7 +1031,7 @@ def factors_list() -> dict:
     return {"factors": factors}
 
 
-class FactorTestRequest(BaseModel):
+class FactorTestRequest(ContractModel):
     expression: str = Field(..., description="因子名或表达式，如 rank(-delta(close, 5))")
     universe: str = "demo"
     start: str = "2022-01-01"
@@ -1077,7 +1077,7 @@ def factors_test(req: FactorTestRequest) -> dict:
 
 # ---------- 回测 ----------
 
-class BacktestRequest(BaseModel):
+class BacktestRequest(ContractModel):
     strategy: Literal["factor", "swing"] = "factor"
     factor: str = "mom_20d"
     universe: str = "demo"
@@ -1197,7 +1197,7 @@ def backtest_run(req: BacktestRequest) -> dict:
     }
 
 
-class ValidateRequest(BaseModel):
+class ValidateRequest(ContractModel):
     expression: str
     universe: str = "demo"
     start: str = "2022-01-01"
@@ -1233,7 +1233,7 @@ def factors_validate(req: ValidateRequest) -> dict:
 
 # ---------- 因子挖掘 ----------
 
-class MineRequest(BaseModel):
+class MineRequest(ContractModel):
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
@@ -1260,7 +1260,7 @@ def mine_genetic(req: MineRequest) -> dict:
     return {"factors": [m.__dict__ for m in mined]}
 
 
-class MineLLMRequest(BaseModel):
+class MineLLMRequest(ContractModel):
     universe: str = "demo"
     start: str = "2022-01-01"
     end: str | None = None
@@ -1286,7 +1286,7 @@ def mine_llm(req: MineLLMRequest) -> dict:
 
 # ---------- 模拟盘 ----------
 
-class PaperRunRequest(BaseModel):
+class PaperRunRequest(ContractModel):
     strategy: str = "factor"         # factor | swing
     factor: str = "mom_20d"
     universe: str = "demo"
@@ -1368,7 +1368,7 @@ def paper_report() -> dict:
 # ---------- 实盘账本 ----------
 
 
-class AssetListIn(BaseModel):
+class AssetListIn(ContractModel):
     symbol: str = Field(..., min_length=1, max_length=40)
     name: str = Field("", max_length=80)
 
@@ -1457,14 +1457,14 @@ def asset_lists_remove(
         raise HTTPException(400, str(e)) from e
     return _asset_lists_payload()
 
-class TradeIn(BaseModel):
-    date: str
-    symbol: str
-    side: str
-    price: float
-    shares: float
-    fee: float = 0.0
-    note: str = ""
+class TradeIn(ContractModel):
+    date: str = Field(min_length=10, max_length=10)
+    symbol: str = Field(min_length=1, max_length=40)
+    side: Literal["buy", "sell"]
+    price: float = Field(gt=0)
+    shares: float = Field(gt=0)
+    fee: float = Field(default=0.0, ge=0)
+    note: str = Field(default="", max_length=1000)
 
 
 @app.post("/api/ledger/trade")
@@ -1478,11 +1478,11 @@ def ledger_add_trade(trade: TradeIn) -> dict:
     return {"status": "ok"}
 
 
-class CashflowIn(BaseModel):
-    date: str
+class CashflowIn(ContractModel):
+    date: str = Field(min_length=10, max_length=10)
     amount: float
-    kind: str = "deposit"
-    note: str = ""
+    kind: Literal["deposit", "withdraw", "dividend"] = "deposit"
+    note: str = Field(default="", max_length=1000)
 
 
 @app.post("/api/ledger/cashflow")

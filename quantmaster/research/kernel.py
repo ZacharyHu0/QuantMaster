@@ -171,9 +171,12 @@ class Kernel:
 
     def robust_standardize(self, values: Any, k: float = 5.0) -> np.ndarray:
         matrix = _matrix(values)
+        normalized_k = float(k)
+        if not np.isfinite(normalized_k) or normalized_k <= 0:
+            raise ValueError("k 必须是有限正数")
         return self._call(
-            "robust_standardize", (_to_native(matrix), float(k)),
-            lambda: _python_robust_standardize(matrix, float(k)),
+            "robust_standardize", (_to_native(matrix), normalized_k),
+            lambda: _python_robust_standardize(matrix, normalized_k),
         )
 
     def weighted_zscore(self, values: Any, weights: Any) -> np.ndarray:

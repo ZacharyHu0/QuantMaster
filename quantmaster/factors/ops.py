@@ -17,6 +17,11 @@ Panel = pd.DataFrame
 EPS = 1e-12
 
 
+def _finite(x: Panel) -> Panel:
+    """Treat infinities as missing before cross-sectional statistics."""
+    return x.replace([np.inf, -np.inf], np.nan)
+
+
 # ---------- 时间序列算子（沿时间轴，每列独立） ----------
 
 def delay(x: Panel, n: int) -> Panel:
@@ -78,28 +83,31 @@ def ema(x: Panel, n: int) -> Panel:
 
 def rank(x: Panel) -> Panel:
     """截面分位排名（0~1），值越大排名越高。"""
-    return x.rank(axis=1, pct=True)
+    return _finite(x).rank(axis=1, pct=True)
 
 
 def zscore(x: Panel) -> Panel:
     """截面标准分。"""
-    mean = x.mean(axis=1)
-    std = x.std(axis=1)
-    return x.sub(mean, axis=0).div(std + EPS, axis=0)
+    clean = _finite(x)
+    mean = clean.mean(axis=1)
+    std = clean.std(axis=1)
+    return clean.sub(mean, axis=0).div(std + EPS, axis=0)
 
 
 def demean(x: Panel) -> Panel:
     """截面去均值。"""
-    return x.sub(x.mean(axis=1), axis=0)
+    clean = _finite(x)
+    return clean.sub(clean.mean(axis=1), axis=0)
 
 
 def winsorize(x: Panel, k: float = 3.0) -> Panel:
     """截面缩尾：把偏离中位数超过 k 倍 MAD 的极端值压回边界，抑制离群点。"""
-    med = x.median(axis=1)
-    mad = (x.sub(med, axis=0)).abs().median(axis=1)
+    clean = _finite(x)
+    med = clean.median(axis=1)
+    mad = (clean.sub(med, axis=0)).abs().median(axis=1)
     lower = med - k * 1.4826 * mad
     upper = med + k * 1.4826 * mad
-    return x.clip(lower=lower, upper=upper, axis=0)
+    return clean.clip(lower=lower, upper=upper, axis=0)
 
 
 # ---------- 逐元素算子 ----------

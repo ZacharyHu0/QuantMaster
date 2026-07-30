@@ -402,6 +402,13 @@ def test_rust_kernel_matches_python_when_extension_is_available():
         assert np.allclose(actual, expected, atol=1e-6, rtol=1e-6, equal_nan=True)
 
 
+@pytest.mark.parametrize("k", [0, -1, float("nan"), float("inf")])
+def test_kernel_rejects_invalid_robust_clipping_limit(k):
+    for backend in (KernelBackend.PYTHON, KernelBackend.AUTO):
+        with pytest.raises(ValueError, match="k 必须是有限正数"):
+            Kernel(backend).robust_standardize([[1.0, 2.0]], k=k)
+
+
 def test_artifact_factor_parser_and_missing_signal_error(panel):
     reference = parse_artifact_reference(
         "artifact:factor:stock:cross_momentum_20d@1.0.0"

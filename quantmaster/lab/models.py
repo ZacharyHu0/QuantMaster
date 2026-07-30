@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
+
+from quantmaster.runtime.json import strict_json_dumps
 
 FactorKind = Literal["expression", "python", "learned", "latent", "composite"]
 FactorStatus = Literal[
@@ -36,7 +37,7 @@ def utc_now() -> str:
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return strict_json_dumps(value, sort_keys=True)
 
 
 def content_hash(value: Any) -> str:
