@@ -593,14 +593,14 @@ def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):
 
 def test_automation_api_and_ui_contract():
     client = TestClient(app)
-    overview = client.get("/api/automation/overview")
+    overview = client.get("/api/v1/automation/overview")
     assert overview.status_code == 200
     data = overview.json()
     assert set(data["channels"]) == {"weixin", "feishu"}
     assert set(data["inbound"]) == {"weixin", "feishu"}
     assert "gateway" not in data
     assert all("context_token" not in target for target in data["targets"])
-    assert client.post("/api/automation/jobs/news_digest/run").status_code == 403
+    assert client.post("/api/v1/automation/jobs/news_digest/run").status_code == 403
 
     page = client.get("/").text
     assert 'data-tab="automation"' in page

@@ -42,7 +42,7 @@ class FeishuConfigIn(ContractModel):
     app_secret: SecretStr
 
 
-@router.get("/api/automation/overview")
+@router.get("/api/v1/automation/overview")
 def automation_overview(request: Request) -> dict:
     _require_local(request)
     runtime = get_runtime()
@@ -52,31 +52,31 @@ def automation_overview(request: Request) -> dict:
     return result
 
 
-@router.get("/api/automation/targets")
+@router.get("/api/v1/automation/targets")
 def automation_targets(request: Request) -> dict:
     _require_local(request)
     return {"targets": service().public_targets()}
 
 
-@router.get("/api/automation/jobs")
+@router.get("/api/v1/automation/jobs")
 def automation_jobs(request: Request) -> dict:
     _require_local(request)
     return {"jobs": service().store.jobs(), "runs": service().store.recent_runs(50)}
 
 
-@router.get("/api/automation/audit")
+@router.get("/api/v1/automation/audit")
 def automation_audit(request: Request, limit: int = 100) -> dict:
     _require_local(request)
     return {"items": service().store.audit_entries(max(1, min(limit, 500)))}
 
 
-@router.get("/api/automation/events")
+@router.get("/api/v1/automation/events")
 def automation_events(request: Request, limit: int = 100) -> dict:
     _require_local(request)
     return {"items": service().store.recent_events(max(1, min(limit, 500)))}
 
 
-@router.post("/api/automation/bindings/code")
+@router.post("/api/v1/automation/bindings/code")
 def automation_binding_code(target_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -85,7 +85,7 @@ def automation_binding_code(target_id: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.get("/api/automation/bindings/{action_id}")
+@router.get("/api/v1/automation/bindings/{action_id}")
 def automation_binding_status(action_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -94,7 +94,7 @@ def automation_binding_status(action_id: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.patch("/api/automation/targets/{target_id}/policy")
+@router.patch("/api/v1/automation/targets/{target_id}/policy")
 def automation_policy(target_id: str, value: PolicyIn, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -105,7 +105,7 @@ def automation_policy(target_id: str, value: PolicyIn, request: Request) -> dict
         raise _error(exc) from exc
 
 
-@router.post("/api/automation/targets/{target_id}/test")
+@router.post("/api/v1/automation/targets/{target_id}/test")
 def automation_target_test(target_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -114,7 +114,7 @@ def automation_target_test(target_id: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.patch("/api/automation/jobs/{name}")
+@router.patch("/api/v1/automation/jobs/{name}")
 def automation_job_update(name: str, value: ScheduleIn, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -126,7 +126,7 @@ def automation_job_update(name: str, value: ScheduleIn, request: Request) -> dic
         raise _error(exc) from exc
 
 
-@router.post("/api/automation/jobs/{name}/run")
+@router.post("/api/v1/automation/jobs/{name}/run")
 def automation_job_run(name: str, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -135,7 +135,7 @@ def automation_job_run(name: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.post("/api/automation/channels/weixin/login")
+@router.post("/api/v1/automation/channels/weixin/login")
 def weixin_login_start(request: Request) -> dict:
     """向腾讯微信 ClawBot iLink 接口申请扫码登录二维码。"""
     _require_csrf(request)
@@ -145,7 +145,7 @@ def weixin_login_start(request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.get("/api/automation/channels/weixin/login/{session_id}")
+@router.get("/api/v1/automation/channels/weixin/login/{session_id}")
 def weixin_login_poll(session_id: str, request: Request, verify_code: str = "") -> dict:
     _require_csrf(request)
     try:
@@ -157,7 +157,7 @@ def weixin_login_poll(session_id: str, request: Request, verify_code: str = "") 
         raise _error(exc) from exc
 
 
-@router.post("/api/automation/channels/feishu/config")
+@router.post("/api/v1/automation/channels/feishu/config")
 def feishu_config(value: FeishuConfigIn, request: Request) -> dict:
     """保存飞书企业自建应用 Bot 凭据；App Secret 只进入系统凭据库。"""
     _require_csrf(request)
@@ -175,7 +175,7 @@ def feishu_config(value: FeishuConfigIn, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.post("/api/automation/channels/feishu/check")
+@router.post("/api/v1/automation/channels/feishu/check")
 def feishu_check(request: Request) -> dict:
     """返回实际凭据、运行时、长连接、入站事件与绑定五阶段状态。"""
     _require_csrf(request)
@@ -251,7 +251,7 @@ def feishu_check(request: Request) -> dict:
     }
 
 
-@router.delete("/api/automation/channels/feishu/config")
+@router.delete("/api/v1/automation/channels/feishu/config")
 def feishu_remove(request: Request) -> dict:
     _require_csrf(request)
     try:

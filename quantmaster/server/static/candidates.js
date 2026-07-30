@@ -151,7 +151,7 @@
     state.loading = true;
     state.catalogPromise = (async () => {
       try {
-        const data = await request('/api/settings/universes');
+        const data = await request('/api/v1/settings/universes');
         state.catalog = data.universes || [];
         state.indexPresets = data.index_presets || [];
         state.conflicts = data.conflicts || [];
@@ -201,7 +201,7 @@
     renderLoading(name === 'csi800' ? '正在读取目标日的动态成分…' : '正在读取候选详情…');
     try {
       const suffix = name === 'csi800' ? `?as_of=${encodeURIComponent(asOf || state.detail?.as_of || today)}` : '';
-      const detail = await request(`/api/settings/universes/${encodeURIComponent(name)}${suffix}`);
+      const detail = await request(`/api/v1/settings/universes/${encodeURIComponent(name)}${suffix}`);
       hydrateDetail(detail);
     } catch (error) {
       state.detail = null;
@@ -446,7 +446,7 @@
   }
 
   async function previewSymbols(symbols, selections = {}) {
-    return request('/api/settings/universes/preview', {
+    return request('/api/v1/settings/universes/preview', {
       method:'POST', body:{kind:'manual', symbols, selections},
     });
   }
@@ -529,7 +529,7 @@
     if (!query) return closeInstrumentSearch();
     state.searchTimer = setTimeout(async () => {
       try {
-        const data = await request(`/api/instruments/search?q=${encodeURIComponent(query)}&limit=12`);
+        const data = await request(`/api/v1/market/instruments/search?q=${encodeURIComponent(query)}&limit=12`);
         if (sequence === state.searchSequence) renderInstrumentSearch(data.items || [], query);
       } catch (error) {
         if (sequence === state.searchSequence) renderInstrumentSearch([], query);
@@ -599,7 +599,7 @@
     button.disabled = true;
     button.textContent = '正在读取…';
     try {
-      const result = await request('/api/settings/universes/preview', {
+      const result = await request('/api/v1/settings/universes/preview', {
         method:'POST', body:{kind:'index', index_symbol:indexSymbol},
       });
       state.draftName = name || state.draftName;
@@ -621,7 +621,7 @@
     button.disabled = true;
     button.textContent = '正在同步…';
     try {
-      const result = await request('/api/settings/universes/names/refresh', {
+      const result = await request('/api/v1/settings/universes/names/refresh', {
         method:'POST', body:{symbols:state.draft.map(item => item.symbol)},
       });
       state.draft.forEach(item => { item.name = result.names[item.symbol] || item.name || null; });
@@ -644,8 +644,8 @@
     if (button) { button.disabled = true; button.textContent = state.newMode ? '正在创建…' : '正在保存…'; }
     const body = {name, symbols:state.draft.map(item => item.symbol)};
     try {
-      if (state.newMode) await request('/api/settings/universes', {method:'POST', body});
-      else await request(`/api/settings/universes/${encodeURIComponent(state.currentName)}`, {method:'PUT', body});
+      if (state.newMode) await request('/api/v1/settings/universes', {method:'POST', body});
+      else await request(`/api/v1/settings/universes/${encodeURIComponent(state.currentName)}`, {method:'PUT', body});
       await refreshCatalog({select:name, loadDetail:true});
       return true;
     } catch (error) {
@@ -675,7 +675,7 @@
     state.notice = null;
     renderDetail();
     try {
-      state.importData = await window.QuantMasterAPI('/api/assets/lists');
+      state.importData = await window.QuantMasterAPI('/api/v1/portfolio/lists');
       renderDetail();
     } catch (error) {
       state.mode = null;
@@ -708,7 +708,7 @@
     button.textContent = '正在重命名…';
     const previous = state.currentName;
     try {
-      await request(`/api/settings/universes/${encodeURIComponent(previous)}/rename`, {
+      await request(`/api/v1/settings/universes/${encodeURIComponent(previous)}/rename`, {
         method:'POST', body:{new_name:next},
       });
       await refreshCatalog({mapping:{from:previous,to:next}, select:next, loadDetail:true});
@@ -727,7 +727,7 @@
     button.textContent = '正在删除…';
     try {
       const suffix = replacement ? `?replacement=${encodeURIComponent(replacement)}` : '';
-      await request(`/api/settings/universes/${encodeURIComponent(previous)}${suffix}`, {method:'DELETE'});
+      await request(`/api/v1/settings/universes/${encodeURIComponent(previous)}${suffix}`, {method:'DELETE'});
       await refreshCatalog({mapping:{from:previous,to:replacement || 'demo'}, select:replacement || 'demo', loadDetail:true});
       await window.QuantMasterManagement.ensureSettings(true);
     } catch (error) {

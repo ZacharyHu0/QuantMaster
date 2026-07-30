@@ -41,7 +41,7 @@ def live_server(tmp_path_factory):
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            if httpx.get(f"{url}/api/health", timeout=0.3).status_code == 200:
+            if httpx.get(f"{url}/api/v1/health", timeout=0.3).status_code == 200:
                 break
         except httpx.HTTPError:
             time.sleep(0.1)
@@ -176,7 +176,7 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1360, "height": 900})
         page.route(
-            "**/api/settings",
+            "**/api/v1/settings",
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -328,7 +328,7 @@ def test_help_settings_failure_keeps_manual_calculators(live_server):
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 900, "height": 800})
-        page.route("**/api/settings", lambda route: route.fulfill(status=503, body="unavailable"))
+        page.route("**/api/v1/settings", lambda route: route.fulfill(status=503, body="unavailable"))
         page.goto(f"{url}/#help/calculators")
         page.locator("#calc-cost").wait_for(state="visible")
         page.wait_for_function(
@@ -404,7 +404,7 @@ def test_decision_chart_survives_progressive_rerender(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/market/overview/stream",
+            "**/api/v1/market/overview/stream",
             lambda route: route.fulfill(
                 status=200, content_type="application/x-ndjson", body=empty_market),
         )
@@ -482,7 +482,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         if "frequency=1m" in request_url:
             route.fulfill(status=404, json={"detail": "1 分钟行情暂不可用"})
             return
-        symbol = request_url.split("/api/market/history/", 1)[1].split("?", 1)[0]
+        symbol = request_url.split("/api/v1/market/history/", 1)[1].split("?", 1)[0]
         frequency = request_url.split("frequency=", 1)[1].split("&", 1)[0]
         route.fulfill(json={
             "symbol": symbol, "frequency": frequency,
@@ -494,7 +494,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
 
     def asset_handler(route):
         request = route.request
-        tail = request.url.split("/api/assets/lists", 1)[1].split("?", 1)[0].strip("/")
+        tail = request.url.split("/api/v1/portfolio/lists", 1)[1].split("?", 1)[0].strip("/")
         if request.method == "POST":
             list_name = tail.split("/", 1)[0]
             item = request.post_data_json
@@ -515,12 +515,12 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/market/overview/stream*",
+            "**/api/v1/market/overview/stream*",
             lambda route: route.fulfill(
                 status=200, content_type="application/x-ndjson", body=empty_market),
         )
-        page.route("**/api/market/history/**", history_handler)
-        page.route("**/api/assets/lists**", asset_handler)
+        page.route("**/api/v1/market/history/**", history_handler)
+        page.route("**/api/v1/portfolio/lists**", asset_handler)
         page.goto(url)
         page.evaluate(
             """data => {
@@ -662,7 +662,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/market/overview/stream*",
+            "**/api/v1/market/overview/stream*",
             lambda route: route.fulfill(
                 status=200, content_type="application/x-ndjson", body=stream),
         )
@@ -729,7 +729,7 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.route("**/api/factors", lambda route: route.fulfill(json={"factors": factors}))
+        page.route("**/api/v1/research/factors", lambda route: route.fulfill(json={"factors": factors}))
         page.goto(url)
         page.get_by_role("button", name="回测", exact=True).click()
         page.locator('#bt-form [name="strategy"]').select_option("factor")
@@ -779,13 +779,13 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         page.evaluate(
             """() => {
               const key = window.QuantMasterRunInfo.begin(
-                '诊断测试', '正在加载数据', {path:'GET /api/test'});
+                '诊断测试', '正在加载数据', {path:'GET /api/v1/test'});
               window.QuantMasterRunInfo.phase('诊断测试', {
                 phase:'读取行情', detail:'第一阶段', request_id:'req-test'
-              }, 'GET /api/test', key);
+              }, 'GET /api/v1/test', key);
               window.QuantMasterRunInfo.phase('诊断测试', {
                 phase:'计算指标', detail:'第二阶段', request_id:'req-test'
-              }, 'GET /api/test', key);
+              }, 'GET /api/v1/test', key);
             }"""
         )
         test_entries = page.locator(".runtime-entry", has_text="诊断测试")
@@ -796,7 +796,7 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
             """window.QuantMasterRunInfo.add(
               'error', '诊断测试', '服务端处理失败', {
                 detail:'database is locked', action:'稍后重试。',
-                path:'POST /api/test', requestId:'req-test', key:'request:test'
+                path:'POST /api/v1/test', requestId:'req-test', key:'request:test'
               })"""
         )
         assert not page.locator("#runtime-info").evaluate(
@@ -819,7 +819,7 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         assert not diagnostics.evaluate("element => element.open")
         diagnostics.locator("summary").click()
         assert "database is locked" in diagnostics.inner_text()
-        assert "POST /api/test" in diagnostics.inner_text()
+        assert "POST /api/v1/test" in diagnostics.inner_text()
         assert "req-test" in diagnostics.inner_text()
 
         page.evaluate(
@@ -866,24 +866,24 @@ def test_lab_compacts_stage_updates_and_mining_batches_are_actionable(live_serve
 
     def route_lab(route):
         request_url = route.request.url
-        if "/api/lab/overview" in request_url:
+        if "/api/v1/lab/overview" in request_url:
             route.fulfill(json={
                 "factor_statuses": {}, "active_jobs": 1, "deployments": 0,
                 "capabilities": {"catalog_size": 48, "models": {"available_models": []}},
                 "research": {"horizons": [3]}, "recent_jobs": [job],
                 "recent_experiments": [], "recent_studies": [],
             })
-        elif "/api/lab/factors" in request_url:
+        elif "/api/v1/lab/factors" in request_url:
             route.fulfill(json={"items": []})
-        elif f"/api/lab/jobs/{job_id}/events" in request_url:
+        elif f"/api/v1/lab/jobs/{job_id}/events" in request_url:
             route.fulfill(json={"items": events})
-        elif f"/api/lab/jobs/{job_id}" in request_url:
+        elif f"/api/v1/lab/jobs/{job_id}" in request_url:
             route.fulfill(json=job)
-        elif "/api/lab/mining/runs/" in request_url:
+        elif "/api/v1/lab/mining/runs/" in request_url:
             run_id = request_url.rsplit("/", 1)[-1]
             selected = next(item for item in runs if item["id"] == run_id)
             route.fulfill(json={**selected, "candidates": []})
-        elif "/api/lab/mining/runs" in request_url:
+        elif "/api/v1/lab/mining/runs" in request_url:
             route.fulfill(json={"items": runs})
         else:
             route.fulfill(json={"items": []})
@@ -891,7 +891,7 @@ def test_lab_compacts_stage_updates_and_mining_batches_are_actionable(live_serve
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.route("**/api/lab/**", route_lab)
+        page.route("**/api/v1/lab/**", route_lab)
         page.goto(url)
         page.locator('nav button[data-tab="lab"]').click()
         page.locator('[data-lab-view="discover"]').click()
@@ -1011,10 +1011,10 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 390, "height": 844})
-        page.route("**/api/automation/overview", lambda route: route.fulfill(json=overview))
-        page.route("**/api/automation/audit*", audit_handler)
-        page.route("**/api/automation/targets/*/policy", policy_handler)
-        page.route("**/api/news/sources*", source_handler)
+        page.route("**/api/v1/automation/overview", lambda route: route.fulfill(json=overview))
+        page.route("**/api/v1/automation/audit*", audit_handler)
+        page.route("**/api/v1/automation/targets/*/policy", policy_handler)
+        page.route("**/api/v1/news/sources*", source_handler)
         page.goto(url)
 
         page.get_by_role("button", name="自动化", exact=True).click()

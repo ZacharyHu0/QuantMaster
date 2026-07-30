@@ -127,19 +127,19 @@ def test_snapshot_is_declared_as_package_data():
 
 def test_instrument_http_api_exposes_and_resolves_ambiguity():
     client = TestClient(app)
-    search = client.get("/api/instruments/search?q=GZMT&online=false").json()
+    search = client.get("/api/v1/market/instruments/search?q=GZMT&online=false").json()
     assert search["items"][0]["symbol"] == "600519.SH"
 
-    settings = client.get("/api/settings").json()
+    settings = client.get("/api/v1/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
     ambiguous = client.post(
-        "/api/instruments/resolve", json={"queries": ["700"]}, headers=headers,
+        "/api/v1/market/instruments/resolve", json={"queries": ["700"]}, headers=headers,
     ).json()
     assert ambiguous["status"] == "needs_confirmation"
     assert len(ambiguous["ambiguous"][0]["candidates"]) >= 2
 
     resolved = client.post(
-        "/api/instruments/resolve",
+        "/api/v1/market/instruments/resolve",
         json={"queries": ["700"], "selections": {"700": "00700.HK"}},
         headers=headers,
     ).json()

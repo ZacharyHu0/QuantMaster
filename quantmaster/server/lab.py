@@ -11,7 +11,7 @@ from quantmaster.config import get_config
 from quantmaster.lab.service import LabService
 from quantmaster.runtime.contracts import ContractModel
 
-router = APIRouter(prefix="/api/lab", tags=["quant-lab"])
+router = APIRouter(prefix="/api/v1/lab", tags=["quant-lab"])
 _service: LabService | None = None
 _service_path = ""
 

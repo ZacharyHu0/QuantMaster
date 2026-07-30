@@ -70,7 +70,7 @@ def test_import_records_rolls_back_whole_transaction(tmp_path):
 
 def test_multipart_preview_strict_and_tolerant_submit():
     client = TestClient(app)
-    settings = client.get("/api/settings").json()
+    settings = client.get("/api/v1/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
     content = (
         b"date,symbol,side,price,shares,fee\n"
@@ -78,21 +78,21 @@ def test_multipart_preview_strict_and_tolerant_submit():
         b"bad,000001,sell,x,100,5\n"
     )
     preview = client.post(
-        "/api/ledger/import/preview", headers=headers,
+        "/api/v1/portfolio/ledger/import/preview", headers=headers,
         files={"file": ("broker.csv", content, "text/csv")},
     )
     assert preview.status_code == 200
     assert preview.json()["valid_count"] == 1
     mapping = json.dumps(preview.json()["suggested_mapping"])
     strict = client.post(
-        "/api/ledger/import/submit", headers=headers,
+        "/api/v1/portfolio/ledger/import/submit", headers=headers,
         files={"file": ("broker.csv", content, "text/csv")},
         data={"mapping": mapping, "strict": "true", "include_duplicates": "false"},
     )
     assert strict.status_code == 422
     assert strict.json()["detail"]["failed_rows"]
     tolerant = client.post(
-        "/api/ledger/import/submit", headers=headers,
+        "/api/v1/portfolio/ledger/import/submit", headers=headers,
         files={"file": ("broker.csv", content, "text/csv")},
         data={"mapping": mapping, "strict": "false", "include_duplicates": "false"},
     )

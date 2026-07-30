@@ -206,22 +206,22 @@ def test_settings_api_requires_local_csrf_and_never_returns_secret(monkeypatch, 
     manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
     monkeypatch.setattr(management, "settings_manager", manager)
     client = TestClient(app)
-    response = client.get("/api/settings")
+    response = client.get("/api/v1/settings")
     assert response.status_code == 200
     assert "api_key" not in response.text and "tushare_token" not in response.text
     payload = {key: response.json()[key]
                for key in ("config_version", "llm", "data", "trade", "server")}
-    assert client.post("/api/settings/validate", json=payload).status_code == 403
+    assert client.post("/api/v1/settings/validate", json=payload).status_code == 403
     csrf = response.json()["csrf_token"]
-    assert client.post("/api/settings/validate", json=payload,
+    assert client.post("/api/v1/settings/validate", json=payload,
                        headers={"X-CSRF-Token": csrf}).status_code == 200
     invalid = {**payload, "llm": {**payload["llm"], "temperature": 99},
                "secrets": {"llm": {"action": "replace", "value": "never-echo-this"}}}
-    rejected = client.put("/api/settings", json=invalid, headers={"X-CSRF-Token": csrf})
+    rejected = client.put("/api/v1/settings", json=invalid, headers={"X-CSRF-Token": csrf})
     assert rejected.status_code == 422
     assert "never-echo-this" not in rejected.text
     remote = TestClient(app, client=("203.0.113.8", 50000))
-    assert remote.get("/api/settings").status_code == 403
+    assert remote.get("/api/v1/settings").status_code == 403
 
 
 def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monkeypatch):
@@ -252,39 +252,39 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
     monkeypatch.setattr(maintenance, "data_refresh_manager", FakeRefreshManager())
     client = TestClient(app)
     assert client.post(
-        "/api/settings/data-refresh/preview", json={"scope": "market"}).status_code == 403
-    settings = client.get("/api/settings").json()
+        "/api/v1/data/refresh/preview", json={"scope": "market"}).status_code == 403
+    settings = client.get("/api/v1/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
 
     preview = client.post(
-        "/api/settings/data-refresh/preview", json={"scope": "universe", "universe": "demo"},
+        "/api/v1/data/refresh/preview", json={"scope": "universe", "universe": "demo"},
         headers=headers,
     )
     assert preview.status_code == 200
     assert preview.json()["total"] == 2
     assert client.post(
-        "/api/settings/data-refresh", json={"scope": "market"}, headers=headers,
+        "/api/v1/data/refresh", json={"scope": "market"}, headers=headers,
     ).json()["status"] == "running"
-    assert client.get("/api/settings/data-refresh/latest").json()["job"]["status"] == "interrupted"
+    assert client.get("/api/v1/data/refresh/latest").json()["job"]["status"] == "interrupted"
     assert client.post(
-        "/api/settings/data-refresh/job-1/resume", headers=headers,
+        "/api/v1/data/refresh/job-1/resume", headers=headers,
     ).json()["status"] == "running"
 
 
 def test_automation_channel_credentials_require_local_csrf():
     client = TestClient(app)
     rejected = client.post(
-        "/api/automation/channels/feishu/config",
+        "/api/v1/automation/channels/feishu/config",
         json={"app_id": "cli_test", "app_secret": "must-not-echo"},
     )
     assert rejected.status_code == 403
     assert "must-not-echo" not in rejected.text
     remote = TestClient(app, client=("203.0.113.8", 50000))
-    assert remote.post("/api/automation/channels/weixin/login").status_code == 403
+    assert remote.post("/api/v1/automation/channels/weixin/login").status_code == 403
 
-    settings = client.get("/api/settings").json()
+    settings = client.get("/api/v1/settings").json()
     checked = client.post(
-        "/api/automation/channels/feishu/check",
+        "/api/v1/automation/channels/feishu/check",
         headers={"X-CSRF-Token": settings["csrf_token"]},
     )
     assert checked.status_code == 200
@@ -318,10 +318,10 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
     )
     set_config(manager.load())
     client = TestClient(app)
-    settings = client.get("/api/settings").json()
+    settings = client.get("/api/v1/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
 
-    catalog_payload = client.get("/api/settings/universes").json()
+    catalog_payload = client.get("/api/v1/settings/universes").json()
     catalog = catalog_payload["universes"]
     assert [(item["name"], item["kind"]) for item in catalog[:2]] == [
         ("demo", "fixed"), ("csi800", "dynamic"),
@@ -336,17 +336,17 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
         ("中证1000", "000852.SH"),
     }
     preset_preview = client.post(
-        "/api/settings/universes/preview",
+        "/api/v1/settings/universes/preview",
         json={"kind": "index", "index_symbol": presets[0]["symbol"]}, headers=headers,
     )
     assert preset_preview.status_code == 200
     assert preset_preview.json()["symbols"] == ["688981.SH", "300750.SZ"]
-    dynamic = client.get("/api/settings/universes/csi800?as_of=2026-07-27")
+    dynamic = client.get("/api/v1/settings/universes/csi800?as_of=2026-07-27")
     assert dynamic.status_code == 200
     assert dynamic.json()["snapshot_dates"]["000300.SH"] == "2026-07-01"
 
     preview = client.post(
-        "/api/settings/universes/preview",
+        "/api/v1/settings/universes/preview",
         json={"kind": "manual", "symbols": ["600519", "600519.SH", "bad"]},
         headers=headers,
     ).json()
@@ -355,11 +355,11 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
     assert preview["errors"][0]["value"] == "bad"
 
     created = client.post(
-        "/api/settings/universes",
+        "/api/v1/settings/universes",
         json={"name": "core", "symbols": ["600519", "000001"]}, headers=headers,
     )
     assert created.status_code == 200
-    detail = client.get("/api/settings/universes/core").json()
+    detail = client.get("/api/v1/settings/universes/core").json()
     assert detail["symbols"] == ["600519.SH", "000001.SZ"]
     assert detail["members"][0]["name"] == "贵州茅台"
 
@@ -368,7 +368,7 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
     update.lab.universe = "core"
     manager.save(update)
     renamed = client.post(
-        "/api/settings/universes/core/rename",
+        "/api/v1/settings/universes/core/rename",
         json={"new_name": "renamed"}, headers=headers,
     )
     assert renamed.status_code == 200
@@ -377,10 +377,10 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
     }
     assert manager.load().automation.primary_universe == "renamed"
 
-    blocked = client.delete("/api/settings/universes/renamed", headers=headers)
+    blocked = client.delete("/api/v1/settings/universes/renamed", headers=headers)
     assert blocked.status_code == 409
     deleted = client.delete(
-        "/api/settings/universes/renamed?replacement=demo", headers=headers)
+        "/api/v1/settings/universes/renamed?replacement=demo", headers=headers)
     assert deleted.status_code == 200
     assert manager.load().automation.primary_universe == "demo"
     assert manager.load().lab.universe == "demo"

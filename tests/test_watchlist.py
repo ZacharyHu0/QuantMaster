@@ -35,7 +35,7 @@ def test_asset_lists_api_includes_cached_quotes_and_holdings():
     ))
 
     response = client.post(
-        "/api/assets/lists/favorites", json={"symbol": "600519", "name": "贵州茅台"})
+        "/api/v1/portfolio/lists/favorites", json={"symbol": "600519", "name": "贵州茅台"})
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["favorites"][0]["last"] == 11.0
@@ -44,7 +44,7 @@ def test_asset_lists_api_includes_cached_quotes_and_holdings():
     assert data["holdings"][0]["shares"] == 100
     assert data["holdings"][0]["unrealized_pnl"] == 100.0
 
-    response = client.delete("/api/assets/lists/favorites/600519.SH")
+    response = client.delete("/api/v1/portfolio/lists/favorites/600519.SH")
     assert response.status_code == 200
     assert response.json()["favorites"] == []
 

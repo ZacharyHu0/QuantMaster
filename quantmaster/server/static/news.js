@@ -106,7 +106,7 @@
   async function streamAnnotationEvents(onEvent) {
     await window.QuantMasterManagement.ensureSettings();
     const csrf = window.QuantMasterManagement.state.csrf;
-    return window.QuantMasterNDJSON('/api/news/reanalyze/stream', {
+    return window.QuantMasterNDJSON('/api/v1/news/reanalyze/stream', {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
       body: JSON.stringify({limit: 100, batch_size: 5}),
@@ -232,7 +232,7 @@
     state.loading = true;
     if (!append) feed.innerHTML = '<div class="news-skeleton" aria-label="加载中"><i></i><i></i><i></i></div>';
     try {
-      const data = await api(`/api/news?${queryString(append ? state.nextCursor : null)}`);
+      const data = await api(`/api/v1/news?${queryString(append ? state.nextCursor : null)}`);
       state.items = data.items || [];
       state.nextCursor = data.next_cursor;
       state.hasMore = Boolean(data.has_more);
@@ -303,7 +303,7 @@
   }
 
   async function loadStats() {
-    try { renderStats(await api('/api/news/stats?days=30')); }
+    try { renderStats(await api('/api/v1/news/stats?days=30')); }
     catch (error) { report('量化摘要读取失败', error); }
   }
 
@@ -394,7 +394,7 @@
 
   async function loadSources(selectFirst = false) {
     try {
-      const data = await api('/api/news/sources');
+      const data = await api('/api/v1/news/sources');
       state.sources = data.items || [];
       updateSourceFilter();
       renderSourceHealth();
@@ -452,13 +452,13 @@
           item_limit: Number(sourceForm.elements.item_limit.value),
           factor_weight: Number(sourceForm.elements.factor_weight.value),
         } : sourcePayload();
-        saved = await secure(`/api/news/sources/${encodeURIComponent(state.selectedSource.id)}`, {
+        saved = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}`, {
           method: 'PUT', body: {source, token_action: state.clearToken ? 'clear' : token ? 'replace' : 'keep', token},
         });
       } else {
         const source = sourcePayload();
         if (source.kind === 'builtin') throw new Error('不能创建内置适配器');
-        saved = await secure('/api/news/sources', {method: 'POST', body: {source, token}});
+        saved = await secure('/api/v1/news/sources', {method: 'POST', body: {source, token}});
       }
       report(`来源“${saved.name}”已保存`, null, 'success');
       state.selectedSource = saved;
@@ -482,8 +482,8 @@
     target.innerHTML = '<span class="news-muted">正在请求并解析前 3 条…</span>';
     try {
       const data = state.selectedSource ? await secure(
-        `/api/news/sources/${encodeURIComponent(state.selectedSource.id)}/test`, {method: 'POST'},
-      ) : await secure('/api/news/sources/preview', {
+        `/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/test`, {method: 'POST'},
+      ) : await secure('/api/v1/news/sources/preview', {
         method: 'POST', body: {source: sourcePayload(), token: sourceForm.elements.token.value},
       });
       target.innerHTML = previewMarkup(data.items);
@@ -495,7 +495,7 @@
   sourceForm.querySelector('[data-source-run]').onclick = async () => {
     if (!state.selectedSource) return;
     try {
-      const result = await secure(`/api/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
+      const result = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
       report(`采集完成：新增 ${result.saved || 0} 条`, null, 'success');
       await Promise.all([loadSources(), loadFeed(), loadStats()]);
     } catch (error) { report('来源采集失败', error); }
@@ -511,7 +511,7 @@
     const source = state.selectedSource;
     if (!source || source.built_in || !window.confirm(`删除资讯来源“${source.name}”？历史资讯仍会保留。`)) return;
     try {
-      await secure(`/api/news/sources/${encodeURIComponent(source.id)}`, {method: 'DELETE'});
+      await secure(`/api/v1/news/sources/${encodeURIComponent(source.id)}`, {method: 'DELETE'});
       state.selectedSource = null;
       await loadSources(true);
       report(`来源“${source.name}”已删除，历史资讯已保留`, null, 'success');
@@ -536,7 +536,7 @@
       const copy = article.querySelector('.news-detail-copy');
       copy.textContent = '正在读取完整正文…';
       try {
-        const detail = await api(`/api/news/${article.dataset.newsId}`);
+        const detail = await api(`/api/v1/news/${article.dataset.newsId}`);
         copy.textContent = detail.content || detail.summary || '暂无正文';
         article.dataset.loaded = 'true';
       } catch (error) {
@@ -557,7 +557,7 @@
     button.disabled = true;
     button.textContent = '同步中…';
     try {
-      const result = await secure('/api/news/crawl', {method: 'POST', body: {limit: 30}});
+      const result = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
       report(`同步完成：抓取 ${result.fetched || 0} 条，新增 ${result.saved || 0} 条`, null, 'success');
       await Promise.all([loadFeed(), loadStats(), loadSources()]);
     } catch (error) { report('同步失败', error); }

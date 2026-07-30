@@ -199,7 +199,7 @@
     state.auditLoading = true;
     if (!state.auditLoaded) root.innerHTML = '<div class="automation-empty">正在读取操作记录…</div>';
     try {
-      const data = await api('/api/automation/audit?limit=30');
+      const data = await api('/api/v1/automation/audit?limit=30');
       root.innerHTML = `<table class="automation-table"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>结果</th></tr></thead><tbody>
         ${data.items.map(item => `<tr><td class="muted">${dateText(item.created_at)}</td><td>${esc(item.actor)}</td><td>${esc(item.action)}</td><td>${esc(item.object_type)} / ${esc(item.object_id)}</td><td>${esc(item.result)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无记录</td></tr>'}
       </tbody></table>`;
@@ -224,7 +224,7 @@
     if (state.loading || (state.loaded && !force)) return;
     state.loading = true;
     try {
-      state.data = await api('/api/automation/overview');
+      state.data = await api('/api/v1/automation/overview');
       state.loaded = true;
       render();
     } catch (error) {
@@ -238,7 +238,7 @@
     state.targetFeedback.set(targetId, {kind:'saving', message:'正在保存…'});
     renderTargets();
     try {
-      const saved = await secureApi(`/api/automation/targets/${encodeURIComponent(targetId)}/policy`, {
+      const saved = await secureApi(`/api/v1/automation/targets/${encodeURIComponent(targetId)}/policy`, {
         method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
       });
       const index = state.data.targets.findIndex(item => item.id === targetId);
@@ -259,7 +259,7 @@
     while (state.bindings.get(targetId) === session && Date.now() < session.expiresAt) {
       await new Promise(resolve => setTimeout(resolve, 2000));
       try {
-        const result = await secureApi(`/api/automation/bindings/${encodeURIComponent(session.id)}`);
+        const result = await secureApi(`/api/v1/automation/bindings/${encodeURIComponent(session.id)}`);
         if (result.status === 'bound') {
           session.status = 'bound';
           state.loaded = false;
@@ -289,7 +289,7 @@
     const box = document.getElementById('weixin-login-box');
     box.innerHTML = '<div class="hint">正在向微信申请二维码…</div>';
     try {
-      const result = await secureApi('/api/automation/channels/weixin/login', {method:'POST'});
+      const result = await secureApi('/api/v1/automation/channels/weixin/login', {method:'POST'});
       state.qrSession = result.session_id;
       box.innerHTML = `<div class="weixin-login"><img src="${esc(result.qrcode_svg || result.qrcode_url)}" alt="微信 ClawBot 登录二维码"><div><p>请使用绑定机器人的微信扫码，并在手机上确认。</p><div class="hint" data-qr-status>等待扫码，二维码约 5 分钟有效。</div></div></div>`;
       pollWeixinLogin();
@@ -304,7 +304,7 @@
     try {
       while (state.qrSession && Date.now() - started < 305000) {
         const query = verifyCode ? `?verify_code=${encodeURIComponent(verifyCode)}` : '';
-        const result = await secureApi(`/api/automation/channels/weixin/login/${encodeURIComponent(state.qrSession)}${query}`);
+        const result = await secureApi(`/api/v1/automation/channels/weixin/login/${encodeURIComponent(state.qrSession)}${query}`);
         verifyCode = '';
         const status = document.querySelector('[data-qr-status]');
         if (result.status === 'confirmed') {
@@ -345,7 +345,7 @@
     diagnose.disabled = true;
     const root = document.querySelector('[data-feishu-diagnostic]');
     root.innerHTML = '<div class="hint">正在检查凭据、运行时、长连接、消息事件和会话绑定…</div>';
-    secureApi('/api/automation/channels/feishu/check', {method:'POST'})
+    secureApi('/api/v1/automation/channels/feishu/check', {method:'POST'})
       .then(data => {
         const labels = {credential:'凭据', runtime:'运行时', websocket:'长连接', event:'消息事件', binding:'会话绑定'};
         root.innerHTML = Object.entries(data.stages || {}).map(([key, value]) =>
@@ -386,7 +386,7 @@
           alert('请先绑定“飞书管理员私聊”。群绑定必须由已绑定管理员在目标群内完成。');
           return;
         }
-        const data = await secureApi(`/api/automation/bindings/code?target_id=${encodeURIComponent(bind.dataset.bindTarget)}`, {method:'POST'});
+        const data = await secureApi(`/api/v1/automation/bindings/code?target_id=${encodeURIComponent(bind.dataset.bindTarget)}`, {method:'POST'});
         const target = state.data.targets.find(item => item.id === bind.dataset.bindTarget);
         const inbound = state.data?.inbound?.feishu?.[target.chat_type] || {total:0};
         const session = {
@@ -405,7 +405,7 @@
           return;
         }
         test.disabled = true;
-        await secureApi(`/api/automation/targets/${encodeURIComponent(test.dataset.testTarget)}/test`, {method:'POST'});
+        await secureApi(`/api/v1/automation/targets/${encodeURIComponent(test.dataset.testTarget)}/test`, {method:'POST'});
         alert('测试消息已提交。'); return;
       }
       if (toggle) {
@@ -447,11 +447,11 @@
     if (!toggle && !run) return;
     const button = toggle || run; button.disabled = true;
     try {
-      if (toggle) await secureApi(`/api/automation/jobs/${encodeURIComponent(toggle.dataset.jobToggle)}`, {
+      if (toggle) await secureApi(`/api/v1/automation/jobs/${encodeURIComponent(toggle.dataset.jobToggle)}`, {
         method:'PATCH', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({action:toggle.dataset.enabled === 'true' ? 'pause' : 'resume'}),
       });
-      if (run) await secureApi(`/api/automation/jobs/${encodeURIComponent(run.dataset.jobRun)}/run`, {method:'POST'});
+      if (run) await secureApi(`/api/v1/automation/jobs/${encodeURIComponent(run.dataset.jobRun)}/run`, {method:'POST'});
       state.loaded = false; await loadAutomation(true);
     } catch (error) { alert(error.message); }
     finally { button.disabled = false; }

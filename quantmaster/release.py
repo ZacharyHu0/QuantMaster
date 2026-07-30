@@ -4,13 +4,40 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.11.1"
+VERSION = "0.12.0"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "版本化 API 与统一任务账本",
+                "items": (
+                    (
+                        "全部本地业务接口、前端请求与文档切换到 /api/v1；未版本化 /api 路径"
+                        "直接返回 404，不保留重定向或兼容别名。"
+                    ),
+                    (
+                        "market、research、lab、backtests、paper、portfolio、news、automation、"
+                        "settings 与 data 按领域归整，固定 session、health 和 diagnostics 系统入口。"
+                    ),
+                    (
+                        "新增统一 /api/v1/jobs 任务账本，以稳定 DTO 查询 Research、Data Refresh、"
+                        "Quant Lab 和 Backtest 任务，并统一事件、取消与安全重试。"
+                    ),
+                    (
+                        "新增旧路径 404、前端无未版本化引用和跨任务重试回归测试，"
+                        "避免后续页面或模块重新引入隐式兼容层。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.11.1",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "严格账本、契约与可重复构建",

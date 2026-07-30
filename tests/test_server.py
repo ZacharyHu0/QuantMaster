@@ -23,7 +23,7 @@ client.headers["X-CSRF-Token"] = _csrf
 
 class TestBasics:
     def test_health(self):
-        resp = client.get("/api/health")
+        resp = client.get("/api/v1/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         assert resp.json()["version"] == __version__
@@ -49,20 +49,20 @@ class TestBasics:
 
     def test_local_boundary_csrf_and_security_headers(self):
         anonymous = TestClient(app)
-        blocked = anonymous.post("/api/selection/daily", json={})
+        blocked = anonymous.post("/api/v1/research/selection/daily", json={})
         assert blocked.status_code == 403
         assert blocked.json()["problem"]["code"] == "request_security_rejected"
 
         session = anonymous.get("/api/v1/session")
         token = session.json()["csrf_token"]
         accepted = anonymous.post(
-            "/api/decision/dashboard/stream",
+            "/api/v1/research/decision/dashboard/stream",
             json={"universe": "demo", "start": "2023-01-01", "horizon": 99},
             headers={"X-CSRF-Token": token},
         )
         assert accepted.status_code == 422
         cross_origin = anonymous.post(
-            "/api/decision/dashboard/stream",
+            "/api/v1/research/decision/dashboard/stream",
             json={"universe": "demo", "start": "2023-01-01", "horizon": 99},
             headers={"X-CSRF-Token": token, "Origin": "https://attacker.example"},
         )
@@ -80,7 +80,7 @@ class TestBasics:
         assert "%%QM_CSP_NONCE%%" not in page.text
 
     def test_release_info(self):
-        resp = client.get("/api/release")
+        resp = client.get("/api/v1/release")
         assert resp.status_code == 200
         data = resp.json()
         assert data["version"] == __version__
@@ -123,7 +123,7 @@ class TestBasics:
         assert 'class="snapshot-period"' in resp.text
         assert 'class="snapshot-pick"' in resp.text
         assert "event.partial" in resp.text
-        assert "/api/decision/dashboard/stream" in resp.text
+        assert "/api/v1/research/decision/dashboard/stream" in resp.text
         assert 'id="asset-workbench"' in resp.text
         assert 'id="tab-candidates"' in resp.text
         assert 'id="candidate-workspace"' in resp.text
@@ -266,7 +266,7 @@ class TestBasics:
             )
 
     def test_validation_error_has_request_id(self):
-        resp = client.post("/api/decision/dashboard/stream", json={
+        resp = client.post("/api/v1/research/decision/dashboard/stream", json={
             "universe": "demo", "start": "2023-01-01", "horizon": 99,
         })
         assert resp.status_code == 422
@@ -274,7 +274,7 @@ class TestBasics:
 
     def test_api_contract_rejects_nonfinite_and_unknown_fields(self):
         nonfinite = client.post(
-            "/api/ledger/trade",
+            "/api/v1/portfolio/ledger/trade",
             content=(
                 b'{"date":"2024-01-02","symbol":"600519.SH","side":"buy",'
                 b'"price":NaN,"shares":100}'
@@ -284,7 +284,7 @@ class TestBasics:
         assert nonfinite.status_code == 422
         assert nonfinite.json()["problem"]["code"] == "request_validation_failed"
 
-        unknown = client.post("/api/research/data/plans", json={
+        unknown = client.post("/api/v1/research/data/plans", json={
             "start": "2024-01-02", "end": "2024-01-03", "assets": ["stock"],
             "unexpected": True,
         })
@@ -302,7 +302,7 @@ class TestBasics:
         )
         monkeypatch.setattr("quantmaster.data.load_panel", lambda *args, **kwargs: panel)
 
-        resp = client.post("/api/backtest/run", json={
+        resp = client.post("/api/v1/backtest/run", json={
             "strategy": "factor", "factor": "mom_20d", "universe": "demo",
             "start": "2026-06-01", "top_n": 1,
         })
@@ -325,13 +325,13 @@ class TestBasics:
         assert message.count("***") == 3
 
     def test_factors_list(self):
-        resp = client.get("/api/factors")
+        resp = client.get("/api/v1/research/factors")
         assert resp.status_code == 200
         factors = resp.json()["factors"]
         assert any(f["name"] == "mom_20d" for f in factors)
 
     def test_selection_history_empty(self):
-        resp = client.get("/api/selection/history")
+        resp = client.get("/api/v1/research/selection/history")
         assert resp.status_code == 200
         assert resp.json() == {"snapshots": []}
 
@@ -406,7 +406,7 @@ class TestBasics:
         monkeypatch.setattr("quantmaster.data.load_stock_names", lambda values: names)
         monkeypatch.setattr("quantmaster.data.industry.load_industry_map", lambda: mapping)
 
-        resp = client.post("/api/decision/dashboard", json={
+        resp = client.post("/api/v1/research/decision/dashboard", json={
             "universe": "demo", "start": "2023-01-01", "top_n": 4,
             "horizon": 3, "save": True,
         })
@@ -430,7 +430,7 @@ class TestBasics:
                    for pick in data["selection"]["picks"])
         assert data["history"][0]["signal_date"] == data["selection"]["signal_date"]
 
-        streamed = client.post("/api/decision/dashboard/stream", json={
+        streamed = client.post("/api/v1/research/decision/dashboard/stream", json={
             "universe": "demo", "start": "2023-01-01", "top_n": 4,
             "horizon": 3, "save": True,
         })
@@ -462,35 +462,35 @@ class TestBasics:
 
 class TestLedgerAPI:
     def test_trade_and_report_flow(self):
-        resp = client.post("/api/ledger/cashflow",
+        resp = client.post("/api/v1/portfolio/ledger/cashflow",
                            json={"date": "2024-01-01", "amount": 100000, "kind": "deposit"})
         assert resp.status_code == 200
-        resp = client.post("/api/ledger/trade", json={
+        resp = client.post("/api/v1/portfolio/ledger/trade", json={
             "date": "2024-01-02", "symbol": "600519.SH", "side": "buy",
             "price": 100.0, "shares": 100, "fee": 5.0})
         assert resp.status_code == 200
 
-        resp = client.get("/api/ledger/trades")
+        resp = client.get("/api/v1/portfolio/ledger/trades")
         assert len(resp.json()["trades"]) == 1
 
     def test_invalid_trade_rejected(self):
-        resp = client.post("/api/ledger/trade", json={
+        resp = client.post("/api/v1/portfolio/ledger/trade", json={
             "date": "2024-01-02", "symbol": "600519.SH", "side": "hold",
             "price": 100.0, "shares": 100})
         assert resp.status_code == 422
 
     def test_bad_factor_expression_400(self):
-        resp = client.post("/api/factors/test",
+        resp = client.post("/api/v1/research/factors/test",
                            json={"expression": "__import__('os')", "universe": "demo"})
         assert resp.status_code == 400
 
     def test_validate_bad_expression_400(self):
-        resp = client.post("/api/factors/validate",
+        resp = client.post("/api/v1/research/factors/validate",
                            json={"expression": "eval(close)", "split": "2024-01-01"})
         assert resp.status_code == 400
 
     def test_ledger_nav_empty(self):
-        resp = client.get("/api/ledger/nav")
+        resp = client.get("/api/v1/portfolio/ledger/nav")
         assert resp.status_code == 200
         data = resp.json()
         assert data["dates"] == []

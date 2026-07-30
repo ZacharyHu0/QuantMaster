@@ -14,7 +14,7 @@ from quantmaster.research.jobs import get_research_job_manager
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.management import _require_csrf, _require_local
 
-router = APIRouter(prefix="/api/research/data", tags=["research-data"])
+router = APIRouter(prefix="/api/v1/research/data", tags=["research-data"])
 
 
 class ResearchPlanRequest(ContractModel):

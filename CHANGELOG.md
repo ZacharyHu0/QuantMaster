@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.0（2026-07-31）
+
+### 版本化 API 与统一任务账本
+- 全部本地业务接口、前端请求、测试和当前文档切换到 `/api/v1/...`；未版本化 `/api/...` 旧路径直接返回 `404`，不提供重定向、兼容别名或双写路由
+- 接口按 `market`、`research`、`lab`、`backtests`、`paper`、`portfolio`、`news`、`automation`、`settings` 与 `data` 领域归整；固定保留 `/api/v1/session`、`/api/v1/health/{live,ready}` 和 `/api/v1/diagnostics`
+- 新增 `/api/v1/jobs` 统一任务账本，以一致的领域、状态、进度、阶段、尝试次数、恢复能力和链接 DTO 聚合 Research、Data Refresh、Quant Lab 与 Backtest
+- 统一任务接口支持详情、事件、取消和重试；Backtest 重试保留双向事件血缘，Research/Data 续跑复用不可变任务，Lab 重试创建引用原任务的新尝试
+- Data Refresh 新增持久任务列表读取；前端架构测试禁止重新引用未版本化 API，服务回归明确验证旧 health、backtests、settings 和 news 路径均为 `404`
+
 ## v0.11.1（2026-07-31）
 
 ### 严格账本、契约与可重复构建

@@ -27,7 +27,7 @@ from quantmaster.settings import (
     document_from_config,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/v1")
 settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
@@ -287,7 +287,7 @@ class MigrationCreate(ContractModel):
     mode: Literal["copy", "switch"] = "copy"
 
 
-@router.post("/settings/migration")
+@router.post("/data/migrations")
 def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
     from quantmaster.automation.runtime import get_runtime
@@ -323,7 +323,7 @@ def create_migration(request: Request, value: MigrationCreate) -> dict:
         raise HTTPException(400, str(exc)) from None
 
 
-@router.get("/settings/migration/{task_id}")
+@router.get("/data/migrations/{task_id}")
 def get_migration(task_id: str, request: Request) -> dict:
     _require_local(request)
     try:
@@ -339,7 +339,7 @@ def get_migration(task_id: str, request: Request) -> dict:
         raise HTTPException(404, str(exc)) from None
 
 
-@router.post("/settings/migration/{task_id}/cancel")
+@router.post("/data/migrations/{task_id}/cancel")
 def cancel_migration(task_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
@@ -354,7 +354,7 @@ class DataRefreshRequest(ContractModel):
     start: str = Field(default="", max_length=10)
 
 
-@router.post("/settings/data-refresh/preview")
+@router.post("/data/refresh/preview")
 def preview_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
     _require_csrf(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -365,7 +365,7 @@ def preview_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
         raise HTTPException(400, str(exc)) from None
 
 
-@router.post("/settings/data-refresh")
+@router.post("/data/refresh")
 def create_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
     _require_csrf(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -378,7 +378,7 @@ def create_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
         raise HTTPException(400, str(exc)) from None
 
 
-@router.get("/settings/data-refresh/latest")
+@router.get("/data/refresh/latest")
 def latest_data_refresh(request: Request) -> dict:
     _require_local(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -386,7 +386,7 @@ def latest_data_refresh(request: Request) -> dict:
     return {"job": data_refresh_manager.latest()}
 
 
-@router.get("/settings/data-refresh/{job_id}")
+@router.get("/data/refresh/{job_id}")
 def get_data_refresh(job_id: str, request: Request) -> dict:
     _require_local(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -397,7 +397,7 @@ def get_data_refresh(job_id: str, request: Request) -> dict:
         raise HTTPException(404, str(exc)) from None
 
 
-@router.get("/settings/data-refresh/{job_id}/events")
+@router.get("/data/refresh/{job_id}/events")
 def get_data_refresh_events(
     job_id: str,
     request: Request,
@@ -414,7 +414,7 @@ def get_data_refresh_events(
     return {"items": data_refresh_manager.events(job_id, after, limit)}
 
 
-@router.post("/settings/data-refresh/{job_id}/cancel")
+@router.post("/data/refresh/{job_id}/cancel")
 def cancel_data_refresh(job_id: str, request: Request) -> dict:
     _require_csrf(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -427,7 +427,7 @@ def cancel_data_refresh(job_id: str, request: Request) -> dict:
         raise HTTPException(409, str(exc)) from None
 
 
-@router.post("/settings/data-refresh/{job_id}/resume")
+@router.post("/data/refresh/{job_id}/resume")
 def resume_data_refresh(job_id: str, request: Request) -> dict:
     _require_csrf(request)
     from quantmaster.data.maintenance import data_refresh_manager
@@ -508,7 +508,7 @@ def _universe_members(symbols: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-@router.get("/instruments/search")
+@router.get("/market/instruments/search")
 def instrument_search(
     request: Request, q: str = "", limit: int = 20, online: bool = True,
 ) -> dict:
@@ -518,7 +518,7 @@ def instrument_search(
     return {"query": q, "items": search_instruments(q, limit=limit, online=online)}
 
 
-@router.post("/instruments/resolve")
+@router.post("/market/instruments/resolve")
 def instrument_resolve(request: Request, value: InstrumentResolveBody) -> dict:
     _require_csrf(request)
     from quantmaster.data.instruments import resolve_instruments
@@ -796,7 +796,7 @@ async def _upload_bytes(file: UploadFile) -> bytes:
     return content
 
 
-@router.post("/ledger/import/preview")
+@router.post("/portfolio/ledger/import/preview")
 async def preview_ledger_csv(
     request: Request,
     file: Annotated[UploadFile, File()],
@@ -815,7 +815,7 @@ async def preview_ledger_csv(
         raise HTTPException(400, str(exc)) from None
 
 
-@router.post("/ledger/import/submit")
+@router.post("/portfolio/ledger/import/submit")
 async def submit_ledger_csv(
     request: Request,
     file: Annotated[UploadFile, File()],

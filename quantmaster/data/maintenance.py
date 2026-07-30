@@ -437,6 +437,14 @@ class DataRefreshManager:
             ).fetchone()
         return self.get(str(row[0])) if row else None
 
+    def list(self, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [self.get(str(row[0])) for row in rows]
+
     @property
     def active(self) -> bool:
         with self._conn() as conn:

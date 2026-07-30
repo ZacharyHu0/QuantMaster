@@ -40,7 +40,7 @@
 
   async function ensureCsrf() {
     if (csrfToken) return csrfToken;
-    const settings = await api('/api/settings', {cache: 'no-store'});
+    const settings = await api('/api/v1/settings', {cache: 'no-store'});
     csrfToken = settings.csrf_token || '';
     if (!csrfToken) throw new Error('未取得本机操作令牌，请刷新页面后重试。');
     return csrfToken;
@@ -289,7 +289,7 @@
     factorCatalogLoading = true;
     if (document.activeElement === factorInput) renderFactorCompletion();
     try {
-      const payload = await api('/api/factors', {cache:'no-store'});
+      const payload = await api('/api/v1/research/factors', {cache:'no-store'});
       useFactorCatalog(payload.factors || []);
       window.QuantMasterFactorCatalog = factorCatalog;
     } catch (error) {
@@ -525,7 +525,7 @@
       btJob.innerHTML = '<div class="trading-success">已确认数据偏差，正在创建仅使用可用数据的新任务。</div>';
       const config = JSON.parse(JSON.stringify(run.config || {}));
       config.allow_partial = true;
-      const retry = await mutate('/api/backtests', 'POST', config);
+      const retry = await mutate('/api/v1/backtests', 'POST', config);
       await loadBacktests();
       await openBacktest(retry.id, {prompt:true});
     } catch (error) {
@@ -561,8 +561,8 @@
     })));
     btOut.innerHTML = `${renderWarnings(artifact.manifest?.warnings)}${renderMetrics(artifact.metrics || {})}
       <div class="trading-result-actions">
-        <a class="trading-secondary" href="/api/backtests/${run.id}/export?format=json">导出完整 JSON</a>
-        <a class="trading-secondary" href="/api/backtests/${run.id}/export?format=trades_csv">导出成交 CSV</a>
+        <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=json">导出完整 JSON</a>
+        <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=trades_csv">导出成交 CSV</a>
         ${run.config?.strategy?.kind === 'lab_version' ? '<span class="trading-secondary">OOF 回测不可直接提升模拟账户</span>' : '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>'}
         <form class="trading-promote" data-bt-promote hidden><input name="name" maxlength="40" required value="${escapeHtml(run.name.slice(0, 34))} 验证" aria-label="模拟账户名称"><button class="trading-primary" type="submit">确认创建</button></form>
       </div>
@@ -578,7 +578,7 @@
     btState.activeId = runId;
     clearTimeout(btState.timer);
     try {
-      const run = await api(`/api/backtests/${runId}`, {cache: 'no-store'});
+      const run = await api(`/api/v1/backtests/${runId}`, {cache: 'no-store'});
       renderBacktestProgress(run);
       renderBacktestResult(run, {prompt});
       renderBacktestHistory();
@@ -616,7 +616,7 @@
 
   async function loadBacktests(render = true) {
     try {
-      const payload = await api('/api/backtests?limit=80', {cache: 'no-store'});
+      const payload = await api('/api/v1/backtests?limit=80', {cache: 'no-store'});
       btState.runs = payload.items || [];
       if (render) renderBacktestHistory();
     } catch (error) {
@@ -627,7 +627,7 @@
   async function compareBacktests() {
     setButtonBusy(btCompare, true, '正在比较…');
     try {
-      const result = await mutate('/api/backtests/compare', 'POST', {run_ids: [...btState.selected]});
+      const result = await mutate('/api/v1/backtests/compare', 'POST', {run_ids: [...btState.selected]});
       const metricNames = [
         ['annual_return', '年化收益', percent], ['max_drawdown', '最大回撤', percent],
         ['sharpe', '夏普', number], ['information_ratio', '信息比率', number],
@@ -657,7 +657,7 @@
       setButtonBusy(submit, true, '正在创建…');
       btJob.innerHTML = '';
       try {
-        const run = await mutate('/api/backtests', 'POST', backtestPayload(btForm));
+        const run = await mutate('/api/v1/backtests', 'POST', backtestPayload(btForm));
         await loadBacktests();
         await openBacktest(run.id, {prompt:true});
       } catch (error) {
@@ -690,7 +690,7 @@
     if (!button) return;
     setButtonBusy(button, true, '正在停止…');
     try {
-      await mutate(`/api/backtests/${button.dataset.btCancel}/cancel`, 'POST');
+      await mutate(`/api/v1/backtests/${button.dataset.btCancel}/cancel`, 'POST');
       await openBacktest(button.dataset.btCancel);
     } catch (error) { renderError(btJob, error, '取消失败'); }
   });
@@ -708,7 +708,7 @@
     const button = form.querySelector('button');
     setButtonBusy(button, true, '正在创建…');
     try {
-      const account = await mutate(`/api/backtests/${btState.activeId}/paper-account`, 'POST', {
+      const account = await mutate(`/api/v1/backtests/${btState.activeId}/paper-account`, 'POST', {
         name: String(new FormData(form).get('name')).trim(), mode: 'manual',
       });
       btJob.innerHTML = `<div class="trading-success">已创建模拟账户“${escapeHtml(account.name)}”，默认需要人工确认提案。</div>`;
@@ -820,7 +820,7 @@
     pause.disabled = account.status === 'archived';
     paperOut.innerHTML = '<div class="trading-skeleton"></div>';
     try {
-      const payload = await api(`/api/paper/accounts/${accountId}/report`, {cache: 'no-store'});
+      const payload = await api(`/api/v1/paper/accounts/${accountId}/report`, {cache: 'no-store'});
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>确认只会排队，下一可用交易日开盘才撮合</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
@@ -831,7 +831,7 @@
 
   async function loadPaperAccounts(openFirst = true) {
     try {
-      const payload = await api('/api/paper/accounts', {cache: 'no-store'});
+      const payload = await api('/api/v1/paper/accounts', {cache: 'no-store'});
       paperState.accounts = payload.items || [];
       renderAccountList();
       if (paperState.activeId && paperState.accounts.some(item => item.id === paperState.activeId)) {
@@ -861,7 +861,7 @@
       const button = paperForm.querySelector('[type="submit"]');
       setButtonBusy(button, true, '正在创建…');
       try {
-        const account = await mutate('/api/paper/accounts', 'POST', paperPayload(paperForm));
+        const account = await mutate('/api/v1/paper/accounts', 'POST', paperPayload(paperForm));
         paperForm.reset();
         syncPaperFields();
         paperForm.hidden = true;
@@ -888,7 +888,7 @@
     setButtonBusy(button, true, '正在生成…');
     paperStatus.innerHTML = '<div class="trading-progress"><strong>正在计算最新收盘信号</strong><span>此步骤不会写入成交账本</span><div class="trading-progress-track"><i style="width:55%"></i></div></div>';
     try {
-      const result = await mutate(`/api/paper/accounts/${paperState.activeId}/proposals`, 'POST');
+      const result = await mutate(`/api/v1/paper/accounts/${paperState.activeId}/proposals`, 'POST');
       if (result.status === 'not_due') {
         paperStatus.innerHTML = `<div class="trading-warning">${escapeHtml(result.message)}</div>`;
       } else {
@@ -903,7 +903,7 @@
     const button = event.currentTarget;
     setButtonBusy(button, true, '正在检查开盘…');
     try {
-      const result = await mutate(`/api/paper/accounts/${paperState.activeId}/process`, 'POST');
+      const result = await mutate(`/api/v1/paper/accounts/${paperState.activeId}/process`, 'POST');
       const messages = {
         idle: '没有待撮合订单。', waiting_open: '下一交易日开盘价尚未到达，账本没有变化。',
         completed: `本轮已成交 ${result.filled?.length || 0} 笔。`,
@@ -922,7 +922,7 @@
     setButtonBusy(button, true, '正在保存…');
     try {
       const next = account.status === 'paused' ? 'active' : 'paused';
-      await mutate(`/api/paper/accounts/${account.id}`, 'PATCH', {status: next});
+      await mutate(`/api/v1/paper/accounts/${account.id}`, 'PATCH', {status: next});
       await loadPaperAccounts(false);
       await openPaperAccount(account.id);
       paperStatus.innerHTML = `<div class="trading-success">账户已${next === 'paused' ? '暂停，不再生成新提案' : '恢复'}。</div>`;
@@ -936,7 +936,7 @@
     const cycleId = button.closest('[data-cycle-id]').dataset.cycleId;
     setButtonBusy(button, true, '正在确认…');
     try {
-      await mutate(`/api/paper/cycles/${cycleId}/confirm`, 'POST');
+      await mutate(`/api/v1/paper/cycles/${cycleId}/confirm`, 'POST');
       paperStatus.innerHTML = '<div class="trading-success">提案已确认并进入待开盘；此刻仍未写入成交。</div>';
       await openPaperAccount(paperState.activeId);
     } catch (error) { renderError(paperStatus, error, '确认失败'); }

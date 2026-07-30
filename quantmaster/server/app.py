@@ -130,9 +130,9 @@ async def safe_validation_error(request: Request, exc: RequestValidationError):
             blocking=True,
         ),
     }
-    if (request.url.path.startswith("/api/settings") or
-            request.url.path.startswith("/api/news/sources") or
-            request.url.path.startswith("/api/automation/channels/")):
+    if (request.url.path.startswith("/api/v1/settings") or
+            request.url.path.startswith("/api/v1/news/sources") or
+            request.url.path.startswith("/api/v1/automation/channels/")):
         errors = [{key: value for key, value in item.items() if key not in {"input", "ctx"}}
                   for item in exc.errors()]
         content["detail"] = jsonable_encoder(errors)
@@ -159,12 +159,12 @@ async def request_context_and_migration_lock(request: Request, call_next):
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
-    allowed = (path in {"/api/health", "/api/release", "/"} or
-               path.startswith(("/static/", "/api/settings/migration")) or
-               (path == "/api/settings" and request.method == "GET"))
+    allowed = (path in {"/api/v1/health", "/api/v1/release", "/"} or
+               path.startswith(("/static/", "/api/v1/data/migrations")) or
+               (path == "/api/v1/settings" and request.method == "GET"))
     try:
         enforce_request_security(request)
-        if migration_manager.active and path.startswith("/api/") and not allowed:
+        if migration_manager.active and path.startswith("/api/v1/") and not allowed:
             problem = make_problem(
                 "data_migration_active",
                 severity="warning",
@@ -230,6 +230,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 from quantmaster.server.automation import router as automation_router  # noqa: E402
+from quantmaster.server.jobs import router as jobs_router  # noqa: E402
 from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
 from quantmaster.server.news import router as news_router  # noqa: E402
@@ -239,6 +240,7 @@ from quantmaster.server.trading import router as trading_router  # noqa: E402
 app.include_router(management_router)
 app.include_router(automation_router)
 app.include_router(lab_router)
+app.include_router(jobs_router)
 app.include_router(news_router)
 app.include_router(trading_router)
 app.include_router(research_router)
@@ -343,7 +345,7 @@ class StockAnalysisIn(ContractModel):
     query: str = Field(..., min_length=1, max_length=80)
 
 
-@app.post("/api/stock-analysis/stream")
+@app.post("/api/v1/research/stock-analysis/stream")
 def stock_analysis_stream(value: StockAnalysisIn, request: Request) -> StreamingResponse:
     """Web 个股分析入口；与飞书共用六维引擎和真实阶段进度。"""
     from quantmaster.analysis.stock import StockAnalysisService
@@ -424,7 +426,7 @@ def diagnostic_report() -> dict:
     return diagnostics()
 
 
-@app.get("/api/health")
+@app.get("/api/v1/health")
 def health() -> dict:
     from quantmaster.server.diagnostics import diagnostics
 
@@ -434,7 +436,7 @@ def health() -> dict:
     }
 
 
-@app.get("/api/release")
+@app.get("/api/v1/release")
 def release_info() -> dict:
     """前端版本入口使用的发布信息，与应用包版本保持一致。"""
     return {
@@ -721,7 +723,7 @@ def _market_overview_data(
     }
 
 
-@app.get("/api/market/overview")
+@app.get("/api/v1/market/overview")
 def market_overview(
     start: str | None = None, refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
@@ -729,7 +731,7 @@ def market_overview(
     return _market_overview_data(start, refresh=refresh)
 
 
-@app.get("/api/market/overview/stream")
+@app.get("/api/v1/market/overview/stream")
 def market_overview_stream(
     request: Request,
     start: str | None = None,
@@ -746,7 +748,7 @@ def market_overview_stream(
     return _progress_stream(task, _request_id(request))
 
 
-@app.get("/api/market/history/{symbol}")
+@app.get("/api/v1/market/history/{symbol}")
 def market_history(symbol: str, start: str = "2023-01-01", end: str | None = None,
                    frequency: str = "1d") -> dict:
     from quantmaster.data import load_bars
@@ -778,7 +780,7 @@ class RegimeRequest(ContractModel):
     history: int = Field(60, ge=7, le=3000)
 
 
-@app.post("/api/market/regime")
+@app.post("/api/v1/market/regime")
 def market_regime(req: RegimeRequest) -> dict:
     """当前/过去/未来市场状态，以及行业板块强弱。"""
     from quantmaster.data import load_panel
@@ -817,7 +819,7 @@ class SelectionRequest(ContractModel):
     save: bool = False
 
 
-@app.post("/api/selection/daily")
+@app.post("/api/v1/research/selection/daily")
 def selection_daily(req: SelectionRequest) -> dict:
     """收盘后生成适合次日执行的 1-7 日持有选股决策。"""
     from quantmaster.data import load_panel, load_stock_names
@@ -844,7 +846,7 @@ def selection_daily(req: SelectionRequest) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
-@app.get("/api/selection/history")
+@app.get("/api/v1/research/selection/history")
 def selection_history(
     universe: str | None = None, limit: int = 30, profile: str | None = None,
 ) -> dict:
@@ -879,7 +881,7 @@ class DecisionDashboardRequest(ContractModel):
     save: bool = True
 
 
-@app.post("/api/decision/dashboard")
+@app.post("/api/v1/research/decision/dashboard")
 def decision_dashboard(req: DecisionDashboardRequest) -> dict:
     """决策工作台：只加载一次行情，同时生成市场、板块、选股和历史快照。"""
     try:
@@ -994,7 +996,7 @@ def _decision_dashboard_data(
     return result
 
 
-@app.post("/api/decision/dashboard/stream")
+@app.post("/api/v1/research/decision/dashboard/stream")
 def decision_dashboard_stream(
     req: DecisionDashboardRequest, request: Request,
 ) -> StreamingResponse:
@@ -1006,7 +1008,7 @@ def decision_dashboard_stream(
 
 # ---------- 因子 ----------
 
-@app.get("/api/factors")
+@app.get("/api/v1/research/factors")
 def factors_list() -> dict:
     from quantmaster.ai.sentiment import list_news_factors
     from quantmaster.factors.fundamental import list_fundamental_factors
@@ -1040,7 +1042,7 @@ class FactorTestRequest(ContractModel):
     neutralize: bool = False          # 行业中性化（行业内去均值）
 
 
-@app.post("/api/factors/test")
+@app.post("/api/v1/research/factors/test")
 def factors_test(req: FactorTestRequest) -> dict:
     from quantmaster.data import load_panel
     from quantmaster.data.universe import load_universe
@@ -1094,7 +1096,7 @@ class BacktestRequest(ContractModel):
     allow_partial: bool = False
 
 
-@app.post("/api/backtest/run")
+@app.post("/api/v1/backtest/run")
 def backtest_run(req: BacktestRequest) -> dict:
     from quantmaster.backtest import BacktestConfig, FactorStrategy, full_report, run_backtest
     from quantmaster.backtest.strategy import MultiFactorStrategy
@@ -1206,7 +1208,7 @@ class ValidateRequest(ContractModel):
     n_splits: int = 4
 
 
-@app.post("/api/factors/validate")
+@app.post("/api/v1/research/factors/validate")
 def factors_validate(req: ValidateRequest) -> dict:
     """样本外验证：split 前训练、split 后验证，外加滚动分段稳定性。"""
     from quantmaster.backtest import train_test_ic, walk_forward_ic
@@ -1243,7 +1245,7 @@ class MineRequest(ContractModel):
     seed: int = 42
 
 
-@app.post("/api/mine/genetic")
+@app.post("/api/v1/research/mining/genetic")
 def mine_genetic(req: MineRequest) -> dict:
     from quantmaster.data import load_panel
     from quantmaster.data.universe import load_universe
@@ -1268,7 +1270,7 @@ class MineLLMRequest(ContractModel):
     rounds: int = 2
 
 
-@app.post("/api/mine/llm")
+@app.post("/api/v1/research/mining/llm")
 def mine_llm(req: MineLLMRequest) -> dict:
     from quantmaster.data import load_panel
     from quantmaster.data.universe import load_universe
@@ -1296,7 +1298,7 @@ class PaperRunRequest(ContractModel):
     initial_capital: float = 1_000_000.0
 
 
-@app.post("/api/paper/run")
+@app.post("/api/v1/paper/run")
 def paper_run(req: PaperRunRequest, request: Request) -> dict:
     """兼容入口：只生成提案，不再按收盘价直接写入成交。"""
     from quantmaster.backtest.paper_accounts import get_paper_service
@@ -1338,7 +1340,7 @@ def paper_run(req: PaperRunRequest, request: Request) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
-@app.get("/api/paper/report")
+@app.get("/api/v1/paper/report")
 def paper_report() -> dict:
     """模拟盘报告 + TWR 净值序列（行情只走本地缓存，不触网）。"""
     from quantmaster.data.storage import BarStore
@@ -1426,13 +1428,13 @@ def _asset_lists_payload() -> dict:
     return payload
 
 
-@app.get("/api/assets/lists")
+@app.get("/api/v1/portfolio/lists")
 def asset_lists_get() -> dict:
     """自选、关注和实盘持有；报价仅复用本地缓存。"""
     return _asset_lists_payload()
 
 
-@app.post("/api/assets/lists/{list_name}")
+@app.post("/api/v1/portfolio/lists/{list_name}")
 def asset_lists_add(
     list_name: Literal["favorites", "following"], item: AssetListIn,
 ) -> dict:
@@ -1445,7 +1447,7 @@ def asset_lists_add(
     return _asset_lists_payload()
 
 
-@app.delete("/api/assets/lists/{list_name}/{symbol}")
+@app.delete("/api/v1/portfolio/lists/{list_name}/{symbol}")
 def asset_lists_remove(
     list_name: Literal["favorites", "following"], symbol: str,
 ) -> dict:
@@ -1467,7 +1469,7 @@ class TradeIn(ContractModel):
     note: str = Field(default="", max_length=1000)
 
 
-@app.post("/api/ledger/trade")
+@app.post("/api/v1/portfolio/ledger/trade")
 def ledger_add_trade(trade: TradeIn) -> dict:
     from quantmaster.portfolio import Ledger, TradeRecord
 
@@ -1485,7 +1487,7 @@ class CashflowIn(ContractModel):
     note: str = Field(default="", max_length=1000)
 
 
-@app.post("/api/ledger/cashflow")
+@app.post("/api/v1/portfolio/ledger/cashflow")
 def ledger_add_cashflow(flow: CashflowIn) -> dict:
     from quantmaster.portfolio import Ledger
 
@@ -1496,14 +1498,14 @@ def ledger_add_cashflow(flow: CashflowIn) -> dict:
     return {"status": "ok"}
 
 
-@app.get("/api/ledger/report")
+@app.get("/api/v1/portfolio/ledger/report")
 def ledger_get_report() -> dict:
     from quantmaster.portfolio import Ledger, ledger_report
 
     return ledger_report(Ledger())
 
 
-@app.get("/api/ledger/trades")
+@app.get("/api/v1/portfolio/ledger/trades")
 def ledger_get_trades() -> dict:
     from quantmaster.portfolio import Ledger
 
@@ -1511,7 +1513,7 @@ def ledger_get_trades() -> dict:
     return {"trades": df.to_dict(orient="records")}
 
 
-@app.get("/api/ledger/nav")
+@app.get("/api/v1/portfolio/ledger/nav")
 def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     """实盘每日净值（TWR）与基准对比。行情走本地缓存，缺失标的按最近成交价估值。"""
     from quantmaster.data import load_history

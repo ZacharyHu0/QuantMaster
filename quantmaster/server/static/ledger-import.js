@@ -81,7 +81,7 @@
       const body = new FormData();
       body.append('file', fileInput.files[0]);
       if (mapping) body.append('mapping', JSON.stringify(mapping));
-      const data = await window.QuantMasterManagement.request('/api/ledger/import/preview', {method: 'POST', body});
+      const data = await window.QuantMasterManagement.request('/api/v1/portfolio/ledger/import/preview', {method: 'POST', body});
       if (resetMapping) renderMapping(data);
       renderPreview(data);
     } catch (error) {
@@ -117,7 +117,7 @@
       body.append('mapping', JSON.stringify(selectedMapping()));
       body.append('strict', document.querySelector('[name="csv-mode"]:checked').value === 'strict');
       body.append('include_duplicates', document.getElementById('csv-duplicates').checked);
-      const data = await window.QuantMasterManagement.request('/api/ledger/import/submit', {method: 'POST', body});
+      const data = await window.QuantMasterManagement.request('/api/v1/portfolio/ledger/import/submit', {method: 'POST', body});
       failedRows = data.failed_rows || [];
       status.textContent = `已导入 ${data.imported} 笔；跳过坏行 ${data.skipped_invalid}，跳过重复 ${data.skipped_duplicates}。`;
       setStep(3);

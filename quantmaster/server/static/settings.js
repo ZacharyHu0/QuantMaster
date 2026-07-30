@@ -161,7 +161,7 @@
   async function loadSettings(force = false) {
     if (state.loaded && !force) return;
     try {
-      const data = await request('/api/settings');
+      const data = await request('/api/v1/settings');
       state.csrf = data.csrf_token;
       state.config = data;
       state.loaded = true;
@@ -337,7 +337,7 @@
       if (result) { result.className = 'check-result'; result.textContent = '检测中…'; }
       button.disabled = true;
       try {
-        const data = await request(`/api/settings/check/${kind}`, {
+        const data = await request(`/api/v1/settings/check/${kind}`, {
           method: 'POST', body: {...documentPayload(false), secrets: documentPayload(true).secrets},
         });
         renderCheck(kind, data);
@@ -394,11 +394,11 @@
     state.saveQueued = false;
     setSaveState('saving', '正在校验…');
     try {
-      const validated = await request('/api/settings/validate', {method: 'POST', body: plain});
+      const validated = await request('/api/v1/settings/validate', {method: 'POST', body: plain});
       setSaveState('saving', '正在自动保存并应用…');
       const update = {...validated.normalized, secrets: secretPayload.secrets,
         allow_plaintext_secrets: secretPayload.allow_plaintext_secrets};
-      const result = await request('/api/settings', {method: 'PUT', body: update});
+      const result = await request('/api/v1/settings', {method: 'PUT', body: update});
 
       if (result.settings) {
         state.config = {...result.settings, csrf_token: state.csrf, runtime: result.runtime};
@@ -470,7 +470,7 @@
     if (!state.loaded) return;
     const runtimeState = document.getElementById('automation-runtime-state');
     try {
-      const data = await request('/api/automation/overview');
+      const data = await request('/api/v1/automation/overview');
       const runtimeLabels = {running: '运行中', standby: '等待调度租约', disabled: '已停用', degraded: '运行异常'};
       runtimeState.textContent = runtimeLabels[data.runtime] || data.runtime;
       runtimeState.className = `state-pill ${data.runtime === 'running' ? 'buy' : ''}`;
@@ -484,7 +484,7 @@
       if (feishu && document.activeElement !== appId) appId.value = feishu.account_id || '';
       document.getElementById('automation-enable-connect').hidden = !(feishu && !data.enabled);
       document.getElementById('feishu-remove').disabled = !feishu;
-      const runtime = await request('/api/settings/runtime');
+      const runtime = await request('/api/v1/settings/runtime');
       renderRuntime(runtime);
     } catch (error) {
       runtimeState.textContent = `状态不可用：${error.message}`;
@@ -501,7 +501,7 @@
     const verifyCode = document.getElementById('weixin-verify-code').value.trim();
     try {
       const data = await request(
-        `/api/automation/channels/weixin/login/${encodeURIComponent(sessionId)}` +
+        `/api/v1/automation/channels/weixin/login/${encodeURIComponent(sessionId)}` +
         `?verify_code=${encodeURIComponent(verifyCode)}`
       );
       const labels = {
@@ -533,7 +533,7 @@
     status.textContent = '正在申请二维码…';
     panel.hidden = false;
     try {
-      const data = await request('/api/automation/channels/weixin/login', {method: 'POST'});
+      const data = await request('/api/v1/automation/channels/weixin/login', {method: 'POST'});
       const image = document.getElementById('weixin-login-qr');
       image.src = data.qrcode_svg || data.qrcode_url;
       image.hidden = !image.src;
@@ -557,7 +557,7 @@
     button.disabled = true;
     status.textContent = '正在验证凭据并启动长连接…';
     try {
-      const data = await request('/api/automation/channels/feishu/config', {
+      const data = await request('/api/v1/automation/channels/feishu/config', {
         method: 'POST', body: {app_id: appId, app_secret: secretInput.value},
       });
       secretInput.value = '';
@@ -595,7 +595,7 @@
     button.disabled = true;
     status.textContent = '正在逐项检测飞书接入…';
     try {
-      const data = await request('/api/automation/channels/feishu/check', {method: 'POST'});
+      const data = await request('/api/v1/automation/channels/feishu/check', {method: 'POST'});
       renderFeishuDiagnostic(data);
       status.textContent = data.status === 'success'
         ? '飞书接入链路全部通过。'
@@ -617,7 +617,7 @@
     event.currentTarget.disabled = true;
     const status = document.getElementById('feishu-connect-status');
     try {
-      const data = await request('/api/automation/channels/feishu/config', {method: 'DELETE'});
+      const data = await request('/api/v1/automation/channels/feishu/config', {method: 'DELETE'});
       document.getElementById('feishu-app-id').value = '';
       document.getElementById('feishu-diagnostic').hidden = true;
       status.textContent = (data.warnings || []).length
@@ -643,7 +643,7 @@
   async function loadSnapshots() {
     const container = document.getElementById('snapshot-list');
     try {
-      const data = await request('/api/settings/snapshots');
+      const data = await request('/api/v1/settings/snapshots');
       if (!data.snapshots.length) {
         container.innerHTML = '<div class="msg">尚无快照。成功保存设置后会自动创建。</div>';
         return;
@@ -662,7 +662,7 @@
     event.preventDefault();
     const input = event.target.elements.name;
     try {
-      await request('/api/settings/snapshots', {method: 'POST', body: {name: input.value}});
+      await request('/api/v1/settings/snapshots', {method: 'POST', body: {name: input.value}});
       input.value = '';
       await loadSnapshots();
     } catch (error) { input.setCustomValidity(error.message); input.reportValidity(); input.setCustomValidity(''); }
@@ -673,7 +673,7 @@
     const deleteButton = event.target.closest('[data-snapshot-delete]');
     if (deleteButton) {
       if (!window.confirm('永久删除这个手动快照？')) return;
-      await request(`/api/settings/snapshots/${deleteButton.dataset.snapshotDelete}`, {method: 'DELETE'});
+      await request(`/api/v1/settings/snapshots/${deleteButton.dataset.snapshotDelete}`, {method: 'DELETE'});
       await loadSnapshots();
       return;
     }
@@ -681,7 +681,7 @@
     const id = diffButton.dataset.snapshotDiff;
     const panel = document.getElementById('snapshot-diff');
     try {
-      const data = await request(`/api/settings/snapshots/${id}/diff`);
+      const data = await request(`/api/v1/settings/snapshots/${id}/diff`);
       panel.hidden = false;
       panel.innerHTML = `<div class="group-heading"><div><h4>回滚前差异</h4><p>${data.diff.length} 个字段会改变，凭据与业务数据不会参与。</p></div>
         <button class="primary" type="button" data-snapshot-rollback="${html(id)}">确认回滚</button></div>
@@ -696,7 +696,7 @@
     if (!button) return;
     button.disabled = true;
     try {
-      await request(`/api/settings/snapshots/${button.dataset.snapshotRollback}/rollback`, {method: 'POST'});
+      await request(`/api/v1/settings/snapshots/${button.dataset.snapshotRollback}/rollback`, {method: 'POST'});
       state.loaded = false;
       await loadSettings(true);
       await loadSnapshots();
@@ -725,7 +725,7 @@
     const start = document.getElementById('data-refresh-start');
     if (!start.value) start.value = state.config?.lab?.start || '';
     try {
-      const data = await request('/api/settings/universes');
+      const data = await request('/api/v1/settings/universes');
       const select = document.getElementById('data-refresh-universe');
       const current = select.value || state.config?.lab?.universe || '';
       select.innerHTML = (data.universes || []).map(item =>
@@ -737,7 +737,7 @@
     }
     resetDataRefreshPreview();
     try {
-      const latest = await request('/api/settings/data-refresh/latest');
+      const latest = await request('/api/v1/data/refresh/latest');
       if (latest.job) {
         renderDataRefresh(latest.job);
         if (['running', 'cancelling'].includes(latest.job.status)) pollDataRefresh(latest.job.id);
@@ -792,7 +792,7 @@
   async function pollDataRefresh(id) {
     clearTimeout(state.dataRefreshTimer);
     try {
-      const task = await request(`/api/settings/data-refresh/${id}`);
+      const task = await request(`/api/v1/data/refresh/${id}`);
       renderDataRefresh(task);
       if (['running', 'cancelling'].includes(task.status)) {
         state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
@@ -811,7 +811,7 @@
   document.getElementById('data-refresh-preview').addEventListener('click', async event => {
     event.target.disabled = true;
     try {
-      const preview = await request('/api/settings/data-refresh/preview', {
+      const preview = await request('/api/v1/data/refresh/preview', {
         method: 'POST', body: dataRefreshPayload(),
       });
       state.dataRefreshPreview = preview;
@@ -836,7 +836,7 @@
     if (!window.confirm(`确认增量同步 ${state.dataRefreshPreview.total} 个标的？已有缓存只请求尾部重叠区间。`)) return;
     event.target.disabled = true;
     try {
-      const task = await request('/api/settings/data-refresh', {
+      const task = await request('/api/v1/data/refresh', {
         method: 'POST', body: dataRefreshPayload(),
       });
       document.getElementById('data-refresh-confirm').hidden = true;
@@ -851,7 +851,7 @@
   document.getElementById('data-refresh-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.jobId;
     if (!id) return;
-    const task = await request(`/api/settings/data-refresh/${id}/cancel`, {method: 'POST'});
+    const task = await request(`/api/v1/data/refresh/${id}/cancel`, {method: 'POST'});
     renderDataRefresh(task);
     pollDataRefresh(id);
   });
@@ -861,7 +861,7 @@
     if (!id) return;
     event.target.disabled = true;
     try {
-      const task = await request(`/api/settings/data-refresh/${id}/resume`, {method: 'POST'});
+      const task = await request(`/api/v1/data/refresh/${id}/resume`, {method: 'POST'});
       renderDataRefresh(task);
       pollDataRefresh(id);
     } finally { event.target.disabled = false; }
@@ -904,9 +904,9 @@
     if (!end.value) end.value = new Date().toISOString().slice(0, 10);
     try {
       const [catalog, capabilities, jobs] = await Promise.all([
-        request('/api/research/data/catalog'),
-        request('/api/research/data/capabilities'),
-        request('/api/research/data/jobs?limit=1'),
+        request('/api/v1/research/data/catalog'),
+        request('/api/v1/research/data/capabilities'),
+        request('/api/v1/research/data/jobs?limit=1'),
       ]);
       state.researchCatalog = catalog;
       const datasetSelect = document.getElementById('research-datasets');
@@ -962,7 +962,7 @@
   async function pollResearchJob(id) {
     clearTimeout(state.researchTimer);
     try {
-      const task = await request(`/api/research/data/jobs/${id}`);
+      const task = await request(`/api/v1/research/data/jobs/${id}`);
       renderResearchJob(task);
       if (['running', 'cancelling'].includes(task.status)) {
         state.researchTimer = setTimeout(() => pollResearchJob(id), 2000);
@@ -986,7 +986,7 @@
     try {
       const payload = researchPayload();
       if (!payload.assets.length) throw new Error('至少选择一种资产');
-      const plan = await request('/api/research/data/plans', {method: 'POST', body: payload});
+      const plan = await request('/api/v1/research/data/plans', {method: 'POST', body: payload});
       state.researchPreview = plan;
       const size = plan.estimated_bytes >= 1048576
         ? `${(plan.estimated_bytes / 1048576).toFixed(1)} MiB` : `${plan.estimated_bytes || 0} B`;
@@ -1007,7 +1007,7 @@
     if (!state.researchPreview) return;
     event.target.disabled = true;
     try {
-      const task = await request('/api/research/data/jobs', {method: 'POST', body: researchPayload()});
+      const task = await request('/api/v1/research/data/jobs', {method: 'POST', body: researchPayload()});
       document.getElementById('research-confirm').hidden = true;
       renderResearchJob(task);
       pollResearchJob(task.id);
@@ -1018,7 +1018,7 @@
   document.getElementById('research-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.jobId;
     if (!id) return;
-    renderResearchJob(await request(`/api/research/data/jobs/${id}/cancel`, {method: 'POST'}));
+    renderResearchJob(await request(`/api/v1/research/data/jobs/${id}/cancel`, {method: 'POST'}));
     pollResearchJob(id);
   });
   document.getElementById('research-resume').addEventListener('click', async event => {
@@ -1026,7 +1026,7 @@
     if (!id) return;
     event.target.disabled = true;
     try {
-      renderResearchJob(await request(`/api/research/data/jobs/${id}/resume`, {method: 'POST'}));
+      renderResearchJob(await request(`/api/v1/research/data/jobs/${id}/resume`, {method: 'POST'}));
       pollResearchJob(id);
     } finally { event.target.disabled = false; }
   });
@@ -1034,7 +1034,7 @@
   async function pollMigration(id) {
     clearTimeout(state.migrationTimer);
     try {
-      const task = await request(`/api/settings/migration/${id}`);
+      const task = await request(`/api/v1/data/migrations/${id}`);
       const root = document.getElementById('migration-progress');
       root.hidden = false;
       root.style.setProperty('--migration-progress', task.progress / 100);
@@ -1060,7 +1060,7 @@
     if (!target) return;
     if (mode === 'switch' && !window.confirm('仅切换不会复制任何数据。确认目标已包含完整数据？')) return;
     try {
-      const task = await request('/api/settings/migration', {method: 'POST', body: {target, mode}});
+      const task = await request('/api/v1/data/migrations', {method: 'POST', body: {target, mode}});
       document.getElementById('migration-cancel').hidden = false;
       document.getElementById('migration-cancel').dataset.taskId = task.id;
       pollMigration(task.id);
@@ -1073,7 +1073,7 @@
 
   document.getElementById('migration-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.taskId;
-    if (id) await request(`/api/settings/migration/${id}/cancel`, {method: 'POST'});
+    if (id) await request(`/api/v1/data/migrations/${id}/cancel`, {method: 'POST'});
   });
 
   async function openSettings(section = 'llm') {

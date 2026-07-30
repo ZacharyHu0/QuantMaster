@@ -282,7 +282,7 @@ def test_annotation_stream_api_contract(monkeypatch):
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
     with client.stream(
-        "POST", "/api/news/reanalyze/stream",
+        "POST", "/api/v1/news/reanalyze/stream",
         json={"limit": 10, "batch_size": 2}, headers={"X-CSRF-Token": token},
     ) as response:
         events = [json.loads(line) for line in response.iter_lines() if line]
@@ -293,13 +293,13 @@ def test_annotation_stream_api_contract(monkeypatch):
 
 def test_news_api_csrf_and_ui_contract():
     client = TestClient(app)
-    assert client.get("/api/news/sources").status_code == 200
-    assert client.post("/api/news/sources", json={"source": source_value()}).status_code == 403
+    assert client.get("/api/v1/news/sources").status_code == 200
+    assert client.post("/api/v1/news/sources", json={"source": source_value()}).status_code == 403
 
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
     response = client.post(
-        "/api/news/sources", json={"source": source_value()},
+        "/api/v1/news/sources", json={"source": source_value()},
         headers={"X-CSRF-Token": token},
     )
     assert response.status_code == 200

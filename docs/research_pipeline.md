@@ -87,7 +87,7 @@ qm backtest \
 
 ## 任务、失败与恢复
 
-- 设置中心和 `POST /api/research/data/jobs` 在后台执行已确认的计划；客户端每 2 秒读取持久化进度。
+- 设置中心和 `POST /api/v1/research/data/jobs` 在后台执行已确认的计划；客户端每 2 秒读取持久化进度。
 - 取消在分区边界生效，已原子落盘的分区保留；服务重启时正在运行的任务标记为 `interrupted`。
 - `qm data resume <job_id>` 只重做尚未成功的任务。部分数据集失败但其他产物完成时，状态是
   `completed_with_errors`，不会伪装为全部成功。

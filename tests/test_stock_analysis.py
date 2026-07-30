@@ -187,7 +187,7 @@ def test_stock_analysis_web_stream_uses_shared_engine(monkeypatch):
     monkeypatch.setattr("quantmaster.analysis.stock.StockAnalysisService", FakeAnalyzer)
     client = TestClient(app)
     client.headers["X-CSRF-Token"] = client.get("/api/v1/session").json()["csrf_token"]
-    response = client.post("/api/stock-analysis/stream", json={"query": "600519"})
+    response = client.post("/api/v1/research/stock-analysis/stream", json={"query": "600519"})
     events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
     assert response.status_code == 200

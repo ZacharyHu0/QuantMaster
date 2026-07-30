@@ -522,14 +522,14 @@ def test_research_management_api_is_local_and_csrf_protected(monkeypatch):
         ),
     )
     client = TestClient(app)
-    settings = client.get("/api/settings")
+    settings = client.get("/api/v1/settings")
     token = settings.json()["csrf_token"]
-    catalog = client.get("/api/research/data/catalog")
+    catalog = client.get("/api/v1/research/data/catalog")
     assert catalog.status_code == 200
     assert len(catalog.json()["specs"]) == 63
-    assert client.post("/api/research/data/plans", json={}).status_code == 403
+    assert client.post("/api/v1/research/data/plans", json={}).status_code == 403
     planned = client.post(
-        "/api/research/data/plans",
+        "/api/v1/research/data/plans",
         headers={"X-CSRF-Token": token},
         json={
             "start": "2024-01-02", "end": "2024-01-03", "assets": ["stock"],

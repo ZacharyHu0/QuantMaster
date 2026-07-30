@@ -49,7 +49,7 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
     service = type("Service", (), {"store": Store()})()
     monkeypatch.setattr(trading, "_service", lambda: service)
 
-    response = TestClient(app).get("/api/backtests/export-strict/export")
+    response = TestClient(app).get("/api/v1/backtests/export-strict/export")
 
     assert response.status_code == 200
     assert response.json() == {"metric": None, "values": [None]}
@@ -417,11 +417,11 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
         "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
         "benchmark": None, "initial_capital": 100_000,
     }
-    assert client.post("/api/backtests", json=payload).status_code == 403
+    assert client.post("/api/v1/backtests", json=payload).status_code == 403
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
     created = client.post(
-        "/api/backtests", json=payload, headers={"X-CSRF-Token": token},
+        "/api/v1/backtests", json=payload, headers={"X-CSRF-Token": token},
     )
     assert created.status_code == 202
     assert created.json()["status"] == "queued"

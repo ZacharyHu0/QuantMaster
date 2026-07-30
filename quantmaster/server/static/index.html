@@ -1597,13 +1597,13 @@ async function protectedFetch(path, options = {}) {
 function sourceForPath(path) {
   const route = apiRoute(path);
   const sources = [
-    ['/api/market', '市场行情'], ['/api/decision', '每日决策'],
-    ['/api/factors', '因子研究'], ['/api/backtest', '策略回测'],
-    ['/api/mining', '因子挖掘'], ['/api/paper', '模拟交易'],
-    ['/api/news', '资讯分析'], ['/api/ledger', '实盘账本'],
-    ['/api/stock-analysis', '个股分析'],
-    ['/api/assets', '我的标的'], ['/api/settings', '设置中心'],
-    ['/api/automation', '自动任务'], ['/api/lab', 'Quant Lab'],
+    ['/api/v1/market', '市场行情'], ['/api/v1/research/decision', '每日决策'],
+    ['/api/v1/research/factors', '因子研究'], ['/api/v1/backtests', '策略回测'],
+    ['/api/v1/research/mining', '因子挖掘'], ['/api/v1/paper', '模拟交易'],
+    ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '实盘账本'],
+    ['/api/v1/research/stock-analysis', '个股分析'],
+    ['/api/v1/portfolio', '我的标的'], ['/api/v1/settings', '设置中心'],
+    ['/api/v1/automation', '自动任务'], ['/api/v1/lab', 'Quant Lab'],
   ];
   return sources.find(([prefix]) => route.startsWith(prefix))?.[1] || '本地服务';
 }
@@ -1728,7 +1728,7 @@ async function api(path, opts = {}) {
       key:requestKey,
     });
   } else runtimeInfo.resolve(requestKey);
-  if (route !== '/api/health') ingestResponseProblems(data, requestKey);
+  if (route !== '/api/v1/health') ingestResponseProblems(data, requestKey);
   return data;
 }
 function post(path, body) {
@@ -1987,7 +1987,7 @@ window.QuantMasterProblemDialog = operationProblemDialog;
 async function refreshBackendHealth() {
   if (document.visibilityState === 'hidden') return;
   try {
-    const data = await api('/api/health', {cache:'no-store'});
+    const data = await api('/api/v1/health', {cache:'no-store'});
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
@@ -1995,7 +1995,7 @@ async function refreshBackendHealth() {
       title:'无法读取后台状态', message:error?.message || '本地服务未响应',
       action:'确认 QuantMaster 服务仍在运行，然后重试。',
     });
-    runtimeInfo.resolve('request:GET:/api/health');
+    runtimeInfo.resolve('request:GET:/api/v1/health');
     runtimeInfo.sync('health', [problem]);
   }
 }
@@ -2309,9 +2309,9 @@ async function streamJson(path, opts, onProgress) {
   const embeddedDate = trigger.dataset.releaseDate;
   const hasEmbeddedSummary = embeddedVersion && !embeddedVersion.includes('%%QM_');
   if (hasEmbeddedSummary) renderSummary({version:embeddedVersion, release_date:embeddedDate});
-  else api('/api/health').then(renderSummary).catch(() => {});
+  else api('/api/v1/health').then(renderSummary).catch(() => {});
 
-  api('/api/release').then(data => {
+  api('/api/v1/release').then(data => {
     renderSummary(data);
     renderReleases(data.releases);
   }).catch(() => {
@@ -2443,7 +2443,7 @@ async function loadAssetLists(showError = true) {
   if (assetListsLoading) return assetListsLoading;
   assetListsError = '';
   if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
-  assetListsLoading = api('/api/assets/lists');
+  assetListsLoading = api('/api/v1/portfolio/lists');
   try {
     acceptAssetLists(await assetListsLoading);
     return assetListsData;
@@ -2470,7 +2470,7 @@ document.getElementById('asset-add-form').addEventListener('submit', async event
   const values = new FormData(form), listName = values.get('list_name');
   button.disabled = true;
   try {
-    acceptAssetLists(await post(`/api/assets/lists/${encodeURIComponent(listName)}`, {
+    acceptAssetLists(await post(`/api/v1/portfolio/lists/${encodeURIComponent(listName)}`, {
       symbol:values.get('symbol'), name:values.get('name'),
     }));
     activeAssetList = listName;
@@ -2487,7 +2487,7 @@ document.getElementById('asset-list').addEventListener('click', async event => {
   if (remove) {
     remove.disabled = true;
     try {
-      acceptAssetLists(await api(`/api/assets/lists/${remove.dataset.removeAsset}/${encodeURIComponent(remove.dataset.symbol)}`, {method:'DELETE'}));
+      acceptAssetLists(await api(`/api/v1/portfolio/lists/${remove.dataset.removeAsset}/${encodeURIComponent(remove.dataset.symbol)}`, {method:'DELETE'}));
       queueMarketReload();
     } catch (error) { remove.disabled = false; reportLocalError('我的标的', '移除标的失败', error); }
     return;
@@ -2662,7 +2662,7 @@ async function loadMarket(refresh = 'auto') {
   const tracker = createLoadProgress(container, '准备市场数据', 'market');
   const renderer = createMarketStreamRenderer(tracker.results, {'A股指数':majorIndexes});
   try {
-    const data = await streamJson(`/api/market/overview/stream?refresh=${encodeURIComponent(refresh)}`, {}, event => {
+    const data = await streamJson(`/api/v1/market/overview/stream?refresh=${encodeURIComponent(refresh)}`, {}, event => {
       tracker.update(event);
       const partial = event.partial;
       if (partial?.kind === 'market_item') {
@@ -2704,7 +2704,7 @@ function klineStartDate(frequency) {
 }
 
 async function loadKlineSeries(symbol, frequency) {
-  const data = await api('/api/market/history/' + encodeURIComponent(symbol)
+  const data = await api('/api/v1/market/history/' + encodeURIComponent(symbol)
     + `?frequency=${encodeURIComponent(frequency)}&start=${klineStartDate(frequency)}`);
   if (!Array.isArray(data.kline) || !data.kline.length) {
     throw new Error('所选周期暂无本地或远端数据');
@@ -3032,8 +3032,8 @@ async function toggleDecisionAsset(listName) {
   updateDecisionAssetButtons();
   try {
     const data = active
-      ? await api(`/api/assets/lists/${listName}/${encodeURIComponent(symbol)}`, {method:'DELETE'})
-      : await post(`/api/assets/lists/${listName}`, {symbol, name});
+      ? await api(`/api/v1/portfolio/lists/${listName}/${encodeURIComponent(symbol)}`, {method:'DELETE'})
+      : await post(`/api/v1/portfolio/lists/${listName}`, {symbol, name});
     acceptAssetLists(data);
     queueMarketReload();
   } catch (error) {
@@ -3233,7 +3233,7 @@ async function loadDecision(form) {
       universe:fd.get('universe'), start:fd.get('start'), horizon:+fd.get('horizon'),
       profile:fd.get('profile') || 'risk_adjusted', top_n:+fd.get('top_n'), sector_top:10, history:2600, save:true,
     };
-    const data = await streamJson('/api/decision/dashboard/stream', {
+    const data = await streamJson('/api/v1/research/decision/dashboard/stream', {
       method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
     }, event => {
       tracker.update(event);
@@ -3308,7 +3308,7 @@ document.getElementById('decision-out').addEventListener('click', e => {
 /* ---------- 因子 ---------- */
 async function loadFactorList() {
   try {
-    const data = await api('/api/factors');
+    const data = await api('/api/v1/research/factors');
     document.getElementById('factor-list').innerHTML =
       data.factors.map(f => `<option value="${esc(f.name)}">${esc(f.description)}</option>`).join('');
     window.QuantMasterFactorCatalog = data.factors;
@@ -3324,7 +3324,7 @@ document.getElementById('factor-form').onsubmit = async e => {
   out.innerHTML = '<div class="msg">计算中…（首次需拉取行情）</div>';
   try {
     const fd = new FormData(form);
-    const data = await post('/api/factors/test', {
+    const data = await post('/api/v1/research/factors/test', {
       expression: fd.get('expression'), universe: fd.get('universe'),
       start: fd.get('start'), quantiles: +fd.get('quantiles'),
       neutralize: form.querySelector('[name=neutralize]').checked });
@@ -3368,7 +3368,7 @@ document.getElementById('validate-form').onsubmit = async e => {
   try {
     const ff = new FormData(document.getElementById('factor-form'));
     const fd = new FormData(form);
-    const r = await post('/api/factors/validate', {
+    const r = await post('/api/v1/research/factors/validate', {
       expression: ff.get('expression'), universe: ff.get('universe'), start: ff.get('start'),
       split: fd.get('split'), n_splits: +fd.get('n_splits') });
     const verdictColor = r.verdict === '稳健' ? 'up' : (r.verdict === '衰减' ? '' : 'down');
@@ -3433,7 +3433,7 @@ document.getElementById('bt-form').onsubmit = async e => {
     let data;
     while (!data) {
       try {
-        data = await post('/api/backtest/run', body);
+        data = await post('/api/v1/backtest/run', body);
       } catch (error) {
         if (error?.problem) {
           const continueWithPartial = await operationProblemDialog.open(error.problem, error.dataQuality);
@@ -3526,7 +3526,7 @@ document.getElementById('gp-form').onsubmit = async e => {
   out.innerHTML = '<div class="msg">遗传规划进化中，视参数可能需要几分钟…</div>';
   try {
     const fd = new FormData(form);
-    const data = await post('/api/mine/genetic', {
+    const data = await post('/api/v1/research/mining/genetic', {
       universe: fd.get('universe'), start: fd.get('start'),
       generations: +fd.get('generations'), population: +fd.get('population') });
     out.innerHTML = renderMined(data.factors, f => `<td>fitness=${(+f.fitness).toFixed(4)}</td>`);
@@ -3539,7 +3539,7 @@ document.getElementById('llm-form').onsubmit = async e => {
   out.innerHTML = '<div class="msg">LLM 生成并验证中…</div>';
   try {
     const fd = new FormData(form);
-    const data = await post('/api/mine/llm', {
+    const data = await post('/api/v1/research/mining/llm', {
       universe: fd.get('universe'), start: fd.get('start'), n: +fd.get('n'), rounds: +fd.get('rounds') });
     out.innerHTML = renderMined(data.factors, f =>
       `<td>${f.valid ? '✅ 达标' : '—'} ${esc(f.rationale || '')}</td>`);
@@ -3551,7 +3551,7 @@ document.getElementById('llm-form').onsubmit = async e => {
 async function loadPaper() {
   const out = document.getElementById('paper-out');
   try {
-    const data = await api('/api/paper/report');
+    const data = await api('/api/v1/paper/report');
     const r = data.report;
     if (!r.trade_count) {
       out.innerHTML = '<div class="msg">模拟盘还没有交易记录——上方选好因子后点「执行一次调仓」。</div>';
@@ -3592,7 +3592,7 @@ document.getElementById('paper-form').onsubmit = async e => {
   out.innerHTML = '<div class="msg">按最新信号调仓中…（需要行情数据，首次较慢）</div>';
   try {
     const fd = new FormData(form);
-    const result = await post('/api/paper/run', {
+    const result = await post('/api/v1/paper/run', {
       strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'),
       top_n: +fd.get('top_n'), holding_days:+fd.get('holding_days'), rebalance: fd.get('rebalance') });
     await loadPaper();
@@ -3613,7 +3613,7 @@ document.getElementById('paper-form').onsubmit = async e => {
 async function loadNews() {
   const out = document.getElementById('news-out');
   try {
-    const data = await api('/api/news?limit=80');
+    const data = await api('/api/v1/news?limit=80');
     if (!data.items.length) { out.innerHTML = '<div class="msg">尚无数据，点击上方抓取。</div>'; return; }
     out.innerHTML = `<table><thead><tr><th>时间</th><th>摘要/内容</th><th>类型</th><th>情绪</th><th>相关标的</th></tr></thead>
       <tbody>${data.items.map(n => `<tr>
@@ -3629,7 +3629,7 @@ document.getElementById('news-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   try {
     const skip = form.querySelector('[name=skip_llm]').checked;
-    await post('/api/news/crawl?skip_llm=' + skip, {});
+    await post('/api/v1/news/crawl?skip_llm=' + skip, {});
     await loadNews();
   } catch (err) { document.getElementById('news-out').innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);
@@ -3638,7 +3638,7 @@ document.getElementById('news-form').onsubmit = async e => {
 /* ---------- 实盘 ---------- */
 async function loadLedgerNav() {
   try {
-    const r = await api('/api/ledger/nav');
+    const r = await api('/api/v1/portfolio/ledger/nav');
     if (!r.dates || !r.dates.length) return;
     document.getElementById('ledger-nav-panel').style.display = '';
     const twr = r.dates.map((d, i) => [d, r.twr[i]]);
@@ -3659,7 +3659,7 @@ async function loadLedger() {
   loadLedgerNav();
   const out = document.getElementById('ledger-out');
   try {
-    const r = await api('/api/ledger/report');
+    const r = await api('/api/v1/portfolio/ledger/report');
     out.innerHTML = `
       <div class="cards">
         <div class="card"><div class="k">总资产</div><div class="v">${r.total_assets.toLocaleString()}</div></div>
@@ -3688,7 +3688,7 @@ document.getElementById('trade-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   try {
     const fd = new FormData(form);
-    await post('/api/ledger/trade', { date: fd.get('date'), symbol: fd.get('symbol'),
+    await post('/api/v1/portfolio/ledger/trade', { date: fd.get('date'), symbol: fd.get('symbol'),
       side: fd.get('side'), price: +fd.get('price'), shares: +fd.get('shares'), fee: +fd.get('fee') });
     await loadLedger();
     await loadAssetLists(false);
@@ -3699,7 +3699,7 @@ document.getElementById('cash-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   try {
     const fd = new FormData(form);
-    await post('/api/ledger/cashflow', { date: fd.get('date'), amount: +fd.get('amount'), kind: fd.get('kind') });
+    await post('/api/v1/portfolio/ledger/cashflow', { date: fd.get('date'), amount: +fd.get('amount'), kind: fd.get('kind') });
     await loadLedger();
   } catch (err) { reportLocalError('实盘账本', '资金流水未能保存', err); }
   busy(form, false);

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "quantmaster"
+STATIC_ROOT = PACKAGE_ROOT / "server" / "static"
 
 
 def _module(path: Path) -> str:
@@ -87,3 +89,15 @@ def test_production_sqlite_connections_use_shared_runtime_factory():
     assert not violations, "direct sqlite3.connect bypasses runtime policy:\n" + "\n".join(
         violations
     )
+
+
+def test_frontend_does_not_reference_unversioned_api_routes():
+    pattern = re.compile(r"/api/(?!v1(?:/|$))")
+    violations = []
+    for path in STATIC_ROOT.rglob("*"):
+        if path.suffix not in {".html", ".js"}:
+            continue
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                violations.append(f"{path.relative_to(PACKAGE_ROOT)}:{line_number}")
+    assert not violations, "frontend references removed API routes:\n" + "\n".join(violations)

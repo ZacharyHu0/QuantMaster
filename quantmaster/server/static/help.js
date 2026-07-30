@@ -97,7 +97,7 @@
   async function fetchTradeSettings() {
     const status = document.getElementById('help-settings-status');
     try {
-      const response = await fetch('/api/settings', {headers: {'Accept': 'application/json'}});
+      const response = await fetch('/api/v1/settings', {headers: {'Accept': 'application/json'}});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       const incoming = payload?.trade;

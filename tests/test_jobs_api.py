@@ -1,0 +1,57 @@
+"""Unified v1 job API and destructive legacy-route migration."""
+
+from fastapi.testclient import TestClient
+
+from quantmaster.backtest.spec import BacktestSpec
+from quantmaster.backtest.workbench import get_backtest_worker
+from quantmaster.server.app import app
+
+
+def _spec(name: str = "统一任务") -> BacktestSpec:
+    return BacktestSpec.model_validate({
+        "name": name,
+        "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3},
+        "universe": "demo",
+        "start": "2023-01-01",
+        "end": "2023-12-31",
+        "benchmark": None,
+        "initial_capital": 100_000,
+    })
+
+
+def test_unified_jobs_lists_gets_cancels_and_retries_backtests(monkeypatch):
+    worker = get_backtest_worker()
+    monkeypatch.setattr(worker, "start", lambda: None)
+    created = worker.service.store.create(_spec())
+    client = TestClient(app)
+
+    listed = client.get("/api/v1/jobs", params={"domain": "backtests"})
+    assert listed.status_code == 200
+    item = next(value for value in listed.json()["items"] if value["id"] == created["id"])
+    assert item["domain"] == "backtests"
+    assert item["can_cancel"] is True
+    assert item["links"]["self"].startswith("/api/v1/jobs/backtests/")
+
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    headers = {"X-CSRF-Token": token}
+    cancelled = client.post(
+        f"/api/v1/jobs/backtests/{created['id']}/cancel", headers=headers,
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+
+    retried = client.post(
+        f"/api/v1/jobs/backtests/{created['id']}/retry", headers=headers,
+    )
+    assert retried.status_code == 202
+    assert retried.json()["id"] != created["id"]
+    events = client.get(
+        f"/api/v1/jobs/backtests/{created['id']}/events",
+    ).json()["items"]
+    assert any(event["type"] == "retried_as" for event in events)
+
+
+def test_legacy_unversioned_api_routes_are_removed():
+    client = TestClient(app)
+    for path in ("/api/health", "/api/backtests", "/api/settings", "/api/news"):
+        assert client.get(path).status_code == 404, path

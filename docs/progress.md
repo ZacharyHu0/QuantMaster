@@ -133,7 +133,7 @@
 - 每日短周期选股：趋势、MACD、资金量、价格位置与低波动合成，输出建议仓位、
   1–7 日持有期、止损止盈和理由；`SwingStrategy` 可直接走原 A 股回测引擎
 - CLI：`qm regime`、`qm select`、`qm fetch --frequency`、
-  `qm backtest --strategy swing`；API：`/api/market/regime`、`/api/selection/daily`
+  `qm backtest --strategy swing`；API：`/api/v1/market/regime`、`/api/v1/research/selection/daily`
 - 多频率 `load_bar_panel` 支持分钟级多标的研究；每日选股快照写入 SQLite，
   `qm decisions` 可回看；`qm daily` 默认执行 SwingStrategy 并复用已加载行情
 - Web 新增「决策」工作台，集中呈现当前/历史/未来、板块强弱、仓位和每日候选；
@@ -160,7 +160,7 @@
 ## 2026-07-27 · 模拟盘 Web 界面 + 桌面化
 
 - 仪表盘新增「模拟盘」标签页：选因子一键调仓、TWR 净值曲线、持仓明细、
-  成交回执；API 新增 /api/paper/run 与 /api/paper/report
+  成交回执；API 新增 `/api/v1/paper/run` 与 `/api/v1/paper/report`
 - 桌面模式 `qm app`：启动服务并自动打开浏览器
 - PyInstaller 打包配置（packaging/），本地实测单文件可执行程序 CLI/服务/
   静态资源全部正常；GitHub Actions release 工作流：打 v* tag 自动构建

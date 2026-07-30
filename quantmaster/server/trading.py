@@ -16,7 +16,7 @@ from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.management import _require_csrf
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/v1")
 
 
 def _service() -> BacktestService:

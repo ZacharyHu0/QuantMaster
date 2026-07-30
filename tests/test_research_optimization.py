@@ -182,7 +182,7 @@ def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path):
         client.headers["X-CSRF-Token"] = client.get(
             "/api/v1/session",
         ).json()["csrf_token"]
-        created = client.post("/api/lab/studies", json={
+        created = client.post("/api/v1/lab/studies", json={
             "universe": "csi800", "start": "2015-01-01", "end": "2026-07-28",
             "models": ["ridge"], "budget_hours": 0.5, "max_trials": 2,
         })
@@ -190,10 +190,10 @@ def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path):
         study = created.json()
         assert study["status"] == "queued"
         assert study["job_id"]
-        detail = client.get(f"/api/lab/studies/{study['id']}")
+        detail = client.get(f"/api/v1/lab/studies/{study['id']}")
         assert detail.status_code == 200
         assert detail.json()["config"]["protocol"]["train_window"] == 756
-        assert client.get("/api/lab/studies").json()["items"][0]["id"] == study["id"]
+        assert client.get("/api/v1/lab/studies").json()["items"][0]["id"] == study["id"]
 
     parsed = build_parser().parse_args([
         "lab", "optimize", "--models", "ridge", "--budget-hours", "0.5",

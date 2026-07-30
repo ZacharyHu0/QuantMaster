@@ -566,26 +566,26 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
         client.headers["X-CSRF-Token"] = client.get(
             "/api/v1/session",
         ).json()["csrf_token"]
-        overview = client.get("/api/lab/overview")
+        overview = client.get("/api/v1/lab/overview")
         assert overview.status_code == 200
         assert overview.json()["capabilities"]["catalog_size"] == 48
-        listing = client.get("/api/lab/factors?limit=60").json()
+        listing = client.get("/api/v1/lab/factors?limit=60").json()
         assert listing["total"] == 48
-        created = client.post("/api/lab/factors", json={
+        created = client.post("/api/v1/lab/factors", json={
             "name": "人工反转", "expression": "rank(-pct_change(close, 5))",
         })
         assert created.status_code == 200
         version_id = created.json()["id"]
-        duplicate = client.post("/api/lab/factors", json={
+        duplicate = client.post("/api/v1/lab/factors", json={
             "name": "人工反转", "expression": "rank(close)",
         })
         assert duplicate.status_code == 400
         assert "名称" in duplicate.json()["detail"] and "已存在" in duplicate.json()["detail"]
-        factor_catalog = client.get("/api/factors").json()["factors"]
+        factor_catalog = client.get("/api/v1/research/factors").json()["factors"]
         catalog_item = next(item for item in factor_catalog if item["name"] == "人工反转")
         assert catalog_item["source"] == "quant_lab"
         assert catalog_item["slug"].startswith("manual_")
-        queued = client.post("/api/lab/jobs", json={
+        queued = client.post("/api/v1/lab/jobs", json={
             "kind": "validate",
             "params": {"version_id": version_id, "universe": "demo",
                        "start": "2023-01-01", "end": "2024-01-01"},
@@ -597,11 +597,11 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
         lab_api.get_lab_service().store.finish_job(
             queued.json()["id"], error="测试失败",
         )
-        retried = client.post(f"/api/lab/jobs/{queued.json()['id']}/retry")
+        retried = client.post(f"/api/v1/lab/jobs/{queued.json()['id']}/retry")
         assert retried.status_code == 202
         assert retried.json()["status"] == "queued"
         events = client.get(
-            f"/api/lab/jobs/{retried.json()['id']}/events?after=0",
+            f"/api/v1/lab/jobs/{retried.json()['id']}/events?after=0",
         ).json()["items"]
         assert any(item["type"] == "retry_of" for item in events)
 
@@ -734,23 +734,23 @@ def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path):
         client.headers["X-CSRF-Token"] = client.get(
             "/api/v1/session",
         ).json()["csrf_token"]
-        preview = client.post("/api/lab/mining/preview", json={
+        preview = client.post("/api/v1/lab/mining/preview", json={
             "start": "2018-01-01", "end": "2026-01-01", "horizon": 3,
         })
         assert preview.status_code == 200
         assert preview.json()["test_policy"] == "sealed_until_finalist_order_frozen"
-        disabled = client.post("/api/lab/jobs", json={
+        disabled = client.post("/api/v1/lab/jobs", json={
             "kind": "discover_python", "params": {
                 "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",
             },
         })
         assert disabled.status_code == 400
         cfg.lab.ai_python_mining_enabled = True
-        queued = client.post("/api/lab/jobs", json={
+        queued = client.post("/api/v1/lab/jobs", json={
             "kind": "discover_python", "params": {
                 "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",
             },
         })
         assert queued.status_code == 202
-        runs = client.get("/api/lab/mining/runs").json()["items"]
+        runs = client.get("/api/v1/lab/mining/runs").json()["items"]
         assert runs and runs[0]["job_id"] == queued.json()["id"]

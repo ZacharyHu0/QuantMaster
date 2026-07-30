@@ -192,7 +192,7 @@
     const requestId = ++suggestionRequest;
     try {
       const data = await window.QuantMasterAPI(
-        `/api/instruments/search?q=${encodeURIComponent(query)}&limit=8&online=false`,
+        `/api/v1/market/instruments/search?q=${encodeURIComponent(query)}&limit=8&online=false`,
         {cache:'no-store'},
       );
       if (requestId !== suggestionRequest || input.value.trim() !== query) return;
@@ -261,7 +261,7 @@
     busy(form, true, '分析生成中…');
     let report = null;
     try {
-      await window.QuantMasterNDJSON('/api/stock-analysis/stream', {
+      await window.QuantMasterNDJSON('/api/v1/research/stock-analysis/stream', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({query}), signal:controller.signal,
       }, streamEvent => {

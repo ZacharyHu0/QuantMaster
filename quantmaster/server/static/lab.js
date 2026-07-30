@@ -606,9 +606,9 @@
     }
     state.jobDetailLoading = true;
     try {
-      const job = await request(`/api/lab/jobs/${encodeURIComponent(jobId)}`);
+      const job = await request(`/api/v1/lab/jobs/${encodeURIComponent(jobId)}`);
       if (state.selectedJobId !== jobId) return;
-      const response = await request(`/api/lab/jobs/${encodeURIComponent(jobId)}/events?after=${state.jobLastSeq}&limit=2000`);
+      const response = await request(`/api/v1/lab/jobs/${encodeURIComponent(jobId)}/events?after=${state.jobLastSeq}&limit=2000`);
       if (state.selectedJobId !== jobId) return;
       const events = response.items || [];
       if (events.length) {
@@ -683,7 +683,7 @@
     const evidence = document.getElementById('lab-factor-evidence');
     evidence.innerHTML = '<div class="lab-empty">读取版本证据…</div>';
     try {
-      const detail = await request(`/api/lab/factors/${encodeURIComponent(versionId)}`);
+      const detail = await request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}`);
       renderEvidence(detail);
       renderCopilot(detail);
     } catch (error) {
@@ -803,7 +803,7 @@
 
   async function refreshStudies() {
     try {
-      const response = await request('/api/lab/studies?limit=100');
+      const response = await request('/api/v1/lab/studies?limit=100');
       state.studies = response.items || [];
       renderStudyList();
       renderStudyDetail();
@@ -855,7 +855,7 @@
     const target = document.getElementById('lab-mining-candidates');
     if (target) target.innerHTML = '<div class="lab-job-loading"><i></i><span>正在读取所选批次…</span></div>';
     try {
-      const run = await request(`/api/lab/mining/runs/${encodeURIComponent(runId)}`);
+      const run = await request(`/api/v1/lab/mining/runs/${encodeURIComponent(runId)}`);
       if (state.selectedMiningRun !== runId) return;
       renderMiningCandidates(run);
       if (reveal) {
@@ -869,7 +869,7 @@
 
   async function refreshMiningRuns() {
     try {
-      const response = await request('/api/lab/mining/runs?limit=20');
+      const response = await request('/api/v1/lab/mining/runs?limit=20');
       state.miningRuns = response.items || [];
       renderMiningRuns();
       const selected = state.miningRuns.some(item => item.id === state.selectedMiningRun)
@@ -887,7 +887,7 @@
     target.hidden = false;
     target.innerHTML = '<span>正在计算 TRAIN / VALID / TEST 边界…</span>';
     try {
-      const value = await request('/api/lab/mining/preview', {method:'POST', body:JSON.stringify({
+      const value = await request('/api/v1/lab/mining/preview', {method:'POST', body:JSON.stringify({
         start:form.elements.start.value, end:new Date().toISOString().slice(0,10),
         horizon:+form.elements.horizon.value,
       })});
@@ -901,7 +901,7 @@
   }
 
   async function refreshOverview() {
-    state.overview = await request('/api/lab/overview');
+    state.overview = await request('/api/v1/lab/overview');
     state.jobs = state.overview.recent_jobs || [];
     state.experiments = state.overview.recent_experiments || [];
     state.studies = state.overview.recent_studies || state.studies;
@@ -916,7 +916,7 @@
   }
 
   async function refreshFactors() {
-    const response = await request('/api/lab/factors?limit=500');
+    const response = await request('/api/v1/lab/factors?limit=500');
     state.factors = response.items || [];
     renderFactorList();
     document.dispatchEvent(new CustomEvent('quantmaster:factors-changed'));
@@ -925,12 +925,12 @@
 
   async function refreshJobs() {
     try {
-      const response = await request('/api/lab/jobs?limit=100');
+      const response = await request('/api/v1/lab/jobs?limit=100');
       state.jobs = response.items || [];
       renderJobList('lab-overview-jobs', state.jobs.slice(0, 5));
       renderJobTable();
       renderTaskTray();
-      const experiments = await request('/api/lab/experiments?limit=50');
+      const experiments = await request('/api/v1/lab/experiments?limit=50');
       state.experiments = experiments.items || [];
       renderExperiments();
       if (state.jobs.some(job => job.kind === 'optimize')) await refreshStudies();
@@ -941,7 +941,7 @@
   }
 
   async function enqueue(kind, params) {
-    const job = await request('/api/lab/jobs', {
+    const job = await request('/api/v1/lab/jobs', {
       method: 'POST', body: JSON.stringify({kind, params}),
     });
     state.jobs.unshift(job);
@@ -1003,7 +1003,7 @@
       const resumeStudy = event.target.closest('[data-resume-study]');
       if (resumeStudy) try {
         resumeStudy.disabled = true;
-        await request(`/api/lab/studies/${encodeURIComponent(resumeStudy.dataset.resumeStudy)}/resume`, {method:'POST'});
+        await request(`/api/v1/lab/studies/${encodeURIComponent(resumeStudy.dataset.resumeStudy)}/resume`, {method:'POST'});
         await Promise.all([refreshStudies(), refreshJobs()]);
       } catch (error) { showError('Study 恢复失败', error); } finally { resumeStudy.disabled = false; }
       const model = event.target.closest('[data-model]');
@@ -1040,14 +1040,14 @@
       if (approve) {
         const reason = window.prompt('如需覆盖软门槛，请填写可审计的研究理由；全部通过可留空。', '') ?? null;
         if (reason !== null) try {
-          await request(`/api/lab/factors/${approve.dataset.approveVersion}/approve`, {method:'POST', body:JSON.stringify({actor:'web', reason})});
+          await request(`/api/v1/lab/factors/${approve.dataset.approveVersion}/approve`, {method:'POST', body:JSON.stringify({actor:'web', reason})});
           await Promise.all([refreshOverview(), refreshFactors()]);
         } catch (error) { showError('候选未能批准', error); }
       }
       const audit = event.target.closest('[data-audit-version]');
       if (audit) try {
         const research = state.overview?.research || {};
-        await request('/api/lab/audits', {method:'POST', body:JSON.stringify({
+        await request('/api/v1/lab/audits', {method:'POST', body:JSON.stringify({
           version_id:audit.dataset.auditVersion, universe:research.universe || 'csi800',
           start:research.start || '2015-01-01', end:new Date().toISOString().slice(0,10),
         })});
@@ -1061,25 +1061,25 @@
         const horizon = Number(config?.querySelector('[data-deploy-horizon]')?.value || 3);
         const profile = config?.querySelector('[data-deploy-profile]')?.value || 'all';
         const scope = config?.querySelector('[data-deploy-scope]')?.value || 'exact';
-        await request(`/api/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
+        await request(`/api/v1/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
         await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
       } catch (error) { showError('Champion 切换失败', error); }
       const suggest = event.target.closest('[data-suggest-version]');
       if (suggest) try {
         suggest.disabled = true;
-        state.suggestion = await request(`/api/lab/factors/${suggest.dataset.suggestVersion}/suggestions`, {method:'POST', body:JSON.stringify({use_cloud:false})});
-        const detail = await request(`/api/lab/factors/${suggest.dataset.suggestVersion}`);
+        state.suggestion = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}/suggestions`, {method:'POST', body:JSON.stringify({use_cloud:false})});
+        const detail = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}`);
         renderCopilot(detail);
       } catch (error) { showError('修正建议生成失败', error); } finally { suggest.disabled = false; }
       const apply = event.target.closest('[data-apply-suggestion]');
       if (apply) try {
-        const version = await request(`/api/lab/suggestions/${apply.dataset.applySuggestion}/apply`, {method:'POST', body:JSON.stringify({actor:'web', reason:''})});
+        const version = await request(`/api/v1/lab/suggestions/${apply.dataset.applySuggestion}/apply`, {method:'POST', body:JSON.stringify({actor:'web', reason:''})});
         await refreshFactors();
         selectFactor(version.id);
       } catch (error) { showError('建议未能应用', error); }
       const cancel = event.target.closest('[data-cancel-job]');
       if (cancel) try {
-        await request(`/api/lab/jobs/${cancel.dataset.cancelJob}/cancel`, {method:'POST'});
+        await request(`/api/v1/lab/jobs/${cancel.dataset.cancelJob}/cancel`, {method:'POST'});
         await refreshJobs();
       } catch (error) { showError('任务取消失败', error); }
       const retry = event.target.closest('[data-retry-job]');
@@ -1092,7 +1092,7 @@
         if (!confirmed) return;
         try {
           retry.disabled = true;
-          const created = await request(`/api/lab/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
+          const created = await request(`/api/v1/lab/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
           await refreshJobs();
           openJobDetail(created.id, retry);
         } catch (error) {
@@ -1177,7 +1177,7 @@
       }
       const universe = String(form.get('universe'));
       try {
-        const study = await request('/api/lab/studies', {method:'POST', body:JSON.stringify({
+        const study = await request('/api/v1/lab/studies', {method:'POST', body:JSON.stringify({
           universe, start:form.get('start'), end:new Date().toISOString().slice(0,10), models,
           budget_hours:+form.get('budget_hours'), max_trials:+form.get('max_trials'),
           top_n:+form.get('top_n'), sequence_length:+form.get('sequence_length'),
@@ -1193,7 +1193,7 @@
       event.preventDefault();
       const form = new FormData(event.target);
       try {
-        const version = await request('/api/lab/factors', {method:'POST', body:JSON.stringify({
+        const version = await request('/api/v1/lab/factors', {method:'POST', body:JSON.stringify({
           name:form.get('name'), expression:form.get('expression'), category:form.get('category'), rationale:form.get('rationale'),
         })});
         document.getElementById('lab-factor-dialog').close();

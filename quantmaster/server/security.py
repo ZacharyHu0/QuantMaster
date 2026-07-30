@@ -65,7 +65,7 @@ def require_csrf(request: Request) -> None:
 def enforce_request_security(request: Request) -> None:
     """Apply one complete policy before any route handler can run."""
     require_local(request)
-    if request.url.path.startswith("/api/") and request.method.upper() in UNSAFE_METHODS:
+    if request.url.path.startswith("/api/v1/") and request.method.upper() in UNSAFE_METHODS:
         require_csrf(request)
 
 
