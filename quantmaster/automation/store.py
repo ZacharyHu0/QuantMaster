@@ -99,6 +99,16 @@ class AutomationStore:
                     UNIQUE(event_id, target_id),
                     FOREIGN KEY(event_id) REFERENCES alert_events(id),
                     FOREIGN KEY(target_id) REFERENCES notification_targets(id));
+                CREATE TABLE IF NOT EXISTS analysis_deliveries (
+                    id TEXT PRIMARY KEY, job_id TEXT NOT NULL, analysis_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '',
+                    query TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'deep',
+                    status TEXT NOT NULL DEFAULT 'active', event_seq INTEGER NOT NULL DEFAULT 0,
+                    update_count INTEGER NOT NULL DEFAULT 0, appendix_cursor INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at REAL NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+                    delivered_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, UNIQUE(job_id,target_id),
+                    FOREIGN KEY(target_id) REFERENCES notification_targets(id));
                 CREATE TABLE IF NOT EXISTS pending_actions (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, actor TEXT NOT NULL,
                     route_key TEXT NOT NULL, payload TEXT NOT NULL, payload_hash TEXT NOT NULL,
@@ -116,6 +126,8 @@ class AutomationStore:
                     sample_size INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_delivery_due
                     ON delivery_attempts(status, next_attempt_at);
+                CREATE INDEX IF NOT EXISTS idx_analysis_delivery_due
+                    ON analysis_deliveries(status, next_attempt_at);
                 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_chat_created
                     ON conversation_messages(channel,account_id,chat_id,created_at DESC);
@@ -134,6 +146,14 @@ class AutomationStore:
             if "account_id" not in inbound_columns:
                 conn.execute(
                     "ALTER TABLE inbound_messages ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+            analysis_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(analysis_deliveries)")}
+            if "query" not in analysis_columns:
+                conn.execute(
+                    "ALTER TABLE analysis_deliveries ADD COLUMN query TEXT NOT NULL DEFAULT ''")
+            if "mode" not in analysis_columns:
+                conn.execute(
+                    "ALTER TABLE analysis_deliveries ADD COLUMN mode TEXT NOT NULL DEFAULT 'deep'")
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -723,6 +743,92 @@ class AutomationStore:
             )
         return True
 
+    def save_analysis_delivery(
+        self, *, job_id: str, analysis_id: str, target_id: str, message_id: str,
+        query: str = "", mode: str = "deep",
+    ) -> dict:
+        """Persist Feishu routing so restarts resume the original progress card."""
+        now, delivery_id = utc_now(), uuid.uuid4().hex
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO analysis_deliveries "
+                "(id,job_id,analysis_id,target_id,message_id,query,mode,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,target_id) DO UPDATE SET "
+                "analysis_id=excluded.analysis_id,message_id=CASE WHEN excluded.message_id<>'' "
+                "THEN excluded.message_id ELSE analysis_deliveries.message_id END,"
+                "query=excluded.query,mode=excluded.mode,"
+                "status=CASE WHEN analysis_deliveries.status IN ('delivered','failed') "
+                "THEN analysis_deliveries.status ELSE 'active' END,updated_at=excluded.updated_at",
+                (delivery_id, job_id, analysis_id, target_id, message_id,
+                 query[:80], mode, now, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM analysis_deliveries WHERE job_id=? AND target_id=?",
+                (job_id, target_id),
+            ).fetchone()
+        return dict(row)
+
+    def analysis_delivery(self, job_id: str, target_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM analysis_deliveries WHERE job_id=? AND target_id=?",
+                (job_id, target_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def due_analysis_deliveries(self, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT d.*,t.channel,t.account_id,t.target,t.chat_type,t.status AS target_status "
+                "FROM analysis_deliveries d JOIN notification_targets t ON t.id=d.target_id "
+                "WHERE d.status IN ('active','retry') AND d.next_attempt_at<=? "
+                "ORDER BY d.updated_at LIMIT ?",
+                (time.time(), max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_analysis_delivery(
+        self, delivery_id: str, *, event_seq: int | None = None,
+        status: str | None = None, message_id: str | None = None,
+        update_increment: int = 0, appendix_cursor: int | None = None,
+        last_error: str | None = None, next_attempt_at: float | None = None,
+    ) -> dict:
+        if status is not None and status not in {"active", "retry", "delivered", "failed"}:
+            raise ValueError("分析投递状态非法")
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM analysis_deliveries WHERE id=?", (delivery_id,),
+            ).fetchone()
+            if current is None:
+                raise KeyError(delivery_id)
+            seq = int(current["event_seq"])
+            if event_seq is not None:
+                if int(event_seq) < seq:
+                    raise ValueError("分析投递 event_seq 不能倒退")
+                seq = int(event_seq)
+            updates = int(current["update_count"]) + max(0, int(update_increment))
+            if updates > 10:
+                raise ValueError("单任务飞书卡片更新不能超过 10 次")
+            resolved_status = status or str(current["status"])
+            delivered_at = (
+                utc_now() if resolved_status == "delivered" else str(current["delivered_at"]))
+            conn.execute(
+                "UPDATE analysis_deliveries SET event_seq=?,status=?,message_id=?,update_count=?,"
+                "appendix_cursor=?,last_error=?,next_attempt_at=?,delivered_at=?,updated_at=? "
+                "WHERE id=?",
+                (seq, resolved_status,
+                 str(current["message_id"] if message_id is None else message_id), updates,
+                 int(current["appendix_cursor"] if appendix_cursor is None else appendix_cursor),
+                 str(current["last_error"] if last_error is None else last_error)[:1000],
+                 float(current["next_attempt_at"] if next_attempt_at is None else next_attempt_at),
+                 delivered_at, utc_now(), delivery_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM analysis_deliveries WHERE id=?", (delivery_id,),
+            ).fetchone()
+        return dict(row)
+
     def release_lease(self, name: str, owner: str) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -748,6 +854,10 @@ class AutomationStore:
             conn.execute(
                 "DELETE FROM delivery_attempts WHERE created_at<? AND status IN ('delivered','failed')",
                 (cutoff,),
+            )
+            conn.execute(
+                "DELETE FROM analysis_deliveries WHERE created_at<? "
+                "AND status IN ('delivered','failed')", (cutoff,),
             )
             conn.execute(
                 "DELETE FROM conversation_messages WHERE created_at<?", (cutoff,)

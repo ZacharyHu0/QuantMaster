@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from typing import Any
 
 import httpx
 
@@ -28,6 +30,21 @@ from quantmaster.config import LLMConfig, get_config
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+
+_WEB_SEARCH_CAPABILITIES: dict[tuple[str, str], dict[str, Any]] = {}
+_WEB_SEARCH_CAPABILITIES_LOCK = threading.RLock()
+
+
+def web_search_capability_status(config: LLMConfig | None = None) -> dict[str, Any]:
+    """Read optional native-search status without constructing a credentialed client."""
+    value = config or get_config().llm
+    key = value.provider, value.base_url.rstrip("/")
+    with _WEB_SEARCH_CAPABILITIES_LOCK:
+        cached = _WEB_SEARCH_CAPABILITIES.get(key)
+    return dict(cached or {
+        "supported": None, "detail": "尚未探测", "checked_at": "",
+        "provider": value.provider,
+    })
 
 
 class LLMError(RuntimeError):
@@ -199,6 +216,206 @@ class LLMClient:
                 retryable=True,
             ) from exc
 
+    def _capability_key(self) -> tuple[str, str]:
+        return self.config.provider, self.config.base_url.rstrip("/")
+
+    def _remember_web_search(self, supported: bool, detail: str = "") -> None:
+        with _WEB_SEARCH_CAPABILITIES_LOCK:
+            _WEB_SEARCH_CAPABILITIES[self._capability_key()] = {
+                "supported": bool(supported),
+                "detail": str(detail)[:500],
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "provider": self.config.provider,
+            }
+
+    def web_search_status(self) -> dict[str, Any]:
+        """Return the process-cached optional search capability for diagnostics."""
+        return web_search_capability_status(self.config)
+
+    @staticmethod
+    def _search_result(
+        url: Any, title: Any = "", text: Any = "", published_at: Any = "",
+    ) -> dict[str, str] | None:
+        value = str(url or "").strip()
+        if not re.match(r"^https?://", value, re.IGNORECASE):
+            return None
+        return {
+            "url": value[:2048],
+            "title": str(title or value)[:300],
+            "text": str(text or "")[:1500],
+            "published_at": str(published_at or "")[:80],
+        }
+
+    @classmethod
+    def _openai_search_results(cls, payload: dict[str, Any]) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        for item in payload.get("output") or []:
+            if item.get("type") == "web_search_call":
+                action = item.get("action") or {}
+                for source in action.get("sources") or []:
+                    result = cls._search_result(source.get("url"), source.get("title"))
+                    if result:
+                        results.append(result)
+            if item.get("type") != "message":
+                continue
+            for content in item.get("content") or []:
+                if content.get("type") != "output_text":
+                    continue
+                output_text = str(content.get("text") or "")
+                for annotation in content.get("annotations") or []:
+                    citation = annotation.get("url_citation") or annotation
+                    if annotation.get("type") != "url_citation" and not citation.get("url"):
+                        continue
+                    start = int(citation.get("start_index") or 0)
+                    end = int(citation.get("end_index") or 0)
+                    excerpt = output_text[max(0, start - 180):min(len(output_text), end + 180)]
+                    result = cls._search_result(
+                        citation.get("url"), citation.get("title"), excerpt,
+                    )
+                    if result:
+                        results.append(result)
+        return _dedupe_search_results(results)
+
+    @classmethod
+    def _anthropic_search_results(cls, payload: dict[str, Any]) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+        for block in payload.get("content") or []:
+            block_type = str(block.get("type") or "")
+            if block_type in {"web_search_tool_result", "web_search_result"}:
+                values = block.get("content") or block.get("results") or []
+                if isinstance(values, dict):
+                    values = values.get("results") or [values]
+                for value in values:
+                    if not isinstance(value, dict):
+                        continue
+                    result = cls._search_result(
+                        value.get("url"), value.get("title"),
+                        value.get("snippet") or value.get("content"),
+                        value.get("page_age") or value.get("published_at"),
+                    )
+                    if result:
+                        results.append(result)
+            if block_type != "text":
+                continue
+            text = str(block.get("text") or "")
+            for citation in block.get("citations") or []:
+                result = cls._search_result(
+                    citation.get("url"), citation.get("title"),
+                    citation.get("cited_text") or text,
+                    citation.get("page_age") or citation.get("published_at"),
+                )
+                if result:
+                    results.append(result)
+        return _dedupe_search_results(results)
+
+    def _web_search_openai(
+        self, query: str, *, timeout: float, max_uses: int,
+    ) -> list[dict[str, str]]:
+        base = self.config.base_url.rstrip("/") if self.config.base_url else "https://api.openai.com/v1"
+        if base.endswith("/chat/completions"):
+            base = base[:-len("/chat/completions")]
+        elif base.endswith("/responses"):
+            base = base[:-len("/responses")]
+        url = base + "/responses"
+        headers = ({"Authorization": f"Bearer {self.config.api_key}"}
+                   if self.config.api_key else {})
+        try:
+            response = httpx.post(
+                url,
+                headers=headers,
+                json={
+                    "model": self.config.model,
+                    "input": query,
+                    "tools": [{"type": "web_search", "search_context_size": "medium"}],
+                    "tool_choice": "auto",
+                    "max_tool_calls": max(1, min(3, int(max_uses))),
+                    "include": ["web_search_call.action.sources"],
+                },
+                timeout=_request_timeout(timeout),
+            )
+        except httpx.HTTPError as exc:
+            raise _transport_error(exc, timeout) from exc
+        if response.status_code != 200:
+            raise _api_error("OpenAI Responses", response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise LLMError(
+                "OpenAI Responses 返回了无法解析的搜索响应",
+                code="invalid_response", retryable=True,
+            ) from exc
+        return self._openai_search_results(payload)
+
+    def _web_search_anthropic(
+        self, query: str, *, timeout: float, max_uses: int,
+    ) -> list[dict[str, str]]:
+        base = self.config.base_url.rstrip("/") if self.config.base_url else ANTHROPIC_URL
+        if self.config.base_url and not base.endswith("/messages"):
+            base += "/messages"
+        headers = {
+            "x-api-key": self.config.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        tool = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": max(1, min(3, int(max_uses))),
+        }
+        request_payload: dict[str, Any] = {
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "messages": [{"role": "user", "content": query}],
+            "tools": [tool],
+        }
+        for _ in range(2):
+            try:
+                response = httpx.post(
+                    base, headers=headers, json=request_payload,
+                    timeout=_request_timeout(timeout),
+                )
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc, timeout) from exc
+            if response.status_code != 200:
+                raise _api_error("Anthropic Web Search", response)
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise LLMError(
+                    "Anthropic API 返回了无法解析的搜索响应",
+                    code="invalid_response", retryable=True,
+                ) from exc
+            if payload.get("stop_reason") != "pause_turn":
+                return self._anthropic_search_results(payload)
+            request_payload["messages"] = [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": payload.get("content") or []},
+            ]
+        return self._anthropic_search_results(payload)
+
+    def web_search(
+        self, query: str, *, timeout: float = 30.0, max_uses: int = 1,
+    ) -> list[dict[str, str]]:
+        """Use the provider's native search when available; unsupported gateways degrade once."""
+        value = str(query or "").strip()
+        if not value:
+            return []
+        cached = self.web_search_status()
+        if cached.get("supported") is False:
+            return []
+        try:
+            if self.config.provider == "anthropic":
+                results = self._web_search_anthropic(value, timeout=timeout, max_uses=max_uses)
+            else:
+                results = self._web_search_openai(value, timeout=timeout, max_uses=max_uses)
+        except LLMError as exc:
+            if exc.status_code in {400, 404, 405, 415, 422}:
+                self._remember_web_search(False, str(exc))
+                return []
+            raise
+        self._remember_web_search(True, f"返回 {len(results)} 个可引用来源")
+        return results
+
     # ---- 对外接口 ----
 
     def chat(
@@ -249,6 +466,19 @@ def parse_json_reply(text: str) -> dict | list:
             code="invalid_json",
             retryable=True,
         ) from e
+
+
+def _dedupe_search_results(values: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    results: list[dict[str, str]] = []
+    for value in values:
+        url = value.get("url", "").strip()
+        key = url.rstrip("/").casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        results.append(value)
+    return results
 
 
 def chat(prompt: str, system: str | None = None) -> str:

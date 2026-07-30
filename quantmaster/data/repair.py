@@ -191,6 +191,7 @@ class DataRepairManager:
 
     def _register_builtin_handlers(self) -> None:
         self.register_handler("bar", self._repair_bar)
+        self.register_handler("api_cache", self._repair_api_cache)
         self.register_handler("research_partition", self._repair_research_partition)
 
     def enqueue(
@@ -510,6 +511,41 @@ class DataRepairManager:
             raise RuntimeError(f"重拉后完整性仍异常: {result.status}: {result.reason}")
         return {
             "rows": len(frame), "content_sha256": result.content_sha256,
+            "quarantine": quarantine,
+        }
+
+    @staticmethod
+    def _repair_api_cache(item: dict[str, Any]) -> dict[str, Any]:
+        """Validate a replacement written after a corrupt endpoint cache was isolated."""
+        import pandas as pd
+
+        spec = item["spec"]
+        root = Path(spec["root"]).resolve()
+        target = Path(spec["path"]).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError("接口缓存修复目标越出声明目录") from exc
+        quarantine = spec.get("quarantine")
+        if not target.exists():
+            return {
+                "state": "quarantined",
+                "replacement": "not_available",
+                "quarantine": quarantine,
+            }
+        try:
+            frame = pd.read_parquet(target)
+        except (ImportError, OSError, TypeError, ValueError) as exc:
+            quarantine_file(
+                target,
+                category="api-cache",
+                target=str(item["target"]),
+                reason=f"替换缓存仍不可读: {type(exc).__name__}: {exc}",
+            )
+            raise RuntimeError("替换后的接口缓存仍不可读") from exc
+        return {
+            "state": "replaced",
+            "rows": len(frame),
             "quarantine": quarantine,
         }
 

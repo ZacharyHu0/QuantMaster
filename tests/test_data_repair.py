@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pandas as pd
 
@@ -127,3 +128,35 @@ def test_research_integrity_failure_enqueues_one_repair(
     assert len(jobs) == 1
     assert jobs[0]["kind"] == "research_partition"
     assert jobs[0]["spec"]["metadata"]["content_sha256"]
+
+
+def test_corrupt_endpoint_cache_is_quarantined_and_uses_global_repair_queue(
+    tmp_path, isolated_config, monkeypatch,
+):
+    from quantmaster.data import repair
+    from quantmaster.data.resilience import EndpointFrameCache
+
+    manager = DataRepairManager(tmp_path / "repairs.sqlite")
+    monkeypatch.setattr(repair, "_MANAGER", manager)
+    cache = EndpointFrameCache("akshare_stock_research", root=tmp_path / "api-cache")
+    endpoint = "stock_financial_abstract"
+    params = {"symbol": "600519"}
+    path = cache.path_for(endpoint, params)
+    path.write_bytes(b"not-a-parquet-file")
+
+    assert cache.get(endpoint, params, ttl_days=7) is None
+    assert not path.exists()
+    jobs = manager.list()
+    assert len(jobs) == 1
+    assert jobs[0]["kind"] == "api_cache"
+    manifest = jobs[0]["spec"]["quarantine"]
+    assert manifest["content_sha256"]
+    assert Path(manifest["quarantine_path"]).is_file()
+
+    replacement = pd.DataFrame({"metric": [1.0]})
+    cache.put(endpoint, params, replacement)
+    completed = manager.run_one()
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["result"]["state"] == "replaced"
+    assert completed["result"]["rows"] == 1

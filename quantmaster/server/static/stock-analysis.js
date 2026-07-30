@@ -1,20 +1,41 @@
 (() => {
   const form = document.getElementById('stock-analysis-form');
   if (!form) return;
+
   const input = document.getElementById('stock-analysis-query');
   const stage = document.getElementById('stock-analysis-stage');
+  const live = document.getElementById('stock-analysis-live');
+  const liveDimensions = document.getElementById('stock-analysis-live-dimensions');
+  const currentPhase = document.getElementById('stock-analysis-current-phase');
+  const elapsedNode = document.getElementById('stock-analysis-elapsed');
+  const etaNode = document.getElementById('stock-analysis-eta');
+  const cancelButton = document.getElementById('stock-analysis-cancel');
   const reportRoot = document.getElementById('stock-analysis-report');
   const suggestions = document.getElementById('stock-analysis-suggestions');
-  const phases = [
-    [5, '确认标的'], [22, '读取行情'], [38, '计算技术面'], [54, '核查基本面'],
-    [68, '消息与资金'], [80, '心理与宏观'], [92, '综合判断'], [100, '分析完成'],
+  const STORAGE_KEY = 'qm.stock-analysis.active.v2';
+  const terminalStatuses = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
+  const dimensionDefs = [
+    ['fundamental', '01', '基本面'], ['technical', '02', '技术面'],
+    ['news', '03', '消息面'], ['capital', '04', '资金面'],
+    ['sentiment', '05', '心理面'], ['macro', '06', '宏观面'],
   ];
-  let controller = null;
+  const stateLabels = {
+    waiting:'等待', collecting:'取数', inference:'推理', complete:'完成', degraded:'降级',
+  };
+
+  let activeRun = null;
+  let activeToken = 0;
   let activeSuggestion = -1;
   let suggestionItems = [];
   let suggestionTimer = 0;
   let suggestionRequest = 0;
   let loaded = false;
+  let tickTimer = 0;
+  let lastProgress = 0;
+  let lastEventSeq = 0;
+  const dimensionState = new Map(dimensionDefs.map(([key]) => [key, {
+    state:'waiting', detail:'等待前序阶段', result:null,
+  }]));
 
   function scoreClass(value) {
     const score = Number(value || 0);
@@ -35,29 +56,69 @@
     return /^https?:\/\//i.test(url) ? url : '';
   }
 
-  function setProgress(event) {
-    const progress = Math.max(0, Math.min(100, Number(event.progress) || 0));
-    if (!stage.querySelector('.sa-progress')) {
-      stage.innerHTML = `<div class="sa-progress" role="status">
-        <div class="sa-progress-value"><strong data-sa-percent>0%</strong><span>ANALYSIS PROGRESS</span></div>
-        <div class="sa-progress-body"><h3 data-sa-phase>准备分析</h3><p data-sa-detail>正在创建任务…</p>
-          <div class="sa-progress-track" role="progressbar" aria-label="个股分析进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-            <div class="sa-progress-fill"></div></div>
-          <ol class="sa-progress-steps">${phases.map(([, label]) => `<li>${esc(label)}</li>`).join('')}</ol>
-        </div></div>`;
-    }
-    const root = stage.querySelector('.sa-progress');
-    root.style.setProperty('--sa-progress', progress / 100);
-    root.querySelector('[data-sa-percent]').textContent = `${Math.round(progress)}%`;
-    root.querySelector('[data-sa-phase]').textContent = event.phase || '正在分析';
-    root.querySelector('[data-sa-detail]').textContent = event.detail || '';
-    root.querySelector('[role=progressbar]').setAttribute('aria-valuenow', String(Math.round(progress)));
-    root.querySelectorAll('.sa-progress-steps li').forEach((item, index) => {
-      const [threshold] = phases[index];
-      const previous = index ? phases[index - 1][0] : 0;
-      item.classList.toggle('complete', progress >= threshold);
-      item.classList.toggle('active', progress >= previous && progress < threshold);
-    });
+  function duration(seconds) {
+    const value = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(value / 60);
+    return `${String(minutes).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+  }
+
+  function saveRun(value) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(value)); } catch (_) { /* private mode */ }
+  }
+
+  function storedRun() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); }
+    catch (_) { return null; }
+  }
+
+  function setMode(mode) {
+    const radio = form.querySelector(`input[name="mode"][value="${mode === 'quick' ? 'quick' : 'deep'}"]`);
+    if (radio) radio.checked = true;
+    const submit = form.querySelector('button.primary');
+    if (submit && !submit.disabled) submit.textContent = mode === 'quick' ? '开始快速分析' : '开始深度分析';
+  }
+
+  function resetDimensions() {
+    dimensionState.forEach(value => Object.assign(value, {
+      state:'waiting', detail:'等待前序阶段', result:null,
+    }));
+    renderLiveDimensions();
+  }
+
+  function renderLiveDimensions() {
+    liveDimensions.innerHTML = dimensionDefs.map(([key, number, title]) => {
+      const value = dimensionState.get(key);
+      const result = value.result;
+      return `<article class="sa-live-dimension" data-state="${esc(value.state)}" data-live-dimension="${key}">
+        <div class="sa-live-dimension-head"><strong>${number} · ${title}</strong><span>${stateLabels[value.state] || '等待'}</span></div>
+        <p>${esc(value.detail || '等待前序阶段')}</p>
+        ${result ? `<div class="sa-live-score ${scoreClass(result.score)}">${fmt(result.score, 1)} / 100 · ${esc(result.stance || '')}</div>` : ''}
+      </article>`;
+    }).join('');
+  }
+
+  function updateDimension(key, stateValue, detail = '', result = null) {
+    const value = dimensionState.get(key);
+    if (!value) return;
+    value.state = stateValue;
+    value.detail = detail || value.detail;
+    if (result) value.result = result;
+    renderLiveDimensions();
+    if (result) renderProgressiveReport();
+  }
+
+  function evidenceLinks(item) {
+    const seen = new Set();
+    return (item.evidence || []).filter(value => {
+      const url = safeUrl(value?.source?.url);
+      if (!url || seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    }).slice(0, 8).map(value => {
+      const source = value.source || {};
+      return `<a href="${esc(source.url)}" target="_blank" rel="noopener noreferrer"
+        title="${esc(value.title || source.name || '证据来源')}"><em>L${esc(source.level || '—')}</em>${esc(source.name || value.title || '查看来源')}</a>`;
+    }).join('');
   }
 
   function metricMarkup(metric) {
@@ -70,21 +131,33 @@
   }
 
   function dimensionMarkup(item) {
-    const evidence = [
+    const findings = [
       ...(item.signals || []).map(value => ({value, risk:false})),
       ...(item.risks || []).map(value => ({value, risk:true})),
-    ].slice(0, 6);
+    ].slice(0, 8);
+    const citations = evidenceLinks(item);
     return `<article class="sa-dimension" data-dimension="${esc(item.key)}">
       <div class="sa-dimension-index"><span>${esc(item.number)}</span><strong>${esc(item.title)}</strong>
         <small>${esc(item.as_of ? `截至 ${item.as_of}` : '数据时间待核查')}</small></div>
       <div class="sa-dimension-summary"><div class="sa-dimension-score ${scoreClass(item.score)}">
-          <strong>${fmt(item.score, 1)}</strong><span>${esc(item.stance)} · ${statusLabel(item.status)}</span></div>
+          <strong>${fmt(item.score, 1)}</strong><span>${esc(item.stance)} · ${statusLabel(item.status)} · ${item.generation === 'llm_assisted' ? '模型复核' : '规则生成'}</span></div>
         <p>${esc(item.summary || '暂无可用结论。')}</p>
-        ${evidence.length ? `<ul class="sa-evidence-list">${evidence.map(row =>
-          `<li class="${row.risk ? 'risk' : ''}">${esc(row.value)}</li>`).join('')}</ul>` : ''}</div>
-      <div class="sa-metrics">${(item.metrics || []).slice(0, 10).map(metricMarkup).join('')
+        ${item.degraded_reason ? `<div class="sa-degraded-reason">降级：${esc(item.degraded_reason)}</div>` : ''}
+        ${findings.length ? `<ul class="sa-evidence-list">${findings.map(row =>
+          `<li class="${row.risk ? 'risk' : ''}">${esc(row.value)}</li>`).join('')}</ul>` : ''}
+        ${citations ? `<div class="sa-citations" aria-label="证据来源">${citations}</div>` : ''}</div>
+      <div class="sa-metrics">${(item.metrics || []).slice(0, 12).map(metricMarkup).join('')
         || '<div class="sa-metric"><span>数据状态</span><strong>暂无可用指标</strong></div>'}</div>
     </article>`;
+  }
+
+  function renderProgressiveReport() {
+    const results = dimensionDefs.map(([key]) => dimensionState.get(key).result).filter(Boolean);
+    if (!results.length) return;
+    reportRoot.innerHTML = `<section class="sa-report sa-progressive-report">
+      <div class="sa-section-heading"><h3>已完成研判</h3><span>${results.length} / 6 · 完成一维即交付</span></div>
+      <section class="sa-dimensions" aria-label="渐进六维分析">${results.map(dimensionMarkup).join('')}</section>
+    </section>`;
   }
 
   function reportText(report) {
@@ -98,8 +171,10 @@
     (report.dimensions || []).forEach(item => {
       lines.push(`${item.number} ${item.title}｜${item.score}/100｜${item.stance}`);
       lines.push(item.summary || '');
-      (item.signals || []).slice(0, 3).forEach(value => lines.push(`- ${value}`));
-      (item.risks || []).slice(0, 2).forEach(value => lines.push(`- 风险：${value}`));
+      (item.signals || []).slice(0, 4).forEach(value => lines.push(`- ${value}`));
+      (item.risks || []).slice(0, 3).forEach(value => lines.push(`- 风险：${value}`));
+      (item.evidence || []).filter(value => safeUrl(value?.source?.url)).slice(0, 5)
+        .forEach(value => lines.push(`- 来源：${value.source.name} ${value.source.url}`));
       lines.push('');
     });
     lines.push(report.disclaimer || '仅作研究，不构成投资建议。');
@@ -110,7 +185,8 @@
     const instrument = report.instrument || {};
     const quote = report.quote || {};
     const overall = report.overall || {};
-    const risks = [...(overall.risks || []), ...(report.warnings || [])].slice(0, 10);
+    const research = report.research || {};
+    const risks = [...(overall.risks || []), ...(report.warnings || [])].slice(0, 14);
     stage.hidden = true;
     reportRoot.innerHTML = `<article class="sa-report">
       <header class="sa-report-head">
@@ -132,7 +208,10 @@
           <span>${esc(item.priority || '')}</span><h4>${esc(item.title || '')}</h4>
           <p><strong>触发</strong>　${esc(item.condition || '')}</p><p><strong>应对</strong>　${esc(item.response || '')}</p></article>`).join('')}</div></section>
       ${risks.length ? `<section class="sa-risk-ledger"><h3>总风险清单</h3><ul>${risks.map(value => `<li>${esc(value)}</li>`).join('')}</ul></section>` : ''}
-      <footer class="sa-disclaimer">${esc(report.disclaimer || '')}　框架：stock-analysis-framework v1.0（安全适配版）</footer>
+      <div class="sa-research-meta"><span>${research.mode === 'quick' ? '快速模式' : '深度模式'}</span>
+        <span>耗时 ${duration(research.elapsed_seconds)}</span><span>${research.evidence_count || 0} 条证据</span>
+        <span>${(research.sources || []).length} 个去重来源</span><span>报告 schema ${esc(report.schema_version || '—')}</span></div>
+      <footer class="sa-disclaimer">${esc(report.disclaimer || '')}</footer>
     </article>`;
     reportRoot.querySelector('[data-sa-copy]')?.addEventListener('click', async event => {
       const button = event.currentTarget;
@@ -140,19 +219,162 @@
         await navigator.clipboard.writeText(reportText(report));
         button.textContent = '已复制';
         setTimeout(() => { if (button.isConnected) button.textContent = '复制报告摘要'; }, 1400);
-      } catch (error) {
-        reportLocalError('个股分析', '报告摘要未能复制', error);
-      }
+      } catch (error) { reportLocalError('个股分析', '报告摘要未能复制', error); }
     });
     if (!REDUCED_MOTION) reportRoot.scrollIntoView({behavior:'smooth', block:'start'});
   }
 
-  function renderFailure(error) {
-    const message = error?.problem?.message || error?.message || '分析任务未完成';
+  function renderFailure(error, status = 'failed') {
+    const message = error?.problem?.message || error?.message || (status === 'cancelled' ? '任务已取消' : '分析任务未完成');
     stage.hidden = false;
-    stage.innerHTML = `<div class="sa-failure"><span aria-hidden="true">×</span><div><h3>报告没有生成</h3>
-      <p>${esc(message)}。请检查代码/名称和本地数据源后重试。</p></div></div>`;
+    stage.innerHTML = `<div class="sa-failure"><span aria-hidden="true">×</span><div><h3>${status === 'cancelled' ? '分析已取消' : '报告没有生成'}</h3>
+      <p>${esc(message)}${status === 'cancelled' ? '' : '。可以保留同一标的并重新提交。'}</p></div></div>`;
   }
+
+  function showLive(run) {
+    stage.hidden = true;
+    live.hidden = false;
+    cancelButton.disabled = terminalStatuses.has(run.status);
+    currentPhase.textContent = run.phase || '正在创建统一任务';
+    clearInterval(tickTimer);
+    tickTimer = setInterval(updateClock, 1000);
+    updateClock();
+  }
+
+  function updateClock() {
+    if (!activeRun) return;
+    const elapsed = Math.max(0, (Date.now() - activeRun.startedAt) / 1000);
+    elapsedNode.textContent = duration(elapsed);
+    if (terminalStatuses.has(activeRun.status)) {
+      etaNode.textContent = '已结束';
+      return;
+    }
+    if (activeRun.eta != null) etaNode.textContent = duration(activeRun.eta);
+    else if (lastProgress > 4) etaNode.textContent = duration(Math.max(0, elapsed * (100 - lastProgress) / lastProgress));
+    else etaNode.textContent = activeRun.mode === 'quick' ? '约 00:30' : '约 03:00';
+  }
+
+  function eventParts(value) {
+    const nested = value?.event && typeof value.event === 'object' ? value.event : {};
+    const type = value?.type || nested.type || value?.event_type || '';
+    const payload = value?.payload || nested.payload || value?.data || nested.data || nested;
+    return {type, payload:payload && typeof payload === 'object' ? payload : {}, seq:Number(value?.seq || 0)};
+  }
+
+  function applyEvent(value) {
+    const {type, payload, seq} = eventParts(value);
+    lastEventSeq = Math.max(lastEventSeq, seq);
+    if (payload.progress != null) lastProgress = Math.max(lastProgress, Number(payload.progress) || 0);
+    if (type === 'evidence_collection_started') {
+      currentPhase.textContent = '联网取证与结构化数据采集';
+      dimensionDefs.forEach(([key]) => updateDimension(key, 'collecting', '正在并发核对来源'));
+    } else if (type === 'evidence_search_started') {
+      currentPhase.textContent = `联网搜索 · 第 ${payload.round || '—'} 轮`;
+    } else if (type === 'dimension_started') {
+      currentPhase.textContent = `${dimensionDefs.find(row => row[0] === payload.dimension)?.[2] || '维度'}研判`;
+      updateDimension(payload.dimension, payload.stage === 'rules' ? 'collecting' : 'inference',
+        payload.stage === 'rules' ? '正在执行确定性评分' : '证据已就绪，正在独立推理');
+    } else if (type === 'dimension_completed' || type === 'dimension_degraded') {
+      const result = payload.result || payload.dimension_result;
+      updateDimension(payload.dimension || result?.key, type === 'dimension_degraded' ? 'degraded' : 'complete',
+        type === 'dimension_degraded' ? (result?.degraded_reason || '已使用规则结果') : '研判完成，可立即核查', result);
+      currentPhase.textContent = `已完成 ${payload.completed || dimensionDefs.filter(([key]) => dimensionState.get(key).result).length} / 6 维`;
+    } else if (type === 'final_review_started') {
+      currentPhase.textContent = '六维交叉复核';
+    } else if (type === 'analysis_completed') {
+      lastProgress = 100;
+      if (payload.report) renderReport(payload.report);
+    }
+  }
+
+  async function refreshAnalysis(run) {
+    const data = await window.QuantMasterAPI(`/api/v1/market/stock-analyses/${encodeURIComponent(run.analysisId)}`, {cache:'no-store'});
+    const report = data.report || (data.schema_version ? data : null);
+    for (const item of (data.dimensions || report?.dimensions || [])) {
+      updateDimension(item.key, item.degraded_reason ? 'degraded' : 'complete',
+        item.degraded_reason || '研判完成，可立即核查', item);
+    }
+    if (report && (data.status == null || terminalStatuses.has(data.status) || report.overall?.thesis)) renderReport(report);
+    return data;
+  }
+
+  async function pollRun(run, token) {
+    showLive(run);
+    while (activeRun === run && token === activeToken) {
+      try {
+        const events = await window.QuantMasterAPI(
+          `/api/v1/jobs/${encodeURIComponent(run.jobId)}/events?after=${lastEventSeq}`, {cache:'no-store'},
+        );
+        const items = events.items || events.events || [];
+        items.forEach(applyEvent);
+        if (items.some(value => ['dimension_completed', 'dimension_degraded', 'analysis_completed']
+          .includes(eventParts(value).type))) await refreshAnalysis(run);
+
+        const payload = await window.QuantMasterAPI(`/api/v1/jobs/${encodeURIComponent(run.jobId)}`, {cache:'no-store'});
+        const job = payload.job || payload;
+        run.status = job.status || run.status;
+        run.phase = job.phase || job.current_phase || currentPhase.textContent;
+        run.eta = job.estimated_remaining_seconds ?? job.eta_seconds ?? null;
+        if (job.progress != null) lastProgress = Math.max(lastProgress, Number(job.progress) || 0);
+        currentPhase.textContent = run.phase;
+        saveRun(run);
+        cancelButton.disabled = terminalStatuses.has(run.status) || run.status === 'cancelling';
+        if (terminalStatuses.has(run.status)) {
+          clearInterval(tickTimer);
+          if (run.status === 'completed' || run.status === 'completed_with_errors') {
+            const finalAnalysis = await refreshAnalysis(run);
+            if (!finalAnalysis.report) {
+              renderFailure({message:finalAnalysis.error || '最终报告产物暂时不可用'});
+            }
+          }
+          else renderFailure({message:job.error || job.message}, run.status);
+          return;
+        }
+      } catch (error) {
+        if (token !== activeToken) return;
+        currentPhase.textContent = '连接暂时中断，后台任务仍在运行';
+        reportLocalError('个股分析', '任务状态暂时无法读取', error);
+      }
+      await new Promise(resolve => setTimeout(resolve, 900));
+    }
+  }
+
+  async function beginRun(query, mode) {
+    activeToken += 1;
+    lastEventSeq = 0;
+    lastProgress = 0;
+    resetDimensions();
+    reportRoot.innerHTML = '';
+    const idempotency = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    const data = await window.QuantMasterAPI('/api/v1/market/stock-analyses', {
+      method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':idempotency},
+      body:JSON.stringify({query, mode}),
+    });
+    const run = {
+      analysisId:data.analysis_id, jobId:data.job_id, query, mode,
+      status:data.status || 'queued', phase:'任务已提交，等待取数', startedAt:Date.now(), eta:null,
+    };
+    if (!run.analysisId || !run.jobId) throw new Error('统一任务接口未返回 analysis_id / job_id');
+    activeRun = run;
+    saveRun(run);
+    pollRun(run, activeToken);
+  }
+
+  cancelButton.addEventListener('click', async () => {
+    if (!activeRun || terminalStatuses.has(activeRun.status)) return;
+    cancelButton.disabled = true;
+    currentPhase.textContent = '正在请求安全取消';
+    try {
+      await window.QuantMasterAPI(`/api/v1/jobs/${encodeURIComponent(activeRun.jobId)}/cancel`, {method:'POST'});
+      activeRun.status = 'cancelling';
+      saveRun(activeRun);
+    } catch (error) {
+      cancelButton.disabled = false;
+      reportLocalError('个股分析', '取消请求未能送达', error);
+    }
+  });
+
+  form.querySelectorAll('input[name="mode"]').forEach(radio => radio.addEventListener('change', () => setMode(radio.value)));
 
   function hideSuggestions() {
     suggestionRequest += 1;
@@ -167,10 +389,7 @@
     suggestions.querySelectorAll('[data-sa-suggestion]').forEach((button, index) => {
       const selected = index === activeSuggestion;
       button.setAttribute('aria-selected', String(selected));
-      if (selected) {
-        input.setAttribute('aria-activedescendant', button.id);
-        button.scrollIntoView({block:'nearest'});
-      }
+      if (selected) input.setAttribute('aria-activedescendant', button.id);
     });
   }
 
@@ -178,17 +397,13 @@
     const item = suggestionItems[index];
     if (!item) return;
     input.value = item.symbol;
-    input.dataset.instrumentName = item.name || item.en_name || '';
     hideSuggestions();
     input.focus();
   }
 
   async function searchSuggestions() {
     const query = input.value.trim();
-    if (query.length < 2) {
-      hideSuggestions();
-      return;
-    }
+    if (query.length < 2) { hideSuggestions(); return; }
     const requestId = ++suggestionRequest;
     try {
       const data = await window.QuantMasterAPI(
@@ -214,23 +429,17 @@
   }
 
   input.addEventListener('input', () => {
-    delete input.dataset.instrumentName;
     hideSuggestions();
     suggestionTimer = setTimeout(searchSuggestions, 180);
   });
   input.addEventListener('keydown', event => {
     if (suggestions.hidden || !suggestionItems.length) return;
     if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      activeSuggestion = (activeSuggestion + 1) % suggestionItems.length;
-      syncSuggestionSelection();
+      event.preventDefault(); activeSuggestion = (activeSuggestion + 1) % suggestionItems.length; syncSuggestionSelection();
     } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      activeSuggestion = (activeSuggestion - 1 + suggestionItems.length) % suggestionItems.length;
-      syncSuggestionSelection();
+      event.preventDefault(); activeSuggestion = (activeSuggestion - 1 + suggestionItems.length) % suggestionItems.length; syncSuggestionSelection();
     } else if (event.key === 'Enter' && activeSuggestion >= 0) {
-      event.preventDefault();
-      chooseSuggestion(activeSuggestion);
+      event.preventDefault(); chooseSuggestion(activeSuggestion);
     } else if (event.key === 'Escape') hideSuggestions();
   });
   suggestions.addEventListener('click', event => {
@@ -240,49 +449,38 @@
   document.addEventListener('pointerdown', event => {
     if (!event.target.closest('.sa-search-shell')) hideSuggestions();
   });
-  document.querySelectorAll('[data-sa-example]').forEach(button => {
-    button.addEventListener('click', () => {
-      input.value = button.dataset.saExample;
-      hideSuggestions();
-      form.requestSubmit();
-    });
-  });
+  document.querySelectorAll('[data-sa-example]').forEach(button => button.addEventListener('click', () => {
+    input.value = button.dataset.saExample;
+    hideSuggestions();
+    form.requestSubmit();
+  }));
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const query = input.value.trim();
     if (!query) return;
+    const mode = form.elements.mode.value === 'quick' ? 'quick' : 'deep';
     hideSuggestions();
-    controller?.abort();
-    controller = new AbortController();
-    stage.hidden = false;
-    reportRoot.innerHTML = '';
-    setProgress({progress:1, phase:'准备分析', detail:`正在创建 ${query} 的六维分析任务`});
-    busy(form, true, '分析生成中…');
-    let report = null;
-    try {
-      await window.QuantMasterNDJSON('/api/v1/research/stock-analysis/stream', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({query}), signal:controller.signal,
-      }, streamEvent => {
-        if (streamEvent.type === 'progress') setProgress(streamEvent);
-        if (streamEvent.type === 'result') report = streamEvent.data;
-      });
-      if (!report) throw new Error('后台完成但没有返回分析报告');
-      renderReport(report);
-    } catch (error) {
-      if (error?.name !== 'AbortError') {
-        renderFailure(error);
-        reportLocalError('个股分析', '六维报告未能生成', error);
-      }
-    } finally {
-      busy(form, false);
-    }
+    busy(form, true, mode === 'quick' ? '快速分析中…' : '深度分析中…');
+    try { await beginRun(query, mode); }
+    catch (error) {
+      renderFailure(error);
+      reportLocalError('个股分析', '六维任务未能提交', error);
+    } finally { busy(form, false); setMode(mode); }
   });
 
-  window.loadStockAnalysis = () => {
+  window.loadStockAnalysis = async () => {
     if (loaded) return;
     loaded = true;
-    queueMicrotask(() => input.focus({preventScroll:true}));
+    resetDimensions();
+    const saved = storedRun();
+    if (saved?.analysisId && saved?.jobId) {
+      activeRun = saved;
+      input.value = saved.query || '';
+      setMode(saved.mode);
+      activeToken += 1;
+      try { await refreshAnalysis(saved); } catch (_) { /* poll supplies the diagnostic */ }
+      pollRun(saved, activeToken);
+    } else queueMicrotask(() => input.focus({preventScroll:true}));
   };
 })();

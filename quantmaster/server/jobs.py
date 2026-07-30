@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
+from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
 from quantmaster.backtest.spec import BacktestSpec
 from quantmaster.backtest.workbench import get_backtest_worker
 from quantmaster.data.maintenance import data_refresh_manager
@@ -184,8 +185,41 @@ def list_jobs(
         for current in domains
         for value in _list(current, limit)
     ]
+    if domain is None:
+        items.extend(get_stock_analysis_jobs().list(limit))
     items.sort(key=lambda value: value["created_at"], reverse=True)
     return {"items": items[:limit], "domains": list(_DOMAINS)}
+
+
+@router.get("/{job_id}/events")
+def get_registered_job_events(
+    job_id: str, after: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+) -> dict[str, Any]:
+    try:
+        return {"id": job_id, "items": get_stock_analysis_jobs().events(job_id, after, limit)}
+    except KeyError as exc:
+        raise _not_found(exc) from None
+
+
+@router.post("/{job_id}/cancel")
+def cancel_registered_job(job_id: str) -> dict[str, Any]:
+    try:
+        return get_stock_analysis_jobs().cancel(job_id)
+    except KeyError as exc:
+        raise _not_found(exc) from None
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.post("/{job_id}/retry", status_code=202)
+def retry_registered_job(job_id: str) -> dict[str, Any]:
+    try:
+        return get_stock_analysis_jobs().retry(job_id)
+    except KeyError as exc:
+        raise _not_found(exc) from None
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.get("/{domain}/{job_id}")
@@ -227,3 +261,11 @@ def retry_job(domain: JobDomain, job_id: str) -> dict[str, Any]:
         raise _not_found(exc) from None
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from None
+
+
+@router.get("/{job_id}")
+def get_registered_job(job_id: str) -> dict[str, Any]:
+    try:
+        return get_stock_analysis_jobs().public_job(job_id)
+    except KeyError as exc:
+        raise _not_found(exc) from None

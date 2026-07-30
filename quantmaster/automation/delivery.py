@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import httpx
@@ -256,6 +257,7 @@ class OutboxDispatcher:
     def __init__(self, store: AutomationStore, gateway: DeliveryGateway | None = None):
         self.store = store
         self.gateway = gateway or BotDeliveryGateway(store)
+        self.analysis_delivery_handler: Callable[[int], dict[str, int]] | None = None
 
     def dispatch(self, limit: int = 20) -> dict[str, int]:
         result = {"delivered": 0, "failed": 0, "retried": 0}
@@ -273,4 +275,8 @@ class OutboxDispatcher:
                 self.store.delivery_success(item["id"])
                 self.store.set_target_status(item["target_id"], "healthy")
                 result["delivered"] += 1
+        if self.analysis_delivery_handler:
+            analysis = self.analysis_delivery_handler(limit)
+            for key in result:
+                result[key] += int(analysis.get(key) or 0)
         return result

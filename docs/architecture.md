@@ -34,9 +34,13 @@
   `sendmessage`；每次回复使用对应会话的最新 `context_token`。该通道仅作为能力受限的文本提醒补充。
 - `commands.py` 优先处理固定中文命令。查询只读；任务/策略变更需要管理员身份；账本和模拟调仓写入
   仅允许管理员私聊，并使用 5 分钟有效的一次性确认码。
-- `analysis/stock.py` 内置 ClawHub `stock-analysis-framework` 的安全适配工作流；只接收用户明确询问的
-  单一标的，组合行情、基本面、本地资讯、资金流和行业缓存生成六维 JSON 报告。Web NDJSON 与飞书
-  卡片共享同一组阶段事件；飞书通过消息 PATCH 原位更新，不为每个阶段新增会话消息。
+- `analysis/stock_research.py` 把单一标的研究拆成并发取证、六维独立规则/模型复核和最终交叉复核；
+  结构化数值由本地规则计算，模型只能引用本任务的 evidence ID。`analysis/stock_jobs.py` 将它注册为
+  `market.stock_analysis`，复用 `runtime/jobs.py` 的不可变规格、幂等键、租约、事件、取消、重试、
+  严格 JSON 产物和损坏产物修复队列，不建立个股专属任务数据库。
+- Web 通过 `/api/v1/market/stock-analyses` 提交，再轮询 `/api/v1/jobs/{job_id}` 及其事件；刷新页面只
+  恢复 job ID，后台任务不依赖浏览器连接。飞书把同一 job 与原卡片 `message_id` 持久化到 Automation
+  outbox，每维完成后原位更新；终态主卡保留六维结论，完整证据按不超过 28 KB 的编号附录续投。
 - 上游 `stock_monitor.py` / `stock_briefing.py` 不在运行时执行，因此不会隐式读取本地持仓文件或把
   持仓列表发送给新浪。逐单资金流不可用时只使用日线量价代理，并在报告中降低数据覆盖率。
 - 飞书群普通消息只写入 `conversation_messages`，真实 `@QuantMaster` 才进入命令路由。未匹配
@@ -62,7 +66,8 @@
 - `server/lab.py` 只暴露安全 DSL、版本操作、任务和证据 API。人工批准是研究生产
   的强制边界，部署仅指 Champion 切换，不连接真实券商。
 
-长耗时的市场概览与决策生成另提供 NDJSON 流式接口。数据层按标的回调真实
+长耗时的市场概览与决策生成另提供 NDJSON 流式接口；个股分析不使用流式连接，而使用可恢复的统一
+任务事件。数据层按标的回调真实
 完成度，事件除进度外还携带可立即使用的 `partial`：市场逐标的返回卡片数据，
 决策依次返回已就绪标的、牛熊、板块、候选和历史快照。最终结果用于一致性收口；
 反向代理应关闭响应缓冲。

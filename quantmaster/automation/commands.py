@@ -31,12 +31,13 @@ HELP_PATTERN = re.compile(
 STOCK_ANALYSIS_EXCLUSIONS = {"大盘", "市场", "行情", "任务", "持仓", "选股", "新闻", "资讯"}
 
 
-def stock_analysis_query(text: str) -> str:
-    """提取明确的个股分析意图；普通聊天和大盘查询继续走原有路由。"""
+def stock_analysis_request(text: str) -> tuple[str, str]:
+    """提取个股分析意图；只有用户明确说“快速分析”才切换快速模式。"""
     value = re.sub(r"[？?。！!]+$", "", str(text).strip())
+    mode = "quick" if re.search(r"快速\s*(?:个股|股票|标的)?\s*分析", value) else "deep"
     patterns = (
         r"^(?:请|帮我)?\s*(?:做(?:一份)?|生成(?:一份)?)?\s*"
-        r"(?:完整|深度|六维)?\s*(?:个股|股票|标的)?\s*分析(?:一下)?\s*[:：]?\s*(.+)$",
+        r"(?:完整|深度|六维|快速)?\s*(?:个股|股票|标的)?\s*分析(?:一下)?\s*[:：]?\s*(.+)$",
         r"^(?:请|帮我)?\s*(?:看看|研究|评估)(?:一下)?\s*[:：]?\s*"
         r"([A-Za-z0-9.\u4e00-\u9fff·]{2,24})$",
         r"^([A-Za-z0-9.\u4e00-\u9fff·]{2,24}?)\s*"
@@ -51,9 +52,14 @@ def stock_analysis_query(text: str) -> str:
         )
         query = re.sub(r"(?:这只|这个)?(?:股票|标的)$", "", query).strip()
         if not query or any(term in query for term in STOCK_ANALYSIS_EXCLUSIONS):
-            return ""
-        return query[:80]
-    return ""
+            return "", "deep"
+        return query[:80], mode
+    return "", "deep"
+
+
+def stock_analysis_query(text: str) -> str:
+    """向后兼容内部意图辅助函数；领域 API 不保留旧路径别名。"""
+    return stock_analysis_request(text)[0]
 
 
 class BotCommandRouter:
@@ -117,10 +123,10 @@ class BotCommandRouter:
         return text[:3500] + ("\n…内容已截断" if len(text) > 3500 else "")
 
     def handle(self, actor: ActorContext, text: str) -> None:
-        analysis_query = stock_analysis_query(text)
+        analysis_query, analysis_mode = stock_analysis_request(text)
         if analysis_query and actor.channel == "feishu":
             try:
-                self.service.handle_stock_analysis(actor, analysis_query)
+                self.service.handle_stock_analysis(actor, analysis_query, mode=analysis_mode)
             except Exception as exc:
                 self.reply(actor, f"个股分析未能启动：{exc}\n发送“帮助”查看可用说法。")
             if actor.chat_type == "group":

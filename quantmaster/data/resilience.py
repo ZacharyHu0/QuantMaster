@@ -355,7 +355,7 @@ def akshare_call(
             return result
         except CircuitOpenError:
             raise
-        except Exception as exc:
+        except (ImportError, OSError, TypeError, ValueError) as exc:
             immediate = _hard_connectivity_error(exc) or _rate_limited(exc)
             if immediate or attempt >= attempts:
                 raise
@@ -445,8 +445,31 @@ class EndpointFrameCache:
             return None
         try:
             return pd.read_parquet(path)
-        except Exception:
-            logger.warning("接口缓存损坏，将重新拉取: %s", path)
+        except Exception as exc:
+            logger.warning("接口缓存损坏，将隔离并重新拉取: %s", path)
+            try:
+                from quantmaster.data.repair import enqueue_repair, quarantine_file
+
+                quarantine = quarantine_file(
+                    path,
+                    category="api-cache",
+                    target=str(path.resolve()),
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                enqueue_repair(
+                    "api_cache",
+                    str(path.resolve()),
+                    reason="接口缓存完整性校验失败",
+                    spec={
+                        "path": str(path.resolve()),
+                        "root": str(self.root.parent.resolve()),
+                        "provider": self.root.name,
+                        "quarantine": quarantine,
+                    },
+                    source=f"api-cache:{self.root.name}",
+                )
+            except (ImportError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+                logger.exception("接口缓存隔离或修复入队失败: %s", path)
             return None
 
     def put(self, endpoint: str, params: dict, frame: pd.DataFrame) -> None:

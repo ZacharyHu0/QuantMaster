@@ -651,10 +651,10 @@
     <div>
       <span class="sa-kicker">SIX-DIMENSION RESEARCH MEMO</span>
       <h2>个股六维分析</h2>
-      <p>把行情、估值、资讯与资金证据整理成一份可核查报告；缺失数据保留为空，不用叙事补数。</p>
+      <p>联网取证、六维分别研判，再做一次交叉复核；每条结论都能回到来源，缺失数据不靠叙事补齐。</p>
     </div>
     <div class="sa-framework-badge" aria-label="分析框架版本">
-      <span>FRAMEWORK</span><strong>6D / v1.0</strong>
+      <span>REPORT SCHEMA</span><strong>6D / v2</strong>
     </div>
   </div>
   <form class="sa-query" id="stock-analysis-form" autocomplete="off">
@@ -666,8 +666,13 @@
           placeholder="输入代码或名称，如 600519 / 贵州茅台" required maxlength="80">
         <div class="sa-suggestions" id="stock-analysis-suggestions" role="listbox" hidden></div>
       </div>
-      <button class="primary" type="submit">生成六维报告</button>
+      <button class="primary" type="submit">开始深度分析</button>
     </div>
+    <fieldset class="sa-mode" aria-label="分析模式">
+      <legend>分析模式</legend>
+      <label><input type="radio" name="mode" value="deep" checked><span>深度</span><small>联网取证 · 约 2–5 分钟</small></label>
+      <label><input type="radio" name="mode" value="quick"><span>快速</span><small>本地规则 · 更快返回</small></label>
+    </fieldset>
     <div class="sa-examples" aria-label="示例标的">
       <span>试一试</span>
       <button type="button" data-sa-example="600519.SH">贵州茅台</button>
@@ -678,7 +683,7 @@
   <div class="sa-stage" id="stock-analysis-stage" aria-live="polite">
     <div class="sa-idle-copy">
       <strong>一次分析，六条证据链</strong>
-      <p>提交后会持续显示当前阶段；你可以切换页面，分析仍会在后台继续。</p>
+      <p>提交后可离开页面或刷新；统一任务会继续运行，回来后从同一 job 恢复。</p>
     </div>
     <ol class="sa-framework-map">
       <li><span>01</span><strong>基本面</strong><small>盈利 · 估值 · 财务质量</small></li>
@@ -688,6 +693,17 @@
       <li><span>05</span><strong>心理面</strong><small>拥挤 · 超买超卖 · 风险偏好</small></li>
       <li><span>06</span><strong>宏观面</strong><small>行业 · 政策 · 外部变量</small></li>
     </ol>
+  </div>
+  <div class="sa-live" id="stock-analysis-live" hidden>
+    <div class="sa-live-head">
+      <div><span>RESEARCH TIMELINE</span><strong id="stock-analysis-current-phase">等待任务启动</strong></div>
+      <dl>
+        <div><dt>已耗时</dt><dd id="stock-analysis-elapsed">00:00</dd></div>
+        <div><dt>预计剩余</dt><dd id="stock-analysis-eta">计算中</dd></div>
+      </dl>
+      <button class="ghost" id="stock-analysis-cancel" type="button">取消分析</button>
+    </div>
+    <div class="sa-live-dimensions" id="stock-analysis-live-dimensions" aria-live="polite"></div>
   </div>
   <div id="stock-analysis-report" aria-live="polite"></div>
 </section>
@@ -1680,12 +1696,13 @@ async function protectedFetch(path, options = {}) {
 function sourceForPath(path) {
   const route = apiRoute(path);
   const sources = [
-    ['/api/v1/market', '市场行情'], ['/api/v1/research/decision', '每日决策'],
+    ['/api/v1/market/stock-analyses', '个股分析'], ['/api/v1/market', '市场行情'],
+    ['/api/v1/research/decision', '每日决策'],
     ['/api/v1/research/factors', '因子研究'], ['/api/v1/backtests', '策略回测'],
     ['/api/v1/research/mining', '因子挖掘'], ['/api/v1/paper', '模拟交易'],
     ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '实盘账本'],
-    ['/api/v1/research/stock-analysis', '个股分析'],
     ['/api/v1/rotation', '板块联动'],
+    ['/api/v1/jobs', '后台任务'],
     ['/api/v1/portfolio', '我的标的'], ['/api/v1/settings', '设置中心'],
     ['/api/v1/automation', '自动任务'], ['/api/v1/lab', 'Quant Lab'],
   ];

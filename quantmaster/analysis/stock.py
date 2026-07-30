@@ -136,8 +136,9 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
         )
 
     close = frame["close"]
-    for window in (5, 10, 20, 60):
-        frame[f"ma{window}"] = close.rolling(window, min_periods=min(window, 20)).mean()
+    for window in (5, 10, 20, 60, 120, 250):
+        minimum = window if window >= 120 else min(window, 20)
+        frame[f"ma{window}"] = close.rolling(window, min_periods=minimum).mean()
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     frame["macd"] = ema12 - ema26
@@ -177,6 +178,7 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
     price = _number(row["close"], 4)
     ma5, ma10 = _number(row.get("ma5"), 4), _number(row.get("ma10"), 4)
     ma20, ma60 = _number(row.get("ma20"), 4), _number(row.get("ma60"), 4)
+    ma120, ma250 = _number(row.get("ma120"), 4), _number(row.get("ma250"), 4)
     rsi = _number(row.get("rsi14"), 2)
     macd_hist = _number(row.get("macd_hist"), 4)
     k_value, d_value = _number(row.get("kdj_k"), 2), _number(row.get("kdj_d"), 2)
@@ -190,6 +192,10 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
     resistance60 = _number(high.tail(60).max(), 4)
     span = (resistance20 or 0) - (support20 or 0)
     position20 = _number(((price or 0) - (support20 or 0)) / span * 100, 1) if span > 0 else None
+    return20 = _number((close.iloc[-1] / close.iloc[-21] - 1) * 100, 2) if len(close) > 20 else None
+    return60 = _number((close.iloc[-1] / close.iloc[-61] - 1) * 100, 2) if len(close) > 60 else None
+    prior_high60 = _number(high.shift(1).tail(60).max(), 4) if len(high) > 1 else None
+    breakout60 = bool(price is not None and prior_high60 is not None and price > prior_high60)
 
     signals: list[str] = []
     risks: list[str] = []
@@ -203,6 +209,15 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
             signals.append("MA5/10/20/60 呈空头排列。")
         else:
             signals.append("均线交错，趋势尚未形成一致方向。")
+    if None not in (price, ma120):
+        score += 4 if price >= ma120 else -4
+        signals.append(f"收盘价位于 MA120 {'上方' if price >= ma120 else '下方'}。")
+    if None not in (price, ma250):
+        score += 4 if price >= ma250 else -4
+        signals.append(f"收盘价位于 MA250 {'上方' if price >= ma250 else '下方'}。")
+    if breakout60:
+        score += 5
+        signals.append("收盘价突破此前 60 日高点，仍需量能和后续收盘确认。")
     if price is not None and ma20 is not None:
         score += 7 if price >= ma20 else -7
         signals.append(f"收盘价位于 MA20 {'上方' if price >= ma20 else '下方'}。")
@@ -246,6 +261,8 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
         _metric("现价", price, _display_number(price)),
         _metric("MA5 / MA20", ma5, f"{_display_number(ma5)} / {_display_number(ma20)}"),
         _metric("MA60", ma60, _display_number(ma60)),
+        _metric("MA120 / MA250", ma120,
+                f"{_display_number(ma120)} / {_display_number(ma250)}"),
         _metric("RSI(14)", rsi, _display_number(rsi, 1)),
         _metric("MACD 柱", macd_hist, _display_number(macd_hist, 4)),
         _metric("K / D", k_value, f"{_display_number(k_value, 1)} / {_display_number(d_value, 1)}"),
@@ -257,6 +274,10 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
         _metric("60 日支撑 / 压力", support60,
                 f"{_display_number(support60)} / {_display_number(resistance60)}"),
         _metric("5/20 日量比", volume_ratio, _display_number(volume_ratio, 2)),
+        _metric("20 / 60 日涨跌", return20,
+                f"{_display_number(return20, 2, '%')} / {_display_number(return60, 2, '%')}"),
+        _metric("60 日突破", 1 if breakout60 else 0, "是" if breakout60 else "否",
+                note=(f"此前高点 {_display_number(prior_high60)}" if prior_high60 is not None else "")),
     ]
     return _dimension(
         "technical", "②", "技术面", score=score,
@@ -648,6 +669,7 @@ class StockAnalysisService:
         news_loader: Callable[[str, str], list[dict[str, Any]]] | None = None,
         capital_loader: Callable[[str], dict[str, Any]] | None = None,
         industry_loader: Callable[[str], str] | None = None,
+        deep_loader: Any | None = None,
         llm_factory: Callable[[], Any] | object | None = _DEFAULT_LLM,
     ):
         if resolver is None:
@@ -668,6 +690,7 @@ class StockAnalysisService:
         self.news_loader = news_loader or _default_news
         self.capital_loader = capital_loader or _default_capital
         self.industry_loader = industry_loader or _default_industry
+        self.deep_loader = deep_loader
         self.llm_factory = llm_factory if callable(llm_factory) else None
 
     def resolve(self, query: str) -> dict[str, Any]:
@@ -809,3 +832,21 @@ class StockAnalysisService:
         ]
         _emit(progress, 100, "分析完成", f"{name} 六维报告已生成", level="success")
         return report
+
+    def analyze_v2(
+        self,
+        query: str,
+        *,
+        mode: str = "deep",
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Run the durable-job friendly v2 research protocol."""
+        from quantmaster.analysis.stock_research import (
+            StockAnalysisSpec,
+            StockResearchEngine,
+        )
+
+        return StockResearchEngine(
+            self, deep_loader=self.deep_loader, llm_factory=self.llm_factory,
+        ).run(StockAnalysisSpec(query=query, mode=mode), emit=emit, **kwargs)

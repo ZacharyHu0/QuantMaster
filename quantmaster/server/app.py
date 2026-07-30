@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from quantmaster.analysis.stock_jobs import (
+        get_stock_analysis_jobs,
+        shutdown_stock_analysis_jobs,
+    )
     from quantmaster.automation.runtime import get_runtime
     from quantmaster.backtest.workbench import get_backtest_worker
     from quantmaster.data.instruments import InstrumentStore
@@ -67,6 +71,7 @@ async def lifespan(_: FastAPI):
     research_worker = get_research_job_manager()
     rotation_worker = get_rotation_worker()
     repair_worker = get_data_repair_manager()
+    stock_analysis_worker = get_stock_analysis_jobs()
 
     def drain_workers() -> None:
         rotation_worker.stop()
@@ -76,8 +81,10 @@ async def lifespan(_: FastAPI):
         backtest_worker.stop()
         worker.stop()
         runtime.stop()
+        stock_analysis_worker.pause()
 
     def resume_workers() -> None:
+        stock_analysis_worker.resume()
         runtime.start()
         research_worker.start()
         data_refresh_manager.start()
@@ -91,9 +98,14 @@ async def lifespan(_: FastAPI):
         name=f"web-background-components:{uuid.uuid4().hex}",
         drain=drain_workers,
         resume=resume_workers,
-        idle=lambda: not data_refresh_manager.active and rotation_worker.idle,
+        idle=lambda: (
+            not data_refresh_manager.active
+            and rotation_worker.idle
+            and stock_analysis_worker.idle
+        ),
     ))
     research_worker.start()
+    stock_analysis_worker.start()
     data_refresh_manager.start()
     repair_worker.start()
     backtest_worker.start()
@@ -122,6 +134,8 @@ async def lifespan(_: FastAPI):
     finally:
         drain_workers()
         unregister_maintenance()
+        # 飞书 outbox 已在 drain_workers 中停止，不会在此处重新创建分析单例。
+        shutdown_stock_analysis_jobs()
         logger.info("QuantMaster 已停止")
 
 
@@ -271,6 +285,7 @@ from quantmaster.server.management import router as management_router  # noqa: E
 from quantmaster.server.news import router as news_router  # noqa: E402
 from quantmaster.server.research import router as research_router  # noqa: E402
 from quantmaster.server.rotation import router as rotation_router  # noqa: E402
+from quantmaster.server.stock_analysis import router as stock_analysis_router  # noqa: E402
 from quantmaster.server.trading import router as trading_router  # noqa: E402
 
 app.include_router(management_router)
@@ -281,6 +296,7 @@ app.include_router(news_router)
 app.include_router(trading_router)
 app.include_router(research_router)
 app.include_router(rotation_router)
+app.include_router(stock_analysis_router)
 
 
 def _series_to_points(s: pd.Series) -> list[list]:
@@ -375,23 +391,6 @@ def _progress_stream(
             "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
             "X-Request-ID": request_id,
         },
-    )
-
-
-class StockAnalysisIn(ContractModel):
-    query: str = Field(..., min_length=1, max_length=80)
-
-
-@app.post("/api/v1/research/stock-analysis/stream")
-def stock_analysis_stream(value: StockAnalysisIn, request: Request) -> StreamingResponse:
-    """Web 个股分析入口；与飞书共用六维引擎和真实阶段进度。"""
-    from quantmaster.analysis.stock import StockAnalysisService
-    from quantmaster.server.management import _require_local
-
-    _require_local(request)
-    return _progress_stream(
-        lambda emit: StockAnalysisService().analyze(value.query, emit),
-        _request_id(request),
     )
 
 

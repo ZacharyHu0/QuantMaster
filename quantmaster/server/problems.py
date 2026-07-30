@@ -138,6 +138,23 @@ def collect_health_report() -> dict[str, Any]:
         issues.append(_component_failure("资讯来源", exc))
 
     try:
+        from quantmaster.ai.llm import web_search_capability_status
+
+        search = web_search_capability_status()
+        if search.get("supported") is False:
+            issues.append(make_problem(
+                "llm_web_search_unavailable",
+                severity="warning",
+                source="个股深度分析",
+                title="模型网关不支持原生联网搜索",
+                message=_clean(search.get("detail")) or "能力探测已确认当前网关不支持 Web Search。",
+                action="系统会自动使用内置金融数据源；如需联网补证，可切换支持原生搜索的模型接口。",
+                problem_id="stock-analysis:web-search",
+            ))
+    except (ImportError, RuntimeError, TypeError, ValueError) as exc:
+        issues.append(_component_failure("个股联网搜索", exc))
+
+    try:
         from quantmaster.automation.runtime import get_runtime
         from quantmaster.config import get_config
 

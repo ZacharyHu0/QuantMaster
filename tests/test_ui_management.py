@@ -1097,3 +1097,99 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert page_errors == []
         browser.close()
+
+
+def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
+    url, _ = live_server
+    keys = [
+        ("fundamental", "①", "基本面"), ("technical", "②", "技术面"),
+        ("news", "③", "消息面"), ("capital", "④", "资金面"),
+        ("sentiment", "⑤", "市场心理面"), ("macro", "⑥", "宏观/政策面"),
+    ]
+    dimensions = [{
+        "key": key, "number": number, "title": title, "score": 61 + index,
+        "stance": "谨慎偏强", "status": "complete", "summary": f"{title}证据已完成复核。",
+        "metrics": [{"label": "样本指标", "value": index, "display": str(index), "note": ""}],
+        "signals": ["证据支持当前方向。"], "risks": ["仍需等待后续数据。"],
+        "as_of": "2026-07-30", "generation": "llm_assisted", "degraded_reason": "",
+        "evidence_ids": [f"ev_{index:020d}"],
+        "evidence": [{
+            "id": f"ev_{index:020d}", "title": f"{title}来源", "value": {"sample": index},
+            "excerpt": "可核查摘要", "published_at": "2026-07-30", "data_as_of": "2026-07-30",
+            "source": {"name": "官方来源", "level": 1, "url": f"https://example.com/{key}"},
+        }],
+    } for index, (key, number, title) in enumerate(keys)]
+    report = {
+        "schema_version": "2.0", "instrument": {
+            "symbol": "600519.SH", "name": "贵州茅台", "market_label": "中国内地",
+        },
+        "quote": {"current": 1500, "change_pct": 1.25}, "data_as_of": "2026-07-30",
+        "overall": {
+            "score": 65.5, "stance": "谨慎偏强", "coverage": 100, "confidence": 85,
+            "thesis": "六维证据总体偏强，但仍需等待新披露。", "summary": "终审已检查证据时点与冲突。",
+            "risks": ["市场波动可能放大。"],
+        },
+        "dimensions": dimensions,
+        "scenarios": [{
+            "title": "基准情景", "priority": "当前主场景",
+            "condition": "价格维持区间。", "response": "等待新证据。",
+        }],
+        "warnings": [], "research": {
+            "mode": "deep", "elapsed_seconds": 128, "evidence_count": 6,
+            "sources": [{"id": "src_1"}],
+        },
+        "disclaimer": "仅作量化研究与记录，不构成投资建议。",
+    }
+    submitted = []
+    event_calls = {"count": 0}
+
+    def route_api(route):
+        request = route.request
+        path = request.url.split("?", 1)[0]
+        if path.endswith("/api/v1/market/stock-analyses") and request.method == "POST":
+            submitted.append(request.post_data_json)
+            route.fulfill(status=202, json={
+                "analysis_id": "analysis-stock", "job_id": "job-stock", "status": "queued",
+            })
+        elif path.endswith("/api/v1/market/stock-analyses/analysis-stock"):
+            route.fulfill(json={"analysis_id": "analysis-stock", "status": "completed", "report": report})
+        elif path.endswith("/api/v1/jobs/job-stock/events"):
+            event_calls["count"] += 1
+            items = [] if event_calls["count"] > 1 else [
+                {"seq": index + 1, "type": "dimension_completed", "payload": {
+                    "dimension": item["key"], "result": item, "completed": index + 1,
+                }} for index, item in enumerate(dimensions)
+            ]
+            route.fulfill(json={"items": items})
+        elif path.endswith("/api/v1/jobs/job-stock"):
+            route.fulfill(json={
+                "id": "job-stock", "status": "completed", "progress": 100,
+                "phase": "分析完成", "estimated_remaining_seconds": 0,
+            })
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 900}, reduced_motion="reduce")
+        page = context.new_page()
+        page.route("**/api/v1/**", route_api)
+        page.goto(url)
+        page.locator('[data-tab="stock-analysis"]').click()
+        page.locator("#stock-analysis-query").fill("600519.SH")
+        assert page.locator('input[name="mode"][value="deep"]').is_checked()
+        page.locator("#stock-analysis-form button.primary").click()
+        page.get_by_text("六维证据总体偏强，但仍需等待新披露。").wait_for()
+
+        assert submitted == [{"query": "600519.SH", "mode": "deep"}]
+        assert page.locator(".sa-dimension").count() == 6
+        assert page.locator('.sa-citations a[href="https://example.com/fundamental"]').count() == 1
+        assert page.locator("#stock-analysis-elapsed").inner_text()
+        assert page.evaluate("getComputedStyle(document.querySelector('.sa-report')).animationName") == "none"
+
+        page.reload()
+        page.locator('[data-tab="stock-analysis"]').click()
+        page.get_by_text("六维证据总体偏强，但仍需等待新披露。").wait_for()
+        restored = page.evaluate("JSON.parse(localStorage.getItem('qm.stock-analysis.active.v2'))")
+        assert restored["jobId"] == "job-stock"
+        browser.close()
