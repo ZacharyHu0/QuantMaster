@@ -68,7 +68,9 @@ class _WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel = ctypes.WinDLL(  # type: ignore[attr-defined]
+            "kernel32", use_last_error=True,
+        )
         kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel.CreateJobObjectW.restype = wintypes.HANDLE
         kernel.SetInformationJobObject.argtypes = [
@@ -84,7 +86,10 @@ class _WindowsJob:
 
         handle = kernel.CreateJobObjectW(None, None)
         if not handle:
-            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+            raise OSError(
+                ctypes.get_last_error(),  # type: ignore[attr-defined]
+                "CreateJobObjectW failed",
+            )
         self._kernel = kernel
         self._handle = handle
         try:
@@ -107,10 +112,16 @@ class _WindowsJob:
             if not kernel.SetInformationJobObject(
                 handle, 9, ctypes.byref(info), ctypes.sizeof(info),
             ):
-                raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+                raise OSError(
+                    ctypes.get_last_error(),  # type: ignore[attr-defined]
+                    "SetInformationJobObject failed",
+                )
             process_handle = wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
             if not kernel.AssignProcessToJobObject(handle, process_handle):
-                raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+                raise OSError(
+                    ctypes.get_last_error(),  # type: ignore[attr-defined]
+                    "AssignProcessToJobObject failed",
+                )
         except Exception:
             self.close()
             raise

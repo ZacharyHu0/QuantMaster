@@ -4,13 +4,40 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.1"
+VERSION = "0.13.2"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "持续质量与浏览器门禁修复",
+                "items": (
+                    (
+                        "受控类型检查按 Python 3.12 解析依赖类型存根，同时保留 Python 3.10/3.12"
+                        "真实运行矩阵；补齐 Windows 文件锁与 Job Object 的跨平台类型边界。"
+                    ),
+                    (
+                        "适配新版 Ruff 的联合类型顺序规则，避免托管 runner 使用最新质量工具时"
+                        "出现仅在远端暴露的静态检查失败。"
+                    ),
+                    (
+                        "Chromium 验收改用 CSP 安全的定位器断言和显式异步状态等待，修复设置、"
+                        "帮助、诊断、确认对话框等流程的竞态与永久等待。"
+                    ),
+                    (
+                        "浏览器套件默认继续在 Ubuntu CI 执行，并提供显式跨平台本地开关，便于"
+                        "在 Windows 上复现并验证相同的完整流程。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.1",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "跨平台发布修复",

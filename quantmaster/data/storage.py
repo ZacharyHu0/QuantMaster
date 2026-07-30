@@ -58,7 +58,9 @@ def _acquire_file_lock(path: Path, timeout: float = 30.0) -> BufferedRandom:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    stream.fileno(), msvcrt.LK_NBLCK, 1,  # type: ignore[attr-defined]
+                )
             else:
                 import fcntl
 
@@ -79,7 +81,9 @@ def _release_file_lock(stream: BufferedRandom) -> None:
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt.locking(  # type: ignore[attr-defined]
+                stream.fileno(), msvcrt.LK_UNLCK, 1,  # type: ignore[attr-defined]
+            )
         else:
             import fcntl
 

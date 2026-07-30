@@ -648,7 +648,7 @@ class StockAnalysisService:
         news_loader: Callable[[str, str], list[dict[str, Any]]] | None = None,
         capital_loader: Callable[[str], dict[str, Any]] | None = None,
         industry_loader: Callable[[str], str] | None = None,
-        llm_factory: Callable[[], Any] | None | object = _DEFAULT_LLM,
+        llm_factory: Callable[[], Any] | object | None = _DEFAULT_LLM,
     ):
         if resolver is None:
             from quantmaster.data.instruments import resolve_instrument

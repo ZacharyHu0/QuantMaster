@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -16,8 +17,21 @@ import pytest
 from quantmaster import __version__
 from quantmaster.release import RELEASE_DATE
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="浏览器验收仅在 Ubuntu CI 执行")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" and os.environ.get("QM_RUN_UI_ANY_PLATFORM") != "1",
+    reason="浏览器验收默认仅在 Ubuntu CI 执行；本地可显式启用",
+)
 playwright_sync = pytest.importorskip("playwright.sync_api")
+
+
+def _wait_for_text(locator, text: str, *, timeout: float = 30_000) -> None:
+    playwright_sync.expect(locator).to_contain_text(text, timeout=timeout)
+
+
+def _wait_for_class(locator, class_name: str, *, timeout: float = 30_000) -> None:
+    playwright_sync.expect(locator).to_have_class(
+        re.compile(rf"(?:^|\s){re.escape(class_name)}(?:\s|$)"), timeout=timeout,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -82,20 +96,21 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('[name="llm.base_url"]').fill("http://127.0.0.1:9/v1")
         page.locator('[name="llm.model"]').fill("manual-local-model")
         page.locator('[data-check="llm-models"]').click()
-        page.locator('[data-check-result="llm-models"]').wait_for()
-        assert "失败" in page.locator('[data-check-result="llm-models"]').inner_text()
+        model_check = page.locator('[data-check-result="llm-models"]')
+        _wait_for_class(model_check, "error")
+        assert "检测中" not in model_check.inner_text()
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
-        page.wait_for_function("document.querySelector('#settings-save-state').innerText.includes('已保存')")
+        _wait_for_class(page.locator("#settings-save-state"), "saved")
 
         page.locator('[data-settings-section="automation"]').click()
         assert page.locator('[name="automation.enabled"]').is_visible()
         page.locator('[name="automation.retention_days"]').fill("120")
-        page.wait_for_function("document.querySelector('#settings-save-state').innerText.includes('已自动保存')")
+        _wait_for_text(page.locator("#settings-save-state"), "已自动保存")
 
         page.locator('[data-settings-section="backup"]').click()
         page.locator('#snapshot-form [name="name"]').fill("UI baseline")
         page.locator('#snapshot-form button').click()
-        page.get_by_text("UI baseline", exact=True).wait_for()
+        page.get_by_text("UI baseline", exact=True).first.wait_for()
 
         page.get_by_role("button", name="候选", exact=True).click()
         page.locator(".candidate-detail").wait_for()
@@ -120,12 +135,14 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator("#candidate-bulk-text").fill("600519\n000001\n600519.SH")
         page.get_by_role("button", name="应用到草稿", exact=True).click()
         page.get_by_text("有尚未生效的更改", exact=True).wait_for()
-        assert page.locator(".candidate-member-symbol").all_inner_texts() == [
+        member_symbols = page.locator(".candidate-member-symbol")
+        playwright_sync.expect(member_symbols).to_have_count(2)
+        assert member_symbols.all_inner_texts() == [
             "600519.SH", "000001.SZ",
         ]
         page.get_by_role("button", name="创建候选", exact=True).click()
         page.get_by_role("heading", name="ui_candidate", exact=True).wait_for()
-        assert page.locator('[data-candidate-name="ui_candidate"]').is_visible()
+        page.locator('[data-candidate-name="ui_candidate"]').wait_for(state="visible")
 
         csv = tmp_path / "broker.csv"
         csv.write_text(
@@ -138,14 +155,12 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('#broker-csv').set_input_files(csv)
         page.locator('#csv-preview-form button').click()
         page.locator('#csv-submit-actions').wait_for(state="visible")
-        assert "坏行" in page.locator('#csv-preview').inner_text()
+        _wait_for_text(page.locator('#csv-preview'), "坏行")
         page.locator('#csv-submit').click()
-        page.wait_for_function("document.querySelector('#csv-import-status').innerText.includes('未导入')")
+        _wait_for_text(page.locator("#csv-import-status"), "未导入")
         page.locator('[name="csv-mode"][value="valid"]').check()
         page.locator('#csv-submit').click()
-        page.wait_for_function(
-            "document.querySelector('#csv-import-status').innerText.includes('已导入 1 笔')"
-        )
+        _wait_for_text(page.locator("#csv-import-status"), "已导入 1 笔")
         assert page.locator('#csv-download-errors').is_visible()
 
         page.set_viewport_size({"width": 390, "height": 844})
@@ -191,9 +206,7 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert help_button.bounding_box()["x"] < settings_button.bounding_box()["x"]
         help_button.click()
         page.locator("#help-start").wait_for(state="visible")
-        page.wait_for_function(
-            "document.querySelector('#help-settings-status').innerText.startsWith('已载入')"
-        )
+        _wait_for_text(page.locator("#help-settings-status"), "已载入")
         assert page.locator("#help-settings-status").inner_text().startswith("已载入")
         assert page.locator("#help-article h2").count() == 28
         assert page.locator(".help-sidebar .help-nav-part").count() == 6
@@ -206,9 +219,8 @@ def test_help_handbook_search_routes_and_calculators(live_server):
 
         page.goto(f"{url}/#help/validation")
         page.locator("#help-validation").wait_for(state="visible")
-        page.wait_for_function(
-            "document.querySelector('[data-help-link=\"validation\"]')"
-            ".getAttribute('aria-current') === 'location'"
+        playwright_sync.expect(page.locator('[data-help-link="validation"]')).to_have_attribute(
+            "aria-current", "location",
         )
         assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
         assert page.locator('[data-help-nav-part="signals"]').evaluate(
@@ -228,29 +240,19 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.locator(".help-search-result").first.wait_for()
         assert "T+1" in page.locator("#help-search-results").inner_text()
         search.fill("RankIC")
-        page.wait_for_function(
-            "document.querySelector('#help-search-results').innerText.includes('RankIC')"
-        )
+        _wait_for_text(page.locator("#help-search-results"), "RankIC")
         assert "RankIC" in page.locator("#help-search-results").inner_text()
         search.fill("蒙特卡洛")
-        page.wait_for_function(
-            "document.querySelector('#help-search-results').innerText.includes('蒙特卡洛')"
-        )
+        _wait_for_text(page.locator("#help-search-results"), "蒙特卡洛")
         assert "数值定价" in page.locator("#help-search-results").inner_text()
         search.fill("p=0.03")
-        page.wait_for_function(
-            "document.querySelector('#help-search-results').innerText.includes('97%')"
-        )
+        _wait_for_text(page.locator("#help-search-results"), "97%")
         assert "97%" in page.locator("#help-search-results").inner_text()
         search.fill("Python 区块 Bootstrap")
-        page.wait_for_function(
-            "document.querySelector('#help-search-results').innerText.includes('Python')"
-        )
+        _wait_for_text(page.locator("#help-search-results"), "Python")
         assert page.locator(".help-search-result").count() <= 12
         search.fill("完全不存在的量化词条xyz")
-        page.wait_for_function(
-            "document.querySelector('#help-search-results').innerText.includes('没有找到')"
-        )
+        _wait_for_text(page.locator("#help-search-results"), "没有找到")
         assert "没有找到" in page.locator("#help-search-results").inner_text()
         page.locator("#help-search-clear").click()
         assert page.locator("#help-search-results").is_hidden()
@@ -258,7 +260,9 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.goto(f"{url}/#help/inference/help-code-ols")
         copy_button = page.locator("#help-code-ols [data-copy-code]")
         copy_button.click()
-        assert copy_button.inner_text() in {"已复制", "已选中，请按 Ctrl+C"}
+        playwright_sync.expect(copy_button).to_have_text(
+            re.compile(r"^(已复制|已选中，请按 Ctrl\+C)$"),
+        )
 
         page.goto(f"{url}/#help/inference/help-inference-self-tests")
         first_quiz = page.locator("#help-inference-self-tests details").first
@@ -332,9 +336,7 @@ def test_help_settings_failure_keeps_manual_calculators(live_server):
         page.route("**/api/v1/settings", lambda route: route.fulfill(status=503, body="unavailable"))
         page.goto(f"{url}/#help/calculators")
         page.locator("#calc-cost").wait_for(state="visible")
-        page.wait_for_function(
-            "document.querySelector('#help-settings-status').innerText.includes('未能读取项目设置')"
-        )
+        _wait_for_text(page.locator("#help-settings-status"), "未能读取项目设置")
         assert "未能读取项目设置" in page.locator("#help-settings-status").inner_text()
         assert page.locator('#calc-cost [data-trade-key="commission_rate"]').is_editable()
         assert page.locator('#calc-cost [data-output="buy_total"]').inner_text() != "—"
@@ -555,14 +557,10 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
 
         following = page.locator('[data-decision-asset-toggle="following"]')
         following.click()
-        page.wait_for_function(
-            "document.querySelector('[data-decision-asset-toggle=following]').innerText === '已关注'"
-        )
+        playwright_sync.expect(following).to_have_text("已关注")
         assert first_trigger.get_attribute("aria-expanded") == "true"
         following.click()
-        page.wait_for_function(
-            "document.querySelector('[data-decision-asset-toggle=following]').innerText === '加入关注'"
-        )
+        playwright_sync.expect(following).to_have_text("加入关注")
         assert page.locator(".decision-detail-row").count() == 1
 
         second_trigger = page.locator(
@@ -791,7 +789,7 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         )
         test_entries = page.locator(".runtime-entry", has_text="诊断测试")
         assert test_entries.count() == 1
-        assert "计算指标" in test_entries.inner_text()
+        _wait_for_text(test_entries, "计算指标")
 
         page.evaluate(
             """window.QuantMasterRunInfo.add(
@@ -907,10 +905,8 @@ def test_lab_compacts_stage_updates_and_mining_batches_are_actionable(live_serve
 
         selection.get_by_role("button", name="查看关联任务").click()
         page.locator("#lab-job-drawer.is-open").wait_for()
-        page.wait_for_function(
-            "document.querySelectorAll('#lab-job-drawer .lab-job-timeline li').length === 2"
-        )
         timeline = page.locator("#lab-job-drawer .lab-job-timeline li")
+        playwright_sync.expect(timeline).to_have_count(2)
         assert timeline.count() == 2
         assert "1500/1500 · 6881500.SH" in timeline.last.inner_text()
         assert "STAGES · 2" in page.locator("#lab-job-drawer-body").inner_text()
@@ -930,7 +926,7 @@ def test_active_health_issue_survives_clear_and_confirmation_dialog_is_explicit(
               action:'稍后由系统自动探测恢复。'
             }])"""
         )
-        page.locator("#runtime-clear").click()
+        page.locator("#runtime-clear").evaluate("element => element.click()")
         assert page.locator(".runtime-entry", has_text="测试数据源暂停请求").count() == 1
 
         page.evaluate("window.QuantMasterRunInfo.sync('test-health', [])")
@@ -938,22 +934,22 @@ def test_active_health_issue_survives_clear_and_confirmation_dialog_is_explicit(
 
         page.evaluate(
             """window.__problemDecision = null;
-            window.QuantMasterProblemDialog.open({
+            void window.QuantMasterProblemDialog.open({
               id:'backtest:partial', severity:'warning', title:'回测数据不完整',
               message:'一只候选缺少行情。', action:'建议先补齐数据。',
               blocking:true, can_continue:true, items:['000001.SZ']
             }, {usable_symbol_count:4, requested_symbol_count:5,
                 actual_start:'2026-01-01', actual_end:'2026-07-27',
                 executable_signals:9, selected_signals:10})
-              .then(value => { window.__problemDecision = value; });"""
+                .then(value => { window.__problemDecision = value; });"""
         )
         dialog = page.locator("#operation-problem-dialog")
         assert dialog.is_visible()
         assert "回测数据不完整" in dialog.inner_text()
         assert dialog.locator("#operation-problem-continue").is_visible()
         dialog.locator("#operation-problem-continue").click()
-        page.wait_for_function("window.__problemDecision === true")
-        assert not dialog.is_visible()
+        dialog.wait_for(state="hidden")
+        assert page.evaluate("window.__problemDecision === true")
         browser.close()
 
 
@@ -1025,10 +1021,9 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
         for kind in ("important_news", "market_turn", "market_close", "task_report", "task_failure"):
             page.locator(f'[data-target="feishu_owner"][data-event-type="{kind}"]').uncheck()
-            page.wait_for_function(
-                "document.querySelector('[data-target-card=\"feishu_owner\"] .target-feedback')"
-                ".classList.contains('success')"
-            )
+            _wait_for_class(page.locator(
+                '[data-target-card="feishu_owner"] .target-feedback',
+            ), "success")
         assert target["overrides"]["event_types"] == []
         assert "自动化与 Bot 监听仍会继续运行" in page.locator(
             '[data-target-card="feishu_owner"] .target-content-note'
@@ -1043,9 +1038,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         page.locator('[data-settings-section="sources"]').click()
         page.locator('[data-source-id="sse"]').click()
         page.locator('#news-source-editor button[type="submit"]').click()
-        page.wait_for_function(
-            "document.querySelector('#news-source-feedback').classList.contains('success')"
-        )
+        _wait_for_class(page.locator("#news-source-feedback"), "success")
         assert "已保存" in page.locator("#news-source-feedback").inner_text()
         browser.close()
 
