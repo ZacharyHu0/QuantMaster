@@ -1,6 +1,6 @@
 """Release metadata and automatic GitHub synchronization guard."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from tools.release_sync import (
     github_https_push_url,
     push_config_variants,
     release_assignments,
+    release_today,
     validate_metadata,
     version_tuple,
 )
@@ -37,7 +38,7 @@ def test_repository_release_metadata_is_consistent():
     errors = validate_metadata(
         (ROOT / RELEASE_FILE).read_text(encoding="utf-8"),
         (ROOT / CHANGELOG_FILE).read_text(encoding="utf-8"),
-        today=date.today(),
+        today=release_today(),
     )
     assert errors == []
 
@@ -57,6 +58,12 @@ def test_validate_metadata_reports_mismatch_and_stale_date():
     errors = validate_metadata(release, changelog, today=date(2026, 7, 28))
     assert any("实际发布日期" in error for error in errors)
     assert any("顶部版本" in error for error in errors)
+
+
+def test_release_clock_uses_asia_shanghai_date_at_utc_boundary():
+    assert release_today(datetime(2026, 7, 30, 22, tzinfo=timezone.utc)) == date(
+        2026, 7, 31,
+    )
 
 
 @pytest.mark.parametrize(

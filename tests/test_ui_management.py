@@ -34,6 +34,19 @@ def _wait_for_class(locator, class_name: str, *, timeout: float = 30_000) -> Non
     )
 
 
+def _wait_for_document_fit(page, *, timeout: float = 30_000) -> None:
+    deadline = time.monotonic() + timeout / 1000
+    dimensions = {"scrollWidth": -1, "innerWidth": -1}
+    while time.monotonic() < deadline:
+        dimensions = page.evaluate(
+            "({scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth})"
+        )
+        if dimensions["scrollWidth"] <= dimensions["innerWidth"]:
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f"页面存在横向溢出: {dimensions}")
+
+
 @pytest.fixture(scope="module")
 def live_server(tmp_path_factory):
     root = tmp_path_factory.mktemp("qm-ui")
@@ -90,15 +103,21 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "模拟盘", "实盘", "自动化",
         ]
         settings.click()
-        page.locator("#settings-config-path").wait_for(state="visible")
+        config_path = page.locator("#settings-config-path")
+        config_path.wait_for(state="visible")
+        playwright_sync.expect(config_path).not_to_have_text("正在读取配置…")
 
         page.locator('[name="llm.provider"]').select_option("openai-compatible")
         page.locator('[name="llm.base_url"]').fill("http://127.0.0.1:9/v1")
         page.locator('[name="llm.model"]').fill("manual-local-model")
         page.locator('[data-check="llm-models"]').click()
         model_check = page.locator('[data-check-result="llm-models"]')
-        _wait_for_class(model_check, "error")
-        assert "检测中" not in model_check.inner_text()
+        playwright_sync.expect(model_check).to_have_class(
+            re.compile(r"(?:^|\s)(?:error|warning)(?:\s|$)"),
+        )
+        check_text = model_check.inner_text()
+        assert "失败" in check_text or "尚未配置" in check_text
+        assert "检测中" not in check_text
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
         _wait_for_class(page.locator("#settings-save-state"), "saved")
 
@@ -681,6 +700,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert index_section.bounding_box()["y"] < personal_section.bounding_box()["y"]
 
         page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         browser.close()
 
@@ -1058,7 +1078,7 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page.locator("#market-temperature-view").wait_for(state="visible")
         assert page.locator("#market-temperature-view h2").inner_text() == "市场温度"
         assert page.locator("#market-quotes-view").is_hidden()
-        assert "等待" in page.locator("#market-temperature-content").inner_text()
+        _wait_for_text(page.locator("#market-temperature-content"), "等待")
 
         page.get_by_role("tab", name="市场风格", exact=True).click()
         page.locator("#market-style-view").wait_for(state="visible")

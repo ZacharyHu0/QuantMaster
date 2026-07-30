@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import math
-import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -354,7 +353,11 @@ class PaperStore:
         strategy = FactorStrategySpec().model_dump(mode="json")
         universe = {"name": "legacy", "symbols": [], "source": source_key}
         destination = self.ledger_path(account_id)
-        shutil.copy2(source, destination)
+        # A byte copy of the main file loses committed rows that are still in
+        # the source WAL. SQLite's online backup API snapshots main + WAL while
+        # leaving the legacy database untouched and readable.
+        with connect_sqlite(source) as source_conn, connect_sqlite(destination) as destination_conn:
+            source_conn.backup(destination_conn)
         Ledger(path=destination)
         with self._conn() as conn:
             conn.execute(

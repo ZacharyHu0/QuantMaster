@@ -4,13 +4,40 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.2"
+VERSION = "0.13.3"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台运行边界与 CI 完整性",
+                "items": (
+                    (
+                        "开发测试依赖显式包含 SciPy 与 scikit-learn，六平台矩阵和覆盖率任务不再"
+                        "因本机偶然安装的可选包产生通过差异。"
+                    ),
+                    (
+                        "发布日期统一按 Asia/Shanghai 业务时区校验，UTC runner 在北京时间凌晨"
+                        "不会把当天版本误判为未来日期。"
+                    ),
+                    (
+                        "POSIX 受限进程按平台安全降低资源上限，数值库线程池固定为单线程；"
+                        "macOS 不再因用户级进程限额在 pre-exec 阶段启动失败。"
+                    ),
+                    (
+                        "历史模拟账本改用 SQLite 在线备份迁移，完整纳入 WAL 已提交成交；设置页"
+                        "浏览器验收会等待配置载入完成后再编辑，消除快慢 runner 竞态。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.2",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "持续质量与浏览器门禁修复",

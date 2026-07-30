@@ -20,6 +20,7 @@ from quantmaster.backtest.spec import (
 )
 from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
 from quantmaster.portfolio import Ledger, TradeRecord
+from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
 
@@ -264,19 +265,25 @@ def test_legacy_paper_ledger_migration_is_idempotent_and_preserves_source(isolat
     root = isolated_config.data_root
     source = root / "ledger_paper.sqlite"
     legacy = Ledger(path=source)
-    legacy.add_cashflow("2024-01-01", 50_000, "deposit")
-    legacy.add_trade(TradeRecord(
-        date="2024-01-02", symbol="600000.SH", side="buy", price=10, shares=100,
-    ))
-    before = hashlib.sha256(source.read_bytes()).hexdigest()
-    store = PaperStore()
-    first = store.migrate_legacy()
-    second = store.migrate_legacy()
+    wal_guard = connect_sqlite(source)
+    try:
+        wal_guard.execute("PRAGMA wal_autocheckpoint=0")
+        legacy.add_cashflow("2024-01-01", 50_000, "deposit")
+        legacy.add_trade(TradeRecord(
+            date="2024-01-02", symbol="600000.SH", side="buy", price=10, shares=100,
+        ))
+        assert source.with_name(f"{source.name}-wal").is_file()
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        store = PaperStore()
+        first = store.migrate_legacy()
+        second = store.migrate_legacy()
 
-    assert first["id"] == second["id"]
-    assert first["status"] == "paused"
-    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
-    assert len(store.ledger(first["id"]).trades()) == 1
+        assert first["id"] == second["id"]
+        assert first["status"] == "paused"
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+        assert len(store.ledger(first["id"]).trades()) == 1
+    finally:
+        wal_guard.close()
 
 
 def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, panel):

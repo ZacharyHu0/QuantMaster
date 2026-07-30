@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Sequence
@@ -140,18 +141,33 @@ def _posix_limit_setup(limits: ProcessLimits):
     def apply() -> None:
         import resource
 
-        os.setsid()  # type: ignore[attr-defined]
         memory = max(16 * 1024 * 1024, int(limits.memory_bytes))
         cpu = max(1, int(limits.cpu_seconds))
         output = max(1024, int(limits.file_bytes or limits.output_bytes))
-        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))  # type: ignore[attr-defined]
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))  # type: ignore[attr-defined]
-        resource.setrlimit(resource.RLIMIT_FSIZE, (output, output))  # type: ignore[attr-defined]
-        if hasattr(resource, "RLIMIT_NPROC"):
-            resource.setrlimit(  # type: ignore[attr-defined]
-                resource.RLIMIT_NPROC,
-                (max(1, limits.max_processes), max(1, limits.max_processes)),
-            )
+
+        def cap(kind: int, requested: int) -> None:
+            try:
+                _, hard = resource.getrlimit(kind)  # type: ignore[attr-defined]
+                value = (
+                    requested
+                    if hard == resource.RLIM_INFINITY  # type: ignore[attr-defined]
+                    else min(requested, hard)
+                )
+                resource.setrlimit(kind, (value, value))  # type: ignore[attr-defined]
+            except (OSError, ValueError):
+                # Some macOS/POSIX runners expose constants whose limits cannot
+                # be lowered in a pre-exec child. Other supported caps and the
+                # process-group kill boundary remain active.
+                pass
+
+        cap(resource.RLIMIT_AS, memory)  # type: ignore[attr-defined]
+        cap(resource.RLIMIT_CPU, cpu)  # type: ignore[attr-defined]
+        cap(resource.RLIMIT_FSIZE, output)  # type: ignore[attr-defined]
+        # Darwin applies RLIMIT_NPROC to the whole runner user and may reject a
+        # value below the already-running process count. Linux applies it here;
+        # macOS still gets bounded process-group cleanup on every exit path.
+        if sys.platform != "darwin" and hasattr(resource, "RLIMIT_NPROC"):
+            cap(resource.RLIMIT_NPROC, max(1, limits.max_processes))
 
     return apply
 
@@ -166,11 +182,17 @@ def run_restricted_process(
 ) -> subprocess.CompletedProcess[str]:
     """Run a child with OS resource limits, process-tree termination and bounded logs."""
     preexec = _posix_limit_setup(limits) if os.name != "nt" else None
+    child_env = dict(os.environ if env is None else env)
+    # Native numeric runtimes commonly start a thread pool during import. Keep
+    # it inside a one-process sandbox instead of letting RLIMIT_NPROC turn a
+    # harmless import into a platform-dependent crash.
+    for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        child_env[key] = "1"
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         try:
             process = subprocess.Popen(
-                list(command), stdout=stdout_file, stderr=stderr_file, env=env, cwd=cwd,
-                preexec_fn=preexec,
+                list(command), stdout=stdout_file, stderr=stderr_file, env=child_env, cwd=cwd,
+                preexec_fn=preexec, start_new_session=os.name != "nt",
             )
         except OSError:
             raise

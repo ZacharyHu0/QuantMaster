@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.13.3（2026-07-31）
+
+### 跨平台运行边界与 CI 完整性
+- 开发测试依赖显式包含 SciPy 与 scikit-learn，六平台矩阵和覆盖率任务不再依赖 runner 是否偶然预装可选包，Ridge、Spearman 与研究诊断契约在干净环境中可重复执行
+- 发布同步按 `Asia/Shanghai` 业务时区判断实际日期，UTC runner 在北京时间凌晨不再把当天版本误判为未来日期
+- POSIX 受限进程逐项安全降低可用资源上限，并把 OpenBLAS/OMP/MKL/NumExpr 固定为单线程；Linux 继续限制子进程数量，macOS 使用有界进程组清理且不再在 `preexec` 阶段失败
+- 历史模拟账本迁移改用 SQLite 在线备份，原子读取主库和 WAL 中已提交成交且不改写源库；设置页 Chromium 验收等待真实配置加载完成后才开始编辑，消除快慢 runner 竞态
+
 ## v0.13.2（2026-07-31）
 
 ### 持续质量与浏览器门禁修复

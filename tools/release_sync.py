@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -32,6 +32,13 @@ CHANGELOG_PATTERN = re.compile(
 )
 RESOLVE_PATTERN = re.compile(r"^github\.com:443:[0-9a-fA-F:.]+$")
 GITHUB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+RELEASE_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+
+def release_today(now: datetime | None = None) -> date:
+    """Return the repository release date in its declared business timezone."""
+    instant = now or datetime.now(timezone.utc)
+    return instant.astimezone(RELEASE_TIMEZONE).date()
 
 
 def run_git(
@@ -111,7 +118,7 @@ def validate_metadata(
     except ValueError:
         parsed_date = None
         errors.append(f"RELEASE_DATE 不是有效日期：{release_date!r}")
-    expected_date = today or date.today()
+    expected_date = today or release_today()
     if parsed_date is not None and parsed_date != expected_date:
         errors.append(
             f"RELEASE_DATE 必须是实际发布日期 {expected_date.isoformat()}，当前为 {release_date}"
