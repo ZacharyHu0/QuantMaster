@@ -3,7 +3,7 @@
     <div class="help-masthead-copy">
       <span class="eyebrow">QUANTMASTER HANDBOOK · 2026</span>
       <h1>量化研究与股市交易基础手册</h1>
-      <p class="help-deck">从市场规则、数据与统计推断，到因子验证、机器学习、回测、组合风控和 QuantMaster 工作流。面向已开户、会写代码，但希望把研究口径系统补齐的 A 股个人投资者。</p>
+      <p class="help-deck">从市场规则、数学与随机过程、资产和衍生品定价，到因子验证、机器学习、组合风控和 QuantMaster 工作流。面向已开户、会写代码，但希望把量化金融知识与研究口径系统补齐的 A 股个人投资者。</p>
     </div>
     <dl class="help-meta">
       <div><dt>规则核验</dt><dd>2026-07-28</dd></div>
@@ -29,44 +29,60 @@
   <div class="help-layout">
     <aside class="help-sidebar">
       <nav aria-label="手册目录">
-        <p class="help-nav-label">目录</p>
-        <ol>
-          <li><a href="#help/start" data-help-link="start"><span>01</span>导读与风险边界</a></li>
-          <li><a href="#help/market" data-help-link="market"><span>02</span>市场、证券与交易所</a></li>
-          <li><a href="#help/trading" data-help-link="trading"><span>03</span>A 股交易规则</a></li>
-          <li><a href="#help/data" data-help-link="data"><span>04</span>行情数据基础</a></li>
-          <li><a href="#help/statistics" data-help-link="statistics"><span>05</span>收益与统计</a></li>
-          <li><a href="#help/inference" data-help-link="inference"><span>06</span>统计推断与检验</a></li>
-          <li><a href="#help/factors" data-help-link="factors"><span>07</span>因子是什么</a></li>
-          <li><a href="#help/validation" data-help-link="validation"><span>08</span>因子验证</a></li>
-          <li><a href="#help/composition" data-help-link="composition"><span>09</span>因子合成与组合构建</a></li>
-          <li><a href="#help/backtest" data-help-link="backtest"><span>10</span>可信回测</a></li>
-          <li><a href="#help/risk" data-help-link="risk"><span>11</span>组合与风控</a></li>
-          <li><a href="#help/machine-learning" data-help-link="machine-learning"><span>12</span>机器学习模型</a></li>
-          <li><a href="#help/research-protocol" data-help-link="research-protocol"><span>13</span>研究协议与晋级</a></li>
-          <li><a href="#help/models" data-help-link="models"><span>14</span>项目模型口径</a></li>
-          <li><a href="#help/workflow" data-help-link="workflow"><span>15</span>研究到执行</a></li>
-          <li><a href="#help/checklist" data-help-link="checklist"><span>16</span>清单、术语与附录</a></li>
+        <p class="help-nav-label">全书目录</p>
+        <ol class="help-book-toc">
+          <li class="help-nav-part" data-help-nav-part="market">
+            <a class="help-part-link" href="#help/start/help-part-market"><span>第一部</span><strong>市场与数据</strong><small>01—04</small></a>
+            <ol><li><a href="#help/start" data-help-link="start"><span>01</span>研究边界与读法</a></li><li><a href="#help/market" data-help-link="market"><span>02</span>市场、证券与基准</a></li><li><a href="#help/trading" data-help-link="trading"><span>03</span>交易制度与执行</a></li><li><a href="#help/data" data-help-link="data"><span>04</span>数据、复权与时点</a></li></ol>
+          </li>
+          <li class="help-nav-part" data-help-nav-part="mathematics">
+            <a class="help-part-link" href="#help/mathematics/help-part-mathematics"><span>第二部</span><strong>数学与统计语言</strong><small>05—07</small></a>
+            <ol><li><a href="#help/mathematics" data-help-link="mathematics"><span>05</span>概率、随机过程与数学工具</a></li><li><a href="#help/statistics" data-help-link="statistics"><span>06</span>收益、风险与分布</a></li><li><a href="#help/inference" data-help-link="inference"><span>07</span>统计推断与检验</a></li></ol>
+          </li>
+          <li class="help-nav-part" data-help-nav-part="pricing">
+            <a class="help-part-link" href="#help/asset-pricing/help-part-pricing"><span>第三部</span><strong>资产定价与衍生工具</strong><small>08—11</small></a>
+            <ol><li><a href="#help/asset-pricing" data-help-link="asset-pricing"><span>08</span>资产定价与金融计量</a></li><li><a href="#help/numerical-pricing" data-help-link="numerical-pricing"><span>09</span>数值定价方法</a></li><li><a href="#help/derivatives" data-help-link="derivatives"><span>10</span>衍生品定价与对冲</a></li><li><a href="#help/fixed-income" data-help-link="fixed-income"><span>11</span>固定收益与利率</a></li></ol>
+          </li>
+          <li class="help-nav-part" data-help-nav-part="signals">
+            <a class="help-part-link" href="#help/factors/help-part-signals"><span>第四部</span><strong>因子与信号研究</strong><small>12—13</small></a>
+            <ol><li><a href="#help/factors" data-help-link="factors"><span>12</span>因子的定义与预处理</a></li><li><a href="#help/validation" data-help-link="validation"><span>13</span>因子验证与稳健性</a></li></ol>
+          </li>
+          <li class="help-nav-part" data-help-nav-part="portfolio">
+            <a class="help-part-link" href="#help/composition/help-part-portfolio"><span>第五部</span><strong>组合、回测与模型</strong><small>14—17</small></a>
+            <ol><li><a href="#help/composition" data-help-link="composition"><span>14</span>组合优化与因子合成</a></li><li><a href="#help/backtest" data-help-link="backtest"><span>15</span>可信回测</a></li><li><a href="#help/risk" data-help-link="risk"><span>16</span>组合风险管理</a></li><li><a href="#help/machine-learning" data-help-link="machine-learning"><span>17</span>金融机器学习</a></li></ol>
+          </li>
+          <li class="help-nav-part" data-help-nav-part="production">
+            <a class="help-part-link" href="#help/research-protocol/help-part-production"><span>第六部</span><strong>生产研究</strong><small>18—21</small></a>
+            <ol><li><a href="#help/research-protocol" data-help-link="research-protocol"><span>18</span>研究协议与晋级</a></li><li><a href="#help/models" data-help-link="models"><span>19</span>项目模型口径</a></li><li><a href="#help/workflow" data-help-link="workflow"><span>20</span>从研究到执行</a></li><li><a href="#help/checklist" data-help-link="checklist"><span>21</span>清单与市场附录</a></li></ol>
+          </li>
         </ol>
-        <a class="help-tool-link" href="#help/calculators" data-help-link="calculators">计算与实验 <span>10 个</span></a>
+        <a class="help-tool-link" href="#help/calculators" data-help-link="calculators"><span>附录 A</span>计算与实验 <small>10 个</small></a>
       </nav>
     </aside>
 
     <div class="help-reading-column">
       <details class="help-mobile-toc">
-        <summary>展开手册目录 <span>16 章 · 10 个工具</span></summary>
+        <summary>展开手册目录 <span>21 章 · 10 个工具</span></summary>
         <nav aria-label="移动端手册目录">
-          <div class="help-mobile-stage"><strong>阶段一 · 市场与数据</strong><a href="#help/start">01 导读与风险边界</a><a href="#help/market">02 市场、证券与交易所</a><a href="#help/trading">03 A 股交易规则</a><a href="#help/data">04 行情数据基础</a></div>
-          <div class="help-mobile-stage"><strong>阶段二 · 统计与信号</strong><a href="#help/statistics">05 收益与统计</a><a href="#help/inference">06 统计推断与检验</a><a href="#help/factors">07 因子是什么</a><a href="#help/validation">08 因子验证</a></div>
-          <div class="help-mobile-stage"><strong>阶段三 · 组合与模型</strong><a href="#help/composition">09 因子合成与组合构建</a><a href="#help/backtest">10 可信回测</a><a href="#help/risk">11 组合与风控</a><a href="#help/machine-learning">12 机器学习模型</a></div>
-          <div class="help-mobile-stage"><strong>阶段四 · 生产与复盘</strong><a href="#help/research-protocol">13 研究协议与晋级</a><a href="#help/models">14 项目模型口径</a><a href="#help/workflow">15 研究到执行</a><a href="#help/checklist">16 清单、术语与附录</a><a href="#help/calculators">10 个计算与实验工具</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/start/help-part-market"><span>第一部</span><strong>市场与数据</strong><small>4 章</small></a><a href="#help/start">01 研究边界与读法</a><a href="#help/market">02 市场、证券与基准</a><a href="#help/trading">03 交易制度与执行</a><a href="#help/data">04 数据、复权与时点</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/mathematics/help-part-mathematics"><span>第二部</span><strong>数学与统计语言</strong><small>3 章</small></a><a href="#help/mathematics">05 概率、随机过程与数学工具</a><a href="#help/statistics">06 收益、风险与分布</a><a href="#help/inference">07 统计推断与检验</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/asset-pricing/help-part-pricing"><span>第三部</span><strong>资产定价与衍生工具</strong><small>4 章</small></a><a href="#help/asset-pricing">08 资产定价与金融计量</a><a href="#help/numerical-pricing">09 数值定价方法</a><a href="#help/derivatives">10 衍生品定价与对冲</a><a href="#help/fixed-income">11 固定收益与利率</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/factors/help-part-signals"><span>第四部</span><strong>因子与信号研究</strong><small>2 章</small></a><a href="#help/factors">12 因子的定义与预处理</a><a href="#help/validation">13 因子验证与稳健性</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/composition/help-part-portfolio"><span>第五部</span><strong>组合、回测与模型</strong><small>4 章</small></a><a href="#help/composition">14 组合优化与因子合成</a><a href="#help/backtest">15 可信回测</a><a href="#help/risk">16 组合风险管理</a><a href="#help/machine-learning">17 金融机器学习</a></div>
+          <div class="help-mobile-stage"><a class="help-mobile-part" href="#help/research-protocol/help-part-production"><span>第六部</span><strong>生产研究</strong><small>4 章</small></a><a href="#help/research-protocol">18 研究协议与晋级</a><a href="#help/models">19 项目模型口径</a><a href="#help/workflow">20 从研究到执行</a><a href="#help/checklist">21 清单与市场附录</a><a href="#help/calculators">附录 A · 计算与实验</a></div>
         </nav>
       </details>
 
       <article class="help-article" id="help-article" tabindex="-1">
-        <section class="help-chapter" id="help-start" data-help-topic="start" data-help-title="导读与风险边界">
+        <section class="help-part-intro" id="help-part-market" data-help-part-intro="market">
+          <p class="help-part-kicker">第一部 · MARKET REALITY</p><h2>市场与数据</h2>
+          <p>这一部先建立研究的现实边界：你交易的是什么、订单怎样进入市场、数据何时真正可得。后续所有统计优势都必须穿过制度、时点和成交三道门。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>会读 K 线与基础财务字段</dd></div><div><dt>完成标准</dt><dd>能从原始信息重建一条无前视、可成交、可追溯的研究样本</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-start" data-help-topic="start" data-help-part="market" data-help-title="研究边界与本书读法">
           <div class="help-chapter-number">01 / ORIENTATION</div>
-          <h2>导读与风险边界</h2>
+          <h2>研究边界与本书读法</h2>
           <p class="help-lead">量化不是把判断交给公式，而是把“我为什么买、在什么条件下可能错、错了损失多少”写成可复查的规则。它减少随意性，却不能消除市场、模型和执行风险。</p>
 
           <section id="help-start-five-layers" data-search-unit data-search-title="量化研究的五层结构">
@@ -86,12 +102,24 @@
             </div>
           </section>
 
-          <section id="help-start-learning-path" data-search-unit data-search-title="四阶段学习路径与手册使用方法">
-            <h3>按问题阅读，不必一次背完</h3>
-            <p>第一阶段建立市场与数据边界：先理解证券、指数、ETF、交易时段、T+1、价格限制、复权和 PIT。它回答“现实中发生了什么、在决策时我真正知道什么”。如果这层错误，后续模型越复杂，结论只会越精确地偏离现实。</p>
-            <p>第二阶段学习统计与信号：从收益、波动、概率进入推断、因子与验证。重点不是记公式，而是能写清样本单位、未来标签、零假设、区间和多重检验范围。遇到一个漂亮指标时，习惯追问它是否样本外、是否扣费、是否由少数日期驱动。</p>
-            <p>第三阶段连接组合、回测、风控和机器学习：把预测分数转成受约束的目标持仓，再通过次日成交、整手、成本和容量得到真实净值。机器学习只是在同一证据链中替换预测器，不能绕过候选、标签、回测与风控。</p>
-            <p>第四阶段负责生产与复盘：冻结研究协议，保存工件与哈希，让候选经过密封测试、Shadow、人工批准和模拟成交，最后用账本拆解实盘偏差。阅读时可以使用搜索直达概念、复制代码复现实验，再用本章自测检查自己是否混淆了统计证据与交易决定。每次只解决一个可证伪问题，并把“不知道”作为允许的研究结论。</p>
+          <section id="help-start-learning-path" data-search-unit data-search-title="六部学习结构与手册使用方法">
+            <h3>把它当成一条依赖链，而不是词典</h3>
+            <p>全书按“现实 → 数学 → 定价 → 信号 → 组合 → 生产”组织。首次阅读建议顺序推进；已有基础时可从任一部开始，但每次遇到模型输出，都应沿引用向前核对它依赖的数据时点、概率假设和可交易条件。</p>
+            <ol class="help-book-map">
+              <li><a href="#help/start/help-part-market"><span>第一部</span><strong>市场与数据</strong><small>制度、微观结构、复权、PIT</small></a></li>
+              <li><a href="#help/mathematics/help-part-mathematics"><span>第二部</span><strong>数学与统计语言</strong><small>随机过程、优化、分布、推断</small></a></li>
+              <li><a href="#help/asset-pricing/help-part-pricing"><span>第三部</span><strong>资产定价与衍生工具</strong><small>SDF、无套利、数值法、利率</small></a></li>
+              <li><a href="#help/factors/help-part-signals"><span>第四部</span><strong>因子与信号研究</strong><small>特征定义、验证、稳健性</small></a></li>
+              <li><a href="#help/composition/help-part-portfolio"><span>第五部</span><strong>组合、回测与模型</strong><small>MVO、成本、尾部风险、机器学习</small></a></li>
+              <li><a href="#help/research-protocol/help-part-production"><span>第六部</span><strong>生产研究</strong><small>协议、晋级、执行、复盘</small></a></li>
+            </ol>
+            <p>每章按四层阅读：先理解概念与经济直觉，再追踪公式或识别假设，然后复现实例与诊断，最后确认模型风险和停止条件。能复述公式不是完成；能在输入、估计、实现和失效边界上独立答辩，才算掌握。</p>
+          </section>
+
+          <section id="help-start-core-curriculum" data-search-unit data-search-title="量化金融核心必学清单与优先级">
+            <h3>这些不是选修：先掌握五个关键支点</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>核心支点</th><th>必须能做什么</th><th>对应章节</th></tr></thead><tbody><tr><td>蒙特卡洛</td><td>在风险中性测度下模拟路径、贴现现金流，并报告随机误差与收敛诊断</td><td>09 数值定价</td></tr><tr><td>MVO</td><td>从收益向量与协方差矩阵构造有效前沿，识别估计误差、病态逆矩阵与约束影响</td><td>14 组合构建</td></tr><tr><td>CAPM</td><td>区分系统性风险、Beta 与 Alpha，用时序回归检验而不把显著性误当因果</td><td>08 资产定价</td></tr><tr><td>期权定价</td><td>从无套利、复制组合和风险中性期望理解 Black–Scholes、二叉树及 Greeks 对冲</td><td>09–10 定价与衍生品</td></tr><tr><td>VaR / CVaR</td><td>按一致损失口径计算分位损失与尾部均值，并用回测和压力情景补足模型盲区</td><td>16 组合风控</td></tr></tbody></table></div>
+            <p>这五项是贯穿定价、配置和风险的主干。布朗运动、伊藤引理、线性代数、最优化、PDE、时间序列与固定收益不是旁枝，而是理解它们的先修和延伸。学习标准是“能写出假设、独立复现、解释失效条件”，不是只会调用函数。</p>
           </section>
 
           <section id="help-start-uncertainty" data-search-unit data-search-title="三类必须接受的不确定性">
@@ -110,9 +138,9 @@
           </section>
         </section>
 
-        <section class="help-chapter" id="help-market" data-help-topic="market" data-help-title="市场、证券、指数、ETF 与交易所">
+        <section class="help-chapter" id="help-market" data-help-topic="market" data-help-part="market" data-help-title="市场、证券与基准">
           <div class="help-chapter-number">02 / MARKET STRUCTURE</div>
-          <h2>市场、证券、指数、ETF 与交易所</h2>
+          <h2>市场、证券与基准</h2>
           <p class="help-lead">交易所提供撮合和规则，证券是可交易权利，指数是测量尺，ETF 则是尽量跟踪某个指数或资产篮子的交易工具。不要把四者混为一谈。</p>
 
           <section id="help-market-instruments" data-search-unit data-search-title="股票、指数与 ETF 的区别">
@@ -150,6 +178,14 @@
             <p>指数也会定期或临时调整样本与权重。今天看到的成分名单不能回填到过去；否则被后续剔除的弱公司消失，被后续纳入的强公司提前出现。正确做法是保存每次成分生效区间，并在信号日使用当时名单。指数权重还可能因自由流通市值、权重上限和缓冲规则而不同于简单总市值排序。</p>
             <div class="concept-flow"><p><b>合成例子</b>某股票在 2025 年 12 月才进入指数。如果用 2026 年成分回测 2024 年，它会被错误纳入早期截面，因子排名、行业权重和基准收益都会改变。</p><p><b>项目位置</b>候选页定义研究范围，Quant Lab 的 PIT 快照按日期冻结历史成分；自定义固定候选更适合沙盒验证，不能代表历史可投资总体。</p><p><b>局限</b>成分正确仍不等于可交易：还要结合上市天数、停牌、价格限制、成交额和账户准入。</p></div>
           </section>
+          <section id="help-market-microstructure-models" data-search-unit data-search-title="价差分解、市场冲击与微观结构估计">
+            <h3>成交成本要区分价差、临时冲击和永久信息冲击</h3>
+            <p>有效价差可写为成交价相对成交前中间价的两倍偏离；实现价差再用成交后一段时间的中间价衡量做市方最终保留的补偿。两者之差近似价格发现或逆向选择成分：若主动买单之后中间价继续上移，说明订单可能携带信息，流动性提供者需要更高补偿。</p>
+            <p>Kyle 型价格冲击用 <code>Δpₜ=λ·qₜ+εₜ</code> 描述带符号订单流 q 对价格变化的边际影响，λ 越高表示深度越差；Amihud 指标用绝对收益除以成交额构造日频非流动性代理。它们都不是结构不变常数：开收盘、公告、波动状态和订单参与率会改变参数，跨股票比较前还要统一价格、金额和自由流通规模。</p>
+            <p>执行模型常把冲击拆为随交易速度增长的临时成本与随累计净订单增长的永久成本。把一个大单机械切得更慢会降低瞬时冲击，却增加等待期间的价格风险；最优执行本质是在冲击成本与未完成敞口方差之间权衡。回测若只减固定 10bp，无法表达规模扩张时的非线性容量边界。</p>
+            <aside class="help-callout"><strong>实证要求</strong><p>估计冲击函数时使用订单决策前可得的盘口，按参与率、波动和时段分桶，并在未参与拟合的日期检查预测误差；成交后的价格变化不能反过来决定当时的订单方向标签。</p></aside>
+          </section>
+
           <section class="help-self-tests" id="help-market-self-tests" data-search-unit data-search-title="市场结构自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 指数上涨 10%，是否意味着某只跟踪 ETF 必然上涨 10%？</summary><p>不必然。ETF 还受到管理费、跟踪误差、现金仓位、申赎、折溢价与交易成本影响；指数本身也要区分价格指数和全收益指数。</p></details>
@@ -157,9 +193,9 @@
           </section>
         </section>
 
-        <section class="help-chapter" id="help-trading" data-help-topic="trading" data-help-title="A 股交易规则与执行">
+        <section class="help-chapter" id="help-trading" data-help-topic="trading" data-help-part="market" data-help-title="交易制度与执行">
           <div class="help-chapter-number">03 / EXECUTION</div>
-          <h2>A 股交易规则与执行</h2>
+          <h2>交易制度与执行</h2>
           <p class="help-lead">研究收益只有在订单能成交时才存在。以下规则以 2026-07-28 可查公开文件为核验基准；具体证券与账户权限以交易所和券商当日提示为准。</p>
 
           <section id="help-trading-sessions" data-search-unit data-search-title="交易时段、集合竞价与连续竞价">
@@ -208,6 +244,13 @@
             <p>价格优先、时间优先意味着同价位越早进入有效队列通常越有利，但你看见的盘口不是全部订单，网络延迟和券商路由也会改变排队位置。用当日最高价判断“卖单一定成交”、用最低价判断“买单一定成交”都过度乐观，因为极值可能只有极少成交量。</p>
             <ul class="help-checks"><li>保留本地订单编号、券商合同号、申报时间、成交时间和撤单结果。</li><li>区分拒单、未成交、部分成交与成交后结算中的异常，不把它们统一记成零收益。</li><li>盘后按成交回报而非计划委托更新仓位，次日再核对可用与可取资金。</li><li>回测至少报告订单数量、未成交比例和被涨跌停/现金/整手约束拦截的原因。</li></ul>
           </section>
+          <section id="help-trading-implementation-shortfall" data-search-unit data-search-title="实施缺口、成交基准与最优执行">
+            <h3>执行质量应从决策价开始归因</h3>
+            <p>实施缺口（Implementation Shortfall）比较“在决策时立即按基准价完成”的纸面组合与实际组合，通常拆为已成交价格冲击、延迟成本、未成交机会成本和显式费用。买单可按 <code>IS=(成交均价−决策价)×成交量+(结束价−决策价)×未成交量+费用</code> 统一为成本；卖单方向相反。只与当日 VWAP 比较会混淆策略择时和执行质量。</p>
+            <p>TWAP 假设时间均匀，VWAP 跟随历史成交量曲线，POV 固定市场参与率；它们是调度基线，不是无条件最优。确定性最优执行可在临时冲击与价格风险之间求一条交易轨迹，实际还需加入涨跌停、午休、撤单率、最小手数和剩余订单的终点惩罚。</p>
+            <p>评估算法时要防止选择性成交：限价单只在价格向有利方向移动时成交，会使成交价看似优秀，但未成交部分可能错过整个行情。报告至少同时给出成交率、条件于成交的滑点、包含未成交机会成本的 IS、市场参与率和尾部百分位。</p>
+          </section>
+
           <section class="help-self-tests" id="help-trading-self-tests" data-search-unit data-search-title="A 股交易规则自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · “T+1 可以卖”与“下一交易日一定能卖出”有什么区别？</summary><p>前者只说明份额取得可卖资格；停牌、跌停封单、流动性不足、价格无效或系统异常仍可能阻止成交。</p></details>
@@ -215,9 +258,9 @@
           </section>
         </section>
 
-        <section class="help-chapter" id="help-data" data-help-topic="data" data-help-title="行情数据基础">
+        <section class="help-chapter" id="help-data" data-help-topic="data" data-help-part="market" data-help-title="数据、复权与信息时点">
           <div class="help-chapter-number">04 / MARKET DATA</div>
-          <h2>行情数据基础</h2>
+          <h2>数据、复权与信息时点</h2>
           <p class="help-lead">数据表看似客观，但时间戳、复权、缺失值和样本范围中的一个小选择，就能改变整个回测结论。</p>
 
           <section id="help-data-ohlcv" data-search-unit data-search-title="OHLCV、成交额、换手率与 VWAP">
@@ -260,6 +303,14 @@
               <div><span>报告期</span><strong>06-30</strong><small>经济事实截止</small></div><i aria-hidden="true"></i><div><span>公告</span><strong>08-25 盘后</strong><small>公众首次可见</small></div><i aria-hidden="true"></i><div><span>入库</span><strong>08-25 20:05</strong><small>系统可稳定消费</small></div><i aria-hidden="true"></i><div><span>信号</span><strong>08-26 收盘</strong><small>使用已知快照</small></div><i aria-hidden="true"></i><div><span>成交</span><strong>08-27 开盘</strong><small>应用执行约束</small></div>
             </div>
           </section>
+          <section id="help-data-bitemporal" data-search-unit data-search-title="双时态数据、PIT Join 与可复现特征仓">
+            <h3>严谨数据表至少同时记录“何时发生”和“何时被知道”</h3>
+            <p>双时态模型区分有效时间（业务事实适用于何时）与系统时间（数据库从何时开始保存该版本）。财报 6 月 30 日属于有效时间，8 月 25 日公告属于首次公开时间，供应商 8 月 25 日 20:05 入库属于系统可得时间，9 月修订则产生新版本而不覆盖旧行。PIT 查询应指定 as-of 时点并返回当时最新已知版本。</p>
+            <p>跨表 PIT Join 不能只按证券和报告期相等连接。对于每个信号时点 T，应在满足 <code>available_at≤T</code> 的候选记录中选最新版本，并为不同来源加入稳定消费延迟；随后将所选记录 ID、版本和来源哈希写入特征快照。若供应商不提供历史修订链，只能标记证据降级，不能假装重建了真实当时视图。</p>
+            <p>复权因子也应版本化。研究价格可以由原始成交价和截至快照的公司行动链派生，成交模拟始终保留未复权价格、股数与现金分配；这样既能计算总收益，又能在任何日期重建真实订单金额。特征仓还需把实体映射版本化，防止代码复用、换股合并或简称变化把不同证券串成一条历史。</p>
+            <div class="concept-flow"><p><b>不变量</b>同一代码提交、数据快照和参数应生成相同特征哈希。</p><p><b>审计查询</b>给定任意信号，应能列出每个输入值的有效时间、可得时间、来源版本和变换步骤。</p><p><b>生产门禁</b>若关键字段只有最新修订值而无历史版本，生产研究应失败或明确降级，而不是静默回填。</p></div>
+          </section>
+
           <section class="help-self-tests" id="help-data-self-tests" data-search-unit data-search-title="行情数据自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 为什么 6 月 30 日的半年报数据不能自动用于 7 月信号？</summary><p>6 月 30 日只是报告期截止日。数据要等公告发布并被系统稳定入库后才可使用，通常还应从下一可执行决策时点开始生效。</p></details>
@@ -267,9 +318,76 @@
           </section>
         </section>
 
-        <section class="help-chapter" id="help-statistics" data-help-topic="statistics" data-help-title="收益、风险与统计基础">
-          <div class="help-chapter-number">05 / STATISTICS</div>
-          <h2>收益、风险与统计基础</h2>
+        <section class="help-part-intro" id="help-part-mathematics" data-help-part-intro="mathematics">
+          <p class="help-part-kicker">第二部 · MATHEMATICAL LANGUAGE</p><h2>数学与统计语言</h2>
+          <p>这一部把直觉写成可计算对象：概率空间定义不确定性，线性代数组织多资产风险，随机微积分连接动态价格，统计推断则判断历史证据是否超出抽样噪声。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>微积分、矩阵运算与基础概率</dd></div><div><dt>完成标准</dt><dd>能写出模型假设、推导关键公式，并选择与依赖结构匹配的估计方法</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-mathematics" data-help-topic="mathematics" data-help-part="mathematics" data-help-title="概率、随机过程与数学工具">
+          <div class="help-chapter-number">05 / MATHEMATICAL FOUNDATIONS</div>
+          <h2>概率、随机过程与数学工具</h2>
+          <p class="help-lead">概率论、线性代数、最优化和随机微积分不是为了增加公式密度，而是为了说清“不确定性怎样传播、风险怎样聚合、价格为什么满足某个方程”。</p>
+
+          <section id="help-mathematics-probability" data-search-unit data-search-title="概率分布、条件期望、方差与协方差">
+            <h3>先区分随机变量、一次观测和条件信息</h3>
+            <p>随机变量描述尚未实现的结果，概率分布描述各结果及其可能性，一段历史样本只是该分布的一次有限实现。期望 <code>E[X]</code> 是概率加权平均，不等于最常出现的结果；方差 <code>Var(X)=E[(X−E[X])²]</code> 衡量平方偏离；协方差 <code>Cov(X,Y)</code> 描述线性共同变化，相关系数只是把它除以两者标准差。</p>
+            <p>条件期望 <code>E[X | ℱₜ]</code> 表示在时点 t 的信息集下对 X 的最佳均方预测。量化研究中的预测必须明确条件信息：若特征在 T 日收盘后才完整，便不能进入 T 日盘中信息集。全期均值、全期标准差和未来成分名单都可能把后来的信息偷渡进条件分布。</p>
+            <div class="concept-flow"><p><b>分布工具</b>正态分布便于解析推导，但收益常有厚尾与偏度；t 分布能表达更厚尾，却仍可能漏掉波动状态和流动性断裂。</p><p><b>大数定律</b>独立同分布且矩存在时，样本均值随样本增加趋近期望；金融序列的依赖、漂移与制度变化会削弱这种保证。</p><p><b>中心极限定理</b>在合适条件下标准化和趋近正态，不意味着原始单期收益正态，也不保证极端尾部被准确近似。</p><p><b>研究纪律</b>先定义样本空间、信息集、频率和损失变量，再选择分布和估计方法。</p></div>
+          </section>
+
+          <section id="help-mathematics-linear-algebra" data-search-unit data-search-title="向量矩阵、协方差、特征值与线性代数">
+            <h3>组合风险本质上是一个二次型</h3>
+            <p>把 n 个资产预期收益写成向量 <code>μ</code>、权重写成 <code>w</code>、协方差写成矩阵 <code>Σ</code>，组合预期收益为 <code>wᵀμ</code>，方差为 <code>wᵀΣw</code>。矩阵乘法同时汇总单资产波动和两两共同变化；只看每只资产的波动而忽略非对角协方差，无法判断分散效果。</p>
+            <p>协方差矩阵应对称半正定。特征向量给出相互正交的波动方向，特征值表示各方向承载的方差；PCA 可用少量主成分近似共同风险，但主成分会随窗口和市场状态旋转，不自动具有稳定经济含义。当资产数接近或超过历史期数时，小特征值估计极不稳定，直接求逆会把噪声放大。</p>
+            <div class="concept-flow"><p><b>数值检查</b>查看矩阵对称性、最小特征值、条件数和有效秩；出现负特征值或巨大条件数时，先检查缺失处理和估计方法。</p><p><b>稳定方法</b>使用协方差收缩、因子风险模型、伪逆或正则化，并在滚动样本外比较权重稳定性。</p><p><b>常见错误</b>对不同日期覆盖的资产两两删缺失，可能拼出并非半正定的协方差矩阵。</p></div>
+          </section>
+
+          <section id="help-mathematics-optimization" data-search-unit data-search-title="凸优化、拉格朗日乘子、目标函数与约束">
+            <h3>优化器只会忠实求解你写下的问题</h3>
+            <p>最优化由决策变量、目标函数和约束组成。若最小化 <code>½wᵀΣw−λμᵀw</code>，并约束 <code>1ᵀw=1</code>、<code>w≥0</code>，目标是在风险与预期收益间权衡的纯多头组合。拉格朗日乘子可解释约束放宽一个单位对最优目标的边际价值；KKT 条件把一阶最优、原始可行、对偶可行与互补松弛统一起来。</p>
+            <p>正定二次目标配合线性约束通常是凸问题，局部最优就是全局最优；加入整数手数、固定费用、非凸冲击成本或复杂止损后，问题可能成为混合整数或非凸优化。此时“求解成功”也只表示在算法与容差下找到一个解，不证明输入估计可靠或策略可执行。</p>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>组成</th><th>金融例子</th><th>必须检查</th></tr></thead><tbody><tr><td>目标</td><td>收益、方差、跟踪误差、CVaR、换手成本</td><td>单位是否一致，风险厌恶参数如何标定</td></tr><tr><td>硬约束</td><td>预算、禁买、杠杆、单股/行业上限</td><td>是否可行，冲突时不得静默删除</td></tr><tr><td>软约束</td><td>偏离目标权重、风格暴露、换手惩罚</td><td>罚项尺度是否压过原目标</td></tr><tr><td>数值解</td><td>连续权重、整数股数、现金余额</td><td>求解容差、取整后重新验约束</td></tr></tbody></table></div>
+          </section>
+
+          <section id="help-mathematics-brownian-ito" data-search-unit data-search-title="布朗运动、几何布朗运动与伊藤引理">
+            <h3>随机路径的微小变化不能按普通微积分处理</h3>
+            <p>标准布朗运动 <code>Wₜ</code> 从 0 开始，路径连续，且对 <code>0≤s&lt;t</code> 有独立增量 <code>Wₜ−Wₛ ~ N(0,t−s)</code>。它的路径几乎处处不可微，二次变差满足形式规则 <code>(dW)²=dt</code>。几何布朗运动写成 <code>dS=μSdt+σSdW</code>，解为 <code>Sₜ=S₀ exp[(μ−½σ²)t+σWₜ]</code>，因此价格保持为正。</p>
+            <p>对 <code>V(t,S)</code> 使用伊藤引理：<code>dV=(Vₜ+μSVₛ+½σ²S²Vₛₛ)dt+σSVₛdW</code>。比普通链式法则多出的二阶项来自布朗运动的二次变差，也是期权 Gamma 进入定价方程的来源。风险中性定价会把可交易资产漂移从真实世界的 <code>μ</code> 换为 <code>r−q</code>，但波动率与边界条件仍需建模和估计。</p>
+            <div class="concept-flow"><p><b>不要误解</b>布朗运动是连续扩散近似，不包含跳跃、随机波动率、交易停牌和流动性枯竭。</p><p><b>离散模拟</b>时间步长 Δt 下用 <code>ΔW=√Δt·Z</code>、<code>Z~N(0,1)</code>；Euler–Maruyama 是近似法，GBM 则可直接使用精确离散解。</p><p><b>两种测度</b>真实测度用于预测实际收益，风险中性测度用于无套利定价；不能把风险中性概率解释为事件真实发生概率。</p></div>
+          </section>
+
+          <section id="help-mathematics-pde" data-search-unit data-search-title="Black-Scholes 偏微分方程、边界条件与终值问题">
+            <h3>PDE 是复制与无套利留下的约束</h3>
+            <p>若标的服从连续扩散、可连续交易且市场满足模型假设，用 <code>Δ=Vₛ</code> 动态对冲可消去局部随机项。无套利要求剩余组合赚取无风险利率，于是欧式衍生品满足 <code>Vₜ+½σ²S²Vₛₛ+(r−q)SVₛ−rV=0</code>。它是向到期日反向求解的终值问题：欧式看涨的到期条件为 <code>V(T,S)=max(S−K,0)</code>。</p>
+            <p>方程本身不够，必须给出终值、价格边界和产品条款。看涨在 <code>S→0</code> 时趋近 0，在大 S 下接近贴现后的远期内在结构；美式期权还多一个可提前行权的自由边界。解析解只覆盖少数简单条款，有限差分、树和蒙特卡洛则用不同方式近似同一无套利关系。</p>
+            <div class="concept-flow"><p><b>桥梁</b>伊藤引理给出价格过程，Delta 对冲消去局部随机项，无套利产生 PDE，边界条件选出具体合约价格。</p><p><b>模型风险</b>真实市场存在离散对冲、买卖价差、波动率微笑、跳跃和融资约束，PDE 价格应配合敏感性和压力测试。</p></div>
+          </section>
+
+          <section id="help-mathematics-martingales-measures" data-search-unit data-search-title="滤过、鞅、测度变换与资产定价基本定理">
+            <h3>风险中性定价的核心不是“把收益率改成 r”</h3>
+            <p>滤过 <code>{ℱₜ}</code> 表示信息随时间增长；过程 Xₜ 若可积、适应于该信息集且满足 <code>E[Xₜ | ℱₛ]=Xₛ</code>（s≤t），则是鞅。鞅不是路径不动，而是给定当前信息后没有可预测漂移。局部鞅只在局部停止时间上满足性质，严格局部鞅甚至可能破坏常见价格直觉，连续时间推导不能只靠形式微分。</p>
+            <p>第一资产定价基本定理把“无免费午餐”与等价局部鞅测度的存在联系起来；第二定理把市场完备性与该测度的唯一性联系起来。市场不完备时风险中性测度不唯一，不可完全复制现金流需要额外偏好、最小方差或校准准则才能定价，单一模型价格不是由无套利唯一决定。</p>
+            <p>Girsanov 定理通过密度过程改变测度。在 GBM 中，可用市场价格风险 <code>θ=(μ−r)/σ</code> 构造 Radon–Nikodym 密度，使 Q 下的 <code>Wₜ^Q=Wₜ+θt</code> 成为布朗运动，进而把 <code>dS=μSdt+σSdW</code> 改写为 <code>dS=rSdt+σSdW^Q</code>。这依赖可积性条件；若密度过程不是严格鞅，形式上的测度变换可能无效。</p>
+          </section>
+
+          <section id="help-mathematics-sde-schemes" data-search-unit data-search-title="SDE 数值格式、强弱收敛与路径误差">
+            <h3>定价收敛与路径收敛不是同一个问题</h3>
+            <p>Euler–Maruyama 对 <code>dX=a(X,t)dt+b(X,t)dW</code> 使用 <code>Xₙ₊₁=Xₙ+aₙΔt+bₙΔW</code>。在常见 Lipschitz 条件下其强收敛阶约为 1/2、弱收敛阶约为 1；Milstein 加入扩散导数项后，一维强收敛阶可提高到 1。强误差衡量同一布朗路径上的轨迹距离，适合路径敏感量；弱误差衡量期望差，普通欧式定价更关心后者。</p>
+            <p>CIR、CEV 等过程用朴素 Euler 可能生成不合法负值，简单截断虽能运行，却改变分布和偏差。应选保持边界的格式、精确转移分布或专门变换，并用矩、边界命中率和已知价格交叉验证。多维相关布朗运动还要检查协方差分解在近奇异矩阵下的稳定性。</p>
+            <p>时间步收敛测试应固定随机数并逐次减半 Δt，将离散偏差与蒙特卡洛标准误分开；多层蒙特卡洛利用粗细网格差的方差衰减，把高精度估计的计算复杂度降下来。路径数增加只能减小抽样误差，不能修复错误的 SDE、边界处理或时间离散。</p>
+          </section>
+
+          <section class="help-self-tests" id="help-mathematics-self-tests" data-search-unit data-search-title="数学与随机过程自测">
+            <h3>本章自测</h3>
+            <details data-self-test><summary>01 · 为什么伊藤引理比普通链式法则多一个二阶导数项？</summary><p>布朗运动增量的量级是 √dt，其平方在极限中保留为 dt；二次变差不消失，因此出现 <code>½σ²S²Vₛₛdt</code>。</p></details>
+            <details data-self-test><summary>02 · 协方差矩阵条件数很大时，为什么优化权重容易极端？</summary><p>矩阵接近奇异，求逆会把小特征方向上的估计噪声大幅放大；应检查数据并使用收缩、因子模型或正则化。</p></details>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-statistics" data-help-topic="statistics" data-help-part="mathematics" data-help-title="收益、风险与分布">
+          <div class="help-chapter-number">06 / STATISTICS</div>
+          <h2>收益、风险与分布</h2>
           <p class="help-lead">统计量不是标签，而是带口径的压缩描述。先问“用什么频率、什么样本、是否扣费、与谁比较”，再看数字大小。</p>
 
           <section id="help-statistics-returns" data-search-unit data-search-title="简单收益、对数收益、复利与年化">
@@ -306,6 +424,13 @@
             <p>校准关注预测为 60% 的样本长期是否约有 60% 发生，而区分度关注高预测组是否比低预测组更常发生。模型可以排序很好但概率偏高，也可以整体校准却几乎无法区分个体。Brier 分数、可靠性曲线与分箱命中率应结合样本量阅读。</p>
             <div class="concept-flow"><p><b>合成例子</b>20 次预测中有 12 次上涨，观察命中率是 60%，但样本很小，真实成功率的不确定区间仍然很宽。不能因一次 12/20 就把仓位按“确定的 60%”放大。</p><p><b>项目位置</b>市场与决策页的未来概率按周期展示，验证报告记录校准和覆盖；置信度同时受样本、数据质量与证据一致性影响。</p><p><b>局限</b>历史校准在制度或市场状态变化后可能失效，应按时间滚动复核，不能只看全样本平均。</p></div>
           </section>
+          <section id="help-statistics-dependence-ergodicity" data-search-unit data-search-title="平稳性、遍历性、长记忆与有效样本量">
+            <h3>时间更长不必然等于信息更多</h3>
+            <p>严格平稳要求任意有限维联合分布对时间平移不变，弱平稳只要求均值常数、方差有限且协方差只依赖滞后。遍历性进一步允许用一条足够长路径的时间平均估计总体期望；平稳不自动推出遍历，结构突变和潜在状态混合也会让全样本均值失去清晰经济对象。</p>
+            <p>均值估计的有效样本量受自相关压缩，可近似写为 <code>N_eff≈N/(1+2Σρₖ)</code>。若日收益本身相关弱但平方收益和绝对收益长时间相关，均值与波动参数的收敛速度不同。重叠持有期收益还会机械地产生 MA(h−1) 结构，不能把每个重叠标签视为独立样本。</p>
+            <p>厚尾下高阶矩可能不存在或估计极不稳定。极值理论用 block maxima 的广义极值分布，或 peaks-over-threshold 的广义帕累托分布建模阈值以上尾部；阈值过低违反渐近近似，过高又只剩少量样本。尾部指数、QQ 图、阈值稳定图和跨窗口敏感性应一起报告。</p>
+          </section>
+
           <section class="help-self-tests" id="help-statistics-self-tests" data-search-unit data-search-title="收益与统计自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 先涨 20% 再跌 20%，总收益是多少？</summary><p>净值从 1 变为 1.2，再变为 0.96，总收益是 −4%。简单收益跨期必须复利相乘，不能直接相加。</p></details>
@@ -313,8 +438,8 @@
           </section>
         </section>
 
-        <section class="help-chapter" id="help-inference" data-help-topic="inference" data-help-title="统计推断与检验">
-          <div class="help-chapter-number">06 / INFERENCE</div>
+        <section class="help-chapter" id="help-inference" data-help-topic="inference" data-help-part="mathematics" data-help-title="统计推断与检验">
+          <div class="help-chapter-number">07 / INFERENCE</div>
           <h2>统计推断与检验</h2>
           <p class="help-lead">样本统计量只是一次历史实现。统计推断要回答的是：在承认抽样误差、序列相关和多次试验之后，观察到的优势还有多大可信范围。</p>
 
@@ -387,6 +512,14 @@ sample = np.concatenate([
 print(round(float(sample.mean()), 4))</code></pre>
             </figure>
           </section>
+          <section id="help-inference-gmm-bayesian" data-search-unit data-search-title="矩估计、GMM、贝叶斯收缩与模型不确定性">
+            <h3>估计方法要与模型真正承诺的条件对应</h3>
+            <p>极大似然要求写出完整条件分布；准极大似然允许分布近似错误，但依赖均值/方差设定与稳健协方差。广义矩估计（GMM）只要求模型给出 <code>E[g(Zₜ,θ₀)]=0</code>。样本矩 <code>ḡ(θ)</code> 通过最小化 <code>ḡ(θ)ᵀWḡ(θ)</code> 求参数；最优权重与矩条件长期协方差的逆相关，实际常用两步或迭代 GMM。</p>
+            <p>过度识别时矩条件多于参数，可用 J 检验检查这些条件能否共同接近零，但未拒绝不证明模型正确，弱识别还会让常规渐近分布失真。资产定价中的 Euler 方程、风险暴露和条件异方差都可写成矩条件；工具变量必须与误差正交且对内生变量有足够相关性。</p>
+            <p>贝叶斯方法把先验 <code>p(θ)</code> 与似然合成后验 <code>p(θ|D)∝p(D|θ)p(θ)</code>，能自然表达参数不确定性和层级收缩。先验并非“主观随便填”：其尺度应做先验预测检查，后验要做收敛与后验预测诊断。比较模型时应平均或传播模型不确定性，而不是把被选择模型当成事先已知。</p>
+            <div class="concept-flow"><p><b>频率学派问题</b>若重复进行同一抽样方案，区间和检验怎样覆盖。</p><p><b>贝叶斯问题</b>给定模型、先验和数据，参数与预测的不确定性怎样更新。</p><p><b>共同底线</b>错误的数据生成假设、选择后推断和结构突变不会因换一种哲学自动消失。</p></div>
+          </section>
+
           <section class="help-self-tests" id="help-inference-self-tests" data-search-unit data-search-title="统计推断自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · p=0.03 是否表示策略有 97% 概率为真？</summary><p>不是。它表示在零假设与检验前提成立时，观察到当前或更极端统计量的概率为 3%；它不直接给出假设为真的概率或经济价值。</p></details>
@@ -394,9 +527,269 @@ print(round(float(sample.mean()), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-factors" data-help-topic="factors" data-help-title="因子是什么">
-          <div class="help-chapter-number">07 / FACTORS</div>
-          <h2>因子是什么</h2>
+        <section class="help-part-intro" id="help-part-pricing" data-help-part-intro="pricing">
+          <p class="help-part-kicker">第三部 · VALUATION &amp; CONTRACTS</p><h2>资产定价与衍生工具</h2>
+          <p>这一部从随机贴现因子与无套利出发，连接风险溢价、风险中性测度、数值算法和合约现金流。定价不是猜未来方向，而是在明确模型与市场摩擦后求一致价格和对冲暴露。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>第二部的条件期望、回归、随机过程与优化</dd></div><div><dt>完成标准</dt><dd>能从现金流和边界条件选择模型，复现价格，并解释校准、离散化与对冲误差</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-asset-pricing" data-help-topic="asset-pricing" data-help-part="pricing" data-help-title="资产定价与金融计量">
+          <div class="help-chapter-number">08 / ASSET PRICING &amp; ECONOMETRICS</div>
+          <h2>资产定价与金融计量</h2>
+          <p class="help-lead">资产定价解释“为什么某类风险可能获得补偿”，时间序列模型描述“条件均值、波动和长期关系怎样变化”。二者都提供可检验假设，不提供永恒规律。</p>
+
+          <section id="help-asset-pricing-no-arbitrage" data-search-unit data-search-title="一价定律、无套利、复制组合与风险中性定价">
+            <h3>先问现金流能否被复制</h3>
+            <p>一价定律要求相同状态、相同时间的现金流具有相同价格；否则可买入便宜组合、卖出昂贵组合并锁定无风险利润。无套利比“投资者偏好某资产”更弱也更基础：只要目标现金流能由已交易资产动态复制，其价格便应等于复制成本。</p>
+            <p>在完备模型中，可找到与市场价格一致的风险中性测度 Q，使贴现后的可交易资产价格为鞅，衍生品价值写成 <code>V₀=E^Q[e^(−∫r dt)·Payoff]</code>。这里 Q 是定价权重，不是现实世界 P 下的主观或统计概率。市场不完备、交易受限或存在信用和流动性风险时，复制可能不唯一，价格会成为区间或依赖额外风险偏好。</p>
+            <div class="concept-flow"><p><b>检查顺序</b>列现金流 → 找复制资产 → 明确融资、分红与保证金 → 检查交易约束 → 再选择定价模型。</p><p><b>现实摩擦</b>买卖价差、融券限制、保证金、交易税和跳跃会阻止理论套利被无成本执行。</p><p><b>关键区别</b>无套利约束价格之间的相对关系，不保证任何资产的未来实际收益。</p></div>
+          </section>
+
+          <section id="help-asset-pricing-capm-apt" data-search-unit data-search-title="CAPM、Beta、Alpha 与 APT 多因子定价">
+            <h3>CAPM 是风险基准，不是选股保证</h3>
+            <p>CAPM 写成 <code>E[Rᵢ]−R_f=βᵢ(E[Rₘ]−R_f)</code>，其中 <code>βᵢ=Cov(Rᵢ,Rₘ)/Var(Rₘ)</code>。Beta 衡量资产对市场超额收益的线性敏感度；时间序列回归 <code>Rᵢ−R_f=αᵢ+βᵢ(Rₘ−R_f)+εᵢ</code> 中的 Alpha 是未被该基准解释的平均收益。它是否显著取决于频率、窗口、基准、费用和稳健标准误。</p>
+            <p>CAPM 的市场组合不可直接观测，借贷利率相同、投资者均值—方差决策等假设也很强。Beta 会随杠杆、业务和市场状态变化；高 Beta 不等于必然高收益，正 Alpha 也可能来自遗漏风险、数据挖掘或不可实现成交。</p>
+            <p>套利定价理论（APT）把超额收益写成多个系统性因子暴露与风险溢价之和：<code>E[Rᵢ]−R_f≈βᵢ1λ₁+…+βᵢKλK</code>。它用分散组合中的近似无套利约束多因子关系，却不自动指定哪些因子正确。因子需要经济解释、可交易代理、PIT 数据和跨时期证据。</p>
+          </section>
+
+          <section id="help-asset-pricing-factor-regression" data-search-unit data-search-title="回归分析与 Fama-French 因子模型">
+            <h3>因子回归用于归因，不自动证明能力</h3>
+            <p>Fama–French 三因子在市场超额收益之外加入 SMB（小市值减大市值）和 HML（高账面市值比减低账面市值比）；五因子再加入 RMW（强盈利减弱盈利）与 CMA（保守投资减激进投资）。组合回归的截距衡量在给定因子定义下未解释的平均收益，斜率衡量暴露。</p>
+            <p>因子构造涉及股票范围、分组断点、权重、财报可得日、退市和再平衡规则。直接套用海外现成序列解释 A 股，会混入市场制度与数据口径差异；自建因子又必须防止幸存者偏差和财报回填。比较策略时应同时报告原始收益、市场 Alpha、多因子 Alpha、暴露稳定性和扣费结果。</p>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>回归问题</th><th>建议方法</th><th>不能忽略</th></tr></thead><tbody><tr><td>单资产/组合时序归因</td><td>超额收益对同期因子收益回归</td><td>HAC 标准误、窗口稳定性、因子定义</td></tr><tr><td>横截面风险溢价</td><td>两阶段或 Fama–MacBeth 回归</td><td>估计 Beta 误差、截面相关、多重检验</td></tr><tr><td>事件或策略增量</td><td>加入控制因子比较残差收益</td><td>遗漏变量与基准选择，不声称自动因果</td></tr></tbody></table></div>
+          </section>
+
+          <section id="help-asset-pricing-arima-garch" data-search-unit data-search-title="ARIMA、GARCH、平稳性与波动聚集">
+            <h3>条件均值与条件方差要分开建模</h3>
+            <p>ARIMA(p,d,q) 先用 d 阶差分把序列变得近似平稳，再以 p 阶自回归项和 q 阶移动平均误差描述条件均值。价格水平通常非平稳，收益更接近平稳，但仍可能有结构突变。阶数应依据训练区间的 ACF/PACF、信息准则和滚动样本外误差选择，不能在全样本反复试到最好。</p>
+            <p>GARCH(1,1) 写成 <code>hₜ=ω+αε²ₜ₋₁+βhₜ₋₁</code>，用上一期冲击和方差预测条件波动。常见协方差平稳条件为 <code>α+β&lt;1</code>；接近 1 表示冲击衰减很慢。标准 GARCH 对正负冲击对称，EGARCH/GJR-GARCH 可表达杠杆效应，但更高自由度需要更严格样本外验证。</p>
+            <div class="concept-flow"><p><b>诊断</b>检查残差自相关、平方残差自相关、参数稳定性和厚尾分布，不只看样本内似然。</p><p><b>用途</b>波动预测可进入仓位缩放、期权风险和 VaR，但均值预测弱时不能被高精度波动预测掩盖。</p><p><b>陷阱</b>日历缺口、涨跌停和零收益会改变残差分布；建模前先确认交易日与缺失口径。</p></div>
+          </section>
+
+          <section id="help-asset-pricing-cointegration" data-search-unit data-search-title="单位根、协整、误差修正与配对关系">
+            <h3>共同趋势不等于稳定价差</h3>
+            <p>两个 I(1) 非平稳序列可能各自带单位根，但若存在系数 β 使 <code>yₜ−βxₜ</code> 平稳，则称它们协整。误差修正模型把短期变化与上一期偏离长期关系的误差结合起来；调整系数描述偏离后回归关系的速度。协整讨论水平序列的长期约束，不等于普通相关，也不保证价差可在交易成本内均值回归。</p>
+            <p>Engle–Granger 两步法先估长期关系、再检验残差；Johansen 方法可处理多个序列与多个协整向量。两者都对样本区间、确定性趋势、滞后阶数和结构突变敏感。配对交易还需检验对冲比率滚动稳定、半衰期、借券与成交能力，并把筛选过的全部配对纳入多重检验。</p>
+          </section>
+
+          <section id="help-asset-pricing-sdf" data-search-unit data-search-title="随机贴现因子、Euler 方程与风险溢价统一框架">
+            <h3>SDF 把 CAPM、APT 与衍生品定价放进同一个方程</h3>
+            <p>若 mₜ₊₁ 是随机贴现因子（SDF），任意正确计价资产满足 <code>1=Eₜ[mₜ₊₁Rₜ₊₁]</code>。无风险资产给出 <code>R_f=1/E[m]</code>；对超额收益有 <code>E[Rᵢ]−R_f=−Cov(m,Rᵢ)/E[m]</code>。风险溢价因此来自资产在“边际价值高”的坏状态里表现差，而不是波动本身。</p>
+            <p>消费 CAPM 从代表性投资者 Euler 方程得到与边际效用增长相关的 m；线性因子模型假设 <code>m=a−bᵀf</code>，从而得到 Beta 定价。传统 CAPM 是单市场因子的特殊情形，APT 强调多因子与近似无套利。衍生品风险中性定价则相当于把 SDF 归一化成状态价格密度。</p>
+            <p>实证上用 GMM 令各测试资产定价误差 <code>E[mR−1]</code> 接近零，检查截面 Alpha、J 统计量和 Hansen–Jagannathan 距离。测试资产选择会决定模型面对哪些方向：只用少数相似组合，错误模型也可能看似通过；加入大量由同一数据挖出的组合又引入选择偏差和病态协方差。</p>
+          </section>
+
+          <section id="help-asset-pricing-dynamic-models" data-search-unit data-search-title="VAR、状态空间、Kalman Filter 与状态切换">
+            <h3>动态模型需要把潜在状态与观测误差分开</h3>
+            <p>VAR(p) 将多变量向量对自身滞后回归，可分析冲击响应与预测误差方差分解；但变量排序、识别限制和非平稳性决定“冲击”的经济含义，普通 Cholesky 排序不是因果事实。高维 VAR 参数随变量数平方增长，通常需要滞后收缩、贝叶斯先验或稀疏化。</p>
+            <p>状态空间模型写成转移方程 <code>xₜ=Fₜxₜ₋₁+wₜ</code> 与观测方程 <code>yₜ=Hₜxₜ+vₜ</code>。Kalman filter 在高斯线性条件下递归更新潜在状态及其协方差，可用于动态 Beta、不可观测趋势和期限结构因子；平滑器使用未来观测估计过去状态，因此只能用于事后分析，不能直接生成当时可得的实时信号。</p>
+            <p>Markov switching 允许参数由不可观测状态切换，隐马尔可夫模型给出过滤概率。状态标签没有天然“牛熊”含义，需依据估计参数解释；若用全样本平滑概率给历史仓位，会引入未来信息。模型状态数、转移稳定性和实时过滤性能必须滚动验证。</p>
+          </section>
+
+          <section class="help-self-tests" id="help-asset-pricing-self-tests" data-search-unit data-search-title="资产定价与时间序列自测">
+            <h3>本章自测</h3>
+            <details data-self-test><summary>01 · CAPM 回归得到显著正 Alpha，是否已经证明选股能力？</summary><p>没有。Alpha 依赖基准、因子遗漏、样本、成本和标准误口径，还必须经过样本外、暴露稳定性与可成交性检验。</p></details>
+            <details data-self-test><summary>02 · 两只价格序列高度相关，是否足以做均值回归配对？</summary><p>不足。非平稳序列可能因共同趋势而伪相关；需检验协整、残差稳定性、结构突变和扣费后的实际可交易性。</p></details>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-numerical-pricing" data-help-topic="numerical-pricing" data-help-part="pricing" data-help-title="数值定价方法">
+          <div class="help-chapter-number">09 / NUMERICAL PRICING</div>
+          <h2>数值定价方法</h2>
+          <p class="help-lead">数值方法把无法直接积分或求闭式解的定价与风险问题化为可控近似。关键不是得到小数，而是量化离散误差、随机误差、稳定性和模型误差。</p>
+
+          <section id="help-numerical-pricing-monte-carlo" data-search-unit data-search-title="蒙特卡洛模拟、风险中性路径与置信区间">
+            <h3>蒙特卡洛是核心工具，但每个随机数都要有口径</h3>
+            <p>在风险中性模型下生成大量终值或完整路径，对每条路径计算现金流并贴现，样本均值近似 <code>V₀=E^Q[e^(−rT)Payoff]</code>。普通蒙特卡洛标准误约按 <code>1/√N</code> 收敛：要把误差缩小一半，路径数约需增加到四倍。结果必须同时报告随机种子、路径数、时间步、价格估计与标准误。</p>
+            <p>方差缩减能提高效率：反变量同时使用 Z 与 −Z；控制变量利用已知期望的相关变量；分层或准蒙特卡洛更均匀覆盖样本空间。离散监控的障碍期权、亚式期权和随机利率产品还要检查时间步偏差。提前行权产品不能简单对每条路径取最大值，通常需要最小二乘蒙特卡洛或树/PDE。</p>
+            <figure class="help-code" id="help-code-monte-carlo-call" data-search-unit data-search-title="Python 风险中性蒙特卡洛欧式看涨示例">
+              <figcaption><span>PYTHON · MONTE CARLO OPTION PRICING</span><button type="button" class="help-copy-code" data-copy-code>复制代码</button></figcaption>
+              <pre><code data-code-language="python">import numpy as np
+
+rng = np.random.default_rng(42)
+spot, strike, rate, dividend, sigma, maturity = 100.0, 105.0, 0.02, 0.0, 0.25, 1.0
+half_paths = 100_000
+z = rng.standard_normal(half_paths)
+z = np.concatenate([z, -z])  # 反变量
+terminal = spot * np.exp(
+    (rate - dividend - 0.5 * sigma**2) * maturity
+    + sigma * np.sqrt(maturity) * z
+)
+discounted_payoff = np.exp(-rate * maturity) * np.maximum(terminal - strike, 0.0)
+price = discounted_payoff.mean()
+standard_error = discounted_payoff.std(ddof=1) / np.sqrt(discounted_payoff.size)
+print(round(float(price), 4), round(float(standard_error), 4))</code></pre>
+            </figure>
+          </section>
+
+          <section id="help-numerical-pricing-binomial" data-search-unit data-search-title="二叉树、风险中性概率与提前行权">
+            <h3>树模型把连续过程拆成可解释的状态</h3>
+            <p>CRR 二叉树每步令价格乘 <code>u=e^(σ√Δt)</code> 或 <code>d=1/u</code>，风险中性上涨概率为 <code>p=(e^((r−q)Δt)−d)/(u−d)</code>。从到期收益向前回溯，每个节点价值是下一步期望的贴现；若 p 不在 [0,1]，步长或参数与该树设定不相容。</p>
+            <p>欧式期权只做贴现期望，美式期权在每个节点比较继续持有价值与立即行权价值，因此树模型直观展示提前行权边界。增加步数应趋向稳定值，但奇偶振荡、分红时点和离散障碍会使收敛不平滑；需做步数加倍与基准产品对照。</p>
+          </section>
+
+          <section id="help-numerical-pricing-finite-difference" data-search-unit data-search-title="有限差分、显式隐式格式与 Crank-Nicolson">
+            <h3>有限差分直接离散 PDE</h3>
+            <p>把标的价格轴和时间轴划成网格，用相邻节点近似 Delta、Gamma 与时间导数，再从到期条件反向求解。显式格式计算简单但受稳定性条件限制；隐式格式每步需解线性方程组但通常更稳定；Crank–Nicolson 对相邻时间层取平均，精度较高，却可能在到期收益折点附近产生振荡。</p>
+            <p>价格上界、下界和时间边界必须与产品一致；网格需要覆盖足够大的标的范围，并在执行价、障碍或行权边界附近加密。美式期权转为带不等式的线性互补问题，可用投影 SOR 等方法。任何有限差分价格都应做网格加密、边界移动和解析基准收敛测试。</p>
+          </section>
+
+          <section id="help-numerical-pricing-cross-check" data-search-unit data-search-title="数值方法选择、误差分解与交叉验证">
+            <h3>能交叉求解的产品不要只跑一种方法</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>方法</th><th>更适合</th><th>主要误差</th><th>诊断</th></tr></thead><tbody><tr><td>蒙特卡洛</td><td>高维、路径依赖、风险聚合</td><td>抽样误差、时间离散、回归偏差</td><td>标准误、种子复现、路径/步数加倍</td></tr><tr><td>二叉/多叉树</td><td>低维、提前行权、教学与基准</td><td>时间离散、树结构振荡</td><td>步数收敛、与闭式解比较</td></tr><tr><td>有限差分</td><td>低维 PDE、边界与自由边界</td><td>网格、边界截断、格式稳定性</td><td>网格加密、边界移动、残差</td></tr></tbody></table></div>
+            <p>欧式看涨可以同时用 Black–Scholes、树、PDE 和蒙特卡洛计算。若差异超过各自数值误差，优先检查分红、复利方式、日计数、波动率单位与边界条件，而不是把最接近期望的结果挑出来。</p>
+          </section>
+
+          <section id="help-numerical-pricing-advanced-monte-carlo" data-search-unit data-search-title="准蒙特卡洛、多层蒙特卡洛与 Greeks 估计">
+            <h3>高级蒙特卡洛优化的是误差预算，而不只是路径数量</h3>
+            <p>控制变量估计量 <code>Ȳ−β(X̄−E[X])</code> 在最优 <code>β=Cov(Y,X)/Var(X)</code> 下可按相关性显著降方差；β 应在独立预演或同批样本中按无偏方式估计。重要性抽样改变路径分布以增加稀有事件出现，再用似然比还原期望；倾斜分布选错可能使权重方差爆炸。</p>
+            <p>准蒙特卡洛用低差异序列替代伪随机点，随机化后仍可估计误差。路径维度高时，Brownian bridge 或 PCA 把主要方差集中到前几个坐标，往往比直接按时间顺序映射更有效。收敛优势依赖被积函数平滑性；数字障碍和提前行权会降低效果。</p>
+            <p>路径导数法对连续可微 payoff 直接传播导数，likelihood-ratio 法对不连续 payoff 更通用但方差可能更高；有限差分 Greeks 需共用随机数并检查扰动尺度。自动微分能高效获得大量敏感度，却只对已实现离散程序求导，离散偏差和模型错误仍然存在。</p>
+            <p>多层蒙特卡洛把高精度期望拆为粗网格期望与一系列相邻网格修正，利用修正方差快速衰减降低成本。实现时应报告每层样本量、偏差估计、方差与总工作量，而不只给最终价格。</p>
+          </section>
+
+          <section id="help-numerical-pricing-american" data-search-unit data-search-title="最小二乘蒙特卡洛、提前行权与高低偏差界">
+            <h3>美式定价的难点是估计继续持有价值</h3>
+            <p>Longstaff–Schwartz 在每个可行权时点，用尚未行权且实值路径的未来贴现现金流回归状态基函数，估计条件继续价值，再与立即行权价值比较。基函数过少产生近似偏差，过多会样本内过拟合；回归、策略选择与估值若复用同一路径，会产生前视偏差。</p>
+            <p>用训练路径学习行权策略，再在独立路径执行，可得到该次优策略的低偏估计；对偶方法利用近似 Snell envelope 构造高偏上界。上下界间距比单个价格更能说明数值质量。多因子美式产品还要诊断状态变量、回归条件数、行权边界单调性和跨种子稳定性。</p>
+          </section>
+
+          <section class="help-self-tests" id="help-numerical-pricing-self-tests" data-search-unit data-search-title="数值定价自测">
+            <h3>本章自测</h3>
+            <details data-self-test><summary>01 · 蒙特卡洛路径数增加四倍，普通标准误大约怎样变化？</summary><p>在常规有限方差条件下约减半，因为标准误按 <code>1/√N</code> 收敛；模型和时间离散误差不会因此自动消失。</p></details>
+            <details data-self-test><summary>02 · 有限差分价格随网格加密仍明显变化，能否作为稳定报价？</summary><p>不能。应继续检查网格、边界、格式稳定性和产品条件；数值收敛前的小数位没有可靠含义。</p></details>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-derivatives" data-help-topic="derivatives" data-help-part="pricing" data-help-title="衍生品定价与对冲">
+          <div class="help-chapter-number">10 / DERIVATIVES</div>
+          <h2>衍生品定价与对冲</h2>
+          <p class="help-lead">衍生品把方向、波动、利率、信用和路径风险重新组合。先画现金流与权利义务，再谈公式；定价是模型输出，对冲则在真实摩擦中持续管理误差。</p>
+
+          <section id="help-derivatives-instruments" data-search-unit data-search-title="期权、期货、远期与互换现金流">
+            <h3>三类合约的权利义务不同</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>合约</th><th>核心现金流</th><th>主要风险</th></tr></thead><tbody><tr><td>期权</td><td>买方支付权利金获得行权权利，卖方承担相应义务</td><td>方向、波动率、时间价值、跳跃与对冲误差</td></tr><tr><td>远期/期货</td><td>约定未来交换价格；期货逐日盯市并缴纳保证金</td><td>基差、保证金流动性、展期与极端波动</td></tr><tr><td>互换</td><td>按名义本金交换多期固定/浮动或不同资产现金流</td><td>期限结构、重置、信用、抵押品与提前终止</td></tr></tbody></table></div>
+            <p>连续复利且标的有连续股息率 q 时，无套利远期价为 <code>F₀,T=S₀e^((r−q)T)</code>。期货因逐日结算，在利率随机且与标的相关时可与远期价格不同。普通固定对浮动利率互换的平价固定利率可写成 <code>K=(P(0,T₀)−P(0,Tₙ))/ΣαᵢP(0,Tᵢ)</code>；实际估值还要使用对应折现与预测曲线、日计数和抵押条款。</p>
+            <p>期货最小方差套保比率可估为 <code>h*=Cov(ΔS,ΔF)/Var(ΔF)</code>，再按现货敞口、期货价格与合约乘数换算张数；现货与期货标的、到期或交易时段不完全一致时仍有基差风险。利率互换对冲则应匹配组合 DV01 与关键期限久期，可使用债券、利率期货或其他互换；只把总 DV01 调成零，仍可能留下曲线陡峭化和扭曲风险。</p>
+          </section>
+
+          <section id="help-derivatives-black-scholes" data-search-unit data-search-title="Black-Scholes 定价、看涨看跌平价与隐含波动率">
+            <h3>Black–Scholes 是基准坐标，不是市场全貌</h3>
+            <p>欧式看涨在常数利率 r、连续股息率 q 和常数波动率 σ 下为 <code>C=S₀e^(−qT)N(d₁)−Ke^(−rT)N(d₂)</code>，其中 <code>d₁=[ln(S₀/K)+(r−q+½σ²)T]/(σ√T)</code>、<code>d₂=d₁−σ√T</code>。欧式看涨看跌平价为 <code>C−P=S₀e^(−qT)−Ke^(−rT)</code>，可用于检查报价与输入一致性。</p>
+            <p>市场常从期权价格反解隐含波动率。不同执行价和到期日形成波动率微笑/曲面，说明常数波动假设不符合全部报价。隐含波动率是模型等价参数，不是未来实现波动率的无偏保证；深度实值/虚值、流动性差或价格接近无套利边界时，反解尤其不稳定。</p>
+            <figure class="help-code" id="help-code-black-scholes" data-search-unit data-search-title="Python Black-Scholes 欧式看涨看跌示例">
+              <figcaption><span>PYTHON · BLACK-SCHOLES</span><button type="button" class="help-copy-code" data-copy-code>复制代码</button></figcaption>
+              <pre><code data-code-language="python">from math import erf, exp, log, sqrt
+
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + erf(value / sqrt(2.0)))
+
+spot, strike, rate, dividend, sigma, maturity = 100.0, 105.0, 0.02, 0.0, 0.25, 1.0
+d1 = (log(spot / strike) + (rate - dividend + 0.5 * sigma**2) * maturity) / (
+    sigma * sqrt(maturity)
+)
+d2 = d1 - sigma * sqrt(maturity)
+call = spot * exp(-dividend * maturity) * normal_cdf(d1) - strike * exp(
+    -rate * maturity
+) * normal_cdf(d2)
+put = call - spot * exp(-dividend * maturity) + strike * exp(-rate * maturity)
+print(round(call, 4), round(put, 4))</code></pre>
+            </figure>
+          </section>
+
+          <section id="help-derivatives-greeks" data-search-unit data-search-title="Delta、Gamma、Vega、Theta、Rho 与敏感性">
+            <h3>Greeks 是局部敏感性，不是固定损益承诺</h3>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>Greek</th><th>局部含义</th><th>管理重点</th></tr></thead><tbody><tr><td>Delta</td><td>标的价格变化 1 单位时，期权价值的一阶变化</td><td>方向敞口与对冲股数</td></tr><tr><td>Gamma</td><td>Delta 对标的价格的变化率</td><td>大幅波动时 Delta 漂移与离散对冲误差</td></tr><tr><td>Vega</td><td>隐含波动率变化对价值的敏感度</td><td>曲面平移、倾斜和期限结构变化</td></tr><tr><td>Theta</td><td>其他输入不变时的时间衰减</td><td>持有成本；单位按天或年必须注明</td></tr><tr><td>Rho</td><td>利率变化对价值的敏感度</td><td>长久期合约与利率曲线联动</td></tr></tbody></table></div>
+            <p>Taylor 近似可写成 <code>ΔV≈Delta·ΔS+½Gamma·(ΔS)²+Vega·Δσ+Theta·Δt+Rho·Δr</code>，但大幅跨越、波动率曲面联动和跳跃会产生高阶及交叉误差。所有 Greeks 都要标明输入扰动单位，例如 Vega 是波动率变动 1 个百分点还是 1.00。</p>
+          </section>
+
+          <section id="help-derivatives-hedging" data-search-unit data-search-title="Delta 对冲、Gamma Vega 风险与离散对冲误差">
+            <h3>对冲是在路径上反复执行，不是初始时刻归零</h3>
+            <p>Delta 对冲按模型 Delta 持有相反数量标的，局部消除一阶方向风险。标的变化后 Delta 因 Gamma 改变，需要再平衡；频繁对冲降低模型内离散误差，却增加价差、冲击和费用。跳跃、停牌或涨跌停期间无法连续调仓，理论复制会断裂。</p>
+            <p>组合级风险应按到期、执行价与标的汇总 Delta、Gamma、Vega 和情景损益，而不是逐张合约分别看。卖出期权可能初始 Theta 为正，却暴露负 Gamma 与尾部损失；“收时间价值”不能替代跳空、波动率上升和保证金压力测试。</p>
+            <div class="concept-flow"><p><b>实务闭环</b>校验合约条款与乘数 → 标记价格和波动率曲面 → 聚合 Greeks → 设计对冲带 → 加入交易成本与不可成交情景 → 复盘模型/执行损益。</p><p><b>模型损益</b>将实际 P&amp;L 拆为 Delta、Gamma、Vega、Theta、利率、价差与残差；残差持续偏大时检查曲面、分红和跳跃假设。</p></div>
+          </section>
+
+          <section id="help-derivatives-volatility-surface" data-search-unit data-search-title="隐含波动率曲面、静态套利与模型校准">
+            <h3>市场交易的是一张曲面，不是一个波动率</h3>
+            <p>期权报价应先转为远期 moneyness 或 log-moneyness，并按 bid/ask、成交量和无套利边界清洗。固定到期的看涨价格随执行价应单调下降且凸，跨到期总方差应避免日历套利；直接对隐含波动率做高阶多项式插值可能产生负密度或局部套利。</p>
+            <p>局部波动模型用完整欧式曲面反演 <code>σ_loc(S,t)</code>，能精确拟合当前香草期权，但未来 smile 动态通常过于机械；Heston 类随机波动引入均值回复方差和 spot-vol 相关，能表达 skew 动态，却难以同时精确拟合所有到期。跳跃模型补充短期限厚尾，参数间往往弱识别。</p>
+            <p>校准应最小化与业务一致的误差：价格、隐含波动或 vega 加权误差会给出不同参数。必须使用 bid/ask 容差、参数正则、多个初值和留出报价，报告目标函数平坦方向。参数能拟合今天的曲面不意味着可预测明天，也不意味着对冲 Greeks 正确。</p>
+          </section>
+
+          <section id="help-derivatives-exotics-xva" data-search-unit data-search-title="路径依赖、障碍期权、信用与 XVA">
+            <h3>复杂产品先增加状态变量，再增加模型</h3>
+            <p>亚式期权依赖路径平均，障碍期权依赖是否曾触及边界，回望期权依赖路径极值；这些变量必须进入数值状态。离散观察障碍不能用连续监控公式直接替代，时间步之间漏触障碍会高估存活概率，可用 Brownian bridge 修正条件穿越概率。</p>
+            <p>场外衍生品价值还受交易对手违约、己方信用、融资、保证金与资本占用影响。CVA 近似对未来正暴露、违约概率和损失率贴现积分，DVA/FVA/MVA 等调整依赖法律净额结算集、抵押协议和资金假设，不能作为无争议的单一加项。暴露模拟必须与违约和市场风险的相关性一致，错向风险会显著放大尾部。</p>
+          </section>
+
+          <section class="help-self-tests" id="help-derivatives-self-tests" data-search-unit data-search-title="衍生品定价与对冲自测">
+            <h3>本章自测</h3>
+            <details data-self-test><summary>01 · 风险中性上涨概率能否当成标的真实上涨概率？</summary><p>不能。它是使贴现资产价格满足无套利关系的定价权重；真实概率需要在现实测度下另行估计。</p></details>
+            <details data-self-test><summary>02 · 组合初始 Delta 为零，是否已经没有方向风险？</summary><p>没有。Gamma 会使 Delta 随标的变化，波动率、时间、利率、跳跃和离散对冲也会产生损益，必须持续监控和再平衡。</p></details>
+          </section>
+        </section>
+
+        <section class="help-chapter" id="help-fixed-income" data-help-topic="fixed-income" data-help-part="pricing" data-help-title="固定收益与利率">
+          <div class="help-chapter-number">11 / FIXED INCOME</div>
+          <h2>固定收益与利率</h2>
+          <p class="help-lead">债券不是“固定价格的固定收益”。现金流虽常预先约定，其现值仍随整条利率曲线、信用、流动性、嵌入期权和再投资条件变化。</p>
+
+          <section id="help-fixed-income-cashflows" data-search-unit data-search-title="债券现金流、现值、到期收益率与信用利差">
+            <h3>先逐笔贴现，再压缩成一个收益率</h3>
+            <p>债券价格是各期现金流按相应期限贴现因子求和：<code>P=Σ CFₜ·P(0,t)</code>。到期收益率（YTM）是让单一内部收益率匹配当前价格的压缩指标，隐含持有到期、现金流按该收益率再投资且无违约等条件；它不等于未来实际实现收益，也不能完整描述非平坦曲线。</p>
+            <p>信用债价格还反映违约概率、回收率、流动性、税收和风险溢价。名义利差、Z-spread 与 OAS 使用不同基准和期权调整；含赎回、回售或可转债条款时，必须对嵌入期权和行为假设建模，不能只比较票息或 YTM。</p>
+          </section>
+
+          <section id="help-fixed-income-duration-convexity" data-search-unit data-search-title="麦考利久期、修正久期、DV01 与凸性">
+            <h3>久期是一阶利率敏感性，凸性补上曲率</h3>
+            <p>麦考利久期是各现金流时间按现值权重的平均；修正久期把它转换为收益率变化的一阶价格敏感度。小幅平行变动下 <code>ΔP/P≈−Dmod·Δy+½Convexity·(Δy)²</code>。DV01 表示收益率上升 1 个基点时价格的大致金额变化，使用时必须说明名义本金和曲线扰动方式。</p>
+            <p>久期近似假设收益率曲线平行移动。实际曲线会陡峭化、扭曲，不同现金流对关键期限敏感度不同，因此还需 key-rate duration。含权债券的现金流会随利率变化，可能出现负凸性；静态现金流久期会失真，应使用有效久期/凸性和情景重估。</p>
+            <div class="concept-flow"><p><b>合成例子</b>修正久期 5、凸性 30 的债券，收益率上升 100bp 时二阶近似约为 <code>−5×1%+½×30×1%²=−4.85%</code>。</p><p><b>组合管理</b>免疫策略同时匹配资产负债现值和久期，并检查凸性、关键期限、现金流时点和再平衡成本。</p><p><b>局限</b>信用利差和无风险曲线可能同时变化，单一利率久期不能解释全部价格风险。</p></div>
+          </section>
+
+          <section id="help-fixed-income-term-structure" data-search-unit data-search-title="即期利率、远期利率、贴现曲线与 Bootstrap">
+            <h3>期限结构是一条曲线，不是一个利率</h3>
+            <p>零息贴现因子 <code>P(0,T)</code> 给出 T 时点一单位确定现金流的现值，即期利率是其年化表达；远期利率由不同期限贴现因子之间的无套利关系推出。票息债 YTM 把多期限现金流压成一个数，不能直接替代即期曲线定价。</p>
+            <p>曲线 Bootstrap 从短期存款/回购、期货或远期、互换和债券等流动工具逐段解出贴现因子。实务中常区分抵押品折现曲线与各期限浮动利率预测曲线，还要统一日计数、支付日历、插值和外推。微小报价或插值变化可能影响远端远期率，必须保存曲线输入和构建版本。</p>
+          </section>
+
+          <section id="help-fixed-income-rate-models" data-search-unit data-search-title="Vasicek、CIR、Hull-White 与利率期限结构模型">
+            <h3>利率模型既要描述动态，也要匹配今天的曲线</h3>
+            <p>Vasicek 短利率模型 <code>dr=κ(θ−r)dt+σdW</code> 具有均值回复和高斯解析便利，但允许负利率；CIR 使用 <code>σ√r dW</code>，在参数条件下更倾向保持非负；Hull–White 通过时间变化漂移拟合当前期限结构，常用于利率衍生品树或蒙特卡洛。</p>
+            <p>短利率模型从一个状态变量生成整条曲线，HJM 则直接约束远期利率曲线动态使其无套利。模型选择取决于产品维度、可校准报价和对冲用途。校准到今天价格不代表能预测明天利率；应同时检查报价拟合、参数稳定、曲线情景与对冲表现。</p>
+          </section>
+
+          <section id="help-fixed-income-hjm-multicurve" data-search-unit data-search-title="HJM 无套利漂移、多曲线与模型校准">
+            <h3>利率定价对象是整条随机曲线</h3>
+            <p>HJM 直接建模瞬时远期率 <code>df(t,T)=α(t,T)dt+σ(t,T)dWₜ</code>。在给定风险中性测度和波动结构后，无套利约束漂移：单因子情形 <code>α(t,T)=σ(t,T)∫ₜᵀσ(t,u)du</code>。这说明不能独立指定每个期限的漂移与波动；任意曲线动态若违反该关系会产生模型内套利。</p>
+            <p>现代抵押品定价通常用隔夜曲线折现，并为不同期限浮动指数建立预测曲线。一个现金流的远期率来自对应预测曲线，现值来自抵押折现曲线；旧式单曲线公式只在基差可忽略的简化世界成立。Bootstrap 需同时求解互换、基差互换等工具，误差会沿期限传播。</p>
+            <p>Hull–White、LMM 等模型应先精确或近似匹配初始曲线，再校准 cap/floor、swaption 等波动报价。校准矩阵的权重、报价缺失和参数正则会显著影响远端风险。检验不仅看价格 RMSE，还要看 bucketed DV01、vega、情景 P&amp;L 与对冲稳定性。</p>
+          </section>
+
+          <section id="help-fixed-income-credit" data-search-unit data-search-title="信用迁移、结构模型、强度模型与信用组合风险">
+            <h3>信用利差不是违约概率的直接读数</h3>
+            <p>Merton 结构模型把公司股权视为资产上的看涨期权，资产价值低于债务边界时违约；它连接杠杆、资产波动和违约，却难以直接观察公司资产过程。约化强度模型用违约强度 λ 描述条件违约到达率，生存概率近似 <code>Q(τ&gt;T)=exp(−∫₀ᵀλ(u)du)</code>，便于从 CDS/债券校准。</p>
+            <p>市场信用利差同时包含预期损失、风险溢价、流动性、税收和技术面，不能简单用 <code>spread≈PD×LGD</code> 当真实世界预测。评级迁移、回收率与违约相关性决定组合尾部；危机期行业和共同因子会使违约聚集，独立 Bernoulli 假设严重低估损失分布。</p>
+            <p>信用组合可用潜变量高斯因子、强度相关或情景模型聚合，但 copula 选择和尾部相关极其敏感。应同时报告 expected loss、unexpected loss、集中度、迁移压力和流动性退出成本，并区分风险中性校准参数与实际违约预测参数。</p>
+          </section>
+
+          <section class="help-self-tests" id="help-fixed-income-self-tests" data-search-unit data-search-title="固定收益与利率模型自测">
+            <h3>本章自测</h3>
+            <details data-self-test><summary>01 · 一只债券 YTM 不变，是否表示所有期限利率都没变？</summary><p>不表示。YTM 是把多期现金流压成单一收益率；期限结构可能发生非平行变化而恰好给出相同压缩值。</p></details>
+            <details data-self-test><summary>02 · 为什么久期无法完整描述含赎回权债券的利率风险？</summary><p>利率变化会改变赎回概率和预期现金流，现金流本身不再固定；需用含权模型、有效久期/凸性和情景重估。</p></details>
+          </section>
+        </section>
+
+        <section class="help-part-intro" id="help-part-signals" data-help-part-intro="signals">
+          <p class="help-part-kicker">第四部 · SIGNAL RESEARCH</p><h2>因子与信号研究</h2>
+          <p>这一部研究预测证据本身：因子怎样从经济机制和可得数据生成，怎样对齐未来标签，以及怎样在多重检验、状态变化和交易成本之后仍保留增量信息。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>数据时点、回归推断、资产定价与基本交易约束</dd></div><div><dt>完成标准</dt><dd>能提交一份包含机制、PIT 实现、稳健性与失败边界的因子研究报告</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-factors" data-help-topic="factors" data-help-part="signals" data-help-title="因子的定义与预处理">
+          <div class="help-chapter-number">12 / FACTORS</div>
+          <h2>因子的定义与预处理</h2>
           <p class="help-lead">因子是在同一时点为一组证券生成的可比较数值。它可以表达预期收益、风险暴露或交易约束，但高分本身不是买入指令。</p>
 
           <section id="help-factors-taxonomy" data-search-unit data-search-title="量价、估值、质量、资讯与截面因子">
@@ -440,6 +833,19 @@ factor = pd.Series([0.02, 0.03, 0.04, 0.40])
 print(mad_winsorize(factor).round(4).tolist())</code></pre>
             </figure>
           </section>
+          <section id="help-factors-return-decomposition" data-search-unit data-search-title="截面收益模型、因子收益与特异收益分解">
+            <h3>“因子值预测收益”与“因子收益解释持仓”是两套方向相反的回归</h3>
+            <p>预测研究通常在 T 时点用因子暴露 xᵢ,T 排序未来收益；风险模型则在每个 T+1 截面用已知暴露解释实现收益：<code>rₜ=Xₜfₜ+uₜ</code>，其中 fₜ 是当期因子收益、uₜ 是特异收益。前者检验条件预测力，后者分解已实现 P&amp;L。混用两者会把事后估计的因子收益泄漏进事前信号。</p>
+            <p>截面回归可按市值或特异方差加权，并加行业虚拟变量和约束解决共线性。因子收益时间序列再用于估计风险溢价、协方差和组合归因。暴露定义、标准化范围和缺失处理必须每日冻结；行业与风格暴露共同变化时，回归系数可能高度不稳定。</p>
+            <p>因子机制至少拆为风险补偿、行为偏差、制度摩擦和数据/方法伪影四类。风险补偿型因子应在坏状态承受可辨认损失；行为型因子应说明错误定价为何持续；摩擦型收益要扣除获得它所需的融资和成交成本。无法提出可被数据推翻的机制，只能被视为统计候选。</p>
+          </section>
+
+          <section id="help-factors-decay-capacity" data-search-unit data-search-title="IC 衰减曲线、持有期选择与因子容量">
+            <h3>单一未来周期会隐藏信号真正的生命周期</h3>
+            <p>对同一 T 日暴露计算 1、2、3…h 日不重叠或明确重叠的未来收益，可得到 IC term structure；再计算分层组合在不同延迟、持有期和调仓频率下的净收益，区分信息衰减与交易成本。短期 IC 高但一日后归零的信号，对开盘缺口和延迟极敏感。</p>
+            <p>容量不是平均成交额乘一个常数。组合成交需要考虑持仓重合、同方向拥挤、参与率导致的冲击函数、涨跌停和退出天数。规模扩大后，最优持有期可能变长、选股数量增加、信号阈值提高；因此容量分析应重新优化执行而不是只在线性放大原策略。</p>
+          </section>
+
           <section class="help-self-tests" id="help-factors-self-tests" data-search-unit data-search-title="因子基础自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 因子数值越高是否天然代表越看多？</summary><p>不是。方向是研究定义的一部分，必须连同窗口、截面、缺失处理和未来收益标签一起冻结。</p></details>
@@ -447,9 +853,9 @@ print(mad_winsorize(factor).round(4).tolist())</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-validation" data-help-topic="validation" data-help-title="因子验证">
-          <div class="help-chapter-number">08 / VALIDATION</div>
-          <h2>因子验证</h2>
+        <section class="help-chapter" id="help-validation" data-help-topic="validation" data-help-part="signals" data-help-title="因子验证与稳健性">
+          <div class="help-chapter-number">13 / VALIDATION</div>
+          <h2>因子验证与稳健性</h2>
           <p class="help-lead">一个可信因子不只要平均相关性为正，还要方向稳定、分层单调、换手可承受、与已有信号不重复，并在未参与选择的时期继续有效。</p>
 
           <section id="help-validation-rankic" data-search-unit data-search-title="IC、RankIC 与 ICIR">
@@ -495,6 +901,20 @@ print(round(float(rank_ic), 4))</code></pre>
             <div class="help-case-grid"><div><span>未经处理</span><strong>RankIC 0.041</strong><p>最高层毛超额明显，但小市值暴露和日均 96% 换手占主导。</p></div><div><span>中性化后</span><strong>RankIC 0.026</strong><p>五层收益仍大体单调，说明信号不只是在做小盘暴露。</p></div><div><span>成本压力</span><strong>净优势 0.07%</strong><p>基准成本下保留方向，双倍滑点后区间跨零，容量成为主要限制。</p></div></div>
             <ol class="help-steps"><li><strong>排除泄漏</strong><span>标签从 T+1 开盘开始；全部预处理参数只取当日以前历史。</span></li><li><strong>检查结构</strong><span>按年、状态、规模和行业穿透，确认贡献不由少数跌停反弹日决定。</span></li><li><strong>调整实现</strong><span>改为每两日调仓并设置排名容忍带，换手降至 54%，净收益更稳定。</span></li><li><strong>保留结论边界</strong><span>只作为组合候选，不因一次样本外通过就直接晋级 Champion。</span></li></ol>
           </section>
+          <section id="help-validation-selection-bias" data-search-unit data-search-title="Deflated Sharpe、PBO、Reality Check 与选择偏差">
+            <h3>样本外一次胜出仍可能是整个搜索过程的幸运冠军</h3>
+            <p>Deflated Sharpe Ratio（DSR）用观测夏普、样本长度、偏度、峰度和有效尝试次数，调整非正态收益与多次选择带来的乐观偏差。有效尝试次数不能简单等于参数网格数：高度相关候选提供的信息较少，但删除失败候选会严重低估它。</p>
+            <p>回测过拟合概率（PBO）可将样本分块，反复用部分块选冠军，再观察该冠军在互补块的相对排名；若样本内冠军经常落到样本外中位数以下，搜索流程不稳定。组合对称交叉验证适合诊断选择过程，但时间依赖和结构断点要求使用连续块而非随意打散。</p>
+            <p>White Reality Check 与 Hansen SPA 检验把“最佳策略相对基准的优势”放在完整候选族的最大统计量分布中评估，常用 stationary bootstrap 保留依赖。它们回答的是候选集中是否至少有一个真正改善，不负责证明选中冠军稳定、容量足够或机制正确。</p>
+            <div class="concept-flow"><p><b>研究对象</b>验证的不只是因子公式，还包括搜索空间、筛选规则和最终选择器。</p><p><b>必须留存</b>所有候选、失败原因、试验顺序、共享数据和人工干预。</p><p><b>停止条件</b>若增加新候选只抬高样本内最佳值而不改善滚动样本外分布，应冻结搜索并重新提出机制。</p></div>
+          </section>
+
+          <section id="help-validation-cpcv" data-search-unit data-search-title="Purged CV、Embargo 与组合清洗交叉验证">
+            <h3>金融标签的时间跨度决定哪些样本必须隔离</h3>
+            <p>每个样本同时有信息起点和标签结束时间。若训练标签区间与验证样本的信息区间重叠，即使观测日期不同，也可能共享未来收益；purging 删除这些训练样本，embargo 再在验证块之后留缓冲，防止持仓或特征窗口外溢。</p>
+            <p>Combinatorial Purged Cross-Validation（CPCV）从若干连续组中选择多组作为测试，生成多条样本外回测路径，从而估计性能分布而不是单一路径。它计算昂贵且各路径不独立，不能把路径数当成独立样本量；其价值在于观察选择器对不同历史拼接的稳定性。</p>
+          </section>
+
           <section class="help-self-tests" id="help-validation-self-tests" data-search-unit data-search-title="因子验证自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 平均 RankIC 为正，为什么还要看分层和换手？</summary><p>平均相关可能由少数日期或极端证券驱动，且无法说明组合映射是否单调、成本是否会吞掉优势。分层与换手把统计关联连接到可实现组合。</p></details>
@@ -502,9 +922,15 @@ print(round(float(rank_ic), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-composition" data-help-topic="composition" data-help-title="因子合成与组合构建">
-          <div class="help-chapter-number">09 / COMPOSITION</div>
-          <h2>因子合成与组合构建</h2>
+        <section class="help-part-intro" id="help-part-portfolio" data-help-part-intro="portfolio">
+          <p class="help-part-kicker">第五部 · PORTFOLIO ENGINEERING</p><h2>组合、回测与模型</h2>
+          <p>这一部把有限预测力转成有限风险预算。权重、成交、回测、尾部风险和机器学习不是独立模块，而是同一个决策系统中相互约束的工程层。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>协方差、优化、样本外验证、市场微观结构与交易成本</dd></div><div><dt>完成标准</dt><dd>能从信号构造可成交组合，并对估计误差、成本、容量和尾部情景完成全链路审计</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-composition" data-help-topic="composition" data-help-part="portfolio" data-help-title="组合优化与因子合成">
+          <div class="help-chapter-number">14 / COMPOSITION</div>
+          <h2>组合优化与因子合成</h2>
           <p class="help-lead">合成不是把更多列相加，而是在预测力、重复信息、稳定性、换手和风险约束之间分配有限信任。简单基线往往比精巧但漂移的权重更可靠。</p>
 
           <section id="help-composition-redundancy" data-search-unit data-search-title="因子相关、正交化与去冗余">
@@ -540,11 +966,50 @@ print(np.round(weights, 4))</code></pre>
             <div class="help-table-wrap"><table class="help-table"><thead><tr><th>约束</th><th>防止的问题</th><th>需要记录</th></tr></thead><tbody><tr><td>单股/行业上限</td><td>少数名字或主题支配净值</td><td>约束前后权重、绑定次数</td></tr><tr><td>成交额参与率</td><td>理论仓位超过市场容量</td><td>订单金额、ADV、完成天数</td></tr><tr><td>换手惩罚/容忍带</td><td>小幅排名变化触发无效交易</td><td>取消订单与节省成本</td></tr><tr><td>风险预算</td><td>低波动假象或相关暴露集中</td><td>边际风险贡献与压力结果</td></tr></tbody></table></div>
           </section>
 
-          <section id="help-composition-optimization" data-search-unit data-search-title="协方差收缩、优化目标与约束优先级">
-            <h3>优化器精确求解的，可能是一个不精确输入</h3>
-            <p>均值—方差优化常写成“最大化预期收益减风险厌恶系数乘组合方差，再减换手成本”。预期收益和协方差都来自估计，尤其均值误差很大；无约束求解会把微小估计差异放大成极端多空权重。A 股个人账户更适合从非负、总仓位、单股/行业上限和换手约束开始。</p>
-            <p>样本协方差在股票多、历史短时容易病态。向对角或常相关目标收缩，可以牺牲部分样本拟合换取更稳定的逆矩阵；因子风险模型则用市场、行业和风格解释共同波动，再估计特异风险。无论哪种方法，都必须做滚动估计和压力放大，不能使用全时期协方差。</p>
-            <p>约束还需要明确优先级：合规与可交易是硬约束，风险上限通常高于预测偏好，换手和风格偏离可作为软惩罚。若优化无解，应报告冲突的约束并保留现金或降低目标规模，而不是静默删除最难满足的风控条件。</p>
+          <section id="help-composition-optimization" data-search-unit data-search-title="MVO 均值-方差优化、有效前沿与协方差收缩">
+            <h3>MVO 是组合构建主干，也是估计误差放大器</h3>
+            <p>Markowitz 均值—方差优化（MVO）以 <code>μ</code> 表示预期收益、<code>Σ</code> 表示协方差，常写成 <code>max wᵀμ−(λ/2)wᵀΣw</code>；也可在给定目标收益下最小化方差。改变风险厌恶系数 λ 或目标收益会得到有效前沿：在相同期望收益下不存在更低方差，或在相同方差下不存在更高期望收益的组合。</p>
+            <p>MVO 对预期收益尤其敏感：均值估计的一点变化可能被矩阵求逆放大成极端多空权重。全局最小方差组合不依赖 μ，通常更稳定，但仍依赖协方差。生产组合应同时保留等权、最小方差和当前持仓等基线，比较扣费后的滚动样本外权重、换手与压力暴露。</p>
+            <p>样本协方差在股票多、历史短时容易病态。向对角或常相关目标收缩，可以牺牲部分样本拟合换取更稳定的逆矩阵；因子风险模型则用市场、行业和风格解释共同波动，再估计特异风险。所有估计只使用当时已知滚动窗口，并做窗口、收缩强度和相关性上升压力测试。</p>
+            <p>约束需要明确优先级：合规与可交易是硬约束，风险上限通常高于预测偏好，换手和风格偏离可作为软惩罚。若优化无解，应报告冲突并保留现金或降低规模，而不是静默删除风控。连续权重经过整手取整后必须重新验证预算、集中度和风险。</p>
+            <figure class="help-code" id="help-code-mvo" data-search-unit data-search-title="Python MVO 最小方差与切点组合示例">
+              <figcaption><span>PYTHON · MEAN-VARIANCE OPTIMIZATION</span><button type="button" class="help-copy-code" data-copy-code>复制代码</button></figcaption>
+              <pre><code data-code-language="python">import numpy as np
+
+expected_return = np.array([0.08, 0.10, 0.12])
+covariance = np.array([
+    [0.040, 0.012, 0.008],
+    [0.012, 0.062, 0.014],
+    [0.008, 0.014, 0.090],
+])
+ones = np.ones(3)
+minimum_variance = np.linalg.solve(covariance, ones)
+minimum_variance /= minimum_variance.sum()
+risk_free = 0.02
+tangent = np.linalg.solve(covariance, expected_return - risk_free)
+tangent /= tangent.sum()
+print(np.round(minimum_variance, 4), np.round(tangent, 4))</code></pre>
+            </figure>
+          </section>
+
+          <section id="help-composition-black-litterman" data-search-unit data-search-title="Black-Litterman 市场均衡、主观观点与置信度">
+            <h3>Black–Litterman 让观点从均衡出发，而不是凭空填均值</h3>
+            <p>Black–Litterman 先用市场权重反推均衡超额收益 <code>Π=δΣwₘₖₜ</code>，再用观点矩阵 P、观点收益 Q 和不确定性 Ω 更新预期收益。常见后验均值为 <code>μBL=[(τΣ)⁻¹+PᵀΩ⁻¹P]⁻¹[(τΣ)⁻¹Π+PᵀΩ⁻¹Q]</code>。观点置信度低时后验靠近均衡，高时才更接近 Q。</p>
+            <p>观点可以是绝对的“资产 A 超额收益为 3%”，也可以是相对的“A 比 B 高 2%”。P 的每行定义观点组合，Q 必须与之同单位、同期限；Ω 描述观点误差而非随意调权旋钮。市场权重、风险厌恶 δ、τ 和协方差仍是模型输入，不能因为用了贝叶斯形式就免于估计风险。</p>
+            <p>Black–Litterman 的价值是把基准和主动偏离分开，使输入更稳定、可解释。它不保证观点正确，也不自动处理交易成本、A 股做空限制或行业集中；后验收益仍要进入带约束、换手和容量的样本外组合流程，并与“不表达观点”的均衡基线比较。</p>
+          </section>
+
+          <section id="help-composition-robust-optimization" data-search-unit data-search-title="稳健优化、分布鲁棒、风险预算与 CVaR 优化">
+            <h3>不要把点估计当成已知真值交给优化器</h3>
+            <p>稳健 MVO 可假设均值和协方差落在不确定集合中，求最坏情形目标；椭球均值集合常等价于对暴露于估计误差方向施加惩罚。分布鲁棒优化则在与经验分布一定距离的概率集合上控制最坏期望损失。集合半径过小退化为普通样本优化，过大则组合过度保守，需要嵌套样本外标定。</p>
+            <p>风险平价令各资产的 Euler 风险贡献 <code>RCᵢ=wᵢ(Σw)ᵢ/σₚ</code> 接近预算 bᵢ，而不是直接估计收益；它降低均值敏感度，却仍依赖协方差，并可能向低波动杠杆资产集中。层次风险平价利用相关结构聚类避免直接逆矩阵，但树结构和距离选择同样会漂移。</p>
+            <p>CVaR 在情景损失上可转成线性规划：同时选择权重、VaR 辅助变量和每个情景的超额损失。相比方差，它直接关注尾部且是相干风险度量；但历史情景未包含的危机仍不会凭空出现。生产目标应联合预期收益、CVaR、换手、冲击与持仓偏离，并在历史和假设压力情景上重新求解。</p>
+          </section>
+
+          <section id="help-composition-multiperiod" data-search-unit data-search-title="多期组合、交易成本与模型预测控制">
+            <h3>今天的最优权重取决于明天还能不能调整</h3>
+            <p>单期优化把调仓后的权重视为终点，忽略未来信号、成本和约束。多期模型以持仓和现金为状态、订单为控制，在预测期内最小化风险与交易成本；receding-horizon 或模型预测控制每期只执行第一步，再用新信息重算。</p>
+            <p>成本函数可包含线性价差、近似 <code>|q|^{3/2}</code> 的非线性冲击、固定费用和参与率约束。固定费与整数手数使问题非凸；常用连续松弛生成目标，再由受控取整/启发式执行，并验证取整后的可行性。预测期过长会放大参数错误，过短则看不见分批交易价值。</p>
           </section>
 
           <section id="help-composition-plateau" data-search-unit data-search-title="参数平台、Pareto 前沿与选择原则">
@@ -555,12 +1020,12 @@ print(np.round(weights, 4))</code></pre>
           <section class="help-self-tests" id="help-composition-self-tests" data-search-unit data-search-title="因子合成与组合构建自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 两个高 IC 因子相关 0.95，为什么组合提升可能很小？</summary><p>它们大多在重复同一排序和风险暴露，新增信息有限；应检查正交化后的增量 IC、持仓重合和成本差异。</p></details>
-            <details data-self-test><summary>02 · 为什么参数平台比单个最优参数更可信？</summary><p>真实机制通常在相邻设置下保持方向；孤立尖峰更可能来自抽样噪声、数据错位或多次搜索后的幸运结果。</p></details>
+            <details data-self-test><summary>02 · Black–Litterman 为什么通常比直接把主观收益塞进 MVO 更稳定？</summary><p>它从市场均衡收益出发，按观点误差和置信度做收缩；低置信观点只产生有限偏离。但协方差、均衡和观点仍可能估错，且必须另加交易与风险约束。</p></details>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-backtest" data-help-topic="backtest" data-help-title="可信回测">
-          <div class="help-chapter-number">10 / BACKTESTING</div>
+        <section class="help-chapter" id="help-backtest" data-help-topic="backtest" data-help-part="portfolio" data-help-title="可信回测">
+          <div class="help-chapter-number">15 / BACKTESTING</div>
           <h2>可信回测</h2>
           <p class="help-lead">回测是对一组明确假设的历史模拟。最有价值的结果不是最高收益曲线，而是当假设变差时，结论如何失效。</p>
 
@@ -616,6 +1081,19 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
             <p>外部现金流不能当作投资收益。时间加权收益（TWR）把入金前后区间链接，适合评价策略；资金加权收益（XIRR）考虑现金流时点，更接近投资者实际体验。回测通常没有外部入金，但模拟盘与实盘账本必须区分入金、出金、分红、费用和交易盈亏。</p>
             <p>基准应与策略使用同一日期、币种和收益类型。策略包含分红而基准使用价格指数，会虚增长期超额；策略持有现金时，是否给现金计息也要说明。若候选仅覆盖中小盘，却用大盘权重指数作唯一基准，至少再报告风格匹配基准与市场中性后的结果。</p>
           </section>
+          <section id="help-backtest-event-driven" data-search-unit data-search-title="事件驱动回测、订单状态机与撮合重放">
+            <h3>生产级回测必须重放状态，而不是只移动权重矩阵</h3>
+            <p>事件驱动引擎按市场数据、信号、订单、成交、公司行动和结算事件推进。订单状态至少包含 created、accepted、partially filled、filled、cancelled、rejected、expired；每次转换保存时间、原因和剩余数量。持仓只能由成交事件改变，计划订单不能直接改仓位。</p>
+            <p>撮合模型要声明报价可见时间、延迟、队列与成交量上限。Bar 数据只能给出区间摘要，无法唯一决定限价单路径；应采用保守规则、随机/上下界情景或更细数据，并报告结果区间。使用 L2/逐笔重放时还要处理隐藏流动性、撤单、同价队列位置和自身订单对盘口的反事实影响。</p>
+            <p>公司行动通过现金、股数和合约调整事件进入账本；期货逐日盯市、期权行权指派、债券应计利息也要修改状态。事件日志应能从初始现金独立重建每一日资产负债表，净值不应由一条预先计算的收益序列反推。</p>
+          </section>
+
+          <section id="help-backtest-uncertainty" data-search-unit data-search-title="回测不确定性、成本面与容量曲线">
+            <h3>一条净值曲线应扩展成一组条件结果</h3>
+            <p>对滑点、延迟、开盘缺口、未成交率和冲击参数建立联合情景，不只做单参数 ±20%。成本与成交往往在高波动时同时恶化，应保留相关结构。输出从“基准曲线”扩展为按情景的收益、回撤、容量和破产概率分布。</p>
+            <p>容量曲线记录资本规模增加时净 Alpha 如何因参与率和执行周期下降。最大容量不应定义为净收益刚好为零的理论点，而应加入参数误差缓冲、拥挤和退出压力，并观察策略在该规模下是否改变持有期和风险暴露。</p>
+          </section>
+
           <section class="help-self-tests" id="help-backtest-self-tests" data-search-unit data-search-title="可信回测自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · T 日收盘因子为什么通常不能按同一收盘价成交？</summary><p>完整 T 日收盘数据只有收盘后才确定；使用同一收盘成交会把未来已知价格放入执行。项目采用 T 日信号、T+1 开盘尝试成交。</p></details>
@@ -623,9 +1101,9 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
           </section>
         </section>
 
-        <section class="help-chapter" id="help-risk" data-help-topic="risk" data-help-title="组合构建与风险管理">
-          <div class="help-chapter-number">11 / PORTFOLIO RISK</div>
-          <h2>组合构建与风险管理</h2>
+        <section class="help-chapter" id="help-risk" data-help-topic="risk" data-help-part="portfolio" data-help-title="组合风险管理">
+          <div class="help-chapter-number">16 / PORTFOLIO RISK</div>
+          <h2>组合风险管理</h2>
           <p class="help-lead">预测决定“更想持有什么”，风控决定“错了还能不能继续”。仓位、暴露和流动性约束应在下单前完成，而不是亏损后补写。</p>
 
           <section id="help-risk-sizing" data-search-unit data-search-title="仓位、单笔风险与风险预算">
@@ -652,22 +1130,39 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
             <div class="concept-flow"><p><b>合成例子</b>五只股票理论各 20%，其中一只次日涨停买不到。真实组合应保留相应现金或按预先规则处理，不能在回测结束后把它假定为成交，也不能临时挑选当日涨得最好的替代品。</p><p><b>应急顺序</b>数据异常时暂停新增风险；成交异常时撤销未确认订单；暴露超限时优先降低流动性较好且可卖的仓位；连续跌停则记录不可执行缺口而非假装已止损。</p><p><b>局限</b>任何静态上限都无法覆盖全部联合尾部风险，仍需保留现金缓冲、人工停机和券商侧核对。</p></div>
           </section>
 
-          <section id="help-risk-tail" data-search-unit data-search-title="VaR、CVaR、压力情景与风险停机">
-            <h3>一个风险数字不能代替应急方案</h3>
-            <p>历史 VaR 在给定置信度下取损失分位，例如 95% 单日 VaR 只描述样本中较差 5% 的边界；CVaR/Expected Shortfall 取越过该边界后的平均损失，更关注尾部深度。两者都依赖历史窗口、持仓映射和分布稳定性，不是“最大可能损失”。</p>
-            <p>压力测试应包含历史重放与假设情景：指数跳空、个股连续跌停、相关性升至高位、波动翻倍、成交量减半、数据源中断和券商拒单。对于无法卖出的仓位，情景要保留风险暴露并继续估值，不能在止损线处假设退出。</p>
-            <p>风险停机应预先定义触发、动作、恢复和审批：数据过期时禁止新增仓位；订单状态不明时停止重复下单；实际回撤或成交偏差越界时降风险并人工复核。停机后恢复需要确认数据、持仓和订单三方一致，而不是次日自动清零警告。</p>
+          <section id="help-risk-tail" data-search-unit data-search-title="VaR、CVaR Expected Shortfall、回测与压力测试">
+            <h3>VaR 定位尾部边界，CVaR 衡量越界后有多痛</h3>
+            <p>先把损失定义为正数 L。在置信度 α 下，<code>VaRα=inf{l:P(L≤l)≥α}</code>；连续分布下 <code>CVaRα=ESα=E[L | L≥VaRα]</code>。例如 95% 单日 VaR 是损失分布的 95% 分位，说明约 5% 情形更差；CVaR/Expected Shortfall 对这些越界损失取平均，因此能区分“刚越界”和“尾部断崖”。两者都不是最大可能损失。</p>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>方法</th><th>做法</th><th>主要盲点</th></tr></thead><tbody><tr><td>历史模拟</td><td>用历史风险因子变动重估当前组合</td><td>样本外事件缺失、窗口与状态依赖</td></tr><tr><td>参数法</td><td>用均值、协方差和选定分布近似损失</td><td>正态假设低估厚尾，非线性产品需 Delta-Gamma 或全重估</td></tr><tr><td>蒙特卡洛</td><td>从联合风险模型生成情景并逐情景重估</td><td>模型、相关结构、校准和计算成本</td></tr></tbody></table></div>
+            <p>期限转换不能机械使用平方根法则：它隐含独立、同分布和近似线性正态损益，遇到自相关、波动聚集、期权 Gamma、调仓和流动性约束时会失真。多日风险更稳妥的做法是模拟完整路径，按真实再平衡与保证金规则逐日重估。</p>
+            <p>VaR 回测比较预测阈值与实际越界次数，Kupiec 检验覆盖率，Christoffersen 类检验还关注越界是否成簇；CVaR 需同时检查越界后的平均严重度。短样本在 99% 置信度下只有极少尾部观测，未拒绝模型不代表模型正确。模型结果还应按资产、行业、因子和流动性拆分边际风险贡献。</p>
+            <p>压力测试与统计尾部并列：历史重放覆盖真实联合冲击；假设情景加入指数跳空、连续跌停、相关性升高、波动翻倍、收益率曲线扭曲和成交量减半；反向压力测试从“账户不可承受损失”反推需要何种联合变化。无法卖出的仓位必须继续暴露和估值，不能在止损线假设退出。</p>
+            <p>风险停机应预先定义触发、动作、恢复和审批：数据过期时禁止新增仓位；订单状态不明时停止重复下单；实际回撤、VaR 越界或成交偏差失控时降风险并人工复核。恢复前确认数据、持仓和订单三方一致。</p>
           </section>
+          <section id="help-risk-coherent-allocation" data-search-unit data-search-title="相干风险度量、Euler 分配与边际风险贡献">
+            <h3>组合风险必须能分配回资产与决策</h3>
+            <p>相干风险度量满足单调性、平移不变性、正齐次和次可加性。连续损失下 ES/CVaR 通常相干，而 VaR 对非椭圆、离散或混合分布可能违反次可加性，因此“合并组合一定更分散”在 VaR 下不总成立。任何度量都仍依赖估计分布，数学性质不代表模型正确。</p>
+            <p>若风险度量 ρ(w) 对权重正齐次且可微，Euler 定理给出 <code>ρ(w)=Σwᵢ∂ρ/∂wᵢ</code>。边际风险 <code>∂ρ/∂wᵢ</code> 回答多增加一单位暴露的影响，成分风险 <code>wᵢ∂ρ/∂wᵢ</code> 则把总风险完整分配。对波动率，边际项与 <code>(Σw)ᵢ/σₚ</code> 有关；对 ES，可用尾部情景中资产损失的条件均值估计。</p>
+            <p>风险归因应沿资产、行业、因子、流动性和策略层级汇总，并区分当前风险、增量订单风险和压力风险。两个头寸单独看边际风险很小，联合在同一尾部情景中却可能强相关；因此还要报告集中度与非线性交互。</p>
+          </section>
+
+          <section id="help-risk-extreme-dependence" data-search-unit data-search-title="EVT、Copula、尾部相关与流动性调整风险">
+            <h3>线性相关看不见“是否一起崩”</h3>
+            <p>Copula 将边际分布与依赖结构分开。高斯 copula 在相关小于 1 时没有渐近尾部相关，t-copula 可表达对称尾部共振；股票下跌依赖常不对称，还可使用分层或 vine 结构。高维 copula 参数极多且危机样本稀少，拟合优度不能替代经济压力情景。</p>
+            <p>EVT 可对每个风险因子或组合损失阈值以上部分拟合广义帕累托，再与 copula/共同因子结合估计联合尾部。阈值、去簇和非平稳波动处理决定结果；先用 GARCH 过滤再拟合标准化残差尾部是一种做法，但过滤模型错误会传递到极值估计。</p>
+            <p>流动性调整风险把平仓期、价差与冲击加入损失。若头寸需 k 日退出，风险不是简单把一日 VaR 乘 √k，因为每日成交改变暴露，冲击与波动相关，价格限制可能令交易暂停。压力测试应按实际参与率模拟订单路径，并把无法完成的剩余头寸继续暴露。</p>
+          </section>
+
           <section class="help-self-tests" id="help-risk-self-tests" data-search-unit data-search-title="组合风控自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 十只股票等权是否必然比两只股票分散？</summary><p>不必然。十只股票可能集中于同一行业、风格、供应链或流动性风险源；应查看相关性与边际风险贡献。</p></details>
-            <details data-self-test><summary>02 · 20% 回撤后需要上涨多少才能回到前高？</summary><p>需要上涨 25%，因为恢复从剩余净值 0.8 出发：0.2 / 0.8 = 25%。</p></details>
+            <details data-self-test><summary>02 · 99% VaR 是否表示损失绝不会超过该数值？</summary><p>不是。它只是模型分布的 99% 分位，仍有约 1% 情形更差；应结合 CVaR、越界回测、压力测试和不可成交情景。</p></details>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-machine-learning" data-help-topic="machine-learning" data-help-title="量化机器学习模型">
-          <div class="help-chapter-number">12 / MACHINE LEARNING</div>
-          <h2>量化机器学习模型</h2>
+        <section class="help-chapter" id="help-machine-learning" data-help-topic="machine-learning" data-help-part="portfolio" data-help-title="金融机器学习">
+          <div class="help-chapter-number">17 / MACHINE LEARNING</div>
+          <h2>金融机器学习</h2>
           <p class="help-lead">机器学习能联合使用大量特征并表达非线性，但它不会自动解决时间穿越、样本选择和不可成交。模型复杂度只能在更严格的验证协议之后增加。</p>
 
           <section id="help-machine-learning-targets" data-search-unit data-search-title="多周期标签、多任务学习与预测对象">
@@ -677,6 +1172,13 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
             <div class="help-diagram help-multihorizon-diagram" role="img" aria-label="共享编码器连接 1、3、5、7 日输出，各候选再按 RankIC、扣费信息比率和最大回撤进入 Pareto 前沿">
               <div class="encoder"><span>FEATURE WINDOW</span><strong>共享时序编码</strong><small>只使用截至 T 的 PIT 特征</small></div><div class="horizons"><b>1D<small>快速、成本敏感</small></b><b>3D<small>短周期主线</small></b><b>5D<small>稳定性验证</small></b><b>7D<small>容量与衰减</small></b></div><div class="pareto"><span>PARETO EVIDENCE</span><strong>RankIC ↑ · 扣费 IR ↑ · 回撤 ↓</strong><small>不存在一个无条件“总分冠军”</small></div>
             </div>
+          </section>
+
+          <section id="help-machine-learning-feature-engineering" data-search-unit data-search-title="金融机器学习特征工程、PIT 与训练折变换">
+            <h3>特征工程首先是信息时点工程</h3>
+            <p>金融特征可来自量价窗口、横截面排名、基本面、估值、行业、宏观、文本事件、波动和流动性。每个特征都要登记原始字段、计算窗口、首次可得时间、发布延迟、缺失机制、单位和线上计算路径。比创造更多技术指标更重要的是证明 T 时点真的能得到完全相同的值。</p>
+            <p>滚动收益、波动和成交量比率应只向后取窗；财报按公告后可得日生效；宏观数据要考虑发布时间和修订版本；新闻同时区分事件、发布、抓取和标注时间。横截面排名、中性化、缩尾、标准化、缺失填充与类别编码都在每个训练折拟合，再冻结应用到验证、测试和线上。</p>
+            <div class="help-table-wrap"><table class="help-table"><thead><tr><th>偏差</th><th>典型表现</th><th>防线</th></tr></thead><tbody><tr><td>前视偏差</td><td>用 T 收盘完整数据在 T 收盘成交；用全期标准化</td><td>PIT 时间戳、T+1 执行、训练折内拟合变换</td></tr><tr><td>标签泄漏</td><td>特征窗口与未来收益重叠；目标编码读取验证标签</td><td>特征/标签边界审计、purge 与 embargo</td></tr><tr><td>幸存者偏差</td><td>只使用今天仍上市的股票或当前指数成分</td><td>历史成分、退市样本和当时可交易集合</td></tr><tr><td>选择过拟合</td><td>反复试模型、窗口和特征后只报告冠军</td><td>冻结候选族、嵌套验证、FDR 与密封测试</td></tr><tr><td>执行偏差</td><td>忽略整手、涨跌停、冲击和最低佣金</td><td>可交易标签、扣费目标与生产级回测</td></tr></tbody></table></div>
           </section>
 
           <section id="help-machine-learning-families" data-search-unit data-search-title="Ridge、TCN、GRU 与 Transformer 的适用边界">
@@ -690,6 +1192,7 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
             <p>均值、标准差、分位点、类别编码和缺失填充值都只能在每个训练折拟合，再原样应用到验证与测试。先对全时期特征做标准化，即使没有直接使用标签，也让未来分布参与了今天的变换。横截面标准化与时间序列标准化回答不同问题，必须与因子定义一致。</p>
             <p>Ridge 的 L2 正则抑制共线特征的极端系数；深度模型常结合权重衰减、dropout、梯度裁剪与早停。早停监控开发期验证指标，并保存最佳 epoch 对应权重；若每天根据密封期结果选 epoch，仍是测试泄漏。学习率、批次大小和随机种子会显著影响小样本训练，应报告多种子分布而非最好一次。</p>
             <p>类别不平衡会让“全部预测不涨”也获得高准确率，应该查看基准率、PR-AUC、分层收益与校准。训练损失与交易目标也可能错位：更低 MSE 未必带来更好排序，更高 AUC 未必覆盖成本。模型选择指标应提前绑定最终用途。</p>
+            <p>对时间序列使用滚动或扩展窗口，标签重叠处执行 purge，并在相邻折间留出与信息泄漏范围相匹配的 embargo。特征选择、超参数优化、早停和概率校准都属于训练过程，必须发生在外层验证折内部；最后密封测试只读取一次。报告全部搜索预算、多随机种子分布和简单基线，不能把最好一次训练当作模型期望表现。</p>
           </section>
 
           <section id="help-machine-learning-calibration" data-search-unit data-search-title="Platt、Isotonic、Brier 与概率校准">
@@ -713,6 +1216,27 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
             </figure>
           </section>
 
+          <section id="help-machine-learning-validation-architecture" data-search-unit data-search-title="嵌套时序验证、CPCV、超参数选择与模型比较">
+            <h3>模型评估单元是整条训练算法，而不是一组冻结权重</h3>
+            <p>外层时间折估计最终泛化，内层折完成特征选择、超参数、早停、校准与交易阈值。若先在全样本选特征再做外层验证，外层结果仍被污染。所有模型应共享外层折、候选范围和搜索预算；复杂模型额外搜索次数必须计入选择偏差。</p>
+            <p>CPCV 可产生多条清洗后的样本外路径，比较模型在不同历史组合中的收益分布、最差折与选择稳定性。路径共享观测，不能对它们做普通独立 t 检验；更适合用来估计排名翻转、失败比例和回撤分布。最终密封块保持时间连续，只在模型族和决策规则冻结后读取一次。</p>
+            <p>模型比较应使用配对损失差，例如相同日期/证券上的预测损失、RankIC 或成本后效用，并对时间和截面依赖使用聚类/HAC 或区块重抽。只比较各自最优 Sharpe 会把模型误差、组合选择和执行噪声混成一个不可诊断数字。</p>
+          </section>
+
+          <section id="help-machine-learning-uncertainty" data-search-unit data-search-title="共形预测、不确定性分解与决策拒绝">
+            <h3>概率、区间和“拒绝交易”需要独立校准</h3>
+            <p>总预测不确定性可粗分为 aleatoric（结果本身噪声）与 epistemic（参数/模型未知）。集成、bootstrap 或贝叶斯近似主要探测后者，异方差似然与分位回归处理前者；两者在分布漂移下都会失效，不能简单相加成真实置信区间。</p>
+            <p>共形预测用校准集残差分位构造有限样本覆盖区间，在交换性条件下给边际覆盖保证。时间序列可使用滚动校准、加权或 block conformal，但严格保证随依赖和漂移减弱。应按市场状态、行业和预测强度检查条件覆盖，整体 90% 覆盖可能掩盖危机期只有 50%。</p>
+            <p>决策层可定义 selective prediction：仅在置信度、OOD、流动性和预期净优势同时过门槛时交易。评估需画 coverage–risk 曲线，观察拒绝更多样本是否真的降低错误；若拒绝规则在验证集调到最优，仍必须进入外层样本外评估。</p>
+          </section>
+
+          <section id="help-machine-learning-interpretability" data-search-unit data-search-title="特征归因、SHAP、反事实与非平稳解释">
+            <h3>解释模型输出不等于解释市场因果</h3>
+            <p>Permutation importance 衡量打乱特征后性能下降，共线特征会互相替代而显得都不重要；SHAP 在给定背景分布和条件假设下分配局部预测贡献，相关特征的归因依赖采用独立还是条件分布。两者解释的是模型函数，不证明特征导致收益。</p>
+            <p>解释应跨时间折、市场状态和随机种子汇总，检查符号、排序和交互是否稳定。PDP 在强相关特征下会访问训练数据之外的不现实组合，ALE 更局部但仍依赖样本覆盖。反事实分析要遵守财务恒等式、行业约束和可行动性，不能建议把市值独立改成负数。</p>
+            <p>生产监控可把特征漂移、归因漂移和残差漂移并列。若预测分布稳定但归因结构突变，可能是特征替代或管道变化；若归因稳定而结果衰减，可能是机制风险溢价变化。任何自动解释都应能回链到具体模型、数据快照和预测时点。</p>
+          </section>
+
           <section id="help-machine-learning-ood" data-search-unit data-search-title="OOD、预测区间、模型漂移与确定性降级">
             <h3>不知道，比自信地猜更有价值</h3>
             <p>Out-of-distribution（OOD）表示当前输入远离训练分布。可监控缺失模式、特征分位漂移、潜变量距离、候选覆盖和预测熵；任何单一阈值都不是完美检测器。遇到 OOD 时应降低置信度、缩小仓位或回退到可解释规则，而不是把异常输入强行压缩进 0–1 概率。</p>
@@ -720,13 +1244,19 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           </section>
           <section class="help-self-tests" id="help-machine-learning-self-tests" data-search-unit data-search-title="机器学习模型自测">
             <h3>本章自测</h3>
-            <details data-self-test><summary>01 · 为什么校准器不能在模型训练内预测上拟合？</summary><p>训练内预测过于乐观，会把过拟合分数映射成虚假的高置信概率。应使用按时间滚动得到的样本外 OOF 预测。</p></details>
+            <details data-self-test><summary>01 · 不使用未来标签，只用全时期特征均值做标准化，仍算前视偏差吗？</summary><p>算。未来特征分布已经参与今天的变换；均值、方差、分位点、填充值和编码都只能在每个训练折拟合。</p></details>
             <details data-self-test><summary>02 · 检测到 OOD 后最稳妥的默认动作是什么？</summary><p>降低置信度和风险，必要时回退到确定性基线或停止新增仓位，并检查数据与分布漂移；不应强行输出伪精确概率。</p></details>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-research-protocol" data-help-topic="research-protocol" data-help-title="研究协议与模型晋级">
-          <div class="help-chapter-number">13 / RESEARCH PROTOCOL</div>
+        <section class="help-part-intro" id="help-part-production" data-help-part-intro="production">
+          <p class="help-part-kicker">第六部 · RESEARCH PRODUCTION</p><h2>生产研究</h2>
+          <p>这一部讨论研究如何成为可运行、可回滚、可问责的系统。真正的完成不是得到一条漂亮曲线，而是冻结证据、控制变更、经过 Shadow 与人工审批，并能解释每一次线上偏差。</p>
+          <dl class="help-part-brief"><div><dt>先修</dt><dd>前五部的研究、定价、组合与风控链条</dd></div><div><dt>完成标准</dt><dd>能维护版本化研究协议、生产门禁、观测指标、故障响应和实盘归因账本</dd></div></dl>
+        </section>
+
+        <section class="help-chapter" id="help-research-protocol" data-help-topic="research-protocol" data-help-part="production" data-help-title="研究协议与模型晋级">
+          <div class="help-chapter-number">18 / RESEARCH PROTOCOL</div>
           <h2>研究协议与模型晋级</h2>
           <p class="help-lead">研究协议的价值是限制研究者在看到结果后改口径。数据切分、搜索空间、失败门槛和批准权限应在计算开始前冻结。</p>
 
@@ -762,6 +1292,13 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
             <div class="help-case-grid"><div><span>统计筛选</span><strong>96 → 11</strong><p>FDR 0.05 后保留 11 项，但其中 4 项经济量级不足。</p></div><div><span>鲁棒门禁</span><strong>7 → 3</strong><p>区块 Bootstrap、参数平台与状态穿透淘汰尖峰和单状态候选。</p></div><div><span>密封测试</span><strong>3 → 1</strong><p>一项双倍成本失效，一项最大回撤越界，剩余项仅进入 Shadow。</p></div></div>
             <p>Shadow 连续运行期间不影响正式决策，只比较实时覆盖、延迟、OOD、预测校准和模拟成交。即使结果良好，也必须由人工核对作用域、工件哈希和回退路径后批准；若失败，密封区间不能重新用于下一轮选参。</p>
           </section>
+          <section id="help-research-protocol-governance" data-search-unit data-search-title="模型风险治理、独立验证与 Champion-Challenger">
+            <h3>模型晋级需要独立于模型作者的否证机制</h3>
+            <p>模型风险治理应按重要性分级：资金规模、杠杆、非线性、自动化程度和退出难度越高，验证深度与审批权限越高。模型清单记录所有者、用途、禁用场景、输入、假设、验证日期、限制和退役状态；影子脚本、手工 Excel 和临时规则同样属于模型。</p>
+            <p>独立验证至少复核概念合理性、数据与代码、性能、敏感性、基准和实施控制。验证者不只重复作者指标，还应设计反例、替代模型和压力场景。发现限制时可附条件批准、规模上限或额外监控，而不是把所有结论压成 pass/fail。</p>
+            <p>Champion–Challenger 让生产基线与候选并行比较。Challenger 不直接控制资金，使用同一实时数据和执行假设输出影子决策；只有在预先定义的成熟期、统计证据、风险与操作门槛同时满足后才可替换。替换后旧 Champion 保留为可回退工件，不能覆盖删除。</p>
+          </section>
+
           <section class="help-self-tests" id="help-research-protocol-self-tests" data-search-unit data-search-title="研究协议自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 根据密封 TEST 结果修改参数后，还能继续称它为测试集吗？</summary><p>不能。它已经参与模型选择，等同验证集；下一轮需要新的未见区间，或明确降低结论的样本外证据等级。</p></details>
@@ -769,9 +1306,9 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-models" data-help-topic="models" data-help-title="QuantMaster 模型与页面口径">
-          <div class="help-chapter-number">14 / PROJECT SEMANTICS</div>
-          <h2>QuantMaster 模型与页面口径</h2>
+        <section class="help-chapter" id="help-models" data-help-topic="models" data-help-part="production" data-help-title="QuantMaster 模型口径">
+          <div class="help-chapter-number">19 / PROJECT SEMANTICS</div>
+          <h2>QuantMaster 模型口径</h2>
           <p class="help-lead">页面指标是研究证据的摘要，不是交易命令。理解输入、时间范围、回退条件和置信度，比记住某个分数阈值更重要。</p>
 
           <section id="help-models-market-state" data-search-unit data-search-title="牛熊分、市场宽度、概率与置信度">
@@ -810,9 +1347,9 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-workflow" data-help-topic="workflow" data-help-title="从研究到执行的工作流">
-          <div class="help-chapter-number">15 / WORKFLOW</div>
-          <h2>从研究到执行的工作流</h2>
+        <section class="help-chapter" id="help-workflow" data-help-topic="workflow" data-help-part="production" data-help-title="从研究到执行">
+          <div class="help-chapter-number">20 / WORKFLOW</div>
+          <h2>从研究到执行</h2>
           <p class="help-lead">把每一次策略变化当成一个可审计实验：明确问题、冻结版本、留出样本、模拟执行、小规模观察，再决定是否扩大使用。</p>
 
           <section id="help-workflow-path" data-search-unit data-search-title="候选到 Quant Lab 到回测到模拟盘到实盘账本">
@@ -855,6 +1392,13 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
             <div class="help-case-grid"><div><span>回测扣费超额</span><strong>+1.40%</strong><p>假设全部符合引擎口径的订单按开盘附近成交。</p></div><div><span>模拟盘超额</span><strong>+0.92%</strong><p>0.31% 来自未成交，0.17% 来自更高滑点。</p></div><div><span>小额实盘超额</span><strong>+0.76%</strong><p>另有 0.11% 最低佣金和 0.05% 人工延迟。</p></div></div>
             <p>这组结果首先要求修订容量和成本压力，而不是立即重训预测模型。只有排除执行差异后仍持续出现方向性预测衰减，才进入新研究版本。</p>
           </section>
+          <section id="help-workflow-observability" data-search-unit data-search-title="生产观测、SLO、数据新鲜度与故障恢复">
+            <h3>线上模型首先是一个有状态的分布式系统</h3>
+            <p>观测应覆盖数据、特征、模型、决策、订单和账本六层。数据层记录新鲜度、覆盖、修订与源切换；模型层记录版本、输入分布、预测与 OOD；订单层记录延迟、拒单、成交率和实施缺口；账本层验证现金、持仓与券商回报一致。只有最终 P&amp;L 的监控无法定位故障。</p>
+            <p>SLO 应对应用户和资金风险，例如“收盘后 20 分钟内完成 PIT 数据校验”“任何新增订单前持仓快照年龄不超过 60 秒”“订单状态不明时零重复下单”。错误预算用来决定何时暂停功能、修复可靠性，而不是允许在资金系统中消耗完再处理。</p>
+            <p>故障恢复先阻断新增风险，再确定事实源。订单未知时查询券商而非盲目重发；数据版本错配时回滚到完整快照而非混拼新旧特征；模型服务不可用时按预案回退基线或保持现金。恢复后执行时间线复盘，区分触发事件、放大因素、检测缺口和控制失败，并把修复写成自动断言。</p>
+          </section>
+
           <section class="help-self-tests" id="help-workflow-self-tests" data-search-unit data-search-title="研究到执行自测">
             <h3>本章自测</h3>
             <details data-self-test><summary>01 · 模拟盘收益低于回测，是否应立即重训模型？</summary><p>不应。先归因数据、延迟、未成交、滑点、费用和人工覆盖；只有排除执行差异后仍有持续预测衰减，才启动新研究。</p></details>
@@ -862,9 +1406,9 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter" id="help-checklist" data-help-topic="checklist" data-help-title="每日清单、术语与市场附录">
-          <div class="help-chapter-number">16 / FIELD GUIDE</div>
-          <h2>每日清单、术语与市场附录</h2>
+        <section class="help-chapter" id="help-checklist" data-help-topic="checklist" data-help-part="production" data-help-title="日常清单与市场附录">
+          <div class="help-chapter-number">21 / FIELD GUIDE</div>
+          <h2>日常清单与市场附录</h2>
           <p class="help-lead">最有效的风险控制通常不是更复杂的模型，而是一张每天都真正执行的短清单。</p>
 
           <section id="help-checklist-daily" data-search-unit data-search-title="盘前盘后研究清单">
@@ -924,8 +1468,8 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           </section>
         </section>
 
-        <section class="help-chapter help-calculators" id="help-calculators" data-help-topic="calculators" data-help-title="研究计算工具">
-          <div class="help-chapter-number">TOOLS / LOCAL ONLY</div>
+        <section class="help-chapter help-calculators" id="help-calculators" data-help-topic="calculators" data-help-part="appendix" data-help-title="研究计算工具">
+          <div class="help-chapter-number">附录 A / LOCAL LABORATORY</div>
           <h2>研究计算与实验工具</h2>
           <p class="help-lead">6 个快速计算器与 4 个算法实验台全部只在当前浏览器中运行，不保存、不下单。交易参数会只读载入“设置 → 交易成本”；你在这里的临时修改不会写回配置。</p>
           <div class="help-settings-status" id="help-settings-status" role="status">正在读取项目交易参数…</div>

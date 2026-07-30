@@ -147,14 +147,35 @@ class TestBasics:
         text = client.get("/static/help-content.html").text
         topics = re.findall(r'data-help-topic="([^"]+)"', text)
         assert topics == [
-            "start", "market", "trading", "data", "statistics", "inference",
-            "factors", "validation", "composition", "backtest", "risk",
-            "machine-learning", "research-protocol", "models", "workflow",
-            "checklist", "calculators",
+            "start", "market", "trading", "data", "mathematics", "statistics",
+            "inference", "asset-pricing", "numerical-pricing", "derivatives",
+            "fixed-income", "factors", "validation", "composition", "backtest",
+            "risk", "machine-learning", "research-protocol", "models",
+            "workflow", "checklist", "calculators",
         ]
-        assert len(topics[:-1]) == 16
-        assert text.count("<details data-self-test>") == 32
-        assert text.count('data-code-language="python"') == 8
+        assert len(topics[:-1]) == 21
+        assert re.findall(r'data-help-part-intro="([^"]+)"', text) == [
+            "market", "mathematics", "pricing", "signals", "portfolio",
+            "production",
+        ]
+        assert re.findall(r'data-help-nav-part="([^"]+)"', text) == [
+            "market", "mathematics", "pricing", "signals", "portfolio",
+            "production",
+        ]
+        chapter_parts = re.findall(
+            r'class="help-chapter(?: [^"]+)?"[^>]+data-help-part="([^"]+)"', text
+        )
+        assert chapter_parts == [
+            *("market" for _ in range(4)),
+            *("mathematics" for _ in range(3)),
+            *("pricing" for _ in range(4)),
+            *("signals" for _ in range(2)),
+            *("portfolio" for _ in range(4)),
+            *("production" for _ in range(4)),
+            "appendix",
+        ]
+        assert text.count("<details data-self-test>") == 42
+        assert text.count('data-code-language="python"') == 11
 
         ids = re.findall(r'\bid="([^"]+)"', text)
         assert len(ids) == len(set(ids))
@@ -172,7 +193,7 @@ class TestBasics:
 
         parser = VisibleText()
         parser.feed(text)
-        assert len("".join("".join(parser.parts).split())) >= 30_000
+        assert len("".join("".join(parser.parts).split())) >= 45_000
 
         for topic, anchor in re.findall(r'href="#help/([^/"#]+)(?:/([^"#]+))?"', text):
             assert topic in topics
@@ -182,7 +203,7 @@ class TestBasics:
         code_blocks = re.findall(
             r'<code data-code-language="python">(.*?)</code>', text, flags=re.DOTALL
         )
-        assert len(code_blocks) == 8
+        assert len(code_blocks) == 11
         for block in code_blocks:
             code = html.unescape(block)
             ast.parse(code)

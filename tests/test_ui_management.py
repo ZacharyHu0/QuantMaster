@@ -194,7 +194,9 @@ def test_help_handbook_search_routes_and_calculators(live_server):
             "document.querySelector('#help-settings-status').innerText.startsWith('已载入')"
         )
         assert page.locator("#help-settings-status").inner_text().startswith("已载入")
-        assert page.locator("#help-article h2").count() == 17
+        assert page.locator("#help-article h2").count() == 28
+        assert page.locator(".help-sidebar .help-nav-part").count() == 6
+        assert page.locator(".help-sidebar .help-nav-part > ol").count() == 6
         assert page.evaluate("location.hash") == "#help/start"
 
         page.reload()
@@ -208,6 +210,13 @@ def test_help_handbook_search_routes_and_calculators(live_server):
             ".getAttribute('aria-current') === 'location'"
         )
         assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
+        assert page.locator('[data-help-nav-part="signals"]').evaluate(
+            "element => element.classList.contains('active')"
+        )
+
+        page.goto(f"{url}/#help/numerical-pricing/help-code-monte-carlo-call")
+        page.locator("#help-code-monte-carlo-call").wait_for(state="visible")
+        assert "MONTE CARLO" in page.locator("#help-code-monte-carlo-call figcaption").inner_text()
 
         page.goto(f"{url}/#help/inference/help-inference-fdr")
         page.locator("#help-inference-fdr").wait_for(state="visible")
@@ -222,6 +231,11 @@ def test_help_handbook_search_routes_and_calculators(live_server):
             "document.querySelector('#help-search-results').innerText.includes('RankIC')"
         )
         assert "RankIC" in page.locator("#help-search-results").inner_text()
+        search.fill("蒙特卡洛")
+        page.wait_for_function(
+            "document.querySelector('#help-search-results').innerText.includes('蒙特卡洛')"
+        )
+        assert "数值定价" in page.locator("#help-search-results").inner_text()
         search.fill("p=0.03")
         page.wait_for_function(
             "document.querySelector('#help-search-results').innerText.includes('97%')"

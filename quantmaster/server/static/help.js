@@ -47,12 +47,17 @@
   }
 
   function selectTopic(topic) {
-    const actual = topicElement(topic)?.dataset.helpTopic || 'start';
+    const chapter = topicElement(topic);
+    const actual = chapter?.dataset.helpTopic || 'start';
+    const activePart = chapter?.dataset.helpPart || '';
     root.querySelectorAll('[data-help-link]').forEach(link => {
       const active = link.dataset.helpLink === actual;
       link.classList.toggle('active', active);
       if (active) link.setAttribute('aria-current', 'location');
       else link.removeAttribute('aria-current');
+    });
+    root.querySelectorAll('[data-help-nav-part]').forEach(part => {
+      part.classList.toggle('active', part.dataset.helpNavPart === activePart);
     });
   }
 

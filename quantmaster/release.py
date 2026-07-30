@@ -4,13 +4,44 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.9.4"
-RELEASE_DATE = "2026-07-28"
+VERSION = "0.9.10"
+RELEASE_DATE = "2026-07-30"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "两级目录与进阶量化教材",
+                "items": (
+                    (
+                        "内置手册扩充为 21 章并重组为六部，桌面与移动端均采用部—章"
+                        "两级目录；每部补充先修知识、核心问题和完成标准。"
+                    ),
+                    (
+                        "补齐概率与随机过程、线性代数与最优化、PDE、资产定价、"
+                        "时间序列、衍生品、固定收益和金融机器学习的完整学习主线。"
+                    ),
+                    (
+                        "蒙特卡洛、MVO、CAPM、Black–Scholes 与 Greeks、"
+                        "Black–Litterman、VaR/CVaR 和压力测试升级为核心必学。"
+                    ),
+                    (
+                        "进阶内容新增鞅与测度变换、SDF/GMM、状态空间、高级蒙特卡洛、"
+                        "波动率曲面、XVA、HJM、多曲线、信用风险和稳健多期优化。"
+                    ),
+                    (
+                        "研究方法新增双时态 PIT、选择偏差检验、CPCV、事件驱动回测、"
+                        "Euler 风险分配、EVT/Copula、模型治理与生产 SLO。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.9.4",
+        "date": "2026-07-28",
         "sections": (
             {
                 "title": "首页主要指数与科技候选预置",
