@@ -22,7 +22,8 @@ jobs:
       - name: Install
         run: |
           pip install -e ".[dev,rust]"
-          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked
+          maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
+          python -m pip install --no-index --find-links dist/native quantmaster-kernel
       - name: Rust quality
         run: |
           cargo fmt --manifest-path rust/quantmaster-kernel/Cargo.toml --check
@@ -64,7 +65,8 @@ jobs:
           python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
           pip install -e ".[dev,quality,rust]"
           pip install pyinstaller
-          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked
+          maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
+          python -m pip install --no-index --find-links dist/native quantmaster-kernel
       - name: Controlled type check
         run: mypy
       - name: Branch coverage floor

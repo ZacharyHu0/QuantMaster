@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.13.1（2026-07-31）
+
+### 跨平台发布修复
+- CI 与桌面发布不再使用要求已激活 virtualenv/Conda 的 `maturin develop`；统一构建原生 wheel，再从本地 wheel 目录安装并验证 Rust 研究内核
+- 修复 GitHub 托管 runner 在 Install 阶段缺少 `VIRTUAL_ENV` / `CONDA_PREFIX` 而退出的问题，Windows、Linux 与 macOS 使用同一条可复现安装路径
+
 ## v0.13.0（2026-07-31）
 
 ### 可恢复数据、自修复与发布一致性

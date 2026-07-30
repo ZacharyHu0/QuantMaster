@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.0"
+VERSION = "0.13.1"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台发布修复",
+                "items": (
+                    (
+                        "CI 与桌面发布不再依赖已激活虚拟环境执行 maturin develop；"
+                        "统一先构建原生 wheel，再通过本地 wheel 目录安装并验证 Rust 研究内核。"
+                    ),
+                    (
+                        "修复 GitHub 托管 runner 在 Install 阶段因缺少 VIRTUAL_ENV/CONDA_PREFIX"
+                        "而退出的问题，Windows、Linux 与 macOS 使用相同的可复现安装路径。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.0",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "可恢复数据、自修复与发布一致性",

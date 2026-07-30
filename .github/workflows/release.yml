@@ -34,7 +34,8 @@ jobs:
       - name: Install
         run: |
           pip install -e ".[data,tushare,rust]"
-          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked
+          maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
+          python -m pip install --no-index --find-links dist/native quantmaster-kernel
           pip install pyinstaller
       - name: Verify native research kernel
         run: python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
