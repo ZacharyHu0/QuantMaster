@@ -17,6 +17,8 @@ from quantmaster.release import RELEASE_DATE
 from quantmaster.server.app import app
 
 client = TestClient(app)
+_csrf = client.get("/api/v1/session").json()["csrf_token"]
+client.headers["X-CSRF-Token"] = _csrf
 
 
 class TestBasics:
@@ -30,6 +32,52 @@ class TestBasics:
         assert resp.json()["checked_at"]
         assert isinstance(resp.json()["issues"], list)
         assert len(resp.headers["X-Request-ID"]) == 12
+
+    def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
+        monkeypatch.setattr(
+            "quantmaster.server.problems.collect_health_report",
+            lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe stores")),
+        )
+        live = client.get("/api/v1/health/live")
+        assert live.status_code == 200
+        assert live.json() == {
+            "status": "ok", "version": __version__, "release_date": RELEASE_DATE,
+        }
+        ready = client.get("/api/v1/health/ready")
+        assert ready.status_code == 200
+        assert ready.json()["status"] == "ready"
+
+    def test_local_boundary_csrf_and_security_headers(self):
+        anonymous = TestClient(app)
+        blocked = anonymous.post("/api/selection/daily", json={})
+        assert blocked.status_code == 403
+        assert blocked.json()["problem"]["code"] == "request_security_rejected"
+
+        session = anonymous.get("/api/v1/session")
+        token = session.json()["csrf_token"]
+        accepted = anonymous.post(
+            "/api/decision/dashboard/stream",
+            json={"universe": "demo", "start": "2023-01-01", "horizon": 99},
+            headers={"X-CSRF-Token": token},
+        )
+        assert accepted.status_code == 422
+        cross_origin = anonymous.post(
+            "/api/decision/dashboard/stream",
+            json={"universe": "demo", "start": "2023-01-01", "horizon": 99},
+            headers={"X-CSRF-Token": token, "Origin": "https://attacker.example"},
+        )
+        assert cross_origin.status_code == 403
+
+        untrusted_host = TestClient(app).get("/", headers={"Host": "attacker.example"})
+        assert untrusted_host.status_code == 403
+        remote = TestClient(app, client=("203.0.113.8", 50000))
+        assert remote.get("/").status_code == 403
+
+        page = anonymous.get("/")
+        assert page.headers["X-Content-Type-Options"] == "nosniff"
+        assert page.headers["X-Frame-Options"] == "DENY"
+        assert "script-src 'self' 'nonce-" in page.headers["Content-Security-Policy"]
+        assert "%%QM_CSP_NONCE%%" not in page.text
 
     def test_release_info(self):
         resp = client.get("/api/release")

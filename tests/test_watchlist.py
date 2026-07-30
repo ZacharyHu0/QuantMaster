@@ -22,6 +22,8 @@ def test_asset_list_store_add_update_remove(tmp_path):
 
 def test_asset_lists_api_includes_cached_quotes_and_holdings():
     client = TestClient(app)
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    client.headers["X-CSRF-Token"] = token
     dates = pd.bdate_range("2024-01-02", periods=2)
     bars = pd.DataFrame({
         "open": [10.0, 11.0], "high": [10.5, 11.5], "low": [9.5, 10.5],

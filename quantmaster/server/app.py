@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import secrets
 import sqlite3
 import threading
 import time
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -36,7 +37,6 @@ from quantmaster.server.problems import (
     OperationProblem,
     assess_panel_quality,
     assess_signal_quality,
-    collect_health_report,
     make_problem,
 )
 
@@ -144,8 +144,9 @@ async def operation_problem(request: Request, exc: OperationProblem):
 
 @app.middleware("http")
 async def request_context_and_migration_lock(request: Request, call_next):
-    """关联前后端错误，并在迁移期间冻结会读写数据的接口。"""
+    """Apply the local security boundary, request context and migration lock."""
     from quantmaster.data.migration import migration_manager
+    from quantmaster.server.security import apply_security_headers, enforce_request_security
 
     request_id = _new_request_id()
     request.state.request_id = request_id
@@ -154,6 +155,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
                path.startswith(("/static/", "/api/settings/migration")) or
                (path == "/api/settings" and request.method == "GET"))
     try:
+        enforce_request_security(request)
         if migration_manager.active and path.startswith("/api/") and not allowed:
             problem = make_problem(
                 "data_migration_active",
@@ -173,6 +175,19 @@ async def request_context_and_migration_lock(request: Request, call_next):
             )
         else:
             response = await call_next(request)
+    except HTTPException as exc:
+        problem = make_problem(
+            "request_security_rejected",
+            source="本地服务",
+            title="请求被安全策略拒绝",
+            message=str(exc.detail),
+            action="请从本机页面刷新后重试。",
+            blocking=True,
+        )
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": str(exc.detail), "problem": problem, "error_id": request_id},
+        )
     except Exception:
         logger.exception(
             "未处理的接口异常 request_id=%s method=%s path=%s",
@@ -195,6 +210,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
             },
         )
     response.headers["X-Request-ID"] = request_id
+    apply_security_headers(response)
     if response.status_code >= 400:
         logger.warning(
             "接口返回失败 request_id=%s method=%s path=%s status=%s",
@@ -337,21 +353,77 @@ def stock_analysis_stream(value: StockAnalysisIn, request: Request) -> Streaming
 
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
+    nonce = secrets.token_urlsafe(18)
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     page = (
         template.replace("%%QM_VERSION%%", __version__)
         .replace("%%QM_RELEASE_DATE%%", RELEASE_DATE)
         .replace("%%QM_TRADING_DAYS%%", str(TRADING_DAYS))
         .replace("%%QM_RISK_FREE%%", str(RISK_FREE))
+        .replace("%%QM_CSP_NONCE%%", nonce)
     )
-    return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
+    csp = "; ".join((
+        "default-src 'self'",
+        f"script-src 'self' 'nonce-{nonce}'",
+        "script-src-attr 'none'",
+        f"style-src 'self' 'nonce-{nonce}'",
+        "style-src-attr 'unsafe-inline'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "font-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ))
+    return HTMLResponse(page, headers={
+        "Cache-Control": "no-cache",
+        "Content-Security-Policy": csp,
+    })
+
+
+@app.get("/api/v1/session")
+def create_browser_session(request: Request, response: Response) -> dict:
+    """Issue a stateless double-submit token for this local browser."""
+    from quantmaster.server.security import attach_csrf_cookie, issue_csrf
+
+    token = issue_csrf()
+    attach_csrf_cookie(response, request, token)
+    return {"csrf_token": token, "expires_in": 8 * 60 * 60, "local_only": True}
+
+
+@app.get("/api/v1/health/live")
+def liveness() -> dict:
+    """Constant-time process liveness; deliberately performs no store access."""
+    return {"status": "ok", "version": __version__, "release_date": RELEASE_DATE}
+
+
+@app.get("/api/v1/health/ready")
+def readiness() -> dict:
+    """Check only the minimum local path needed to accept work."""
+    root = get_config().data_root
+    ready = root.is_dir()
+    return {
+        "status": "ready" if ready else "not_ready",
+        "version": __version__,
+        "data_root": str(root),
+    }
+
+
+@app.get("/api/v1/diagnostics")
+def diagnostic_report() -> dict:
+    from quantmaster.server.diagnostics import diagnostics
+
+    return diagnostics()
 
 
 @app.get("/api/health")
 def health() -> dict:
+    from quantmaster.server.diagnostics import diagnostics
+
     return {
         "status": "ok", "version": __version__, "release_date": RELEASE_DATE,
-        **collect_health_report(),
+        **diagnostics(),
     }
 
 

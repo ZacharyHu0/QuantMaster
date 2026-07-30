@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -99,19 +98,9 @@ class ServerSettings(StrictModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
-        if value in {"localhost", "0.0.0.0", "::"}:
-            return value
-        try:
-            ipaddress.ip_address(value)
-            return value
-        except ValueError:
-            hostname = (
-                r"(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
-                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-            )
-            if not re.fullmatch(hostname, value):
-                raise ValueError("host 不是合法的 IP 地址或主机名") from None
-            return value.lower()
+        from quantmaster.server.security import validate_listen_host
+
+        return validate_listen_host(value)
 
 
 class NewsSettings(StrictModel):
@@ -398,8 +387,6 @@ class ConfigManager:
         root = Path(doc.data.root).expanduser()
         if not root.is_absolute():
             warnings.append(f"数据目录将相对于启动目录解析：{root}")
-        if doc.server.host not in {"127.0.0.1", "localhost", "::1"}:
-            warnings.append("服务监听非本机地址时，远程设置入口会保持禁用")
         for label, universe in (("自动化主候选", doc.automation.primary_universe),
                                 ("Quant Lab 默认候选", doc.lab.universe)):
             if universe.lower() in {"demo", "csi800"}:

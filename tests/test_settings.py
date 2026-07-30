@@ -132,6 +132,14 @@ def test_automation_settings_are_normalized_and_validated(tmp_path):
     set_config(None)
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.8", "quant.local"])
+def test_server_settings_reject_non_loopback_hosts(host):
+    raw = document_from_config(load_config()).model_dump()
+    raw["server"]["host"] = host
+    with pytest.raises(ValueError, match="回环地址"):
+        SettingsUpdate.model_validate(raw)
+
+
 def test_snapshot_diff_rollback_preserves_current_secret(tmp_path):
     path = tmp_path / "config.yaml"
     credentials = FakeCredentials()

@@ -563,6 +563,9 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
     from quantmaster.server.app import app
 
     with TestClient(app) as client:
+        client.headers["X-CSRF-Token"] = client.get(
+            "/api/v1/session",
+        ).json()["csrf_token"]
         overview = client.get("/api/lab/overview")
         assert overview.status_code == 200
         assert overview.json()["capabilities"]["catalog_size"] == 48
@@ -728,6 +731,9 @@ def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path):
     from quantmaster.server.app import app
 
     with TestClient(app) as client:
+        client.headers["X-CSRF-Token"] = client.get(
+            "/api/v1/session",
+        ).json()["csrf_token"]
         preview = client.post("/api/lab/mining/preview", json={
             "start": "2018-01-01", "end": "2026-01-01", "horizon": 3,
         })

@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import hmac
-import secrets
-import time
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
@@ -16,6 +12,13 @@ from pydantic import BaseModel, Field
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
 from quantmaster.data.migration import MigrationError, migration_manager
+from quantmaster.server.security import (
+    attach_csrf_cookie,
+    is_local_request,
+    issue_csrf,
+    require_csrf,
+    require_local,
+)
 from quantmaster.settings import (
     SecretMutations,
     SettingsDocument,
@@ -25,43 +28,24 @@ from quantmaster.settings import (
 
 router = APIRouter(prefix="/api")
 settings_manager = migration_manager.config_manager
-_csrf_tokens: dict[str, float] = {}
-_CSRF_TTL = 8 * 60 * 60
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
 
 
 def _local(request: Request) -> bool:
-    host = request.client.host if request.client else ""
-    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    return is_local_request(request)
 
 
 def _require_local(request: Request) -> None:
-    if not _local(request):
-        raise HTTPException(403, "设置中心仅允许从本机访问")
+    require_local(request)
 
 
 def _issue_csrf() -> str:
-    now = time.time()
-    for token, expires in list(_csrf_tokens.items()):
-        if expires < now:
-            _csrf_tokens.pop(token, None)
-    token = secrets.token_urlsafe(32)
-    _csrf_tokens[token] = now + _CSRF_TTL
-    return token
+    return issue_csrf()
 
 
 def _require_csrf(request: Request) -> None:
-    _require_local(request)
-    header = request.headers.get("x-csrf-token", "")
-    cookie = request.cookies.get("qm_csrf", "")
-    if not header or not cookie or not hmac.compare_digest(header, cookie):
-        raise HTTPException(403, "CSRF 令牌缺失或无效；请刷新设置页")
-    if _csrf_tokens.get(header, 0) < time.time():
-        raise HTTPException(403, "CSRF 令牌已过期；请刷新设置页")
-    origin = request.headers.get("origin")
-    if origin and urlparse(origin).netloc.lower() != request.headers.get("host", "").lower():
-        raise HTTPException(403, "拒绝跨来源设置请求")
+    require_csrf(request)
 
 
 def capture_runtime_baseline() -> None:
@@ -139,8 +123,7 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
 def get_settings(request: Request, response: Response) -> dict:
     _require_local(request)
     token = _issue_csrf()
-    response.set_cookie("qm_csrf", token, httponly=False, samesite="strict",
-                        secure=request.url.scheme == "https", max_age=_CSRF_TTL, path="/")
+    attach_csrf_cookie(response, request, token)
     return {**settings_manager.public(), "csrf_token": token, "remote_management": False,
             "runtime": _runtime_status()}
 

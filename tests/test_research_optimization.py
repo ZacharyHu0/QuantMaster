@@ -175,6 +175,9 @@ def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path):
     from quantmaster.server.app import app
 
     with TestClient(app) as client:
+        client.headers["X-CSRF-Token"] = client.get(
+            "/api/v1/session",
+        ).json()["csrf_token"]
         created = client.post("/api/lab/studies", json={
             "universe": "csi800", "start": "2015-01-01", "end": "2026-07-28",
             "models": ["ridge"], "budget_hours": 0.5, "max_trials": 2,

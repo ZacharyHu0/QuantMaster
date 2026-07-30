@@ -14,7 +14,7 @@
 <link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
-<style>
+<style nonce="%%QM_CSP_NONCE%%">
   /* 验证过的暗色图表调色板（dataviz palette, dark mode） */
   :root {
     --page: #0d0d0d; --surface: #1a1a19; --border: rgba(255,255,255,0.10);
@@ -1501,7 +1501,7 @@
   </div>
 </dialog>
 
-<script>
+<script nonce="%%QM_CSP_NONCE%%">
 const PALETTE = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
 const INK2 = '#c3c2b7', MUTED = '#898781', GRID = '#2c2c2a', AXIS = '#383835';
 const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1561,6 +1561,38 @@ class QuantApiError extends Error {
 function apiRoute(path) {
   try { return new URL(path, window.location.origin).pathname; }
   catch (_) { return String(path || ''); }
+}
+let browserCsrfToken = '';
+function csrfCookie() {
+  const item = document.cookie.split(';').map(value => value.trim())
+    .find(value => value.startsWith('qm_csrf='));
+  return item ? decodeURIComponent(item.slice('qm_csrf='.length)) : '';
+}
+async function ensureCsrfToken() {
+  const cookie = csrfCookie();
+  if (cookie) {
+    browserCsrfToken = cookie;
+    return cookie;
+  }
+  const response = await fetch('/api/v1/session', {
+    headers:{'Accept':'application/json'}, credentials:'same-origin', cache:'no-store',
+  });
+  if (!response.ok) throw new Error('无法建立本机安全会话');
+  const data = await response.json();
+  browserCsrfToken = String(data.csrf_token || '');
+  if (!browserCsrfToken) throw new Error('本机安全会话未返回操作令牌');
+  return browserCsrfToken;
+}
+async function protectedOptions(options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (['POST','PUT','PATCH','DELETE'].includes(method) && !headers.has('X-CSRF-Token')) {
+    headers.set('X-CSRF-Token', await ensureCsrfToken());
+  }
+  return {...options, method, headers, credentials:'same-origin'};
+}
+async function protectedFetch(path, options = {}) {
+  return fetch(path, await protectedOptions(options));
 }
 function sourceForPath(path) {
   const route = apiRoute(path);
@@ -1674,7 +1706,7 @@ async function api(path, opts = {}) {
   const route = apiRoute(path), requestKey = `request:${method}:${route}`;
   let res;
   try {
-    res = await fetch(path, opts);
+    res = await protectedFetch(path, opts);
   } catch (cause) {
     const cancelled = cause?.name === 'AbortError';
     const message = cancelled ? '请求已取消' : '无法连接本地服务';
@@ -2085,7 +2117,7 @@ async function readNdjsonEvents(path, opts = {}, onEvent) {
   const operationKey = runtimeInfo.begin(source, '后台任务正在处理', {path:`${method} ${route}`});
   let requestId = '';
   try {
-    const response = await fetch(path, opts);
+    const response = await protectedFetch(path, opts);
     requestId = response.headers.get('X-Request-ID') || '';
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
@@ -2151,7 +2183,7 @@ async function streamJson(path, opts, onProgress) {
   const operationKey = runtimeInfo.begin(source, '正在加载数据', {path:`${method} ${route}`});
   let requestId = '';
   try {
-    const response = await fetch(path, opts);
+    const response = await protectedFetch(path, opts);
     requestId = response.headers.get('X-Request-ID') || '';
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));

@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.sqlite import connect_sqlite
 
 _LOCKS_GUARD = threading.Lock()
 _SYMBOL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
@@ -71,10 +72,7 @@ class BarStore:
             )
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.meta_db, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        return connect_sqlite(self.meta_db, policy="cache")
 
     def _path(self, symbol: str) -> Path:
         return self.root / f"{_safe_name(symbol)}.parquet"
