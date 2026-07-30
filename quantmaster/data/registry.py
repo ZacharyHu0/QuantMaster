@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
@@ -17,7 +18,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.base import DataSource, Market, guess_market, validate_frequency
-from quantmaster.data.resilience import data_priority
+from quantmaster.data.resilience import bypass_endpoint_cache, data_priority
 from quantmaster.data.storage import BarStore, IntradayBarStore
 
 logger = logging.getLogger(__name__)
@@ -103,8 +104,13 @@ def _align_increment(
     if ratios.empty:
         raise AdjustmentMismatch("重叠交易日价格无效")
     ratio = float(ratios.median())
-    if len(ratios) >= 2 and float((ratios / ratio - 1).abs().max()) > 0.005:
-        raise AdjustmentMismatch("重叠交易日无法形成稳定的复权比例")
+    if len(ratios) >= 2:
+        deviations = (ratios / ratio - 1).abs()
+        stable = deviations <= 0.005
+        # 允许少量上游修订或异常重叠行，但至少 80% 日期必须支持同一比例。
+        if int(stable.sum()) < max(2, math.ceil(len(ratios) * 0.8)):
+            raise AdjustmentMismatch("重叠交易日无法形成稳定的复权比例")
+        ratio = float(ratios.loc[stable].median())
     ohlc = [column for column in ("open", "high", "low", "close")
             if column in cached.columns and column in fresh.columns]
     if direction == "left":
@@ -131,7 +137,7 @@ def _full_refresh(
     for factory in _factories().get(market, []):
         try:
             source = factory()
-            with data_priority(priority):
+            with data_priority(priority), bypass_endpoint_cache():
                 frame = source.daily(symbol, start, end)
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
@@ -161,13 +167,30 @@ def _fetch_segment(
     cached: pd.DataFrame | None,
     store: BarStore,
     priority: str,
+    refresh_provider_cache: bool = False,
 ) -> tuple[pd.DataFrame | None, list[str], bool]:
     market = guess_market(symbol)
     errors: list[str] = []
+    cached_latest = (
+        pd.Timestamp(cached.index.max()).normalize()
+        if cached is not None and not cached.empty else None
+    )
+    prefer_extension = (
+        direction == "right"
+        and cached_latest is not None
+        and cached_latest < pd.Timestamp(end).normalize()
+    )
+    best: tuple[DataSource, pd.DataFrame, pd.Timestamp] | None = None
+
+    def save(source: DataSource, merged: pd.DataFrame) -> tuple[pd.DataFrame, list[str], bool]:
+        store.put(symbol, merged, replace=True)
+        store.mark_checked(symbol, start, end, source=source.name)
+        return store.get(symbol), errors, True
+
     for factory in _factories().get(market, []):
         try:
             source = factory()
-            with data_priority(priority):
+            with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
                 frame = source.daily(symbol, start, end)
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
@@ -177,15 +200,54 @@ def _fetch_segment(
                 continue
             merged = frame if cached is None or cached.empty else _align_increment(
                 cached, frame, direction)
-            store.put(symbol, merged, replace=True)
-            store.mark_checked(symbol, start, end, source=source.name)
-            return store.get(symbol), errors, True
+            fresh_latest = pd.Timestamp(frame.index.max()).normalize()
+            if prefer_extension and fresh_latest <= cached_latest:
+                errors.append(
+                    f"{factory.__name__}: 未返回 {cached_latest.date()} 之后的新行情")
+                if best is None or fresh_latest > best[2]:
+                    best = (source, merged, fresh_latest)
+                continue
+            return save(source, merged)
         except AdjustmentMismatch as exc:
             errors.append(f"{factory.__name__}: {exc}")
         except Exception as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 增量获取 %s 失败: %s", factory.__name__, symbol, exc)
+    if best is not None:
+        # 周末、休市或所有上游尚未发布时，保留最新的有效响应。
+        saved, collected_errors, _ = save(best[0], best[1])
+        store.mark_status(symbol, "stale", source=best[0].name)
+        return saved, collected_errors, False
     return cached, errors, False
+
+
+def _session_refresh_due(
+    symbol: str,
+    requested_end: pd.Timestamp,
+    cached: pd.DataFrame | None,
+    checked_at: float,
+    *,
+    now: pd.Timestamp | None = None,
+) -> bool:
+    """Return true once an early-day CN check crosses the market-close boundary."""
+    if guess_market(symbol) not in {Market.CN, Market.INDEX}:
+        return False
+    if cached is None or cached.empty or not checked_at:
+        return False
+    current = now if now is not None else pd.Timestamp.now(tz="Asia/Shanghai")
+    if current.tzinfo is None:
+        current = current.tz_localize("Asia/Shanghai")
+    else:
+        current = current.tz_convert("Asia/Shanghai")
+    today = current.normalize()
+    close = today + pd.Timedelta(hours=15, minutes=30)
+    cached_end = pd.Timestamp(cached.index.max()).date()
+    return bool(
+        requested_end.date() >= today.date()
+        and cached_end < today.date()
+        and current >= close
+        and checked_at < close.timestamp()
+    )
 
 
 def _factories() -> dict[Market, list]:
@@ -248,6 +310,10 @@ def _load_history_locked(
     covers_end = bool(coverage_end and coverage_end >= end)
     checked = store.check_freshness(symbol)
     ttl_fresh = checked is not None and checked < cfg.data.cache_days * 86400
+    session_refresh_due = _session_refresh_due(
+        symbol, requested_end, cached, float(meta.get("checked_at") or 0))
+    if session_refresh_due:
+        ttl_fresh = False
     sliced = _cached_slice(cached, start, end)
     if sliced is not None and covers_start and covers_end:
         if not near_current or (mode == RefreshMode.AUTO and ttl_fresh):
@@ -270,7 +336,9 @@ def _load_history_locked(
     all_segments_succeeded = True
     for fetch_start, fetch_end, direction in segments:
         cached, segment_errors, succeeded = _fetch_segment(
-            symbol, fetch_start, fetch_end, direction, cached, store, priority)
+            symbol, fetch_start, fetch_end, direction, cached, store, priority,
+            refresh_provider_cache=(mode == RefreshMode.INCREMENTAL or session_refresh_due),
+        )
         errors.extend(segment_errors)
         all_segments_succeeded = all_segments_succeeded and succeeded
         if cached is None or cached.empty:

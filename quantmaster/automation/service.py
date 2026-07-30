@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -228,6 +229,76 @@ class AutomationService:
                     message_id=f"local_bot_{uuid.uuid4().hex}", sender_id="bot",
                     sender_name="QuantMaster", text=text, is_bot=True,
                 )
+
+    def handle_stock_analysis(self, actor: ActorContext, query: str) -> dict[str, Any]:
+        """在飞书中用同一张卡片持续展示六维分析进度和最终报告。"""
+        if actor.channel != "feishu":
+            raise ValueError("带进度的个股分析目前仅支持飞书；Web 请使用“个股分析”入口")
+        if not self.store.target_by_route(actor.channel, actor.account_id, actor.target):
+            raise PermissionError("当前会话尚未绑定，请先在自动化页面生成绑定码")
+
+        from quantmaster.analysis.stock import StockAnalysisService
+        from quantmaster.automation.stock_cards import (
+            stock_analysis_failure_card,
+            stock_analysis_progress_card,
+            stock_analysis_report_card,
+        )
+
+        message_id = self.feishu.send_card(
+            chat_id=actor.target,
+            card=stock_analysis_progress_card(query),
+        )
+        last_update = {"progress": 3, "time": time.monotonic()}
+
+        def update(progress: int, phase: str, detail: str = "", **_: Any) -> None:
+            value = max(0, min(100, int(progress)))
+            now = time.monotonic()
+            if value < 100 and value - last_update["progress"] < 10 and now - last_update["time"] < 1:
+                return
+            try:
+                self.feishu.update_card(
+                    message_id=message_id,
+                    card=stock_analysis_progress_card(query, value, phase, detail),
+                )
+                last_update.update({"progress": value, "time": now})
+            except Exception:
+                # 单次进度更新失败不应中止分析；最终结果仍会再次更新或补发。
+                logger.exception("飞书个股分析进度卡更新失败 message_id=%s", message_id)
+
+        try:
+            report = StockAnalysisService().analyze(query, update)
+        except Exception as exc:
+            logger.exception("飞书个股分析失败 query=%s", query)
+            failure = stock_analysis_failure_card(query, str(exc))
+            try:
+                self.feishu.update_card(message_id=message_id, card=failure)
+            except Exception:
+                self.feishu.send_card(chat_id=actor.target, card=failure)
+            return {"status": "failed", "message_id": message_id, "error": str(exc)}
+
+        card = stock_analysis_report_card(report)
+        try:
+            self.feishu.update_card(message_id=message_id, card=card)
+        except Exception:
+            logger.exception("飞书个股分析最终卡更新失败，改为补发 message_id=%s", message_id)
+            message_id = self.feishu.send_card(chat_id=actor.target, card=card)
+
+        if actor.chat_type == "group":
+            instrument = report.get("instrument") or {}
+            overall = report.get("overall") or {}
+            self.store.remember_conversation_message(
+                channel="feishu", account_id=actor.account_id, chat_id=actor.target,
+                message_id=f"local_bot_{uuid.uuid4().hex}", sender_id="bot",
+                sender_name="QuantMaster",
+                text=(
+                    f"{instrument.get('name') or instrument.get('symbol')}"
+                    f"（{instrument.get('symbol')}）六维分析完成：综合分 "
+                    f"{overall.get('score')}，{overall.get('stance')}。"
+                    f"{overall.get('thesis') or ''}"
+                ),
+                is_bot=True,
+            )
+        return {"status": "completed", "message_id": message_id, "report": report}
 
     def update_policy(self, target_id: str, preset: str, overrides: dict,
                       enabled: bool | None, actor: str) -> dict:

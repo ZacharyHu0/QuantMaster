@@ -341,7 +341,7 @@ def collect_health_report() -> dict[str, Any]:
                 "data_refresh_status",
                 severity="info" if running else "warning",
                 source="数据刷新",
-                title="全量数据正在刷新" if running else "最近的数据刷新未完整完成",
+                title="行情正在增量同步" if running else "最近的数据同步未完整完成",
                 message=(
                     f"进度 {refresh.get('progress', 0)}%，"
                     f"当前 {refresh.get('current_symbol') or '准备中'}"

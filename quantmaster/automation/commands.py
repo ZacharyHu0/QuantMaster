@@ -28,6 +28,33 @@ HELP_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+STOCK_ANALYSIS_EXCLUSIONS = {"大盘", "市场", "行情", "任务", "持仓", "选股", "新闻", "资讯"}
+
+
+def stock_analysis_query(text: str) -> str:
+    """提取明确的个股分析意图；普通聊天和大盘查询继续走原有路由。"""
+    value = re.sub(r"[？?。！!]+$", "", str(text).strip())
+    patterns = (
+        r"^(?:请|帮我)?\s*(?:做(?:一份)?|生成(?:一份)?)?\s*"
+        r"(?:完整|深度|六维)?\s*(?:个股|股票|标的)?\s*分析(?:一下)?\s*[:：]?\s*(.+)$",
+        r"^(?:请|帮我)?\s*(?:看看|研究|评估)(?:一下)?\s*[:：]?\s*"
+        r"([A-Za-z0-9.\u4e00-\u9fff·]{2,24})$",
+        r"^([A-Za-z0-9.\u4e00-\u9fff·]{2,24}?)\s*"
+        r"(?:这只股票|这个标的)?\s*(?:怎么样|如何|值得关注吗|值得买吗)$",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, value, re.IGNORECASE)
+        if not match:
+            continue
+        query = re.sub(
+            r"^(?:一下|下)\s*", "", match.group(1).strip(), flags=re.IGNORECASE,
+        )
+        query = re.sub(r"(?:这只|这个)?(?:股票|标的)$", "", query).strip()
+        if not query or any(term in query for term in STOCK_ANALYSIS_EXCLUSIONS):
+            return ""
+        return query[:80]
+    return ""
+
 
 class BotCommandRouter:
     def __init__(self, service: AutomationService,
@@ -60,6 +87,7 @@ class BotCommandRouter:
             "",
             "查询",
             "• 现在大盘怎么样",
+            "• 分析贵州茅台 / 六维分析 600519（生成完整报告）",
             "• 查看今天的选股 / 持仓 / 重要消息 / 告警 / 任务",
             "",
             "推送与任务（仅管理员）",
@@ -89,6 +117,15 @@ class BotCommandRouter:
         return text[:3500] + ("\n…内容已截断" if len(text) > 3500 else "")
 
     def handle(self, actor: ActorContext, text: str) -> None:
+        analysis_query = stock_analysis_query(text)
+        if analysis_query and actor.channel == "feishu":
+            try:
+                self.service.handle_stock_analysis(actor, analysis_query)
+            except Exception as exc:
+                self.reply(actor, f"个股分析未能启动：{exc}\n发送“帮助”查看可用说法。")
+            if actor.chat_type == "group":
+                self.service.executor.submit(self.service.maintain_conversation, actor)
+            return
         try:
             answer = self.execute(actor, text.strip())
         except Exception as exc:

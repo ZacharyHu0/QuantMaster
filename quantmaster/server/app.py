@@ -314,6 +314,23 @@ def _progress_stream(
 
 
 # ---------- 页面 ----------
+class StockAnalysisIn(BaseModel):
+    query: str = Field(..., min_length=1, max_length=80)
+
+
+@app.post("/api/stock-analysis/stream")
+def stock_analysis_stream(value: StockAnalysisIn, request: Request) -> StreamingResponse:
+    """Web 个股分析入口；与飞书共用六维引擎和真实阶段进度。"""
+    from quantmaster.analysis.stock import StockAnalysisService
+    from quantmaster.server.management import _require_local
+
+    _require_local(request)
+    return _progress_stream(
+        lambda emit: StockAnalysisService().analyze(value.query, emit),
+        _request_id(request),
+    )
+
+
 
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:

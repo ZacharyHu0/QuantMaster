@@ -7,6 +7,7 @@ from PyInstaller.utils.hooks import collect_submodules
 datas = [
     ("../quantmaster/server/static", "quantmaster/server/static"),
     ("../quantmaster/data/security_master.json.gz", "quantmaster/data"),
+    ("../quantmaster/skills/stock-analysis-framework", "quantmaster/skills/stock-analysis-framework"),
 ]
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +

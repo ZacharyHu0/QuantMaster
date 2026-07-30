@@ -21,7 +21,7 @@ from quantmaster.data.resilience import (
     provider_call,
 )
 from quantmaster.data.storage import BarStore
-from quantmaster.data.tushare_source import TushareSource
+from quantmaster.data.tushare_source import TushareSource, _current_session_cache_floor
 
 
 def test_akshare_exponential_retry(isolated_config, monkeypatch):
@@ -124,6 +124,136 @@ def test_tushare_index_uses_index_daily_only(tmp_path, isolated_config, monkeypa
     frame = source.daily("000300.SH", "2024-01-02", "2024-01-02")
     assert not frame.empty
     assert api.calls == ["index_daily"]
+
+
+def test_current_session_rejects_endpoint_cache_written_before_close():
+    before_close = pd.Timestamp("2026-07-28 14:00", tz="Asia/Shanghai").to_pydatetime()
+    after_close = pd.Timestamp("2026-07-28 16:00", tz="Asia/Shanghai").to_pydatetime()
+    assert _current_session_cache_floor("20260728", now=before_close) is None
+    assert _current_session_cache_floor(
+        "20260728", now=after_close,
+    ) == pd.Timestamp("2026-07-28 15:30", tz="Asia/Shanghai").timestamp()
+
+
+def test_incremental_refresh_bypasses_cached_tushare_tail(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+
+    class FakePro:
+        include_latest = False
+        calls: ClassVar[list[dict]] = []
+
+        def index_daily(self, **params):
+            self.calls.append(params)
+            dates = ["20240102", "20240103"] if self.include_latest else ["20240102"]
+            return pd.DataFrame({
+                "ts_code": ["000300.SH"] * len(dates), "trade_date": dates,
+                "open": [3000.0] * len(dates), "high": [3010.0] * len(dates),
+                "low": [2990.0] * len(dates), "close": [3005.0] * len(dates),
+                "vol": [100.0] * len(dates), "amount": [20.0] * len(dates),
+            })
+
+    api = FakePro()
+    cache = EndpointFrameCache("tushare", root=tmp_path / "api-cache")
+    warm = TushareSource(cache)
+    warm._api = api
+    old = warm.daily("000300.SH", "2024-01-02", "2024-01-03")
+    assert str(old.index.max().date()) == "2024-01-02"
+
+    store = BarStore(root=tmp_path / "bars")
+    store.put("000300.SH", old)
+    api.include_latest = True
+
+    class FakeTushare(TushareSource):
+        def __init__(self):
+            super().__init__(cache)
+            self._api = api
+
+    monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeTushare]})
+    refreshed = registry.load_history(
+        "000300.SH", "2024-01-02", "2024-01-03", store=store,
+        refresh="incremental",
+    )
+
+    assert str(refreshed.index.max().date()) == "2024-01-03"
+    assert len(api.calls) == 2
+    assert api.calls[-1]["start_date"] == "20240102"
+    assert api.calls[-1]["end_date"] == "20240103"
+
+
+def test_incremental_tail_tries_fallback_when_primary_has_no_new_date(
+    tmp_path, monkeypatch,
+):
+    store = BarStore(root=tmp_path / "bars")
+    old_date = pd.DatetimeIndex(["2024-01-02"])
+    old = pd.DataFrame({
+        "open": [10.0], "high": [10.0], "low": [10.0], "close": [10.0],
+        "volume": [1.0],
+    }, index=old_date)
+    store.put("600000.SH", old)
+
+    class Lagging(DataSource):
+        name = "lagging"
+        markets = (Market.CN,)
+        calls = 0
+
+        def daily(self, symbol, start, end):
+            type(self).calls += 1
+            return old
+
+    class Current(DataSource):
+        name = "current"
+        markets = (Market.CN,)
+        calls = 0
+
+        def daily(self, symbol, start, end):
+            type(self).calls += 1
+            frame = pd.concat([old, old.rename(index={old.index[0]: pd.Timestamp("2024-01-03")})])
+            return frame
+
+    monkeypatch.setattr(
+        registry, "_factories", lambda: {Market.CN: [Lagging, Current]})
+    refreshed = registry.load_history(
+        "600000.SH", "2024-01-02", "2024-01-03", store=store,
+        refresh="incremental",
+    )
+
+    assert str(refreshed.index.max().date()) == "2024-01-03"
+    assert Lagging.calls == Current.calls == 1
+    assert store.metadata("600000.SH")["last_source"] == "current"
+
+
+def test_incremental_alignment_accepts_one_revised_overlap_day():
+    dates = pd.bdate_range("2026-07-21", periods=5)
+    cached = pd.DataFrame({
+        "open": [100.0] * 5, "high": [100.0] * 5, "low": [100.0] * 5,
+        "close": [100.0, 100.0, 100.0, 100.0, 99.0], "volume": [1.0] * 5,
+    }, index=dates)
+    fresh_dates = dates.append(pd.DatetimeIndex(["2026-07-28"]))
+    fresh = pd.DataFrame({
+        "open": [100.0] * 6, "high": [100.0] * 6, "low": [100.0] * 6,
+        "close": [100.0] * 6, "volume": [2.0] * 6,
+    }, index=fresh_dates)
+
+    merged = registry._align_increment(cached, fresh, "right")
+    assert merged.loc[dates[-1], "close"] == pytest.approx(100.0)
+    assert merged.loc["2026-07-28", "close"] == pytest.approx(100.0)
+
+
+def test_cn_early_check_becomes_stale_after_close():
+    cached = pd.DataFrame(
+        {"close": [10.0]}, index=pd.DatetimeIndex(["2026-07-27"]))
+    checked_at = pd.Timestamp("2026-07-28 10:00", tz="Asia/Shanghai").timestamp()
+    assert registry._session_refresh_due(
+        "600000.SH", pd.Timestamp("2026-07-28"), cached, checked_at,
+        now=pd.Timestamp("2026-07-28 16:00", tz="Asia/Shanghai"),
+    )
+    assert not registry._session_refresh_due(
+        "600000.SH", pd.Timestamp("2026-07-28"), cached, checked_at,
+        now=pd.Timestamp("2026-07-28 14:00", tz="Asia/Shanghai"),
+    )
 
 
 def test_tushare_industry_is_batched_and_cached(tmp_path, isolated_config, monkeypatch):

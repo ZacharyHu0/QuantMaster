@@ -48,6 +48,8 @@ class EmptyProviderResponse(RuntimeError):
 _PRIORITIES = {"interactive": 0, "maintenance": 5, "normal": 7, "background": 10}
 _REQUEST_PRIORITY: ContextVar[int] = ContextVar(
     "quantmaster_data_priority", default=_PRIORITIES["normal"])
+_BYPASS_ENDPOINT_CACHE: ContextVar[bool] = ContextVar(
+    "quantmaster_bypass_endpoint_cache", default=False)
 
 
 @contextmanager
@@ -57,6 +59,20 @@ def data_priority(value: str):
         yield
     finally:
         _REQUEST_PRIORITY.reset(token)
+
+
+@contextmanager
+def bypass_endpoint_cache(enabled: bool = True):
+    """Force provider calls to ignore persisted endpoint responses for this request."""
+    token = _BYPASS_ENDPOINT_CACHE.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _BYPASS_ENDPOINT_CACHE.reset(token)
+
+
+def endpoint_cache_bypassed() -> bool:
+    return _BYPASS_ENDPOINT_CACHE.get()
 
 
 @dataclass(order=True)
@@ -413,11 +429,21 @@ class EndpointFrameCache:
         safe_endpoint = "".join(c if c.isalnum() or c in "-_" else "_" for c in endpoint)
         return self.root / f"{safe_endpoint}-{self._digest(endpoint, params)}.parquet"
 
-    def get(self, endpoint: str, params: dict, ttl_days: float) -> pd.DataFrame | None:
+    def get(
+        self,
+        endpoint: str,
+        params: dict,
+        ttl_days: float,
+        *,
+        min_mtime: float | None = None,
+    ) -> pd.DataFrame | None:
         path = self.path_for(endpoint, params)
         if not path.exists():
             return None
-        age = time.time() - path.stat().st_mtime
+        mtime = path.stat().st_mtime
+        if min_mtime is not None and mtime < min_mtime:
+            return None
+        age = time.time() - mtime
         if age > max(0.0, ttl_days) * 86400:
             return None
         try:

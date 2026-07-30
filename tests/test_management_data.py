@@ -162,7 +162,7 @@ def test_switch_only_accepts_existing_data_directory(tmp_path):
     assert switcher.target == str(target.resolve())
 
 
-def test_full_refresh_job_is_persistent_and_retries_only_failures(
+def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     isolated_config, monkeypatch,
 ):
     from quantmaster.data.maintenance import DataRefreshManager
@@ -186,7 +186,7 @@ def test_full_refresh_job_is_persistent_and_retries_only_failures(
     completed = manager.get(job["id"])
     assert completed["status"] == "completed"
     assert [item[0] for item in calls] == symbols
-    assert all(item[3]["refresh"] == RefreshMode.FULL for item in calls)
+    assert all(item[3]["refresh"] == RefreshMode.INCREMENTAL for item in calls)
     assert all(item[3]["priority"] == "maintenance" for item in calls)
 
     # 已结束任务中的失败项续跑时只重排失败标的，不重复成功标的。

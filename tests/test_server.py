@@ -81,6 +81,9 @@ class TestBasics:
         assert 'id="candidate-workspace"' in resp.text
         assert 'href="/static/candidates.css"' in resp.text
         assert 'src="/static/candidates.js"' in resp.text
+        assert 'id="tab-stock-analysis"' in resp.text
+        assert 'href="/static/stock-analysis.css"' in resp.text
+        assert 'src="/static/stock-analysis.js"' in resp.text
         assert 'id="tab-help"' in resp.text
         assert 'class="header-help" data-tab="help"' in resp.text
         assert 'href="/static/help.css"' in resp.text
@@ -119,11 +122,11 @@ class TestBasics:
         assert 'data-tab="settings"' not in nav_markup
         assert [
             nav_markup.index(f'data-tab="{tab}"')
-            for tab in ("market", "news", "candidates", "decision", "lab", "backtest",
+            for tab in ("market", "news", "stock-analysis", "candidates", "decision", "lab", "backtest",
                         "paper", "ledger", "automation")
         ] == sorted([
             nav_markup.index(f'data-tab="{tab}"')
-            for tab in ("market", "news", "candidates", "decision", "lab", "backtest",
+            for tab in ("market", "news", "stock-analysis", "candidates", "decision", "lab", "backtest",
                         "paper", "ledger", "automation")
         ])
         assert 'class="header-settings" data-tab="settings"' in resp.text
@@ -133,6 +136,8 @@ class TestBasics:
         assert settings_markup.count("<rect x=\"10.65\"") == 8
         assert client.get("/static/candidates.css").status_code == 200
         assert client.get("/static/candidates.js").status_code == 200
+        assert client.get("/static/stock-analysis.css").status_code == 200
+        assert client.get("/static/stock-analysis.js").status_code == 200
         assert client.get("/static/help.css").status_code == 200
         assert client.get("/static/help.js").status_code == 200
         help_content = client.get("/static/help-content.html")

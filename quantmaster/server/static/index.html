@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/automation.css">
 <link rel="stylesheet" href="/static/news.css">
+<link rel="stylesheet" href="/static/stock-analysis.css">
 <link rel="stylesheet" href="/static/lab.css">
 <link rel="stylesheet" href="/static/trading.css">
 <link rel="stylesheet" href="/static/help.css">
@@ -454,6 +455,7 @@
     <span class="nav-group" aria-label="观察">
       <button data-tab="market" class="active">市场</button>
       <button data-tab="news">资讯</button>
+      <button data-tab="stock-analysis">个股分析</button>
     </span>
     <span class="nav-group" aria-label="决策">
       <button data-tab="candidates">候选</button>
@@ -558,6 +560,53 @@
     </div>
     <div class="chart" id="kline"></div>
   </div>
+</section>
+
+<!-- ================= 个股分析 ================= -->
+<section class="tab" id="tab-stock-analysis">
+  <div class="sa-masthead">
+    <div>
+      <span class="sa-kicker">SIX-DIMENSION RESEARCH MEMO</span>
+      <h2>个股六维分析</h2>
+      <p>把行情、估值、资讯与资金证据整理成一份可核查报告；缺失数据保留为空，不用叙事补数。</p>
+    </div>
+    <div class="sa-framework-badge" aria-label="分析框架版本">
+      <span>FRAMEWORK</span><strong>6D / v1.0</strong>
+    </div>
+  </div>
+  <form class="sa-query" id="stock-analysis-form" autocomplete="off">
+    <label for="stock-analysis-query">分析标的</label>
+    <div class="sa-query-row">
+      <div class="sa-search-shell">
+        <input id="stock-analysis-query" name="query" type="search" role="combobox"
+          aria-autocomplete="list" aria-expanded="false" aria-controls="stock-analysis-suggestions"
+          placeholder="输入代码或名称，如 600519 / 贵州茅台" required maxlength="80">
+        <div class="sa-suggestions" id="stock-analysis-suggestions" role="listbox" hidden></div>
+      </div>
+      <button class="primary" type="submit">生成六维报告</button>
+    </div>
+    <div class="sa-examples" aria-label="示例标的">
+      <span>试一试</span>
+      <button type="button" data-sa-example="600519.SH">贵州茅台</button>
+      <button type="button" data-sa-example="300750.SZ">宁德时代</button>
+      <button type="button" data-sa-example="601318.SH">中国平安</button>
+    </div>
+  </form>
+  <div class="sa-stage" id="stock-analysis-stage" aria-live="polite">
+    <div class="sa-idle-copy">
+      <strong>一次分析，六条证据链</strong>
+      <p>提交后会持续显示当前阶段；你可以切换页面，分析仍会在后台继续。</p>
+    </div>
+    <ol class="sa-framework-map">
+      <li><span>01</span><strong>基本面</strong><small>盈利 · 估值 · 财务质量</small></li>
+      <li><span>02</span><strong>技术面</strong><small>趋势 · 动量 · 支撑压力</small></li>
+      <li><span>03</span><strong>消息面</strong><small>公告 · 事件 · 影响方向</small></li>
+      <li><span>04</span><strong>资金面</strong><small>净流入 · 量价确认</small></li>
+      <li><span>05</span><strong>心理面</strong><small>拥挤 · 超买超卖 · 风险偏好</small></li>
+      <li><span>06</span><strong>宏观面</strong><small>行业 · 政策 · 外部变量</small></li>
+    </ol>
+  </div>
+  <div id="stock-analysis-report" aria-live="polite"></div>
 </section>
 
 <!-- ================= 候选 ================= -->
@@ -1217,14 +1266,14 @@
           </div>
           <div class="check-stack"><div class="check-result" data-check-result="storage">目录尚未检测</div><div class="check-result" data-check-result="data-sources">数据源尚未检测</div><div class="check-result" data-check-result="tushare">Tushare 尚未检测</div></div>
           <div class="maintenance-box">
-            <div><h4>手动全量刷新行情库</h4><p>日常启动只读取本地缓存并同步缺失边界。仅在历史库需要重建或修复时使用这里；旧缓存会保留到单标的校验成功。</p></div>
+            <div><h4>手动增量同步行情</h4><p>已有标的只请求最后 5 个交易日的重叠区间，用于校准复权并补齐新行情；只有未缓存标的才会按起始日期初始化。</p></div>
             <div class="maintenance-controls">
               <select id="data-refresh-scope" aria-label="刷新范围"><option value="market">市场页标的</option><option value="universe">指定候选</option><option value="all_cached">全部已缓存标的</option></select>
               <select id="data-refresh-universe" aria-label="候选" disabled><option value="">选择候选</option></select>
               <input id="data-refresh-start" type="date" aria-label="起始日期" disabled>
               <button class="ghost" id="data-refresh-preview" type="button">预览影响</button>
             </div>
-            <div class="maintenance-confirm" id="data-refresh-confirm" hidden><span data-refresh-preview-text></span><button class="primary" id="data-refresh-start-button" type="button">确认全量刷新</button></div>
+            <div class="maintenance-confirm" id="data-refresh-confirm" hidden><span data-refresh-preview-text></span><button class="primary" id="data-refresh-start-button" type="button">确认增量同步</button></div>
             <div class="maintenance-progress" id="data-refresh-progress" hidden aria-live="polite">
               <div><span data-refresh-phase>准备中</span><strong data-refresh-percent>0%</strong></div>
               <div class="load-track"><div class="load-fill"></div></div>
@@ -1499,6 +1548,7 @@ function readableDetail(detail) {
   if (Array.isArray(detail)) return detail.map(item => {
     const field = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
     return [field, item?.msg || item?.message].filter(Boolean).join('：');
+    ['/api/stock-analysis', '个股分析'],
   }).filter(Boolean).join('；');
   if (detail && typeof detail === 'object') {
     if (detail.message) return String(detail.message);
@@ -2243,6 +2293,9 @@ function loadActiveTab(tab) {
   }
 }
 
+  if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
+    window.loadStockAnalysis();
+  }
 function activateTab(control, {persist = true, load = true} = {}) {
   const tab = control?.dataset.tab;
   if (!tab || !document.getElementById('tab-' + tab)) return false;
@@ -3596,3 +3649,4 @@ document.getElementById('cash-form').onsubmit = async e => {
 <script src="/static/help.js"></script>
 </body>
 </html>
+<script src="/static/stock-analysis.js"></script>

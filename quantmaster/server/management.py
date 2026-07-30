@@ -294,7 +294,7 @@ def create_migration(request: Request, value: MigrationCreate) -> dict:
 
     if data_refresh_manager.active:
         raise HTTPException(
-            409, "行情数据库正在全量刷新；请先完成或取消刷新，再迁移数据目录")
+            409, "行情数据库正在增量同步；请先完成或取消同步，再迁移数据目录")
     active_job = get_worker().status().get("active_job_id")
     if active_job:
         raise HTTPException(

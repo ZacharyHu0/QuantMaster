@@ -729,7 +729,7 @@
       ).join('');
       if ([...select.options].some(option => option.value === current)) select.value = current;
     } catch (_) {
-      // 候选管理区域仍可独立报告加载错误；全量刷新保留市场页与已缓存范围。
+      // 候选管理区域仍可独立报告加载错误；增量同步保留市场页与已缓存范围。
     }
     resetDataRefreshPreview();
     try {
@@ -746,8 +746,8 @@
     root.hidden = false;
     root.style.setProperty('--data-refresh-progress', (task.progress || 0) / 100);
     const labels = {
-      running: '全量刷新中', cancelling: '正在完成当前标的', cancelled: '已取消，可继续',
-      interrupted: '服务重启中断，可继续', completed: '全量刷新完成',
+      running: '增量同步中', cancelling: '正在完成当前标的', cancelled: '已取消，可继续',
+      interrupted: '服务重启中断，可继续', completed: '增量同步完成',
       completed_with_errors: '刷新完成，部分标的失败',
     };
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
@@ -757,7 +757,7 @@
     const failures = task.failures || [];
     root.querySelector('[data-refresh-failures]').textContent = failures.length
       ? `${task.failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
-      : `${task.succeeded || 0} 个标的已成功替换缓存`;
+      : `${task.succeeded || 0} 个标的已成功同步`;
     const cancel = document.getElementById('data-refresh-cancel');
     cancel.hidden = !['running', 'cancelling'].includes(task.status);
     cancel.disabled = task.status === 'cancelling';
@@ -767,7 +767,7 @@
     resume.dataset.jobId = task.id;
     const runtimeKey = `persistent:health:refresh:${task.id}`;
     if (['running', 'cancelling'].includes(task.status)) {
-      window.QuantMasterRunInfo.add('info', '数据刷新', '全量数据正在刷新', {
+      window.QuantMasterRunInfo.add('info', '数据同步', '行情尾部正在增量同步', {
         detail:`进度 ${task.progress || 0}%，当前 ${task.current_symbol || '准备中'}`,
         action:'任务会在后台继续，可正常浏览其他页面。',
         key:runtimeKey, scope:'health', persistent:true,
@@ -829,7 +829,7 @@
 
   document.getElementById('data-refresh-start-button').addEventListener('click', async event => {
     if (!state.dataRefreshPreview) return;
-    if (!window.confirm(`确认全量拉取并重建 ${state.dataRefreshPreview.total} 个标的的日线缓存？`)) return;
+    if (!window.confirm(`确认增量同步 ${state.dataRefreshPreview.total} 个标的？已有缓存只请求尾部重叠区间。`)) return;
     event.target.disabled = true;
     try {
       const task = await request('/api/settings/data-refresh', {

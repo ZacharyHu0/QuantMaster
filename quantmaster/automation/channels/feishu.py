@@ -96,14 +96,26 @@ class FeishuBotClient:
         app_id, secret = self.credentials_value()
         return lark.Client.builder().app_id(app_id).app_secret(secret).build()
 
-    def send(self, *, chat_id: str, text: str) -> None:
-        self._send_message(chat_id=chat_id, msg_type="text", content={"text": text})
+    def send(self, *, chat_id: str, text: str) -> str:
+        return self._send_message(chat_id=chat_id, msg_type="text", content={"text": text})
 
-    def send_card(self, *, chat_id: str, card: dict) -> None:
+    def send_card(self, *, chat_id: str, card: dict) -> str:
         """发送飞书消息卡片；用于主通道的结构化告警。"""
-        self._send_message(chat_id=chat_id, msg_type="interactive", content=card)
+        return self._send_message(chat_id=chat_id, msg_type="interactive", content=card)
 
-    def _send_message(self, *, chat_id: str, msg_type: str, content: dict) -> None:
+    def update_card(self, *, message_id: str, card: dict) -> None:
+        """原位更新已发送的交互卡片，用于长任务进度与最终报告。"""
+        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+        request = PatchMessageRequest.builder().message_id(message_id).request_body(
+            PatchMessageRequestBody.builder().content(
+                json.dumps(card, ensure_ascii=False)).build()
+        ).build()
+        response = self._client().im.v1.message.patch(request)
+        if not response.success():
+            raise RuntimeError(f"飞书卡片更新失败 code={response.code}: {response.msg}")
+
+    def _send_message(self, *, chat_id: str, msg_type: str, content: dict) -> str:
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
         request = CreateMessageRequest.builder().receive_id_type("chat_id").request_body(
@@ -113,6 +125,10 @@ class FeishuBotClient:
         response = self._client().im.v1.message.create(request)
         if not response.success():
             raise RuntimeError(f"飞书发送失败 code={response.code}: {response.msg}")
+        message_id = str(getattr(response.data, "message_id", "") or "")
+        if not message_id:
+            raise RuntimeError("飞书发送成功但响应缺少 message_id")
+        return message_id
 
     def listen_forever(self, on_message: Callable[[ActorContext, str], None],
                        stop_event: threading.Event) -> None:

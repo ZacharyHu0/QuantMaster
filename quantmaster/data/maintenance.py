@@ -1,4 +1,4 @@
-"""行情数据库全量刷新任务：持久化进度、可取消、失败时保留旧缓存。"""
+"""行情数据库增量同步任务：持久化进度、可取消、失败时保留旧缓存。"""
 
 from __future__ import annotations
 
@@ -130,7 +130,10 @@ class DataRefreshManager:
             "end": end,
             "total": len(symbols),
             "unhealthy_sources": unhealthy,
-            "message": f"将全量刷新 {len(symbols)} 个日线标的；原缓存仅在单标的验证成功后替换",
+            "message": (
+                f"将增量同步 {len(symbols)} 个日线标的；"
+                "已缓存标的只请求尾部重叠区间，未缓存标的才按起始日期初始化"
+            ),
         }
         return preview, symbols
 
@@ -212,11 +215,11 @@ class DataRefreshManager:
             error = ""
             try:
                 load_history(
-                    symbol, start, end, store=store, refresh=RefreshMode.FULL,
+                    symbol, start, end, store=store, refresh=RefreshMode.INCREMENTAL,
                     priority="maintenance",
                 )
                 meta = store.metadata(symbol) or {}
-                if meta.get("last_status") == "refresh_failed":
+                if meta.get("last_status") in {"refresh_failed", "stale"}:
                     error = "所有数据源失败，已保留原缓存"
             except Exception as exc:
                 from quantmaster.logging_config import redact_sensitive_text

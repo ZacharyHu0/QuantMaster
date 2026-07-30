@@ -13,7 +13,9 @@ Tushare 是 AKShare 连续重试失败后的 A 股日线备用源；每次接口
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as datetime_time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -22,10 +24,12 @@ from quantmaster.data.base import DataSource, Market, normalize_daily
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
     EndpointFrameCache,
+    endpoint_cache_bypassed,
     provider_call,
 )
 
 logger = logging.getLogger(__name__)
+_CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _require_tushare():
@@ -73,6 +77,34 @@ def _cache_ttl(end: str | None, default_days: int) -> int:
     return max(0, int(default_days))
 
 
+def _current_session_cache_floor(
+    end: str | None,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Invalidate responses captured before today's A-share close.
+
+    A request made shortly after midnight legitimately returns the previous trading day,
+    but it must not remain reusable after the 15:30 close boundary.
+    """
+    if not end:
+        return None
+    current = now or datetime.now(_CHINA_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_CHINA_TZ)
+    else:
+        current = current.astimezone(_CHINA_TZ)
+    try:
+        requested_end = pd.Timestamp(end).date()
+    except (TypeError, ValueError):
+        return None
+    close = datetime.combine(
+        current.date(), datetime_time(hour=15, minute=30), tzinfo=_CHINA_TZ)
+    if requested_end >= current.date() and current >= close:
+        return close.timestamp()
+    return None
+
+
 class TushareSource(DataSource):
     name = "tushare"
     markets = (Market.CN, Market.INDEX)
@@ -88,19 +120,30 @@ class TushareSource(DataSource):
 
     def _call(self, endpoint: str, ttl_days: int, **params) -> pd.DataFrame:
         clean = {key: value for key, value in params.items() if value not in (None, "")}
-        cached = self.cache.get(endpoint, clean, ttl_days)
+        force_refresh = endpoint_cache_bypassed()
+        min_mtime = _current_session_cache_floor(clean.get("end_date"))
+
+        def read_cache() -> pd.DataFrame | None:
+            if force_refresh:
+                return None
+            return self.cache.get(
+                endpoint, clean, ttl_days, min_mtime=min_mtime)
+
+        cached = read_cache()
         if cached is not None:
             return cached.copy()
         key = endpoint + ":" + self.cache._digest(endpoint, clean)
+        if force_refresh:
+            key += ":refresh"
 
         def fetch() -> pd.DataFrame:
             # 任务进入提供商队列后再次检查，确保排队期间已完成的相同响应直接复用。
-            cached = self.cache.get(endpoint, clean, ttl_days)
+            cached = read_cache()
             if cached is not None:
                 return cached.copy()
             method = getattr(self._pro(), endpoint)
             TUSHARE_LIMITER.wait()
-            cached = self.cache.get(endpoint, clean, ttl_days)
+            cached = read_cache()
             if cached is not None:
                 return cached.copy()
             result = method(**clean)
