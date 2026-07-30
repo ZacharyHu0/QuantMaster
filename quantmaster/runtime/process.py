@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
 import signal
 import subprocess
@@ -27,6 +28,50 @@ class ProcessLimits:
     output_bytes: int
     max_processes: int = 1
     file_bytes: int | None = None
+
+
+def _prepare_windows_venv_launch(
+    command: Sequence[str | PathLike[str]],
+    child_env: dict[str, str],
+    *,
+    platform: str | None = None,
+    executable: str | None = None,
+    base_executable: str | None = None,
+    search_path: Sequence[str] | None = None,
+) -> tuple[list[str | PathLike[str]], dict[str, str]]:
+    """Bypass a Windows venv redirector without weakening the Job Object limit.
+
+    Windows virtual-environment launchers create the base interpreter as a
+    second process. Assigning the launcher to a one-process Job Object therefore
+    prevents Python itself from starting. Running the base interpreter with the
+    current environment's import path keeps the worker functional while leaving
+    no spare Job Object slot for untrusted descendants.
+    """
+    launch_command = list(command)
+    prepared_env = dict(child_env)
+    current_platform = os.name if platform is None else platform
+    if current_platform != "nt" or not launch_command:
+        return launch_command, prepared_env
+
+    current_executable = sys.executable if executable is None else executable
+    current_base = (
+        getattr(sys, "_base_executable", current_executable)
+        if base_executable is None
+        else base_executable
+    )
+    requested = ntpath.normcase(ntpath.abspath(os.fspath(launch_command[0])))
+    current = ntpath.normcase(ntpath.abspath(current_executable))
+    base = ntpath.normcase(ntpath.abspath(current_base))
+    if requested != current or base == current:
+        return launch_command, prepared_env
+
+    launch_command[0] = current_base
+    paths = [entry for entry in (sys.path if search_path is None else search_path) if entry]
+    paths.extend(
+        entry for entry in prepared_env.get("PYTHONPATH", "").split(";") if entry
+    )
+    prepared_env["PYTHONPATH"] = ";".join(dict.fromkeys(paths))
+    return launch_command, prepared_env
 
 
 class _WindowsJob:
@@ -188,10 +233,11 @@ def run_restricted_process(
     # harmless import into a platform-dependent crash.
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         child_env[key] = "1"
+    launch_command, child_env = _prepare_windows_venv_launch(command, child_env)
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         try:
             process = subprocess.Popen(
-                list(command), stdout=stdout_file, stderr=stderr_file, env=child_env, cwd=cwd,
+                launch_command, stdout=stdout_file, stderr=stderr_file, env=child_env, cwd=cwd,
                 preexec_fn=preexec, start_new_session=os.name != "nt",
             )
         except OSError:
@@ -225,7 +271,7 @@ def run_restricted_process(
                     else:  # pragma: no cover - Windows always has a job here
                         process.kill()
                     process.wait(timeout=5)
-                    raise subprocess.TimeoutExpired(list(command), timeout)
+                    raise subprocess.TimeoutExpired(launch_command, timeout)
                 time.sleep(0.02)
             stdout_file.seek(0)
             stderr_file.seek(0)
@@ -237,7 +283,7 @@ def run_restricted_process(
             )
             if len(stdout.encode()) + len(stderr.encode()) > limits.output_bytes:
                 raise ProcessLimitError("子进程输出超过安全上限")
-            return subprocess.CompletedProcess(list(command), process.returncode, stdout, stderr)
+            return subprocess.CompletedProcess(launch_command, process.returncode, stdout, stderr)
         finally:
             if process.poll() is None:
                 if job:

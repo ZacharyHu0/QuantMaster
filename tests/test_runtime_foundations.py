@@ -26,6 +26,35 @@ from quantmaster.runtime.process import ProcessLimitError, ProcessLimits, run_re
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 
 
+def test_connection_factory_context_releases_database_handle(tmp_path):
+    path = tmp_path / "closed.sqlite"
+    with connect_sqlite(path) as connection:
+        connection.execute("CREATE TABLE values_table (value INTEGER)")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+
+def test_windows_venv_launch_uses_base_interpreter_without_an_extra_job_slot():
+    from quantmaster.runtime import process
+
+    command, env = process._prepare_windows_venv_launch(
+        [r"C:\venv\Scripts\python.exe", "-m", "worker"],
+        {"PYTHONPATH": r"C:\existing"},
+        platform="nt",
+        executable=r"C:\venv\Scripts\python.exe",
+        base_executable=r"C:\Python312\python.exe",
+        search_path=(r"C:\venv\Lib\site-packages", r"C:\workspace"),
+    )
+
+    assert command == [r"C:\Python312\python.exe", "-m", "worker"]
+    assert env["PYTHONPATH"].split(";") == [
+        r"C:\venv\Lib\site-packages",
+        r"C:\workspace",
+        r"C:\existing",
+    ]
+
+
 def test_concurrent_first_connections_enable_wal_once_without_locking(tmp_path):
     path = tmp_path / "runtime.sqlite"
 

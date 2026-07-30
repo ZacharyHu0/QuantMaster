@@ -99,7 +99,7 @@ def test_copy_migration_keeps_source_and_switches_only_after_verify(tmp_path):
         if result["status"] not in {"pending", "running", "cancelling"}:
             break
         time.sleep(0.02)
-    assert result["status"] == "completed", result
+    assert result["status"] == "completed", result.get("error") or result
     assert (source / "bars" / "sample.bin").is_file()
     assert (target / "bars" / "sample.bin").read_bytes() == b"abc" * 1000
     assert switcher.target == str(target.resolve())
@@ -122,7 +122,7 @@ def test_migration_uses_sqlite_consistent_backup(tmp_path):
         if result["status"] not in {"pending", "running", "cancelling"}:
             break
         time.sleep(0.02)
-    assert result["status"] == "completed", result
+    assert result["status"] == "completed", result.get("error") or result
     with sqlite3.connect(target / "ledger.sqlite") as connection:
         assert connection.execute("SELECT value FROM entries").fetchone() == ("kept",)
 

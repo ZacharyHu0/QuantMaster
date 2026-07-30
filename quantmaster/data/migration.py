@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,8 +106,12 @@ def _source_state(root: Path) -> tuple[tuple[str, int, int], ...]:
 
 def _copy_sqlite(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True) as src:
-        with sqlite3.connect(target) as dst:
+    source_uri = f"{source.resolve().as_uri()}?mode=ro"
+    # sqlite3.Connection's own context manager commits/rolls back but does not
+    # promise to close. Explicit closing is required before Windows can rename
+    # the staging directory after verification.
+    with closing(sqlite3.connect(source_uri, uri=True, timeout=30.0)) as src:
+        with closing(sqlite3.connect(target, timeout=30.0)) as dst:
             src.backup(dst)
             result = dst.execute("PRAGMA integrity_check").fetchone()
             if not result or result[0] != "ok":

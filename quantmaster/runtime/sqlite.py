@@ -16,6 +16,16 @@ _INIT_LOCKS: dict[str, threading.RLock] = {}
 _WAL_READY: set[str] = set()
 
 
+class _ManagedConnection(sqlite3.Connection):
+    """Commit or roll back, then deterministically release the database handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def _database_key(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve())
 
@@ -65,7 +75,9 @@ def connect_sqlite(
     if maintenance_barrier.frozen and not destination.exists():
         raise MaintenanceActiveError("维护期间不能创建新的 SQLite 数据库")
     key = _database_key(destination)
-    connection = sqlite3.connect(destination, timeout=timeout)
+    connection = sqlite3.connect(
+        destination, timeout=timeout, factory=_ManagedConnection,
+    )
     try:
         connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
         connection.execute("PRAGMA foreign_keys=ON")

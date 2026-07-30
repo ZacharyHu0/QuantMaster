@@ -124,7 +124,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('[data-settings-section="automation"]').click()
         assert page.locator('[name="automation.enabled"]').is_visible()
         page.locator('[name="automation.retention_days"]').fill("120")
-        _wait_for_text(page.locator("#settings-save-state"), "已自动保存")
+        _wait_for_class(page.locator("#settings-save-state"), "saved")
 
         page.locator('[data-settings-section="backup"]').click()
         page.locator('#snapshot-form [name="name"]').fill("UI baseline")

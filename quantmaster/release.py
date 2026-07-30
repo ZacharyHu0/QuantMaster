@@ -4,13 +4,58 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.4"
+VERSION = "0.13.5"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "SQLite 句柄生命周期与 Windows 原子切换",
+                "items": (
+                    (
+                        "统一 SQLite 连接工厂现在保证上下文退出时先提交或回滚、再确定性关闭句柄，"
+                        "消除依赖垃圾回收时机造成的连接积压和 Windows 文件锁。"
+                    ),
+                    (
+                        "数据根迁移的只读源库与暂存目标库使用显式 closing，并以规范 file URI"
+                        "打开源库；完整性校验结束后即可可靠原子重命名暂存目录。"
+                    ),
+                    (
+                        "新增连接关闭契约和 Python 3.12 Windows 迁移回归；迁移断言会直接报告"
+                        "后台错误，不再用截断任务字典掩盖真实失败原因。"
+                    ),
+                ),
+            },
+            {
+                "title": "Windows 受限解释器边界",
+                "items": (
+                    (
+                        "受限 Python 在 Windows 虚拟环境中直接启动基础解释器并显式继承当前"
+                        "导入路径，避免 venv 或 uv 重定向器占用唯一的 Job Object 进程名额。"
+                    ),
+                    (
+                        "Job Object 的活动进程上限继续保持为一；合法因子 worker 可以启动，"
+                        "而用户代码创建子进程仍会被操作系统拒绝。"
+                    ),
+                ),
+            },
+            {
+                "title": "浏览器回归稳定性",
+                "items": (
+                    (
+                        "设置页自动保存验收改为等待稳定的 saved 状态，不再依赖异步切换的"
+                        "提示文案，降低快慢 Chromium runner 间的偶发竞态。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.4",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "六维联网取证与交叉复核",
