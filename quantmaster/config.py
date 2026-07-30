@@ -43,6 +43,11 @@ class DataConfig:
     tushare_calls_per_minute: int = 120   # 2000 积分档保守全局限速
     tushare_cache_days: int = 1           # Tushare 当期接口响应缓存天数
     fundamental_cache_days: int = 7       # 季度财务数据本地缓存天数
+    repair_enabled: bool = True            # 检测到可重建数据损坏时持久排队
+    repair_daily_budget: int = 100         # 每个数据源每日最多自动修复次数
+    repair_max_workers: int = 2            # 全局自动修复并发上限
+    repair_retry_backoff: float = 60.0     # 修复失败后的初始退避秒数
+    repair_max_attempts: int = 5           # 自动修复最大尝试次数
 
 
 @dataclass
@@ -163,6 +168,17 @@ def _apply_env(cfg: Config) -> None:
         env.get("QM_TUSHARE_CACHE_DAYS", cfg.data.tushare_cache_days))
     cfg.data.fundamental_cache_days = int(
         env.get("QM_FUNDAMENTAL_CACHE_DAYS", cfg.data.fundamental_cache_days))
+    cfg.data.repair_enabled = env.get(
+        "QM_DATA_REPAIR_ENABLED", str(cfg.data.repair_enabled)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.repair_daily_budget = int(
+        env.get("QM_DATA_REPAIR_DAILY_BUDGET", cfg.data.repair_daily_budget))
+    cfg.data.repair_max_workers = int(
+        env.get("QM_DATA_REPAIR_MAX_WORKERS", cfg.data.repair_max_workers))
+    cfg.data.repair_retry_backoff = float(
+        env.get("QM_DATA_REPAIR_RETRY_BACKOFF", cfg.data.repair_retry_backoff))
+    cfg.data.repair_max_attempts = int(
+        env.get("QM_DATA_REPAIR_MAX_ATTEMPTS", cfg.data.repair_max_attempts))
     enabled = env.get("QM_AUTOMATION_ENABLED")
     if enabled is not None:
         cfg.automation.enabled = enabled.strip().lower() in {"1", "true", "yes", "on"}

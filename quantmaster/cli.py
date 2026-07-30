@@ -69,6 +69,18 @@ def cmd_serve(args) -> None:
             browser_timer.cancel()
 
 
+def cmd_doctor(args) -> int:
+    from quantmaster.doctor import run_doctor
+
+    report = run_doctor(deep=bool(args.deep))
+    _print_json(report)
+    if report["counts"]["high"]:
+        return 2
+    if args.strict and report["counts"]["warning"]:
+        return 1
+    return 0
+
+
 def cmd_automation(args) -> None:
     from quantmaster.automation.service import AutomationService
     from quantmaster.config import get_config
@@ -755,6 +767,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
     p.set_defaults(func=cmd_serve, open_browser=True)
 
+    p = sub.add_parser("doctor", help="检查运行边界、存储完整性和工程约束")
+    p.add_argument("--deep", action="store_true", help="逐库、逐文件并执行架构/API 深度检查")
+    p.add_argument("--strict", action="store_true", help="存在 warning 时也返回非零状态")
+    p.set_defaults(func=cmd_doctor)
+
     p = sub.add_parser("automation", help="Bot 推送与定时任务诊断/手动执行")
     asub = p.add_subparsers(dest="automation_cmd", required=True)
     asub.add_parser("doctor", help="检查依赖、Bot 账号、推送目标和任务状态")
@@ -1082,8 +1099,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(parsed_argv)
     args.verbose = verbose
     try:
-        args.func(args)
-        return 0
+        result = args.func(args)
+        return int(result or 0)
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("命令已停止")
         return 130

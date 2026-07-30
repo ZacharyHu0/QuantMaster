@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/static/stock-analysis.css">
 <link rel="stylesheet" href="/static/lab.css">
 <link rel="stylesheet" href="/static/trading.css">
+<link rel="stylesheet" href="/static/rotation.css">
 <link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
@@ -454,6 +455,7 @@
   <nav id="nav" aria-label="主要功能">
     <span class="nav-group" aria-label="观察">
       <button data-tab="market" class="active">市场</button>
+      <button data-tab="rotation">轮动</button>
       <button data-tab="news">资讯</button>
       <button data-tab="stock-analysis">个股分析</button>
     </span>
@@ -518,6 +520,34 @@
 
 <!-- ================= 市场 ================= -->
 <section class="tab active" id="tab-market">
+  <div class="rotation-local-nav" data-rotation-nav="market">
+    <div class="rotation-local-tabs" role="tablist" aria-label="市场视图">
+      <button type="button" role="tab" data-market-page="quotes" aria-selected="true" aria-controls="market-quotes-view">行情</button>
+      <button type="button" role="tab" data-market-page="temperature" aria-selected="false" aria-controls="market-temperature-view">市场温度</button>
+      <button type="button" role="tab" data-market-page="style" aria-selected="false" aria-controls="market-style-view">市场风格</button>
+    </div>
+    <div class="rotation-local-meta" data-rotation-meta="market">
+      <div class="rotation-meta-line"><span>行情与联动快照独立更新</span></div>
+      <button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
+    </div>
+  </div>
+  <section class="rotation-view" id="market-temperature-view" data-market-view="temperature" role="tabpanel" hidden>
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">MARKET BREADTH</span><h2>市场温度</h2>
+        <p>用全市场个股趋势分层计算扩散比例，同时展示证据缺口与样本覆盖；折线不是 K 线。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>QM_ROTATION_V1</dd></dl>
+    </div>
+    <div id="market-temperature-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
+  <section class="rotation-view" id="market-style-view" data-market-view="style" role="tabpanel" hidden>
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">COHORT STRUCTURE</span><h2>市场风格</h2>
+        <p>比较强势与低位样本的收益分布，以 0.25 个百分点死区过滤噪声，连续三日才确认状态。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="structure"><dt>快照</dt><dd>等待刷新</dd><dt>确认</dt><dd>连续 3 日</dd></dl>
+    </div>
+    <div id="market-style-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
+  <div id="market-quotes-view" data-market-view="quotes" role="tabpanel">
   <form class="controls" id="mkt-refresh">
     <button class="primary" type="submit">同步最新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
@@ -560,6 +590,59 @@
     </div>
     <div class="chart" id="kline"></div>
   </div>
+  </div>
+</section>
+
+<!-- ================= 轮动 ================= -->
+<section class="tab" id="tab-rotation">
+  <div class="rotation-local-nav" data-rotation-nav="rotation">
+    <div class="rotation-local-tabs" role="tablist" aria-label="板块联动视图">
+      <button type="button" role="tab" data-rotation-page="radar" aria-selected="true" aria-controls="rotation-radar-view">轮动雷达</button>
+      <button type="button" role="tab" data-rotation-page="industry" aria-selected="false" aria-controls="rotation-industry-view">行业周期</button>
+      <button type="button" role="tab" data-rotation-page="themes" aria-selected="false" aria-controls="rotation-themes-view">细分题材</button>
+      <button type="button" role="tab" data-rotation-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view">宽基资金</button>
+    </div>
+    <div class="rotation-local-meta" data-rotation-meta="rotation">
+      <div class="rotation-meta-line"><span>申万 2021 一级 · 东方财富概念 · ETF 份额</span></div>
+      <button class="rotation-refresh" type="button" data-rotation-refresh="all">刷新联动</button>
+    </div>
+  </div>
+
+  <section class="rotation-view" id="rotation-radar-view" data-rotation-view="radar" role="tabpanel">
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">ROTATION OVERVIEW</span><h2>轮动雷达</h2>
+        <p>把市场温度、行业生命周期、题材宽度和 ETF 资金放在同一快照语境中；各维度仍保留独立质量状态。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="overview"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>QM_ROTATION_V1</dd></dl>
+    </div>
+    <div id="rotation-radar-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
+
+  <section class="rotation-view" id="rotation-industry-view" data-rotation-view="industry" role="tabpanel" hidden>
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">SW2021 CYCLE MAP</span><h2>行业周期</h2>
+        <p>横轴为强势加速占比，纵轴为低位偏弱占比，气泡大小代表有效成分数；二级关注区不改写一级总量。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="industries"><dt>快照</dt><dd>等待刷新</dd><dt>口径</dt><dd>申万 2021</dd></dl>
+    </div>
+    <div id="rotation-industry-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
+
+  <section class="rotation-view" id="rotation-themes-view" data-rotation-view="themes" role="tabpanel" hidden>
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">CONCEPT LIFECYCLE</span><h2>细分题材</h2>
+        <p>自动目录按生命周期与市场宽度评分；默认展示 Top 16，也可搜索完整目录。分级仅表达数据状态，不代表交易优先级。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="themes"><dt>快照</dt><dd>等待刷新</dd><dt>来源</dt><dd>东方财富概念</dd></dl>
+    </div>
+    <div id="rotation-themes-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
+
+  <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etf-flows" role="tabpanel" hidden>
+    <div class="rotation-masthead">
+      <div><span class="rotation-eyebrow">ETF SHARE FLOW</span><h2>宽基资金</h2>
+        <p>资金估算采用“份额变化 × 当日净值”，净值缺失时才使用收盘价，并逐只标记降级来源。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待 09:05</dd><dt>公式</dt><dd>Δ份额 × 净值</dd></dl>
+    </div>
+    <div id="rotation-etf-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+  </section>
 </section>
 
 <!-- ================= 个股分析 ================= -->
@@ -1602,6 +1685,7 @@ function sourceForPath(path) {
     ['/api/v1/research/mining', '因子挖掘'], ['/api/v1/paper', '模拟交易'],
     ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '实盘账本'],
     ['/api/v1/research/stock-analysis', '个股分析'],
+    ['/api/v1/rotation', '板块联动'],
     ['/api/v1/portfolio', '我的标的'], ['/api/v1/settings', '设置中心'],
     ['/api/v1/automation', '自动任务'], ['/api/v1/lab', 'Quant Lab'],
   ];
@@ -1728,7 +1812,7 @@ async function api(path, opts = {}) {
       key:requestKey,
     });
   } else runtimeInfo.resolve(requestKey);
-  if (route !== '/api/v1/health') ingestResponseProblems(data, requestKey);
+  if (route !== '/api/v1/diagnostics') ingestResponseProblems(data, requestKey);
   return data;
 }
 function post(path, body) {
@@ -1987,7 +2071,7 @@ window.QuantMasterProblemDialog = operationProblemDialog;
 async function refreshBackendHealth() {
   if (document.visibilityState === 'hidden') return;
   try {
-    const data = await api('/api/v1/health', {cache:'no-store'});
+    const data = await api('/api/v1/diagnostics', {cache:'no-store'});
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
@@ -1995,7 +2079,7 @@ async function refreshBackendHealth() {
       title:'无法读取后台状态', message:error?.message || '本地服务未响应',
       action:'确认 QuantMaster 服务仍在运行，然后重试。',
     });
-    runtimeInfo.resolve('request:GET:/api/v1/health');
+    runtimeInfo.resolve('request:GET:/api/v1/diagnostics');
     runtimeInfo.sync('health', [problem]);
   }
 }
@@ -2309,7 +2393,7 @@ async function streamJson(path, opts, onProgress) {
   const embeddedDate = trigger.dataset.releaseDate;
   const hasEmbeddedSummary = embeddedVersion && !embeddedVersion.includes('%%QM_');
   if (hasEmbeddedSummary) renderSummary({version:embeddedVersion, release_date:embeddedDate});
-  else api('/api/v1/health').then(renderSummary).catch(() => {});
+  else api('/api/v1/release').then(renderSummary).catch(() => {});
 
   api('/api/v1/release').then(data => {
     renderSummary(data);
@@ -2344,6 +2428,8 @@ function tabControl(tab) {
 }
 
 function loadActiveTab(tab) {
+  if ((tab === 'market' || tab === 'rotation')
+      && typeof window.loadRotationFeature === 'function') window.loadRotationFeature(tab);
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
   if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
@@ -3713,6 +3799,7 @@ document.getElementById('cash-form').onsubmit = async e => {
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>
 <script src="/static/trading.js"></script>
+<script src="/static/rotation.js"></script>
 <script src="/static/help.js"></script>
 </body>
 </html>

@@ -345,6 +345,54 @@ def test_job_partial_completion_and_retry_are_auditable(tmp_path):
     assert any(item["type"] == "retry_of" for item in store.events(retried["id"]))
 
 
+def test_model_publication_outbox_is_immutable_leased_and_idempotent(
+    tmp_path, monkeypatch,
+):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    rows = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2024-01-02"]),
+        "symbol": ["600000.SH"],
+        "value": [0.1],
+    })
+    artifact_dir = tmp_path / "lab_artifacts" / "experiment-1"
+    publication = service._stage_model_publication(
+        version_id="version-1", experiment_id="experiment-1",
+        artifact_dir=artifact_dir, slug="model_one", prediction_rows=rows,
+    )
+    repeated = store.enqueue_publication(
+        "model_predictions", "version-1", "experiment-1", publication["payload"],
+    )
+    assert repeated["id"] == publication["id"]
+
+    calls = []
+
+    def publish(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [{"partition_key": "model:2024-01-02"}]
+
+    monkeypatch.setattr(
+        "quantmaster.research.engine.ResearchEngine.publish_model_predictions", publish,
+    )
+    completed = service.publish_model_outbox(publication["id"])
+    repeated = service.publish_model_outbox(publication["id"])
+
+    assert completed["status"] == "published"
+    assert repeated["status"] == "published"
+    assert completed["result"]["partitions"] == 1
+    assert len(calls) == 1
+    assert [event["type"] for event in store.publication_events(publication["id"])] == [
+        "pending", "publishing", "published",
+    ]
+
+    with pytest.raises(ValueError, match="不可改写"):
+        store.enqueue_publication(
+            "model_predictions", "version-1", "experiment-1",
+            {**publication["payload"], "rows": 999},
+        )
+
+
 def test_feature_engineering_and_ridge_training(tmp_path):
     _config(tmp_path)
     panel = _panel()
@@ -428,6 +476,10 @@ def test_learned_model_is_shadow_candidate_until_manual_champion_promotion(
         "quantmaster.lab.validation.validate_factor_values",
         lambda *args, **kwargs: json.loads(json.dumps(report)),
     )
+    monkeypatch.setattr(
+        "quantmaster.research.engine.ResearchEngine.publish_model_predictions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("lake offline")),
+    )
 
     result = service.train_model(
         model="ridge", universe="demo", start="2023-01-01", end="2024-01-01",
@@ -440,6 +492,11 @@ def test_learned_model_is_shadow_candidate_until_manual_champion_promotion(
     manifest = json.loads((tmp_path / result["manifest"]).read_text(encoding="utf-8"))
     assert manifest["fit_through"] < manifest["validation_start"]
     assert store.active_deployments() == []
+    assert result["warnings"][0]["code"] == "model_publication_pending"
+    assert store.experiment(result["experiment_id"])["status"] == "completed_with_warnings"
+    publication = store.publication(result["publication"]["id"])
+    assert publication["status"] == "pending"
+    assert "OSError: lake offline" in publication["last_error"]
 
     store.approve(version["id"], actor="tester")
     deployed = store.deploy(

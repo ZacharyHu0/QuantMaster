@@ -29,7 +29,9 @@ jobs:
           cargo check --manifest-path rust/quantmaster-kernel/Cargo.toml --locked
           cargo clippy --manifest-path rust/quantmaster-kernel/Cargo.toml --locked -- -D warnings
       - name: Lint
-        run: ruff check quantmaster tests tools/release_sync.py
+        run: |
+          ruff check quantmaster tests tools/release_sync.py tools/exception_policy.py
+          python tools/exception_policy.py
       - name: Test
         run: pytest
 
@@ -47,3 +49,48 @@ jobs:
           playwright install --with-deps chromium
       - name: Chromium management flows
         run: pytest -q tests/test_ui_management.py
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install quality and packaging dependencies
+        run: |
+          python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
+          pip install -e ".[dev,quality,rust]"
+          pip install pyinstaller
+          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked
+      - name: Controlled type check
+        run: mypy
+      - name: Branch coverage floor
+        run: |
+          coverage run -m pytest
+          coverage report
+          coverage xml
+      - name: Dependency audit
+        run: pip-audit --strict --local --vulnerability-service osv
+      - name: Build wheel and source distribution
+        run: python -m build
+      - name: Fresh wheel and CLI smoke test
+        shell: bash
+        run: |
+          python -m venv /tmp/quantmaster-wheel
+          /tmp/quantmaster-wheel/bin/pip install dist/*.whl
+          QM_DATA_ROOT="$(mktemp -d)" /tmp/quantmaster-wheel/bin/qm --help
+          QM_DATA_ROOT="$(mktemp -d)" /tmp/quantmaster-wheel/bin/qm doctor --deep
+      - name: PyInstaller smoke build
+        working-directory: packaging
+        shell: bash
+        run: |
+          pyinstaller quantmaster.spec --noconfirm
+          QM_DATA_ROOT="$(mktemp -d)" ./dist/QuantMaster --help
+          QM_DATA_ROOT="$(mktemp -d)" ./dist/QuantMaster doctor --deep
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml

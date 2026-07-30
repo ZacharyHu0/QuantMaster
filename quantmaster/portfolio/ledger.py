@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ class LedgerIntegrityError(ValueError):
 
 
 def _finite_number(
-    value: object,
+    value: Any,
     label: str,
     *,
     positive: bool = False,
@@ -78,6 +79,8 @@ class Position:
     shares: float
     avg_cost: float            # FIFO 剩余批次的加权成本
     realized_pnl: float        # 该标的累计已实现盈亏（含费用）
+    cost_basis_complete: bool = True
+    unknown_cost_shares: float = 0.0
 
 
 class Ledger:
@@ -118,9 +121,54 @@ class Ledger:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_cashflows_idempotency "
                 "ON cashflows(idempotency_key) WHERE idempotency_key IS NOT NULL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS ledger_anomalies ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,"
+                "reference_id INTEGER NOT NULL,symbol TEXT NOT NULL,trade_date TEXT NOT NULL,"
+                "details_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                "UNIQUE(kind,reference_id))"
+            )
+            self._migrate_historical_inventory_anomalies(conn)
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+    @staticmethod
+    def _migrate_historical_inventory_anomalies(connection: sqlite3.Connection) -> None:
+        """Classify legacy unmatched sells without inventing a zero cost basis."""
+        rows = connection.execute(
+            "SELECT id,date,symbol,side,shares FROM trades ORDER BY symbol,date,id"
+        ).fetchall()
+        balances: dict[str, float] = {}
+        for trade_id, trade_date, symbol, side, raw_shares in rows:
+            shares = _finite_number(raw_shares, "账本成交数量", positive=True)
+            key = str(symbol)
+            balance = balances.get(key, 0.0)
+            if str(side).lower() == "buy":
+                balances[key] = balance + shares
+                continue
+            if str(side).lower() != "sell":
+                continue
+            remaining = balance - shares
+            if remaining >= -1e-9:
+                balances[key] = max(0.0, remaining)
+                continue
+            unknown = abs(remaining)
+            connection.execute(
+                "INSERT OR IGNORE INTO ledger_anomalies "
+                "(kind,reference_id,symbol,trade_date,details_json) VALUES (?,?,?,?,?)",
+                (
+                    "unknown_cost_sell", int(trade_id), key, str(trade_date),
+                    json.dumps({
+                        "unknown_cost_shares": unknown,
+                        "accounting_effect": "excluded_from_realized_pnl",
+                        "migration": "legacy_unmatched_sell_v1",
+                    }, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
+                ),
+            )
+            # The unmatched quantity represents pre-ledger inventory.  It is consumed by
+            # this historical sale and must not make later, known purchases look negative.
+            balances[key] = 0.0
 
     # ---- 写入 ----
 
@@ -138,6 +186,11 @@ class Ledger:
             f"WHERE symbol IN ({placeholders})",
             symbols,
         ).fetchall()
+        legacy_anomaly_ids = {
+            int(row[0]) for row in connection.execute(
+                "SELECT reference_id FROM ledger_anomalies WHERE kind='unknown_cost_sell'"
+            ).fetchall()
+        }
         events: dict[str, list[tuple[str, int, int, str, float]]] = {
             symbol: [] for symbol in symbols
         }
@@ -153,9 +206,12 @@ class Ledger:
             ))
         for symbol, values in events.items():
             balance = 0.0
-            for trade_date, _source, _order, side, shares in sorted(values):
+            for trade_date, source, order, side, shares in sorted(values):
                 balance += shares if side == "buy" else -shares
                 if balance < -1e-9:
+                    if source == 0 and order in legacy_anomaly_ids:
+                        balance = 0.0
+                        continue
                     raise LedgerIntegrityError(
                         f"{symbol} 在 {trade_date} 卖出超过可用持仓 "
                         f"{abs(balance):g} 股；请先补录买入或修正成交数量"
@@ -185,6 +241,9 @@ class Ledger:
         }
 
     def add_trade(self, trade: TradeRecord, idempotency_key: str | None = None) -> bool:
+        from quantmaster.runtime.maintenance import maintenance_barrier
+
+        maintenance_barrier.require_writable()
         value = self._normalize_trade(trade)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -203,6 +262,9 @@ class Ledger:
 
     def add_cashflow(self, date: str, amount: float, kind: str = "deposit", note: str = "",
                      idempotency_key: str | None = None) -> bool:
+        from quantmaster.runtime.maintenance import maintenance_barrier
+
+        maintenance_barrier.require_writable()
         if kind not in ("deposit", "withdraw", "dividend"):
             raise ValueError(f"kind 必须是 deposit/withdraw/dividend: {kind}")
         normalized_amount = _finite_number(amount, "amount")
@@ -252,6 +314,10 @@ class Ledger:
         """在单个 SQLite 事务中写入最终记录；任一失败会整体回滚。"""
         import uuid
 
+        from quantmaster.runtime.maintenance import maintenance_barrier
+
+        maintenance_barrier.require_writable()
+
         if not records:
             return 0
         normalized = [self._normalize_trade(record) for record in records]
@@ -286,6 +352,21 @@ class Ledger:
             return pd.read_sql_query(
                 "SELECT * FROM cashflows ORDER BY date, id", conn)
 
+    def anomalies(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id,kind,reference_id,symbol,trade_date,details_json,created_at "
+                "FROM ledger_anomalies ORDER BY id"
+            ).fetchall()
+        return [
+            {
+                "id": row[0], "kind": row[1], "reference_id": row[2],
+                "symbol": row[3], "trade_date": row[4],
+                "details": json.loads(row[5]), "created_at": row[6],
+            }
+            for row in rows
+        ]
+
     # ---- 核算 ----
 
     def positions(self) -> list[Position]:
@@ -295,6 +376,7 @@ class Ledger:
         for symbol, group in trades.groupby("symbol"):
             lots: list[list[float]] = []   # [shares, price_with_fee_per_share]
             realized = 0.0
+            unknown_cost_shares = 0.0
             for _, t in group.iterrows():
                 if t["side"] == "buy":
                     per_share_cost = t["price"] + t["fee"] / t["shares"]
@@ -311,14 +393,16 @@ class Ledger:
                         if lot[0] <= 1e-9:
                             lots.pop(0)
                     if remaining > 1e-9:
-                        raise LedgerIntegrityError(
-                            f"{symbol} 的历史成交卖出超过持仓 {remaining:g} 股；"
-                            "拒绝按零成本虚增已实现收益"
-                        )
+                        # Legacy broker imports may start after the position was opened.
+                        # Proceeds for that unmatched quantity are intentionally excluded
+                        # until the missing acquisition cost is supplied.
+                        unknown_cost_shares += remaining
             total_shares = sum(lot[0] for lot in lots)
             avg_cost = (
                 sum(lot[0] * lot[1] for lot in lots) / total_shares if total_shares > 0 else 0.0
             )
             result.append(Position(symbol=str(symbol), shares=total_shares,
-                                   avg_cost=avg_cost, realized_pnl=realized))
+                                   avg_cost=avg_cost, realized_pnl=realized,
+                                   cost_basis_complete=unknown_cost_shares <= 1e-9,
+                                   unknown_cost_shares=unknown_cost_shares))
         return result

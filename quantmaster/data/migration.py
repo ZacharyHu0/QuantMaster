@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from quantmaster.config import get_config
+from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
 from quantmaster.settings import ConfigManager
 
 
@@ -35,10 +36,11 @@ class MigrationTask:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     finished_at: str | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    maintenance_lease: MaintenanceLease | None = field(default=None, repr=False)
 
     def public(self) -> dict:
         return {item.name: getattr(self, item.name) for item in fields(self)
-                if item.name != "cancel_event"}
+                if item.name not in {"cancel_event", "maintenance_lease"}}
 
 
 def _resolved(path: str | Path) -> Path:
@@ -128,13 +130,20 @@ class DataMigrationManager:
         source = _resolved(get_config().data.root)
         target_path = _resolved(target)
         total, _ = _preflight(source, target_path, mode)
-        with self._lock:
-            if self.active:
-                raise MigrationError("已有数据迁移任务正在进行")
-            task = MigrationTask(id=uuid.uuid4().hex, source=str(source), target=str(target_path),
-                                 mode=mode, total_bytes=total)
-            self._tasks[task.id] = task
-            self._active_id = task.id
+        lease = maintenance_barrier.enter("data_root_migration", timeout=30.0)
+        try:
+            with self._lock:
+                if self.active:
+                    raise MigrationError("已有数据迁移任务正在进行")
+                task = MigrationTask(
+                    id=uuid.uuid4().hex, source=str(source), target=str(target_path),
+                    mode=mode, total_bytes=total, maintenance_lease=lease,
+                )
+                self._tasks[task.id] = task
+                self._active_id = task.id
+        except Exception:
+            maintenance_barrier.exit(lease)
+            raise
         if mode == "switch":
             # 仅切换仍走任务状态机，以便前端给出一致反馈。
             worker = threading.Thread(target=self._switch_only, args=(task,), daemon=True)
@@ -176,6 +185,16 @@ class DataMigrationManager:
                 task.phase = "迁移失败，原目录未变"
             if self._active_id == task.id:
                 self._active_id = None
+            lease, task.maintenance_lease = task.maintenance_lease, None
+        if lease is not None:
+            try:
+                maintenance_barrier.exit(lease)
+            except Exception as exc:
+                with self._lock:
+                    task.error = "; ".join(filter(None, (task.error, str(exc))))
+                    if task.status == "completed":
+                        task.status = "failed"
+                        task.phase = "迁移已完成，但后台组件恢复失败"
 
     def _switch_only(self, task: MigrationTask) -> None:
         try:

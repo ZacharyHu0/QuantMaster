@@ -23,15 +23,13 @@ client.headers["X-CSRF-Token"] = _csrf
 
 class TestBasics:
     def test_health(self):
-        resp = client.get("/api/v1/health")
+        resp = client.get("/api/v1/diagnostics")
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
-        assert resp.json()["version"] == __version__
-        assert resp.json()["release_date"] == RELEASE_DATE
         assert resp.json()["level"] in {"ok", "warning", "error"}
         assert resp.json()["checked_at"]
         assert isinstance(resp.json()["issues"], list)
         assert len(resp.headers["X-Request-ID"]) == 12
+        assert client.get("/api/v1/health").status_code == 404
 
     def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
         monkeypatch.setattr(

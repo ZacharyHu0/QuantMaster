@@ -88,6 +88,38 @@ def collect_health_report() -> dict[str, Any]:
         issues.append(_component_failure("数据刷新", exc))
 
     try:
+        from quantmaster.data.repair import get_data_repair_manager
+
+        repairs = get_data_repair_manager().list(limit=200)
+        failed_repairs = [item for item in repairs if item.get("status") == "failed"]
+        pending_repairs = [
+            item for item in repairs
+            if item.get("status") in {"queued", "running", "cancelling"}
+        ]
+        if failed_repairs:
+            issues.append(make_problem(
+                "data_repair_failed",
+                severity="warning",
+                source="数据修复",
+                title="部分数据修复已耗尽自动重试",
+                message=f"{len(failed_repairs)} 个可重建数据目标仍未恢复。",
+                action="在统一任务列表选择 repairs 查看错误并人工重试。",
+                problem_id="data-repair:failed",
+            ))
+        elif pending_repairs:
+            issues.append(make_problem(
+                "data_repair_pending",
+                severity="info",
+                source="数据修复",
+                title="数据完整性修复正在排队",
+                message=f"{len(pending_repairs)} 个目标将按来源额度与退避策略修复。",
+                action="系统会保留隔离原件并自动校验替换结果。",
+                problem_id="data-repair:pending",
+            ))
+    except Exception as exc:
+        issues.append(_component_failure("数据修复", exc))
+
+    try:
         from quantmaster.ai.news_sources import NewsSourceStore
 
         for source in NewsSourceStore().list(enabled=True):
@@ -165,6 +197,17 @@ def collect_health_report() -> dict[str, Any]:
                     message=_clean(latest.get("error")) or "研究任务未完成",
                     action="打开 Quant Lab 查看任务事件并重新运行。",
                     problem_id=f"lab-job:{latest.get('id', 'latest')}",
+                ))
+            publications = LabStore().pending_publications(100, due_only=False)
+            if publications:
+                issues.append(make_problem(
+                    "lab_publication_pending",
+                    severity="warning",
+                    source="Quant Lab",
+                    title="模型训练已完成，数据发布仍在重试",
+                    message=f"{len(publications)} 个模型预测 outbox 尚未发布完成。",
+                    action="Lab worker 会幂等重试；训练版本与验证证据不受影响。",
+                    problem_id="lab:publication-pending",
                 ))
             elif latest and latest.get("status") == "completed_with_warnings":
                 warnings = (latest.get("result") or {}).get("warnings") or []

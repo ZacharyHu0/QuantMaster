@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,19 @@ class LabStore:
                     error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL, UNIQUE(run_id,candidate_key),
                     FOREIGN KEY(run_id) REFERENCES mining_runs(id));
+                CREATE TABLE IF NOT EXISTS lab_publications (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, version_id TEXT NOT NULL,
+                    experiment_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, status TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0, next_run REAL NOT NULL DEFAULT 0,
+                    owner TEXT NOT NULL DEFAULT '', lease_expires REAL NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(kind,version_id));
+                CREATE TABLE IF NOT EXISTS lab_publication_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, publication_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(publication_id) REFERENCES lab_publications(id));
                 CREATE INDEX IF NOT EXISTS idx_factor_versions_status
                     ON factor_versions(status,updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lab_jobs_status
@@ -167,6 +181,8 @@ class LabStore:
                     ON mining_runs(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_mining_candidates_run
                     ON mining_candidates(run_id,pareto_rank,created_at);
+                CREATE INDEX IF NOT EXISTS idx_lab_publications_due
+                    ON lab_publications(status,next_run,created_at);
             """)
             deployment_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(deployments)")
@@ -637,6 +653,170 @@ class LabStore:
                 (max(1, min(limit, 500)),),
             ).fetchall()
         return [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
+
+    @staticmethod
+    def _publication(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        value = dict(row)
+        value["payload"] = json.loads(value.pop("payload_json"))
+        value["result"] = json.loads(value.pop("result_json"))
+        return value
+
+    def enqueue_publication(
+        self,
+        kind: str,
+        version_id: str,
+        experiment_id: str,
+        payload: dict,
+    ) -> dict:
+        """Persist an immutable publish request before touching the target data lake."""
+        payload_json = canonical_json(payload)
+        payload_hash = content_hash(payload)
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM lab_publications WHERE kind=? AND version_id=?",
+                (kind, version_id),
+            ).fetchone()
+            if row is not None:
+                if row["payload_hash"] != payload_hash:
+                    raise ValueError("同一模型版本的发布规格不可改写")
+                return self._publication(row) or {}
+            publication_id = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO lab_publications "
+                "(id,kind,version_id,experiment_id,payload_hash,payload_json,status,"
+                "next_run,created_at,updated_at) VALUES (?,?,?,?,?,?,'pending',?,?,?)",
+                (
+                    publication_id, kind, version_id, experiment_id, payload_hash,
+                    payload_json, time.time(), now, now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO lab_publication_events(publication_id,event_json,created_at) "
+                "VALUES (?,?,?)",
+                (publication_id, canonical_json({"type": "pending"}), now),
+            )
+            row = conn.execute(
+                "SELECT * FROM lab_publications WHERE id=?", (publication_id,),
+            ).fetchone()
+        return self._publication(row) or {}
+
+    def publication(self, publication_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM lab_publications WHERE id=?", (publication_id,),
+            ).fetchone()
+        return self._publication(row)
+
+    def pending_publications(
+        self, limit: int = 100, *, due_only: bool = True,
+    ) -> list[dict]:
+        now = time.time()
+        where = (
+            "((status='pending' AND next_run<=?) OR "
+            "(status='publishing' AND lease_expires<=?))"
+            if due_only else "status IN ('pending','publishing')"
+        )
+        params: list[Any] = [now, now] if due_only else []
+        params.append(max(1, min(int(limit), 1000)))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM lab_publications WHERE {where} "
+                "ORDER BY created_at LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._publication(row) or {} for row in rows]
+
+    def claim_publication(
+        self, publication_id: str, owner: str, *, lease_seconds: float = 120.0,
+    ) -> dict | None:
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE lab_publications SET status='publishing',attempt=attempt+1,owner=?,"
+                "lease_expires=?,updated_at=? WHERE id=? AND "
+                "((status='pending' AND next_run<=?) OR "
+                "(status='publishing' AND lease_expires<=?))",
+                (owner, now + max(10.0, lease_seconds), utc_now(), publication_id, now, now),
+            ).rowcount
+            if not changed:
+                return None
+            row = conn.execute(
+                "SELECT * FROM lab_publications WHERE id=?", (publication_id,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO lab_publication_events(publication_id,event_json,created_at) "
+                "VALUES (?,?,?)",
+                (publication_id, canonical_json({
+                    "type": "publishing", "owner": owner, "attempt": int(row["attempt"]),
+                }), utc_now()),
+            )
+        return self._publication(row)
+
+    def complete_publication(
+        self, publication_id: str, owner: str, result: dict,
+    ) -> bool:
+        now = utc_now()
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE lab_publications SET status='published',owner='',lease_expires=0,"
+                "last_error='',result_json=?,updated_at=? "
+                "WHERE id=? AND owner=? AND status='publishing'",
+                (canonical_json(result), now, publication_id, owner),
+            ).rowcount
+            if changed:
+                conn.execute(
+                    "INSERT INTO lab_publication_events(publication_id,event_json,created_at) "
+                    "VALUES (?,?,?)",
+                    (publication_id, canonical_json({"type": "published", "result": result}), now),
+                )
+        return bool(changed)
+
+    def fail_publication(
+        self, publication_id: str, owner: str, error: str,
+    ) -> bool:
+        now_epoch = time.time()
+        now = utc_now()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT attempt FROM lab_publications WHERE id=? AND owner=? "
+                "AND status='publishing'",
+                (publication_id, owner),
+            ).fetchone()
+            if row is None:
+                return False
+            retry_at = now_epoch + min(60.0 * (2 ** max(0, int(row["attempt"]) - 1)), 86400.0)
+            conn.execute(
+                "UPDATE lab_publications SET status='pending',owner='',lease_expires=0,"
+                "last_error=?,next_run=?,updated_at=? WHERE id=? AND owner=?",
+                (error[:2000], retry_at, now, publication_id, owner),
+            )
+            conn.execute(
+                "INSERT INTO lab_publication_events(publication_id,event_json,created_at) "
+                "VALUES (?,?,?)",
+                (publication_id, canonical_json({
+                    "type": "publish_failed", "error": error[:1000],
+                    "retry_at": retry_at,
+                }), now),
+            )
+        return True
+
+    def publication_events(self, publication_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT seq,event_json,created_at FROM lab_publication_events "
+                "WHERE publication_id=? ORDER BY seq",
+                (publication_id,),
+            ).fetchall()
+        return [
+            {"seq": row["seq"], "created_at": row["created_at"],
+             **json.loads(row["event_json"])}
+            for row in rows
+        ]
 
     def create_study(self, config: dict, *, storage_url: str = "") -> dict:
         study_id, now = uuid.uuid4().hex, utc_now()

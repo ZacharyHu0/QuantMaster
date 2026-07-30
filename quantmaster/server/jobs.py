@@ -12,10 +12,19 @@ from quantmaster.backtest.workbench import get_backtest_worker
 from quantmaster.data.maintenance import data_refresh_manager
 from quantmaster.lab.store import LabStore
 from quantmaster.research.jobs import get_research_job_manager
+from quantmaster.server.rotation import (
+    cancel_rotation_job,
+    get_rotation_job,
+    list_rotation_jobs,
+    retry_rotation_job,
+    rotation_job_events,
+)
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
-JobDomain = Literal["research", "data", "lab", "backtests"]
-_DOMAINS: tuple[JobDomain, ...] = ("research", "data", "lab", "backtests")
+JobDomain = Literal["research", "data", "lab", "backtests", "rotation", "repairs"]
+_DOMAINS: tuple[JobDomain, ...] = (
+    "research", "data", "lab", "backtests", "repairs", "rotation",
+)
 _ACTIVE = frozenset({"queued", "running", "cancelling", "paused", "interrupted"})
 _RETRYABLE = frozenset({
     "failed", "cancelled", "interrupted", "completed", "completed_with_errors",
@@ -57,11 +66,17 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "repairs":
+        from quantmaster.data.repair import get_data_repair_manager
+
+        return get_data_repair_manager().get(job_id)
     if domain == "research":
         manager = get_research_job_manager()
         return manager.public(manager.get(job_id))
     if domain == "data":
         return data_refresh_manager.get(job_id)
+    if domain == "rotation":
+        return get_rotation_job(job_id)
     if domain == "lab":
         value = LabStore().job(job_id)
     else:
@@ -72,43 +87,67 @@ def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
 
 
 def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
+    if domain == "repairs":
+        from quantmaster.data.repair import get_data_repair_manager
+
+        return get_data_repair_manager().list(limit=limit)
     if domain == "research":
         manager = get_research_job_manager()
         return [manager.public(value) for value in manager.list(limit)]
     if domain == "data":
         return data_refresh_manager.list(limit)
+    if domain == "rotation":
+        return list_rotation_jobs(limit)
     if domain == "lab":
         return LabStore().jobs(limit)
     return get_backtest_worker().service.store.list(limit)
 
 
 def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    if domain == "repairs":
+        from quantmaster.data.repair import get_data_repair_manager
+
+        return get_data_repair_manager().events(job_id, after)[:limit]
     _get(domain, job_id)
     if domain == "research":
         return get_research_job_manager().catalog.job_events(job_id, after, limit)
     if domain == "data":
         return data_refresh_manager.events(job_id, after, limit)
+    if domain == "rotation":
+        return rotation_job_events(job_id, after, limit)
     if domain == "lab":
         return LabStore().events(job_id, after, limit)
     return get_backtest_worker().service.store.events(job_id, after, limit)
 
 
 def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "repairs":
+        from quantmaster.data.repair import get_data_repair_manager
+
+        return get_data_repair_manager().cancel(job_id)
     if domain == "research":
         return get_research_job_manager().public(get_research_job_manager().cancel(job_id))
     if domain == "data":
         return data_refresh_manager.cancel(job_id)
+    if domain == "rotation":
+        return cancel_rotation_job(job_id)
     if domain == "lab":
         return LabStore().request_cancel(job_id)
     return get_backtest_worker().service.store.cancel(job_id)
 
 
 def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "repairs":
+        from quantmaster.data.repair import get_data_repair_manager
+
+        return get_data_repair_manager().retry(job_id)
     if domain == "research":
         manager = get_research_job_manager()
         return manager.public(manager.resume(job_id))
     if domain == "data":
         return data_refresh_manager.resume(job_id)
+    if domain == "rotation":
+        return retry_rotation_job(job_id)
     if domain == "lab":
         return LabStore().retry_job(job_id)
 

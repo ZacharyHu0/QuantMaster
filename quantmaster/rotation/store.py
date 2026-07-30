@@ -1,0 +1,538 @@
+"""Versioned rotation cache, authoritative preferences and durable jobs."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import sqlite3
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from quantmaster.config import get_config
+from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
+
+ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
+TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
+logger = logging.getLogger(__name__)
+
+
+class RotationIntegrityError(RuntimeError):
+    """A rebuildable rotation artifact exists but failed integrity validation."""
+
+
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class RotationStore:
+    """Keep rebuildable analytics separate from user-selected L2 preferences."""
+
+    def __init__(self, root: str | Path | None = None):
+        base = Path(root) if root is not None else get_config().data_root / "rotation"
+        self.root = base.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.cache_path = self.root / "cache.sqlite"
+        self.preferences_path = self.root / "preferences.sqlite"
+        self.etf_path = self.root / "etf_observations.parquet"
+        self._initialize()
+
+    def _cache(self) -> sqlite3.Connection:
+        return connect_sqlite(self.cache_path, policy="cache", row_factory=True)
+
+    def _preferences(self) -> sqlite3.Connection:
+        return connect_sqlite(self.preferences_path, policy="authoritative", row_factory=True)
+
+    @staticmethod
+    def _cache_v1(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE snapshots (
+                kind TEXT PRIMARY KEY,
+                snapshot_id TEXT NOT NULL,
+                as_of TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL
+            );
+            CREATE TABLE taxonomy_nodes (
+                code TEXT PRIMARY KEY,
+                level TEXT NOT NULL,
+                parent_code TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL,
+                observed_at REAL NOT NULL
+            );
+            CREATE INDEX idx_rotation_taxonomy_level
+                ON taxonomy_nodes(level, parent_code, code);
+            CREATE TABLE theme_catalog (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                observed_at REAL NOT NULL
+            );
+            CREATE INDEX idx_rotation_theme_name ON theme_catalog(name, code);
+            CREATE TABLE runtime_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+
+    @staticmethod
+    def _preferences_v1(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE preferences ("
+            "id INTEGER PRIMARY KEY CHECK(id=1),payload_json TEXT NOT NULL,updated_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO preferences(id,payload_json,updated_at) VALUES(1,?,?)",
+            (strict_json_dumps({"l2_codes": [], "theme_limit": 16}), time.time()),
+        )
+
+    def _initialize(self) -> None:
+        with self._cache() as connection:
+            migrate_schema(connection, ((1, self._cache_v1),))
+        with self._preferences() as connection:
+            migrate_schema(connection, ((1, self._preferences_v1),))
+
+    def save_snapshots(self, payloads: dict[str, dict[str, Any]]) -> None:
+        """Commit a coherent set of computed views in one cache transaction."""
+        rows = []
+        for kind, payload in payloads.items():
+            text = strict_json_dumps(payload)
+            meta = payload.get("meta") or {}
+            rows.append((
+                str(kind), str(meta.get("snapshot_id") or ""), str(meta.get("as_of") or ""),
+                str(meta.get("generated_at") or ""), text, _hash_text(text),
+            ))
+        with self._cache() as connection:
+            connection.executemany(
+                "INSERT INTO snapshots(kind,snapshot_id,as_of,generated_at,payload_json,"
+                "content_sha256) VALUES(?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET "
+                "snapshot_id=excluded.snapshot_id,as_of=excluded.as_of,"
+                "generated_at=excluded.generated_at,payload_json=excluded.payload_json,"
+                "content_sha256=excluded.content_sha256",
+                rows,
+            )
+
+    def snapshot(self, kind: str) -> dict[str, Any] | None:
+        with self._cache() as connection:
+            row = connection.execute(
+                "SELECT payload_json,content_sha256 FROM snapshots WHERE kind=?", (kind,),
+            ).fetchone()
+        if row is None:
+            return None
+        text = str(row["payload_json"])
+        if _hash_text(text) != str(row["content_sha256"]):
+            raise RotationIntegrityError(f"{kind} 快照内容哈希不匹配")
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RotationIntegrityError(f"{kind} 快照不是有效 JSON") from exc
+        if not isinstance(value, dict):
+            raise RotationIntegrityError(f"{kind} 快照根节点不是对象")
+        return value
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        with self._cache() as connection:
+            rows = connection.execute(
+                "SELECT kind,snapshot_id,as_of,generated_at FROM snapshots ORDER BY kind"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def preferences(self) -> dict[str, Any]:
+        with self._preferences() as connection:
+            row = connection.execute(
+                "SELECT payload_json,updated_at FROM preferences WHERE id=1"
+            ).fetchone()
+        value = json.loads(str(row["payload_json"])) if row else {}
+        return {
+            "l2_codes": [str(code) for code in value.get("l2_codes") or []],
+            "theme_limit": int(value.get("theme_limit") or 16),
+            "updated_at": float(row["updated_at"]) if row else 0.0,
+        }
+
+    def save_preferences(self, value: dict[str, Any]) -> dict[str, Any]:
+        l2_codes = list(dict.fromkeys(
+            str(code).strip().upper() for code in value.get("l2_codes") or [] if str(code).strip()
+        ))
+        if len(l2_codes) > 30:
+            raise ValueError("最多关注 30 个申万二级行业")
+        theme_limit = int(value.get("theme_limit") or 16)
+        if not 8 <= theme_limit <= 32:
+            raise ValueError("题材首屏数量需在 8–32 之间")
+        payload = {"l2_codes": l2_codes, "theme_limit": theme_limit}
+        now = time.time()
+        with self._preferences() as connection:
+            connection.execute(
+                "UPDATE preferences SET payload_json=?,updated_at=? WHERE id=1",
+                (strict_json_dumps(payload), now),
+            )
+        return {**payload, "updated_at": now}
+
+    def replace_taxonomy_nodes(self, nodes: list[dict[str, Any]]) -> None:
+        rows = []
+        for node in nodes:
+            code = str(node.get("code") or "").strip().upper()
+            level = str(node.get("level") or "").strip().upper()
+            if not code or level not in {"L1", "L2"}:
+                continue
+            rows.append((
+                code, level, str(node.get("parent_code") or "").strip().upper(),
+                strict_json_dumps(node), time.time(),
+            ))
+        with self._cache() as connection:
+            connection.execute("DELETE FROM taxonomy_nodes")
+            connection.executemany(
+                "INSERT INTO taxonomy_nodes(code,level,parent_code,payload_json,observed_at) "
+                "VALUES(?,?,?,?,?)",
+                rows,
+            )
+
+    def taxonomy_nodes(self, level: str | None = None) -> list[dict[str, Any]]:
+        with self._cache() as connection:
+            if level:
+                rows = connection.execute(
+                    "SELECT payload_json FROM taxonomy_nodes WHERE level=? ORDER BY code",
+                    (str(level).upper(),),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload_json FROM taxonomy_nodes ORDER BY level,code"
+                ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                item = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                result.append(item)
+        return result
+
+    def replace_themes(self, themes: list[dict[str, Any]]) -> None:
+        rows = []
+        observed_at = time.time()
+        for theme in themes:
+            code = str(theme.get("code") or "").strip().upper()
+            name = str(theme.get("name") or "").strip()
+            if code and name:
+                rows.append((code, name, strict_json_dumps(theme), observed_at))
+        with self._cache() as connection:
+            connection.execute("DELETE FROM theme_catalog")
+            connection.executemany(
+                "INSERT INTO theme_catalog(code,name,payload_json,observed_at) VALUES(?,?,?,?)",
+                rows,
+            )
+
+    def themes(self) -> list[dict[str, Any]]:
+        with self._cache() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM theme_catalog ORDER BY name,code"
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                item = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                result.append(item)
+        return result
+
+    def runtime_state(self, key: str) -> str:
+        with self._cache() as connection:
+            row = connection.execute(
+                "SELECT value FROM runtime_state WHERE key=?", (str(key),),
+            ).fetchone()
+        return str(row["value"]) if row else ""
+
+    def set_runtime_state(self, key: str, value: str) -> None:
+        with self._cache() as connection:
+            connection.execute(
+                "INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                "updated_at=excluded.updated_at",
+                (str(key), str(value), time.time()),
+            )
+
+    def save_etf_observations(self, frame: pd.DataFrame) -> None:
+        if frame is None or frame.empty:
+            return
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".etf_observations.", suffix=".parquet.tmp", dir=self.root,
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        try:
+            frame.to_parquet(temp, index=False)
+            with temp.open("rb+") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temp, self.etf_path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def etf_observations(self) -> pd.DataFrame:
+        if not self.etf_path.is_file():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(self.etf_path)
+        except (OSError, ValueError) as exc:
+            logger.error("ETF 观察文件完整性校验失败: %s", self.etf_path, exc_info=True)
+            raise RotationIntegrityError("ETF 观察文件损坏，拒绝按空数据继续计算") from exc
+
+
+class RotationJobStore:
+    """Durable immutable job specs with lease-based claims and an event stream."""
+
+    def __init__(self, path: str | Path | None = None):
+        self.path = (
+            Path(path) if path is not None
+            else get_config().data_root / "rotation" / "jobs.sqlite"
+        ).resolve()
+        with self._connect() as connection:
+            migrate_schema(connection, ((1, self._v1),))
+
+    def _connect(self) -> sqlite3.Connection:
+        return connect_sqlite(self.path, policy="authoritative", row_factory=True)
+
+    @staticmethod
+    def _v1(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                spec_json TEXT NOT NULL,
+                logical_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                attempt INTEGER NOT NULL DEFAULT 1,
+                worker_owner TEXT NOT NULL DEFAULT '',
+                lease_expires_at REAL NOT NULL DEFAULT 0,
+                heartbeat_at REAL NOT NULL DEFAULT 0,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX idx_rotation_jobs_claim
+                ON jobs(status,lease_expires_at,created_at);
+            CREATE INDEX idx_rotation_jobs_hash
+                ON jobs(logical_hash,status,created_at);
+            CREATE TABLE events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                event_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX idx_rotation_job_events ON events(job_id,seq);
+            """
+        )
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        value = dict(row)
+        value["cancel_requested"] = bool(value["cancel_requested"])
+        try:
+            value["spec"] = json.loads(value.pop("spec_json"))
+        except json.JSONDecodeError:
+            value["spec"] = {}
+        result_text = value.pop("result_json")
+        try:
+            value["result"] = json.loads(result_text) if result_text else None
+        except json.JSONDecodeError:
+            value["result"] = None
+        return value
+
+    def _event(self, connection: sqlite3.Connection, job_id: str, value: dict[str, Any]) -> None:
+        connection.execute(
+            "INSERT INTO events(job_id,event_json,created_at) VALUES(?,?,?)",
+            (job_id, strict_json_dumps(value), time.time()),
+        )
+
+    def create(self, spec: dict[str, Any]) -> dict[str, Any]:
+        text = strict_json_dumps(spec, sort_keys=True)
+        logical_hash = _hash_text(text)
+        now = time.time()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM jobs WHERE logical_hash=? AND status IN ('queued','running',"
+                "'cancelling') ORDER BY created_at DESC LIMIT 1",
+                (logical_hash,),
+            ).fetchone()
+            if existing is not None:
+                return self._row(existing) or {}
+            job_id = uuid.uuid4().hex
+            connection.execute(
+                "INSERT INTO jobs(id,spec_json,logical_hash,status,progress,phase,detail,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (job_id, text, logical_hash, "queued", 0, "等待执行", "", now, now),
+            )
+            self._event(connection, job_id, {"type": "queued", "phase": "等待执行"})
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return self._row(row) or {}
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return self._row(row)
+
+    def list(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 200)),),
+            ).fetchall()
+        return [value for row in rows if (value := self._row(row)) is not None]
+
+    def claim(self, owner: str, lease_seconds: float = 45.0) -> dict[str, Any] | None:
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE status='queued' OR "
+                "(status IN ('running','cancelling') AND lease_expires_at<?) "
+                "ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,created_at LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            attempt = int(row["attempt"]) + (0 if row["status"] == "queued" else 1)
+            status = "cancelling" if bool(row["cancel_requested"]) else "running"
+            connection.execute(
+                "UPDATE jobs SET status=?,attempt=?,worker_owner=?,lease_expires_at=?,"
+                "heartbeat_at=?,updated_at=? WHERE id=?",
+                (status, attempt, owner, now + lease_seconds, now, now, row["id"]),
+            )
+            self._event(connection, str(row["id"]), {
+                "type": "claimed", "owner": owner, "attempt": attempt,
+            })
+            connection.commit()
+        return self.get(str(row["id"]))
+
+    def heartbeat(self, job_id: str, owner: str, lease_seconds: float = 45.0) -> bool:
+        now = time.time()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET heartbeat_at=?,lease_expires_at=?,updated_at=? "
+                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
+                (now, now + lease_seconds, now, job_id, owner),
+            )
+        return cursor.rowcount == 1
+
+    def progress(
+        self, job_id: str, owner: str, progress: int, phase: str, detail: str = "",
+    ) -> None:
+        now = time.time()
+        value = max(0, min(99, int(progress)))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET progress=?,phase=?,detail=?,heartbeat_at=?,"
+                "lease_expires_at=?,updated_at=? WHERE id=? AND worker_owner=? "
+                "AND status IN ('running','cancelling')",
+                (value, str(phase)[:200], str(detail)[:1000], now, now + 45, now, job_id, owner),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("任务租约已失效")
+            self._event(connection, job_id, {
+                "type": "progress", "progress": value, "phase": phase, "detail": detail,
+            })
+
+    def is_cancel_requested(self, job_id: str, owner: str = "") -> bool:
+        with self._connect() as connection:
+            if owner:
+                row = connection.execute(
+                    "SELECT cancel_requested FROM jobs WHERE id=? AND worker_owner=?",
+                    (job_id, owner),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT cancel_requested FROM jobs WHERE id=?", (job_id,),
+                ).fetchone()
+        return bool(row and row["cancel_requested"])
+
+    def complete(self, job_id: str, owner: str, result: dict[str, Any]) -> None:
+        now = time.time()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status='completed',progress=100,phase='分析已更新',"
+                "detail='',result_json=?,error='',lease_expires_at=0,updated_at=? "
+                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
+                (strict_json_dumps(result), now, job_id, owner),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("任务租约已失效")
+            self._event(connection, job_id, {"type": "completed", "result": result})
+
+    def fail(self, job_id: str, owner: str, error: str, *, cancelled: bool = False) -> None:
+        now = time.time()
+        status = "cancelled" if cancelled else "failed"
+        phase = "已取消" if cancelled else "执行失败"
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status=?,phase=?,detail=?,error=?,lease_expires_at=0,"
+                "updated_at=? WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
+                (status, phase, str(error)[:1000], str(error)[:1000], now, job_id, owner),
+            )
+            if cursor.rowcount:
+                self._event(connection, job_id, {"type": status, "error": str(error)[:1000]})
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            status = str(row["status"])
+            if status in TERMINAL_JOB_STATUSES:
+                return self.get(job_id) or {}
+            next_status = "cancelled" if status == "queued" else "cancelling"
+            connection.execute(
+                "UPDATE jobs SET cancel_requested=1,status=?,phase=?,updated_at=? WHERE id=?",
+                (next_status, "已取消" if next_status == "cancelled" else "正在安全停止", now, job_id),
+            )
+            self._event(connection, job_id, {"type": "cancel_requested"})
+        return self.get(job_id) or {}
+
+    def retry(self, job_id: str) -> dict[str, Any]:
+        current = self.get(job_id)
+        if current is None:
+            raise KeyError(job_id)
+        if current["status"] not in TERMINAL_JOB_STATUSES:
+            raise ValueError("当前任务尚未结束，不能重试")
+        created = self.create(current["spec"])
+        with self._connect() as connection:
+            self._event(connection, str(created["id"]), {"type": "retry_of", "job_id": job_id})
+            self._event(connection, job_id, {"type": "retried_as", "job_id": created["id"]})
+        return created
+
+    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        if self.get(job_id) is None:
+            raise KeyError(job_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT seq,event_json,created_at FROM events WHERE job_id=? AND seq>? "
+                "ORDER BY seq LIMIT ?",
+                (job_id, max(0, int(after)), max(1, min(int(limit), 2000))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                value = json.loads(str(row["event_json"]))
+            except json.JSONDecodeError:
+                value = {"type": "invalid_event"}
+            result.append({"seq": int(row["seq"]), "created_at": row["created_at"], **value})
+        return result

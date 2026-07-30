@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -83,6 +84,18 @@ class LabWorker:
         while not self._stop.is_set():
             if not self._accepting.is_set():
                 break
+            recover_publications = getattr(self.service, "recover_publications", None)
+            recovered = {"attempted": 0, "published": 0}
+            if callable(recover_publications):
+                try:
+                    recovered = recover_publications(limit=1)
+                except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+                    logger.error("Quant Lab model publication recovery deferred: %s", exc)
+            if recovered["attempted"]:
+                logger.info(
+                    "Quant Lab model publication recovery attempted=%s published=%s",
+                    recovered["attempted"], recovered["published"],
+                )
             # 多进程 Worker 可以并存；只恢复心跳真正过期的任务，不能在第二个
             # Worker 启动时把第一个 Worker 的正常任务改成 interrupted。
             self.service.store.interrupt_stale()

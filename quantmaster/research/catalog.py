@@ -331,6 +331,14 @@ class ResearchCatalog:
                 (int(file_size), int(file_mtime_ns), partition_key),
             )
 
+    def delete_partition(self, partition_key: str) -> bool:
+        """Forget metadata only after a caller has durably quarantined the original file."""
+        with self._connect() as connection:
+            changed = connection.execute(
+                "DELETE FROM research_partitions WHERE partition_key=?", (partition_key,),
+            ).rowcount
+        return bool(changed)
+
     @staticmethod
     def _partition(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
@@ -386,6 +394,23 @@ class ResearchCatalog:
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._partition(row) for row in rows]
+
+    def trading_dates(
+        self,
+        asset_class: AssetClass | str,
+        frequency: Frequency | str,
+        start: str,
+        end: str,
+    ) -> list[str]:
+        """Return dates evidenced by verified raw partitions, never synthetic weekdays."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT trade_date FROM research_partitions "
+                "WHERE kind=? AND asset_class=? AND frequency=? "
+                "AND trade_date>=? AND trade_date<=? ORDER BY trade_date",
+                (str(ArtifactKind.RAW), str(asset_class), str(frequency), start, end),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def claim(self, partition_key: str, owner: str, ttl_seconds: int = 300) -> bool:
         now = time.time()
@@ -492,7 +517,7 @@ class ResearchCatalog:
                 "VALUES (?,?,?,?)",
                 (job_id, attempt, canonical_json(event), utc_now()),
             )
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid or 0)
 
     def claim_job(self, job_id: str, owner: str, lease_seconds: float = 30.0) -> bool:
         now = utc_now()

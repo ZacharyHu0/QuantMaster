@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+from quantmaster.cli import main
+from quantmaster.doctor import _api_issues, _route_paths, run_doctor
+
+
+def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config):
+    report = run_doctor(deep=True)
+
+    assert report["deep"]
+    assert report["status"] == "ok"
+    assert report["counts"]["high"] == 0
+    assert report["metrics"]["sqlite_checked"] >= 2
+
+
+def test_deep_doctor_reports_corrupt_sqlite_as_high_risk(isolated_config):
+    (isolated_config.data_root / "authority.sqlite").write_bytes(b"not a sqlite database")
+
+    report = run_doctor(deep=True)
+
+    assert report["status"] == "high_risk"
+    assert any(item["code"] == "sqlite_unreadable" for item in report["issues"])
+
+
+def test_doctor_cli_returns_nonzero_for_non_loopback_configuration(
+    isolated_config, capsys,
+):
+    isolated_config.server.host = "0.0.0.0"
+
+    assert main(["doctor"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "high_risk"
+    assert payload["issues"][0]["code"] == "non_loopback_host"
+
+
+def test_api_doctor_ignores_framework_router_sentinels(monkeypatch):
+    from quantmaster.server.app import app
+
+    monkeypatch.setattr(app.router, "routes", [*app.router.routes, object()])
+
+    assert not any(item["code"] == "api_contract_missing" for item in _api_issues())
+
+
+def test_api_doctor_flattens_lazy_included_routers():
+    nested = SimpleNamespace(routes=[SimpleNamespace(path="/jobs")])
+    context = SimpleNamespace(prefix="/api/v1")
+    included = SimpleNamespace(original_router=nested, include_context=context)
+
+    assert _route_paths([included, object()]) == {"/api/v1/jobs"}

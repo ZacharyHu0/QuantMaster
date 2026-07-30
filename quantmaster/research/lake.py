@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -33,6 +34,7 @@ from quantmaster.runtime.json import strict_json_dumps
 
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _KEY_COLUMNS = ("trade_date", "symbol")
+logger = logging.getLogger(__name__)
 
 
 class ResearchDataIntegrityError(RuntimeError):
@@ -45,6 +47,16 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _safe(value: str) -> str:
@@ -110,6 +122,7 @@ class ResearchLake:
                     elif target.exists():
                         target.unlink()
                     os.replace(staged, target)
+                    _sync_directory(target.parent)
                     metadata = dict(intent["metadata"])
                     stat = target.stat()
                     metadata.update({
@@ -122,6 +135,7 @@ class ResearchLake:
                 elif backup.is_file():
                     target.unlink(missing_ok=True)
                     os.replace(backup, target)
+                    _sync_directory(target.parent)
                     staged.unlink(missing_ok=True)
                     self.catalog.discard_partition_intent(key, owner)
                     recovered += 1
@@ -133,28 +147,77 @@ class ResearchLake:
                 continue
         return recovered
 
-    def _validated_partition_path(self, metadata: dict[str, Any]) -> Path:
-        path = self._resolved_relative(str(metadata["path"]))
-        if not path.is_file():
-            raise ResearchDataIntegrityError(f"研究分区文件缺失: {metadata['path']}")
-        stat = path.stat()
-        unchanged = (
-            int(metadata.get("file_size") or 0) == stat.st_size
-            and int(metadata.get("file_mtime_ns") or 0) == stat.st_mtime_ns
-            and int(metadata.get("file_size") or 0) > 0
+    def path_for_repair(self, metadata: dict[str, Any]) -> Path:
+        return self._resolved_relative(str(metadata["path"]))
+
+    def _enqueue_integrity_failure(self, metadata: dict[str, Any], reason: str) -> None:
+        logger.error(
+            "ResearchLake integrity failure partition=%s reason=%s",
+            metadata.get("partition_key", "unknown"), reason,
         )
-        actual = file_sha256(path)
-        if actual != str(metadata["content_sha256"]):
-            raise ResearchDataIntegrityError(
-                f"研究分区内容校验失败: {metadata['path']}"
+        try:
+            from quantmaster.data.repair import enqueue_repair
+
+            source = str(metadata.get("dataset_id") or "research")
+            enqueue_repair(
+                "research_partition",
+                f"{self.root}::{metadata.get('partition_key', metadata.get('path', 'unknown'))}",
+                reason=reason,
+                spec={"root": str(self.root), "metadata": metadata},
+                source=source,
             )
-        if not unchanged:
-            self.catalog.update_partition_file_identity(
-                str(metadata["partition_key"]),
-                file_size=stat.st_size,
-                file_mtime_ns=stat.st_mtime_ns,
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error("Unable to enqueue research repair: %s", exc)
+
+    def validate_partition(
+        self, metadata: dict[str, Any], *, enqueue_repair: bool = True,
+    ) -> Path:
+        """Validate one catalog record and persist a repair request on failure."""
+        try:
+            path = self.path_for_repair(metadata)
+            if not path.is_file():
+                raise ResearchDataIntegrityError(
+                    f"研究分区文件缺失: {metadata['path']}"
+                )
+            stat = path.stat()
+            unchanged = (
+                int(metadata.get("file_size") or 0) == stat.st_size
+                and int(metadata.get("file_mtime_ns") or 0) == stat.st_mtime_ns
+                and int(metadata.get("file_size") or 0) > 0
             )
-        return path
+            actual = file_sha256(path)
+            if actual != str(metadata["content_sha256"]):
+                raise ResearchDataIntegrityError(
+                    f"研究分区内容校验失败: {metadata['path']}"
+                )
+            if not unchanged:
+                self.catalog.update_partition_file_identity(
+                    str(metadata["partition_key"]),
+                    file_size=stat.st_size,
+                    file_mtime_ns=stat.st_mtime_ns,
+                )
+            return path
+        except (OSError, KeyError, ResearchDataIntegrityError) as exc:
+            reason = str(exc)
+            if enqueue_repair:
+                self._enqueue_integrity_failure(metadata, reason)
+            if isinstance(exc, ResearchDataIntegrityError):
+                raise
+            raise ResearchDataIntegrityError(reason) from exc
+
+    def _validated_partition_path(self, metadata: dict[str, Any]) -> Path:
+        return self.validate_partition(metadata)
+
+    def _read_partition_file(
+        self, metadata: dict[str, Any], columns: list[str] | None = None,
+    ) -> pd.DataFrame:
+        path = self.validate_partition(metadata)
+        try:
+            return pd.read_parquet(path, columns=columns)
+        except Exception as exc:
+            reason = f"研究分区 Parquet 无法读取: {metadata['path']}: {type(exc).__name__}: {exc}"
+            self._enqueue_integrity_failure(metadata, reason)
+            raise ResearchDataIntegrityError(reason) from exc
 
     @staticmethod
     def dataset_for_kind(kind: ArtifactKind, dataset_id: str = "") -> str:
@@ -255,6 +318,9 @@ class ResearchLake:
         run_id: str = "",
         owner: str = "",
     ) -> dict[str, Any]:
+        from quantmaster.runtime.maintenance import maintenance_barrier
+
+        maintenance_barrier.require_writable()
         date_text = _as_date(trade_date)
         dataset = self.dataset_for_kind(kind, dataset_id)
         key = self.catalog.partition_key(kind, asset_class, frequency, dataset, date_text)
@@ -270,7 +336,9 @@ class ResearchLake:
                 frame, kind=kind, frequency=frequency, trade_date=date_text,
             )
             if merge_columns and target.exists():
-                existing = pd.read_parquet(target)
+                if previous_metadata is None:
+                    raise ResearchDataIntegrityError(f"研究分区存在但目录记录缺失: {target}")
+                existing = self._read_partition_file(previous_metadata)
                 existing = self._normalize_frame(
                     existing, kind=kind, frequency=frequency, trade_date=date_text,
                 )
@@ -330,6 +398,7 @@ class ResearchLake:
                 if target.exists():
                     os.replace(target, backup)
                 os.replace(temp, target)
+                _sync_directory(target.parent)
                 stat = target.stat()
                 metadata.update({
                     "file_size": stat.st_size,
@@ -337,6 +406,7 @@ class ResearchLake:
                 })
                 metadata = self.catalog.commit_partition_write(key, owner, metadata)
                 backup.unlink(missing_ok=True)
+                _sync_directory(target.parent)
             finally:
                 temp.unlink(missing_ok=True)
             return metadata
@@ -358,8 +428,7 @@ class ResearchLake:
         )
         if metadata is None:
             return pd.DataFrame()
-        path = self._validated_partition_path(metadata)
-        return pd.read_parquet(path, columns=columns)
+        return self._read_partition_file(metadata, columns=columns)
 
     def read_range(
         self,
@@ -377,8 +446,7 @@ class ResearchLake:
         )
         frames = []
         for item in partitions:
-            path = self._validated_partition_path(item)
-            frames.append(pd.read_parquet(path, columns=columns))
+            frames.append(self._read_partition_file(item, columns=columns))
         if not frames:
             return pd.DataFrame(columns=columns)
         result = pd.concat(frames, ignore_index=True)
@@ -424,7 +492,16 @@ class ResearchLake:
         )
         if data.empty or ref.storage_column not in data:
             return pd.DataFrame()
-        return data.pivot(index="trade_date", columns="symbol", values=ref.storage_column).sort_index()
+        panel = data.pivot(
+            index="trade_date", columns="symbol", values=ref.storage_column,
+        ).sort_index()
+        calendar = self.catalog.trading_dates(
+            ref.asset_class, ref.frequency, start, end,
+        )
+        if calendar:
+            panel.index = pd.DatetimeIndex(pd.to_datetime(panel.index), name="trade_date")
+            panel = panel.reindex(pd.DatetimeIndex(pd.to_datetime(calendar), name="trade_date"))
+        return panel
 
     def materialize_bar_store(
         self,
@@ -527,6 +604,7 @@ class ResearchLake:
                         raise ResearchDataIntegrityError(f"运行表不可变: {run_id}/{name}")
                     if not target.exists():
                         os.replace(temp, target)
+                        _sync_directory(run)
                 finally:
                     temp.unlink(missing_ok=True)
         if commit and not manifest_path.exists():
@@ -540,6 +618,7 @@ class ResearchLake:
                 with temp.open("rb+") as stream:
                     os.fsync(stream.fileno())
                 os.replace(temp, manifest_path)
+                _sync_directory(run)
             finally:
                 temp.unlink(missing_ok=True)
         return run
@@ -563,6 +642,9 @@ class FeatureBatchProvider:
             inputs.append({
                 "ref": ref.to_dict(),
                 "partitions": [item["content_sha256"] for item in partitions],
+                "trading_dates": self.lake.catalog.trading_dates(
+                    ref.asset_class, ref.frequency, start, end,
+                ),
             })
         return content_hash({"start": start, "end": end, "inputs": inputs})
 

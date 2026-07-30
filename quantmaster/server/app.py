@@ -47,9 +47,12 @@ async def lifespan(_: FastAPI):
     from quantmaster.backtest.workbench import get_backtest_worker
     from quantmaster.data.instruments import InstrumentStore
     from quantmaster.data.maintenance import data_refresh_manager
+    from quantmaster.data.repair import get_data_repair_manager
     from quantmaster.lab.worker import get_worker
     from quantmaster.logging_config import current_log_path
     from quantmaster.research.jobs import get_research_job_manager
+    from quantmaster.rotation.service import get_rotation_worker
+    from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
     from quantmaster.server.management import capture_runtime_baseline
 
     capture_runtime_baseline()
@@ -62,9 +65,39 @@ async def lifespan(_: FastAPI):
     worker = get_worker()
     backtest_worker = get_backtest_worker()
     research_worker = get_research_job_manager()
+    rotation_worker = get_rotation_worker()
+    repair_worker = get_data_repair_manager()
+
+    def drain_workers() -> None:
+        rotation_worker.stop()
+        repair_worker.shutdown()
+        data_refresh_manager.shutdown()
+        research_worker.shutdown()
+        backtest_worker.stop()
+        worker.stop()
+        runtime.stop()
+
+    def resume_workers() -> None:
+        runtime.start()
+        research_worker.start()
+        data_refresh_manager.start()
+        repair_worker.start()
+        backtest_worker.start()
+        rotation_worker.start()
+        if get_config().lab.enabled:
+            worker.start()
+
+    unregister_maintenance = maintenance_barrier.register(MaintenanceParticipant(
+        name=f"web-background-components:{uuid.uuid4().hex}",
+        drain=drain_workers,
+        resume=resume_workers,
+        idle=lambda: not data_refresh_manager.active and rotation_worker.idle,
+    ))
     research_worker.start()
     data_refresh_manager.start()
+    repair_worker.start()
     backtest_worker.start()
+    rotation_worker.start(bootstrap_local=True)
     if get_config().lab.enabled:
         worker.start()
     cfg = get_config()
@@ -87,11 +120,8 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        data_refresh_manager.shutdown()
-        research_worker.shutdown()
-        backtest_worker.stop()
-        worker.stop()
-        runtime.stop()
+        drain_workers()
+        unregister_maintenance()
         logger.info("QuantMaster 已停止")
 
 
@@ -154,17 +184,22 @@ async def operation_problem(request: Request, exc: OperationProblem):
 async def request_context_and_migration_lock(request: Request, call_next):
     """Apply the local security boundary, request context and migration lock."""
     from quantmaster.data.migration import migration_manager
+    from quantmaster.runtime.maintenance import maintenance_barrier
     from quantmaster.server.security import apply_security_headers, enforce_request_security
 
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
-    allowed = (path in {"/api/v1/health", "/api/v1/release", "/"} or
+    allowed = (path in {
+                   "/api/v1/health/live", "/api/v1/health/ready",
+                   "/api/v1/diagnostics", "/api/v1/release", "/api/v1/session", "/",
+               } or
                path.startswith(("/static/", "/api/v1/data/migrations")) or
                (path == "/api/v1/settings" and request.method == "GET"))
     try:
         enforce_request_security(request)
-        if migration_manager.active and path.startswith("/api/v1/") and not allowed:
+        if ((migration_manager.active or maintenance_barrier.active)
+                and path.startswith("/api/v1/") and not allowed):
             problem = make_problem(
                 "data_migration_active",
                 severity="warning",
@@ -235,6 +270,7 @@ from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
 from quantmaster.server.news import router as news_router  # noqa: E402
 from quantmaster.server.research import router as research_router  # noqa: E402
+from quantmaster.server.rotation import router as rotation_router  # noqa: E402
 from quantmaster.server.trading import router as trading_router  # noqa: E402
 
 app.include_router(management_router)
@@ -244,6 +280,7 @@ app.include_router(jobs_router)
 app.include_router(news_router)
 app.include_router(trading_router)
 app.include_router(research_router)
+app.include_router(rotation_router)
 
 
 def _series_to_points(s: pd.Series) -> list[list]:
@@ -424,16 +461,6 @@ def diagnostic_report() -> dict:
     from quantmaster.server.diagnostics import diagnostics
 
     return diagnostics()
-
-
-@app.get("/api/v1/health")
-def health() -> dict:
-    from quantmaster.server.diagnostics import diagnostics
-
-    return {
-        "status": "ok", "version": __version__, "release_date": RELEASE_DATE,
-        **diagnostics(),
-    }
 
 
 @app.get("/api/v1/release")

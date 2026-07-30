@@ -117,6 +117,44 @@ def test_lake_merges_versioned_wide_partitions_and_builds_tensor():
     assert tensor["mask"].shape == tensor["values"].shape
 
 
+def test_artifact_panel_preserves_verified_trading_date_gaps_as_nan(tmp_path):
+    lake = ResearchLake(tmp_path / "lake")
+    ref = ArtifactRef(
+        ArtifactKind.FACTOR, "gap_factor", "1.0.0", AssetClass.STOCK,
+    )
+    for trade_date in ("2024-01-02", "2024-01-03", "2024-01-04"):
+        lake.write_partition(
+            ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+            "stock_bars", trade_date,
+            pd.DataFrame({
+                "trade_date": [trade_date], "symbol": ["600000.SH"], "close": [10.0],
+            }),
+        )
+    for trade_date, value in (("2024-01-02", 1.0), ("2024-01-04", 3.0)):
+        lake.write_partition(
+            ArtifactKind.FACTOR, AssetClass.STOCK, Frequency.DAILY,
+            ref.id, trade_date,
+            pd.DataFrame({
+                "trade_date": [trade_date], "symbol": ["600000.SH"],
+                ref.storage_column: [value],
+            }),
+            merge_columns=True,
+            spec_versions={ref.id: ref.version},
+        )
+
+    panel = lake.artifact_panel(ref, "2024-01-02", "2024-01-04")
+    tensor = FeatureBatchProvider(lake).tensor(
+        [ref], "2024-01-02", "2024-01-04", lookback=2,
+    )
+
+    assert [str(value.date()) for value in panel.index] == [
+        "2024-01-02", "2024-01-03", "2024-01-04",
+    ]
+    assert pd.isna(panel.loc["2024-01-03", "600000.SH"])
+    assert tensor["keys"][-1] == {"trade_date": "2024-01-04", "symbol": "600000.SH"}
+    assert tensor["mask"][-1, :, 0].tolist() == [False, True]
+
+
 def test_lake_rejects_duplicate_keys_without_replacing_good_partition():
     lake = ResearchLake()
     good = pd.DataFrame({

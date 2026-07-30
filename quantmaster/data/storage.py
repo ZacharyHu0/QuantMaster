@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -14,15 +15,22 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from io import BufferedRandom
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite
 
+logger = logging.getLogger(__name__)
+
 _LOCKS_GUARD = threading.Lock()
 _SYMBOL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_FILE_LOCK_STATE: dict[tuple[str, str], tuple[int, BufferedRandom]] = {}
 
 _META_COLUMNS = (
     "symbol", "start", "end", "updated_at", "coverage_start", "coverage_end",
@@ -37,6 +45,84 @@ def _symbol_lock(root: Path, symbol: str) -> threading.RLock:
         return _SYMBOL_LOCKS.setdefault(key, threading.RLock())
 
 
+def _acquire_file_lock(path: Path, timeout: float = 30.0) -> BufferedRandom:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = path.open("a+b")
+    if stream.tell() == 0:
+        stream.write(b"\0")
+        stream.flush()
+    deadline = time.monotonic() + max(0.1, timeout)
+    while True:
+        try:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(  # type: ignore[attr-defined]
+                    stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                )
+            return stream
+        except (OSError, BlockingIOError):
+            if time.monotonic() >= deadline:
+                stream.close()
+                raise TimeoutError(f"等待数据文件锁超时: {path.name}") from None
+            time.sleep(0.02)
+
+
+def _release_file_lock(stream: BufferedRandom) -> None:
+    try:
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+    finally:
+        stream.close()
+
+
+class _BarLock(AbstractContextManager["_BarLock"]):
+    """Reentrant in-process lock backed by one cross-process file lock."""
+
+    def __init__(self, root: Path, symbol: str) -> None:
+        self.root = root.resolve()
+        self.symbol = symbol
+        self.key = (str(self.root), symbol)
+        self.thread_lock = _symbol_lock(root, symbol)
+
+    def __enter__(self) -> _BarLock:
+        self.thread_lock.acquire()
+        try:
+            state = _FILE_LOCK_STATE.get(self.key)
+            if state is None:
+                lock_path = self.root / ".locks" / f"{_safe_name(self.symbol)}.lock"
+                _FILE_LOCK_STATE[self.key] = (1, _acquire_file_lock(lock_path))
+            else:
+                _FILE_LOCK_STATE[self.key] = (state[0] + 1, state[1])
+            return self
+        except OSError:
+            self.thread_lock.release()
+            raise
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        try:
+            depth, stream = _FILE_LOCK_STATE[self.key]
+            if depth == 1:
+                _FILE_LOCK_STATE.pop(self.key, None)
+                _release_file_lock(stream)
+            else:
+                _FILE_LOCK_STATE[self.key] = (depth - 1, stream)
+        finally:
+            self.thread_lock.release()
+
+
 def _safe_name(symbol: str) -> str:
     return re.sub(r"[^0-9A-Za-z._^-]", "_", symbol)
 
@@ -47,6 +133,29 @@ def _file_sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+BarIntegrityStatus = Literal["ready", "missing", "corrupt", "orphaned"]
+
+
+@dataclass(frozen=True)
+class BarReadResult:
+    """Explicit file-integrity outcome; callers no longer need to infer it from ``None``."""
+
+    frame: pd.DataFrame | None
+    status: BarIntegrityStatus
+    reason: str = ""
+    content_sha256: str = ""
 
 
 class BarStore:
@@ -105,16 +214,35 @@ class BarStore:
     def _path(self, symbol: str) -> Path:
         return self.root / f"{_safe_name(symbol)}.parquet"
 
-    def lock(self, symbol: str) -> threading.RLock:
-        """返回跨 BarStore 实例共享的单标的锁，覆盖读取、拉取和原子替换。"""
-        return _symbol_lock(self.root, symbol)
+    def path_for_repair(self, symbol: str) -> Path:
+        """Resolve a repair target without exposing arbitrary path construction."""
+        return self._path(symbol).resolve()
 
-    def get(self, symbol: str, columns: list[str] | None = None) -> pd.DataFrame | None:
+    def lock(self, symbol: str) -> AbstractContextManager:
+        """返回跨 BarStore 实例共享的单标的锁，覆盖读取、拉取和原子替换。"""
+        return _BarLock(self.root, symbol)
+
+    def read(
+        self,
+        symbol: str,
+        columns: list[str] | None = None,
+        *,
+        enqueue_repair: bool = True,
+    ) -> BarReadResult:
+        """Read a cache file and report missing/corrupt/orphaned states explicitly."""
         path = self._path(symbol)
+        metadata = self.metadata(symbol)
         if not path.exists():
-            return None
+            if metadata is None:
+                return BarReadResult(None, "missing")
+            reason = "cataloged bar file is missing"
+            self._record_integrity_failure(symbol, reason, metadata, enqueue_repair)
+            return BarReadResult(None, "corrupt", reason)
         try:
-            metadata = self.metadata(symbol)
+            orphan_reason = ""
+            if metadata is None:
+                orphan_reason = "bar file exists without catalog metadata"
+                self._record_integrity_failure(symbol, orphan_reason, {}, enqueue_repair)
             stat = path.stat()
             expected_hash = str((metadata or {}).get("content_sha256") or "")
             unchanged = bool(
@@ -125,26 +253,83 @@ class BarStore:
             if not unchanged:
                 actual_hash = _file_sha256(path)
                 if expected_hash and actual_hash != expected_hash:
-                    self._mark_corrupt(symbol)
-                    return None
+                    reason = "bar content hash mismatch"
+                    self._record_integrity_failure(
+                        symbol, reason, metadata or {}, enqueue_repair,
+                    )
+                    return BarReadResult(None, "corrupt", reason, actual_hash)
             value = pd.read_parquet(path, columns=columns)
+            if orphan_reason:
+                # A readable legacy/orphan file is useful as an explicit degraded
+                # offline result while its catalog entry is rebuilt.  It must never
+                # be promoted to "ready" or silently adopted here.
+                return BarReadResult(
+                    value, "orphaned", orphan_reason, _file_sha256(path),
+                )
             if metadata and columns is None and int(metadata.get("row_count") or 0) not in {
                 0, len(value),
             }:
-                self._mark_corrupt(symbol)
-                return None
+                reason = "bar row count differs from catalog"
+                self._record_integrity_failure(
+                    symbol, reason, metadata, enqueue_repair,
+                )
+                return BarReadResult(
+                    None, "corrupt", reason, expected_hash if unchanged else actual_hash,
+                )
             if not unchanged:
                 self._backfill_file_identity(symbol, path, value, actual_hash)
-            return value
-        except Exception:
-            self._mark_corrupt(symbol)
-            return None
+            return BarReadResult(value, "ready", content_sha256=expected_hash or actual_hash)
+        except (OSError, ValueError, TypeError, ImportError) as exc:
+            reason = f"bar file cannot be read: {type(exc).__name__}: {exc}"
+            self._record_integrity_failure(symbol, reason, metadata or {}, enqueue_repair)
+            return BarReadResult(None, "corrupt", reason)
+        except Exception as exc:
+            # PyArrow exposes version-specific exception classes.  This remains a storage
+            # boundary, but the failure is classified, logged and persisted for repair.
+            reason = f"bar parquet read failed: {type(exc).__name__}: {exc}"
+            logger.exception("BarStore read failed symbol=%s path=%s", symbol, path)
+            self._record_integrity_failure(symbol, reason, metadata or {}, enqueue_repair)
+            return BarReadResult(None, "corrupt", reason)
+
+    def get(self, symbol: str, columns: list[str] | None = None) -> pd.DataFrame | None:
+        """Compatibility convenience over :meth:`read`; integrity remains queryable."""
+        return self.read(symbol, columns).frame
+
+    def _record_integrity_failure(
+        self,
+        symbol: str,
+        reason: str,
+        metadata: dict,
+        enqueue: bool,
+    ) -> None:
+        self._mark_corrupt(symbol)
+        logger.error("BarStore integrity failure symbol=%s reason=%s", symbol, reason)
+        if not enqueue or self.root.name != "bars":
+            return
+        try:
+            from quantmaster.data.repair import enqueue_repair
+
+            enqueue_repair(
+                "bar",
+                f"{self.root.resolve()}::{symbol}",
+                reason=reason,
+                spec={
+                    "root": str(self.root.resolve()),
+                    "symbol": symbol,
+                    "start": str(metadata.get("coverage_start") or metadata.get("start") or ""),
+                    "end": str(metadata.get("coverage_end") or metadata.get("end") or ""),
+                    "content_sha256": str(metadata.get("content_sha256") or ""),
+                },
+                source=str(metadata.get("last_source") or "market"),
+            )
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            logger.error("Unable to enqueue bar repair symbol=%s: %s", symbol, exc)
 
     def _mark_corrupt(self, symbol: str) -> None:
         try:
             self.mark_status(symbol, "corrupt")
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            logger.error("Unable to mark corrupt bar symbol=%s: %s", symbol, exc)
 
     @staticmethod
     def _metadata_values(metadata: dict) -> tuple:
@@ -181,7 +366,7 @@ class BarStore:
             rows = connection.execute("SELECT * FROM bar_write_intents").fetchall()
         for row in rows:
             symbol = str(row[0])
-            with _symbol_lock(self.root, symbol):
+            with self.lock(symbol):
                 try:
                     names = [str(row[index]) for index in (1, 2, 3)]
                     if any(Path(name).name != name for name in names):
@@ -197,6 +382,7 @@ class BarStore:
                         elif target.exists():
                             target.unlink()
                         os.replace(staged, target)
+                        _sync_directory(self.root)
                         target_ready = True
                     if target_ready:
                         stat = target.stat()
@@ -211,6 +397,7 @@ class BarStore:
                     elif backup.is_file():
                         target.unlink(missing_ok=True)
                         os.replace(backup, target)
+                        _sync_directory(self.root)
                         staged.unlink(missing_ok=True)
                         with self._conn() as connection:
                             connection.execute(
@@ -234,7 +421,10 @@ class BarStore:
         """
         if df is None or df.empty:
             return
-        with _symbol_lock(self.root, symbol):
+        from quantmaster.runtime.maintenance import maintenance_barrier
+
+        maintenance_barrier.require_writable()
+        with self.lock(symbol):
             old_meta = self.metadata(symbol)
             if not replace:
                 old = self.get(symbol)
@@ -276,11 +466,13 @@ class BarStore:
                 if target.exists():
                     os.replace(target, backup)
                 os.replace(temp_path, target)
+                _sync_directory(self.root)
                 stat = target.stat()
                 metadata.update({"file_size": stat.st_size, "file_mtime_ns": stat.st_mtime_ns})
                 with self._conn() as conn:
                     self._commit_metadata(conn, metadata, clear_intent=True)
                 backup.unlink(missing_ok=True)
+                _sync_directory(self.root)
             finally:
                 temp_path.unlink(missing_ok=True)
 
@@ -317,7 +509,7 @@ class BarStore:
         replace_coverage: bool = False,
     ) -> None:
         """记录已经成功检查的请求范围；没有新 K 线时也必须调用。"""
-        with _symbol_lock(self.root, symbol), self._conn() as conn:
+        with self.lock(symbol), self._conn() as conn:
             row = conn.execute(
                 "SELECT coverage_start,coverage_end FROM bar_meta WHERE symbol=?", (symbol,)
             ).fetchone()

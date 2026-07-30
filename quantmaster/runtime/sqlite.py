@@ -60,6 +60,10 @@ def connect_sqlite(
     """Open a configured connection without racing WAL initialization."""
     destination = Path(path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    from quantmaster.runtime.maintenance import MaintenanceActiveError, maintenance_barrier
+
+    if maintenance_barrier.frozen and not destination.exists():
+        raise MaintenanceActiveError("维护期间不能创建新的 SQLite 数据库")
     key = _database_key(destination)
     connection = sqlite3.connect(destination, timeout=timeout)
     try:
@@ -72,6 +76,8 @@ def connect_sqlite(
         )
         if row_factory:
             connection.row_factory = sqlite3.Row
+        if maintenance_barrier.frozen:
+            connection.execute("PRAGMA query_only=ON")
         return connection
     except Exception:
         connection.close()
@@ -107,4 +113,3 @@ def reset_sqlite_runtime_for_tests() -> None:
     with _INIT_GUARD:
         _WAL_READY.clear()
         _INIT_LOCKS.clear()
-

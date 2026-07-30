@@ -22,7 +22,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quantmaster.runtime.process import run_process
+from quantmaster.runtime.process import (
+    ProcessLimitError,
+    ProcessLimits,
+    run_restricted_process,
+)
 
 
 class PythonFactorPolicyError(ValueError):
@@ -185,7 +189,10 @@ def _worker(request_path: str, response_path: str) -> int:
 @dataclass(frozen=True)
 class RestrictedPythonRunner:
     timeout_seconds: float = 20.0
-    memory_mb: int = 768
+    memory_mb: int = 1024
+    cpu_seconds: int = 15
+    output_mb: int = 2
+    result_mb: int = 64
 
     def execute(
         self, source: str, features: dict[str, pd.DataFrame], params: dict | None = None,
@@ -212,21 +219,34 @@ class RestrictedPythonRunner:
                 "PATH", "PYTHONPATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG",
                 "LC_ALL", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERPROFILE",
             }}
+            env["PYTHONIOENCODING"] = "utf-8"
             try:
-                completed = run_process(
-                    command, capture_output=True, text=True, timeout=self.timeout_seconds,
-                    env=env, check=False,
+                completed = run_restricted_process(
+                    command,
+                    limits=ProcessLimits(
+                        memory_bytes=max(128, self.memory_mb) * 1024 * 1024,
+                        cpu_seconds=max(1, self.cpu_seconds),
+                        output_bytes=max(1, self.output_mb) * 1024 * 1024,
+                        max_processes=1,
+                        file_bytes=max(1, self.result_mb) * 1024 * 1024,
+                    ),
+                    timeout=self.timeout_seconds,
+                    env=env,
                 )
             except TimeoutExpired as exc:
                 raise PythonFactorPolicyError(
                     f"候选执行超过 {self.timeout_seconds:g} 秒，已终止"
                 ) from exc
+            except ProcessLimitError as exc:
+                raise PythonFactorPolicyError(str(exc)) from exc
             if not response_path.exists():
                 detail = (completed.stderr or completed.stdout).strip()[:500]
                 raise PythonFactorPolicyError(f"隔离进程异常退出: {detail or completed.returncode}")
             response = json.loads(response_path.read_text(encoding="utf-8"))
             if not response.get("ok"):
                 raise PythonFactorPolicyError(str(response.get("error") or "候选执行失败"))
+            if output_path.stat().st_size > max(1, self.result_mb) * 1024 * 1024:
+                raise PythonFactorPolicyError("候选结果超过安全上限")
             with output_path.open("rb") as stream:
                 return pickle.load(stream)
 

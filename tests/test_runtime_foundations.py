@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
@@ -14,6 +16,13 @@ from pydantic import ValidationError
 
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import StrictJSONResponse, strict_json_dumps
+from quantmaster.runtime.maintenance import (
+    MaintenanceActiveError,
+    MaintenanceBarrier,
+    MaintenanceParticipant,
+    maintenance_barrier,
+)
+from quantmaster.runtime.process import ProcessLimitError, ProcessLimits, run_restricted_process
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 
 
@@ -55,6 +64,51 @@ def test_schema_migration_rolls_back_version_and_content_together(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM values_v1").fetchone()[0] == 0
 
 
+def test_maintenance_barrier_drains_freezes_and_resumes_in_reverse_order():
+    barrier = MaintenanceBarrier()
+    events = []
+    idle = {"one": False, "two": False}
+
+    for name in ("one", "two"):
+        barrier.register(MaintenanceParticipant(
+            name=name,
+            drain=lambda name=name: (events.append(f"drain:{name}"), idle.__setitem__(name, True)),
+            resume=lambda name=name: events.append(f"resume:{name}"),
+            idle=lambda name=name: idle[name],
+        ))
+
+    lease = barrier.enter("test", timeout=1)
+    assert barrier.frozen
+    with pytest.raises(MaintenanceActiveError):
+        barrier.require_writable()
+    barrier.exit(lease)
+
+    assert events == ["drain:one", "drain:two", "resume:two", "resume:one"]
+    assert not barrier.active
+
+
+def test_frozen_barrier_makes_existing_sqlite_connections_read_only(tmp_path):
+    path = tmp_path / "frozen.sqlite"
+    with connect_sqlite(path) as connection:
+        connection.execute("CREATE TABLE values_v1 (value TEXT)")
+        connection.execute("INSERT INTO values_v1 VALUES ('before')")
+
+    lease = maintenance_barrier.enter("test_sqlite_freeze")
+    try:
+        with connect_sqlite(path) as connection:
+            assert connection.execute("SELECT value FROM values_v1").fetchone()[0] == "before"
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                connection.execute("INSERT INTO values_v1 VALUES ('during')")
+        with pytest.raises(MaintenanceActiveError):
+            connect_sqlite(tmp_path / "new.sqlite")
+    finally:
+        maintenance_barrier.exit(lease)
+
+    with connect_sqlite(path) as connection:
+        connection.execute("INSERT INTO values_v1 VALUES ('after')")
+        assert connection.execute("SELECT COUNT(*) FROM values_v1").fetchone()[0] == 2
+
+
 def test_process_start_retries_only_transient_windows_errors(monkeypatch):
     from quantmaster.runtime import process
 
@@ -92,6 +146,38 @@ def test_process_start_does_not_retry_permanent_errors(monkeypatch):
     with pytest.raises(FileNotFoundError):
         process.run_process(["missing"])
     assert calls == 1
+
+
+def test_restricted_process_rejects_excess_output():
+    with pytest.raises(ProcessLimitError, match="输出超过"):
+        run_restricted_process(
+            [sys.executable, "-c", "print('x' * 10000)"],
+            limits=ProcessLimits(
+                memory_bytes=256 * 1024 * 1024,
+                cpu_seconds=5,
+                output_bytes=1024,
+            ),
+            timeout=5,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object contract")
+def test_windows_restricted_process_cannot_create_child_process():
+    result = run_restricted_process(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,sys; subprocess.run([sys.executable,'-c','print(1)'],check=True)",
+        ],
+        limits=ProcessLimits(
+            memory_bytes=256 * 1024 * 1024,
+            cpu_seconds=5,
+            output_bytes=64 * 1024,
+            max_processes=1,
+        ),
+        timeout=5,
+    )
+    assert result.returncode != 0
 
 
 def test_strict_json_boundary_converts_nonfinite_values_to_null():

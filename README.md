@@ -23,6 +23,7 @@
 | 📡 多市场数据 | 约 3.4 万条内地/香港/美国证券主数据随包离线可用，支持代码、名称和拼音智能解析；日线及 1/5/15/30/60 分钟线按频率本地 Parquet 归档，断网复用、自动降级 |
 | 🏭 研究生产线 | A 股、ETF 与期货的按日 Parquet 研究湖，不可变因子/标签/风险/模型 Artifact，依赖 dry-run、增量修订、血缘、持久化续跑和可选 Rust 加速 |
 | 🧭 市场状态 | 候选与行业板块的牛熊分、上行/下行/震荡、市场宽度、MACD、资金量；分当前、历史和未来 1/3/5/7 日概率展望，历史图支持 7D–10Y 观察窗口 |
+| 🔄 板块联动 | 全市场温度与强弱风格、申万 2021 行业周期、东方财富细分题材、ETF 份额资金；所有视图披露快照、算法版本、覆盖质量和降级来源，不输出买卖结论 |
 | 🔎 六维个股分析 | 输入股票名称或代码，按基本面、技术面、消息面、资金面、心理面和宏观面生成可核查报告；Web 显示真实阶段进度，飞书使用单张原位更新卡片 |
 | 🎯 Hybrid v2 决策 | 自适应规则 + Quant Lab 因子 / ML Champion；提供三种策略画像、扣费后预期、概率校准、模型贡献、连续仓位和异常回退，面向 1 / 3 / 5 / 7 个交易日 |
 | 🧪 AI Quant Lab | 48 个策展因子起点、不可变版本账本、PIT 中证800快照、purged walk-forward、FDR、交易成本与 Monte Carlo / 参数敏感性 / 穿透性门禁；学习模型先影子运行，统一验证和人工批准后才能按候选 / 周期 / 画像设为 Champion |
@@ -88,6 +89,7 @@ qm lab worker                                       # 独立研究 Worker（Web 
 qm data capabilities                               # 检查日线权限与 Rust/Python 内核
 qm data plan --assets stock,etf --specs cross_momentum_20d,forward_returns --start 2022-01-01
 qm data sync --assets stock --specs cross_asset_core,forward_returns,qm_style_v1 --start 2022-01-01
+qm doctor --deep                                    # 深查存储完整性、运行边界和 API/架构约束
 ```
 
 `qm data plan` 只生成依赖、预热/前瞻窗口、分区数、预估行数和权限阻塞，

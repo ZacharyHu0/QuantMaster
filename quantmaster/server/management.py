@@ -290,35 +290,10 @@ class MigrationCreate(ContractModel):
 @router.post("/data/migrations")
 def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
-    from quantmaster.automation.runtime import get_runtime
-    from quantmaster.backtest.workbench import get_backtest_worker
-    from quantmaster.data.maintenance import data_refresh_manager
-    from quantmaster.lab.worker import get_worker
-    from quantmaster.research.jobs import get_research_job_manager
-
-    if data_refresh_manager.active:
-        raise HTTPException(
-            409, "行情数据库正在增量同步；请先完成或取消同步，再迁移数据目录")
-    active_job = get_worker().status().get("active_job_id")
-    if active_job:
-        raise HTTPException(
-            409, "Quant Lab 当前有研究任务在执行；任务完成后再迁移，当前任务不会被中断")
-    research_active = [
-        item for item in get_research_job_manager().list(200)
-        if item["status"] in {"queued", "running", "cancelling"}
-    ]
-    if research_active:
-        raise HTTPException(409, "研究数据任务仍在执行；完成或取消后再迁移数据目录")
-    backtest_active = [
-        item for item in get_backtest_worker().service.store.list(200)
-        if item["status"] in {"queued", "running"}
-    ]
-    if backtest_active:
-        raise HTTPException(409, "回测任务仍在执行；完成或取消后再迁移数据目录")
-    if get_config().automation.enabled and get_runtime().status().get("started"):
-        raise HTTPException(409, "自动化调度仍在运行；请先停用自动化再迁移数据目录")
     try:
         return migration_manager.create(value.target, value.mode)
+    except (TimeoutError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
     except MigrationError as exc:
         raise HTTPException(400, str(exc)) from None
 

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from quantmaster.backtest.spec import BacktestSpec
 from quantmaster.backtest.workbench import get_backtest_worker
+from quantmaster.data.repair import get_data_repair_manager
 from quantmaster.server.app import app
 
 
@@ -55,3 +56,34 @@ def test_legacy_unversioned_api_routes_are_removed():
     client = TestClient(app)
     for path in ("/api/health", "/api/backtests", "/api/settings", "/api/news"):
         assert client.get(path).status_code == 404, path
+
+
+def test_unified_jobs_exposes_repair_events_cancel_and_retry():
+    manager = get_data_repair_manager()
+    created = manager.enqueue(
+        "bar", "bars::600000.SH", reason="hash mismatch",
+        spec={"root": "bars", "symbol": "600000.SH"}, source="market",
+    )
+    client = TestClient(app)
+
+    listed = client.get("/api/v1/jobs", params={"domain": "repairs"})
+    assert listed.status_code == 200
+    assert next(item for item in listed.json()["items"] if item["id"] == created["id"])[
+        "can_cancel"
+    ]
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    headers = {"X-CSRF-Token": token}
+    cancelled = client.post(
+        f"/api/v1/jobs/repairs/{created['id']}/cancel", headers=headers,
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    retried = client.post(
+        f"/api/v1/jobs/repairs/{created['id']}/retry", headers=headers,
+    )
+    assert retried.status_code == 202
+    assert retried.json()["id"] == created["id"]
+    events = client.get(
+        f"/api/v1/jobs/repairs/{created['id']}/events",
+    ).json()["items"]
+    assert [item["type"] for item in events] == ["queued", "cancelled", "retried"]

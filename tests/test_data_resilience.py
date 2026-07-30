@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import ClassVar
 
 import pandas as pd
@@ -22,6 +25,15 @@ from quantmaster.data.resilience import (
 )
 from quantmaster.data.storage import BarStore
 from quantmaster.data.tushare_source import TushareSource, _current_session_cache_floor
+
+
+def _hold_cross_process_bar_lock(root: str, start, events) -> None:
+    store = BarStore(Path(root))
+    start.wait(10)
+    with store.lock("600000.SH"):
+        events.put(("enter", os.getpid(), time.monotonic()))
+        time.sleep(0.25)
+        events.put(("exit", os.getpid(), time.monotonic()))
 
 
 def test_akshare_exponential_retry(isolated_config, monkeypatch):
@@ -509,6 +521,35 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
         results = list(pool.map(load, range(2)))
     assert SlowSource.calls == 1
     pd.testing.assert_frame_equal(results[0], results[1])
+
+
+def test_same_symbol_lock_serializes_spawned_processes(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    events = context.Queue()
+    processes = [
+        context.Process(
+            target=_hold_cross_process_bar_lock,
+            args=(str(tmp_path / "bars"), start, events),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    records = [events.get(timeout=15) for _ in range(4)]
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    by_process = {}
+    for kind, process_id, timestamp in records:
+        by_process.setdefault(process_id, {})[kind] = timestamp
+    assert len(by_process) == 2
+    intervals = sorted(
+        (value["enter"], value["exit"]) for value in by_process.values()
+    )
+    assert intervals[1][0] >= intervals[0][1] - 0.02
 
 
 def test_failed_full_refresh_keeps_previous_cache(tmp_path, monkeypatch):

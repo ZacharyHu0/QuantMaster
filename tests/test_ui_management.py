@@ -41,7 +41,7 @@ def live_server(tmp_path_factory):
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            if httpx.get(f"{url}/api/v1/health", timeout=0.3).status_code == 200:
+            if httpx.get(f"{url}/api/v1/health/live", timeout=0.3).status_code == 200:
                 break
         except httpx.HTTPError:
             time.sleep(0.1)
@@ -72,7 +72,8 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
         assert page.locator("#nav button:not([hidden])").all_inner_texts() == [
-            "市场", "资讯", "候选", "决策", "Quant Lab", "回测", "模拟盘", "实盘", "自动化",
+            "市场", "轮动", "资讯", "个股分析", "候选", "决策", "Quant Lab", "回测",
+            "模拟盘", "实盘", "自动化",
         ]
         settings.click()
         page.locator("#settings-config-path").wait_for(state="visible")
@@ -1046,4 +1047,40 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
             "document.querySelector('#news-source-feedback').classList.contains('success')"
         )
         assert "已保存" in page.locator("#news-source-feedback").inner_text()
+        browser.close()
+
+
+def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 390, "height": 844},
+            reduced_motion="reduce",
+        )
+        page_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(f"{url}/#market/temperature")
+
+        page.locator("#market-temperature-view").wait_for(state="visible")
+        assert page.locator("#market-temperature-view h2").inner_text() == "市场温度"
+        assert page.locator("#market-quotes-view").is_hidden()
+        assert "等待" in page.locator("#market-temperature-content").inner_text()
+
+        page.get_by_role("tab", name="市场风格", exact=True).click()
+        page.locator("#market-style-view").wait_for(state="visible")
+        assert page.url.endswith("#market/style")
+
+        page.get_by_role("button", name="轮动", exact=True).click()
+        page.locator("#rotation-radar-view").wait_for(state="visible")
+        assert page.url.endswith("#rotation/radar")
+        page.get_by_role("tab", name="行业周期", exact=True).click()
+        page.locator("#rotation-industry-view").wait_for(state="visible")
+        page.get_by_role("tab", name="细分题材", exact=True).click()
+        page.locator("#rotation-themes-view").wait_for(state="visible")
+        page.get_by_role("tab", name="宽基资金", exact=True).click()
+        page.locator("#rotation-etf-view").wait_for(state="visible")
+
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page_errors == []
         browser.close()

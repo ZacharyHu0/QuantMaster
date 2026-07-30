@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "quantmaster"
 STATIC_ROOT = PACKAGE_ROOT / "server" / "static"
+sys.path.insert(0, str(PACKAGE_ROOT.parent))
 
 
 def _module(path: Path) -> str:
@@ -101,3 +103,9 @@ def test_frontend_does_not_reference_unversioned_api_routes():
             if pattern.search(line):
                 violations.append(f"{path.relative_to(PACKAGE_ROOT)}:{line_number}")
     assert not violations, "frontend references removed API routes:\n" + "\n".join(violations)
+
+
+def test_broad_exception_policy_does_not_expand():
+    from tools.exception_policy import analyze
+
+    assert analyze() == []

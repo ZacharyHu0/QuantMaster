@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
+import os
 import re
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,8 @@ from quantmaster.lab.dataset import create_snapshot, load_csi800_membership, rea
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.store import LabStore
 from quantmaster.runtime.json import strict_json_dumps
+
+logger = logging.getLogger(__name__)
 
 
 def _slug(prefix: str, expression: str) -> str:
@@ -66,6 +71,100 @@ class LabService:
             "recent_experiments": self.store.list_experiments(6),
             "recent_studies": self.store.studies(6),
         }
+
+    def _stage_model_publication(
+        self,
+        *,
+        version_id: str,
+        experiment_id: str,
+        artifact_dir: Path,
+        slug: str,
+        prediction_rows: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Durably stage prediction rows, then record their immutable outbox request."""
+        from quantmaster.lab.ml import artifact_sha256
+
+        root = Path(get_config().data_root).resolve()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        target = artifact_dir / "research_predictions.parquet"
+        staged = artifact_dir / ".research_predictions.parquet.tmp"
+        prediction_rows.to_parquet(staged, index=False)
+        with staged.open("rb+") as stream:
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+        relative = target.resolve().relative_to(root).as_posix()
+        payload = {
+            "schema_version": 1,
+            "kind": "model_predictions",
+            "slug": slug,
+            "version": "1.0.0",
+            "asset_class": "stock",
+            "run_id": experiment_id,
+            "path": relative,
+            "content_sha256": artifact_sha256(target),
+            "rows": len(prediction_rows),
+        }
+        return self.store.enqueue_publication(
+            "model_predictions", version_id, experiment_id, payload,
+        )
+
+    def publish_model_outbox(self, publication_id: str) -> dict[str, Any]:
+        """Idempotently publish one staged model output; failure remains retryable."""
+        current = self.store.publication(publication_id)
+        if current is None:
+            raise KeyError("模型发布任务不存在")
+        if current["status"] == "published":
+            return current
+        owner = f"lab-publish:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        claimed = self.store.claim_publication(publication_id, owner)
+        if claimed is None:
+            return self.store.publication(publication_id) or current
+        try:
+            from quantmaster.lab.ml import artifact_sha256
+            from quantmaster.research.contracts import AssetClass
+            from quantmaster.research.engine import ResearchEngine
+
+            payload = claimed["payload"]
+            root = Path(get_config().data_root).resolve()
+            path = (root / str(payload["path"])).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError("模型预测暂存文件缺失或路径越界")
+            if artifact_sha256(path) != str(payload["content_sha256"]):
+                raise ValueError("模型预测暂存文件哈希不匹配")
+            rows = pd.read_parquet(path)
+            required = {"trade_date", "symbol", "value"}
+            if not required.issubset(rows):
+                raise ValueError(f"模型预测缺少字段: {sorted(required - set(rows))}")
+            records = ResearchEngine().publish_model_predictions(
+                str(payload["slug"]), str(payload["version"]),
+                AssetClass(str(payload["asset_class"])), rows,
+                run_id=str(payload["run_id"]),
+            )
+            result = {
+                "ref": (
+                    f"artifact:model:{payload['asset_class']}:"
+                    f"{payload['slug']}@{payload['version']}"
+                ),
+                "partitions": len(records),
+                "content_sha256": payload["content_sha256"],
+            }
+            if not self.store.complete_publication(publication_id, owner, result):
+                raise RuntimeError("模型发布租约在提交前失效")
+        except Exception as exc:
+            logger.exception("Lab model publication failed publication=%s", publication_id)
+            self.store.fail_publication(
+                publication_id, owner, f"{type(exc).__name__}: {exc}",
+            )
+        return self.store.publication(publication_id) or claimed
+
+    def recover_publications(self, limit: int = 20) -> dict[str, int]:
+        """Retry due/lease-expired outbox work without affecting training status."""
+        attempted = published = 0
+        for item in self.store.pending_publications(limit):
+            attempted += 1
+            value = self.publish_model_outbox(str(item["id"]))
+            published += int(value.get("status") == "published")
+        return {"attempted": attempted, "published": published}
 
     def create_expression(
         self, *, name: str, expression: str, description: str = "",
@@ -812,16 +911,34 @@ class LabService:
             version = self.store.save_validation(
                 version["id"], snapshot["snapshot_hash"], report,
             )
-            from quantmaster.research.contracts import AssetClass
-            from quantmaster.research.engine import ResearchEngine
-
             research_rows = prediction_rows.rename(columns={"date": "trade_date"})[
                 ["trade_date", "symbol", "value"]
             ]
-            research_records = ResearchEngine().publish_model_predictions(
-                learned.slug, "1.0.0", AssetClass.STOCK, research_rows,
-                run_id=experiment["id"],
-            )
+            publication: dict[str, Any] | None = None
+            publication_warning: dict[str, Any] | None = None
+            try:
+                publication = self._stage_model_publication(
+                    version_id=version["id"], experiment_id=experiment["id"],
+                    artifact_dir=artifact_dir, slug=learned.slug,
+                    prediction_rows=research_rows,
+                )
+                publication = self.publish_model_outbox(str(publication["id"]))
+                if publication.get("status") != "published":
+                    publication_warning = {
+                        "code": "model_publication_pending",
+                        "message": "模型训练已完成，研究分区发布将在后台安全重试",
+                        "publication_id": publication["id"],
+                        "error": publication.get("last_error", ""),
+                    }
+            except Exception as exc:
+                logger.exception(
+                    "Unable to stage Lab model publication experiment=%s", experiment["id"],
+                )
+                publication_warning = {
+                    "code": "model_publication_staging_failed",
+                    "message": "模型训练已完成，但预测分区暂存失败",
+                    "error": f"{type(exc).__name__}: {exc}"[:1000],
+                }
             result.update({
                 "features": feature_names,
                 "snapshot_hash": snapshot["snapshot_hash"],
@@ -835,13 +952,20 @@ class LabService:
                     "gates": report.get("gates", {}),
                 },
                 "manifest": manifest_relative,
-                "research_artifact": {
-                    "ref": f"artifact:model:stock:{learned.slug}@1.0.0",
-                    "partitions": len(research_records),
-                },
+                "research_artifact": (
+                    publication.get("result", {}) if publication else {
+                        "ref": f"artifact:model:stock:{learned.slug}@1.0.0",
+                        "partitions": 0,
+                    }
+                ),
+                "publication": publication or {},
             })
+            if publication_warning:
+                result.setdefault("warnings", []).append(publication_warning)
             self.store.update_experiment(
-                experiment["id"], status="completed", result=result,
+                experiment["id"],
+                status="completed_with_warnings" if publication_warning else "completed",
+                result=result,
                 dataset_id=snapshot["id"],
             )
             return result
