@@ -30,10 +30,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install
         run: |
-          pip install -e ".[data]"
+          pip install -e ".[data,tushare,rust]"
+          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release
           pip install pyinstaller
+      - name: Verify native research kernel
+        run: python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
       - name: Verify tag matches application version
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash

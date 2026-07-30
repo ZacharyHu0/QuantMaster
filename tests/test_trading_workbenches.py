@@ -374,6 +374,13 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "Hybrid v2 决策" in page
     assert 'data-bt-field="decision"' in page
     assert 'data-paper-field="decision"' in page
+    assert 'id="bt-factor-input"' in page
+    assert 'role="combobox"' in page
+    assert 'id="bt-factor-options" role="listbox"' in page
+    assert 'popover="manual"' in page
+    assert 'id="bt-factor-completion-hint"' not in page
+    backtest_form = page.split('id="bt-form"', 1)[1].split("</form>", 1)[0]
+    assert 'list="factor-list" value="mom_20d"' not in backtest_form
     assert "生成调仓提案" in page
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
 
@@ -384,3 +391,5 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "min-width: 18px" in checkbox_rule
     assert "padding: 0" in checkbox_rule
     assert "justify-self: center" in checkbox_rule
+    assert ".factor-completion-option.active" in css
+    assert "position: fixed" in css.split(".factor-completion-menu", 1)[1].split("}", 1)[0]

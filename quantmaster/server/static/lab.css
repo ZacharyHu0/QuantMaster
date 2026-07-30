@@ -146,11 +146,23 @@
 .lab-python-gate button { flex:0 0 auto; min-height:30px; border:1px solid var(--lab-line); border-radius:4px; background:transparent; color:var(--lab-blue); padding:6px 9px; cursor:pointer; font-size:9px; }
 .lab-python-gate:focus-visible { border-color:var(--lab-blue); }
 .lab-mining-ledger { margin-top:14px; }
-.lab-mining-run { display:grid; grid-template-columns:minmax(150px,1fr) repeat(4,minmax(82px,.55fr)); gap:10px; align-items:center; padding:10px 0; border-top:1px solid var(--lab-line-soft); font-size:10px; }
+.lab-mining-run { display:grid; grid-template-columns:minmax(150px,1fr) repeat(4,minmax(82px,.55fr)); gap:10px; align-items:center; padding:10px 8px; border-top:1px solid var(--lab-line-soft); border-left:2px solid transparent; font-size:10px; }
+.lab-mining-run.selected { border-left-color:var(--lab-blue); background:color-mix(in oklch,var(--lab-blue) 6%,transparent); }
 .lab-mining-run strong,.lab-mining-run span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lab-mining-run span { color:var(--lab-text-3); }
 .lab-mining-run button { border:0; background:transparent; color:var(--lab-blue); cursor:pointer; font:650 10px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; text-align:left; }
 #lab-mining-candidates { margin-top:12px; }
+.lab-mining-selection { display:grid; grid-template-columns:minmax(170px,1fr) minmax(260px,1.5fr) auto; gap:14px; align-items:center; padding:12px; border:1px solid var(--lab-line); background:var(--lab-canvas); outline:none; }
+.lab-mining-selection:focus-visible { border-color:var(--lab-blue); }
+.lab-mining-selection span,.lab-mining-selection b,.lab-mining-selection small { display:block; }
+.lab-mining-selection span { color:var(--lab-blue); font:600 8px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; letter-spacing:.1em; }
+.lab-mining-selection b { margin-top:5px; font:650 11px/1 ui-monospace,"SFMono-Regular",Consolas,monospace; }
+.lab-mining-selection small { margin-top:5px; color:var(--lab-text-3); font-size:8px; }
+.lab-mining-selection dl { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; background:var(--lab-line-soft); }
+.lab-mining-selection dl > div { min-width:0; padding:7px 9px; background:var(--lab-panel); }
+.lab-mining-selection dt { color:var(--lab-text-3); font-size:8px; }
+.lab-mining-selection dd { margin-top:3px; overflow:hidden; color:var(--lab-text-2); font:600 9px/1.3 ui-monospace,"SFMono-Regular",Consolas,monospace; text-overflow:ellipsis; white-space:nowrap; }
+.lab-mining-selection button { min-height:30px; border:1px solid var(--lab-line); border-radius:4px; background:transparent; color:var(--lab-blue); padding:6px 9px; cursor:pointer; font-size:9px; }
 .lab-mining-table { width:100%; border-collapse:collapse; }
 .lab-mining-table th,.lab-mining-table td { padding:9px; border-top:1px solid var(--lab-line-soft); color:var(--lab-text-2); font-size:9px; text-align:left; }
 .lab-mining-table th { color:var(--lab-text-3); font-weight:500; }
@@ -493,6 +505,7 @@
   .lab-job-drawer-actions { position:sticky; bottom:0; z-index:2; padding:10px 16px max(10px,env(safe-area-inset-bottom)); }
   .lab-job-drawer-actions button { min-height:44px; }
   .lab-job-param-grid,.lab-job-result-grid { grid-template-columns:1fr; }
+  .lab-mining-selection { grid-template-columns:1fr; }
   .lab-dialog-grid { grid-template-columns:1fr; }
   .lab-fold-timeline { grid-template-columns:1fr 1fr; }
   .lab-study-evidence { grid-template-columns:1fr 1fr; }
@@ -515,6 +528,7 @@
   .lab-split-preview { grid-template-columns:1fr; }
   .lab-python-gate { align-items:flex-start; flex-direction:column; }
   .lab-mining-run { grid-template-columns:1fr 1fr; }
+  .lab-mining-selection dl { grid-template-columns:1fr; }
   .lab-guardrails { grid-template-columns:1fr; }
   .lab-guardrails div + div { border-left:0; border-top:1px solid var(--lab-line-soft); }
   .lab-evidence-meta { grid-template-columns:1fr; }

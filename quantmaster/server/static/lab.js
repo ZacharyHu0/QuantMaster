@@ -450,28 +450,46 @@
 
   function compactJobEvents(events) {
     const compacted = [];
+    const positions = new Map();
     for (const event of events) {
-      const phase = String(event.phase || '');
+      const phase = String(event.phase || '').trim();
+      const stage = event.type === 'progress'
+        ? phase
+          .replace(/\s*·\s*\d+\s*\/\s*\d+(?:\s*·.*)?$/, '')
+          .replace(/\s+\d+\s*\/\s*\d+(?:\s*·.*)?$/, '')
+          .trim()
+        : phase;
+      const phaseUpdate = event.type === 'progress' && stage && phase !== stage
+        ? phase.slice(stage.length).replace(/^\s*·?\s*/, '')
+        : '';
       const compactKey = event.type === 'llm_candidate_checked'
         ? `${event.type}:${event.round || 0}`
-        : event.type === 'progress' && /^(读取|下载|准备|计算|行情)/.test(phase)
-          ? `${event.type}:${phase.replace(/\d+(?:\.\d+)?%?/g, '#')}`
+        : event.type === 'progress' && stage
+          ? `${event.type}:${stage}`
           : '';
-      const previous = compacted[compacted.length - 1];
-      if (compactKey && previous?._compactKey === compactKey) {
-        previous._count += 1;
+      const position = compactKey ? positions.get(compactKey) : undefined;
+      const previous = position == null ? null : compacted[position];
+      const updateCount = Math.max(1, Number(event._count) || 1);
+      const detailParts = [phaseUpdate, event.detail]
+        .map(value => String(value || '').trim()).filter(Boolean);
+      const latestDetail = [...new Set(detailParts)].join(' · ');
+      if (previous) {
+        const count = previous._count + updateCount;
+        const firstCreatedAt = previous._firstCreatedAt;
         previous._lastCreatedAt = event.created_at;
         Object.assign(previous, event, {
-          _compactKey: compactKey,
-          _count: previous._count,
-          _firstCreatedAt: previous._firstCreatedAt,
-          _lastCreatedAt: event.created_at,
+          _compactKey: compactKey, _count: count, _stage: stage,
+          _latestDetail: latestDetail, _firstCreatedAt: firstCreatedAt,
+          _lastCreatedAt: event._lastCreatedAt || event.created_at,
         });
       } else {
         compacted.push({
-          ...event, _compactKey: compactKey, _count: 1,
-          _firstCreatedAt: event.created_at, _lastCreatedAt: event.created_at,
+          ...event, _compactKey: compactKey, _count: updateCount, _stage: stage,
+          _latestDetail: latestDetail,
+          _firstCreatedAt: event._firstCreatedAt || event.created_at,
+          _lastCreatedAt: event._lastCreatedAt || event.created_at,
         });
+        if (compactKey) positions.set(compactKey, compacted.length - 1);
       }
     }
     return compacted;
@@ -537,13 +555,15 @@
 
   function renderJobTimeline(events) {
     if (!events.length) return '<div class="lab-job-empty-line">尚无执行事件</div>';
-    return `<ol class="lab-job-timeline">${compactJobEvents(events).map(event => {
+    return `<ol class="lab-job-timeline">${events.map(event => {
       const type = String(event.type || 'progress');
-      const description = event.detail || event.phase || event.message || eventLabel[type] || type;
+      const description = type === 'progress'
+        ? event._stage || event.phase || eventLabel[type]
+        : event.detail || event.phase || event.message || eventLabel[type] || type;
       const attempt = event.attempt ? ` · 尝试 ${event.attempt}/${event.max_attempts || 4}` : '';
       const timeout = event.timeout_seconds ? ` · 最长 ${event.timeout_seconds} 秒` : '';
-      const merged = event._count > 1 ? ` · 合并 ${event._count} 条` : '';
-      return `<li class="${h(type)}"><i></i><div><span>${h(eventLabel[type] || type)}${h(attempt)}${h(timeout)}${h(merged)}</span><b>${h(description)}</b><small>${h(formatDate(event._lastCreatedAt, true))}${event.progress != null ? ` · ${h(event.progress)}%` : ''}</small></div></li>`;
+      const detail = type === 'progress' ? event._latestDetail : '';
+      return `<li class="${h(type)}"><i></i><div><span>${h(eventLabel[type] || type)}${h(attempt)}${h(timeout)}</span><b>${h(description)}</b><small>${detail ? `${h(detail)} · ` : ''}${h(formatDate(event._lastCreatedAt, true))}${event.progress != null ? ` · ${h(event.progress)}%` : ''}</small></div></li>`;
     }).join('')}</ol>`;
   }
 
@@ -573,7 +593,7 @@
       </div>
       <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>INPUT</span><h4>研究参数</h4></div>${renderJobParams(job.params)}</section>
       <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>OUTPUT</span><h4>任务产出</h4></div>${renderJobResult(job)}</section>
-      <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>EVENTS · ${state.jobEvents.length}</span><h4>执行时间线</h4></div>${renderJobTimeline(state.jobEvents)}</section>
+      <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>STAGES · ${state.jobEvents.length}</span><h4>执行时间线</h4></div>${renderJobTimeline(state.jobEvents)}</section>
       <section class="lab-job-detail-section lab-job-identifiers"><div class="lab-job-section-head"><span>AUDIT</span><h4>审计标识</h4></div><dl><div><dt>任务 ID</dt><dd>${h(job.id)}</dd></div><div><dt>创建时间</dt><dd>${h(formatDate(job.created_at, true))}</dd></div><div><dt>最近心跳</dt><dd>${h(formatDate(job.heartbeat_at, true))}</dd></div></dl></section>`;
   }
 
@@ -592,8 +612,8 @@
       if (state.selectedJobId !== jobId) return;
       const events = response.items || [];
       if (events.length) {
-        state.jobEvents.push(...events);
         state.jobLastSeq = Math.max(state.jobLastSeq, ...events.map(item => Number(item.seq) || 0));
+        state.jobEvents = compactJobEvents([...state.jobEvents, ...events]);
       }
       state.jobDetail = job;
       renderJobDetail();
@@ -801,7 +821,8 @@
     }
     target.innerHTML = state.miningRuns.slice(0, 8).map(item => {
       const result = item.result || {};
-      return `<div class="lab-mining-run"><button type="button" data-mining-run="${h(item.id)}">${h(String(item.id).slice(0, 12).toUpperCase())}</button><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span><span>${h(result.research_quality || '等待数据门禁')}</span><span>${Number(result.candidate_count || 0)} 候选 / ${Number(result.finalist_count || 0)} 入围</span><span>${h(formatDate(item.updated_at))}</span></div>`;
+      const selected = item.id === state.selectedMiningRun;
+      return `<div class="lab-mining-run ${selected ? 'selected' : ''}"><button type="button" data-mining-run="${h(item.id)}" aria-pressed="${selected}">${h(String(item.id).slice(0, 12).toUpperCase())}</button><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span><span>${h(result.research_quality || '等待数据门禁')}</span><span>${Number(result.candidate_count || 0)} 候选 / ${Number(result.finalist_count || 0)} 入围</span><span>${h(formatDate(item.updated_at))}</span></div>`;
     }).join('');
   }
 
@@ -809,21 +830,38 @@
     const target = document.getElementById('lab-mining-candidates');
     if (!target) return;
     const candidates = run?.candidates || [];
+    const result = run?.result || {};
+    const config = run?.config || {};
+    const batch = String(run?.id || '').slice(0, 12).toUpperCase();
+    const summary = `<div class="lab-mining-selection" tabindex="-1">
+      <div><span>SELECTED BATCH</span><b>${h(batch || '—')}</b><small>${h(statusLabel[run?.status] || run?.status || '未知状态')} · 更新于 ${h(formatDate(run?.updated_at))}</small></div>
+      <dl><div><dt>研究等级</dt><dd>${h(result.research_quality || config.research_tier || '等待数据门禁')}</dd></div><div><dt>候选 / 入围</dt><dd>${Number(result.candidate_count || candidates.length)} / ${Number(result.finalist_count || 0)}</dd></div><div><dt>LLM 调用</dt><dd>${Number(result.llm_calls || 0)} / 3</dd></div></dl>
+      ${run?.job_id ? `<button type="button" data-job-detail="${h(run.job_id)}">查看关联任务</button>` : ''}
+    </div>`;
     if (!candidates.length) {
-      target.innerHTML = '<div class="lab-empty">该批次尚未产生可比较候选</div>';
+      target.innerHTML = `${summary}<div class="lab-empty">该批次正在 ${h(result.stage || '准备数据与候选')}；候选写入后会显示 TRAIN / VALID / 密封 TEST 对比。</div>`;
       return;
     }
-    target.innerHTML = `<div class="table-scroll"><table class="lab-mining-table"><thead><tr><th>候选</th><th>状态</th><th>Pareto</th><th>TRAIN IC</th><th>VALID IC / q</th><th>SEALED TEST IC</th><th>版本</th></tr></thead><tbody>${candidates.map(item => {
+    target.innerHTML = `${summary}<div class="table-scroll"><table class="lab-mining-table"><thead><tr><th>候选</th><th>状态</th><th>Pareto</th><th>TRAIN IC</th><th>VALID IC / q</th><th>SEALED TEST IC</th><th>版本</th></tr></thead><tbody>${candidates.map(item => {
       const proposal = item.proposal || {}, metrics = item.metrics || {};
       return `<tr><td>${h(proposal.name || item.candidate_key)}</td><td>${h(item.status)}</td><td>${item.pareto_rank == null ? '—' : '#' + Number(item.pareto_rank)}</td><td>${number(metrics.train_metrics?.rank_ic, 4)}</td><td>${number(metrics.valid_metrics?.rank_ic, 4)} / ${number(metrics.valid_metrics?.q_value, 3)}</td><td>${number(metrics.test_metrics?.rank_ic, 4)}</td><td>${item.version_id ? `<button type="button" data-factor-version="${h(item.version_id)}">查看候选</button>` : '—'}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
 
-  async function loadMiningRun(runId) {
+  async function loadMiningRun(runId, {reveal = false} = {}) {
     if (!runId) return;
     state.selectedMiningRun = runId;
+    renderMiningRuns();
+    const target = document.getElementById('lab-mining-candidates');
+    if (target) target.innerHTML = '<div class="lab-job-loading"><i></i><span>正在读取所选批次…</span></div>';
     try {
-      renderMiningCandidates(await request(`/api/lab/mining/runs/${encodeURIComponent(runId)}`));
+      const run = await request(`/api/lab/mining/runs/${encodeURIComponent(runId)}`);
+      if (state.selectedMiningRun !== runId) return;
+      renderMiningCandidates(run);
+      if (reveal) {
+        target?.scrollIntoView({behavior:'smooth', block:'nearest'});
+        target?.querySelector('.lab-mining-selection')?.focus({preventScroll:true});
+      }
     } catch (error) {
       if (isLabActive()) showError('AutoMiner 候选对比加载失败', error);
     }
@@ -881,6 +919,7 @@
     const response = await request('/api/lab/factors?limit=500');
     state.factors = response.items || [];
     renderFactorList();
+    document.dispatchEvent(new CustomEvent('quantmaster:factors-changed'));
     if (!state.selectedVersion && state.factors.length) selectFactor(state.factors[0].version_id);
   }
 
@@ -1176,7 +1215,7 @@
     });
     document.getElementById('lab-mining-runs')?.addEventListener('click', event => {
       const button = event.target.closest('[data-mining-run]');
-      if (button) loadMiningRun(button.dataset.miningRun);
+      if (button) loadMiningRun(button.dataset.miningRun, {reveal:true});
     });
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && state.selectedJobId) closeJobDetail();

@@ -21,6 +21,7 @@
 | 模块 | 说明 |
 | --- | --- |
 | 📡 多市场数据 | 约 3.4 万条内地/香港/美国证券主数据随包离线可用，支持代码、名称和拼音智能解析；日线及 1/5/15/30/60 分钟线按频率本地 Parquet 归档，断网复用、自动降级 |
+| 🏭 研究生产线 | A 股、ETF 与期货的按日 Parquet 研究湖，不可变因子/标签/风险/模型 Artifact，依赖 dry-run、增量修订、血缘、持久化续跑和可选 Rust 加速 |
 | 🧭 市场状态 | 候选与行业板块的牛熊分、上行/下行/震荡、市场宽度、MACD、资金量；分当前、历史和未来 1/3/5/7 日概率展望，历史图支持 7D–10Y 观察窗口 |
 | 🔎 六维个股分析 | 输入股票名称或代码，按基本面、技术面、消息面、资金面、心理面和宏观面生成可核查报告；Web 显示真实阶段进度，飞书使用单张原位更新卡片 |
 | 🎯 Hybrid v2 决策 | 自适应规则 + Quant Lab 因子 / ML Champion；提供三种策略画像、扣费后预期、概率校准、模型贡献、连续仓位和异常回退，面向 1 / 3 / 5 / 7 个交易日 |
@@ -84,7 +85,15 @@ qm lab train --model ridge --universe demo           # Ridge 基线；ml 依赖�
 qm lab optimize --universe csi800 --budget-hours 10 # 共享 1/3/5/7 日 Pareto 滚动优化
 qm lab studies                                      # 查看 Study、Pareto 与密封评估状态
 qm lab worker                                       # 独立研究 Worker（Web 进程外运行）
+qm data capabilities                               # 检查日线权限与 Rust/Python 内核
+qm data plan --assets stock,etf --specs cross_momentum_20d,forward_returns --start 2022-01-01
+qm data sync --assets stock --specs cross_asset_core,forward_returns,qm_style_v1 --start 2022-01-01
 ```
+
+`qm data plan` 只生成依赖、预热/前瞻窗口、分区数、预估行数和权限阻塞，
+不访问生产数据。确认后再执行 `sync`；设置中心的“研究生产湖”提供相同的
+dry-run、启动、取消和续跑能力。详细数据口径、ArtifactRef 和 Rust 构建见
+[docs/research_pipeline.md](docs/research_pipeline.md)。
 
 Python API 同样直接：
 

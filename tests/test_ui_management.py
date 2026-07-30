@@ -709,6 +709,66 @@ def test_active_tab_survives_reload(live_server):
         browser.close()
 
 
+def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_server):
+    url, _ = live_server
+    factors = [
+        {
+            "name": "mom_20d", "description": "20 日动量", "source": "builtin",
+        },
+        {
+            "name": "人工反转", "slug": "manual_a1b2c3d4e5",
+            "description": "Quant Lab 人工表达式", "category": "人工研究",
+            "status": "candidate", "source": "quant_lab",
+        },
+        {
+            "name": "GP 候选 2", "slug": "gp_2222222222",
+            "description": "遗传规划候选", "category": "AI 发现",
+            "status": "draft", "source": "quant_lab",
+        },
+    ]
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/factors", lambda route: route.fulfill(json={"factors": factors}))
+        page.goto(url)
+        page.get_by_role("button", name="回测", exact=True).click()
+        page.locator('#bt-form [name="strategy"]').select_option("factor")
+        factor_input = page.locator("#bt-factor-input")
+        factor_input.fill("mom_20d,")
+
+        menu = page.locator("#bt-factor-options")
+        menu.wait_for(state="visible")
+        assert factor_input.get_attribute("aria-expanded") == "true"
+        assert "人工反转" in menu.inner_text()
+        assert "GP 候选 2" in menu.inner_text()
+        assert "mom_20d" not in menu.inner_text()
+        input_box = factor_input.bounding_box()
+        menu_box = menu.bounding_box()
+        assert menu_box["y"] >= input_box["y"] + input_box["height"] \
+            or menu_box["y"] + menu_box["height"] <= input_box["y"]
+
+        factor_input.type("人工")
+        assert menu.locator('[role="option"]').count() == 1
+        assert "Quant Lab 人工表达式" in menu.inner_text()
+        factor_input.press("ArrowDown")
+        factor_input.press("Enter")
+        assert factor_input.input_value() == "mom_20d, 人工反转"
+        assert factor_input.get_attribute("aria-expanded") == "false"
+
+        factor_input.type(",")
+        menu.wait_for(state="visible")
+        assert "GP 候选 2" in menu.inner_text()
+        assert "人工反转" not in menu.inner_text()
+        menu.locator('[role="option"]', has_text="GP 候选 2").click()
+        assert factor_input.input_value() == "mom_20d, 人工反转, GP 候选 2"
+
+        factor_input.press("Escape")
+        page.locator(".factor-completion-trigger").click()
+        menu.wait_for(state="visible")
+        assert factor_input.get_attribute("aria-expanded") == "true"
+        browser.close()
+
+
 def test_runtime_messages_are_compact_and_diagnostic(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -769,6 +829,90 @@ def test_runtime_messages_are_compact_and_diagnostic(live_server):
         assert page.locator(
             '.runtime-entry[data-level="error"]', has_text="服务端处理失败"
         ).count() == 0
+        browser.close()
+
+
+def test_lab_compacts_stage_updates_and_mining_batches_are_actionable(live_server):
+    url, _ = live_server
+    job_id = "job-stage-progress"
+    runs = [
+        {
+            "id": "firstbatch000000000000000000000001", "job_id": job_id,
+            "status": "running", "config": {"research_tier": "production"},
+            "result": {}, "updated_at": "2026-07-28T12:00:00+00:00",
+        },
+        {
+            "id": "secondbatch00000000000000000002", "job_id": job_id,
+            "status": "running", "config": {"research_tier": "production"},
+            "result": {}, "updated_at": "2026-07-28T12:01:00+00:00",
+        },
+    ]
+    job = {
+        "id": job_id, "kind": "optimize", "status": "running", "progress": 50,
+        "phase": "原始成交/PIT约束", "detail": "1500/1500 · 688981.SH",
+        "params": {}, "result": {}, "worker": "test-worker",
+        "created_at": "2026-07-28T11:00:00+00:00",
+        "started_at": "2026-07-28T11:00:01+00:00",
+        "heartbeat_at": "2026-07-28T12:01:00+00:00", "finished_at": "",
+    }
+    events = [{
+        "seq": 1, "type": "queued", "phase": "等待执行",
+        "created_at": "2026-07-28T11:00:00+00:00", "progress": 0,
+    }] + [{
+        "seq": number + 1, "type": "progress", "progress": 20 + number // 50,
+        "phase": f"原始成交/PIT约束 {number}/1500 · 688{number:03d}.SH",
+        "detail": "", "created_at": "2026-07-28T12:00:00+00:00",
+    } for number in range(1, 1501)]
+
+    def route_lab(route):
+        request_url = route.request.url
+        if "/api/lab/overview" in request_url:
+            route.fulfill(json={
+                "factor_statuses": {}, "active_jobs": 1, "deployments": 0,
+                "capabilities": {"catalog_size": 48, "models": {"available_models": []}},
+                "research": {"horizons": [3]}, "recent_jobs": [job],
+                "recent_experiments": [], "recent_studies": [],
+            })
+        elif "/api/lab/factors" in request_url:
+            route.fulfill(json={"items": []})
+        elif f"/api/lab/jobs/{job_id}/events" in request_url:
+            route.fulfill(json={"items": events})
+        elif f"/api/lab/jobs/{job_id}" in request_url:
+            route.fulfill(json=job)
+        elif "/api/lab/mining/runs/" in request_url:
+            run_id = request_url.rsplit("/", 1)[-1]
+            selected = next(item for item in runs if item["id"] == run_id)
+            route.fulfill(json={**selected, "candidates": []})
+        elif "/api/lab/mining/runs" in request_url:
+            route.fulfill(json={"items": runs})
+        else:
+            route.fulfill(json={"items": []})
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/lab/**", route_lab)
+        page.goto(url)
+        page.locator('nav button[data-tab="lab"]').click()
+        page.locator('[data-lab-view="discover"]').click()
+
+        second = page.locator(
+            f'#lab-mining-runs [data-mining-run="{runs[1]["id"]}"]')
+        second.click()
+        assert second.get_attribute("aria-pressed") == "true"
+        selection = page.locator("#lab-mining-candidates .lab-mining-selection")
+        assert runs[1]["id"][:12].upper() in selection.inner_text()
+        assert "查看关联任务" in selection.inner_text()
+
+        selection.get_by_role("button", name="查看关联任务").click()
+        page.locator("#lab-job-drawer.is-open").wait_for()
+        page.wait_for_function(
+            "document.querySelectorAll('#lab-job-drawer .lab-job-timeline li').length === 2"
+        )
+        timeline = page.locator("#lab-job-drawer .lab-job-timeline li")
+        assert timeline.count() == 2
+        assert "1500/1500 · 6881500.SH" in timeline.last.inner_text()
+        assert "STAGES · 2" in page.locator("#lab-job-drawer-body").inner_text()
         browser.close()
 
 

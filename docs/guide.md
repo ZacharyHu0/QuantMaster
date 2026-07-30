@@ -115,6 +115,36 @@ combined, weights = ic_weighted_combine(       # 滚动 IC 加权动态合成（
     {k: values[k] for k in picked}, panel["close"], lookback=60)
 ```
 
+## 3.8 生产跨资产研究 Artifact
+
+先 dry-run，再生产：
+
+```bash
+qm data capabilities
+qm data plan --assets stock,etf \
+  --specs cross_asset_core,forward_returns,qm_style_v1 \
+  --start 2022-01-01 --end 2026-07-30
+qm data sync --assets stock,etf \
+  --specs cross_asset_core,forward_returns,qm_style_v1 \
+  --start 2022-01-01 --end 2026-07-30
+qm data jobs
+```
+
+Windows PowerShell 可将换行续写改为反引号，或把命令写在同一行。`plan` 会显示
+依赖、预热/前瞻窗口、缺失分区、修订范围、预估行数和权限阻塞；只有 `sync`
+才会读取数据并写入研究湖。也可在“设置 → 数据与缓存 → 研究生产湖”执行
+同样的流程。需要将旧按标的行情缓存暴露给新流水线时，使用 `qm data materialize`。
+
+回测可直接锁定不可变产物：
+
+```bash
+qm backtest --factor artifact:factor:stock:cross_momentum_20d@1.0.0 --universe demo
+```
+
+学习模型训练后会以 `artifact:model:stock:<slug>@1.0.0` 发布样本外预测分区；因子、
+标签、风险和模型都使用同一版本与血缘协议。完整字段口径见
+[研究生产流水线](research_pipeline.md)。
+
 ## 4. 挖掘因子
 
 ### AI Quant Lab：推荐工作流

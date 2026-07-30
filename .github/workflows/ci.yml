@@ -18,8 +18,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install
-        run: pip install -e ".[dev]"
+        run: |
+          pip install -e ".[dev,rust]"
+          maturin develop --manifest-path rust/quantmaster-kernel/Cargo.toml --release
+      - name: Rust format
+        run: cargo fmt --manifest-path rust/quantmaster-kernel/Cargo.toml --check
       - name: Lint
         run: ruff check quantmaster tests tools/release_sync.py
       - name: Test

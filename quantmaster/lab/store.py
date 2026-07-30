@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from pathlib import Path
@@ -14,8 +15,49 @@ from quantmaster.lab.models import (
     FactorSpec,
     canonical_json,
     content_hash,
+    factor_name_key,
+    normalize_factor_name,
     utc_now,
 )
+
+_GENERATED_FACTOR_NAME = re.compile(
+    r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
+)
+
+
+def _collision_safe_factor_name(
+    name: str, slug: str, occupied: dict[str, str],
+) -> str:
+    """Build a short generated name, falling back to a deterministic identifier."""
+    generated = _GENERATED_FACTOR_NAME.fullmatch(name)
+    if generated:
+        family = generated.group(1)
+        numbers = [
+            int(match.group(2))
+            for existing in occupied.values()
+            if (match := _GENERATED_FACTOR_NAME.fullmatch(existing))
+            and match.group(1) == family
+        ]
+        number = max([int(generated.group(2)), *numbers], default=0) + 1
+        while True:
+            candidate = f"{family} 候选 {number}"
+            if factor_name_key(candidate) not in occupied:
+                return candidate
+            number += 1
+
+    identifier = (slug.rsplit("_", 1)[-1] or slug)[:10]
+    for suffix in (identifier[:8], identifier, slug[:16]):
+        marker = f" · {suffix}"
+        candidate = f"{name[:120 - len(marker)].rstrip()}{marker}"
+        if factor_name_key(candidate) not in occupied:
+            return candidate
+    counter = 2
+    while True:
+        marker = f" · {identifier[:8]}-{counter}"
+        candidate = f"{name[:120 - len(marker)].rstrip()}{marker}"
+        if factor_name_key(candidate) not in occupied:
+            return candidate
+        counter += 1
 
 
 class LabStore:
@@ -34,10 +76,12 @@ class LabStore:
 
     def _migrate(self) -> None:
         with self._conn() as conn:
+            previous_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS factor_definitions (
                     id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
-                    kind TEXT NOT NULL, category TEXT NOT NULL, created_at TEXT NOT NULL);
+                    name_key TEXT NOT NULL, kind TEXT NOT NULL, category TEXT NOT NULL,
+                    created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS factor_versions (
                     id TEXT PRIMARY KEY, factor_id TEXT NOT NULL, version INTEGER NOT NULL,
                     parent_id TEXT NOT NULL DEFAULT '', content_hash TEXT NOT NULL,
@@ -138,11 +182,54 @@ class LabStore:
             ):
                 if name not in deployment_columns:
                     conn.execute(f"ALTER TABLE deployments ADD COLUMN {name} {declaration}")
+            definition_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(factor_definitions)")
+            }
+            added_name_key = "name_key" not in definition_columns
+            if added_name_key:
+                conn.execute(
+                    "ALTER TABLE factor_definitions "
+                    "ADD COLUMN name_key TEXT NOT NULL DEFAULT ''"
+                )
+            missing_name_keys = conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM factor_definitions WHERE name_key='')"
+            ).fetchone()[0]
+            if previous_user_version < 6 or added_name_key or missing_name_keys:
+                self._repair_factor_names(conn)
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_definitions_name_key "
+                "ON factor_definitions(name_key)"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
                 "ON deployments(status,universe,horizon,profile,role)"
             )
-            conn.execute("PRAGMA user_version=4")
+            conn.execute("PRAGMA user_version=6")
+
+    @staticmethod
+    def _repair_factor_names(conn: sqlite3.Connection) -> None:
+        """Assign unique registry labels while preserving every historical version."""
+        occupied: dict[str, str] = {}
+        rows = conn.execute(
+            "SELECT id,slug,name FROM factor_definitions ORDER BY created_at,id"
+        ).fetchall()
+        for row in rows:
+            name = normalize_factor_name(row["name"]) or row["slug"]
+            # ASCII comma is the multi-factor delimiter in the workbench. Historical
+            # generated labels are made copy-safe without touching immutable specs.
+            name = name.replace(",", "，")[:120]
+            generated = _GENERATED_FACTOR_NAME.fullmatch(name)
+            if generated:
+                name = f"{generated.group(1)} 候选 {int(generated.group(2))}"
+            key = factor_name_key(name)
+            if key in occupied:
+                name = _collision_safe_factor_name(name, row["slug"], occupied)
+                key = factor_name_key(name)
+            conn.execute(
+                "UPDATE factor_definitions SET name=?,name_key=? WHERE id=?",
+                (name, key, row["id"]),
+            )
+            occupied[key] = name
 
     @staticmethod
     def _decode(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -185,21 +272,62 @@ class LabStore:
     ) -> tuple[dict, dict, bool]:
         if status not in FACTOR_STATUSES:
             raise ValueError(f"未知因子状态: {status}")
-        payload = spec.to_dict()
-        digest = content_hash(payload)
+        requested_name = normalize_factor_name(spec.name)
+        if source == "manual" and "," in requested_name:
+            raise ValueError("因子名称不能包含英文逗号；逗号用于分隔多个因子")
+        if source != "manual":
+            requested_name = requested_name.replace(",", "，")
         now = utc_now()
         with self._conn() as conn:
+            # Serialize the name check with the insert so concurrent workers cannot
+            # create two definitions with the same Unicode-normalized display name.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM factor_definitions WHERE slug=?", (spec.slug,)).fetchone()
             if row is None:
+                occupied_rows = conn.execute(
+                    "SELECT id,slug,name,name_key FROM factor_definitions"
+                ).fetchall()
+                occupied = {item["name_key"]: item["name"] for item in occupied_rows}
+                requested_key = factor_name_key(requested_name)
+                conflict = next(
+                    (item for item in occupied_rows if item["name_key"] == requested_key),
+                    None,
+                )
+                if conflict is not None and source == "manual":
+                    raise ValueError(
+                        f"因子名称“{requested_name}”已存在（标识 {conflict['slug']}），"
+                        "请使用唯一名称"
+                    )
+                assigned_name = (
+                    _collision_safe_factor_name(requested_name, spec.slug, occupied)
+                    if conflict is not None else requested_name
+                )
                 factor_id = uuid.uuid4().hex
                 conn.execute(
-                    "INSERT INTO factor_definitions VALUES (?,?,?,?,?,?)",
-                    (factor_id, spec.slug, spec.name, spec.kind, spec.category, now),
+                    "INSERT INTO factor_definitions"
+                    "(id,slug,name,name_key,kind,category,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        factor_id, spec.slug, assigned_name,
+                        factor_name_key(assigned_name), spec.kind, spec.category, now,
+                    ),
                 )
                 row = conn.execute(
                     "SELECT * FROM factor_definitions WHERE id=?", (factor_id,)).fetchone()
+            elif factor_name_key(requested_name) != row["name_key"] and source == "manual":
+                raise ValueError(
+                    f"该表达式已登记为因子“{row['name']}”（标识 {row['slug']}），"
+                    "请使用现有名称或从现有版本修订"
+                )
             factor = dict(row)
+            if factor["kind"] != spec.kind:
+                raise ValueError(
+                    f"因子标识 {spec.slug} 已用于 {factor['kind']} 类型，不能改为 {spec.kind}"
+                )
+            payload = spec.to_dict()
+            payload["name"] = factor["name"]
+            digest = content_hash(payload)
             existing = conn.execute(
                 "SELECT * FROM factor_versions WHERE factor_id=? AND content_hash=?",
                 (factor["id"], digest),
@@ -252,8 +380,54 @@ class LabStore:
         for row in rows:
             value = self._decode(row, ("spec_json",)) or {}
             value["spec"] = value.pop("spec_json")
+            value.pop("name_key", None)
             items.append(value)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def factor_reference(self, reference: str) -> dict | None:
+        """Resolve the latest factor version by its stable slug or unique display name."""
+        value = normalize_factor_name(reference)
+        if not value:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT d.slug,d.name,d.kind,d.category,v.id AS version_id,v.version,"
+                "v.status,v.source,v.spec_json,v.updated_at "
+                "FROM factor_definitions d JOIN factor_versions v ON v.factor_id=d.id "
+                "AND v.version=(SELECT MAX(v2.version) FROM factor_versions v2 "
+                "WHERE v2.factor_id=d.id) "
+                "WHERE d.slug=? OR d.name_key=? "
+                "ORDER BY CASE WHEN d.slug=? THEN 0 ELSE 1 END LIMIT 1",
+                (value, factor_name_key(value), value),
+            ).fetchone()
+        resolved = self._decode(row, ("spec_json",))
+        if resolved is not None:
+            resolved["spec"] = resolved.pop("spec_json")
+        return resolved
+
+    def runtime_factors(self) -> list[dict]:
+        """Return expression factors that can be referenced by the regular workbench."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT d.slug,d.name,d.category,v.status,v.source,v.spec_json "
+                "FROM factor_definitions d JOIN factor_versions v ON v.factor_id=d.id "
+                "AND v.version=(SELECT MAX(v2.version) FROM factor_versions v2 "
+                "WHERE v2.factor_id=d.id) WHERE d.kind='expression' "
+                "ORDER BY d.name_key,d.slug"
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = self._decode(row, ("spec_json",)) or {}
+            spec = value.pop("spec_json")
+            if value["source"] == "builtin" or not spec.get("expression"):
+                continue
+            result.append({
+                "name": value["name"], "slug": value["slug"],
+                "description": spec.get("description") or spec.get("rationale") or "",
+                "category": value["category"], "status": value["status"],
+                "source": "quant_lab",
+            })
+        return result
 
     def version(self, version_id: str) -> dict | None:
         with self._conn() as conn:

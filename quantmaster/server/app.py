@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sqlite3
 import threading
 import time
 import uuid
@@ -208,6 +209,7 @@ from quantmaster.server.automation import router as automation_router  # noqa: E
 from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
 from quantmaster.server.news import router as news_router  # noqa: E402
+from quantmaster.server.research import router as research_router  # noqa: E402
 from quantmaster.server.trading import router as trading_router  # noqa: E402
 
 app.include_router(management_router)
@@ -215,6 +217,7 @@ app.include_router(automation_router)
 app.include_router(lab_router)
 app.include_router(news_router)
 app.include_router(trading_router)
+app.include_router(research_router)
 
 
 def _series_to_points(s: pd.Series) -> list[list]:
@@ -313,7 +316,6 @@ def _progress_stream(
     )
 
 
-# ---------- 页面 ----------
 class StockAnalysisIn(BaseModel):
     query: str = Field(..., min_length=1, max_length=80)
 
@@ -331,6 +333,7 @@ def stock_analysis_stream(value: StockAnalysisIn, request: Request) -> Streaming
     )
 
 
+# ---------- 页面 ----------
 
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
@@ -929,8 +932,24 @@ def factors_list() -> dict:
     from quantmaster.ai.sentiment import list_news_factors
     from quantmaster.factors.fundamental import list_fundamental_factors
     from quantmaster.factors.library import list_factors
+    from quantmaster.lab.models import factor_name_key
+    from quantmaster.lab.store import LabStore
 
-    return {"factors": list_factors() + list_fundamental_factors() + list_news_factors()}
+    factors = list_factors() + list_fundamental_factors() + list_news_factors()
+    for item in factors:
+        item.setdefault("source", "builtin")
+    known_names = {factor_name_key(item["name"]) for item in factors}
+    try:
+        for item in LabStore().runtime_factors():
+            key = factor_name_key(item["name"])
+            if key in known_names:
+                continue
+            factors.append(item)
+            known_names.add(key)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        # The core catalog remains useful if the optional Lab ledger is unavailable.
+        logger.warning("Quant Lab 因子目录暂不可用于自动补全: %s", exc)
+    return {"factors": factors}
 
 
 class FactorTestRequest(BaseModel):

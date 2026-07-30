@@ -109,6 +109,16 @@ def resolve_factor(
     """
     from quantmaster.factors.library import get_factor
 
+    name_or_expr = name_or_expr.strip()
+    if name_or_expr.startswith("artifact:"):
+        from quantmaster.factors.artifact import ArtifactFactor, parse_artifact_reference
+
+        reference = parse_artifact_reference(name_or_expr)
+        if reference is None:
+            raise ValueError(
+                "研究产物格式应为 artifact:factor|risk|model:stock|etf|future:id@1.0.0"
+            )
+        return ArtifactFactor(reference)
     if name_or_expr == "news_sentiment":
         from quantmaster.ai.sentiment import NewsSentimentFactor
 
@@ -135,6 +145,32 @@ def resolve_factor(
                 f"可用: {sorted(factors) or '无'}"
             )
         return factors[name_or_expr]
+    from quantmaster.factors.library import BUILTIN_FACTORS
+
+    if name_or_expr in BUILTIN_FACTORS:
+        return BUILTIN_FACTORS[name_or_expr]
+
+    # Quant Lab display names are unique registry aliases. Resolving them here keeps
+    # copied names and autocomplete insertions executable without exposing the raw
+    # expression (whose function commas conflict with multi-factor separators).
+    from quantmaster.lab.store import LabStore
+
+    stored = LabStore().factor_reference(name_or_expr)
+    if stored is not None:
+        if stored["kind"] != "expression":
+            raise ValueError(
+                f"Quant Lab 因子“{stored['name']}”是 {stored['kind']} 类型；"
+                "请在回测工作台选择 Quant Lab OOF 版本策略并填写版本 ID"
+            )
+        spec = stored.get("spec") or {}
+        expression = str(spec.get("expression") or "").strip()
+        if not expression:
+            raise ValueError(f"Quant Lab 因子“{stored['name']}”没有可执行表达式")
+        from quantmaster.factors.base import ExpressionFactor
+
+        return ExpressionFactor(
+            expression, name=stored["name"], description=str(spec.get("description") or ""),
+        )
     return get_factor(name_or_expr)
 
 

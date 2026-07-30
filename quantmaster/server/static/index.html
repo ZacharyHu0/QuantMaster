@@ -965,7 +965,17 @@
         <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
         <label>研究等级<select name="research_tier"><option value="auto">自动 · CSI800 生产门禁</option><option value="production">强制 production</option><option value="sandbox">sandbox 近似</option></select></label>
         <label class="wide" data-bt-field="lab_version" hidden>Quant Lab 版本 ID<span>仅使用该版本滚动 OOF 预测</span><input name="version_id" maxlength="64" placeholder="从 Quant Lab 候选证据复制版本 ID"></label>
-        <label class="wide" data-bt-field="factor">因子<span>逗号分隔可组合</span><input name="factor" list="factor-list" value="mom_20d" placeholder="mom_20d,rev_5d,ep" required></label>
+        <label class="wide" data-bt-field="factor">因子
+          <div class="factor-completion" data-factor-completion>
+            <input id="bt-factor-input" name="factor" value="mom_20d" placeholder="mom_20d, rev_5d, ep" required
+                   autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false"
+                   aria-haspopup="listbox" aria-controls="bt-factor-options">
+            <button class="factor-completion-trigger" type="button" aria-label="打开因子候选" aria-expanded="false" aria-controls="bt-factor-options">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+            </button>
+            <div class="factor-completion-menu" id="bt-factor-options" role="listbox" aria-label="因子候选" popover="manual"></div>
+          </div>
+        </label>
         <label data-bt-field="factor">合成<select name="weighting"><option value="equal">等权</option><option value="ic">滚动 IC 加权</option></select></label>
         <label data-bt-field="factor">调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
         <label data-bt-field="swing decision lab_version" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
@@ -1281,6 +1291,27 @@
               <small data-refresh-failures></small>
             </div>
           </div>
+          <div class="research-data-box">
+            <div class="research-data-heading"><div><h4>跨资产研究生产湖</h4><p>按日生成可追溯的股票、ETF 与期货分区；先预览依赖、权限和磁盘影响，再启动可恢复任务。</p></div><button class="ghost" id="research-data-reload" type="button">刷新目录</button></div>
+            <div class="research-capabilities" id="research-capabilities" aria-live="polite"><span>正在读取日线权限与计算内核…</span></div>
+            <div class="research-plan-grid">
+              <fieldset id="research-assets"><legend>资产</legend><label><input type="checkbox" value="stock" checked> A 股</label><label><input type="checkbox" value="etf"> ETF</label><label><input type="checkbox" value="future"> 期货</label></fieldset>
+              <label>模式<select id="research-mode"><option value="incremental">增量生产</option><option value="historical">历史初始化</option></select></label>
+              <label>计算内核<select id="research-backend"><option value="auto">自动（Rust 优先）</option><option value="python">Python</option><option value="rust">Rust / 自动回退</option></select></label>
+              <label>起始日期<input id="research-start" type="date"></label>
+              <label>结束日期<input id="research-end" type="date"></label>
+              <label class="research-multi">数据集<select id="research-datasets" multiple aria-label="研究数据集"></select><small>留空时使用各资产 2000 积分日线基线。</small></label>
+              <label class="research-multi">研究产物<select id="research-specs" multiple aria-label="因子、标签与风险暴露"></select><small>可多选；同一 provider 的输入只扫描一次。</small></label>
+              <button class="ghost research-preview" id="research-preview" type="button">生成 Dry-run</button>
+            </div>
+            <div class="maintenance-confirm" id="research-confirm" hidden><span data-research-preview-text></span><button class="primary" id="research-start-button" type="button">启动研究任务</button></div>
+            <div class="maintenance-progress research-progress" id="research-progress" hidden aria-live="polite">
+              <div><span data-research-phase>准备中</span><strong data-research-percent>0%</strong></div>
+              <div class="load-track"><div class="load-fill"></div></div>
+              <div class="maintenance-actions"><button class="ghost" id="research-cancel" type="button">完成当前分区后取消</button><button class="ghost" id="research-resume" type="button" hidden>继续任务</button></div>
+              <small data-research-detail></small>
+            </div>
+          </div>
           <div class="migration-box">
             <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
             <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
@@ -1538,6 +1569,7 @@ function sourceForPath(path) {
     ['/api/factors', '因子研究'], ['/api/backtest', '策略回测'],
     ['/api/mining', '因子挖掘'], ['/api/paper', '模拟交易'],
     ['/api/news', '资讯分析'], ['/api/ledger', '实盘账本'],
+    ['/api/stock-analysis', '个股分析'],
     ['/api/assets', '我的标的'], ['/api/settings', '设置中心'],
     ['/api/automation', '自动任务'], ['/api/lab', 'Quant Lab'],
   ];
@@ -1548,7 +1580,6 @@ function readableDetail(detail) {
   if (Array.isArray(detail)) return detail.map(item => {
     const field = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
     return [field, item?.msg || item?.message].filter(Boolean).join('：');
-    ['/api/stock-analysis', '个股分析'],
   }).filter(Boolean).join('；');
   if (detail && typeof detail === 'object') {
     if (detail.message) return String(detail.message);
@@ -2283,6 +2314,9 @@ function tabControl(tab) {
 function loadActiveTab(tab) {
   if (tab === 'ledger') loadLedger();
   if (tab === 'news') loadNews();
+  if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
+    window.loadStockAnalysis();
+  }
   if (tab === 'paper') loadPaper();
   if (tab === 'help' && typeof window.loadHelp === 'function') window.loadHelp();
   if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
@@ -2293,9 +2327,6 @@ function loadActiveTab(tab) {
   }
 }
 
-  if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
-    window.loadStockAnalysis();
-  }
 function activateTab(control, {persist = true, load = true} = {}) {
   const tab = control?.dataset.tab;
   if (!tab || !document.getElementById('tab-' + tab)) return false;
@@ -3248,9 +3279,12 @@ async function loadFactorList() {
     const data = await api('/api/factors');
     document.getElementById('factor-list').innerHTML =
       data.factors.map(f => `<option value="${esc(f.name)}">${esc(f.description)}</option>`).join('');
+    window.QuantMasterFactorCatalog = data.factors;
+    document.dispatchEvent(new CustomEvent('quantmaster:factor-catalog', {detail:data.factors}));
   } catch (e) { /* 非致命 */ }
 }
 loadFactorList();
+document.addEventListener('quantmaster:factors-changed', loadFactorList);
 
 document.getElementById('factor-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
@@ -3643,10 +3677,10 @@ document.getElementById('cash-form').onsubmit = async e => {
 <script src="/static/settings.js"></script>
 <script src="/static/candidates.js"></script>
 <script src="/static/news.js"></script>
+<script src="/static/stock-analysis.js"></script>
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>
 <script src="/static/trading.js"></script>
 <script src="/static/help.js"></script>
 </body>
 </html>
-<script src="/static/stock-analysis.js"></script>

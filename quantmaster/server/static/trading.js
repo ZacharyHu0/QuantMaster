@@ -92,6 +92,273 @@
   const btJob = document.getElementById('bt-job-state');
   const btHistory = document.getElementById('bt-history');
   const btCompare = document.getElementById('bt-compare');
+  const factorCompletion = document.querySelector('[data-factor-completion]');
+  const factorInput = document.getElementById('bt-factor-input');
+  const factorMenu = document.getElementById('bt-factor-options');
+  const factorTrigger = factorCompletion?.querySelector('.factor-completion-trigger');
+  const nativeFactorPopover = typeof factorMenu?.showPopover === 'function';
+  const factorStatusLabel = {
+    draft:'草稿', validating:'验证中', candidate:'候选', approved:'已批准',
+    production:'生产', degraded:'降级', archived:'已归档',
+  };
+  let factorCatalog = Array.isArray(window.QuantMasterFactorCatalog)
+    ? window.QuantMasterFactorCatalog : [];
+  let factorMatches = [];
+  let factorActiveIndex = -1;
+  let factorCatalogLoading = false;
+  let factorCatalogError = '';
+  let factorPositionFrame = 0;
+
+  if (factorMenu && !nativeFactorPopover) factorMenu.hidden = true;
+
+  const factorKey = value => String(value || '').normalize('NFKC')
+    .trim().replace(/\s+/g, ' ').toLocaleLowerCase('zh-CN');
+
+  function currentFactorToken() {
+    const value = factorInput?.value || '';
+    const caret = factorInput?.selectionStart ?? value.length;
+    const start = value.lastIndexOf(',', Math.max(0, caret - 1)) + 1;
+    const nextComma = value.indexOf(',', caret);
+    const end = nextComma < 0 ? value.length : nextComma;
+    return {value, start, end, query:value.slice(start, end).trim()};
+  }
+
+  function factorMenuIsOpen() {
+    if (!factorMenu) return false;
+    return nativeFactorPopover
+      ? factorMenu.matches(':popover-open')
+      : !factorMenu.hidden;
+  }
+
+  function positionFactorCompletion() {
+    if (!factorMenuIsOpen() || !factorInput) return;
+    const rect = factorInput.getBoundingClientRect();
+    const viewportPadding = 12, gap = 6;
+    const width = Math.min(
+      Math.max(rect.width, 420), window.innerWidth - viewportPadding * 2,
+    );
+    const left = Math.min(
+      Math.max(viewportPadding, rect.left), window.innerWidth - width - viewportPadding,
+    );
+    const below = window.innerHeight - rect.bottom - gap - viewportPadding;
+    const above = rect.top - gap - viewportPadding;
+    const opensAbove = below < 220 && above > below;
+    const available = Math.max(120, Math.min(310, opensAbove ? above : below));
+    const options = factorMenu.querySelector('.factor-completion-options');
+    if (options) options.style.maxHeight = `${available}px`;
+    factorMenu.style.width = `${width}px`;
+    factorMenu.style.left = `${left}px`;
+    factorMenu.classList.toggle('opens-above', opensAbove);
+    factorMenu.style.top = opensAbove
+      ? `${Math.max(viewportPadding, rect.top - gap - factorMenu.offsetHeight)}px`
+      : `${rect.bottom + gap}px`;
+  }
+
+  function queueFactorCompletionPosition() {
+    if (!factorMenuIsOpen() || factorPositionFrame) return;
+    factorPositionFrame = window.requestAnimationFrame(() => {
+      factorPositionFrame = 0;
+      positionFactorCompletion();
+    });
+  }
+
+  function openFactorCompletion() {
+    if (!factorMenu || !factorInput || factorInput.disabled) return;
+    if (!factorMenuIsOpen()) {
+      if (nativeFactorPopover) factorMenu.showPopover();
+      else factorMenu.hidden = false;
+    }
+    factorInput.setAttribute('aria-expanded', 'true');
+    factorTrigger?.setAttribute('aria-expanded', 'true');
+    positionFactorCompletion();
+    queueFactorCompletionPosition();
+  }
+
+  function closeFactorCompletion() {
+    if (!factorMenu || !factorInput) return;
+    if (nativeFactorPopover && factorMenuIsOpen()) factorMenu.hidePopover();
+    else if (!nativeFactorPopover) factorMenu.hidden = true;
+    factorInput.setAttribute('aria-expanded', 'false');
+    factorTrigger?.setAttribute('aria-expanded', 'false');
+    factorInput.removeAttribute('aria-activedescendant');
+    factorActiveIndex = -1;
+  }
+
+  function setFactorActive(index, scroll = true) {
+    if (!factorMatches.length) return;
+    factorActiveIndex = (index + factorMatches.length) % factorMatches.length;
+    factorMenu.querySelectorAll('[role="option"]').forEach((option, optionIndex) => {
+      const active = optionIndex === factorActiveIndex;
+      option.classList.toggle('active', active);
+      option.setAttribute('aria-selected', String(active));
+      if (active) {
+        factorInput.setAttribute('aria-activedescendant', option.id);
+        if (scroll) option.scrollIntoView({block:'nearest'});
+      }
+    });
+  }
+
+  function filteredFactorCatalog(query) {
+    const token = currentFactorToken();
+    const selected = new Set([
+      ...token.value.slice(0, token.start).split(','),
+      ...token.value.slice(token.end).split(','),
+    ].map(factorKey).filter(Boolean));
+    const normalizedQuery = factorKey(query);
+    const unique = new Map();
+    factorCatalog.forEach(item => {
+      const name = String(item?.name || '').trim();
+      if (!name) return;
+      const nameKey = factorKey(name), slugKey = factorKey(item.slug || '');
+      if (selected.has(nameKey) || (slugKey && selected.has(slugKey))) return;
+      const haystack = factorKey(`${name} ${item.slug || ''} ${item.description || ''} ${item.category || ''}`);
+      if (normalizedQuery && !haystack.includes(normalizedQuery)) return;
+      const score = !normalizedQuery ? 4
+        : nameKey === normalizedQuery || slugKey === normalizedQuery ? 0
+        : nameKey.startsWith(normalizedQuery) ? 1
+        : slugKey.startsWith(normalizedQuery) ? 2 : 3;
+      const previous = unique.get(nameKey);
+      if (!previous || score < previous.score) unique.set(nameKey, {item, score});
+    });
+    return [...unique.values()]
+      .sort((left, right) => left.score - right.score
+        || String(left.item.name).localeCompare(
+          String(right.item.name), 'zh-CN', {numeric:true, sensitivity:'base'},
+        ))
+      .slice(0, 16).map(entry => entry.item);
+  }
+
+  function renderFactorCompletion() {
+    if (!factorMenu || !factorInput || factorInput.disabled) {
+      closeFactorCompletion();
+      return;
+    }
+    const {query} = currentFactorToken();
+    factorMatches = filteredFactorCatalog(query);
+    if (factorCatalogLoading && !factorCatalog.length) {
+      factorMenu.innerHTML = '<div class="factor-completion-empty">正在载入因子目录…</div>';
+      factorActiveIndex = -1;
+    } else if (!factorMatches.length) {
+      const message = factorCatalogError
+        ? '候选目录暂时不可用，仍可手动输入名称或表达式'
+        : `没有匹配“${escapeHtml(query)}”的因子；仍可手动输入表达式`;
+      factorMenu.innerHTML = `<div class="factor-completion-empty">${message}</div>`;
+      factorActiveIndex = -1;
+    } else {
+      factorMenu.innerHTML = `<div class="factor-completion-options">${factorMatches.map((item, index) => {
+        const lab = item.source === 'quant_lab';
+        const meta = lab
+          ? `Quant Lab${item.status ? ` · ${factorStatusLabel[item.status] || item.status}` : ''}`
+          : '内置因子';
+        const secondary = item.description || item.category || item.slug || '可执行因子';
+        return `<div id="bt-factor-option-${index}" class="factor-completion-option" role="option" aria-selected="false" data-factor-option="${index}">
+          <span class="factor-completion-kind" aria-hidden="true">${lab ? 'Q' : 'ƒ'}</span>
+          <span class="factor-completion-copy"><b>${escapeHtml(item.name)}</b><small>${escapeHtml(secondary)}</small></span>
+          <span class="factor-completion-meta">${escapeHtml(meta)}</span>
+        </div>`;
+      }).join('')}</div>`;
+      setFactorActive(0, false);
+    }
+    openFactorCompletion();
+  }
+
+  function insertFactorMatch(index) {
+    const item = factorMatches[index];
+    if (!item || !factorInput) return;
+    const token = currentFactorToken();
+    const prefix = token.value.slice(0, token.start);
+    const suffix = token.value.slice(token.end);
+    const spacer = token.start > 0 && !/\s$/.test(prefix) ? ' ' : '';
+    const replacement = `${spacer}${item.name}`;
+    factorInput.value = `${prefix}${replacement}${suffix}`;
+    const caret = prefix.length + replacement.length;
+    factorInput.setSelectionRange(caret, caret);
+    factorInput.dispatchEvent(new Event('change', {bubbles:true}));
+    closeFactorCompletion();
+    factorInput.focus();
+  }
+
+  function useFactorCatalog(items) {
+    factorCatalog = Array.isArray(items) ? items : [];
+    factorCatalogError = '';
+    if (document.activeElement === factorInput) renderFactorCompletion();
+  }
+
+  async function loadFactorCatalog() {
+    if (factorCatalogLoading) return;
+    factorCatalogLoading = true;
+    if (document.activeElement === factorInput) renderFactorCompletion();
+    try {
+      const payload = await api('/api/factors', {cache:'no-store'});
+      useFactorCatalog(payload.factors || []);
+      window.QuantMasterFactorCatalog = factorCatalog;
+    } catch (error) {
+      factorCatalogError = error?.message || '因子目录加载失败';
+      if (document.activeElement === factorInput) renderFactorCompletion();
+    } finally {
+      factorCatalogLoading = false;
+      if (document.activeElement === factorInput) renderFactorCompletion();
+    }
+  }
+
+  if (factorInput && factorMenu) {
+    factorInput.addEventListener('focus', () => {
+      renderFactorCompletion();
+      if (!factorCatalog.length) loadFactorCatalog();
+    });
+    factorInput.addEventListener('click', renderFactorCompletion);
+    factorInput.addEventListener('input', renderFactorCompletion);
+    factorInput.addEventListener('keydown', event => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (!factorMenuIsOpen()) renderFactorCompletion();
+        setFactorActive(factorActiveIndex + (event.key === 'ArrowDown' ? 1 : -1));
+      } else if ((event.key === 'Enter' || event.key === 'Tab')
+          && factorMenuIsOpen() && factorActiveIndex >= 0) {
+        event.preventDefault();
+        insertFactorMatch(factorActiveIndex);
+      } else if (event.key === 'Escape' && factorMenuIsOpen()) {
+        event.preventDefault();
+        closeFactorCompletion();
+      }
+    });
+    factorTrigger?.addEventListener('pointerdown', event => event.preventDefault());
+    factorTrigger?.addEventListener('click', () => {
+      if (factorMenuIsOpen()) {
+        closeFactorCompletion();
+        return;
+      }
+      factorInput.focus({preventScroll:true});
+      renderFactorCompletion();
+    });
+    factorInput.addEventListener('blur', () => window.setTimeout(() => {
+      if (!factorCompletion?.contains(document.activeElement)) closeFactorCompletion();
+    }, 0));
+    factorMenu.addEventListener('pointerdown', event => event.preventDefault());
+    factorMenu.addEventListener('mousemove', event => {
+      const option = event.target.closest('[data-factor-option]');
+      if (option) setFactorActive(Number(option.dataset.factorOption), false);
+    });
+    factorMenu.addEventListener('click', event => {
+      const option = event.target.closest('[data-factor-option]');
+      if (option) insertFactorMatch(Number(option.dataset.factorOption));
+    });
+    factorMenu.addEventListener('toggle', () => {
+      const open = factorMenuIsOpen();
+      factorInput.setAttribute('aria-expanded', String(open));
+      factorTrigger?.setAttribute('aria-expanded', String(open));
+      if (open) queueFactorCompletionPosition();
+    });
+    document.addEventListener('pointerdown', event => {
+      if (!factorCompletion?.contains(event.target)) closeFactorCompletion();
+    });
+    document.addEventListener('quantmaster:factor-catalog', event => {
+      useFactorCatalog(event.detail);
+    });
+    window.addEventListener('resize', queueFactorCompletionPosition);
+    document.addEventListener('scroll', queueFactorCompletionPosition, true);
+    loadFactorCatalog();
+  }
 
   function syncBacktestFields() {
     if (!btForm) return;
@@ -105,6 +372,7 @@
         if (input.name === 'version_id') input.required = visible;
       });
     });
+    if (kind !== 'factor') closeFactorCompletion();
   }
 
   function backtestPayload(form) {

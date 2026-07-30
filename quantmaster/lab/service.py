@@ -476,9 +476,12 @@ class LabService:
         if quality == "production":
             def relay(done: int, total: int, symbol: str, success: bool) -> None:
                 if progress:
-                    progress(20 + int(30 * done / max(1, total)),
-                             f"PIT 研究包 {done}/{total} · {symbol}",
-                             "" if success else "严格数据门禁失败")
+                    detail = f"{done}/{total} · {symbol}"
+                    if not success:
+                        detail += " · 严格数据门禁失败"
+                    progress(
+                        20 + int(30 * done / max(1, total)), "PIT 研究包", detail,
+                    )
 
             bundle = load_research_bundle(
                 symbols, start, end, membership=membership, progress=relay,
@@ -808,6 +811,16 @@ class LabService:
             version = self.store.save_validation(
                 version["id"], snapshot["snapshot_hash"], report,
             )
+            from quantmaster.research.contracts import AssetClass
+            from quantmaster.research.engine import ResearchEngine
+
+            research_rows = prediction_rows.rename(columns={"date": "trade_date"})[
+                ["trade_date", "symbol", "value"]
+            ]
+            research_records = ResearchEngine().publish_model_predictions(
+                learned.slug, "1.0.0", AssetClass.STOCK, research_rows,
+                run_id=experiment["id"],
+            )
             result.update({
                 "features": feature_names,
                 "snapshot_hash": snapshot["snapshot_hash"],
@@ -821,6 +834,10 @@ class LabService:
                     "gates": report.get("gates", {}),
                 },
                 "manifest": manifest_relative,
+                "research_artifact": {
+                    "ref": f"artifact:model:stock:{learned.slug}@1.0.0",
+                    "partitions": len(research_records),
+                },
             })
             self.store.update_experiment(
                 experiment["id"], status="completed", result=result,
@@ -864,10 +881,12 @@ class LabService:
 
                 def research_progress(done: int, total: int, symbol: str, success: bool) -> None:
                     if progress:
+                        detail = f"{done}/{total} · {symbol}"
+                        if not success:
+                            detail += " · 数据门禁失败"
                         progress(
                             20 + int(30 * done / max(1, total)),
-                            f"原始成交/PIT约束 {done}/{total} · {symbol}",
-                            "" if success else "数据门禁失败",
+                            "原始成交/PIT约束", detail,
                         )
 
                 research_bundle = load_research_bundle(

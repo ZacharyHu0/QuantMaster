@@ -154,6 +154,80 @@
   border-color: color-mix(in oklch, var(--bad) 72%, var(--axis));
 }
 
+.factor-completion { position: relative; width: 100%; }
+.factor-completion input { padding-inline-end: 44px; }
+.factor-completion-trigger {
+  position: absolute;
+  z-index: 1;
+  top: 1px;
+  right: 1px;
+  display: grid;
+  width: 40px;
+  height: 42px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--trade-line);
+  border-radius: 0 5px 5px 0;
+  background: color-mix(in oklch, var(--surface) 45%, transparent);
+  color: var(--muted);
+  cursor: pointer;
+}
+.factor-completion-trigger:hover,
+.factor-completion-trigger[aria-expanded="true"] { color: var(--trade-accent); background: var(--trade-soft); }
+.factor-completion-trigger:focus-visible { outline: 2px solid var(--trade-accent); outline-offset: -2px; }
+.factor-completion-trigger svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
+.factor-completion-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
+.factor-completion-menu {
+  position: fixed;
+  z-index: 80;
+  inset: auto;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--trade-accent) 38%, var(--axis));
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--surface) 96%, var(--page));
+  box-shadow: 0 10px 28px color-mix(in oklch, var(--page) 76%, transparent);
+  color: var(--ink);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 110ms ease-out, transform 110ms ease-out;
+}
+.factor-completion-menu:popover-open { opacity: 1; transform: translateY(0); }
+.factor-completion-menu.opens-above { transform: translateY(4px); }
+.factor-completion-menu.opens-above:popover-open { transform: translateY(0); }
+.factor-completion-options { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.factor-completion-option {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) max-content;
+  gap: 9px;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.factor-completion-option + .factor-completion-option { border-top: 1px solid var(--trade-line); }
+.factor-completion-option:hover,
+.factor-completion-option.active { background: color-mix(in oklch, var(--trade-accent) 12%, transparent); }
+.factor-completion-kind {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid color-mix(in oklch, var(--trade-accent) 42%, var(--axis));
+  border-radius: 4px;
+  color: var(--trade-accent);
+  font: 700 11px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+.factor-completion-copy { min-width: 0; }
+.factor-completion-copy b,
+.factor-completion-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.factor-completion-copy b { color: var(--ink); font: 620 11px/1.35 ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.factor-completion-copy small { margin-top: 3px; color: var(--muted); font-size: 9px; font-weight: 450; }
+.factor-completion-meta { color: var(--muted); font-size: 8px; font-weight: 540; white-space: nowrap; }
+.factor-completion-empty { padding: 13px 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+
 .trading-form .candidate-field,
 .paper-create-form .candidate-field { display: grid; grid-template-columns: minmax(0, 1fr) 44px; }
 .trading-form .candidate-view,
@@ -425,4 +499,5 @@
 @media (prefers-reduced-motion: reduce) {
   .trading-skeleton { animation: none; }
   .trading-progress-track i { transition: none; }
+  .factor-completion-menu { transition: none; }
 }

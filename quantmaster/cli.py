@@ -661,6 +661,80 @@ def cmd_ledger(args) -> None:
         _print_json(ledger_report(ledger))
 
 
+def _research_assets(value: str):
+    from quantmaster.research import AssetClass
+
+    try:
+        return tuple(AssetClass(item.strip().lower()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise ValueError("资产只支持 stock,etf,future") from exc
+
+
+def cmd_data(args) -> None:
+    """Versioned research lake, capability and production job commands."""
+    from quantmaster.research import KernelBackend
+    from quantmaster.research.engine import ResearchEngine, save_plan
+
+    engine = ResearchEngine()
+    if args.data_cmd == "catalog":
+        _print_json(engine.catalog())
+        return
+    if args.data_cmd == "capabilities":
+        _print_json(engine.capabilities())
+        return
+    if args.data_cmd in {"jobs", "status", "cancel", "resume"}:
+        from quantmaster.research.jobs import get_research_job_manager
+
+        manager = get_research_job_manager()
+        if args.data_cmd in {"jobs", "status"}:
+            _print_json({"items": manager.list(args.limit)})
+        elif args.data_cmd == "cancel":
+            _print_json(manager.cancel(args.job_id))
+        else:
+            resumed = manager.resume(args.job_id)
+            _print_json(manager.wait(resumed["id"]))
+        return
+    if args.data_cmd == "materialize":
+        from quantmaster.data.instruments import InstrumentStore
+        from quantmaster.data.storage import BarStore
+
+        symbols = [item.strip().upper() for item in args.symbols.split(",") if item.strip()]
+        if not symbols:
+            candidates = BarStore().symbols()
+            instruments = InstrumentStore().get_many(candidates)
+            symbols = [
+                symbol for symbol in candidates
+                if (instruments.get(symbol) and instruments[symbol].asset_type == args.asset)
+            ]
+        records = engine.lake.materialize_bar_store(
+            symbols, args.start, args.end or _today(), asset_class=_research_assets(args.asset)[0],
+        )
+        _print_json({
+            "asset_class": args.asset, "symbols": len(symbols),
+            "partitions": len(records), "rows": sum(item["row_count"] for item in records),
+        })
+        return
+
+    end = args.end or _today()
+    plan = engine.plan(
+        args.start, end, asset_classes=_research_assets(args.assets),
+        datasets=tuple(item.strip() for item in args.datasets.split(",") if item.strip()) or None,
+        spec_ids=tuple(item.strip() for item in args.specs.split(",") if item.strip()) or None,
+        mode=args.mode, backend=KernelBackend(args.backend),
+    )
+    if args.data_cmd == "plan":
+        if args.output:
+            save_plan(plan, args.output)
+        _print_json(plan.to_dict())
+        return
+
+    def progress(index, total, task):
+        print(f"[{index}/{total}] {task.key}", file=sys.stderr)
+
+    result = engine.execute(plan, progress=progress)
+    _print_json(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qm", description="QuantMaster — A股量化研究平台")
     parser.add_argument(
@@ -773,6 +847,39 @@ def build_parser() -> argparse.ArgumentParser:
                    help="K线频率；分钟线会按频率独立长期归档")
     p.add_argument("--force", action="store_true", help="忽略缓存强制刷新")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("data", help="跨资产研究目录、日期分区湖与生产任务")
+    dsub = p.add_subparsers(dest="data_cmd", required=True)
+    dsub.add_parser("catalog", help="列出数据集、版本化研究规格和本地覆盖")
+    dsub.add_parser("capabilities", help="查看 Tushare 权限和 Python/Rust 内核状态")
+
+    def data_plan_args(command):
+        command.add_argument("--assets", default="stock", help="逗号分隔：stock,etf,future")
+        command.add_argument("--datasets", default="", help="数据集 ID；留空使用资产日线基线")
+        command.add_argument("--specs", default="", help="同时计算的因子/标签/风险规格 ID")
+        command.add_argument("--start", default="2022-01-01")
+        command.add_argument("--end", default=None)
+        command.add_argument("--mode", choices=["historical", "incremental"], default="historical")
+        command.add_argument("--backend", choices=["auto", "python", "rust"], default="auto")
+
+    dp = dsub.add_parser("plan", help="只生成依赖、权限、分区和成本计划")
+    data_plan_args(dp)
+    dp.add_argument("--output", default="", help="可选的计划 JSON 输出路径")
+    ds = dsub.add_parser("sync", help="前台执行历史或增量研究计划")
+    data_plan_args(ds)
+    dm = dsub.add_parser("materialize", help="从现有 BarStore 按需派生日期分区")
+    dm.add_argument("--asset", choices=["stock", "etf", "future"], default="stock")
+    dm.add_argument("--symbols", default="", help="逗号分隔；留空按证券主数据筛选缓存")
+    dm.add_argument("--start", default="2022-01-01")
+    dm.add_argument("--end", default=None)
+    for command_name in ("jobs", "status"):
+        command = dsub.add_parser(command_name, help="查看持久化研究任务")
+        command.add_argument("--limit", type=int, default=50)
+    dc = dsub.add_parser("cancel", help="请求取消正在由 Web/Worker 执行的任务")
+    dc.add_argument("job_id")
+    dr = dsub.add_parser("resume", help="恢复中断、取消或部分失败的任务")
+    dr.add_argument("job_id")
+    p.set_defaults(func=cmd_data, output="", mode="historical", backend="auto")
 
     p = sub.add_parser("regime", help="牛熊、上/下行/震荡、板块强弱与1-7日展望")
     common(p)

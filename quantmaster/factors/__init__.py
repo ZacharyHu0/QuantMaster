@@ -1,4 +1,5 @@
 from quantmaster.factors.analysis import FactorReport, analyze_factor
+from quantmaster.factors.artifact import ArtifactFactor, parse_artifact_reference
 from quantmaster.factors.base import ExpressionFactor, Factor, FuncFactor
 from quantmaster.factors.composite import (
     factor_correlation,
@@ -12,6 +13,7 @@ from quantmaster.factors.library import BUILTIN_FACTORS
 
 __all__ = [
     "BUILTIN_FACTORS",
+    "ArtifactFactor",
     "ExpressionFactor",
     "Factor",
     "FactorReport",
@@ -25,4 +27,5 @@ __all__ = [
     "ic_weighted_combine",
     "make_fundamental_factors",
     "orthogonalize",
+    "parse_artifact_reference",
 ]

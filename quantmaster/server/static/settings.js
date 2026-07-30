@@ -9,6 +9,9 @@
     migrationTimer: null,
     dataRefreshTimer: null,
     dataRefreshPreview: null,
+    researchTimer: null,
+    researchPreview: null,
+    researchCatalog: null,
     modelCheckSignature: '',
     modelCheckTimer: null,
     autoSaveTimer: null,
@@ -164,6 +167,7 @@
       state.loaded = true;
       fillForm(data);
       await loadDataRefreshControls();
+      await loadResearchControls();
     } catch (error) {
       document.getElementById('settings-config-path').textContent = `设置不可用：${error.message}`;
       form.querySelectorAll('input, select, textarea, button').forEach(item => { item.disabled = true; });
@@ -860,6 +864,170 @@
       const task = await request(`/api/settings/data-refresh/${id}/resume`, {method: 'POST'});
       renderDataRefresh(task);
       pollDataRefresh(id);
+    } finally { event.target.disabled = false; }
+  });
+
+  function researchPayload() {
+    return {
+      assets: [...document.querySelectorAll('#research-assets input:checked')].map(item => item.value),
+      datasets: [...document.getElementById('research-datasets').selectedOptions].map(item => item.value),
+      specs: [...document.getElementById('research-specs').selectedOptions].map(item => item.value),
+      start: document.getElementById('research-start').value,
+      end: document.getElementById('research-end').value,
+      mode: document.getElementById('research-mode').value,
+      backend: document.getElementById('research-backend').value,
+    };
+  }
+
+  function resetResearchPreview() {
+    state.researchPreview = null;
+    document.getElementById('research-confirm').hidden = true;
+  }
+
+  function renderResearchCapabilities(data) {
+    const root = document.getElementById('research-capabilities');
+    const daily = (data.data || []).filter(item => !item.premium);
+    const unique = [];
+    daily.forEach(item => {
+      if (!unique.some(value => value.endpoint === item.endpoint)) unique.push(item);
+    });
+    const kernel = data.kernel || {};
+    root.innerHTML = unique.map(item =>
+      `<span class="research-capability ${html(item.state)}" title="${html(item.detail)}">${html(item.endpoint)} · ${html(item.state)}</span>`
+    ).join('') + `<span class="research-capability ${kernel.backend === 'rust' ? 'available' : ''}" title="${html(kernel.fallback_reason || '原生内核可用')}">kernel · ${html(kernel.backend || 'python')}</span>`;
+  }
+
+  async function loadResearchControls() {
+    const start = document.getElementById('research-start');
+    const end = document.getElementById('research-end');
+    if (!start.value) start.value = state.config?.lab?.start || '2022-01-01';
+    if (!end.value) end.value = new Date().toISOString().slice(0, 10);
+    try {
+      const [catalog, capabilities, jobs] = await Promise.all([
+        request('/api/research/data/catalog'),
+        request('/api/research/data/capabilities'),
+        request('/api/research/data/jobs?limit=1'),
+      ]);
+      state.researchCatalog = catalog;
+      const datasetSelect = document.getElementById('research-datasets');
+      const selectedDatasets = new Set([...datasetSelect.selectedOptions].map(item => item.value));
+      datasetSelect.innerHTML = (catalog.datasets || []).filter(item => !item.premium).map(item =>
+        `<option value="${html(item.id)}"${selectedDatasets.has(item.id) ? ' selected' : ''}>${html(item.asset_class)} · ${html(item.name)}</option>`
+      ).join('');
+      const specSelect = document.getElementById('research-specs');
+      const selectedSpecs = new Set([...specSelect.selectedOptions].map(item => item.value));
+      specSelect.innerHTML = (catalog.specs || []).filter(item =>
+        item.tags?.includes('cross-asset') || item.tags?.includes('label') || item.tags?.includes('qm-style-v1')
+      ).map(item =>
+        `<option value="${html(item.id)}"${selectedSpecs.has(item.id) ? ' selected' : ''}>${html(item.kind)} · ${html(item.name || item.id)}</option>`
+      ).join('');
+      renderResearchCapabilities(capabilities);
+      const latest = (jobs.items || [])[0];
+      if (latest) {
+        renderResearchJob(latest);
+        if (['running', 'cancelling'].includes(latest.status)) pollResearchJob(latest.id);
+      }
+    } catch (error) {
+      document.getElementById('research-capabilities').innerHTML = `<span class="err">研究目录不可用：${html(error.message)}</span>`;
+    }
+    resetResearchPreview();
+  }
+
+  function renderResearchJob(task) {
+    const root = document.getElementById('research-progress');
+    root.hidden = false;
+    root.style.setProperty('--research-progress', (task.progress || 0) / 100);
+    const labels = {
+      running: '研究生产中', cancelling: '正在完成当前分区', cancelled: '已取消，可继续',
+      interrupted: '服务重启中断，可继续', completed: '研究生产完成',
+      completed_with_errors: '任务完成，部分分区失败', failed: '研究任务失败',
+    };
+    const current = task.current_task ? ` · ${task.current_task}` : '';
+    root.querySelector('[data-research-phase]').textContent =
+      `${labels[task.status] || task.status} · ${task.next_index}/${task.total}${current}`;
+    root.querySelector('[data-research-percent]').textContent = `${task.progress || 0}%`;
+    const failures = task.failures || [];
+    root.querySelector('[data-research-detail]').textContent = failures.length
+      ? `${failures.length} 个失败：${failures.slice(-2).map(item => item.error).join('；')}`
+      : `${task.succeeded || 0} 个分区或计算批次已完成`;
+    const cancel = document.getElementById('research-cancel');
+    cancel.hidden = !['running', 'cancelling'].includes(task.status);
+    cancel.disabled = task.status === 'cancelling';
+    cancel.dataset.jobId = task.id;
+    const resume = document.getElementById('research-resume');
+    resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
+    resume.dataset.jobId = task.id;
+  }
+
+  async function pollResearchJob(id) {
+    clearTimeout(state.researchTimer);
+    try {
+      const task = await request(`/api/research/data/jobs/${id}`);
+      renderResearchJob(task);
+      if (['running', 'cancelling'].includes(task.status)) {
+        state.researchTimer = setTimeout(() => pollResearchJob(id), 2000);
+      }
+    } catch (error) {
+      const root = document.getElementById('research-progress');
+      root.hidden = false;
+      root.querySelector('[data-research-detail]').textContent = error.message;
+    }
+  }
+
+  document.querySelectorAll('#research-assets input, #research-mode, #research-backend, #research-start, #research-end, #research-datasets, #research-specs').forEach(item => {
+    item.addEventListener('change', resetResearchPreview);
+  });
+  document.getElementById('research-data-reload').addEventListener('click', async event => {
+    event.target.disabled = true;
+    try { await loadResearchControls(); } finally { event.target.disabled = false; }
+  });
+  document.getElementById('research-preview').addEventListener('click', async event => {
+    event.target.disabled = true;
+    try {
+      const payload = researchPayload();
+      if (!payload.assets.length) throw new Error('至少选择一种资产');
+      const plan = await request('/api/research/data/plans', {method: 'POST', body: payload});
+      state.researchPreview = plan;
+      const size = plan.estimated_bytes >= 1048576
+        ? `${(plan.estimated_bytes / 1048576).toFixed(1)} MiB` : `${plan.estimated_bytes || 0} B`;
+      const blockers = plan.capability_blocks || [];
+      document.querySelector('[data-research-preview-text]').textContent = blockers.length
+        ? `能力阻塞：${blockers.map(item => `${item.dataset_id} ${item.detail}`).join('；')}`
+        : `${plan.tasks.length} 个批次，约 ${plan.estimated_rows} 行 / ${size}。${(plan.warnings || []).join('；')}`;
+      document.getElementById('research-start-button').disabled = Boolean(blockers.length);
+      document.getElementById('research-confirm').hidden = false;
+    } catch (error) {
+      state.researchPreview = null;
+      document.querySelector('[data-research-preview-text]').textContent = error.message;
+      document.getElementById('research-start-button').disabled = true;
+      document.getElementById('research-confirm').hidden = false;
+    } finally { event.target.disabled = false; }
+  });
+  document.getElementById('research-start-button').addEventListener('click', async event => {
+    if (!state.researchPreview) return;
+    event.target.disabled = true;
+    try {
+      const task = await request('/api/research/data/jobs', {method: 'POST', body: researchPayload()});
+      document.getElementById('research-confirm').hidden = true;
+      renderResearchJob(task);
+      pollResearchJob(task.id);
+    } catch (error) {
+      document.querySelector('[data-research-preview-text]').textContent = error.message;
+    } finally { event.target.disabled = false; }
+  });
+  document.getElementById('research-cancel').addEventListener('click', async event => {
+    const id = event.target.dataset.jobId;
+    if (!id) return;
+    renderResearchJob(await request(`/api/research/data/jobs/${id}/cancel`, {method: 'POST'}));
+    pollResearchJob(id);
+  });
+  document.getElementById('research-resume').addEventListener('click', async event => {
+    const id = event.target.dataset.jobId;
+    if (!id) return;
+    event.target.disabled = true;
+    try {
+      renderResearchJob(await request(`/api/research/data/jobs/${id}/resume`, {method: 'POST'}));
+      pollResearchJob(id);
     } finally { event.target.disabled = false; }
   });
 

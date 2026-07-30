@@ -100,6 +100,28 @@
 - **分钟线口径**：本地归档使用不复权价格，避免后续增量与变化后的前复权
   基准拼接产生假跳空；1 分钟免费源回溯有限，需要每日运行 `qm fetch` 积累。
 
+## 研究生产层（research/）
+
+- `contracts.py` 定义不可变 `ResearchSpec`、`ArtifactRef`、`ExecutionPlan`
+  和 `RunManifest`；语义版本会进入存储列名，旧因子计算结果不会被新定义覆盖。
+- `lake.py` 在 `data_root/research_lake` 中按 kind / asset / frequency / dataset /
+  trade_date 组织 Zstd Parquet；SQLite 目录保存模式哈希、内容 SHA-256、输入
+  血缘、规格版本和 run id。写入经过临时文件、fsync 和原子替换。
+- `adapters.py` 用交易日截面接口生产 A 股、ETF 和期货基线，区分未配置、
+  缺少权限与短暂失败。高级分钟接口只报能力，不会阻塞可用的日线基线。
+- `engine.py` 先用官方日历和 lookback/lookahead 生成 dry-run DAG，再按 provider 合并
+  公共扫描。增量运行会重算数据集的修订窗口，分区租约避免并发重复写入。
+- `providers.py` 内置六个跨资产截面因子、四个前瞻标签、QM_STYLE_V1 五风格
+  暴露和期货主连前比例复权。QM_STYLE_V1 是透明的本项目风格基线，不声称是
+  Barra CNE6 的完整复刻。
+- `kernel.py` 以 Python 结果为规范实现；可选 `_quantmaster_kernel` 用 PyO3/Rayon
+  加速排名、稳健/加权标准化和滚动统计。`auto` 选择加速内核，并且仅在不可用时
+  显式记录一次 Python 回退原因。
+- `jobs.py` 与 `server/research.py` 提供持久化后台任务、取消、中断恢复和
+  `completed_with_errors`；变更类 REST 端点继续受本机来源和 CSRF 约束。
+
+详细操作和数据口径见 [研究生产流水线](research_pipeline.md)。
+
 ## 市场状态与决策层（market/、decision/）
 
 - `market/regime.py`：逐日计算 MACD、资金量比、波动、牛熊分和五档趋势状态；

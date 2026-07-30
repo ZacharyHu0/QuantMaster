@@ -1,0 +1,14 @@
+[package]
+name = "quantmaster-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Optional numerical kernels for QuantMaster research"
+
+[lib]
+name = "_quantmaster_kernel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+rayon = "1.10"

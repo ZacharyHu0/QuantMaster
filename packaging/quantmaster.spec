@@ -21,7 +21,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on",
+        "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",
     ] + optional_hidden,
     excludes=["tkinter", "matplotlib"],
 )

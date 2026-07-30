@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
@@ -196,6 +197,88 @@ def test_store_versions_validation_approval_deployment_and_jobs(tmp_path):
     store.finish_job(queued["id"], result={"ok": True})
     assert store.job(queued["id"])["status"] == "completed"
     assert len(store.events(queued["id"])) >= 3
+
+
+def test_factor_registry_enforces_unique_names_and_resolves_runtime_aliases(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    first_spec = FactorSpec(
+        slug="manual_first", name="人工反转", expression="rank(-close)",
+    )
+    first_factor, first_version, _created = store.create_factor(first_spec)
+
+    with pytest.raises(ValueError, match=r"名称.*已存在"):
+        store.create_factor(FactorSpec(
+            slug="manual_second", name=" 人工反转 ", expression="rank(close)",
+        ))
+    with pytest.raises(ValueError, match="已登记为因子"):
+        store.create_factor(FactorSpec(
+            slug="manual_first", name="另一个名称", expression="rank(-close)",
+        ))
+    with pytest.raises(ValueError, match="英文逗号"):
+        store.create_factor(FactorSpec(
+            slug="manual_comma", name="反转,低波", expression="rank(close)",
+        ))
+
+    generated_factor, generated_version, _created = store.create_factor(
+        FactorSpec(
+            slug="gp_generated", name="人工反转", expression="rank(close)",
+        ),
+        source="genetic", actor="worker",
+    )
+    assert generated_factor["name"].startswith("人工反转 · ")
+    assert generated_version["spec_json"]["name"] == generated_factor["name"]
+    assert store.factor_reference("人工反转")["version_id"] == first_version["id"]
+    assert store.factor_reference("manual_first")["name"] == first_factor["name"]
+    assert {item["name"] for item in store.runtime_factors()} == {
+        "人工反转", generated_factor["name"],
+    }
+
+    from quantmaster.factors.fundamental import resolve_factor
+
+    resolved = resolve_factor("人工反转", ["600000.SH"], "2024-01-01", "2024-12-31")
+    assert resolved.name == "人工反转"
+    assert resolved.expression == "rank(-close)"
+
+    _factor, ai_first, _created = store.create_factor(
+        FactorSpec(slug="llm_first", name="AI 候选 1", expression="rank(volume)"),
+        source="llm", actor="worker",
+    )
+    ai_second_factor, ai_second, _created = store.create_factor(
+        FactorSpec(slug="llm_second", name="AI 候选 1", expression="rank(amount)"),
+        source="llm", actor="worker",
+    )
+    assert ai_first["spec_json"]["name"] == "AI 候选 1"
+    assert ai_second_factor["name"] == "AI 候选 2"
+    assert ai_second["spec_json"]["name"] == "AI 候选 2"
+
+
+def test_factor_registry_migrates_existing_duplicate_names_without_data_loss(tmp_path):
+    path = tmp_path / "legacy-lab.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE factor_definitions ("
+            "id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,"
+            "kind TEXT NOT NULL, category TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO factor_definitions VALUES (?,?,?,?,?,?)",
+            [
+                ("first", "gp_1111111111", "GP 候选 1", "expression", "AI", "2026-01-01"),
+                ("second", "gp_2222222222", "GP 候选 1", "expression", "AI", "2026-01-02"),
+            ],
+        )
+
+    LabStore(path)
+
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute(
+            "SELECT id,name,name_key FROM factor_definitions ORDER BY created_at"
+        ).fetchall()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert rows[0][1] == "GP 候选 1"
+    assert rows[1][1] == "GP 候选 2"
+    assert len({row[2] for row in rows}) == 2
 
 
 def test_llm_miner_retries_with_longer_read_windows():
@@ -490,6 +573,15 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
         })
         assert created.status_code == 200
         version_id = created.json()["id"]
+        duplicate = client.post("/api/lab/factors", json={
+            "name": "人工反转", "expression": "rank(close)",
+        })
+        assert duplicate.status_code == 400
+        assert "名称" in duplicate.json()["detail"] and "已存在" in duplicate.json()["detail"]
+        factor_catalog = client.get("/api/factors").json()["factors"]
+        catalog_item = next(item for item in factor_catalog if item["name"] == "人工反转")
+        assert catalog_item["source"] == "quant_lab"
+        assert catalog_item["slug"].startswith("manual_")
         queued = client.post("/api/lab/jobs", json={
             "kind": "validate",
             "params": {"version_id": version_id, "universe": "demo",

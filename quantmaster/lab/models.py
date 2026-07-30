@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -42,6 +43,16 @@ def content_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def normalize_factor_name(value: str) -> str:
+    """Normalize display whitespace without changing the user's visible script."""
+    return " ".join(unicodedata.normalize("NFC", str(value or "")).split())
+
+
+def factor_name_key(value: str) -> str:
+    """Return the Unicode-aware comparison key used for factor-name uniqueness."""
+    return unicodedata.normalize("NFKC", normalize_factor_name(value)).casefold()
+
+
 @dataclass(frozen=True)
 class FactorSpec:
     slug: str
@@ -62,6 +73,10 @@ class FactorSpec:
     def __post_init__(self) -> None:
         if not self.slug or len(self.slug) > 120:
             raise ValueError("因子标识必须为 1–120 个字符")
+        normalized_name = normalize_factor_name(self.name)
+        if not normalized_name or len(normalized_name) > 120:
+            raise ValueError("因子名称必须为 1–120 个字符")
+        object.__setattr__(self, "name", normalized_name)
         if self.kind not in {"expression", "python", "learned", "latent", "composite"}:
             raise ValueError(f"未知因子类型: {self.kind}")
         if self.kind == "expression" and not self.expression and self.slug not in {
