@@ -61,7 +61,9 @@ class ResearchCatalog:
                     spec_versions_json TEXT NOT NULL,
                     input_hashes_json TEXT NOT NULL,
                     run_id TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_mtime_ns INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_research_partitions_lookup
                     ON research_partitions(kind,asset_class,frequency,dataset_id,trade_date);
@@ -75,6 +77,16 @@ class ResearchCatalog:
                     partition_key TEXT PRIMARY KEY,
                     owner TEXT NOT NULL,
                     expires_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_partition_intents (
+                    partition_key TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    staged_path TEXT NOT NULL,
+                    backup_path TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS research_capabilities (
                     endpoint TEXT PRIMARY KEY,
@@ -111,6 +123,17 @@ class ResearchCatalog:
                     ON research_job_events(job_id,seq);
                 """
             )
+            partition_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(research_partitions)"
+                ).fetchall()
+            }
+            for name in ("file_size", "file_mtime_ns"):
+                if name not in partition_columns:
+                    connection.execute(
+                        f"ALTER TABLE research_partitions ADD COLUMN {name} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
             columns = {
                 row[1] for row in connection.execute(
                     "PRAGMA table_info(research_jobs)"
@@ -211,22 +234,102 @@ class ResearchCatalog:
             "updated_at": value.get("updated_at") or utc_now(),
         }
         with self._connect() as connection:
+            self._record_partition(connection, payload)
+        return payload
+
+    @staticmethod
+    def _record_partition(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        key = str(payload["partition_key"])
+        connection.execute(
+            "INSERT OR REPLACE INTO research_partitions "
+            "(partition_key,kind,asset_class,frequency,dataset_id,trade_date,path,row_count,"
+            "columns_json,schema_hash,content_sha256,spec_versions_json,input_hashes_json,"
+            "run_id,updated_at,file_size,file_mtime_ns) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                key, str(payload["kind"]), str(payload["asset_class"]),
+                str(payload["frequency"]), payload["dataset_id"], payload["trade_date"],
+                payload["path"], int(payload["row_count"]), canonical_json(payload["columns"]),
+                payload["schema_hash"], payload["content_sha256"],
+                canonical_json(payload.get("spec_versions") or {}),
+                canonical_json(payload.get("input_hashes") or {}), payload.get("run_id") or "",
+                payload.get("updated_at") or utc_now(), int(payload.get("file_size") or 0),
+                int(payload.get("file_mtime_ns") or 0),
+            ),
+        )
+
+    def begin_partition_write(
+        self,
+        partition_key: str,
+        owner: str,
+        *,
+        target_path: str,
+        staged_path: str,
+        backup_path: str,
+        content_sha256: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Persist the recovery record before replacing a partition file."""
+        with self._connect() as connection:
             connection.execute(
-                "INSERT OR REPLACE INTO research_partitions "
-                "(partition_key,kind,asset_class,frequency,dataset_id,trade_date,path,row_count,"
-                "columns_json,schema_hash,content_sha256,spec_versions_json,input_hashes_json,"
-                "run_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    key, str(payload["kind"]), str(payload["asset_class"]),
-                    str(payload["frequency"]), payload["dataset_id"], payload["trade_date"],
-                    payload["path"], int(payload["row_count"]), canonical_json(payload["columns"]),
-                    payload["schema_hash"], payload["content_sha256"],
-                    canonical_json(payload["spec_versions"]),
-                    canonical_json(payload["input_hashes"]), payload["run_id"],
-                    payload["updated_at"],
-                ),
+                "INSERT OR REPLACE INTO research_partition_intents "
+                "(partition_key,owner,target_path,staged_path,backup_path,content_sha256,"
+                "metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (partition_key, owner, target_path, staged_path, backup_path, content_sha256,
+                 canonical_json(metadata), time.time()),
+            )
+
+    def commit_partition_write(
+        self, partition_key: str, owner: str, metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Commit partition metadata and clear its intent in one SQLite transaction."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT owner,metadata_json FROM research_partition_intents "
+                "WHERE partition_key=?",
+                (partition_key,),
+            ).fetchone()
+            if row is None or row["owner"] != owner:
+                raise RuntimeError(f"研究分区写入意图已失效: {partition_key}")
+            payload = dict(metadata or json.loads(row["metadata_json"]))
+            payload["partition_key"] = partition_key
+            self._record_partition(connection, payload)
+            connection.execute(
+                "DELETE FROM research_partition_intents WHERE partition_key=? AND owner=?",
+                (partition_key, owner),
             )
         return payload
+
+    def partition_intents(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT i.*,l.expires_at AS lease_expires FROM research_partition_intents i "
+                "LEFT JOIN research_leases l ON l.partition_key=i.partition_key"
+            ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["metadata"] = json.loads(value.pop("metadata_json"))
+            values.append(value)
+        return values
+
+    def discard_partition_intent(self, partition_key: str, owner: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM research_partition_intents WHERE partition_key=? AND owner=?",
+                (partition_key, owner),
+            )
+
+    def update_partition_file_identity(
+        self, partition_key: str, *, file_size: int, file_mtime_ns: int,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE research_partitions SET file_size=?,file_mtime_ns=? "
+                "WHERE partition_key=?",
+                (int(file_size), int(file_mtime_ns), partition_key),
+            )
 
     @staticmethod
     def _partition(row: sqlite3.Row) -> dict[str, Any]:

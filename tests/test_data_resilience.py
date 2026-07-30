@@ -384,6 +384,43 @@ def test_old_bar_metadata_is_migrated_without_network(tmp_path):
     assert meta["last_status"] == "ready"
 
 
+def test_bar_store_recovers_file_after_metadata_commit_failure(tmp_path, monkeypatch):
+    root = tmp_path / "bars"
+    store = BarStore(root=root)
+    old = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2024-01-02"]))
+    new = pd.DataFrame({"close": [11.0]}, index=pd.to_datetime(["2024-01-03"]))
+    store.put("600000.SH", old)
+    original_commit = store._commit_metadata
+
+    def fail_commit(connection, metadata, *, clear_intent):
+        if clear_intent and metadata["end"] == "2024-01-03":
+            raise sqlite3.OperationalError("injected catalog failure")
+        return original_commit(connection, metadata, clear_intent=clear_intent)
+
+    monkeypatch.setattr(store, "_commit_metadata", fail_commit)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        store.put("600000.SH", new, replace=True)
+
+    recovered = BarStore(root=root)
+    pd.testing.assert_frame_equal(recovered.get("600000.SH"), new, check_freq=False)
+    assert recovered.metadata("600000.SH")["content_sha256"]
+    with recovered._conn() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM bar_write_intents").fetchone()[0] == 0
+    assert not list(root.glob("*.bak"))
+
+
+def test_bar_store_rejects_readable_content_that_changed_outside_commit(tmp_path):
+    store = BarStore(root=tmp_path / "bars")
+    original = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2024-01-02"]))
+    store.put("600000.SH", original)
+    pd.DataFrame(
+        {"close": [99.0]}, index=pd.to_datetime(["2024-01-02"]),
+    ).to_parquet(store._path("600000.SH"))
+
+    assert store.get("600000.SH") is None
+    assert store.metadata("600000.SH")["last_status"] == "corrupt"
+
+
 def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkeypatch):
     store = BarStore(root=tmp_path / "bars")
     dates = pd.bdate_range("2024-01-02", "2024-03-29")

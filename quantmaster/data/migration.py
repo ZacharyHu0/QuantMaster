@@ -88,6 +88,19 @@ def _sha256(path: Path, cancel: threading.Event | None = None) -> str:
     return digest.hexdigest()
 
 
+def _source_state(root: Path) -> tuple[tuple[str, int, int], ...]:
+    """Cheap final fence that includes SQLite sidecars and newly created files."""
+    return tuple(sorted(
+        (
+            path.relative_to(root).as_posix(),
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in root.rglob("*")
+        if path.is_file()
+    ))
+
+
 def _copy_sqlite(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True) as src:
@@ -182,6 +195,7 @@ class DataMigrationManager:
         try:
             task.status, task.phase = "running", "复制数据文件"
             _, files = _preflight(source, target, "copy")
+            source_state = _source_state(source)
             temp.mkdir(parents=True, exist_ok=False)
             for directory in (path for path in source.rglob("*") if path.is_dir()):
                 (temp / directory.relative_to(source)).mkdir(parents=True, exist_ok=True)
@@ -211,6 +225,11 @@ class DataMigrationManager:
                     raise MigrationError(f"文件大小校验失败: {rel}")
                 if digest != "sqlite" and _sha256(dst, task.cancel_event) != digest:
                     raise MigrationError(f"SHA-256 校验失败: {rel}")
+            task.phase, task.progress = "确认源目录静止", 94
+            if _source_state(source) != source_state:
+                raise MigrationError(
+                    "源数据目录在迁移期间发生写入；已放弃切换，请停止后台任务后重试"
+                )
             task.phase, task.progress = "切换数据目录", 96
             if target.exists():
                 target.rmdir()  # 预检已确认是空目录

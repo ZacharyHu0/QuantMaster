@@ -26,7 +26,11 @@ from quantmaster.research.diagnostics import factor_diagnostics
 from quantmaster.research.engine import ResearchEngine
 from quantmaster.research.jobs import ResearchJobManager
 from quantmaster.research.kernel import Kernel
-from quantmaster.research.lake import FeatureBatchProvider, ResearchLake
+from quantmaster.research.lake import (
+    FeatureBatchProvider,
+    ResearchDataIntegrityError,
+    ResearchLake,
+)
 from quantmaster.research.providers import (
     build_future_continuous,
     compute_core_factors,
@@ -132,6 +136,64 @@ def test_lake_rejects_duplicate_keys_without_replacing_good_partition():
         ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
         "stock_bars", "2024-01-02",
     )) == 1
+
+
+def test_lake_recovers_replaced_partition_after_catalog_commit_failure(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path / "lake"
+    lake = ResearchLake(root)
+    old = pd.DataFrame({
+        "trade_date": ["2024-01-02"], "symbol": ["600000.SH"], "close": [10.0],
+    })
+    new = old.assign(close=11.0)
+    lake.write_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_bars", "2024-01-02", old,
+    )
+
+    def fail_commit(*args, **kwargs):
+        raise RuntimeError("injected catalog failure")
+
+    monkeypatch.setattr(lake.catalog, "commit_partition_write", fail_commit)
+    with pytest.raises(RuntimeError, match="injected"):
+        lake.write_partition(
+            ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+            "stock_bars", "2024-01-02", new,
+        )
+
+    recovered = ResearchLake(root)
+    frame = recovered.read_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_bars", "2024-01-02",
+    )
+    assert frame.iloc[0]["close"] == 11.0
+    assert recovered.catalog.partition_intents() == []
+
+
+def test_lake_detects_valid_parquet_tampering_and_run_artifacts_are_immutable(tmp_path):
+    lake = ResearchLake(tmp_path / "lake")
+    frame = pd.DataFrame({
+        "trade_date": ["2024-01-02"], "symbol": ["600000.SH"], "close": [10.0],
+    })
+    lake.write_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_bars", "2024-01-02", frame,
+    )
+    path = lake.partition_path(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_bars", "2024-01-02",
+    )
+    frame.assign(close=99.0).to_parquet(path, index=False)
+    with pytest.raises(ResearchDataIntegrityError, match="内容校验失败"):
+        lake.read_partition(
+            ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+            "stock_bars", "2024-01-02",
+        )
+
+    lake.write_run_files("run-1", {"run_id": "run-1", "status": "completed"})
+    with pytest.raises(ResearchDataIntegrityError, match="运行工件不可变"):
+        lake.write_run_files("run-1", {"run_id": "run-1", "status": "failed"})
 
 
 def test_core_factors_labels_and_style_model_have_expected_contracts():
@@ -242,6 +304,20 @@ def test_engine_executes_offline_from_local_trading_dates_and_publishes_diagnost
         ArtifactKind.FACTOR, "cross_momentum_20d", "1.0.0", AssetClass.STOCK,
     )
     assert not lake.artifact_panel(reference, plan.start, plan.end).empty
+
+
+def test_planner_refuses_unverified_business_day_fallback_without_local_calendar():
+    class OfflineAdapter(FakePlanningAdapter):
+        def official_calendar(self, asset_class, start, end):
+            return pd.DatetimeIndex([]), "fallback:unavailable (offline)"
+
+    engine = ResearchEngine(adapter=OfflineAdapter())
+    with pytest.raises(RuntimeError, match="拒绝生成研究计划"):
+        engine.plan(
+            "2024-10-01", "2024-10-07",
+            asset_classes=(AssetClass.STOCK,), datasets=("stock_bars",),
+            spec_ids=("cross_asset_core",),
+        )
 
 
 def test_tushare_adapter_normalizes_cross_section_units():
@@ -430,7 +506,14 @@ def test_research_retry_preserves_original_plan_and_records_attempt(tmp_path):
     ]
 
 
-def test_research_management_api_is_local_and_csrf_protected():
+def test_research_management_api_is_local_and_csrf_protected(monkeypatch):
+    monkeypatch.setattr(
+        TushareResearchAdapter,
+        "official_calendar",
+        lambda self, asset_class, start, end: (
+            pd.date_range("2024-01-02", "2024-01-03"), "fixture:official",
+        ),
+    )
     client = TestClient(app)
     settings = client.get("/api/settings")
     token = settings.json()["csrf_token"]

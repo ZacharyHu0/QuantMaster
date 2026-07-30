@@ -171,7 +171,10 @@ class ResearchEngine:
                         f"{asset.value} 官方日历不可用，复用本地已落盘交易日"
                     )
                 else:
-                    warnings.append(f"{asset.value} 使用工作日历兜底：{source}")
+                    raise RuntimeError(
+                        f"{asset.value} 官方交易日历不可用，且本地没有已验证交易日；"
+                        "为避免把节假日当作交易日，已拒绝生成研究计划"
+                    )
             start_stamp, end_stamp = pd.Timestamp(start), pd.Timestamp(end)
             target_calendar = calendar[(calendar >= start_stamp) & (calendar <= end_stamp)]
             before = calendar[calendar < start_stamp][-lookback:] if lookback else calendar[:0]
@@ -540,7 +543,10 @@ class ResearchEngine:
             temp = manifest_path.with_suffix(".json.tmp")
             temp.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
             temp.replace(manifest_path)
-            self.lake.write_run_files(run_id, {"run_id": run_id, "diagnostics": summaries}, **tables)
+            self.lake.write_run_files(
+                run_id, {"run_id": run_id, "diagnostics": summaries},
+                commit=False, **tables,
+            )
         return summaries
 
     def publish_model_predictions(

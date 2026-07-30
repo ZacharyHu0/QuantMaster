@@ -127,6 +127,38 @@ def test_migration_uses_sqlite_consistent_backup(tmp_path):
         assert connection.execute("SELECT value FROM entries").fetchone() == ("kept",)
 
 
+def test_migration_aborts_if_source_changes_during_copy(tmp_path, monkeypatch):
+    from quantmaster.data import migration
+
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.mkdir()
+    (source / "bars.parquet").write_bytes(b"stable")
+    cfg = Config()
+    cfg.data.root = str(source)
+    set_config(cfg)
+    switcher = RootSwitcher()
+    manager = DataMigrationManager(switcher)
+    original_copy = migration.shutil.copy2
+
+    def copy_then_mutate(src, dst):
+        result = original_copy(src, dst)
+        (source / "late-write.json").write_text("changed", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(migration.shutil, "copy2", copy_then_mutate)
+    task = manager.create(target, "copy")
+    for _ in range(100):
+        result = manager.get(task["id"])
+        if result["status"] not in {"pending", "running", "cancelling"}:
+            break
+        time.sleep(0.02)
+
+    assert result["status"] == "failed"
+    assert "迁移期间发生写入" in result["error"]
+    assert switcher.target is None
+    assert not target.exists()
+
+
 def test_migration_preflight_rejects_nested_and_nonempty(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

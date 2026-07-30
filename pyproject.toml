@@ -72,7 +72,7 @@ version = {attr = "quantmaster.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -p no:xonsh"
 
 [tool.ruff]
 line-length = 110

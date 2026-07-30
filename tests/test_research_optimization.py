@@ -139,6 +139,10 @@ def test_research_daily_separates_stable_signal_and_suspension_interval(monkeypa
         "suspend_d": pd.DataFrame({
             "trade_date": ["20240103"], "suspend_type": ["S"],
         }),
+        "trade_cal": pd.DataFrame({
+            "cal_date": ["20240102", "20240103", "20240104"],
+            "is_open": [1, 1, 1],
+        }),
     }
     source._call = lambda endpoint, ttl, **params: frames[endpoint].copy()  # type: ignore[method-assign]
 

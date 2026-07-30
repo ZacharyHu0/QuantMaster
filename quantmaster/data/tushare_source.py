@@ -259,7 +259,7 @@ class TushareSource(DataSource):
         signal = raw_frame.copy()
         for column in ("open", "high", "low", "close"):
             signal[column] = raw_frame[column] * merged["adj_factor"]
-        suspension_index = pd.bdate_range(start, end).union(merged.index).sort_values()
+        suspension_index = self.trade_calendar(start, end).union(merged.index).sort_values()
         suspended = pd.Series(False, index=suspension_index, name="suspended")
         if not suspensions.empty and "trade_date" in suspensions:
             suspension_types = (

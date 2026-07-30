@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +24,12 @@ from quantmaster.runtime.sqlite import connect_sqlite
 _LOCKS_GUARD = threading.Lock()
 _SYMBOL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 
+_META_COLUMNS = (
+    "symbol", "start", "end", "updated_at", "coverage_start", "coverage_end",
+    "checked_at", "last_source", "last_status", "content_sha256", "row_count",
+    "file_size", "file_mtime_ns",
+)
+
 
 def _symbol_lock(root: Path, symbol: str) -> threading.RLock:
     key = (str(root.resolve()), symbol)
@@ -30,6 +39,14 @@ def _symbol_lock(root: Path, symbol: str) -> threading.RLock:
 
 def _safe_name(symbol: str) -> str:
     return re.sub(r"[^0-9A-Za-z._^-]", "_", symbol)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class BarStore:
@@ -51,6 +68,10 @@ class BarStore:
                 "checked_at": "REAL",
                 "last_source": "TEXT",
                 "last_status": "TEXT",
+                "content_sha256": "TEXT NOT NULL DEFAULT ''",
+                "row_count": "INTEGER NOT NULL DEFAULT 0",
+                "file_size": "INTEGER NOT NULL DEFAULT 0",
+                "file_mtime_ns": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, kind in additions.items():
                 if name not in columns:
@@ -70,6 +91,13 @@ class BarStore:
                 "last_source=COALESCE(last_source,''), "
                 "last_status=COALESCE(last_status,'ready')"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS bar_write_intents ("
+                "symbol TEXT PRIMARY KEY, target_name TEXT NOT NULL, staged_name TEXT NOT NULL,"
+                "backup_name TEXT NOT NULL, content_sha256 TEXT NOT NULL,"
+                "metadata_json TEXT NOT NULL, created_at REAL NOT NULL)"
+            )
+        self._recover_writes()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.meta_db, policy="cache")
@@ -86,9 +114,117 @@ class BarStore:
         if not path.exists():
             return None
         try:
-            return pd.read_parquet(path, columns=columns)
+            metadata = self.metadata(symbol)
+            stat = path.stat()
+            expected_hash = str((metadata or {}).get("content_sha256") or "")
+            unchanged = bool(
+                expected_hash
+                and int((metadata or {}).get("file_size") or 0) == stat.st_size
+                and int((metadata or {}).get("file_mtime_ns") or 0) == stat.st_mtime_ns
+            )
+            if not unchanged:
+                actual_hash = _file_sha256(path)
+                if expected_hash and actual_hash != expected_hash:
+                    self._mark_corrupt(symbol)
+                    return None
+            value = pd.read_parquet(path, columns=columns)
+            if metadata and columns is None and int(metadata.get("row_count") or 0) not in {
+                0, len(value),
+            }:
+                self._mark_corrupt(symbol)
+                return None
+            if not unchanged:
+                self._backfill_file_identity(symbol, path, value, actual_hash)
+            return value
         except Exception:
+            self._mark_corrupt(symbol)
             return None
+
+    def _mark_corrupt(self, symbol: str) -> None:
+        try:
+            self.mark_status(symbol, "corrupt")
+        except sqlite3.Error:
+            pass
+
+    @staticmethod
+    def _metadata_values(metadata: dict) -> tuple:
+        return tuple(metadata.get(column) for column in _META_COLUMNS)
+
+    def _commit_metadata(
+        self, connection: sqlite3.Connection, metadata: dict, *, clear_intent: bool,
+    ) -> None:
+        placeholders = ",".join("?" for _ in _META_COLUMNS)
+        connection.execute(
+            f"INSERT OR REPLACE INTO bar_meta ({','.join(_META_COLUMNS)}) "
+            f"VALUES ({placeholders})",
+            self._metadata_values(metadata),
+        )
+        if clear_intent:
+            connection.execute(
+                "DELETE FROM bar_write_intents WHERE symbol=?", (metadata["symbol"],),
+            )
+
+    def _backfill_file_identity(
+        self, symbol: str, path: Path, frame: pd.DataFrame, content_hash: str,
+    ) -> None:
+        stat = path.stat()
+        with self._conn() as connection:
+            connection.execute(
+                "UPDATE bar_meta SET content_sha256=?,row_count=?,file_size=?,file_mtime_ns=? "
+                "WHERE symbol=?",
+                (content_hash, len(frame), stat.st_size, stat.st_mtime_ns, symbol),
+            )
+
+    def _recover_writes(self) -> None:
+        """Complete or roll back interrupted file/catalog commits."""
+        with self._conn() as connection:
+            rows = connection.execute("SELECT * FROM bar_write_intents").fetchall()
+        for row in rows:
+            symbol = str(row[0])
+            with _symbol_lock(self.root, symbol):
+                try:
+                    names = [str(row[index]) for index in (1, 2, 3)]
+                    if any(Path(name).name != name for name in names):
+                        raise ValueError("bar write intent path escaped its root")
+                    target, staged, backup = (self.root / name for name in names)
+                    expected = str(row[4])
+                    metadata = json.loads(str(row[5]))
+                    target_ready = target.is_file() and _file_sha256(target) == expected
+                    staged_ready = staged.is_file() and _file_sha256(staged) == expected
+                    if not target_ready and staged_ready:
+                        if target.exists() and not backup.exists():
+                            os.replace(target, backup)
+                        elif target.exists():
+                            target.unlink()
+                        os.replace(staged, target)
+                        target_ready = True
+                    if target_ready:
+                        stat = target.stat()
+                        metadata.update({
+                            "file_size": stat.st_size,
+                            "file_mtime_ns": stat.st_mtime_ns,
+                        })
+                        with self._conn() as connection:
+                            self._commit_metadata(connection, metadata, clear_intent=True)
+                        staged.unlink(missing_ok=True)
+                        backup.unlink(missing_ok=True)
+                    elif backup.is_file():
+                        target.unlink(missing_ok=True)
+                        os.replace(backup, target)
+                        staged.unlink(missing_ok=True)
+                        with self._conn() as connection:
+                            connection.execute(
+                                "DELETE FROM bar_write_intents WHERE symbol=?", (symbol,),
+                            )
+                    else:
+                        staged.unlink(missing_ok=True)
+                        with self._conn() as connection:
+                            connection.execute(
+                                "DELETE FROM bar_write_intents WHERE symbol=?", (symbol,),
+                            )
+                except (OSError, sqlite3.Error, ValueError):
+                    # Leave the intent intact; a later startup can retry without guessing.
+                    continue
 
     def put(self, symbol: str, df: pd.DataFrame, replace: bool = False) -> None:
         """写入缓存。
@@ -113,21 +249,40 @@ class BarStore:
             temp_path = Path(temp_name)
             try:
                 df.to_parquet(temp_path)
+                with temp_path.open("rb+") as stream:
+                    os.fsync(stream.fileno())
+                content_hash = _file_sha256(temp_path)
+                now = time.time()
+                start, end = str(df.index.min().date()), str(df.index.max().date())
+                coverage_start = (old_meta or {}).get("coverage_start") or start
+                coverage_end = (old_meta or {}).get("coverage_end") or end
+                metadata = {
+                    "symbol": symbol, "start": start, "end": end, "updated_at": now,
+                    "coverage_start": coverage_start, "coverage_end": coverage_end,
+                    "checked_at": now, "last_source": (old_meta or {}).get("last_source", ""),
+                    "last_status": "ready", "content_sha256": content_hash,
+                    "row_count": len(df), "file_size": temp_path.stat().st_size,
+                    "file_mtime_ns": 0,
+                }
+                backup = self.root / f".{target.stem}.{uuid.uuid4().hex}.parquet.bak"
+                with self._conn() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO bar_write_intents "
+                        "(symbol,target_name,staged_name,backup_name,content_sha256,"
+                        "metadata_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                        (symbol, target.name, temp_path.name, backup.name, content_hash,
+                         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), now),
+                    )
+                if target.exists():
+                    os.replace(target, backup)
                 os.replace(temp_path, target)
+                stat = target.stat()
+                metadata.update({"file_size": stat.st_size, "file_mtime_ns": stat.st_mtime_ns})
+                with self._conn() as conn:
+                    self._commit_metadata(conn, metadata, clear_intent=True)
+                backup.unlink(missing_ok=True)
             finally:
                 temp_path.unlink(missing_ok=True)
-            now = time.time()
-            start, end = str(df.index.min().date()), str(df.index.max().date())
-            coverage_start = (old_meta or {}).get("coverage_start") or start
-            coverage_end = (old_meta or {}).get("coverage_end") or end
-            with self._conn() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO bar_meta "
-                    "(symbol,start,end,updated_at,coverage_start,coverage_end,checked_at,"
-                    "last_source,last_status) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (symbol, start, end, now, coverage_start, coverage_end, now,
-                     (old_meta or {}).get("last_source", ""), "ready"),
-                )
 
     def metadata(self, symbol: str) -> dict | None:
         """返回单个标的的缓存覆盖与检查状态。"""

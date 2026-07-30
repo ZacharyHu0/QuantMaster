@@ -66,7 +66,7 @@ def load_csi800_membership(
     if frame.empty:
         raise RuntimeError("中证800历史成分为空；请检查 Tushare token 与 index_weight 权限")
     if calendar is None:
-        calendar = pd.bdate_range(start, end)
+        calendar = source.trade_calendar(start, end)
     return build_membership_mask(frame, calendar)
 
 

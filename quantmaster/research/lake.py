@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from collections.abc import Iterable
 from pathlib import Path
@@ -31,6 +32,10 @@ from quantmaster.research.contracts import (
 
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _KEY_COLUMNS = ("trade_date", "symbol")
+
+
+class ResearchDataIntegrityError(RuntimeError):
+    """A cataloged research partition is missing or has unexpected content."""
 
 
 def file_sha256(path: Path) -> str:
@@ -62,6 +67,93 @@ class ResearchLake:
         self.meta_root = self.root / "_meta"
         self.meta_root.mkdir(parents=True, exist_ok=True)
         self.catalog = ResearchCatalog(self.meta_root / "catalog.sqlite")
+        self.recover_partition_writes()
+
+    def _resolved_relative(self, value: str) -> Path:
+        path = (self.root / value).resolve()
+        if self.root not in path.parents:
+            raise ResearchDataIntegrityError(f"研究分区路径越界: {value}")
+        return path
+
+    def recover_partition_writes(self) -> int:
+        """Finalize committed files or restore backups left by interrupted writers."""
+        recovered = 0
+        now = time.time()
+        for intent in self.catalog.partition_intents():
+            key, owner = str(intent["partition_key"]), str(intent["owner"])
+            try:
+                target = self._resolved_relative(str(intent["target_path"]))
+                staged = self._resolved_relative(str(intent["staged_path"]))
+                backup = self._resolved_relative(str(intent["backup_path"]))
+                expected = str(intent["content_sha256"])
+                target_ready = target.is_file() and file_sha256(target) == expected
+                lease_active = float(intent.get("lease_expires") or 0) > now
+                if target_ready:
+                    metadata = dict(intent["metadata"])
+                    stat = target.stat()
+                    metadata.update({
+                        "file_size": stat.st_size,
+                        "file_mtime_ns": stat.st_mtime_ns,
+                    })
+                    self.catalog.commit_partition_write(key, owner, metadata)
+                    staged.unlink(missing_ok=True)
+                    backup.unlink(missing_ok=True)
+                    recovered += 1
+                    continue
+                if lease_active:
+                    continue
+                staged_ready = staged.is_file() and file_sha256(staged) == expected
+                if staged_ready:
+                    if target.exists() and not backup.exists():
+                        os.replace(target, backup)
+                    elif target.exists():
+                        target.unlink()
+                    os.replace(staged, target)
+                    metadata = dict(intent["metadata"])
+                    stat = target.stat()
+                    metadata.update({
+                        "file_size": stat.st_size,
+                        "file_mtime_ns": stat.st_mtime_ns,
+                    })
+                    self.catalog.commit_partition_write(key, owner, metadata)
+                    backup.unlink(missing_ok=True)
+                    recovered += 1
+                elif backup.is_file():
+                    target.unlink(missing_ok=True)
+                    os.replace(backup, target)
+                    staged.unlink(missing_ok=True)
+                    self.catalog.discard_partition_intent(key, owner)
+                    recovered += 1
+                else:
+                    staged.unlink(missing_ok=True)
+                    self.catalog.discard_partition_intent(key, owner)
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+                # An intact intent is safer than guessing after an incomplete repair.
+                continue
+        return recovered
+
+    def _validated_partition_path(self, metadata: dict[str, Any]) -> Path:
+        path = self._resolved_relative(str(metadata["path"]))
+        if not path.is_file():
+            raise ResearchDataIntegrityError(f"研究分区文件缺失: {metadata['path']}")
+        stat = path.stat()
+        unchanged = (
+            int(metadata.get("file_size") or 0) == stat.st_size
+            and int(metadata.get("file_mtime_ns") or 0) == stat.st_mtime_ns
+            and int(metadata.get("file_size") or 0) > 0
+        )
+        actual = file_sha256(path)
+        if actual != str(metadata["content_sha256"]):
+            raise ResearchDataIntegrityError(
+                f"研究分区内容校验失败: {metadata['path']}"
+            )
+        if not unchanged:
+            self.catalog.update_partition_file_identity(
+                str(metadata["partition_key"]),
+                file_size=stat.st_size,
+                file_mtime_ns=stat.st_mtime_ns,
+            )
+        return path
 
     @staticmethod
     def dataset_for_kind(kind: ArtifactKind, dataset_id: str = "") -> str:
@@ -201,30 +293,51 @@ class ResearchLake:
                 pq.write_table(table, temp, compression="zstd", use_dictionary=True)
                 with temp.open("rb+") as stream:
                     os.fsync(stream.fileno())
+                relative = target.relative_to(self.root).as_posix()
+                staged_relative = temp.relative_to(self.root).as_posix()
+                backup = target.parent / f".{target.stem}.{uuid.uuid4().hex}.parquet.bak"
+                backup_relative = backup.relative_to(self.root).as_posix()
+                merged_versions = dict((previous_metadata or {}).get("spec_versions") or {})
+                merged_versions.update(spec_versions or {})
+                merged_inputs = dict((previous_metadata or {}).get("input_hashes") or {})
+                merged_inputs.update(input_hashes or {})
+                stat = temp.stat()
+                metadata = {
+                    "partition_key": key,
+                    "kind": kind.value,
+                    "asset_class": asset_class.value,
+                    "frequency": frequency.value,
+                    "dataset_id": dataset,
+                    "trade_date": date_text,
+                    "path": relative,
+                    "row_count": len(normalized),
+                    "columns": list(normalized.columns),
+                    "schema_hash": self._schema_hash(table),
+                    "content_sha256": file_sha256(temp),
+                    "spec_versions": merged_versions,
+                    "input_hashes": merged_inputs,
+                    "run_id": run_id,
+                    "updated_at": utc_now(),
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                }
+                self.catalog.begin_partition_write(
+                    key, owner, target_path=relative, staged_path=staged_relative,
+                    backup_path=backup_relative, content_sha256=metadata["content_sha256"],
+                    metadata=metadata,
+                )
+                if target.exists():
+                    os.replace(target, backup)
                 os.replace(temp, target)
+                stat = target.stat()
+                metadata.update({
+                    "file_size": stat.st_size,
+                    "file_mtime_ns": stat.st_mtime_ns,
+                })
+                metadata = self.catalog.commit_partition_write(key, owner, metadata)
+                backup.unlink(missing_ok=True)
             finally:
                 temp.unlink(missing_ok=True)
-            relative = target.relative_to(self.root).as_posix()
-            merged_versions = dict((previous_metadata or {}).get("spec_versions") or {})
-            merged_versions.update(spec_versions or {})
-            merged_inputs = dict((previous_metadata or {}).get("input_hashes") or {})
-            merged_inputs.update(input_hashes or {})
-            metadata = self.catalog.record_partition({
-                "kind": kind.value,
-                "asset_class": asset_class.value,
-                "frequency": frequency.value,
-                "dataset_id": dataset,
-                "trade_date": date_text,
-                "path": relative,
-                "row_count": len(normalized),
-                "columns": list(normalized.columns),
-                "schema_hash": self._schema_hash(table),
-                "content_sha256": file_sha256(target),
-                "spec_versions": merged_versions,
-                "input_hashes": merged_inputs,
-                "run_id": run_id,
-                "updated_at": utc_now(),
-            })
             return metadata
         finally:
             self.catalog.release(key, owner)
@@ -238,9 +351,13 @@ class ResearchLake:
         trade_date: str,
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
-        path = self.partition_path(kind, asset_class, frequency, dataset_id, trade_date)
-        if not path.is_file():
+        metadata = self.catalog.partition(
+            kind, asset_class, frequency, self.dataset_for_kind(kind, dataset_id),
+            _as_date(trade_date),
+        )
+        if metadata is None:
             return pd.DataFrame()
+        path = self._validated_partition_path(metadata)
         return pd.read_parquet(path, columns=columns)
 
     def read_range(
@@ -259,9 +376,7 @@ class ResearchLake:
         )
         frames = []
         for item in partitions:
-            path = (self.root / item["path"]).resolve()
-            if self.root not in path.parents or not path.is_file():
-                continue
+            path = self._validated_partition_path(item)
             frames.append(pd.read_parquet(path, columns=columns))
         if not frames:
             return pd.DataFrame(columns=columns)
@@ -379,15 +494,53 @@ class ResearchLake:
             count += len(value)
         return count
 
-    def write_run_files(self, run_id: str, manifest: dict[str, Any], **tables: pd.DataFrame) -> Path:
+    def write_run_files(
+        self,
+        run_id: str,
+        manifest: dict[str, Any],
+        *,
+        commit: bool = True,
+        **tables: pd.DataFrame,
+    ) -> Path:
         run = self.root / "runs" / _safe(run_id)
         run.mkdir(parents=True, exist_ok=True)
-        temp = run / ".manifest.json.tmp"
-        temp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, run / "manifest.json")
+        manifest_path = run / "manifest.json"
+        encoded = json.dumps(manifest, ensure_ascii=False, indent=2)
+        if commit and manifest_path.exists():
+            current = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if current != manifest:
+                raise ResearchDataIntegrityError(f"运行工件不可变: {run_id}")
         for name, table in tables.items():
             if table is not None and not table.empty:
-                table.to_parquet(run / f"{_safe(name)}.parquet", index=False)
+                target = run / f"{_safe(name)}.parquet"
+                fd, temp_name = tempfile.mkstemp(
+                    prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=run,
+                )
+                os.close(fd)
+                temp = Path(temp_name)
+                try:
+                    table.to_parquet(temp, index=False)
+                    with temp.open("rb+") as stream:
+                        os.fsync(stream.fileno())
+                    if target.exists() and file_sha256(target) != file_sha256(temp):
+                        raise ResearchDataIntegrityError(f"运行表不可变: {run_id}/{name}")
+                    if not target.exists():
+                        os.replace(temp, target)
+                finally:
+                    temp.unlink(missing_ok=True)
+        if commit and not manifest_path.exists():
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".manifest.", suffix=".json.tmp", dir=run,
+            )
+            os.close(fd)
+            temp = Path(temp_name)
+            try:
+                temp.write_text(encoded, encoding="utf-8")
+                with temp.open("rb+") as stream:
+                    os.fsync(stream.fileno())
+                os.replace(temp, manifest_path)
+            finally:
+                temp.unlink(missing_ok=True)
         return run
 
 

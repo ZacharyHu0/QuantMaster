@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -199,7 +198,7 @@ class TushareResearchAdapter:
             calendar = pd.DatetimeIndex(pd.to_datetime(values).dropna().unique()).sort_values()
             return calendar, "tushare:fut_trade_cal"
         except Exception as exc:
-            return pd.bdate_range(start, end), f"fallback:business_days ({str(exc)[:120]})"
+            return pd.DatetimeIndex([]), f"fallback:unavailable ({str(exc)[:120]})"
 
     def fetch_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
         try:
@@ -280,18 +279,3 @@ class TushareResearchAdapter:
         if "symbol" in value:
             value["exchange"] = value["symbol"].str.rsplit(".", n=1).str[-1]
         return value
-
-
-def default_dates(start: str, end: str) -> list[str]:
-    return [str(item.date()) for item in pd.bdate_range(start, end)]
-
-
-def incremental_start(end: str, sessions: int = 5) -> str:
-    return str((pd.Timestamp(end) - pd.tseries.offsets.BDay(max(1, sessions))).date())
-
-
-def recent_probe_date() -> str:
-    current = date.today()
-    while current.weekday() >= 5:
-        current -= timedelta(days=1)
-    return str(current)
