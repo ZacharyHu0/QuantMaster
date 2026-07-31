@@ -119,9 +119,8 @@ jobs:
                 exit 1
               fi
             else
-              git tag "$release_tag" "$target_commit"
-              # GITHUB_TOKEN-created refs do not recursively trigger the tag workflow.
-              git push origin "refs/tags/${release_tag}"
+              echo "required immutable tag $release_tag is missing; create it with the release operator" >&2
+              exit 1
             fi
             printf '%s\t%s\t%s\n' "$release_tag" "$target_commit" "$make_latest" \
               >> "$normalized_file"

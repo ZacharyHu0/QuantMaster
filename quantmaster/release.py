@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.8"
+VERSION = "0.13.9"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "最小权限发布职责分离",
+                "items": (
+                    (
+                        "历史恢复工作流不再尝试用受限 GITHUB_TOKEN 创建指向含 Actions 文件的"
+                        "标签；标签由受 release-sync 保护的发布操作者创建。"
+                    ),
+                    (
+                        "Actions 只接受已存在且指向目标提交的不可变标签，缺失或指向不符时在"
+                        "构建前失败；构建与 Release 写入继续使用最小 contents 权限。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.8",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "版本化发布恢复清单",
@@ -62,8 +81,8 @@ RELEASES = (
                         "且提交必须属于 main 历史、标签必须与目标版本完全一致。"
                     ),
                     (
-                        "缺失标签由 Actions 最小权限令牌创建，已有标签只能复用原提交；工作流"
-                        "拒绝移动标签，并避免补录动作递归触发旧版标签工作流。"
+                        "已有标签只能复用原提交且工作流拒绝移动标签；缺失标签必须由具备"
+                        "Workflows 权限的发布操作者创建，避免在 CI 内保存高权限密钥。"
                     ),
                     (
                         "历史源码使用当前可靠的 wheel 构建路径生成 Windows、macOS 与 Linux"

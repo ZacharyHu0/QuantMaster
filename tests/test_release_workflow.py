@@ -18,6 +18,8 @@ def test_release_workflow_guards_historical_backfills() -> None:
     assert "target_sha must be a full lowercase commit SHA" in source
     assert "tag $release_tag does not match target version" in source
     assert "immutable tag $release_tag" in source
+    assert "required immutable tag $release_tag is missing" in source
+    assert 'git push origin "refs/tags/${release_tag}"' not in source
     assert "fromJSON(needs.prepare.outputs.targets)" in source
     assert "matrix.target.target_sha" in source
     assert "matrix.target.make_latest" in source
