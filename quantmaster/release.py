@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.13"
+VERSION = "0.13.14"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "可选数据源缺失容错",
+                "items": (
+                    (
+                        "最小安装未包含 AKShare 时，题材目录将其视为东方财富来源不可用并"
+                        "继续尝试 Tushare DC，不再因导入错误中断统一双源容错。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.13",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "双层六维研究与可读报告",

@@ -233,7 +233,10 @@ class RotationProvider:
         previous_items: list[dict[str, Any]],
     ) -> dict[str, Any]:  # pragma: no cover - 网络
         """Scan Eastmoney concepts without mixing a prior provider's taxonomy."""
-        import akshare as ak
+        try:
+            import akshare as ak
+        except ModuleNotFoundError as exc:
+            raise ThemeSourceUnavailable("AKShare 可选数据扩展未安装") from exc
 
         boards = self._eastmoney_theme_call(
             "stock_board_concept_name_em", ak.stock_board_concept_name_em,
