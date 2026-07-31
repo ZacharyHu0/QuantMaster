@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "tag": "v0.10.1",
+      "target_sha": "6f5bd6c831d7e608cb4b723948e1cd5cf7754e93"
+    },
+    {
+      "tag": "v0.10.2",
+      "target_sha": "ce27ce5cd2b6735a8f2161e18cbc5d1a53ff7e6b"
+    },
+    {
+      "tag": "v0.11.0",
+      "target_sha": "431483b7e6d0c95c0efc8e480fb8a1f82ffde6f8"
+    },
+    {
+      "tag": "v0.11.1",
+      "target_sha": "9be46ecb929732f97515756b39090b2d815b7052"
+    },
+    {
+      "tag": "v0.12.0",
+      "target_sha": "5aa4a528585a7f5411a94df78e2338a01f94aaa9"
+    },
+    {
+      "tag": "v0.13.6",
+      "target_sha": "ce0f117f45768bfa4b8e65279bfc8b4376e8df40"
+    }
+  ]
+}
