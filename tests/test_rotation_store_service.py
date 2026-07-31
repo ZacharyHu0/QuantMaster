@@ -171,6 +171,63 @@ def test_rotation_job_cancel_queued_is_terminal(tmp_path):
     assert time.time() >= cancelled["updated_at"]
 
 
+def test_rotation_overview_reports_dimensions_without_fabricating_zero_coverage(
+    tmp_path,
+):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    meta = {
+        "snapshot_id": "sample",
+        "as_of": "2026-07-30",
+        "generated_at": "2026-07-30T10:00:00+00:00",
+        "sources": ["test:local"],
+    }
+    store.save_snapshots({
+        "temperature": {
+            "meta": {**meta, "quality": {"status": "complete", "issues": []}},
+            "data": {"current": {"temperature": 42.0}},
+        },
+        "industries": {
+            "meta": {**meta, "quality": {"status": "partial", "issues": []}},
+            "data": {"items": []},
+        },
+        "etf_flows": {
+            "meta": {**meta, "quality": {"status": "complete", "issues": []}},
+            "data": {"summary": {"status": "ready"}, "items": []},
+        },
+    })
+
+    quality = service.overview()["meta"]["quality"]
+
+    assert quality["status"] == "partial"
+    assert quality["coverage"] is None
+    assert quality["eligible_count"] is None
+    assert quality["expected_count"] is None
+    assert quality["available_dimensions"] == 3
+    assert quality["total_dimensions"] == 4
+    assert quality["dimension_statuses"]["细分题材"] == "cold"
+    assert "3/4 个维度可用" in quality["issues"][0]
+
+
+def test_rotation_service_normalizes_legacy_unknown_coverage(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    store.save_snapshots({
+        "themes": {
+            "meta": {
+                "snapshot_id": "legacy", "as_of": "", "generated_at": "",
+                "quality": {
+                    "status": "cold", "eligible_count": 0, "expected_count": 0,
+                    "coverage": 0.0, "issues": ["旧快照"],
+                },
+            },
+            "data": {"items": []},
+        },
+    })
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+
+    assert service.snapshot("themes")["meta"]["quality"]["coverage"] is None
+
+
 def test_rotation_snapshot_hash_failure_is_exposed_as_corrupt(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     store.save_snapshots({

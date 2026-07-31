@@ -1,9 +1,11 @@
 """Tushare 2000 积分档数据源：限速、落盘缓存、前复权日线与基本面。
 
-当前只使用仓库 ``docs/tushare_2000_guide.md`` 明确列为 2000 积分可用的接口：
+核心行情只使用仓库 ``docs/tushare_2000_guide.md`` 明确列为 2000 积分可用的接口：
 ``daily``、``adj_factor``、``index_daily``、``daily_basic``、
 ``fina_indicator``、``stk_limit``、``suspend_d``、``trade_cal``、
-``index_classify``、``index_member_all`` 与 ``index_weight``。
+``index_classify``、``index_member_all`` 与 ``index_weight``。板块联动仅在东方财富
+概念不可用时尝试权限隔离的 ``dc_index + dc_member``（当前需 6000 积分）；缺少
+权限不会影响核心 Tushare 行情通道。
 
 Tushare 是 AKShare 连续重试失败后的 A 股日线备用源；每次接口响应还会按
 ``endpoint + params`` 缓存在 ``data/api_cache/tushare``，避免研究/回测重复
@@ -118,7 +120,14 @@ class TushareSource(DataSource):
             self._api = _require_tushare()
         return self._api
 
-    def _call(self, endpoint: str, ttl_days: int, **params) -> pd.DataFrame:
+    def _call(
+        self,
+        endpoint: str,
+        ttl_days: int,
+        *,
+        provider_lane: str = "tushare",
+        **params,
+    ) -> pd.DataFrame:
         clean = {key: value for key, value in params.items() if value not in (None, "")}
         force_refresh = endpoint_cache_bypassed()
         min_mtime = _current_session_cache_floor(clean.get("end_date"))
@@ -151,7 +160,7 @@ class TushareSource(DataSource):
             self.cache.put(endpoint, clean, frame)
             return frame.copy()
 
-        return provider_call("tushare", key, fetch)
+        return provider_call(provider_lane, key, fetch)
 
     @staticmethod
     def _normalize_market_frame(raw: pd.DataFrame) -> pd.DataFrame:

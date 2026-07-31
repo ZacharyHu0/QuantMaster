@@ -104,6 +104,10 @@ class TestBasics:
         assert "data:[{yAxis:0}]" in resp.text
         assert "type:'dashed'" in resp.text
         assert "prefers-reduced-motion" in resp.text
+        assert "--scrollbar-track: #151514" in resp.text
+        assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in resp.text
+        assert "scrollbar-gutter:stable" in resp.text
+        assert 'class="backtest-trades-scroll"' in resp.text
         assert "createLoadProgress" in resp.text
         assert "createMarketStreamRenderer" in resp.text
         assert "createDecisionStreamRenderer" in resp.text

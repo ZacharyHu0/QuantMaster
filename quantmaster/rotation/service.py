@@ -64,15 +64,22 @@ def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:
 def _status_quality(
     status: str,
     *,
-    eligible: int = 0,
-    expected: int = 0,
+    eligible: int | None = None,
+    expected: int | None = None,
     issues: list[str] | None = None,
 ) -> dict[str, Any]:
+    eligible_count = int(eligible) if eligible is not None else None
+    expected_count = int(expected) if expected is not None else None
     return {
         "status": status,
-        "eligible_count": int(eligible),
-        "expected_count": int(expected),
-        "coverage": round(eligible / expected, 4) if expected else 0.0,
+        "eligible_count": eligible_count,
+        "expected_count": expected_count,
+        "coverage": (
+            round(eligible_count / expected_count, 4)
+            if eligible_count is not None and expected_count is not None
+            and expected_count > 0
+            else None
+        ),
         "issues": list(issues or []),
     }
 
@@ -251,7 +258,7 @@ def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any
             "parent_code": "",
             "members": sorted(members),
             "aliases": list(dict.fromkeys(str(value) for value in raw.get("aliases") or [])),
-            "source": "eastmoney-concept",
+            "source": str(raw.get("source") or "eastmoney-concept"),
         }
         memberships.append((code, members))
     return result
@@ -276,6 +283,10 @@ class RotationService:
         quality: dict[str, Any],
         sources: list[str],
     ) -> dict[str, Any]:
+        theme_taxonomy = next((
+            source for source in sources
+            if source in {"eastmoney-concept", "tushare:dc-concept"}
+        ), "eastmoney-concept")
         return {
             "snapshot_id": snapshot_id,
             "as_of": as_of,
@@ -283,7 +294,7 @@ class RotationService:
             "algorithm_version": ALGORITHM_VERSION,
             "taxonomy_versions": {
                 "industry": "SW2021",
-                "theme": "eastmoney-concept",
+                "theme": theme_taxonomy,
             },
             "quality": quality,
             "sources": sources,
@@ -321,13 +332,15 @@ class RotationService:
         computed: dict[str, dict[str, Any]] = {}
         need_market = scope in {"all", "close", "market", "industries", "themes"}
         provider_warnings: list[str] = []
+        provider_results: dict[str, dict[str, Any]] = {}
         if spec.source == "auto":
             from quantmaster.rotation.provider import RotationProvider
 
             provider = RotationProvider(self.store)
-            operations: list[tuple[str, Callable[[], dict[str, Any]]]] = []
+            operations: list[tuple[str, str, Callable[[], dict[str, Any]]]] = []
             if need_market:
                 operations.append((
+                    "market",
                     "全市场日线",
                     lambda: provider.sync_market_history(
                         progress, cancelled, rebuild=spec.mode == "rebuild",
@@ -335,22 +348,25 @@ class RotationService:
                 ))
             if scope in {"all", "close", "industries"}:
                 operations.append((
+                    "industries",
                     "申万行业层级",
                     lambda: provider.sync_industry_taxonomy(progress, cancelled),
                 ))
             if scope in {"all", "close", "themes"}:
                 operations.append((
-                    "东方财富概念",
+                    "themes",
+                    "细分题材目录",
                     lambda: provider.sync_themes(progress, cancelled),
                 ))
             if scope in {"all", "etf"}:
                 operations.append((
+                    "etf",
                     "ETF 份额",
                     lambda: provider.sync_etf_observations(progress, cancelled),
                 ))
-            for label, operation in operations:
+            for key, label, operation in operations:
                 try:
-                    operation()
+                    provider_results[key] = operation()
                 except InterruptedError:
                     raise
                 except Exception as exc:  # 外部数据源边界：记录后降级到已有快照
@@ -455,8 +471,16 @@ class RotationService:
             )
 
         if scope in {"all", "close", "themes"}:
-            progress(compute_base + 17, "扫描细分题材", "合并高度重叠的东方财富概念")
-            themes = _deduplicate_themes(self.store.themes())
+            progress(compute_base + 17, "扫描细分题材", "合并高度重叠的概念板块")
+            stored_themes = self.store.themes()
+            themes = _deduplicate_themes(stored_themes)
+            theme_sources = list(dict.fromkeys(
+                str(item.get("source") or "") for item in stored_themes
+                if str(item.get("source") or "")
+            ))
+            theme_provider_issues = list(
+                provider_results.get("themes", {}).get("issues") or []
+            )
             if themes:
                 theme_data = analyze_group_rotation(
                     close, themes, names=names, amount=amount, kind="theme", trend=trend,
@@ -468,6 +492,7 @@ class RotationService:
                     expected=len(themes),
                     issues=[
                         *([] if count >= 50 else ["概念成分目录仍在积累"]),
+                        *theme_provider_issues,
                         *provider_warnings,
                     ],
                 )
@@ -485,14 +510,15 @@ class RotationService:
                     },
                 }
                 theme_quality = _status_quality(
-                    "cold", issues=["尚未建立东方财富概念成分目录", *provider_warnings],
+                    "cold",
+                    issues=["尚未建立细分题材成分目录", *provider_warnings],
                 )
             computed["themes"] = self._envelope(
                 theme_data,
                 snapshot_id=snapshot_id,
                 generated_at=generated_at,
                 quality=theme_quality,
-                sources=[*sources, "eastmoney-concept"],
+                sources=list(dict.fromkeys([*sources, *theme_sources])),
             )
 
         if scope in {"all", "etf"}:
@@ -570,7 +596,7 @@ class RotationService:
                 "as_of": "",
                 "generated_at": "",
                 "algorithm_version": ALGORITHM_VERSION,
-                "taxonomy_versions": {
+            "taxonomy_versions": {
                     "industry": "SW2021", "theme": "eastmoney-concept",
                 },
                 "quality": _status_quality("cold", issues=[messages.get(kind, "尚无快照")]),
@@ -581,7 +607,14 @@ class RotationService:
 
     def snapshot(self, kind: str) -> dict[str, Any]:
         try:
-            return self.store.snapshot(kind) or self.cold(kind)
+            value = self.store.snapshot(kind) or self.cold(kind)
+            quality = value.get("meta", {}).get("quality", {})
+            expected = quality.get("expected_count")
+            if expected is None or expected == 0:
+                # v0.13.0 snapshots serialized an unknown denominator as 0%.  Keep
+                # them readable while correcting the public meaning immediately.
+                quality["coverage"] = None
+            return value
         except RotationIntegrityError as exc:
             logger.error("板块联动快照完整性失败 kind=%s", kind, exc_info=True)
             value = self.cold(kind)
@@ -624,6 +657,11 @@ class RotationService:
         status = "complete" if all(value == "complete" for value in qualities) else (
             "cold" if all(value == "cold" for value in qualities) else "partial"
         )
+        dimension_names = ("市场温度", "行业周期", "细分题材", "宽基资金")
+        unavailable_statuses = {"cold", "corrupt", "empty"}
+        available_dimensions = sum(
+            value not in unavailable_statuses for value in qualities
+        )
         selected_l2 = set(self.store.preferences()["l2_codes"])
         visible_industries = [
             item for item in industries["data"].get("items", [])
@@ -637,6 +675,18 @@ class RotationService:
             "themes": themes["data"].get("items", [])[:8],
             "etf": etf["data"].get("summary", {}),
         }
+        overview_quality = _status_quality(status, issues=(
+            [
+                f"当前 {available_dimensions}/4 个维度可用；"
+                "各维度可能有不同快照时间，请以对应页面为准。"
+            ]
+            if status == "partial" else []
+        ))
+        overview_quality.update({
+            "available_dimensions": available_dimensions,
+            "total_dimensions": len(dimension_names),
+            "dimension_statuses": dict(zip(dimension_names, qualities, strict=True)),
+        })
         return {
             "meta": self._meta(
                 snapshot_id=_snapshot_id(
@@ -646,9 +696,7 @@ class RotationService:
                 ),
                 as_of=as_of,
                 generated_at=generated,
-                quality=_status_quality(status, issues=[
-                    "总览包含不同更新时间的子视图；请以各页面快照时间为准。"
-                ] if status == "partial" else []),
+                quality=overview_quality,
                 sources=list(dict.fromkeys(
                     source for meta in metas for source in meta.get("sources") or []
                 )),

@@ -138,6 +138,39 @@ def test_tushare_index_uses_index_daily_only(tmp_path, isolated_config, monkeypa
     assert api.calls == ["index_daily"]
 
 
+def test_tushare_permission_gated_endpoint_can_use_an_isolated_health_lane(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    lanes = []
+
+    def direct_call(lane, key, fetch):
+        lanes.append(lane)
+        return fetch()
+
+    monkeypatch.setattr("quantmaster.data.tushare_source.provider_call", direct_call)
+
+    class FakePro:
+        def dc_index(self, **params):
+            return pd.DataFrame([{
+                "ts_code": "BK1184.DC", "trade_date": params["trade_date"],
+                "name": "人形机器人",
+            }])
+
+    source = TushareSource(EndpointFrameCache("tushare", root=tmp_path / "cache"))
+    source._api = FakePro()
+    frame = source._call(
+        "dc_index",
+        1,
+        provider_lane="tushare:dc-concept",
+        trade_date="20260730",
+    )
+
+    assert len(frame) == 1
+    assert lanes == ["tushare:dc-concept"]
+
+
 def test_current_session_rejects_endpoint_cache_written_before_close():
     before_close = pd.Timestamp("2026-07-28 14:00", tz="Asia/Shanghai").to_pydatetime()
     after_close = pd.Timestamp("2026-07-28 16:00", tz="Asia/Shanghai").to_pydatetime()
@@ -313,7 +346,7 @@ def test_fundamentals_fall_back_to_tushare(isolated_config, monkeypatch):
 
     class BrokenAkshare:
         @staticmethod
-        def stock_a_indicator_lg(**params):
+        def stock_zh_valuation_baidu(**params):
             raise ConnectionError("akshare down")
 
     expected = pd.DataFrame(

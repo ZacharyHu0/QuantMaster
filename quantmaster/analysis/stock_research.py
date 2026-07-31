@@ -545,11 +545,17 @@ class DefaultDeepEvidenceLoader:
             "https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/"
             f"Index?type=web&code={prefixed}"
         )
+        financial_start_year = str(max(1990, int(report_period[:4]) - 5))
         specs = (
             ("利润表与审计意见", "stock_profit_sheet_by_report_em", {"symbol": prefixed}, financial_url),
             ("资产负债表", "stock_balance_sheet_by_report_em", {"symbol": prefixed}, financial_url),
             ("现金流量表", "stock_cash_flow_sheet_by_report_em", {"symbol": prefixed}, financial_url),
-            ("财务指标", "stock_financial_analysis_indicator", {"symbol": code}, financial_url),
+            (
+                "财务指标",
+                "stock_financial_analysis_indicator",
+                {"symbol": code, "start_year": financial_start_year},
+                financial_url,
+            ),
             (
                 "业绩预告",
                 "stock_yjyg_em",

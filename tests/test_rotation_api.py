@@ -19,7 +19,13 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     temperature = client.get("/api/v1/market/temperature")
     assert temperature.status_code == 200
     assert temperature.json()["meta"]["quality"]["status"] == "cold"
+    assert temperature.json()["meta"]["quality"]["coverage"] is None
     assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V1"
+
+    overview = client.get("/api/v1/rotation/overview").json()
+    assert overview["meta"]["quality"]["coverage"] is None
+    assert overview["meta"]["quality"]["available_dimensions"] == 0
+    assert overview["meta"]["quality"]["total_dimensions"] == 4
 
     taxonomy = client.get("/api/v1/rotation/taxonomy/industries")
     assert taxonomy.status_code == 200

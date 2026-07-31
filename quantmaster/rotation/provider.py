@@ -1,14 +1,16 @@
 """Layered online acquisition for rotation inputs.
 
 Automatic refresh prefers Tushare's date-partitioned research data and strict SW2021
-classification.  Eastmoney concepts use AKShare as a replaceable snapshot source.  A
-failed source never deletes the previous catalog or ETF observations.
+classification.  Concepts prefer Eastmoney through AKShare and fall back to Tushare's
+DC catalog when that interface is available.  A failed source never deletes the
+previous catalog or ETF observations.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from datetime import date
 from typing import Any
 
@@ -37,6 +39,16 @@ _SECTOR_OR_NON_CN_TERMS = (
     "机械", "材料", "资源", "港股", "恒生", "纳指", "标普500", "日经", "德国",
     "法国", "美国", "黄金", "白银", "商品", "债", "货币",
 )
+_EASTMONEY_THEME_SOURCE = "eastmoney-concept"
+_TUSHARE_THEME_SOURCE = "tushare:dc-concept"
+
+
+class RotationProviderCallError(RuntimeError):
+    """An upstream provider call failed at the classified network boundary."""
+
+
+class ThemeSourceUnavailable(RuntimeError):
+    """A theme provider cannot currently supply a usable coherent catalog."""
 
 
 def _symbol(value: Any) -> str:
@@ -70,6 +82,28 @@ class RotationProvider:
     def __init__(self, store: RotationStore, source: TushareSource | None = None):
         self.store = store
         self.source = source or TushareSource()
+
+    def _tushare_call(self, endpoint: str, ttl_days: int, **params) -> pd.DataFrame:
+        try:
+            return self.source._call(endpoint, ttl_days, **params)
+        except Exception as exc:  # Tushare SDK raises a plain Exception for permissions
+            raise RotationProviderCallError(
+                f"Tushare {endpoint} 调用失败：{str(exc)[:180]}"
+            ) from exc
+
+    @staticmethod
+    def _eastmoney_theme_call(
+        label: str,
+        function: Callable[..., pd.DataFrame],
+        *args,
+        **params,
+    ) -> pd.DataFrame:
+        try:
+            return akshare_call(label, function, *args, **params)
+        except Exception as exc:  # AKShare/requests provider boundary
+            raise ThemeSourceUnavailable(
+                f"东方财富 {label} 调用失败：{str(exc)[:180]}"
+            ) from exc
 
     def sync_market_history(self, progress, cancelled, *, rebuild: bool = False) -> dict[str, Any]:
         """Materialize three years of date-partitioned full-market stock bars."""
@@ -115,7 +149,7 @@ class RotationProvider:
 
     def sync_industry_taxonomy(self, progress, cancelled) -> dict[str, Any]:
         """Fetch L1/L2 memberships per L1 so provider row limits cannot truncate the market."""
-        classes = self.source._call(
+        classes = self._tushare_call(
             "index_classify", 30, level="L1", src="SW2021",
             fields="index_code,industry_name,level",
         )
@@ -135,11 +169,11 @@ class RotationProvider:
             if strict_l1.get(l1_code) != l1_name:
                 continue
             try:
-                members = self.source._call(
+                members = self._tushare_call(
                     "index_member_all", 30, l1_code=l1_code, is_new="Y",
                     fields="l1_code,l1_name,l2_code,l2_name,ts_code,is_new",
                 )
-            except Exception:
+            except RotationProviderCallError:
                 logger.warning("申万行业 %s 成分同步失败，保留旧目录", l1_name, exc_info=True)
                 for code, item in previous.items():
                     if code == l1_code or str(item.get("parent_code") or "") == l1_code:
@@ -179,16 +213,41 @@ class RotationProvider:
             "l2": sum(item.get("level") == "L2" for item in nodes.values()),
         }
 
-    def sync_themes(self, progress, cancelled) -> dict[str, Any]:  # pragma: no cover - 网络
-        """Scan the complete Eastmoney concept catalog, checkpointing partial success."""
+    @staticmethod
+    def _themes_from_source(
+        previous_items: list[dict[str, Any]], source: str,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        matching = [
+            item for item in previous_items
+            if str(item.get("source") or "") == source
+        ]
+        return (
+            {str(item.get("code") or ""): item for item in matching},
+            {str(item.get("name") or ""): item for item in matching},
+        )
+
+    def _sync_eastmoney_themes(
+        self,
+        progress,
+        cancelled,
+        previous_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # pragma: no cover - 网络
+        """Scan Eastmoney concepts without mixing a prior provider's taxonomy."""
         import akshare as ak
 
-        boards = akshare_call("stock_board_concept_name_em", ak.stock_board_concept_name_em)
-        previous_items = self.store.themes()
-        previous_code = {str(item.get("code") or ""): item for item in previous_items}
-        previous_name = {str(item.get("name") or ""): item for item in previous_items}
+        boards = self._eastmoney_theme_call(
+            "stock_board_concept_name_em", ak.stock_board_concept_name_em,
+        )
+        if boards is None or boards.empty:
+            raise ThemeSourceUnavailable("东方财富概念目录为空")
+        previous_code, previous_name = self._themes_from_source(
+            previous_items, _EASTMONEY_THEME_SOURCE,
+        )
+        previous_matching = list(previous_code.values())
         themes: dict[str, dict[str, Any]] = {}
         rows = [row for _, row in boards.iterrows()]
+        fresh_count = 0
+        member_failures = 0
         for index, row in enumerate(rows, start=1):
             if cancelled():
                 raise InterruptedError("东方财富概念扫描已取消")
@@ -197,39 +256,195 @@ class RotationProvider:
             code = raw_code or f"EMC_{hashlib.sha1(name.encode('utf-8')).hexdigest()[:10].upper()}"
             if not name:
                 continue
+            member_symbol = (
+                raw_code
+                if raw_code.startswith("BK") and raw_code[2:].isdigit()
+                else name
+            )
             try:
-                members = akshare_call(
-                    f"stock_board_concept_cons_em({name})",
+                members = self._eastmoney_theme_call(
+                    f"stock_board_concept_cons_em({member_symbol})",
                     ak.stock_board_concept_cons_em,
-                    symbol=name,
+                    symbol=member_symbol,
                 )
                 values = [
                     symbol for raw in members.get("代码", pd.Series(dtype=str))
                     if (symbol := _symbol(raw))
                 ]
                 if not values:
-                    raise RuntimeError("概念成分为空")
+                    raise ThemeSourceUnavailable("概念成分为空")
                 themes[code] = {
                     "code": code, "name": name, "members": sorted(set(values)),
-                    "aliases": [], "source": "eastmoney-concept",
+                    "aliases": [], "source": _EASTMONEY_THEME_SOURCE,
                 }
-            except Exception:
+                fresh_count += 1
+                member_failures = 0
+            except ThemeSourceUnavailable:
+                member_failures += 1
                 old = previous_code.get(code) or previous_name.get(name)
                 if old:
                     themes[code] = old
                 logger.warning("概念 %s 成分同步失败，保留旧快照", name, exc_info=True)
+                if fresh_count == 0 and member_failures >= 3:
+                    break
             if index % 20 == 0 or index == len(rows):
                 unprocessed = {
-                    str(item.get("code") or ""): item for item in previous_items
+                    str(item.get("code") or ""): item for item in previous_matching
                     if str(item.get("code") or "") not in themes
                 }
-                self.store.replace_themes([*themes.values(), *unprocessed.values()])
+                if fresh_count:
+                    self.store.replace_themes([*themes.values(), *unprocessed.values()])
                 progress(
                     39 + round(16 * index / max(1, len(rows))),
                     "扫描细分题材",
-                    f"{index}/{len(rows)} · 成功 {len(themes)}",
+                    f"东方财富 {index}/{len(rows)} · 成功 {fresh_count}",
                 )
-        return {"catalog": len(rows), "available": len(themes)}
+        if not fresh_count:
+            raise ThemeSourceUnavailable("东方财富概念成分连续不可用")
+        return {
+            "catalog": len(rows),
+            "available": len(themes),
+            "fresh": fresh_count,
+            "source": _EASTMONEY_THEME_SOURCE,
+            "issues": [],
+        }
+
+    def _sync_tushare_themes(
+        self,
+        progress,
+        cancelled,
+        previous_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # pragma: no cover - 网络
+        """Use the permission-gated Tushare DC catalog as the second provider."""
+        end = pd.Timestamp(date.today())
+        start = end - pd.Timedelta(days=14)
+        # Use candidate weekdays instead of the core Tushare trade-calendar lane.  The
+        # DC permission probe must not depend on or poison the 2000-point data channel.
+        sessions = list(pd.bdate_range(start, end))
+        if not sessions:
+            sessions = [end]
+        boards = pd.DataFrame()
+        trade_date = ""
+        for session in reversed(sessions[-7:]):
+            if cancelled():
+                raise InterruptedError("Tushare DC 概念扫描已取消")
+            candidate = pd.Timestamp(session).strftime("%Y%m%d")
+            boards = self._tushare_call(
+                "dc_index",
+                1,
+                provider_lane="tushare:dc-concept",
+                trade_date=candidate,
+                idx_type="概念板块",
+                fields="ts_code,trade_date,name,idx_type",
+            )
+            if boards is not None and not boards.empty:
+                trade_date = candidate
+                break
+        if boards is None or boards.empty or not trade_date:
+            raise ThemeSourceUnavailable("Tushare DC 概念目录为空")
+        if not {"ts_code", "name"}.issubset(boards.columns):
+            raise ThemeSourceUnavailable("Tushare DC 概念目录缺少代码或名称列")
+
+        previous_code, previous_name = self._themes_from_source(
+            previous_items, _TUSHARE_THEME_SOURCE,
+        )
+        previous_matching = list(previous_code.values())
+        themes: dict[str, dict[str, Any]] = {}
+        rows = [row for _, row in boards.drop_duplicates("ts_code").iterrows()]
+        fresh_count = 0
+        member_failures = 0
+        for index, row in enumerate(rows, start=1):
+            if cancelled():
+                raise InterruptedError("Tushare DC 概念扫描已取消")
+            code = str(row.get("ts_code") or "").strip().upper()
+            name = str(row.get("name") or "").strip()
+            if not code or not name:
+                continue
+            try:
+                members = self._tushare_call(
+                    "dc_member",
+                    7,
+                    provider_lane="tushare:dc-concept",
+                    trade_date=trade_date,
+                    ts_code=code,
+                    fields="trade_date,ts_code,con_code,name",
+                )
+                values = [
+                    symbol for raw in members.get("con_code", pd.Series(dtype=str))
+                    if (symbol := _symbol(raw))
+                ]
+                if not values:
+                    raise ThemeSourceUnavailable("概念成分为空")
+                themes[code] = {
+                    "code": code,
+                    "name": name,
+                    "members": sorted(set(values)),
+                    "aliases": [],
+                    "source": _TUSHARE_THEME_SOURCE,
+                }
+                fresh_count += 1
+                member_failures = 0
+            except (RotationProviderCallError, ThemeSourceUnavailable):
+                member_failures += 1
+                old = previous_code.get(code) or previous_name.get(name)
+                if old:
+                    themes[code] = old
+                logger.warning(
+                    "Tushare DC 概念 %s 成分同步失败，保留同源旧快照",
+                    name,
+                    exc_info=True,
+                )
+                if fresh_count == 0 and member_failures >= 3:
+                    break
+            if index % 20 == 0 or index == len(rows):
+                unprocessed = {
+                    str(item.get("code") or ""): item for item in previous_matching
+                    if str(item.get("code") or "") not in themes
+                }
+                if fresh_count:
+                    self.store.replace_themes([*themes.values(), *unprocessed.values()])
+                progress(
+                    39 + round(16 * index / max(1, len(rows))),
+                    "扫描细分题材",
+                    f"Tushare DC {index}/{len(rows)} · 成功 {fresh_count}",
+                )
+        if not fresh_count:
+            raise ThemeSourceUnavailable("Tushare DC 概念成分连续不可用")
+        return {
+            "catalog": len(rows),
+            "available": len(themes),
+            "fresh": fresh_count,
+            "source": _TUSHARE_THEME_SOURCE,
+            "trade_date": trade_date,
+            "issues": ["东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"],
+        }
+
+    def sync_themes(self, progress, cancelled) -> dict[str, Any]:  # pragma: no cover - 网络
+        """Refresh one coherent concept taxonomy, preferring Eastmoney then Tushare."""
+        previous_items = self.store.themes()
+        try:
+            return self._sync_eastmoney_themes(
+                progress, cancelled, previous_items,
+            )
+        except InterruptedError:
+            raise
+        except ThemeSourceUnavailable as eastmoney_error:
+            logger.warning(
+                "东方财富概念目录不可用，尝试 Tushare DC 后备源",
+                exc_info=True,
+            )
+            try:
+                return self._sync_tushare_themes(
+                    progress, cancelled, previous_items,
+                )
+            except InterruptedError:
+                raise
+            except (RotationProviderCallError, ThemeSourceUnavailable) as tushare_error:
+                raise RuntimeError(
+                    "题材目录双源不可用："
+                    f"东方财富 {str(eastmoney_error)[:100]}；"
+                    f"Tushare {str(tushare_error)[:100]}"
+                ) from tushare_error
 
     def sync_etf_observations(self, progress, cancelled) -> dict[str, Any]:
         """Fetch recent bulk fund shares and closes, preserving earlier observations."""
@@ -284,13 +499,13 @@ class RotationProvider:
             nav = pd.DataFrame(columns=["symbol", "nav"])
             if nav_available:
                 try:
-                    nav = self.source._call(
+                    nav = self._tushare_call(
                         "fund_nav", 1, nav_date=compact, market="E",
                         fields="ts_code,nav_date,unit_nav",
                     ).rename(columns={"ts_code": "symbol", "unit_nav": "nav"})
                     if not {"symbol", "nav"}.issubset(nav.columns):
                         nav = pd.DataFrame(columns=["symbol", "nav"])
-                except Exception:
+                except RotationProviderCallError:
                     nav_available = False
                     logger.warning(
                         "场内基金单位净值接口不可用，本轮 ETF 资金改用收盘价并逐只标记",

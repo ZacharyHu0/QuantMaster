@@ -1089,10 +1089,20 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page.get_by_role("button", name="轮动", exact=True).click()
         page.locator("#rotation-radar-view").wait_for(state="visible")
         assert page.url.endswith("#rotation/radar")
+        _wait_for_text(page.locator("#rotation-radar-content"), "等待")
+        assert "· 0%" not in page.locator(
+            '[data-rotation-meta="rotation"] .rotation-meta-line'
+        ).inner_text()
         page.get_by_role("tab", name="行业周期", exact=True).click()
         page.locator("#rotation-industry-view").wait_for(state="visible")
         page.get_by_role("tab", name="细分题材", exact=True).click()
         page.locator("#rotation-themes-view").wait_for(state="visible")
+        _wait_for_text(page.locator("#rotation-themes-content"), "等待")
+        theme_meta = page.locator(
+            '[data-rotation-meta="rotation"] .rotation-meta-line'
+        ).inner_text()
+        assert "等待快照" in theme_meta
+        assert "· 0%" not in theme_meta
         page.get_by_role("tab", name="宽基资金", exact=True).click()
         page.locator("#rotation-etf-view").wait_for(state="visible")
 

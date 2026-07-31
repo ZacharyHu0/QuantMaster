@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 import pandas as pd
+import pytest
 
 from quantmaster.rotation.analytics import estimate_etf_flows
 from quantmaster.rotation.provider import RotationProvider, _broad_etf_category
@@ -49,6 +52,32 @@ class FakeTushare:
             nav = 4.05 if nav_date == "20260729" else 4.15
             return pd.DataFrame([
                 {"ts_code": "510300.SH", "nav_date": nav_date, "unit_nav": nav},
+            ])
+        if endpoint == "dc_index":
+            return pd.DataFrame([
+                {
+                    "ts_code": "BK1184.DC", "trade_date": params["trade_date"],
+                    "name": "人形机器人", "idx_type": "概念板块",
+                },
+                {
+                    "ts_code": "BK0816.DC", "trade_date": params["trade_date"],
+                    "name": "人工智能", "idx_type": "概念板块",
+                },
+            ])
+        if endpoint == "dc_member":
+            symbols = (
+                ["002117.SZ", "603662.SH", "688165.SH"]
+                if params["ts_code"] == "BK1184.DC"
+                else ["000001.SZ", "600001.SH", "830001.BJ"]
+            )
+            return pd.DataFrame([
+                {
+                    "trade_date": params["trade_date"],
+                    "ts_code": params["ts_code"],
+                    "con_code": symbol,
+                    "name": f"成分{index}",
+                }
+                for index, symbol in enumerate(symbols)
             ])
         raise AssertionError(endpoint)
 
@@ -113,3 +142,89 @@ def test_provider_marks_close_fallback_when_fund_nav_is_unavailable(tmp_path, mo
 
     assert result["items"][0]["price_source"] == "close"
     assert result["summary"]["close_fallback_count"] == 1
+
+
+def test_provider_uses_akshare_concept_code_for_member_lookup(tmp_path, monkeypatch):
+    """新版目录返回 BK 代码后直接查询成分，避免再次按名称解析目录。"""
+    member_symbols = []
+
+    class FakeAkshare:
+        @staticmethod
+        def stock_board_concept_name_em():
+            return pd.DataFrame([{"板块代码": "BK0816", "板块名称": "人工智能"}])
+
+        @staticmethod
+        def stock_board_concept_cons_em(symbol):
+            member_symbols.append(symbol)
+            return pd.DataFrame({"代码": ["000001", "600001"]})
+
+    def direct_call(endpoint, function, **kwargs):
+        kwargs.pop("lane", None)
+        return function(**kwargs)
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    monkeypatch.setattr("quantmaster.rotation.provider.akshare_call", direct_call)
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare())
+
+    result = provider.sync_themes(lambda *args: None, lambda: False)
+
+    assert result["source"] == "eastmoney-concept"
+    assert member_symbols == ["BK0816"]
+    assert store.themes()[0]["members"] == ["000001.SZ", "600001.SH"]
+
+
+def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
+    tmp_path, monkeypatch,
+):
+    store = RotationStore(tmp_path / "rotation")
+    store.replace_themes([{
+        "code": "EM_OLD", "name": "东方财富旧目录", "members": ["600000.SH"],
+        "aliases": [], "source": "eastmoney-concept",
+    }])
+    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
+        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
+    ))
+    provider = RotationProvider(store, FakeTushare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.akshare_call",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("connection closed")),
+    )
+
+    result = provider.sync_themes(lambda *args: None, lambda: False)
+
+    assert result["source"] == "tushare:dc-concept"
+    assert result["trade_date"] == "20260730"
+    assert result["issues"] == [
+        "东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"
+    ]
+    themes = store.themes()
+    assert {item["code"] for item in themes} == {"BK0816.DC", "BK1184.DC"}
+    assert {item["source"] for item in themes} == {"tushare:dc-concept"}
+
+
+def test_provider_keeps_previous_theme_catalog_when_both_sources_fail(
+    tmp_path, monkeypatch,
+):
+    class UnavailableTushare(FakeTushare):
+        def _call(self, endpoint, ttl, **params):
+            if endpoint == "dc_index":
+                raise RuntimeError("permission unavailable")
+            return super()._call(endpoint, ttl, **params)
+
+    store = RotationStore(tmp_path / "rotation")
+    previous = {
+        "code": "EM_OLD", "name": "可恢复旧目录", "members": ["600000.SH"],
+        "aliases": [], "source": "eastmoney-concept",
+    }
+    store.replace_themes([previous])
+    provider = RotationProvider(store, UnavailableTushare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.akshare_call",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("connection closed")),
+    )
+
+    with pytest.raises(RuntimeError, match="题材目录双源不可用"):
+        provider.sync_themes(lambda *args: None, lambda: False)
+
+    assert store.themes() == [previous]

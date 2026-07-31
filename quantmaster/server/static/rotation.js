@@ -45,9 +45,20 @@
     const quality = meta?.quality || {status:'cold', issues:[]};
     const status = quality.status || 'cold';
     const coverage = quality.scope_coverage ?? quality.coverage ?? quality.price_coverage;
-    const coverageText = Number.isFinite(Number(coverage)) ? ` · ${(Number(coverage) * 100).toFixed(0)}%` : '';
+    const availableDimensions = Number(quality.available_dimensions);
+    const totalDimensions = Number(quality.total_dimensions);
+    const dimensionText = Number.isFinite(availableDimensions) && Number.isFinite(totalDimensions) && totalDimensions > 0
+      ? ` · ${availableDimensions}/${totalDimensions} 维度`
+      : '';
+    const hasCoverage = coverage !== null && coverage !== undefined && coverage !== '';
+    const hasCoverageBasis = quality.scope_coverage !== null && quality.scope_coverage !== undefined
+      || quality.price_coverage !== null && quality.price_coverage !== undefined
+      || Number(quality.expected_count) > 0;
+    const coverageText = !dimensionText && hasCoverage && hasCoverageBasis && Number.isFinite(Number(coverage))
+      ? ` · ${(Number(coverage) * 100).toFixed(0)}%`
+      : '';
     const title = (quality.issues || []).join('；');
-    return `<span class="rotation-quality" data-status="${esc(status)}" title="${esc(title)}">${esc(QUALITY_LABELS[status] || status)}${coverageText}</span>`;
+    return `<span class="rotation-quality" data-status="${esc(status)}" title="${esc(title)}">${esc(QUALITY_LABELS[status] || status)}${dimensionText}${coverageText}</span>`;
   }
 
   function updateMeta(kind, meta) {
@@ -60,7 +71,11 @@
     const group = kind === 'temperature' || kind === 'structure' ? 'market' : 'rotation';
     const line = document.querySelector(`[data-rotation-meta="${group}"] .rotation-meta-line`);
     if (line && meta) {
-      const source = (meta.sources || []).slice(0, 2).join(' · ') || '本地缓存';
+      const sources = [...(meta.sources || [])];
+      if (kind === 'themes') sources.sort((left, right) => (
+        Number(String(right).includes('concept')) - Number(String(left).includes('concept'))
+      ));
+      const source = sources.slice(0, 2).join(' · ') || '本地缓存';
       line.innerHTML = `${qualityMarkup(meta)}<span>${esc(meta.as_of || '尚无日期')}</span><span>${esc(source)}</span>`;
     }
   }
@@ -326,7 +341,7 @@
     updateMeta('themes', meta);
     themeCatalog = data.items || [];
     if (!themeCatalog.length) {
-      out.innerHTML = emptyMarkup(meta, data.message || '尚未建立东方财富概念成分目录。', 'themes');
+      out.innerHTML = emptyMarkup(meta, data.message || '尚未建立细分题材成分目录。', 'themes');
       return;
     }
     out.innerHTML = `<div class="rotation-theme-toolbar"><label for="rotation-theme-search">搜索完整题材目录<input id="rotation-theme-search" type="search" placeholder="输入题材名称或板块代码" autocomplete="off"></label><div class="rotation-meta-line"><span id="rotation-theme-count"></span>${qualityMarkup(meta)}</div></div><div id="rotation-theme-results"></div><section class="rotation-detail" id="rotation-theme-detail" hidden></section>${issuesMarkup(meta)}`;
@@ -395,15 +410,40 @@
   }
 
   async function loadCurrent(force = false) {
+    const marketPage = activeMarketPage;
+    const rotationPage = activeRotationPage;
+    const marketActive = document.getElementById('tab-market')?.classList.contains('active');
+    const rotationActive = document.getElementById('tab-rotation')?.classList.contains('active');
+    const stillCurrent = () => (
+      (marketActive && activeMarketPage === marketPage && document.getElementById('tab-market')?.classList.contains('active'))
+      || (rotationActive && activeRotationPage === rotationPage && document.getElementById('tab-rotation')?.classList.contains('active'))
+    );
     try {
-      if (activeMarketPage === 'temperature') renderTemperature(await fetchView('temperature','/api/v1/market/temperature',force));
-      else if (activeMarketPage === 'style') renderStructure(await fetchView('structure','/api/v1/market/structure',force));
-      if (activeRotationPage === 'radar' && document.getElementById('tab-rotation')?.classList.contains('active')) renderRadar(await fetchView('overview','/api/v1/rotation/overview',force));
-      else if (activeRotationPage === 'industry' && document.getElementById('tab-rotation')?.classList.contains('active')) renderIndustries(await fetchView('industries','/api/v1/rotation/industries',force));
-      else if (activeRotationPage === 'themes' && document.getElementById('tab-rotation')?.classList.contains('active')) renderThemes(await fetchView('themes','/api/v1/rotation/themes?limit=500',force));
-      else if (activeRotationPage === 'etf-flows' && document.getElementById('tab-rotation')?.classList.contains('active')) renderEtf(await fetchView('etf','/api/v1/rotation/etf-flows',force));
+      let payload;
+      if (marketActive && marketPage === 'temperature') {
+        payload = await fetchView('temperature','/api/v1/market/temperature',force);
+        if (stillCurrent()) renderTemperature(payload);
+      } else if (marketActive && marketPage === 'style') {
+        payload = await fetchView('structure','/api/v1/market/structure',force);
+        if (stillCurrent()) renderStructure(payload);
+      } else if (rotationActive && rotationPage === 'radar') {
+        payload = await fetchView('overview','/api/v1/rotation/overview',force);
+        if (stillCurrent()) renderRadar(payload);
+      } else if (rotationActive && rotationPage === 'industry') {
+        payload = await fetchView('industries','/api/v1/rotation/industries',force);
+        if (stillCurrent()) renderIndustries(payload);
+      } else if (rotationActive && rotationPage === 'themes') {
+        payload = await fetchView('themes','/api/v1/rotation/themes?limit=500',force);
+        if (stillCurrent()) renderThemes(payload);
+      } else if (rotationActive && rotationPage === 'etf-flows') {
+        payload = await fetchView('etf','/api/v1/rotation/etf-flows',force);
+        if (stillCurrent()) renderEtf(payload);
+      }
     } catch (error) {
-      const target = activeMarketPage === 'temperature' ? document.getElementById('market-temperature-content') : activeMarketPage === 'style' ? document.getElementById('market-style-content') : document.getElementById(`rotation-${activeRotationPage === 'etf-flows' ? 'etf' : activeRotationPage}-content`);
+      if (!stillCurrent()) return;
+      const target = marketActive
+        ? (marketPage === 'temperature' ? document.getElementById('market-temperature-content') : document.getElementById('market-style-content'))
+        : document.getElementById(`rotation-${rotationPage === 'etf-flows' ? 'etf' : rotationPage}-content`);
       if (target) target.innerHTML = errorMarkup(error);
     }
   }

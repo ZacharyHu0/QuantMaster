@@ -31,8 +31,17 @@ from quantmaster.data.storage import BarStore
 
 logger = logging.getLogger(__name__)
 
-# 每日估值指标的标准字段（对应 akshare stock_a_indicator_lg 的返回列）
+# 每日估值指标的标准字段（Tushare 与 AKShare 归一化后的公共口径）
 DAILY_FIELDS = ("pe", "pe_ttm", "pb", "dv_ratio", "total_mv")
+
+# AKShare 1.18.81 的现行个股历史估值接口按指标分别返回两列数据。
+# 百度总市值的数值单位为亿元；乘 10_000 后与 Tushare daily_basic 的万元口径一致。
+_AKSHARE_VALUATION_FIELDS = (
+    ("市盈率(静)", "pe", 1.0),
+    ("市盈率(TTM)", "pe_ttm", 1.0),
+    ("市净率", "pb", 1.0),
+    ("总市值", "total_mv", 10_000.0),
+)
 
 # fundamental_panel 的默认字段集合（tuple 不可变，可安全作默认参数）
 DEFAULT_FIELDS = ("pe_ttm", "pb", "dv_ratio", "total_mv", "roe")
@@ -58,16 +67,76 @@ def _roe_key(symbol: str) -> str:
     return f"{symbol}#roe"
 
 
+def _akshare_valuation_period(start: str | None) -> str:
+    """选择能覆盖请求起点的百度估值窗口，避免无条件下载全部历史。"""
+    if not start:
+        return "全部"
+    age_days = max(
+        0,
+        (pd.Timestamp.now().normalize() - pd.Timestamp(start).normalize()).days,
+    )
+    for days, period in (
+        (366, "近一年"),
+        (3 * 366, "近三年"),
+        (5 * 366, "近五年"),
+        (10 * 366, "近十年"),
+    ):
+        if age_days <= days:
+            return period
+    return "全部"
+
+
+def _fetch_akshare_daily_indicators(
+    ak,
+    code: str,
+    start: str | None,
+    end: str | None,
+) -> pd.DataFrame:
+    """从 AKShare 当前百度估值接口拼接标准化的每日估值面板。"""
+    period = _akshare_valuation_period(start)
+    frames: list[pd.DataFrame] = []
+    for indicator, field, scale in _AKSHARE_VALUATION_FIELDS:
+        raw = akshare_call(
+            f"stock_zh_valuation_baidu({code},{indicator})",
+            ak.stock_zh_valuation_baidu,
+            symbol=code,
+            indicator=indicator,
+            period=period,
+            lane="akshare:other",
+        )
+        if raw is None or raw.empty:
+            continue
+        if not {"date", "value"}.issubset(raw.columns):
+            raise ValueError(f"AKShare {indicator} 返回列不完整")
+        frame = raw[["date", "value"]].copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame[field] = pd.to_numeric(frame["value"], errors="coerce") * scale
+        frame = frame.dropna(subset=["date"]).drop_duplicates("date", keep="last")
+        frames.append(frame.set_index("date")[[field]])
+    if not frames:
+        raise RuntimeError("AKShare 返回空数据")
+    result = pd.concat(frames, axis=1).sort_index()
+    result.index.name = "date"
+    if start:
+        result = result.loc[pd.Timestamp(start):]
+    if end:
+        result = result.loc[:pd.Timestamp(end)]
+    if result.empty:
+        raise RuntimeError("AKShare 返回数据不覆盖请求区间")
+    # 当前官方接口不提供历史股息率；保留 NaN 列维持稳定 schema，不合成数据。
+    return result.reindex(columns=DAILY_FIELDS).astype(float)
+
+
 def fetch_daily_indicators(
     symbol: str,
     start: str | None = None,
     end: str | None = None,
 ) -> pd.DataFrame:  # pragma: no cover - 网络
-    """拉取每日估值指标（akshare stock_a_indicator_lg，数据源为乐咕乐股）。
+    """拉取每日估值指标（AKShare 百度估值，失败时降级 Tushare）。
 
     返回 index=DatetimeIndex 的 DataFrame，列为 pe / pe_ttm / pb / dv_ratio /
-    total_mv（列名标准化为小写）。该接口一次返回上市以来的全部历史，
-    适合整体写入缓存后按日期切片使用。
+    total_mv。AKShare 当前不提供历史股息率，因此 dv_ratio 保留为空；总市值统一为
+    Tushare 的万元口径。按请求起点选择一、三、五、十年或全部历史窗口。
     """
     code = _six_digit(symbol)
     from quantmaster.data.tushare_source import TushareSource
@@ -78,11 +147,7 @@ def fetch_daily_indicators(
         return cached_tushare
     try:
         ak = _require_akshare()
-        raw = akshare_call(
-            f"stock_a_indicator_lg({symbol})", ak.stock_a_indicator_lg,
-            symbol=code, lane="akshare:other")
-        if raw is None or raw.empty:
-            raise RuntimeError("AKShare 返回空数据")
+        return _fetch_akshare_daily_indicators(ak, code, start, end)
     except Exception as ak_error:
         if not get_config().data.tushare_token:
             raise
@@ -90,14 +155,6 @@ def fetch_daily_indicators(
         if start or end:
             return tushare.daily_indicators(symbol, start=start, end=end)
         return tushare.daily_indicators(symbol)
-    df = raw.copy()
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    date_col = "trade_date" if "trade_date" in df.columns else df.columns[0]
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.set_index(date_col).sort_index()
-    df.index.name = "date"
-    keep = [c for c in DAILY_FIELDS if c in df.columns]
-    return df[keep].astype(float)
 
 
 def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame:  # pragma: no cover - 网络

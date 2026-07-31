@@ -840,6 +840,9 @@ def test_default_deep_loader_uses_documented_symbol_shapes_and_source_urls(monke
     call_map = {endpoint: kwargs for endpoint, kwargs in calls}
     assert call_map["stock_profit_sheet_by_report_em"]["symbol"] == "SH600519"
     assert call_map["stock_zygc_em"]["symbol"] == "SH600519"
+    financial_kwargs = call_map["stock_financial_analysis_indicator"]
+    assert financial_kwargs["symbol"] == "600519"
+    assert pd.Timestamp.now().year - int(financial_kwargs["start_year"]) in {5, 6}
     assert set(call_map["stock_yjyg_em"]) == {"date"}
     assert any(item["provider"] == "stock_zh_a_spot_em" for item in capital)
     assert any(item["provider"] == "currency_boc_safe" for item in macro)

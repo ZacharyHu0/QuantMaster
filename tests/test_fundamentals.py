@@ -28,6 +28,45 @@ def make_quarterly() -> pd.DataFrame:
     return pd.DataFrame({"roe": [10.0, 12.0, 8.0]}, index=idx)
 
 
+def test_current_akshare_valuation_api_is_normalized(monkeypatch):
+    """AKShare 1.18.81 的分指标估值接口应拼成稳定字段并统一市值单位。"""
+    calls = []
+    values = {
+        "市盈率(静)": [18.0, 19.0],
+        "市盈率(TTM)": [17.0, 18.0],
+        "市净率": [1.8, 1.9],
+        "总市值": [100.0, 101.0],
+    }
+
+    class CurrentAkshare:
+        @staticmethod
+        def stock_zh_valuation_baidu(**params):
+            calls.append(params)
+            return pd.DataFrame({
+                "date": ["2026-07-29", "2026-07-30"],
+                "value": values[params["indicator"]],
+            })
+
+    monkeypatch.setattr(fundamentals, "_require_akshare", lambda: CurrentAkshare())
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.cached_daily_indicators",
+        lambda self, symbol, start=None, end=None: None,
+    )
+
+    result = fundamentals.fetch_daily_indicators(
+        "600000.SH", start="2026-07-29", end="2026-07-30",
+    )
+
+    assert list(result.columns) == list(fundamentals.DAILY_FIELDS)
+    assert result.loc["2026-07-30", "pe"] == 19.0
+    assert result.loc["2026-07-30", "pe_ttm"] == 18.0
+    assert result.loc["2026-07-30", "pb"] == 1.9
+    assert result.loc["2026-07-30", "total_mv"] == 1_010_000.0
+    assert result["dv_ratio"].isna().all()
+    assert {item["indicator"] for item in calls} == set(values)
+    assert {item["period"] for item in calls} == {"近一年"}
+
+
 def make_fund_panel(close: pd.DataFrame, seed: int = 3) -> dict[str, pd.DataFrame]:
     """构造与行情面板同形状的合成基本面面板。
 
