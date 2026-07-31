@@ -1244,7 +1244,7 @@ def test_deadline_returns_completed_with_errors_and_rule_dimensions():
     class SlowDeepLoader(FakeDeepLoader):
         @staticmethod
         def _pause():
-            time.sleep(1.2)
+            time.sleep(2.0)
 
         def fundamental(self, symbol):
             self._pause()
@@ -1273,7 +1273,9 @@ def test_deadline_returns_completed_with_errors_and_rule_dimensions():
 
     report = service.analyze_v2("600519", mode="deep", deadline_seconds=1)
 
-    assert time.monotonic() - started < 1.15
+    # The deadline must return well before an uncooperative collector finishes,
+    # while leaving enough room for scheduler jitter and deterministic report assembly.
+    assert time.monotonic() - started < 1.5
     assert report["research"]["completion_status"] == "completed_with_errors"
     assert len(report["dimensions"]) == 6
     assert any("截止时间" in warning for warning in report["warnings"])

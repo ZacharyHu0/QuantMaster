@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def test_release_workflow_guards_historical_backfills() -> None:
@@ -27,3 +28,9 @@ def test_release_workflow_builds_native_wheels_without_maturin_develop() -> None
     assert "maturin build" in source
     assert "lock_args+=(--locked)" in source
     assert "fail_on_unmatched_files: true" in source
+
+
+def test_ci_matrix_collects_every_platform_result() -> None:
+    source = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "strategy:\n      fail-fast: false\n      matrix:" in source
