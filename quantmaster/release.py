@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.9"
+VERSION = "0.13.10"
 RELEASE_DATE = "2026-07-31"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "历史制品交付与跨平台收口",
+                "items": (
+                    (
+                        "早期提交没有 Cargo.lock 时使用独立的非锁定 maturin 命令，避免 macOS"
+                        " Bash 3 在 set -u 下展开空数组失败。"
+                    ),
+                    (
+                        "历史矩阵的三平台二进制作为具名 Actions 制品保留 90 天并写入任务摘要；"
+                        "不会再用受限分支令牌尝试跨标签创建 Release。"
+                    ),
+                    (
+                        "Chromium 实盘 CSV 流程在上传文件后明确等待预览按钮可见再点击，消除"
+                        "页面切换尚未完成时命中隐藏表单的竞态。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.9",
+        "date": "2026-07-31",
         "sections": (
             {
                 "title": "最小权限发布职责分离",

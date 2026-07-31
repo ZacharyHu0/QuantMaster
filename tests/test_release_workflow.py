@@ -30,8 +30,11 @@ def test_release_workflow_builds_native_wheels_without_maturin_develop() -> None
 
     assert "maturin develop" not in source
     assert "maturin build" in source
-    assert "lock_args+=(--locked)" in source
+    assert "if [[ -f rust/quantmaster-kernel/Cargo.lock ]]" in source
+    assert source.count("maturin build") == 2
     assert "fail_on_unmatched_files: true" in source
+    assert "if: matrix.target.make_latest" in source
+    assert "retention-days: 90" in source
 
 
 def test_ci_matrix_collects_every_platform_result() -> None:
@@ -46,6 +49,14 @@ def test_release_backfill_manifest_is_unique_and_immutable() -> None:
     tags = [item["tag"] for item in releases]
 
     assert payload["schema_version"] == 1
-    assert tags == ["v0.10.1", "v0.10.2", "v0.11.0", "v0.11.1", "v0.12.0", "v0.13.6"]
+    assert tags == [
+        "v0.10.1",
+        "v0.10.2",
+        "v0.11.0",
+        "v0.11.1",
+        "v0.12.0",
+        "v0.13.6",
+        "v0.13.8",
+    ]
     assert len(tags) == len(set(tags))
     assert all(len(item["target_sha"]) == 40 for item in releases)

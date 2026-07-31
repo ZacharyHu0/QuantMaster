@@ -24,6 +24,10 @@
     {
       "tag": "v0.13.6",
       "target_sha": "ce0f117f45768bfa4b8e65279bfc8b4376e8df40"
+    },
+    {
+      "tag": "v0.13.8",
+      "target_sha": "fedf578db2232292c8a8e9fa7e9ece9614381e2f"
     }
   ]
 }
