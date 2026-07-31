@@ -677,7 +677,7 @@
     <div>
       <span class="sa-kicker">SIX-DIMENSION RESEARCH MEMO</span>
       <h2>个股六维分析</h2>
-      <p>联网取证、六维分别研判，再做一次交叉复核；每条结论都能回到来源，缺失数据不靠叙事补齐。</p>
+      <p>快速研究完成一轮联网六维复核；深度研究再做逐维反方审查与独立证伪终审。证据不足时明确标出未达深度标准。</p>
     </div>
     <div class="sa-framework-badge" aria-label="分析框架版本">
       <span>REPORT SCHEMA</span><strong>6D / v2</strong>
@@ -692,12 +692,12 @@
           placeholder="输入代码或名称，如 600519 / 贵州茅台" required maxlength="80">
         <div class="sa-suggestions" id="stock-analysis-suggestions" role="listbox" hidden></div>
       </div>
-      <button class="primary" type="submit">开始深度分析</button>
+      <button class="primary" type="submit">开始深度研究</button>
     </div>
     <fieldset class="sa-mode" aria-label="分析模式">
       <legend>分析模式</legend>
-      <label><input type="radio" name="mode" value="deep" checked><span>深度</span><small>联网取证 · 约 2–5 分钟</small></label>
-      <label><input type="radio" name="mode" value="quick"><span>快速</span><small>本地规则 · 更快返回</small></label>
+      <label><input type="radio" name="mode" value="deep" checked><span>深度</span><small>三轮追证 + 双重审查 · 约 8–15 分钟</small></label>
+      <label><input type="radio" name="mode" value="quick"><span>快速</span><small>联网六维 + 一次终审 · 约 2–5 分钟</small></label>
     </fieldset>
     <div class="sa-examples" aria-label="示例标的">
       <span>试一试</span>
@@ -708,7 +708,7 @@
   </form>
   <div class="sa-stage" id="stock-analysis-stage" aria-live="polite">
     <div class="sa-idle-copy">
-      <strong>一次分析，六条证据链</strong>
+      <strong>研究强度可验证，不只看模式名称</strong>
       <p>提交后可离开页面或刷新；统一任务会继续运行，回来后从同一 job 恢复。</p>
     </div>
     <ol class="sa-framework-map">
@@ -1373,7 +1373,7 @@
     <div class="settings-content">
       <form id="settings-form" novalidate>
         <section class="settings-group active" data-settings-panel="llm">
-          <div class="group-heading"><div><h3>模型服务</h3><p>读取模型列表不会发送推理请求，也不代表模型兼容聊天接口。</p></div><button class="ghost check-button" type="button" data-check="llm-models">刷新模型</button></div>
+          <div class="group-heading"><div><h3>模型服务</h3><p>模型列表检测不发送推理；搜索检测会发送一次最小联网请求，并清除旧的“不支持”缓存。</p></div><div class="button-pair"><button class="ghost check-button" type="button" data-check="llm-models">刷新模型</button><button class="ghost check-button" type="button" data-check="llm-web-search">检测联网搜索</button></div></div>
           <div class="field-grid">
             <label>提供商<select name="llm.provider" required><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
             <label>模型 ID<input name="llm.model" list="settings-model-list" autocomplete="off" required><datalist id="settings-model-list"></datalist><small id="model-hint">可手动输入任意模型 ID</small></label>
@@ -1384,6 +1384,7 @@
             <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
           </div>
           <div class="check-result" data-check-result="llm-models">等待检测</div>
+          <div class="check-result" data-check-result="llm-web-search">联网搜索尚未检测</div>
         </section>
 
         <section class="settings-group" data-settings-panel="data">

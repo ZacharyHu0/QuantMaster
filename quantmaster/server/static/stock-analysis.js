@@ -56,6 +56,35 @@
     return /^https?:\/\//i.test(url) ? url : '';
   }
 
+  function displayText(value, fallback = '') {
+    if (value == null) return fallback;
+    if (typeof value === 'object') {
+      for (const key of ['text', 'summary', 'message', 'content']) {
+        if (value[key] != null) return displayText(value[key], fallback);
+      }
+      return fallback;
+    }
+    const text = String(value).trim();
+    if (!text) return fallback;
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try { return displayText(JSON.parse(text), fallback); }
+      catch (_) {
+        const legacy = text.match(/^\{\s*['"]text['"]\s*:\s*(['"])([\s\S]*?)\1\s*,\s*['"]evidence_ids['"]\s*:/);
+        return legacy ? legacy[2].trim() : fallback;
+      }
+    }
+    return text;
+  }
+
+  function displayList(value) {
+    return Array.isArray(value) ? value.map(item => displayText(item)).filter(Boolean) : [];
+  }
+
+  function warningText(value) {
+    const text = displayText(value, '上游服务返回了不可读的结构化错误，已按降级处理。');
+    return text.replace(/\{[\s\S]*$/, '上游请求失败，已按降级处理。');
+  }
+
   function duration(seconds) {
     const value = Math.max(0, Math.round(Number(seconds) || 0));
     const minutes = Math.floor(value / 60);
@@ -75,7 +104,7 @@
     const radio = form.querySelector(`input[name="mode"][value="${mode === 'quick' ? 'quick' : 'deep'}"]`);
     if (radio) radio.checked = true;
     const submit = form.querySelector('button.primary');
-    if (submit && !submit.disabled) submit.textContent = mode === 'quick' ? '开始快速分析' : '开始深度分析';
+    if (submit && !submit.disabled) submit.textContent = mode === 'quick' ? '开始快速研究' : '开始深度研究';
   }
 
   function resetDimensions() {
@@ -122,29 +151,34 @@
   }
 
   function metricMarkup(metric) {
-    const label = esc(metric.label || '指标');
-    const display = esc(metric.display || '—');
+    const label = esc(displayText(metric.label, '指标'));
+    const display = esc(displayText(metric.display, '—'));
+    const note = displayText(metric.note);
     const url = safeUrl(metric.url);
     return `<div class="sa-metric"><span>${label}</span><strong title="${display}">${url
       ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${display}</a>`
-      : display}</strong>${metric.note ? `<small title="${esc(metric.note)}">${esc(metric.note)}</small>` : ''}</div>`;
+      : display}</strong>${note ? `<small title="${esc(note)}">${esc(note)}</small>` : ''}</div>`;
   }
 
   function dimensionMarkup(item) {
     const findings = [
-      ...(item.signals || []).map(value => ({value, risk:false})),
-      ...(item.risks || []).map(value => ({value, risk:true})),
+      ...displayList(item.signals).map(value => ({value, risk:false})),
+      ...displayList(item.risks).map(value => ({value, risk:true})),
     ].slice(0, 8);
+    const counterpoints = displayList(item.counterpoints);
+    const openQuestions = displayList(item.open_questions);
     const citations = evidenceLinks(item);
     return `<article class="sa-dimension" data-dimension="${esc(item.key)}">
       <div class="sa-dimension-index"><span>${esc(item.number)}</span><strong>${esc(item.title)}</strong>
-        <small>${esc(item.as_of ? `截至 ${item.as_of}` : '数据时间待核查')}</small></div>
+        <small>${esc(item.as_of ? `截至 ${displayText(item.as_of)}` : '数据时间待核查')}</small></div>
       <div class="sa-dimension-summary"><div class="sa-dimension-score ${scoreClass(item.score)}">
-          <strong>${fmt(item.score, 1)}</strong><span>${esc(item.stance)} · ${statusLabel(item.status)} · ${item.generation === 'llm_assisted' ? '模型复核' : '规则生成'}</span></div>
-        <p>${esc(item.summary || '暂无可用结论。')}</p>
-        ${item.degraded_reason ? `<div class="sa-degraded-reason">降级：${esc(item.degraded_reason)}</div>` : ''}
+          <strong>${fmt(item.score, 1)}</strong><span>${esc(displayText(item.stance, '待核查'))} · ${statusLabel(item.status)} · ${item.review_passes >= 2 ? '双重审查' : item.generation === 'llm_assisted' ? '模型复核' : '规则生成'}</span></div>
+        <p>${esc(displayText(item.summary, '该维结论格式异常，请重新运行分析。'))}</p>
+        ${item.degraded_reason ? `<div class="sa-degraded-reason">降级：${esc(warningText(item.degraded_reason))}</div>` : ''}
         ${findings.length ? `<ul class="sa-evidence-list">${findings.map(row =>
           `<li class="${row.risk ? 'risk' : ''}">${esc(row.value)}</li>`).join('')}</ul>` : ''}
+        ${counterpoints.length ? `<div class="sa-counter-review"><strong>反方审查</strong><ul>${counterpoints.map(value => `<li>${esc(value)}</li>`).join('')}</ul></div>` : ''}
+        ${openQuestions.length ? `<div class="sa-open-questions"><strong>仍待核查</strong><ul>${openQuestions.map(value => `<li>${esc(value)}</li>`).join('')}</ul></div>` : ''}
         ${citations ? `<div class="sa-citations" aria-label="证据来源">${citations}</div>` : ''}</div>
       <div class="sa-metrics">${(item.metrics || []).slice(0, 12).map(metricMarkup).join('')
         || '<div class="sa-metric"><span>数据状态</span><strong>暂无可用指标</strong></div>'}</div>
@@ -166,13 +200,13 @@
     const lines = [
       `${instrument.name || instrument.symbol}（${instrument.symbol || ''}）六维分析`,
       `综合分 ${overall.score} / 100 · ${overall.stance} · 数据覆盖 ${overall.coverage}%`,
-      overall.thesis || '', overall.summary || '', '',
+      displayText(overall.thesis), displayText(overall.summary), '',
     ];
     (report.dimensions || []).forEach(item => {
       lines.push(`${item.number} ${item.title}｜${item.score}/100｜${item.stance}`);
-      lines.push(item.summary || '');
-      (item.signals || []).slice(0, 4).forEach(value => lines.push(`- ${value}`));
-      (item.risks || []).slice(0, 3).forEach(value => lines.push(`- 风险：${value}`));
+      lines.push(displayText(item.summary));
+      displayList(item.signals).slice(0, 4).forEach(value => lines.push(`- ${value}`));
+      displayList(item.risks).slice(0, 3).forEach(value => lines.push(`- 风险：${value}`));
       (item.evidence || []).filter(value => safeUrl(value?.source?.url)).slice(0, 5)
         .forEach(value => lines.push(`- 来源：${value.source.name} ${value.source.url}`));
       lines.push('');
@@ -181,18 +215,53 @@
     return lines.filter((value, index) => value || lines[index - 1]).join('\n');
   }
 
+  function researchDepthMarkup(report) {
+    const research = report.research || {};
+    const depth = research.depth || {};
+    if (!depth.label) return '';
+    const gaps = displayList(depth.gaps);
+    const counts = depth.evidence_counts || {};
+    return `<section class="sa-depth-audit" data-depth-status="${esc(depth.status || 'degraded')}">
+      <div class="sa-section-heading"><h3>${esc(displayText(depth.label, '研究完整度待核查'))}</h3>
+        <span>完整度 ${fmt(depth.score, 1)} / 100</span></div>
+      <div class="sa-depth-grid">
+        <div><span>逐维证据</span><strong>${dimensionDefs.map(([key, , title]) => `${title} ${Number(counts[key] || 0)}`).join(' · ')}</strong></div>
+        <div><span>审查进度</span><strong>首轮 ${Number(depth.dimension_review_passes || 0)}/6 · 反方 ${Number(depth.counter_review_passes || 0)}/6 · 终审 ${depth.final_reviewed ? '完成' : '未完成'}</strong></div>
+      </div>
+      ${gaps.length ? `<div class="sa-depth-gaps"><strong>为什么没有达到目标强度</strong><ul>${gaps.map(value => `<li>${esc(value)}</li>`).join('')}</ul></div>` : ''}
+    </section>`;
+  }
+
+  function deepReviewMarkup(report) {
+    const review = report.deep_review || {};
+    if (!review.summary && review.status !== 'complete') return '';
+    const groups = [
+      ['证据冲突', review.contradictions], ['仍然未知', review.unknowns],
+      ['潜在催化剂', review.catalysts], ['结论失效条件', review.invalidation_conditions],
+    ];
+    return `<section class="sa-deep-review"><div class="sa-section-heading"><h3>深度证伪终审</h3><span>${review.status === 'complete' ? '独立二次复核' : '未完整执行'}</span></div>
+      ${displayText(review.summary) ? `<p>${esc(displayText(review.summary))}</p>` : ''}
+      <div class="sa-deep-review-grid">${groups.map(([title, values]) => {
+        const items = displayList(values);
+        return items.length ? `<article><h4>${title}</h4><ul>${items.map(value => `<li>${esc(value)}</li>`).join('')}</ul></article>` : '';
+      }).join('')}</div></section>`;
+  }
+
   function renderReport(report) {
     const instrument = report.instrument || {};
     const quote = report.quote || {};
     const overall = report.overall || {};
     const research = report.research || {};
-    const risks = [...(overall.risks || []), ...(report.warnings || [])].slice(0, 14);
+    const risks = [
+      ...displayList(overall.risks),
+      ...(Array.isArray(report.warnings) ? report.warnings.map(warningText).filter(Boolean) : []),
+    ].slice(0, 14);
     stage.hidden = true;
     reportRoot.innerHTML = `<article class="sa-report">
       <header class="sa-report-head">
         <div class="sa-report-identity"><span class="sa-report-symbol">${esc(instrument.symbol || '')} · ${esc(instrument.market_label || instrument.market || '')}</span>
           <h2>${esc(instrument.name || instrument.en_name || instrument.symbol || '标的')}</h2>
-          <p class="sa-thesis">${esc(overall.thesis || '')}</p><p class="sa-summary">${esc(overall.summary || '')}</p></div>
+          <p class="sa-thesis">${esc(displayText(overall.thesis, '结论待核查'))}</p><p class="sa-summary">${esc(displayText(overall.summary))}</p></div>
         <div class="sa-report-score"><div class="sa-score-heading"><span>COMPOSITE SCORE</span><strong>${esc(overall.stance || '待核查')}</strong></div>
           <div class="sa-score-number ${scoreClass(overall.score)}"><strong>${fmt(overall.score, 1)}</strong><span>/ 100</span></div>
           <div class="sa-score-track" style="--sa-score:${Math.max(0, Math.min(100, Number(overall.score) || 0))}%" aria-label="综合分 ${fmt(overall.score, 1)}"></div>
@@ -202,13 +271,15 @@
             <div><span>结论置信</span><strong>${fmt(overall.confidence, 0, '%')}</strong></div></div>
           <div class="sa-report-tools"><button class="sa-copy" type="button" data-sa-copy>复制报告摘要</button></div></div>
       </header>
+      ${researchDepthMarkup(report)}
       <section class="sa-dimensions" aria-label="六维分析">${(report.dimensions || []).map(dimensionMarkup).join('')}</section>
+      ${deepReviewMarkup(report)}
       <section class="sa-scenarios"><div class="sa-section-heading"><h3>情景验证</h3><span>条件触发，不是确定性预测</span></div>
         <div class="sa-scenario-list">${(report.scenarios || []).map(item => `<article class="sa-scenario">
           <span>${esc(item.priority || '')}</span><h4>${esc(item.title || '')}</h4>
           <p><strong>触发</strong>　${esc(item.condition || '')}</p><p><strong>应对</strong>　${esc(item.response || '')}</p></article>`).join('')}</div></section>
       ${risks.length ? `<section class="sa-risk-ledger"><h3>总风险清单</h3><ul>${risks.map(value => `<li>${esc(value)}</li>`).join('')}</ul></section>` : ''}
-      <div class="sa-research-meta"><span>${research.mode === 'quick' ? '快速模式' : '深度模式'}</span>
+      <div class="sa-research-meta"><span>${research.mode === 'quick' ? '快速联网研究' : '深度双重审查'}</span>
         <span>耗时 ${duration(research.elapsed_seconds)}</span><span>${research.evidence_count || 0} 条证据</span>
         <span>${(research.sources || []).length} 个去重来源</span><span>报告 schema ${esc(report.schema_version || '—')}</span></div>
       <footer class="sa-disclaimer">${esc(report.disclaimer || '')}</footer>
@@ -251,7 +322,7 @@
     }
     if (activeRun.eta != null) etaNode.textContent = duration(activeRun.eta);
     else if (lastProgress > 4) etaNode.textContent = duration(Math.max(0, elapsed * (100 - lastProgress) / lastProgress));
-    else etaNode.textContent = activeRun.mode === 'quick' ? '约 00:30' : '约 03:00';
+    else etaNode.textContent = activeRun.mode === 'quick' ? '约 03:00' : '约 10:00';
   }
 
   function eventParts(value) {
@@ -269,11 +340,14 @@
       currentPhase.textContent = '联网取证与结构化数据采集';
       dimensionDefs.forEach(([key]) => updateDimension(key, 'collecting', '正在并发核对来源'));
     } else if (type === 'evidence_search_started') {
-      currentPhase.textContent = `联网搜索 · 第 ${payload.round || '—'} 轮`;
+      currentPhase.textContent = `联网搜索 · 第 ${payload.round || '—'} 轮${payload.queries ? ` · ${payload.query || 1}/${payload.queries}` : ''}`;
     } else if (type === 'dimension_started') {
       currentPhase.textContent = `${dimensionDefs.find(row => row[0] === payload.dimension)?.[2] || '维度'}研判`;
       updateDimension(payload.dimension, payload.stage === 'rules' ? 'collecting' : 'inference',
         payload.stage === 'rules' ? '正在执行确定性评分' : '证据已就绪，正在独立推理');
+    } else if (type === 'dimension_audit_started') {
+      currentPhase.textContent = `${dimensionDefs.find(row => row[0] === payload.dimension)?.[2] || '维度'}反方审查`;
+      updateDimension(payload.dimension, 'inference', '第一轮完成，正在寻找反例、遗漏与时点错配');
     } else if (type === 'dimension_completed' || type === 'dimension_degraded') {
       const result = payload.result || payload.dimension_result;
       updateDimension(payload.dimension || result?.key, type === 'dimension_degraded' ? 'degraded' : 'complete',
@@ -281,6 +355,8 @@
       currentPhase.textContent = `已完成 ${payload.completed || dimensionDefs.filter(([key]) => dimensionState.get(key).result).length} / 6 维`;
     } else if (type === 'final_review_started') {
       currentPhase.textContent = '六维交叉复核';
+    } else if (type === 'deep_final_review_started') {
+      currentPhase.textContent = '深度证伪终审';
     } else if (type === 'analysis_completed') {
       lastProgress = 100;
       if (payload.report) renderReport(payload.report);
@@ -461,7 +537,7 @@
     if (!query) return;
     const mode = form.elements.mode.value === 'quick' ? 'quick' : 'deep';
     hideSuggestions();
-    busy(form, true, mode === 'quick' ? '快速分析中…' : '深度分析中…');
+    busy(form, true, mode === 'quick' ? '快速研究中…' : '深度研究中…');
     try { await beginRun(query, mode); }
     catch (error) {
       renderFailure(error);

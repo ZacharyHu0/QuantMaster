@@ -55,6 +55,23 @@ def sample_bars() -> pd.DataFrame:
     )
 
 
+class OfflineDeepLoader:
+    def fundamental(self, symbol):
+        return [], []
+
+    def industry_history(self, industry):
+        return pd.DataFrame(), []
+
+    def capital(self, symbol):
+        return [], []
+
+    def sentiment(self, symbol):
+        return [], []
+
+    def macro(self, symbol):
+        return [], []
+
+
 def build_service() -> StockAnalysisService:
     bars = sample_bars()
     symbol = "600519.SH"
@@ -102,6 +119,7 @@ def build_service() -> StockAnalysisService:
             "date": "2025-09-10",
         },
         industry_loader=lambda *args: "白酒",
+        deep_loader=OfflineDeepLoader(),
         llm_factory=None,
     )
 
@@ -163,11 +181,15 @@ def test_stock_analysis_registers_with_unified_runtime_and_restores_artifacts(tm
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if store.get(submitted["id"])["status"] in {"completed", "failed"}:
+        if store.get(submitted["id"])["status"] in {
+            "completed",
+            "completed_with_errors",
+            "failed",
+        }:
             break
         time.sleep(0.01)
     result = jobs.analysis(submitted["id"])
-    assert result["status"] == "completed"
+    assert result["status"] == "completed_with_errors"
     assert [item["key"] for item in result["dimensions"]] == [
         "fundamental",
         "technical",
@@ -227,7 +249,7 @@ def test_stock_analysis_v1_api_is_idempotent_progressive_and_retryable(tmp_path,
     while time.monotonic() < deadline:
         job = client.get(f"/api/v1/jobs/{job_id}")
         assert job.status_code == 200
-        if job.json()["status"] == "completed":
+        if job.json()["status"] in {"completed", "completed_with_errors"}:
             break
         time.sleep(0.01)
     analysis = client.get(f"/api/v1/market/stock-analyses/{job_id}")
@@ -242,7 +264,7 @@ def test_stock_analysis_v1_api_is_idempotent_progressive_and_retryable(tmp_path,
 
     cancelled = client.post(f"/api/v1/jobs/{job_id}/cancel", headers={"X-CSRF-Token": token})
     assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "completed"
+    assert cancelled.json()["status"] == "completed_with_errors"
     retried = client.post(f"/api/v1/jobs/{job_id}/retry", headers={"X-CSRF-Token": token})
     assert retried.status_code == 202
     assert retried.json()["attempt"] == 2
@@ -665,6 +687,24 @@ class FakeResearchLLM:
                 "risks": ["公告后的价格反应仍待验证"],
                 "evidence_ids": evidence_ids[:4],
             }
+        if "反方审稿人" in prompt:
+            return {
+                "summary": "反方审查后，保留原方向但下调确信程度。",
+                "counterpoints": ["样本时点和覆盖范围仍有限"],
+                "open_questions": ["等待下一期官方披露核验"],
+                "confidence_adjustment": -4.0,
+                "evidence_ids": evidence_ids[:2],
+            }
+        if "独立终审风控" in prompt:
+            return {
+                "summary": "证伪终审确认结论仍有可推翻条件。",
+                "contradictions": ["短期动量与部分基本面信号不完全一致"],
+                "unknowns": ["下一期现金流数据尚未披露"],
+                "catalysts": ["正式业绩公告"],
+                "invalidation_conditions": ["关键盈利指标显著低于当前证据"],
+                "confidence_adjustment": -3.0,
+                "evidence_ids": evidence_ids[:4],
+            }
         return {
             "summary": "模型仅依据所列证据完成本维复核。",
             "signals": ["已有证据支持规则方向"],
@@ -690,10 +730,11 @@ def test_v2_deep_research_emits_each_dimension_and_strict_lineage():
         ),
     )
 
-    assert report["schema_version"] == "2.0"
+    assert report["schema_version"] == "2.1"
     assert report["research"]["task_type"] == "market.stock_analysis"
+    assert report["research"]["deadline_seconds"] == 900
     assert report["research"]["search"]["rounds"] == 3
-    assert llm.search_calls == 3
+    assert llm.search_calls == 12
     completed = [
         payload["dimension"]
         for kind, payload in events
@@ -722,10 +763,61 @@ def test_v2_deep_research_emits_each_dimension_and_strict_lineage():
     assert any(metric["label"].startswith("事件后 1/3/5 日") for metric in news["metrics"])
     capital = next(item for item in report["dimensions"] if item["key"] == "capital")
     assert any(metric["label"] == "最新 / 20日平均换手率" for metric in capital["metrics"])
-    assert report["generation_mode"] == "llm_cross_review"
+    assert report["generation_mode"] == "llm_deep_review"
+    assert report["research"]["depth"]["status"] == "met"
+    assert all(item["review_passes"] == 2 for item in report["dimensions"])
     assert report["research"]["artifacts"]
     assert artifacts["stock_analysis.report"] == report
     json.dumps(report, allow_nan=False)
+
+
+def test_quick_mode_now_runs_the_previous_online_six_dimension_review():
+    service = build_service()
+    service.deep_loader = FakeDeepLoader()
+    llm = FakeResearchLLM()
+    service.llm_factory = lambda: llm
+
+    report = service.analyze_v2("600519", mode="quick")
+
+    assert llm.search_calls == 3
+    assert report["research"]["deadline_seconds"] == 300
+    assert report["generation_mode"] == "llm_cross_review"
+    assert report["research"]["depth"]["label"] == "快速研究已完成"
+    assert all(item["review_passes"] == 1 for item in report["dimensions"])
+    assert "deep_review" not in report
+
+
+def test_model_text_envelopes_never_leak_json_into_report_or_feishu_copy():
+    class EnvelopedTextLLM(FakeResearchLLM):
+        def chat_json(self, prompt, system=None, timeout=None):
+            result = super().chat_json(prompt, system=system, timeout=timeout)
+            if "只依据给定证据复核" in prompt:
+                result["summary"] = {
+                    "text": "结构化信封中的正文已被正确提取。",
+                    "evidence_ids": result["evidence_ids"],
+                }
+            elif "反方审稿人" in prompt:
+                result["summary"] = {
+                    "text": "结构化信封中的正文已被正确提取。",
+                    "evidence_ids": result["evidence_ids"],
+                }
+            elif "交叉复核六维结论" in prompt:
+                result["thesis"] = {"text": "终审结论是纯文本。"}
+                result["summary"] = {"text": "终审摘要也是纯文本。"}
+            return result
+
+    service = build_service()
+    service.deep_loader = FakeDeepLoader()
+    service.llm_factory = EnvelopedTextLLM
+
+    report = service.analyze_v2("600519", mode="deep")
+    assert report["overall"]["thesis"] == "终审结论是纯文本。"
+    assert report["overall"]["summary"] == "终审摘要也是纯文本。"
+    assert all(isinstance(item["summary"], str) for item in report["dimensions"])
+    assert any("结构化信封中的正文" in item["summary"] for item in report["dimensions"])
+    card_text = json.dumps(stock_analysis_report_card(report), ensure_ascii=False)
+    assert "{'text':" not in card_text
+    assert '"evidence_ids"' not in card_text
 
 
 def test_v2_rejects_illegal_evidence_ids_and_degrades_to_rules():
@@ -918,7 +1010,8 @@ def test_v2_only_degrades_the_dimension_whose_llm_call_fails():
     others = [item for item in report["dimensions"] if item["key"] != "news"]
     assert news["generation"] == "rules"
     assert "timed out" in news["degraded_reason"]
-    assert all(item["generation"] == "llm_assisted" for item in others)
+    assert all(item["generation"] == "llm_deep_review" for item in others)
+    assert all(item["review_passes"] == 2 for item in others)
     assert report["research"]["completion_status"] == "completed_with_errors"
 
 
@@ -965,6 +1058,60 @@ def test_openai_native_search_parses_citations(monkeypatch):
     assert results[0]["title"] == "交易所公告"
     assert client.web_search_status()["supported"] is True
     assert calls[0]["json"]["include"] == ["web_search_call.action.sources"]
+
+
+def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatch):
+    calls = []
+
+    class Response:
+        headers: ClassVar[dict] = {}
+
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self.payload = payload or {}
+            self.text = "unsupported optional field"
+
+        def json(self):
+            return self.payload
+
+    responses = iter([
+        Response(400),
+        Response(200, {
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "公告来源",
+                    "annotations": [{
+                        "type": "url_citation",
+                        "url": "https://www.cninfo.com.cn/new/disclosure",
+                        "title": "巨潮资讯公告",
+                    }],
+                }],
+            }],
+        }),
+    ])
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.httpx.post",
+        lambda *args, **kwargs: calls.append(kwargs["json"]) or next(responses),
+    )
+    client = LLMClient(LLMConfig(
+        provider="openai-compatible",
+        model="gateway-search",
+        api_key="secret",
+        base_url="https://gateway.test/v1",
+    ))
+
+    results = client.web_search("查询公告")
+
+    assert results[0]["url"] == "https://www.cninfo.com.cn/new/disclosure"
+    assert "include" in calls[0]
+    assert calls[1] == {
+        "model": "gateway-search",
+        "input": "查询公告",
+        "tools": [{"type": "web_search"}],
+    }
+    assert client.web_search_status()["supported"] is True
 
 
 def test_anthropic_native_search_resumes_pause_turn_and_parses_sources(monkeypatch):
@@ -1032,7 +1179,7 @@ def test_anthropic_native_search_resumes_pause_turn_and_parses_sources(monkeypat
     assert client.web_search_status()["supported"] is True
 
 
-def test_unsupported_gateway_search_is_cached(monkeypatch):
+def test_unsupported_gateway_search_is_cached_then_reprobed(monkeypatch):
     calls = []
 
     class Response:
@@ -1051,11 +1198,20 @@ def test_unsupported_gateway_search_is_cached(monkeypatch):
             base_url="https://gateway.test/v1",
         )
     )
+    from quantmaster.ai.llm import reset_web_search_capability
+
+    reset_web_search_capability(client.config)
 
     assert client.web_search("first") == []
     assert client.web_search("second") == []
-    assert len(calls) == 1
-    assert client.web_search_status()["supported"] is False
+    assert len(calls) == 2
+    status = client.web_search_status()
+    assert status["supported"] is False
+    assert "web_search is unsupported" not in status["detail"]
+
+    monkeypatch.setattr("quantmaster.ai.llm._WEB_SEARCH_NEGATIVE_TTL_SECONDS", 0.0)
+    assert client.web_search("after gateway upgrade") == []
+    assert len(calls) == 4
 
 
 def test_engine_marks_cached_unsupported_web_search_as_optional_degradation():
@@ -1067,7 +1223,10 @@ def test_engine_marks_cached_unsupported_web_search_as_optional_degradation():
         def web_search_status(self):
             return {
                 "supported": False,
-                "detail": "OpenAI Responses HTTP 400: web_search unsupported",
+                "detail": (
+                    'OpenAI Responses HTTP 400: {"error":{"message":"web_search unsupported",'
+                    '"type":"unsupported_tool"}}'
+                ),
             }
 
     service = build_service()
@@ -1086,6 +1245,7 @@ def test_engine_marks_cached_unsupported_web_search_as_optional_degradation():
     assert report["research"]["search"]["rounds"] == 1
     assert report["research"]["completion_status"] == "completed_with_errors"
     assert any("HTTP 400" in warning for warning in report["warnings"])
+    assert all('{"error"' not in warning for warning in report["warnings"])
     assert any(kind == "source_warning" and payload["source"] == "web_search" for kind, payload in events)
 
 
@@ -1102,6 +1262,7 @@ def test_feishu_report_splits_every_evidence_under_28kb():
             item["id"] = f"ev_fixture_{number:03d}"
             item["title"] = f"证据 {number:03d}"
             item["excerpt"] = "完整证据内容" * 180
+            item["value"] = {"样本值": number, "口径": {"单位": "百分比"}}
             item["source"]["url"] = f"https://example.com/evidence/{number}"
             dimension["evidence"].append(item)
             evidence_ids.append(item["id"])
@@ -1112,6 +1273,8 @@ def test_feishu_report_splits_every_evidence_under_28kb():
     assert len(cards) > 2
     assert all(card_size_bytes(card) <= FEISHU_CARD_LIMIT_BYTES for card in cards)
     assert serialized_appendices.count("证据 ID") == len(evidence_ids)
+    assert "样本值：0" in serialized_appendices
+    assert '\\"样本值\\"' not in serialized_appendices
     assert all(
         f"https://example.com/evidence/{number}" in serialized_appendices
         for number in range(len(evidence_ids))
@@ -1174,6 +1337,7 @@ def test_dimension_checkpoints_require_same_spec_and_valid_hash():
         checkpoint_writer=lambda key, spec_hash, value: checkpoints.__setitem__(key, value),
     )
     checkpoints["news"]["content_hash"] = "corrupt"
+    checkpoints["capital"]["schema_version"] = "2.0"
     events = []
     second = service.analyze_v2(
         "600519",
@@ -1183,7 +1347,8 @@ def test_dimension_checkpoints_require_same_spec_and_valid_hash():
     )
 
     assert first["research"]["spec_hash"] == second["research"]["spec_hash"]
-    assert any("检查点被拒绝" in warning for warning in second["warnings"])
+    assert sum("检查点被拒绝" in warning for warning in second["warnings"]) == 2
+    assert any("schema 版本不一致" in warning for warning in second["warnings"])
     completed = [
         payload["dimension"]
         for kind, payload in events

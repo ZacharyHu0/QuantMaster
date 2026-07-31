@@ -8,8 +8,10 @@ from typing import Any
 
 from quantmaster.analysis.stock import StockAnalysisService
 from quantmaster.analysis.stock_research import (
+    DEEP_DEADLINE_SECONDS,
     DIMENSION_LABELS,
     DIMENSION_ORDER,
+    QUICK_DEADLINE_SECONDS,
     REPORT_SCHEMA_VERSION,
     StockAnalysisSpec,
 )
@@ -70,7 +72,9 @@ class StockAnalysisJobs:
             STOCK_ANALYSIS_TASK_TYPE,
             self._spec(query, mode),
             idempotency_key=idempotency_key,
-            deadline_seconds=300 if mode == "deep" else 90,
+            deadline_seconds=(
+                DEEP_DEADLINE_SECONDS if mode == "deep" else QUICK_DEADLINE_SECONDS
+            ),
         )
 
     @staticmethod
@@ -92,14 +96,18 @@ class StockAnalysisJobs:
         if event_type == "dimension_started":
             stage = "规则计算" if payload.get("stage") == "rules" else "模型复核"
             return max(current, 30), f"{label}{stage}", "仅允许引用本维 evidence ID"
+        if event_type == "dimension_audit_started":
+            return max(current, 36), f"{label}反方审查", "主动寻找反例、遗漏和时点错配"
         if event_type in {"dimension_completed", "dimension_degraded"}:
             completed = max(1, min(len(DIMENSION_ORDER), int(payload.get("completed") or 1)))
             state = "降级交付" if event_type.endswith("degraded") else "完成"
             return 28 + completed * 10, f"{label}{state}", f"六维已交付 {completed}/{len(DIMENSION_ORDER)}"
         if event_type == "final_review_started":
             return 92, "交叉复核", "检查证据冲突、时点和空白"
+        if event_type == "deep_final_review_started":
+            return 95, "深度证伪终审", "核查未知项、催化剂和结论失效条件"
         if event_type == "final_review_completed":
-            return 98, "终审完成", "正在提交严格 JSON 产物"
+            return 98, "终审完成", "正在保存可核查报告"
         if event_type == "analysis_completed":
             return 99, "保存报告", "完整报告已生成"
         return current, "分析进行中", str(payload.get("message") or "")[:300]

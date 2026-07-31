@@ -35,7 +35,9 @@
 - `commands.py` 优先处理固定中文命令。查询只读；任务/策略变更需要管理员身份；账本和模拟调仓写入
   仅允许管理员私聊，并使用 5 分钟有效的一次性确认码。
 - `analysis/stock_research.py` 把单一标的研究拆成并发取证、六维独立规则/模型复核和最终交叉复核；
-  结构化数值由本地规则计算，模型只能引用本任务的 evidence ID。`analysis/stock_jobs.py` 将它注册为
+  快速模式执行联网首轮复核，深度模式追加三轮定向搜索、逐维反方审查和独立证伪终审，并用确定性
+  完整度门槛披露证据缺口。结构化数值由本地规则计算，模型只能引用本任务的 evidence ID；面向用户的
+  文案字段必须通过纯文本校验，结构化模型信封不会直接进入 Web 或飞书。`analysis/stock_jobs.py` 将它注册为
   `market.stock_analysis`，复用 `runtime/jobs.py` 的不可变规格、幂等键、租约、事件、取消、重试、
   严格 JSON 产物和损坏产物修复队列，不建立个股专属任务数据库。
 - Web 通过 `/api/v1/market/stock-analyses` 提交，再轮询 `/api/v1/jobs/{job_id}` 及其事件；刷新页面只

@@ -526,6 +526,48 @@
 .sa-risk-ledger ul { display: grid; gap: 7px; margin: 0; padding-left: 18px; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .sa-disclaimer { padding: 16px 0 30px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 10px; }
 
+.sa-depth-audit,
+.sa-deep-review {
+  margin: 22px 0;
+  padding: 18px;
+  border: 1px solid var(--grid);
+  background: color-mix(in oklch, var(--s1) 4%, var(--page));
+}
+
+.sa-depth-audit[data-depth-status="degraded"] {
+  border-left: 3px solid var(--warn, #a56a12);
+  background: color-mix(in oklch, var(--warn, #a56a12) 5%, var(--page));
+}
+
+.sa-depth-grid,
+.sa-deep-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sa-depth-grid > div,
+.sa-deep-review-grid article {
+  padding: 12px;
+  border: 1px solid var(--grid);
+  background: var(--page);
+}
+
+.sa-depth-grid span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.sa-depth-grid strong { color: var(--ink-2); font-size: 10px; line-height: 1.6; }
+.sa-depth-gaps { margin-top: 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.sa-depth-gaps ul,
+.sa-deep-review-grid ul,
+.sa-counter-review ul,
+.sa-open-questions ul { margin: 7px 0 0; padding-left: 18px; }
+.sa-deep-review > p { color: var(--ink-2); font-size: 12px; line-height: 1.7; }
+.sa-deep-review-grid h4 { margin: 0; color: var(--ink-2); font-size: 10px; }
+.sa-deep-review-grid li { margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.sa-counter-review,
+.sa-open-questions { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--grid); color: var(--muted); font-size: 10px; line-height: 1.55; }
+.sa-counter-review strong,
+.sa-open-questions strong { color: var(--ink-2); }
+
 .sa-research-meta {
   display: flex;
   flex-wrap: wrap;
@@ -566,6 +608,7 @@
   .sa-framework-map li:nth-child(2n) { border-left: 1px solid var(--grid); }
   .sa-framework-map li:nth-child(n+4) { border-bottom: 1px solid var(--grid); }
   .sa-framework-map li:nth-child(n+5) { border-bottom: 0; }
+  .sa-depth-grid, .sa-deep-review-grid { grid-template-columns: 1fr; }
   .sa-progress { grid-template-columns: 1fr; gap: 18px; }
   .sa-live-head { grid-template-columns: 1fr auto; gap: 16px; }
   .sa-live-head dl { grid-column: 1 / -1; grid-row: 2; }

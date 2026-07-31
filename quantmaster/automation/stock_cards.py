@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from quantmaster.analysis.stock import STOCK_ANALYSIS_PHASES
@@ -10,13 +12,61 @@ from quantmaster.analysis.stock import STOCK_ANALYSIS_PHASES
 FEISHU_CARD_LIMIT_BYTES = 28 * 1024
 
 
+def _display_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        for key in ("text", "summary", "message", "content"):
+            if value.get(key) is not None:
+                return _display_value(value[key])
+        return "结构化内容已隐藏"
+    if isinstance(value, (list, tuple)):
+        return "结构化内容已隐藏"
+    result = str(value).strip()
+    if result.startswith(("{", "[")):
+        parsed: Any = None
+        try:
+            parsed = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            try:
+                parsed = ast.literal_eval(result)
+            except (SyntaxError, ValueError):
+                return (
+                    "上游返回了不可读的结构化内容，已按降级处理"
+                    if result.startswith("{")
+                    else result
+                )
+        return _display_value(parsed)
+    return result
+
+
 def _text(value: Any, limit: int = 260) -> str:
-    result = str(value or "").strip()
+    result = _display_value(value)
     if len(result) > limit:
         result = result[:limit - 1] + "…"
     for character in ("\\", "*", "_", "[", "]", "<", ">"):
         result = result.replace(character, f"\\{character}")
     return result
+
+
+def _evidence_value(value: Any, *, depth: int = 0) -> str:
+    """Render evidence values as readable labels instead of exposing JSON syntax."""
+    if value is None:
+        return "—"
+    if isinstance(value, Mapping):
+        if depth >= 2:
+            return "结构化明细"
+        rows = [
+            f"{str(key).strip()}：{_evidence_value(item, depth=depth + 1)}"
+            for key, item in list(value.items())[:12]
+        ]
+        return "；".join(rows) or "—"
+    if isinstance(value, (list, tuple)):
+        rows = [_evidence_value(item, depth=depth + 1) for item in value[:8]]
+        return "、".join(rows) or "—"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value).strip() or "—"
 
 
 def _progress_bar(progress: int) -> str:
@@ -41,7 +91,7 @@ def stock_analysis_progress_card(
         stage_lines.append(f"{marker} {label}")
     content = (
         f"**分析标的**  {_text(query, 80)}\n"
-        f"**分析模式**  {'快速' if mode == 'quick' else '深度联网'}\n"
+        f"**分析模式**  {'快速联网研究' if mode == 'quick' else '深度双重审查'}\n"
         f"**当前阶段**  {_text(phase, 80)}\n\n"
         f"`{_progress_bar(value)}`  **{value}%**\n"
         f"{_text(detail, 240)}\n\n"
@@ -118,6 +168,12 @@ def _dimension_content(item: dict[str, Any], *, compact: bool = False) -> str:
         for value in (item.get("signals") or [])[:1 if compact else 3]
     ]
     risks = [f"• 风险：{_text(value)}" for value in (item.get("risks") or [])[:2]]
+    counterpoints = [
+        f"• 反方：{_text(value)}" for value in (item.get("counterpoints") or [])[:1 if compact else 3]
+    ]
+    questions = [
+        f"• 待核查：{_text(value)}" for value in (item.get("open_questions") or [])[:1 if compact else 3]
+    ]
     rows = [
         f"**{_text(item.get('number'))} {_text(item.get('title'))}**  "
         f"`{float(item.get('score') or 0):.0f}/100`  {_text(item.get('stance'))}  ·  {status}",
@@ -125,8 +181,8 @@ def _dimension_content(item: dict[str, Any], *, compact: bool = False) -> str:
     ]
     if metrics:
         rows.extend(["", "　｜　".join(metrics)])
-    if signals or risks:
-        rows.extend(["", *signals, *risks])
+    if signals or risks or counterpoints or questions:
+        rows.extend(["", *signals, *risks, *counterpoints, *questions])
     if item.get("degraded_reason"):
         rows.extend(["", f"降级：{_text(item['degraded_reason'], 400)}"])
     references, seen = [], set()
@@ -165,8 +221,24 @@ def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
     )
     elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
-        {"tag": "hr"},
     ]
+    depth = (report.get("research") or {}).get("depth") or {}
+    if depth:
+        gaps = [_text(value, 220) for value in (depth.get("gaps") or [])[:5]]
+        depth_content = (
+            f"**研究完整度**  {_text(depth.get('label'), 80)} · "
+            f"{float(depth.get('score') or 0):.1f}/100\n"
+            f"首轮复核 {int(depth.get('dimension_review_passes') or 0)}/6 · "
+            f"反方审查 {int(depth.get('counter_review_passes') or 0)}/6 · "
+            f"来源 {int(depth.get('source_count') or 0)} 个"
+        )
+        if gaps:
+            depth_content += "\n" + "\n".join(f"• {value}" for value in gaps)
+        elements.extend([
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": depth_content}},
+        ])
+    elements.append({"tag": "hr"})
     for index, item in enumerate(report.get("dimensions") or []):
         elements.append({
             "tag": "div", "text": {"tag": "lark_md", "content": _dimension_content(item)},
@@ -186,8 +258,24 @@ def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n\n".join(scenario_lines)}},
         ])
-    risks = [str(value) for value in (overall.get("risks") or [])[:6]]
-    warnings = [str(value) for value in (report.get("warnings") or [])[:4]]
+    deep_review = report.get("deep_review") or {}
+    if deep_review.get("summary") or deep_review.get("status") == "complete":
+        audit_lines = ["**深度证伪终审**", _text(deep_review.get("summary"), 600)]
+        for label, key in (
+            ("冲突", "contradictions"),
+            ("未知", "unknowns"),
+            ("催化", "catalysts"),
+            ("失效条件", "invalidation_conditions"),
+        ):
+            audit_lines.extend(
+                f"• {label}：{_text(value, 260)}" for value in (deep_review.get(key) or [])[:3]
+            )
+        elements.extend([
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(filter(None, audit_lines))}},
+        ])
+    risks = [_text(value) for value in (overall.get("risks") or [])[:6]]
+    warnings = [_text(value) for value in (report.get("warnings") or [])[:4]]
     if risks or warnings:
         elements.extend([
             {"tag": "hr"},
@@ -264,10 +352,7 @@ def _evidence_blocks(report: dict[str, Any]) -> list[dict[str, Any]]:
             source_text = _text(source.get("name") or "未知来源", 180)
             if url.startswith(("http://", "https://")):
                 source_text = f"[{source_text}]({url})"
-            value = json.dumps(
-                evidence.get("value"), ensure_ascii=False, sort_keys=True,
-                separators=(",", ":"), allow_nan=False,
-            )
+            value = _evidence_value(evidence.get("value"))
             escaped_value = _text(value, max(2, len(value) + 1))
             content = (
                 f"**E{number:03d} · {_text(dimension.get('title'), 40)} · "

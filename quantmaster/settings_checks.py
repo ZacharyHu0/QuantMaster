@@ -89,6 +89,56 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         return _result("warning", f"联网检测失败：{type(exc).__name__}", started, models=[])
 
 
+def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
+    """Force a bounded native-search probe without exposing credentials or raw responses."""
+    started = time.perf_counter()
+    if settings.provider in {"anthropic", "openai"} and not api_key:
+        return _result("error", "尚未配置 API Key", started, supported=False, sources=[])
+
+    from quantmaster.ai.llm import LLMClient, LLMError, reset_web_search_capability
+    from quantmaster.config import LLMConfig
+
+    config = LLMConfig(
+        provider=settings.provider,
+        model=settings.model,
+        api_key=api_key,
+        base_url=settings.base_url,
+        max_tokens=settings.max_tokens,
+        temperature=settings.temperature,
+        timeout=settings.timeout,
+    )
+    reset_web_search_capability(config)
+    client = LLMClient(config)
+    try:
+        results = client.web_search(
+            "中国证监会 官方网站 A股 最新公告",
+            timeout=min(30.0, settings.timeout),
+            max_uses=1,
+        )
+    except LLMError as exc:
+        message = "搜索请求超时或网络不可达" if exc.retryable else "搜索能力检测失败"
+        return _result(
+            "warning", message, started, supported=None, sources=[], error_code=exc.code,
+        )
+
+    capability = client.web_search_status()
+    supported = capability.get("supported") is True
+    sources = [
+        {"title": item.get("title", "")[:120], "url": item.get("url", "")[:2048]}
+        for item in results[:5]
+    ]
+    if supported:
+        message = f"原生联网搜索可用，本次返回 {len(results)} 个可引用来源"
+        return _result("success", message, started, supported=True, sources=sources)
+    return _result(
+        "warning",
+        "当前网关未通过原生搜索探测；5 分钟后会自动重新探测",
+        started,
+        supported=False,
+        sources=[],
+    )
+
+
 def check_tushare(token: str) -> dict[str, Any]:
     started = time.perf_counter()
     if not token:

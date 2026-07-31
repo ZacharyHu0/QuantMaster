@@ -8,7 +8,12 @@ from typing import ClassVar
 import httpx
 
 from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
-from quantmaster.settings_checks import check_data_sources, check_lab, list_llm_models
+from quantmaster.settings_checks import (
+    check_data_sources,
+    check_lab,
+    check_llm_web_search,
+    list_llm_models,
+)
 
 
 class FakeClient:
@@ -79,6 +84,49 @@ def test_unauthorized_and_legacy_endpoint_normalization(monkeypatch):
     assert result["details"]["http_status"] == 401
     assert "do not expose" not in str(result)
     assert normalize_api_base("openai-compatible", "https://gw.test/v1/models") == "https://gw.test/v1"
+
+
+def test_web_search_check_forces_reprobe_and_returns_only_safe_sources(monkeypatch):
+    reset = []
+
+    class SearchClient:
+        def __init__(self, config):
+            self.config = config
+
+        def web_search(self, query, **kwargs):
+            assert "证监会" in query
+            return [{
+                "title": "证监会公告",
+                "url": "https://www.csrc.gov.cn/notice",
+                "text": "internal excerpt",
+            }]
+
+        def web_search_status(self):
+            return {"supported": True}
+
+    monkeypatch.setattr("quantmaster.ai.llm.LLMClient", SearchClient)
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.reset_web_search_capability",
+        lambda config: reset.append(config),
+    )
+    result = check_llm_web_search(
+        LLMSettings(provider="openai", model="gpt-search", timeout=45),
+        "secret",
+    )
+
+    assert result["status"] == "success"
+    assert result["details"]["supported"] is True
+    assert result["details"]["sources"] == [{
+        "title": "证监会公告", "url": "https://www.csrc.gov.cn/notice",
+    }]
+    assert len(reset) == 1
+    assert "secret" not in str(result)
+
+
+def test_web_search_check_requires_official_provider_key():
+    result = check_llm_web_search(LLMSettings(provider="openai", model="gpt-search"))
+    assert result["status"] == "error"
+    assert result["details"]["supported"] is False
 
 
 def test_lab_check_reports_demo_and_missing_custom_pool(tmp_path):

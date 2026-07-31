@@ -186,13 +186,14 @@ def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutat
 
 @router.post("/settings/check/{kind}")
 def check_setting(kind: Literal[
-        "llm-models", "tushare", "storage", "data-sources", "server", "lab"],
+        "llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
                   request: Request,
                   body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
     _require_csrf(request)
     from quantmaster.settings_checks import (
         check_data_sources,
         check_lab,
+        check_llm_web_search,
         check_server,
         check_storage,
         check_tushare,
@@ -220,6 +221,8 @@ def check_setting(kind: Literal[
         tushare_secret = current.data.tushare_token
     if kind == "llm-models":
         return list_llm_models(document.llm, llm_secret)
+    if kind == "llm-web-search":
+        return check_llm_web_search(document.llm, llm_secret)
     if kind == "tushare":
         return check_tushare(tushare_secret)
     if kind == "storage":

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -31,20 +32,39 @@ from quantmaster.config import LLMConfig, get_config
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
-_WEB_SEARCH_CAPABILITIES: dict[tuple[str, str], dict[str, Any]] = {}
+_WEB_SEARCH_CAPABILITIES: dict[tuple[str, str, str], dict[str, Any]] = {}
 _WEB_SEARCH_CAPABILITIES_LOCK = threading.RLock()
+_WEB_SEARCH_NEGATIVE_TTL_SECONDS = 300.0
+
+
+def _web_search_capability_key(config: LLMConfig) -> tuple[str, str, str]:
+    return config.provider, config.base_url.rstrip("/"), config.model
+
+
+def reset_web_search_capability(config: LLMConfig | None = None) -> None:
+    """Forget one provider probe so an operator can retry after a gateway upgrade."""
+    value = config or get_config().llm
+    with _WEB_SEARCH_CAPABILITIES_LOCK:
+        _WEB_SEARCH_CAPABILITIES.pop(_web_search_capability_key(value), None)
 
 
 def web_search_capability_status(config: LLMConfig | None = None) -> dict[str, Any]:
     """Read optional native-search status without constructing a credentialed client."""
     value = config or get_config().llm
-    key = value.provider, value.base_url.rstrip("/")
+    key = _web_search_capability_key(value)
     with _WEB_SEARCH_CAPABILITIES_LOCK:
         cached = _WEB_SEARCH_CAPABILITIES.get(key)
-    return dict(cached or {
+        if (cached and cached.get("supported") is False and
+                time.monotonic() - float(cached.get("checked_monotonic") or 0.0) >=
+                _WEB_SEARCH_NEGATIVE_TTL_SECONDS):
+            _WEB_SEARCH_CAPABILITIES.pop(key, None)
+            cached = None
+    public = dict(cached or {
         "supported": None, "detail": "尚未探测", "checked_at": "",
         "provider": value.provider,
     })
+    public.pop("checked_monotonic", None)
+    return public
 
 
 class LLMError(RuntimeError):
@@ -216,8 +236,8 @@ class LLMClient:
                 retryable=True,
             ) from exc
 
-    def _capability_key(self) -> tuple[str, str]:
-        return self.config.provider, self.config.base_url.rstrip("/")
+    def _capability_key(self) -> tuple[str, str, str]:
+        return _web_search_capability_key(self.config)
 
     def _remember_web_search(self, supported: bool, detail: str = "") -> None:
         with _WEB_SEARCH_CAPABILITIES_LOCK:
@@ -225,6 +245,7 @@ class LLMClient:
                 "supported": bool(supported),
                 "detail": str(detail)[:500],
                 "checked_at": datetime.now(timezone.utc).isoformat(),
+                "checked_monotonic": time.monotonic(),
                 "provider": self.config.provider,
             }
 
@@ -319,24 +340,37 @@ class LLMClient:
         url = base + "/responses"
         headers = ({"Authorization": f"Bearer {self.config.api_key}"}
                    if self.config.api_key else {})
-        try:
-            response = httpx.post(
-                url,
-                headers=headers,
-                json={
-                    "model": self.config.model,
-                    "input": query,
-                    "tools": [{"type": "web_search", "search_context_size": "medium"}],
-                    "tool_choice": "auto",
-                    "max_tool_calls": max(1, min(3, int(max_uses))),
-                    "include": ["web_search_call.action.sources"],
-                },
-                timeout=_request_timeout(timeout),
-            )
-        except httpx.HTTPError as exc:
-            raise _transport_error(exc, timeout) from exc
-        if response.status_code != 200:
+        rich_payload = {
+            "model": self.config.model,
+            "input": query,
+            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "tool_choice": "auto",
+            "max_tool_calls": max(1, min(3, int(max_uses))),
+            "include": ["web_search_call.action.sources"],
+        }
+        minimal_payload = {
+            "model": self.config.model,
+            "input": query,
+            "tools": [{"type": "web_search"}],
+        }
+        response: Any = None
+        for index, payload in enumerate((rich_payload, minimal_payload)):
+            try:
+                response = httpx.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=_request_timeout(timeout),
+                )
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc, timeout) from exc
+            if response.status_code == 200:
+                break
+            if index == 0 and response.status_code in {400, 415, 422}:
+                continue
             raise _api_error("OpenAI Responses", response)
+        if response is None or response.status_code != 200:
+            raise LLMError("OpenAI Responses 搜索探测未返回结果", code="invalid_response")
         try:
             payload = response.json()
         except ValueError as exc:
@@ -410,7 +444,10 @@ class LLMClient:
                 results = self._web_search_openai(value, timeout=timeout, max_uses=max_uses)
         except LLMError as exc:
             if exc.status_code in {400, 404, 405, 415, 422}:
-                self._remember_web_search(False, str(exc))
+                self._remember_web_search(
+                    False,
+                    f"原生搜索探测未通过（HTTP {exc.status_code}），5 分钟后自动重试",
+                )
                 return []
             raise
         self._remember_web_search(True, f"返回 {len(results)} 个可引用来源")

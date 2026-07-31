@@ -224,6 +224,39 @@ def test_settings_api_requires_local_csrf_and_never_returns_secret(monkeypatch, 
     assert remote.get("/api/v1/settings").status_code == 403
 
 
+def test_settings_web_search_probe_route_requires_csrf_and_uses_safe_check(monkeypatch):
+    captured = []
+
+    def fake_check(settings, api_key):
+        captured.append((settings.model, bool(api_key)))
+        return {
+            "status": "success",
+            "message": "原生联网搜索可用",
+            "latency_ms": 12,
+            "checked_at": "2026-07-31T00:00:00+00:00",
+            "details": {"supported": True, "sources": []},
+        }
+
+    monkeypatch.setattr("quantmaster.settings_checks.check_llm_web_search", fake_check)
+    client = TestClient(app)
+    settings = client.get("/api/v1/settings").json()
+    payload = {"settings": {
+        key: settings[key]
+        for key in ("config_version", "llm", "data", "trade", "news", "server", "automation", "lab")
+    }}
+
+    assert client.post("/api/v1/settings/check/llm-web-search", json=payload).status_code == 403
+    response = client.post(
+        "/api/v1/settings/check/llm-web-search",
+        json=payload,
+        headers={"X-CSRF-Token": settings["csrf_token"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["details"]["supported"] is True
+    assert captured and captured[0][0] == settings["llm"]["model"]
+
+
 def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monkeypatch):
     from quantmaster.data import maintenance
 

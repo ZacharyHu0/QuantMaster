@@ -1131,6 +1131,10 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
             "source": {"name": "官方来源", "level": 1, "url": f"https://example.com/{key}"},
         }],
     } for index, (key, number, title) in enumerate(keys)]
+    dimensions[0]["summary"] = {
+        "text": "基本面结构化信封已转换为正文。",
+        "evidence_ids": [dimensions[0]["evidence_ids"][0]],
+    }
     report = {
         "schema_version": "2.0", "instrument": {
             "symbol": "600519.SH", "name": "贵州茅台", "market_label": "中国内地",
@@ -1192,9 +1196,11 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         assert page.locator('input[name="mode"][value="deep"]').is_checked()
         page.locator("#stock-analysis-form button.primary").click()
         page.get_by_text("六维证据总体偏强，但仍需等待新披露。").wait_for()
+        page.get_by_text("基本面结构化信封已转换为正文。").wait_for()
 
         assert submitted == [{"query": "600519.SH", "mode": "deep"}]
         assert page.locator(".sa-dimension").count() == 6
+        assert "evidence_ids" not in page.locator("#stock-analysis-report").inner_text()
         assert page.locator('.sa-citations a[href="https://example.com/fundamental"]').count() == 1
         assert page.locator("#stock-analysis-elapsed").inner_text()
         assert page.evaluate("getComputedStyle(document.querySelector('.sa-report')).animationName") == "none"
