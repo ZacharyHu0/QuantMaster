@@ -45,16 +45,27 @@ def collect_health_report() -> dict[str, Any]:
             if state == "closed":
                 continue
             remaining = max(0, int(float(item.get("open_until") or 0) - datetime.now().timestamp()))
+            disabled = state == "disabled"
+            failure_class = str(item.get("failure_class") or "transient_upstream")
             issues.append(make_problem(
-                "provider_circuit_open",
+                "provider_disabled" if disabled else "provider_circuit_open",
                 severity="warning",
                 source="行情数据源",
-                title=f"{lane} 暂停请求",
+                title=f"{lane} {'已停用' if disabled else '暂停请求'}",
                 message=_clean(item.get("last_error")) or f"数据源处于 {state} 状态",
-                action=(f"约 {remaining} 秒后系统会自动探测恢复。" if remaining
-                        else "系统正在探测恢复，可稍后重试相关操作。"),
+                action=(
+                    "更新对应凭据或依赖后，在后台诊断中执行一次手工探测。"
+                    if disabled else (
+                        f"约 {remaining} 秒后系统会自动探测恢复。" if remaining
+                        else "下一次相关请求会执行受控恢复探测。"
+                    )
+                ),
                 problem_id=f"provider:{lane}",
                 state=state,
+                failure_class=failure_class,
+                last_success=float(item.get("last_success") or 0),
+                next_probe_at=float(item.get("next_probe_at") or 0),
+                can_continue=True,
             ))
     except Exception as exc:
         issues.append(_component_failure("行情数据源", exc))

@@ -22,14 +22,12 @@
     intraday_monitor:'盘中变盘监控', fast_news_scan:'财经快讯扫描',
     official_news_scan:'官方公告扫描', periodic_news_scan:'定期资讯扫描',
     daily_close_pipeline:'收盘决策流程',
-    news_digest:'重要消息摘要', paper_rebalance_proposal:'模拟调仓建议',
+    news_digest:'重要消息摘要', news_dead_letter_recovery:'新闻死信恢复',
+    paper_rebalance_proposal:'模拟调仓建议',
   };
 
   async function secureApi(path, options = {}) {
-    await window.QuantMasterManagement.ensureSettings();
-    const headers = new Headers(options.headers || {});
-    headers.set('X-CSRF-Token', window.QuantMasterManagement.state.csrf);
-    return api(path, {...options, headers});
+    return api(path, options);
   }
 
   function statusText(value) {

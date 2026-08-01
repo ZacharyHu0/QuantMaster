@@ -154,7 +154,7 @@ def _full_refresh(
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
     if cached is not None and not cached.empty:
         store.mark_status(symbol, "refresh_failed")
-        logger.warning("全量刷新失败，保留本地缓存: %s", symbol)
+        logger.debug("全量刷新失败，保留本地缓存: %s", symbol)
         return cached.loc[start:end]
     raise RuntimeError(f"获取 {symbol} 日线失败: {errors}")
 
@@ -436,7 +436,7 @@ def load_intraday(
             errors.append(f"{factory.__name__}: {e}")
             logger.debug("数据源 %s 获取 %s %s 失败: %s", factory.__name__, symbol, frequency, e)
     if cached is not None and not cached.empty:
-        logger.warning("全部分钟数据源失败，使用本地缓存: %s %s", symbol, frequency)
+        logger.debug("全部分钟数据源失败，使用本地缓存: %s %s", symbol, frequency)
         return cached.loc[start_ts:end_ts]
     raise RuntimeError(f"获取 {symbol} {frequency} 分钟线失败: {errors}")
 
@@ -483,6 +483,7 @@ def load_bar_panel(
         BarStore() if frequency == "1d" else IntradayBarStore(frequency)
     )
     frames: dict[str, pd.DataFrame] = {}
+    failures: list[tuple[str, str]] = []
     total = len(symbols)
 
     def one(symbol: str) -> pd.DataFrame:
@@ -508,12 +509,18 @@ def load_bar_panel(
                     frames[symbol] = frame
                     success = True
             except Exception as exc:
-                logger.warning("跳过 %s: %s", symbol, exc)
+                failures.append((symbol, str(exc)))
             if progress:
                 try:
                     progress(completed, total, symbol, success)
                 except Exception as exc:
                     logger.warning("行情进度回调失败（不影响数据加载）: %s", exc)
+    if failures:
+        samples = "；".join(f"{symbol}: {error}" for symbol, error in failures[:5])
+        logger.warning(
+            "行情批量加载失败 %s/%s 个标的（样本：%s）",
+            len(failures), total, samples,
+        )
     if not frames:
         raise RuntimeError("没有任何标的成功加载数据")
 

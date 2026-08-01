@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from quantmaster.ai.crawler import NewsItem, NewsStore
+from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
 from quantmaster.ai.news_sources import (
     NewsSourceStore,
     _request_headers,
@@ -213,6 +213,12 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     assert sectors["电子"]["positive"] == 1
     assert sectors["银行"]["score"] == pytest.approx(-50.0, abs=0.02)
     assert sectors["银行"]["label"] == "明显偏空"
+    assert stats["display_scale"] == {
+        "mode": "adaptive_bucket_v1",
+        "theoretical_abs_max": 100,
+        "market_abs_max": 10,
+        "sector_abs_max": 60,
+    }
 
 
 def test_annotation_stream_yields_each_persisted_batch(tmp_path):
@@ -307,12 +313,17 @@ def test_news_api_csrf_and_ui_contract():
 
     page = client.get("/").text
     assert 'id="news-factor-chart"' in page
+    assert '<div id="news-factor-chart"' in page
+    assert '<svg id="news-factor-chart"' not in page
     assert 'id="news-market-label"' in page
     assert 'id="news-sector-scores"' in page
     assert 'id="news-annotation-progress"' in page
     assert 'data-settings-section="sources"' in page
     assert "/static/news.js" in page
     assert "/static/news.css" in page
+    chart_source = client.get("/static/news.js").text
+    assert "mkChart('news-factor-chart')" in chart_source
+    assert "CHART_COLORS.primary" in chart_source
 
 
 def test_periodic_news_job_is_registered():
@@ -320,3 +331,34 @@ def test_periodic_news_job_is_registered():
     assert DEFAULT_JOBS["official_news_scan"][1]["minutes"] == 15
     assert DEFAULT_JOBS["periodic_news_scan"][1]["minutes"] == 60
     assert "periodic_news_scan" in ALLOWED_TASKS
+
+
+def test_analysis_failures_enter_bounded_dead_letter_and_recover(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([NewsItem(source="unit", title="待恢复资讯", content="测试内容")])
+    item_id = store.max_id()
+
+    for _ in range(3):
+        store.analysis_failure([item_id], "request timeout", "timeout")
+
+    dead = store.detail(item_id)
+    assert dead["analysis_status"] == "dead_letter"
+    assert dead["analysis_attempts"] == 3
+    assert dead["last_failure_code"] == "timeout"
+    with store._conn() as connection:
+        connection.execute("UPDATE news SET next_retry_at=0 WHERE id=?", (item_id,))
+
+    class HealthyClient:
+        def chat_json(self, prompt, system=None):
+            return [{
+                "symbols": [], "sectors": [], "event_type": "其他",
+                "sentiment": 0, "summary": "恢复完成", "scope": "market",
+                "urgency": "normal", "confidence": 0.8,
+            }]
+
+    result = AICrawler(client=HealthyClient(), store=store).recover_dead_letters(limit=20)
+    recovered = store.detail(item_id)
+    assert result["selected"] == 1
+    assert result["completed"] == 1
+    assert recovered["analysis_status"] == "complete"
+    assert recovered["analysis_recovery_count"] == 1

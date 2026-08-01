@@ -52,6 +52,9 @@ class LLMSettings(StrictModel):
     provider: Literal["anthropic", "openai", "openai-compatible"] = "anthropic"
     model: str = Field(default="claude-sonnet-5", min_length=1, max_length=200)
     base_url: str = Field(default="", max_length=2048)
+    reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    ] = "medium"
     max_tokens: int = Field(default=2048, ge=1, le=1_000_000)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     timeout: float = Field(default=60.0, gt=0.0, le=600.0)
@@ -61,6 +64,8 @@ class LLMSettings(StrictModel):
         self.base_url = normalize_api_base(self.provider, self.base_url)
         if self.provider == "openai-compatible" and not self.base_url:
             raise ValueError("OpenAI-compatible 必须填写 API 根地址")
+        if self.provider == "anthropic" and self.reasoning_effort in {"none", "minimal"}:
+            raise ValueError("Anthropic 推理强度不支持 none 或 minimal")
         return self
 
 

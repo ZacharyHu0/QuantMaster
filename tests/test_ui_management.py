@@ -110,6 +110,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('[name="llm.provider"]').select_option("openai-compatible")
         page.locator('[name="llm.base_url"]').fill("http://127.0.0.1:9/v1")
         page.locator('[name="llm.model"]').fill("manual-local-model")
+        page.locator('[name="llm.reasoning_effort"]').select_option("high")
         page.locator('[data-check="llm-models"]').click()
         model_check = page.locator('[data-check-result="llm-models"]')
         playwright_sync.expect(model_check).to_have_class(
@@ -119,6 +120,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert "失败" in check_text or "尚未配置" in check_text
         assert "检测中" not in check_text
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
+        assert page.locator('[name="llm.reasoning_effort"]').input_value() == "high"
         _wait_for_class(page.locator("#settings-save-state"), "saved")
 
         page.locator('[data-settings-section="automation"]').click()
@@ -452,6 +454,35 @@ def test_decision_chart_survives_progressive_rerender(live_server):
         assert state == {
             "canvasCount": 1, "boundConnected": True, "boundToVisible": True,
         }
+        replay_state = page.evaluate(
+            """async () => {
+              const chart = charts['regime-chart'];
+              const replay = document.querySelector('[data-chart-replay="regime-chart"]');
+              const before = chart;
+              replay.click();
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+              const element = document.getElementById('regime-chart');
+              return {
+                sameInstance: before === charts['regime-chart'],
+                canvasCount: element.querySelectorAll('canvas').length,
+                replayLabel: replay.getAttribute('aria-label'),
+              };
+            }"""
+        )
+        assert replay_state == {
+            "sameInstance": True,
+            "canvasCount": 1,
+            "replayLabel": "重播牛熊分与市场宽度动画",
+        }
+        replay_box = page.locator('[data-chart-replay="regime-chart"]').bounding_box()
+        last_window_box = page.locator('[data-regime-window="10y"]').bounding_box()
+        assert replay_box["y"] >= last_window_box["y"] + last_window_box["height"]
+        page.emulate_media(reduced_motion="reduce")
+        page.wait_for_timeout(50)
+        reduced_profile = page.evaluate("QuantCharts.motionProfile('bar', 12)")
+        assert reduced_profile == {
+            "enabled": False, "duration": 0, "update": 0, "stagger": 0,
+        }
         period = page.locator(".snapshot-period").last
         assert period.evaluate("element => getComputedStyle(element).whiteSpace") == "nowrap"
         assert period.bounding_box()["width"] >= 72
@@ -699,6 +730,29 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert index_section.locator(".mkt-item").count() == 1
         assert index_section.locator("canvas").is_visible()
         assert index_section.locator(".spark").bounding_box()["height"] >= 70
+        assert "区间 -0.20%" in index_section.locator(".mkt-spark-foot").inner_text()
+        assert "07.20—07.21" in index_section.locator(".mkt-spark-period").inner_text()
+        spark_id = index_section.locator(".spark").get_attribute("id")
+        spark_option = page.evaluate(
+            """id => {
+              const option = charts[id].getOption();
+              return {
+                series: option.series.map(item => item.name),
+                tooltip: option.tooltip[0].show,
+                areaOpacity: option.series[0].areaStyle.opacity,
+                lineColor: option.series[0].lineStyle.color,
+                endpointPoints: option.series[1].data.length,
+              };
+            }""",
+            spark_id,
+        )
+        assert spark_option == {
+            "series": ["区间走势", "最新位置"],
+            "tooltip": True,
+            "areaOpacity": 0.1,
+            "lineColor": "#24a06b",
+            "endpointPoints": 1,
+        }
         assert index_section.bounding_box()["y"] < personal_section.bounding_box()["y"]
 
         page.set_viewport_size({"width": 390, "height": 844})

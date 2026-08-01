@@ -16,6 +16,7 @@
   let activeMarketPage = 'quotes';
   let activeRotationPage = 'radar';
   let activeJob = null;
+  const ACTIVE_JOB_KEY = 'quantmaster.rotation.active-job.v1';
   let themeCatalog = [];
   let showAllThemes = false;
 
@@ -114,8 +115,8 @@
     const chart = mkChart('rotation-temperature-chart');
     if (!chart) return;
     const series = [
-      ['市场温度','temperature','#e66767',2], ['MA5','ma5','#3987e5',1.2],
-      ['MA10','ma10','#c98500',1.2], ['MA20','ma20','#9085e9',1.2],
+      ['市场温度','temperature',CHART_COLORS.primary,2], ['MA5','ma5',CHART_COLORS.neutral,1.2],
+      ['MA10','ma10',CHART_COLORS.warning,1.2], ['MA20','ma20',CHART_COLORS.compare,1.2],
     ].map(([name, field, color, width], index) => ({
       name, type:'line', showSymbol:false, smooth:index > 0, connectNulls:false,
       lineStyle:{width,color}, itemStyle:{color},
@@ -173,9 +174,9 @@
       grid:{left:52,right:18,top:38,bottom:34}, xAxis:timeAxis(),
       yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value => `${(value * 100).toFixed(1)}%`},splitLine:{lineStyle:{color:GRID}}},
       series:[
-        {name:'强势样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.strong_return]),lineStyle:{color:'#e66767',width:1.5}},
-        {name:'低位样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.weak_return]),lineStyle:{color:'#0ca30c',width:1.5}},
-        {name:'强弱差',type:'bar',barMaxWidth:6,data:history.map(row => [row.date,row.spread]),itemStyle:{color:'#3987e5'}},
+        {name:'强势样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.strong_return]),lineStyle:{color:CHART_COLORS.up,width:1.5}},
+        {name:'低位样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.weak_return]),lineStyle:{color:CHART_COLORS.down,width:1.5}},
+        {name:'强弱差',type:'bar',barMaxWidth:6,data:history.map(row => [row.date,row.spread]),itemStyle:{color:CHART_COLORS.primary}},
       ],
     }));
   }
@@ -215,17 +216,22 @@
   }
 
   function scatterOption(items, name = '行业') {
+    const axisMax = field => {
+      const maximum = Math.max(0, ...items.map(item => Number(item[field])).filter(Number.isFinite));
+      const padded = maximum * 1.15;
+      return [5,10,20,40,60,80,100].find(value => value >= padded) || 100;
+    };
     return baseOpt({
       grid:{left:50,right:22,top:24,bottom:44},
       tooltip:{trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:11},formatter:params => {
         const item = params.data.item;
         return `${esc(item.name)}<br>强势 ${percent(item.strong_ratio)}<br>低位 ${percent(item.weak_ratio)}<br>${esc(item.stage_label)} · ${number(item.rotation_score,1)}`;
       }},
-      xAxis:{type:'value',name:'强势加速占比',nameLocation:'middle',nameGap:28,min:0,max:value => Math.max(40,Math.ceil(value.max/10)*10),axisLabel:{color:MUTED,formatter:'{value}%'},nameTextStyle:{color:MUTED,fontSize:10},splitLine:{lineStyle:{color:GRID}}},
-      yAxis:{type:'value',name:'低位偏弱占比',nameTextStyle:{color:MUTED,fontSize:10},min:0,max:value => Math.max(60,Math.ceil(value.max/10)*10),axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
+      xAxis:{type:'value',name:'强势加速占比',nameLocation:'middle',nameGap:28,min:0,max:axisMax('strong_ratio'),axisLabel:{color:MUTED,formatter:'{value}%'},nameTextStyle:{color:MUTED,fontSize:10},splitLine:{lineStyle:{color:GRID}}},
+      yAxis:{type:'value',name:'低位偏弱占比',nameTextStyle:{color:MUTED,fontSize:10},min:0,max:axisMax('weak_ratio'),axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
       series:[{name,type:'scatter',data:items.map(item => ({
         value:[item.strong_ratio,item.weak_ratio,Math.max(7,Math.sqrt(item.eligible_count || 1)*2.2)], item,
-        itemStyle:{color:item.stage?.includes('repair') ? '#e66767' : item.stage?.includes('retreat') ? '#0ca30c' : '#3987e5'},
+        itemStyle:{color:item.stage?.includes('repair') ? CHART_COLORS.up : item.stage?.includes('retreat') ? CHART_COLORS.down : CHART_COLORS.primary},
       })),symbolSize:value => value[2],label:{show:items.length <= 18,position:'top',color:INK2,fontSize:9,formatter:params => params.data.item.name}}],
     });
   }
@@ -383,10 +389,10 @@
       legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:64,right:64,top:38,bottom:34},xAxis:timeAxis(),
       yAxis:[{type:'value',axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{lineStyle:{color:GRID}}},{type:'value',axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{show:false}}],
       series:[
-        {name:'当日净流',type:'bar',barMaxWidth:8,data:(data.daily || []).map(row => [row.date,row.flow]),itemStyle:{color:params => Number(params.value[1]) >= 0 ? '#e66767' : '#0ca30c'}},
-        {name:'累计净流',type:'line',yAxisIndex:1,showSymbol:false,data:(data.daily || []).map(row => [row.date,row.cumulative]),lineStyle:{color:'#3987e5',width:1.7}},
-        {name:'累计 MA5',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma5]),lineStyle:{color:'#c98500',width:1.2}},
-        {name:'累计 MA20',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma20]),lineStyle:{color:'#9085e9',width:1.2}},
+        {name:'当日净流',type:'bar',barMaxWidth:8,data:(data.daily || []).map(row => [row.date,row.flow]),itemStyle:{color:params => Number(params.value[1]) >= 0 ? CHART_COLORS.up : CHART_COLORS.down}},
+        {name:'累计净流',type:'line',yAxisIndex:1,showSymbol:false,data:(data.daily || []).map(row => [row.date,row.cumulative]),lineStyle:{color:CHART_COLORS.primary,width:1.7}},
+        {name:'累计 MA5',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma5]),lineStyle:{color:CHART_COLORS.warning,width:1.2}},
+        {name:'累计 MA20',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma20]),lineStyle:{color:CHART_COLORS.compare,width:1.2}},
       ],
     }));
   }
@@ -404,7 +410,7 @@
       target.innerHTML = `<div class="rotation-detail-head"><div><h3>${esc(item.name)} <span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></h3><p>${esc(item.code)} · ${item.eligible_count}/${item.member_count} 有效成分 · 覆盖 ${percent(Number(item.coverage || 0)*100)}</p></div><button type="button" class="rotation-link" data-close-rotation-detail>关闭详情</button></div><div class="rotation-representatives">${(item.representatives || []).map(value => `<div class="rotation-representative"><strong>${esc(value.name)}</strong><span>${esc(value.symbol)}</span><span class="${tone(value.return_1d)}">趋势 ${number(value.trend_score,3)} · ${returnPct(value.return_1d)}</span></div>`).join('') || '<span class="hint">暂无满足流动性与历史门槛的代表样本</span>'}</div><div class="rotation-chart compact" id="rotation-detail-chart"></div>`;
       const chart = mkChart('rotation-detail-chart');
       if (chart) chart.setOption(baseOpt({
-        legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:48,right:18,top:36,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},series:[{name:'强势加速',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.strong_ratio]),lineStyle:{color:'#e66767',width:1.5}},{name:'低位偏弱',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.weak_ratio]),lineStyle:{color:'#0ca30c',width:1.5}}],
+        legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:48,right:18,top:36,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},series:[{name:'强势加速',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.strong_ratio]),lineStyle:{color:CHART_COLORS.up,width:1.5}},{name:'低位偏弱',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.weak_ratio]),lineStyle:{color:CHART_COLORS.down,width:1.5}}],
       }));
     } catch (error) { target.innerHTML = errorMarkup(error); }
   }
@@ -468,14 +474,33 @@
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
   }
 
-  async function refresh(scope, button) {
-    if (activeJob) return;
+  function saveActiveJob(job, scope) {
+    activeJob = job;
+    try { sessionStorage.setItem(ACTIVE_JOB_KEY,JSON.stringify({id:job.id,scope})); } catch (_) {}
+  }
+
+  function clearActiveJob() {
+    activeJob = null;
+    try { sessionStorage.removeItem(ACTIVE_JOB_KEY); } catch (_) {}
+  }
+
+  function refreshResult(scope, title, detail, resultTone = 'warning') {
+    const target = scope === 'market'
+      ? document.getElementById('market-temperature-content')
+      : scope === 'industries' ? document.getElementById('rotation-industry-content')
+      : scope === 'themes' ? document.getElementById('rotation-themes-content')
+      : scope === 'etf' ? document.getElementById('rotation-etf-content')
+      : document.getElementById('rotation-radar-content');
+    if (!target) return;
+    target.querySelector('[data-rotation-job-result]')?.remove();
+    target.insertAdjacentHTML('afterbegin',`<aside class="rotation-callout" data-rotation-job-result data-tone="${esc(resultTone)}"><strong>${esc(title)}</strong><span>${esc(detail || '')}</span></aside>`);
+  }
+
+  async function monitorRefresh(job, scope, button, idleLabel = '') {
+    const idle = idleLabel || button.textContent;
     button.disabled = true;
-    const idle = button.textContent;
-    button.textContent = '正在创建任务…';
     try {
-      const allowed = new Set(['all','market','industries','themes','etf']);
-      activeJob = await post('/api/v1/market/analytics/refresh',{scope:allowed.has(scope) ? scope : 'all',mode:'incremental',source:'auto'});
+      saveActiveJob(job,scope);
       button.textContent = `${activeJob.phase || '等待执行'} · ${activeJob.progress || 0}%`;
       while (activeJob && !['completed','failed','cancelled'].includes(activeJob.status)) {
         await new Promise(resolve => setTimeout(resolve,1200));
@@ -484,18 +509,60 @@
       }
       if (activeJob?.status === 'completed') {
         cache.clear(); themeCatalog = []; showAllThemes = false;
-        button.textContent = '快照已更新';
+        const outcome = activeJob.result?.outcome || 'updated';
+        const labels = {updated:'快照已更新',partial:'部分更新完成',unchanged:'数据未推进'};
+        button.textContent = labels[outcome] || '任务已完成';
         await loadCurrent(true);
+        const warnings = activeJob.result?.warnings || [];
+        const detail = warnings.join('；') || (
+          outcome === 'unchanged'
+            ? `行情仍截至 ${activeJob.result?.as_of || '原日期'}，未发现可提交的新数据。`
+            : `数据截至 ${activeJob.result?.as_of || '最新快照'}。`
+        );
+        refreshResult(scope,labels[outcome] || '任务已完成',detail,outcome === 'updated' ? 'info' : 'warning');
       } else if (activeJob) {
         throw new Error(activeJob.detail || '刷新任务未完成');
       }
     } catch (error) {
       button.textContent = '刷新失败';
+      refreshResult(scope,'联动快照刷新失败',error?.message || '请稍后重试','error');
       reportLocalError('板块联动','分析快照未能更新',error);
     } finally {
-      activeJob = null;
+      clearActiveJob();
       setTimeout(() => { button.disabled = false; button.textContent = idle; },1000);
     }
+  }
+
+  async function refresh(scope, button) {
+    if (activeJob) return;
+    const idle = button.textContent;
+    button.disabled = true;
+    button.textContent = '正在创建任务…';
+    try {
+      const allowed = new Set(['all','market','industries','themes','etf']);
+      const selected = allowed.has(scope) ? scope : 'all';
+      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'auto'});
+      await monitorRefresh(job,selected,button,idle);
+    } catch (error) {
+      clearActiveJob();
+      button.disabled = false;
+      button.textContent = '刷新失败';
+      refreshResult(scope,'刷新任务创建失败',error?.message || '请稍后重试','error');
+      reportLocalError('板块联动','刷新任务未能创建',error);
+    }
+  }
+
+  function recoverActiveJob() {
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem(ACTIVE_JOB_KEY) || 'null'); } catch (_) { saved = null; }
+    if (!saved?.id) return;
+    const scope = saved.scope || 'all';
+    const button = document.querySelector(`[data-rotation-refresh="${scope}"]`)
+      || document.querySelector('[data-rotation-refresh]');
+    if (!button) return;
+    api(`/api/v1/jobs/rotation/${encodeURIComponent(saved.id)}`)
+      .then(job => monitorRefresh(job,scope,button))
+      .catch(() => clearActiveJob());
   }
 
   function applyHash() {
@@ -539,4 +606,5 @@
   };
 
   if (!applyHash()) setMarketPage('quotes',false);
+  recoverActiveJob();
 })();

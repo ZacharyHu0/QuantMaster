@@ -430,7 +430,9 @@ class PaperService:
             return "Hybrid v2 当前仅使用规则基线；可用于模拟验证，尚未叠加 Quant Lab Champion。"
         if not isinstance(strategy, FactorStrategySpec):
             return "该规则策略未关联 Quant Lab 批准版本；可用于模拟验证，不代表已通过研究门禁。"
-        names = [item.strip() for item in strategy.factor.split(",") if item.strip()]
+        from quantmaster.backtest.spec import split_factor_references
+
+        names = split_factor_references(strategy.factor)
         try:
             from quantmaster.lab.store import LabStore
 

@@ -80,7 +80,7 @@ def stock_analysis_progress_card(
 ) -> dict[str, Any]:
     """一张可原位更新的进度卡，避免飞书会话被阶段消息刷屏。"""
     value = max(0, min(100, int(progress)))
-    stage_lines = []
+    stage_lines: list[str] = []
     for threshold, label in STOCK_ANALYSIS_PHASES:
         if value >= threshold:
             marker = "✓"

@@ -190,3 +190,19 @@ def test_runtime_pause_drains_and_resume_recovers_interrupted_job(tmp_path):
     assert _wait(store, job["id"], {"completed"})["detail"] == "resumed"
     assert attempts == 2
     runtime.stop()
+
+
+def test_unified_runtime_converts_unexpected_value_error_to_terminal_failure(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+
+    def invalid(_context, _spec):
+        raise ValueError("invalid immutable specification")
+
+    runtime.register("test.invalid", invalid)
+    job, _ = runtime.submit("test.invalid", {"value": 1}, max_attempts=1)
+    failed = _wait(store, job["id"], {"failed"})
+
+    assert "invalid immutable specification" in failed["detail"]
+    assert failed["owner"] == ""
+    runtime.stop()

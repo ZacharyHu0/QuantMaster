@@ -21,15 +21,30 @@ from quantmaster.automation.policy import policy_allows, resolved_policy
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
+from quantmaster.runtime.jobs import (
+    JobContext,
+    JobOutcome,
+    UnifiedJobRuntime,
+    UnifiedJobStore,
+)
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_TASKS = {
     "intraday_monitor", "fast_news_scan", "official_news_scan", "periodic_news_scan",
     "daily_close_pipeline", "news_digest", "paper_rebalance_proposal",
+    "news_dead_letter_recovery",
 }
 UNFILTERED_KINDS = {"task_failure", "task_report"}
-NEWS_TASKS = {"fast_news_scan", "official_news_scan", "periodic_news_scan", "news_digest"}
+NEWS_PIPELINE_TASKS = {"fast_news_scan", "official_news_scan", "periodic_news_scan"}
+NEWS_TASKS = {*NEWS_PIPELINE_TASKS, "news_digest", "news_dead_letter_recovery"}
+NEWS_TASK_LABELS = {
+    "fast_news_scan": "快讯扫描",
+    "official_news_scan": "官方资讯扫描",
+    "periodic_news_scan": "定期资讯扫描",
+    "news_digest": "重要资讯摘要",
+    "news_dead_letter_recovery": "新闻死信恢复",
+}
 CONVERSATION_RAW_CHARACTER_LIMIT = 14_000
 CONVERSATION_RAW_MESSAGE_LIMIT = 60
 CONVERSATION_RECENT_TURNS = 10
@@ -38,6 +53,18 @@ TOPIC_STOP_TERMS = {
     "这个", "那个", "这些", "那些", "什么", "怎么", "为什么", "一下", "现在",
     "今天", "刚才", "觉得", "认为", "可以", "还是", "我们", "你们", "他们",
 }
+
+
+def _safe_notification_error(value: Any, limit: int = 280) -> str:
+    """保留可行动的错误上下文，同时避免把凭据带进 Bot 通知。"""
+    message = str(value).strip() or "未返回错误详情"
+    message = re.sub(
+        r"(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;&]+",
+        r"\1***", message,
+    )
+    message = re.sub(r"(?i)(bearer\s+)[^\s,;&]+", r"\1***", message)
+    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***", message)
+    return message if len(message) <= limit else message[:limit - 1] + "…"
 
 
 def _topic_features(text: str) -> set[str]:
@@ -96,7 +123,12 @@ class AutomationService:
             self.store, BotDeliveryGateway(self.store, self.weixin, self.feishu))
         self.dispatcher.analysis_delivery_handler = self.dispatch_analysis_deliveries
         self.detector = MarketTurnDetector()
-        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="qm-automation")
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="qm-bot-command")
+        self.jobs = UnifiedJobRuntime(
+            UnifiedJobStore(self.store.path.with_name("jobs.sqlite")), max_workers=3,
+        )
+        for name in sorted(ALLOWED_TASKS):
+            self.jobs.register(f"automation.{name}", self._unified_task_handler)
         self._conversation_lock = threading.Lock()
 
     # ---------- 状态与策略 ----------
@@ -736,36 +768,177 @@ class AutomationService:
                 "你仍可以尝试「大盘怎么样」「查看任务」，或发送「帮助」。"
             )
 
-    def run_task(self, name: str, *, actor: str = "scheduler") -> dict:
+    def run_task(
+        self,
+        name: str,
+        *,
+        actor: str = "scheduler",
+        idempotency_key: str = "",
+    ) -> dict:
         if name not in ALLOWED_TASKS:
             raise ValueError("任务不在允许列表中")
-        run_id = self.store.start_run(name, actor)
-        self.executor.submit(self._run_task, run_id, name, actor)
-        return {"status": "accepted", "run_id": run_id, "task": name}
+        deadlines = {
+            "intraday_monitor": 180,
+            "fast_news_scan": 600,
+            "official_news_scan": 900,
+            "periodic_news_scan": 1200,
+            "news_digest": 300,
+            "news_dead_letter_recovery": 900,
+            "daily_close_pipeline": 3600,
+            "paper_rebalance_proposal": 1800,
+        }
+        job, created = self.jobs.submit(
+            f"automation.{name}",
+            {"name": name, "actor": actor},
+            idempotency_key=idempotency_key,
+            deadline_seconds=deadlines[name],
+            max_attempts=3,
+        )
+        return {
+            "status": "accepted" if created else str(job["status"]),
+            "run_id": job["id"],
+            "job_id": job["id"],
+            "task": name,
+            "created": created,
+        }
+
+    def _unified_task_handler(self, context: JobContext, spec: dict) -> JobOutcome:
+        name = str(spec.get("name") or "")
+        actor = str(spec.get("actor") or "scheduler")
+        if name not in ALLOWED_TASKS:
+            raise ValueError("持久任务规格包含未知自动化任务")
+        context.progress(5, "准备自动化任务", name)
+        try:
+            result = getattr(self, f"_task_{name}")()
+            context.ensure_active()
+            context.progress(90, "保存任务结果", name)
+            self._after_task_success(context.job_id, name, result)
+            artifact = context.write_artifact(
+                "automation.result",
+                {"schema_version": "1.0", "task": name, "actor": actor, "result": result},
+                {
+                    "schema_version": "1.0",
+                    "lineage": {"task": name, "spec_hash": context.spec_hash},
+                },
+            )
+            status = "completed_with_errors" if result.get("status") == "degraded" else "completed"
+            return JobOutcome(status, str(result.get("warning") or "")[:1000], artifact["id"])
+        except (
+            ArithmeticError, ImportError, LookupError, OSError,
+            RuntimeError, TypeError, ValueError,
+        ) as exc:
+            self._notify_task_failure(context.job_id, name, exc)
+            raise
+
+    @staticmethod
+    def _news_result_failure_event(run_id: str, name: str, result: dict) -> AlertEvent | None:
+        """把采集器返回的部分失败提升为通知；正常完成保持静默。"""
+        if name not in NEWS_PIPELINE_TASKS:
+            return None
+        raw_source_errors = result.get("errors") or {}
+        source_errors = raw_source_errors if isinstance(raw_source_errors, dict) else {}
+        raw_annotation = result.get("annotation") or {}
+        annotation = raw_annotation if isinstance(raw_annotation, dict) else {}
+        try:
+            analysis_failed = max(0, int(annotation.get("failed") or 0))
+        except (TypeError, ValueError):
+            analysis_failed = 0
+        if not source_errors and not analysis_failed:
+            return None
+
+        phases: list[str] = []
+        evidence: list[str] = []
+        if source_errors:
+            phases.append("fetch")
+            successful_sources = result.get("sources") or []
+            state = "全部来源拉取失败" if not successful_sources else "部分来源拉取失败"
+            source_names = "、".join(str(value) for value in sorted(source_errors))
+            evidence.append(f"{state}（{len(source_errors)} 个）：{source_names}")
+            evidence.extend(
+                f"{source}: {_safe_notification_error(error)}"
+                for source, error in list(sorted(source_errors.items()))[:2]
+            )
+        if analysis_failed:
+            phases.append("analysis")
+            try:
+                processed = max(0, int(annotation.get("processed") or 0))
+                completed = max(0, int(annotation.get("completed") or 0))
+            except (TypeError, ValueError):
+                processed = completed = 0
+            state = "全部分析失败" if processed and analysis_failed >= processed else "部分新闻分析失败"
+            evidence.append(f"{state}：失败 {analysis_failed}/{processed} 条，成功 {completed} 条")
+        evidence.append(f"运行编号 {run_id[:10]}")
+
+        if phases == ["fetch", "analysis"]:
+            phase_label = "新闻拉取与分析异常"
+        elif phases == ["fetch"]:
+            phase_label = "新闻拉取异常"
+        else:
+            phase_label = "新闻分析异常"
+        now = datetime.now(timezone.utc)
+        return AlertEvent(
+            kind="task_failure", score=100, severity="critical", data_as_of=now.isoformat(),
+            evidence=evidence,
+            dedupe_key=stable_hash({
+                "news_task_failure": name,
+                "hour": now.strftime("%Y%m%d%H"),
+                "phases": phases,
+                "sources": sorted(source_errors),
+            }),
+            payload={
+                "title": f"{phase_label}：{NEWS_TASK_LABELS[name]}",
+                "task": name,
+                "task_label": NEWS_TASK_LABELS[name],
+                "phases": phases,
+                "partial": True,
+            },
+        )
 
     def _run_task(self, run_id: str, name: str, actor: str) -> None:
         try:
             result = getattr(self, f"_task_{name}")()
             self.store.finish_run(run_id, result=result)
-            if name not in NEWS_TASKS:
-                report = AlertEvent(
-                    kind="task_report", score=0, severity="info",
-                    data_as_of=datetime.now().isoformat(),
-                    evidence=[f"任务 {name} 已完成", f"运行编号 {run_id[:10]}"],
-                    dedupe_key=stable_hash({"task": name, "run": run_id}),
-                    payload={"title": f"任务完成：{name}", "result": result},
-                )
-                self.process_event(report)
+            self._after_task_success(run_id, name, result)
         except Exception as exc:  # pragma: no cover - 网络任务错误路径
             logger.exception("自动化任务 %s 失败", name)
             self.store.finish_run(run_id, error=str(exc))
-            event = AlertEvent(
-                kind="task_failure", score=100, severity="critical", data_as_of=datetime.now().isoformat(),
-                evidence=[str(exc)[:500], f"运行编号 {run_id[:10]}"],
-                dedupe_key=stable_hash({"task_failure": name, "hour": datetime.now().strftime("%Y%m%d%H")}),
-                payload={"title": f"任务失败：{name}"},
-            )
-            self.process_event(event)
+            self._notify_task_failure(run_id, name, exc)
+
+    def _after_task_success(self, run_id: str, name: str, result: dict) -> None:
+        if name in NEWS_TASKS:
+            failure = self._news_result_failure_event(run_id, name, result)
+            if failure is not None:
+                self.process_event(failure)
+            return
+        report = AlertEvent(
+            kind="task_report", score=0, severity="info",
+            data_as_of=datetime.now().isoformat(),
+            evidence=[f"任务 {name} 已完成", f"运行编号 {run_id[:10]}"],
+            dedupe_key=stable_hash({"task": name, "run": run_id}),
+            payload={"title": f"任务完成：{name}", "result": result},
+        )
+        self.process_event(report)
+
+    def _notify_task_failure(self, run_id: str, name: str, exc: Exception) -> None:
+        task_label = NEWS_TASK_LABELS.get(name, name)
+        title = (
+            f"新闻任务失败：{task_label}"
+            if name in NEWS_TASKS else f"任务失败：{task_label}"
+        )
+        event = AlertEvent(
+            kind="task_failure", score=100, severity="critical",
+            data_as_of=datetime.now().isoformat(),
+            evidence=[_safe_notification_error(exc, 500), f"运行编号 {run_id[:10]}"],
+            dedupe_key=stable_hash({
+                "task_failure": name,
+                "hour": datetime.now().strftime("%Y%m%d%H"),
+            }),
+            payload={
+                "title": title, "task": name,
+                "task_label": NEWS_TASK_LABELS.get(name, name), "partial": False,
+            },
+        )
+        self.process_event(event)
 
     # ---------- 任务实现 ----------
 
@@ -785,17 +958,53 @@ class AutomationService:
         if not latest or cutoff - min(latest) > pd.Timedelta(minutes=10):
             return {"status": "skipped", "reason": "分钟行情超过 10 分钟未更新"}
         symbols = load_universe(get_config().automation.primary_universe)
-        spot = AkshareSource().spot(symbols)
-        ratio = float((pd.to_numeric(spot["change_pct"], errors="coerce") > 0).mean()) if len(spot) else 0.5
-        self.store.save_breadth(cutoff.isoformat(), ratio, len(spot))
+        breadth_source = "live"
+        warning = ""
+        try:
+            spot = AkshareSource().spot(symbols)
+            changes = pd.to_numeric(spot.get("change_pct"), errors="coerce").dropna()
+            previous = self.store.latest_breadth()
+            expected = len(symbols)
+            minimum = max(1, int(expected * 0.6))
+            if previous:
+                minimum = max(minimum, int(previous["sample_size"] * 0.6))
+            if len(changes) < minimum:
+                raise RuntimeError(
+                    f"实时宽度样本不完整：{len(changes)}/{expected}，最低要求 {minimum}"
+                )
+            ratio = float((changes > 0).mean())
+            sample_size = len(changes)
+            self.store.save_breadth(cutoff.isoformat(), ratio, sample_size)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            cached = self.store.latest_breadth()
+            cached_at = pd.Timestamp(cached["observed_at"]) if cached else None
+            if cached_at is None or cutoff - cached_at > pd.Timedelta(minutes=15):
+                logger.warning("盘中宽度不可用且无新鲜缓存：%s", exc)
+                return {
+                    "status": "degraded",
+                    "reason": "实时市场宽度不可用，未用中性值伪造信号",
+                    "warning": _safe_notification_error(exc),
+                }
+            assert cached is not None
+            ratio = float(cached["advance_ratio"])
+            sample_size = int(cached["sample_size"])
+            breadth_source = "cache"
+            warning = f"实时市场宽度不可用，使用 {cached_at.isoformat()} 的短时缓存"
+            logger.warning("%s：%s", warning, exc)
         breadth_rows = self.store.breadth()
         breadth = pd.Series(
             [row["advance_ratio"] for row in breadth_rows],
             index=pd.to_datetime([row["observed_at"] for row in breadth_rows]),
         )
         event = self.detector.evaluate(bars, breadth, cutoff=cutoff)
-        return {"status": "ok", "event": self.process_event(event) if event else None,
-                "breadth": ratio, "sample_size": len(spot)}
+        return {
+            "status": "ok" if breadth_source == "live" else "degraded",
+            "event": self.process_event(event) if event else None,
+            "breadth": ratio,
+            "sample_size": sample_size,
+            "breadth_source": breadth_source,
+            "warning": warning,
+        }
 
     def _news_context(self) -> tuple[set[str], set[str]]:
         from quantmaster.data.universe import load_universe
@@ -820,7 +1029,8 @@ class AutomationService:
             *result.get("annotation", {}).get("completed_ids", []),
         }
         for item_id in sorted(candidate_ids):
-            row = crawler.store.detail(int(item_id))
+            row_id = int(item_id)
+            row = crawler.store.detail(row_id)
             if row is None:
                 continue
             item = NewsItem(
@@ -829,13 +1039,13 @@ class AutomationService:
                 symbols=row["symbols"], sectors=row["sectors"], event_type=row["event_type"],
                 sentiment=float(row["sentiment"] or 0), summary=row["summary"],
                 confidence=float(row["confidence"] or 0),
-                is_official=bool(row["is_official"]), db_id=int(row["id"]),
+                is_official=bool(row["is_official"]), db_id=row_id,
             )
             score, scope, _ = importance_score(item, holdings, watchlist)
             item.importance_score, item.scope = score, scope
             item.urgency = "critical" if score >= 95 else "high" if score >= 80 else "normal"
             crawler.store.update_context(
-                int(item.db_id), importance_score=score, scope=scope, urgency=item.urgency,
+                row_id, importance_score=score, scope=scope, urgency=item.urgency,
             )
             # 无 LLM 时只有官方明确重大关键词能立即推送；其余仍入库供摘要查看。
             can_push = row["analysis_status"] == "complete" or (
@@ -854,6 +1064,11 @@ class AutomationService:
 
     def _task_periodic_news_scan(self) -> dict:
         return self._scan_news("periodic")
+
+    def _task_news_dead_letter_recovery(self) -> dict:
+        from quantmaster.ai.crawler import AICrawler
+
+        return AICrawler().recover_dead_letters(limit=20, batch_size=5)
 
     def _task_daily_close_pipeline(self) -> dict:
         from quantmaster.data import load_panel
@@ -898,7 +1113,9 @@ class AutomationService:
         direction_counts = {"up": 0, "down": 0, "neutral": 0}
         for item in items:
             payload = item.get("payload", {})
-            direction = item.get("direction") if item.get("direction") in direction_counts else "neutral"
+            direction = str(item.get("direction") or "neutral")
+            if direction not in direction_counts:
+                direction = "neutral"
             direction_counts[direction] += 1
             compact_items.append({
                 "title": str(payload.get("title") or "消息"),

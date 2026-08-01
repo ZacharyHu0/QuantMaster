@@ -229,6 +229,14 @@ def _sentiment_snapshot(values: list[tuple[float, float]]) -> dict[str, Any]:
     }
 
 
+def _adaptive_sentiment_scale(values: list[float], default: int = 20) -> int:
+    finite = [abs(float(value)) for value in values if math.isfinite(float(value))]
+    if not finite:
+        return default
+    padded = max(finite) * 1.15
+    return next((bucket for bucket in (10, 20, 40, 60, 80, 100) if bucket >= padded), 100)
+
+
 def _safe_analysis_error(exc: Exception) -> str:
     message = str(exc).strip() or "标注服务未返回结果"
     message = re.sub(
@@ -238,6 +246,19 @@ def _safe_analysis_error(exc: Exception) -> str:
     message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1***", message)
     message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***", message)
     return message[:497] + "…" if len(message) > 500 else message
+
+
+def _analysis_failure_code(exc: Exception) -> str:
+    value = str(exc).casefold()
+    if "rate limit" in value or "too many requests" in value or "限流" in value:
+        return "rate_limit"
+    if "timeout" in value or "timed out" in value or "超时" in value:
+        return "timeout"
+    if "auth" in value or "token" in value or "unauthorized" in value or "鉴权" in value:
+        return "authentication"
+    if "数量与输入不一致" in str(exc):
+        return "invalid_batch_shape"
+    return type(exc).__name__.removesuffix("Error").casefold()[:80] or "unknown"
 
 
 class NewsStore:
@@ -282,7 +303,9 @@ class NewsStore:
                 "raw_cache_key TEXT DEFAULT '',analysis_status TEXT DEFAULT 'pending',"
                 "analysis_attempts INTEGER DEFAULT 0,analysis_error TEXT DEFAULT '',"
                 "analysis_version INTEGER DEFAULT 1,next_retry_at REAL DEFAULT 0,"
-                "parser_version TEXT DEFAULT '1',UNIQUE(source,title,published_at))"
+                "parser_version TEXT DEFAULT '1',analysis_recovery_count INTEGER DEFAULT 0,"
+                "last_failure_code TEXT DEFAULT '',analysis_updated_at REAL DEFAULT 0,"
+                "UNIQUE(source,title,published_at))"
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(news)")}
             additions = {
@@ -296,6 +319,9 @@ class NewsStore:
                 "analysis_attempts": "INTEGER DEFAULT 0", "analysis_error": "TEXT DEFAULT ''",
                 "analysis_version": "INTEGER DEFAULT 1", "next_retry_at": "REAL DEFAULT 0",
                 "parser_version": "TEXT DEFAULT '1'",
+                "analysis_recovery_count": "INTEGER DEFAULT 0",
+                "last_failure_code": "TEXT DEFAULT ''",
+                "analysis_updated_at": "REAL DEFAULT 0",
             }
             for name, sql_type in additions.items():
                 if name not in columns:
@@ -303,6 +329,14 @@ class NewsStore:
             conn.execute("UPDATE news SET source_id=source WHERE source_id='' OR source_id IS NULL")
             conn.execute("UPDATE news SET first_seen_at=created_at WHERE first_seen_at=0")
             conn.execute("UPDATE news SET last_seen_at=created_at WHERE last_seen_at=0")
+            conn.execute(
+                "UPDATE news SET analysis_status='dead_letter' "
+                "WHERE analysis_status='failed' AND analysis_attempts>=3"
+            )
+            conn.execute(
+                "UPDATE news SET analysis_updated_at=last_seen_at "
+                "WHERE analysis_status='complete' AND analysis_updated_at=0"
+            )
             rows = conn.execute(
                 "SELECT id,source,title,content,url,published_at,fingerprint,content_hash,"
                 "summary,confidence,symbols,analysis_status FROM news"
@@ -416,7 +450,10 @@ class NewsStore:
         return saved
 
     def pending(self, limit: int = 100, ids: list[int] | None = None) -> list[dict]:
-        where = "analysis_status IN ('pending','failed') AND analysis_attempts<3 AND next_retry_at<=?"
+        where = (
+            "analysis_status IN ('pending','failed','recovery') "
+            "AND analysis_attempts<3 AND next_retry_at<=?"
+        )
         params: list[Any] = [time.time()]
         if ids:
             placeholders = ",".join("?" for _ in ids)
@@ -435,28 +472,84 @@ class NewsStore:
             conn.execute(
                 "UPDATE news SET symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
                 "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error='',"
-                "analysis_version=?,next_retry_at=0 WHERE id=?",
+                "analysis_version=?,next_retry_at=0,last_failure_code='',analysis_updated_at=? "
+                "WHERE id=?",
                 (json.dumps(item.symbols, ensure_ascii=False),
                  json.dumps(item.sectors, ensure_ascii=False), item.event_type,
                  item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
-                 item.confidence, self.ANALYSIS_VERSION, item_id),
+                 item.confidence, self.ANALYSIS_VERSION, time.time(), item_id),
             )
 
-    def analysis_failure(self, item_ids: list[int], error: str) -> None:
+    def analysis_failure(
+        self, item_ids: list[int], error: str, failure_code: str = "unknown",
+    ) -> None:
         if not item_ids:
             return
         with self._conn() as conn:
             for item_id in item_ids:
                 row = conn.execute(
-                    "SELECT analysis_attempts FROM news WHERE id=?", (item_id,)
+                    "SELECT analysis_attempts,analysis_status,analysis_recovery_count "
+                    "FROM news WHERE id=?", (item_id,)
                 ).fetchone()
                 attempts = int(row[0] if row else 0) + 1
-                delay = (60, 300, 1800)[min(attempts - 1, 2)]
-                conn.execute(
-                    "UPDATE news SET analysis_status='failed',analysis_attempts=?,analysis_error=?,"
-                    "next_retry_at=? WHERE id=? AND analysis_status<>'complete'",
-                    (attempts, error[:1000], time.time() + delay, item_id),
+                recovering = bool(row and row["analysis_status"] == "recovery")
+                recovery_count = int(row["analysis_recovery_count"] if row else 0)
+                dead_letter = recovering or attempts >= 3
+                delay = (
+                    (86400, 3 * 86400, 7 * 86400)[min(max(recovery_count, 1) - 1, 2)]
+                    if dead_letter else (60, 300, 1800)[min(attempts - 1, 2)]
                 )
+                conn.execute(
+                    "UPDATE news SET analysis_status=?,analysis_attempts=?,analysis_error=?,"
+                    "last_failure_code=?,next_retry_at=?,analysis_updated_at=? "
+                    "WHERE id=? AND analysis_status<>'complete'",
+                    (
+                        "dead_letter" if dead_letter else "failed",
+                        attempts, error[:1000], failure_code[:80], time.time() + delay,
+                        time.time(), item_id,
+                    ),
+                )
+
+    def prepare_dead_letter_recovery(
+        self, limit: int = 20, ids: list[int] | None = None,
+    ) -> list[int]:
+        clauses = [
+            "analysis_status='dead_letter'",
+            "analysis_recovery_count<3",
+            "next_retry_at<=?",
+        ]
+        params: list[Any] = [time.time()]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"id IN ({placeholders})")
+            params.extend(int(value) for value in ids)
+        params.append(max(1, min(int(limit), 20)))
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                f"SELECT id FROM news WHERE {' AND '.join(clauses)} "
+                "ORDER BY next_retry_at,id LIMIT ?",
+                params,
+            ).fetchall()
+            selected = [int(row["id"]) for row in rows]
+            if selected:
+                placeholders = ",".join("?" for _ in selected)
+                conn.execute(
+                    "UPDATE news SET analysis_status='recovery',analysis_attempts=0,"
+                    "analysis_recovery_count=analysis_recovery_count+1,next_retry_at=0 "
+                    f"WHERE id IN ({placeholders})",
+                    selected,
+                )
+        return selected
+
+    def llm_recently_healthy(self, hours: int = 24) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(analysis_updated_at) AS latest FROM news "
+                "WHERE analysis_status='complete'"
+            ).fetchone()
+        latest = float(row["latest"] or 0) if row else 0.0
+        return latest == 0 or latest >= time.time() - max(1, int(hours)) * 3600
 
     def reset_analysis(self, ids: list[int] | None = None) -> int:
         where, params = "analysis_status<>'pending'", []
@@ -467,7 +560,7 @@ class NewsStore:
         with self._conn() as conn:
             cursor = conn.execute(
                 f"UPDATE news SET analysis_status='pending',analysis_attempts=0,analysis_error='',"
-                f"next_retry_at=0 WHERE {where}", params,
+                f"next_retry_at=0,analysis_recovery_count=0,last_failure_code='' WHERE {where}", params,
             )
         return cursor.rowcount
 
@@ -476,7 +569,8 @@ class NewsStore:
               sentiment: str = "", scope: str = "", symbol: str = "",
               status: str = "", date_from: float | None = None,
               date_to: float | None = None, sort: str = "recent") -> dict:
-        clauses, params = [], []
+        clauses: list[str] = []
+        params: list[object] = []
         if cursor and sort != "importance":
             clauses.append("n.id<?")
             params.append(cursor)
@@ -616,6 +710,7 @@ class NewsStore:
                 "SUM(analysis_status='complete') AS annotated,"
                 "SUM(analysis_status='pending') AS pending,"
                 "SUM(analysis_status='failed') AS failed,"
+                "SUM(analysis_status='dead_letter') AS dead_letter,"
                 "SUM(importance_score>=80) AS important,"
                 "SUM(sentiment>0.15 AND analysis_status='complete') AS positive,"
                 "SUM(sentiment<-0.15 AND analysis_status='complete') AS negative "
@@ -686,12 +781,12 @@ class NewsStore:
                     counts_for_sector["negative"] += 1
             for symbol in symbols:
                 symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-        series = [
-            [day, round(sum(score * weight for score, weight in values) /
-                        sum(weight for _score, weight in values), 4)]
+        series: list[tuple[str, float]] = [
+            (day, round(sum(score * weight for score, weight in values) /
+                        sum(weight for _score, weight in values), 4))
             for day, values in sorted(daily.items())
         ]
-        data = dict(counts) if counts else {}
+        data: dict[str, Any] = dict(counts) if counts else {}
         data["coverage"] = round(int(data.get("annotated") or 0) / max(1, int(data.get("total") or 0)), 4)
         data["sentiment_series"] = series
         data["halflife_days"] = halflife_days
@@ -704,6 +799,17 @@ class NewsStore:
             }
             for sector, values in sector_values.items()
         ), key=lambda item: (-abs(float(item["score"])), str(item["sector"])))
+        market_scale_values = [
+            float(data["market_sentiment"].get("score") or 0),
+            *(float(item[1]) * 100 for item in series),
+        ] if data["market_sentiment"].get("event_count") else []
+        sector_scale_values = [float(item.get("score") or 0) for item in data["sector_scores"]]
+        data["display_scale"] = {
+            "mode": "adaptive_bucket_v1",
+            "theoretical_abs_max": 100,
+            "market_abs_max": _adaptive_sentiment_scale(market_scale_values),
+            "sector_abs_max": _adaptive_sentiment_scale(sector_scale_values),
+        }
         data["top_symbols"] = [
             {"symbol": symbol, "count": count}
             for symbol, count in sorted(symbol_counts.items(), key=lambda item: item[1], reverse=True)[:8]
@@ -903,19 +1009,25 @@ class AICrawler:
                 from quantmaster.automation.news import importance_score
 
                 for item, result in zip(items, parsed, strict=True):
+                    if item.db_id is None:
+                        raise ValueError("待标注资讯缺少持久化 ID")
                     self._apply_result(item, result, self.store._industry_map)
                     item.importance_score, item.scope, _ = importance_score(item, set(), set())
-                    self.store.update_analysis(int(item.db_id), item)
+                    self.store.update_analysis(item.db_id, item)
                     completed += 1
                     chunk_completed += 1
-                    completed_ids.append(int(item.db_id))
+                    completed_ids.append(item.db_id)
             except Exception as exc:
                 error = _safe_analysis_error(exc)
-                self.store.analysis_failure([int(item.db_id) for item in items], error)
+                self.store.analysis_failure(
+                    [item.db_id for item in items if item.db_id is not None],
+                    error,
+                    _analysis_failure_code(exc),
+                )
             chunk_failed = len(items) - chunk_completed
             failed += chunk_failed
             processed += len(items)
-            updated_ids = [int(item.db_id) for item in items]
+            updated_ids = [item.db_id for item in items if item.db_id is not None]
             updated_items = [
                 self._stream_item(value) for item_id in updated_ids
                 if (value := self.store.detail(item_id)) is not None
@@ -947,6 +1059,27 @@ class AICrawler:
     def reanalyze(self, ids: list[int] | None = None, limit: int | None = None) -> dict:
         reset = self.store.reset_analysis(ids)
         return {"reset": reset, **self.enrich_pending(limit=limit, ids=ids)}
+
+    def recover_dead_letters(
+        self, ids: list[int] | None = None, limit: int = 20, batch_size: int = 5,
+    ) -> dict:
+        if not self.store.llm_recently_healthy():
+            return {
+                "status": "skipped",
+                "reason": "LLM 最近 24 小时没有成功标注",
+                "selected": 0,
+            }
+        selected = self.store.prepare_dead_letter_recovery(limit=limit, ids=ids)
+        if not selected:
+            return {
+                "status": "ok", "selected": 0, "processed": 0,
+                "completed": 0, "failed": 0,
+            }
+        return {
+            "status": "ok",
+            "selected": len(selected),
+            **self.enrich_pending(ids=selected, limit=len(selected), batch_size=batch_size),
+        }
 
     def run(self, sources: list[str] | None = None, limit: int = 30,
             skip_llm: bool = False, group: str | None = None) -> dict:
@@ -985,7 +1118,9 @@ class AICrawler:
                 errors[source_id] = str(exc)
                 if run_id:
                     self.source_store.finish_run(run_id, error=str(exc))
-        annotation = {"processed": 0, "completed": 0, "failed": 0, "completed_ids": []}
+        annotation: dict[str, Any] = {
+            "processed": 0, "completed": 0, "failed": 0, "completed_ids": [],
+        }
         llm_cfg = get_config().llm
         can_annotate = self._client is not None or bool(llm_cfg.api_key or llm_cfg.base_url)
         if (not skip_llm and get_config().news.annotation_enabled and can_annotate):

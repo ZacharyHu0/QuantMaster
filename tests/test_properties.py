@@ -29,7 +29,11 @@ from quantmaster.runtime.json import strict_json_dumps
         max_leaves=30,
     )
 )
-@settings(max_examples=100, deadline=None)
+@settings(
+    max_examples=100,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_strict_json_is_always_rfc_parseable(value):
     encoded = strict_json_dumps(value)
     decoded = json.loads(encoded, parse_constant=lambda token: (_ for _ in ()).throw(AssertionError(token)))

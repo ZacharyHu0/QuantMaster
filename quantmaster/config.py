@@ -27,6 +27,7 @@ class LLMConfig:
     model: str = "claude-sonnet-5"
     api_key: str = ""
     base_url: str = ""                    # openai-compatible 网关地址（DeepSeek/Qwen 等）
+    reasoning_effort: str = "medium"      # none | minimal | low | medium | high | xhigh | max
     max_tokens: int = 2048
     temperature: float = 0.3
     timeout: float = 60.0
@@ -156,6 +157,8 @@ def _apply_env(cfg: Config) -> None:
             cfg.llm.api_key = env.get("OPENAI_API_KEY", "")
     cfg.llm.model = env.get("QM_LLM_MODEL", cfg.llm.model)
     cfg.llm.base_url = env.get("QM_LLM_BASE_URL", cfg.llm.base_url)
+    cfg.llm.reasoning_effort = env.get(
+        "QM_LLM_REASONING_EFFORT", cfg.llm.reasoning_effort)
     cfg.data.tushare_token = env.get("TUSHARE_TOKEN", cfg.data.tushare_token)
     cfg.data.root = env.get("QM_DATA_ROOT", cfg.data.root)
     cfg.data.akshare_retries = int(

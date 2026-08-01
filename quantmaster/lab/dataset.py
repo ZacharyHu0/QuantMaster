@@ -35,7 +35,7 @@ def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataF
     all_symbols = sorted(set(frame["symbol"].dropna().astype(str)))
     mask = pd.DataFrame(False, index=dates, columns=all_symbols, dtype=bool)
     positions = {code: -1 for code in snapshots}
-    active = {code: set() for code in snapshots}
+    active: dict[str, set[str]] = {code: set() for code in snapshots}
     for date in dates:
         for code, values in snapshots.items():
             position = positions[code]

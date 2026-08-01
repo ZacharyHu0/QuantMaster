@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 import os
@@ -98,7 +99,7 @@ class BacktestStore:
                 "INSERT INTO backtest_events(run_id,event_json,created_at) VALUES (?,?,?)",
                 (run_id, canonical_json(event), utc_now()),
             )
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid or 0)
 
     def claim_next(self, worker: str) -> dict | None:
         now = utc_now()
@@ -196,12 +197,51 @@ class BacktestStore:
         })
         return True
 
+    def needs_confirmation(
+        self,
+        run_id: str,
+        *,
+        problem: dict,
+        data_quality: dict | None = None,
+        expected_worker: str = "",
+    ) -> bool:
+        now = utc_now()
+        with self._conn() as conn:
+            where = "id=? AND status='running'"
+            params: list[Any] = [
+                canonical_json({
+                    "problem": problem,
+                    "data_quality": data_quality or {},
+                }),
+                str(problem.get("message") or "需要用户确认")[:500],
+                now,
+                now,
+                run_id,
+            ]
+            if expected_worker:
+                where += " AND worker=?"
+                params.append(expected_worker)
+            changed = conn.execute(
+                "UPDATE backtest_runs SET status='needs_confirmation',result_json=?,"
+                "phase='等待用户确认',detail=?,heartbeat_at=?,finished_at=?,worker='' "
+                f"WHERE {where}",
+                params,
+            ).rowcount
+        if changed:
+            self.append_event(run_id, {
+                "type": "needs_confirmation",
+                "progress": 0,
+                "phase": "等待用户确认",
+                "problem": problem,
+            })
+        return bool(changed)
+
     def cancel(self, run_id: str) -> dict:
         with self._conn() as conn:
             row = conn.execute("SELECT status FROM backtest_runs WHERE id=?", (run_id,)).fetchone()
             if row is None:
                 raise KeyError("回测不存在")
-            if row["status"] in {"completed", "failed", "cancelled"}:
+            if row["status"] in {"completed", "failed", "cancelled", "needs_confirmation"}:
                 return self.get(run_id) or {}
             status = "cancelled" if row["status"] in {"queued", "interrupted"} else row["status"]
             conn.execute(
@@ -257,7 +297,9 @@ class BacktestStore:
             ).fetchall()
         return [self._decode(row) or {} for row in rows]
 
-    def events(self, run_id: str, after: int = 0, limit: int = 500) -> list[dict]:
+    def events(
+        self, run_id: str, after: int = 0, limit: int = 500,
+    ) -> builtins.list[dict]:
         if self.get(run_id) is None:
             raise KeyError("回测不存在")
         with self._conn() as conn:
@@ -293,8 +335,9 @@ class BacktestService:
         self.store = store or BacktestStore()
 
     def enqueue(self, spec: BacktestSpec) -> dict:
-        from quantmaster.backtest.spec import pin_decision_strategy
+        from quantmaster.backtest.spec import pin_decision_strategy, preflight_strategy
 
+        preflight_strategy(spec)
         strategy = pin_decision_strategy(spec.strategy, spec.universe)
         if strategy is not spec.strategy:
             spec = spec.model_copy(update={"strategy": strategy})
@@ -627,12 +670,16 @@ class BacktestWorker:
             target=heartbeat, name=f"backtest-heartbeat-{run_id[:8]}", daemon=True,
         )
         heartbeat_thread.start()
+
+        def report_progress(value: int, phase: str, detail: str = "") -> None:
+            self.service.store.update(
+                run_id, value, phase, detail, expected_worker=self.worker_id,
+            )
+
         try:
             manifest, payload = self.service.run(
                 run,
-                progress=lambda value, phase, detail="": self.service.store.update(
-                    run_id, value, phase, detail, expected_worker=self.worker_id,
-                ),
+                progress=report_progress,
                 cancelled=lambda: (
                     self._stop.is_set() or not lease_alive.is_set()
                     or self.service.store.is_cancelled(run_id)
@@ -658,15 +705,23 @@ class BacktestWorker:
                 "回测任务被数据门禁阻止 run=%s code=%s",
                 run_id, exc.problem.get("code"),
             )
-            self.service.store.finish(
-                run_id,
-                result={
-                    "problem": exc.problem,
-                    "data_quality": exc.data_quality or {},
-                },
-                error=exc.problem["message"],
-                expected_worker=self.worker_id,
-            )
+            if exc.problem.get("can_continue"):
+                self.service.store.needs_confirmation(
+                    run_id,
+                    problem=exc.problem,
+                    data_quality=exc.data_quality,
+                    expected_worker=self.worker_id,
+                )
+            else:
+                self.service.store.finish(
+                    run_id,
+                    result={
+                        "problem": exc.problem,
+                        "data_quality": exc.data_quality or {},
+                    },
+                    error=exc.problem["message"],
+                    expected_worker=self.worker_id,
+                )
         except Exception as exc:
             logger.exception("回测任务失败 run=%s", run_id)
             self.service.store.finish(

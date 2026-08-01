@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -14,7 +15,7 @@ from quantmaster.automation.delivery import OutboxDispatcher, format_alert, form
 from quantmaster.automation.models import ActorContext, AlertEvent
 from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
-from quantmaster.automation.service import AutomationService
+from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
 from quantmaster.server.app import app
@@ -355,11 +356,48 @@ def test_feishu_primary_alert_uses_structured_card():
         "payload": {"title": "指数与宽度同步转弱"},
     })
     assert card["header"]["template"] == "green"
-    assert card["header"]["title"]["content"].startswith("QuantMaster")
+    assert card["header"]["title"]["content"] == "盘中变盘"
     content = card["elements"][0]["text"]["content"]
-    assert "核查依据" in content
+    assert "指数与宽度同步转弱" in content
+    assert "触发依据" in content
     assert "000300.SH" in content
     assert "https://example.com/source" in content
+
+
+def test_feishu_market_close_and_task_result_use_category_headers():
+    close_card = format_feishu_card({
+        "kind": "market_close", "score": 82, "severity": "high", "direction": "up",
+        "data_as_of": "2026-08-01", "evidence": ["市场状态 下行 → 震荡"],
+        "payload": {
+            "previous": {"state": "down", "state_label": "下行", "bull_score": 35.1},
+            "current": {
+                "state": "range", "state_label": "震荡", "bull_score": 52.3,
+                "return_1d": 0.0235, "advance_ratio": 0.75,
+            },
+        },
+    })
+    assert close_card["header"]["title"]["content"] == "收盘状态"
+    close_content = close_card["elements"][0]["text"]["content"]
+    assert "**状态变化**  下行 → 震荡" in close_content
+    assert "**牛市分数**  35.1 → 52.3" in close_content
+    assert "**上涨比例**  75.0%" in close_content
+    assert close_content.count("市场状态 下行 → 震荡") == 0
+
+    task_card = format_feishu_card({
+        "kind": "task_report", "score": 0, "severity": "info", "direction": "neutral",
+        "data_as_of": "2026-08-01T15:05:00+08:00",
+        "evidence": ["运行编号 abc123"],
+        "payload": {
+            "title": "收盘流水线已完成",
+            "result": {"status": "completed", "signal_date": "2026-08-01", "picks": 6},
+        },
+    })
+    assert task_card["header"]["title"]["content"] == "任务结果"
+    task_content = task_card["elements"][0]["text"]["content"]
+    assert "收盘流水线已完成" in task_content
+    assert "**状态**  已完成" in task_content
+    assert "**候选数量**  6" in task_content
+    assert "**运行说明**" in task_content
 
 
 def test_news_alert_surfaces_summary_and_bullish_bearish_judgement():
@@ -377,10 +415,15 @@ def test_news_alert_surfaces_summary_and_bullish_bearish_judgement():
     assert "核查依据" in text
 
     card = format_feishu_card(event)
+    assert card["header"]["title"]["content"] == "重要资讯"
     content = card["elements"][0]["text"]["content"]
+    assert "公司上调业绩预告" in content
     assert "**研判**  利好 (+0.72)" in content
     assert "**摘要**" in content
     assert "盈利预测上修" in content
+    assert "**来源**  sse" in content
+    assert "**类型**  业绩" in content
+    assert "**范围**  持仓" in content
     assert "**相关板块**  银行" in content
 
 
@@ -409,20 +452,57 @@ def test_news_digest_contains_compact_directional_summaries(tmp_path):
     assert "利好 1 · 利空 1 · 中性 0" in text
     assert "[利好] 资讯 1" in text
     assert "需求回暖带动盈利预期上修" in text
+    card = format_feishu_card(digest)
+    assert card["header"]["title"]["content"] == "资讯摘要"
+    assert "**1 · 利好**" in card["elements"][0]["text"]["content"]
 
 
-def test_news_task_does_not_emit_generic_completion_report(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_name", sorted(NEWS_TASKS))
+def test_news_task_does_not_emit_generic_completion_report(tmp_path, monkeypatch, task_name):
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     emitted = []
-    monkeypatch.setattr(service, "_task_fast_news_scan", lambda: {"saved": 0, "events": 0})
+    monkeypatch.setattr(service, f"_task_{task_name}", lambda: {"saved": 0, "events": 0})
     monkeypatch.setattr(
         service, "process_event", lambda event, *args, **kwargs: emitted.append(event) or {},
     )
-    run_id = store.start_run("fast_news_scan", "test")
-    service._run_task(run_id, "fast_news_scan", "test")
+    run_id = store.start_run(task_name, "test")
+    service._run_task(run_id, task_name, "test")
     assert emitted == []
     assert store.recent_runs(1)[0]["status"] == "succeeded"
+
+
+def test_news_task_reports_fetch_and_analysis_errors_once_per_hour(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    monkeypatch.setattr(service, "_task_official_news_scan", lambda: {
+        "sources": [{"source": "csrc", "fetched": 3, "saved": 1}],
+        "errors": {"sse": "request failed token=top-secret"},
+        "annotation": {"processed": 5, "completed": 3, "failed": 2},
+    })
+
+    for _ in range(2):
+        run_id = store.start_run("official_news_scan", "test")
+        service._run_task(run_id, "official_news_scan", "test")
+
+    failures = [event for event in store.recent_events(10) if event["kind"] == "task_failure"]
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["payload"]["title"] == "新闻拉取与分析异常：官方资讯扫描"
+    assert failure["payload"]["phases"] == ["fetch", "analysis"]
+    assert any("部分来源拉取失败" in value for value in failure["evidence"])
+    assert any("失败 2/5 条，成功 3 条" in value for value in failure["evidence"])
+    assert "top-secret" not in " ".join(failure["evidence"])
+    assert [run["status"] for run in store.recent_runs(2)] == ["succeeded", "succeeded"]
+
+    card = format_feishu_card(failure)
+    assert card["header"]["title"]["content"] == "资讯处理异常"
+    content = card["elements"][0]["text"]["content"]
+    assert "**任务**  官方资讯扫描" in content
+    assert "**异常阶段**  资讯拉取、新闻分析" in content
+    assert "**影响**  本轮部分结果可用" in content
+    assert "**错误详情**" in content
+    assert "系统会按计划重试" in card["elements"][-1]["elements"][0]["content"]
 
 
 def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
@@ -589,6 +669,72 @@ def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):
     assert runtime.leader is True
     assert store.attempts == 2
     runtime.stop()
+
+
+def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    symbols = ["000300.SH", "000905.SH", "000852.SH", "399006.SZ"]
+    now = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
+    cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
+    index = pd.date_range(cutoff - pd.Timedelta(minutes=20), cutoff, freq="5min")
+    frame = pd.DataFrame({"close": [100.0] * len(index)}, index=index)
+    store.save_breadth(cutoff.isoformat(), 0.63, 4)
+
+    monkeypatch.setattr(
+        "quantmaster.automation.service.get_config",
+        lambda: SimpleNamespace(automation=SimpleNamespace(
+            timezone="Asia/Shanghai", sentinel_indices=symbols, primary_universe="demo",
+        )),
+    )
+    monkeypatch.setattr("quantmaster.data.load_intraday", lambda *args, **kwargs: frame)
+    monkeypatch.setattr("quantmaster.data.universe.load_universe", lambda _name: symbols)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("eastmoney circuit open")
+
+    monkeypatch.setattr("quantmaster.data.akshare_source.AkshareSource.spot", unavailable)
+    result = service._task_intraday_monitor()
+
+    assert result["status"] == "degraded"
+    assert result["breadth_source"] == "cache"
+    assert result["breadth"] == pytest.approx(0.63)
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_automation_run_uses_unified_durable_job_and_idempotency(tmp_path, monkeypatch):
+    import time
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    monkeypatch.setattr(service, "_task_news_digest", lambda: {"items": 0})
+
+    first = service.run_task(
+        "news_digest", actor="test", idempotency_key="manual-request-1",
+    )
+    duplicate = service.run_task(
+        "news_digest", actor="test", idempotency_key="manual-request-1",
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        job = service.jobs.store.get(first["job_id"])
+        if job["status"] == "completed":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError(service.jobs.store.get(first["job_id"]))
+
+    assert duplicate["job_id"] == first["job_id"]
+    assert duplicate["created"] is False
+    assert job["result_artifact_id"]
+    assert store.recent_runs(10) == []
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_automation_api_and_ui_contract():

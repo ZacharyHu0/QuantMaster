@@ -257,6 +257,7 @@ class ResearchEngine:
         *,
         cancelled: Callable[[], bool] | None = None,
         progress: Callable[[int, int, PlanTask], None] | None = None,
+        continue_on_sync_error: bool = False,
     ) -> dict[str, Any]:
         if plan.capability_blocks:
             detail = "；".join(
@@ -268,6 +269,7 @@ class ResearchEngine:
         input_records: list[dict[str, Any]] = []
         output_records: list[dict[str, Any]] = []
         warnings = list(plan.warnings)
+        failed_tasks: list[dict[str, str]] = []
         run_id = plan.id
         manifest = RunManifest(
             run_id=run_id, plan_hash=plan.plan_hash, status="running",
@@ -279,7 +281,23 @@ class ResearchEngine:
             for index, task in enumerate(plan.tasks, start=1):
                 if cancelled and cancelled():
                     raise InterruptedError("研究任务已取消")
-                records = self.execute_task(plan, task, kernel=kernel, run_id=run_id)
+                try:
+                    records = self.execute_task(plan, task, kernel=kernel, run_id=run_id)
+                except InterruptedError:
+                    raise
+                except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                    if not continue_on_sync_error or task.kind != "sync":
+                        raise
+                    failure = {
+                        "dataset_id": task.dataset_id,
+                        "trade_date": task.trade_date,
+                        "error": str(exc)[:300],
+                    }
+                    failed_tasks.append(failure)
+                    warnings.append(
+                        f"{task.dataset_id} {task.trade_date} 同步失败：{str(exc)[:180]}"
+                    )
+                    records = []
                 (input_records if task.kind == "sync" else output_records).extend(records)
                 if progress:
                     progress(index, len(plan.tasks), task)
@@ -287,7 +305,9 @@ class ResearchEngine:
                 warnings.append(kernel.fallback_reason)
             diagnostics = self._emit_diagnostics(plan, run_id)
             finished = RunManifest(
-                run_id=run_id, plan_hash=plan.plan_hash, status="completed",
+                run_id=run_id,
+                plan_hash=plan.plan_hash,
+                status="completed_with_errors" if failed_tasks else "completed",
                 backend_requested=plan.backend, backend_used=kernel.backend_used,
                 started_at=started, finished_at=utc_now(),
                 input_partitions=tuple(input_records), output_partitions=tuple(output_records),
@@ -295,6 +315,7 @@ class ResearchEngine:
             )
             payload = finished.to_dict()
             payload["diagnostics"] = diagnostics
+            payload["failed_tasks"] = failed_tasks
             self.lake.catalog.save_run(payload)
             self.lake.write_run_files(run_id, payload)
             return payload

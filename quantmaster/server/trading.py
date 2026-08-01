@@ -33,7 +33,10 @@ def _error(exc: Exception) -> HTTPException:
 def create_backtest(spec: BacktestSpec, request: Request) -> dict:
     _require_csrf(request)
     worker = get_backtest_worker()
-    run = worker.service.enqueue(spec)
+    try:
+        run = worker.service.enqueue(spec)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     worker.start()
     return run
 

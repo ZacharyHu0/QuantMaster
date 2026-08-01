@@ -77,6 +77,10 @@ class JobLeaseLost(RuntimeError):
     """The running worker no longer owns the job lease."""
 
 
+class JobDeadlineExceeded(RuntimeError):
+    """The current attempt exceeded its declared execution deadline."""
+
+
 @dataclass(frozen=True)
 class JobOutcome:
     status: str = "completed"
@@ -677,6 +681,7 @@ class JobContext:
         self.spec_hash = str(job["spec_hash"])
         self.attempt = int(job["attempt"])
         self.deadline_seconds = float(job["deadline_seconds"])
+        self._deadline_at = time.monotonic() + self.deadline_seconds
         self._lease_alive = lease_alive
 
     def emit(self, event_type: str, payload: Mapping[str, Any] | None = None) -> int:
@@ -693,6 +698,10 @@ class JobContext:
         return self.store.cancelled(self.job_id, self.runtime.identity.value)
 
     def ensure_active(self) -> None:
+        if time.monotonic() >= self._deadline_at:
+            raise JobDeadlineExceeded(
+                f"任务尝试超过截止时间 {self.deadline_seconds:.0f} 秒"
+            )
         if not self._lease_alive.is_set():
             raise JobLeaseLost(self.job_id)
         if self.runtime.stopping:
@@ -791,6 +800,7 @@ class UnifiedJobRuntime:
         *,
         idempotency_key: str = "",
         deadline_seconds: float = 300,
+        max_attempts: int = 3,
     ) -> tuple[dict[str, Any], bool]:
         if self.stopping:
             raise RuntimeError("任务运行时正在维护或已经停止")
@@ -801,6 +811,7 @@ class UnifiedJobRuntime:
             spec,
             idempotency_key=idempotency_key,
             deadline_seconds=deadline_seconds,
+            max_attempts=max_attempts,
         )
         self.start()
         if job["status"] in {"queued", "interrupted"}:
@@ -831,6 +842,7 @@ class UnifiedJobRuntime:
         lease_alive = threading.Event()
         lease_alive.set()
         heartbeat: threading.Thread | None = None
+        retry_delay = 0.0
         try:
             if self.stopping:
                 return
@@ -872,6 +884,7 @@ class UnifiedJobRuntime:
                 RuntimeError,
                 sqlite3.Error,
                 TypeError,
+                ValueError,
             ) as exc:
                 logger.exception(
                     "Unified job handler failed job_id=%s type=%s",
@@ -880,12 +893,38 @@ class UnifiedJobRuntime:
                 )
                 outcome = JobOutcome("failed", str(exc)[:1000])
             self.store.finish(job_id, self.identity.value, outcome)
+            if (
+                outcome.status == "failed"
+                and int(job["attempt"]) < int(job["max_attempts"])
+                and self._is_transient_failure(outcome.detail)
+            ):
+                retried = self.store.retry(job_id)
+                retry_delay = min(60.0, 5.0 * (2 ** (int(retried["attempt"]) - 2)))
+                self.store.append_event(
+                    job_id,
+                    "job_auto_retry_scheduled",
+                    {"delay_seconds": retry_delay, "attempt": retried["attempt"]},
+                )
         finally:
             heartbeat_stop.set()
             if heartbeat is not None:
                 heartbeat.join(timeout=1.0)
             with self._lock:
                 self._active.discard(job_id)
+            if retry_delay and not self.stopping:
+                timer = threading.Timer(retry_delay, self._schedule, args=(job_id,))
+                timer.name = f"unified-retry-{job_id[-8:]}"
+                timer.daemon = True
+                timer.start()
+
+    @staticmethod
+    def _is_transient_failure(detail: str) -> bool:
+        value = str(detail).casefold()
+        return any(token in value for token in (
+            "timeout", "timed out", "temporarily", "temporary", "connection",
+            "network", "rate limit", "too many requests", "circuit", "熔断",
+            "超时", "连接", "网络", "限流", "暂时", "database is locked",
+        ))
 
     def retry(self, job_id: str) -> dict[str, Any]:
         if self.stopping:

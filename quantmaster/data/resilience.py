@@ -25,6 +25,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from importlib import metadata as package_metadata
 from itertools import count
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar
@@ -44,6 +45,60 @@ class CircuitOpenError(RuntimeError):
 
 class EmptyProviderResponse(RuntimeError):
     """提供商完成请求但没有返回任何可用数据。"""
+
+
+_PERMANENT_FAILURES = frozenset({"permission", "authentication", "capability_missing"})
+
+
+def classify_provider_failure(exc: BaseException) -> str:
+    """Classify provider errors without persisting volatile exception types."""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    if isinstance(exc, EmptyProviderResponse):
+        return "empty_response"
+    if isinstance(exc, AttributeError) or any(value in text for value in (
+        "has no attribute", "接口不存在", "endpoint not found", "not implemented",
+    )):
+        return "capability_missing"
+    if any(value in text for value in (
+        "no permission", "permission denied", "无权限", "没有权限", "访问权限", "权限不足",
+        "forbidden", "积分不足",
+    )):
+        return "permission"
+    if any(value in text for value in (
+        "unauthorized", "invalid token", "token invalid", "认证失败", "未配置 tushare_token",
+    )):
+        return "authentication"
+    if "429" in text or "rate limit" in text or "too many requests" in text:
+        return "rate_limit"
+    if re.search(r"\b5\d\d\b", text):
+        return "upstream_5xx"
+    if any(value in name or value in text for value in (
+        "proxy", "ssl", "timeout", "connection", "remote disconnected", "getaddrinfo",
+        "name or service not known", "certificate verify failed",
+    )):
+        return "transient_network"
+    return "transient_upstream"
+
+
+def _provider_revision(lane: str) -> str:
+    provider = lane.partition(":")[0]
+    version = ""
+    package = {"akshare": "akshare", "ths": "akshare", "yahoo": "yfinance"}.get(provider)
+    if package:
+        try:
+            version = package_metadata.version(package)
+        except package_metadata.PackageNotFoundError:
+            version = "missing"
+    credential = ""
+    if provider == "tushare":
+        credential = get_config().data.tushare_token
+    payload = json.dumps({
+        "lane": lane,
+        "package_version": version,
+        "credential_digest": hashlib.sha256(credential.encode("utf-8")).hexdigest() if credential else "",
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
 _PRIORITIES = {"interactive": 0, "maintenance": 5, "normal": 7, "background": 10}
@@ -90,11 +145,18 @@ class ProviderScheduler:
 
     DEFAULT_WORKERS: ClassVar[dict[str, int]] = {
         "akshare:eastmoney": 1,
+        "akshare:eastmoney-concept": 1,
+        "akshare:eastmoney-reference": 1,
+        "akshare:eastmoney-spot": 1,
         "akshare:sina": 1,
+        "akshare:sina-reference": 1,
+        "akshare:bond-reference": 1,
         "akshare:csindex": 1,
         "akshare:other": 1,
         "yahoo": 1,
         "tushare": 4,
+        "tushare:fx-reference": 1,
+        "ths:concept": 1,
     }
 
     def __init__(self) -> None:
@@ -170,28 +232,93 @@ class ProviderHealthStore:
             "failures INTEGER NOT NULL DEFAULT 0,open_count INTEGER NOT NULL DEFAULT 0,"
             "open_until REAL NOT NULL DEFAULT 0,last_failure REAL NOT NULL DEFAULT 0,"
             "last_success REAL NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',"
-            "suppressed INTEGER NOT NULL DEFAULT 0)"
+            "suppressed INTEGER NOT NULL DEFAULT 0,failure_class TEXT NOT NULL DEFAULT '',"
+            "config_revision TEXT NOT NULL DEFAULT '',probe_started REAL NOT NULL DEFAULT 0)"
         )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(source_health)")}
+        for name, definition in (
+            ("failure_class", "TEXT NOT NULL DEFAULT ''"),
+            ("config_revision", "TEXT NOT NULL DEFAULT ''"),
+            ("probe_started", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE source_health ADD COLUMN {name} {definition}")
+        schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if schema_version < 3:
+            # v3 corrects previously persisted Tushare wordings such as
+            # “没有接口(dc_index)访问权限”.  Without this migration an upgraded
+            # process would retain the old transient cooldown until another
+            # wasteful upstream request happened to fail.
+            rows = conn.execute(
+                "SELECT lane,state,last_error,failure_class FROM source_health"
+            ).fetchall()
+            for lane, state, last_error, stored_class in rows:
+                corrected = classify_provider_failure(RuntimeError(str(last_error or "")))
+                if corrected in _PERMANENT_FAILURES and (
+                    str(state) != "disabled" or str(stored_class) != corrected
+                ):
+                    conn.execute(
+                        "UPDATE source_health SET state='disabled',open_until=0,"
+                        "failure_class=?,config_revision=?,probe_started=0 WHERE lane=?",
+                        (corrected, _provider_revision(str(lane)), lane),
+                    )
+            conn.execute("PRAGMA user_version=3")
+            # Callers such as before_call() immediately open an explicit
+            # transaction on this same connection.  End the migration
+            # transaction first so a first request after upgrade is usable.
+            conn.commit()
         return conn
 
     def status(self, lane: str | None = None) -> dict[str, dict]:
-        with self._conn() as conn:
+        now = time.time()
+        with self._lock, self._conn() as conn:
             conn.row_factory = sqlite3.Row
             if lane:
                 rows = conn.execute(
                     "SELECT * FROM source_health WHERE lane=?", (lane,)).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM source_health ORDER BY lane").fetchall()
-        return {str(row["lane"]): dict(row) for row in rows}
+            result: dict[str, dict] = {}
+            for row in rows:
+                value = dict(row)
+                if value["state"] == "half_open" and float(value["open_until"] or 0) <= now:
+                    value["state"] = "open"
+                    value["open_until"] = 0.0
+                    value["probe_started"] = 0.0
+                    conn.execute(
+                        "UPDATE source_health SET state='open',open_until=0,probe_started=0 "
+                        "WHERE lane=? AND state='half_open' AND open_until<=?",
+                        (value["lane"], now),
+                    )
+                value["permanent"] = value["state"] == "disabled"
+                value["next_probe_at"] = float(value.get("open_until") or 0)
+                result[str(value["lane"])] = value
+        return result
 
     def before_call(self, lane: str, *, probe: bool = False) -> None:
         now = time.time()
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT state,open_until,suppressed FROM source_health WHERE lane=?", (lane,)
+                "SELECT state,open_until,suppressed,config_revision FROM source_health WHERE lane=?",
+                (lane,),
             ).fetchone()
             if row is None or row[0] == "closed":
                 return
+            if row[0] == "disabled":
+                revision = _provider_revision(lane)
+                if revision != str(row[3] or ""):
+                    conn.execute(
+                        "UPDATE source_health SET state='closed',failures=0,open_count=0,"
+                        "open_until=0,last_error='',failure_class='',config_revision=?,"
+                        "probe_started=0 WHERE lane=?",
+                        (revision, lane),
+                    )
+                    return
+                if not probe:
+                    conn.execute(
+                        "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
+                    raise CircuitOpenError(f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测")
             if not probe and float(row[1]) > now:
                 conn.execute(
                     "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
@@ -202,8 +329,8 @@ class ProviderHealthStore:
             if row[0] == "half_open" and not probe and float(row[1]) > now:
                 raise CircuitOpenError(f"{lane} 正在探测恢复状态")
             conn.execute(
-                "UPDATE source_health SET state='half_open',open_until=? WHERE lane=?",
-                (now + 60, lane),
+                "UPDATE source_health SET state='half_open',open_until=?,probe_started=? WHERE lane=?",
+                (now + 60, now, lane),
             )
 
     def success(self, lane: str) -> None:
@@ -217,11 +344,13 @@ class ProviderHealthStore:
                     "数据源 %s 已恢复；冷却期间跳过 %s 次请求", lane, int(row[2] or 0))
             conn.execute(
                 "INSERT INTO source_health "
-                "(lane,state,failures,open_count,open_until,last_success,last_error,suppressed) "
-                "VALUES (?,'closed',0,0,0,?,'',0) "
+                "(lane,state,failures,open_count,open_until,last_success,last_error,suppressed,"
+                "failure_class,config_revision,probe_started) "
+                "VALUES (?,'closed',0,0,0,?,'',0,'',?,0) "
                 "ON CONFLICT(lane) DO UPDATE SET state='closed',failures=0,open_count=0,"
-                "open_until=0,last_success=excluded.last_success,last_error='',suppressed=0",
-                (lane, now),
+                "open_until=0,last_success=excluded.last_success,last_error='',suppressed=0,"
+                "failure_class='',config_revision=excluded.config_revision,probe_started=0",
+                (lane, now, _provider_revision(lane)),
             )
 
     def failure(self, lane: str, exc: BaseException, *, immediate: bool = False) -> None:
@@ -230,6 +359,8 @@ class ProviderHealthStore:
         now = time.time()
         summary = redact_sensitive_text(exc).replace("\n", " ")
         summary = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1***@", summary)[:300]
+        failure_class = classify_provider_failure(exc)
+        permanent = failure_class in _PERMANENT_FAILURES
         with self._lock, self._conn() as conn:
             row = conn.execute(
                 "SELECT failures,open_count,state FROM source_health WHERE lane=?", (lane,)
@@ -238,29 +369,65 @@ class ProviderHealthStore:
             open_count = int(row[1] if row else 0)
             half_open = bool(row and row[2] == "half_open")
             should_open = immediate or half_open or failures >= 2
+            if permanent:
+                conn.execute(
+                    "INSERT INTO source_health "
+                    "(lane,state,failures,open_count,open_until,last_failure,last_error,"
+                    "failure_class,config_revision,probe_started) "
+                    "VALUES (?,'disabled',?,?,0,?,?,?,?,0) "
+                    "ON CONFLICT(lane) DO UPDATE SET state='disabled',failures=excluded.failures,"
+                    "open_count=excluded.open_count,open_until=0,last_failure=excluded.last_failure,"
+                    "last_error=excluded.last_error,failure_class=excluded.failure_class,"
+                    "config_revision=excluded.config_revision,probe_started=0",
+                    (
+                        lane, failures, open_count, now, summary, failure_class,
+                        _provider_revision(lane),
+                    ),
+                )
+                if not row or str(row[2]) != "disabled":
+                    logger.warning("数据源 %s 已停用（%s）：%s", lane, failure_class, summary)
+                return
             if should_open:
                 open_count += 1
                 cooldown = (300, 900, 1800)[min(open_count - 1, 2)]
                 conn.execute(
                     "INSERT INTO source_health "
-                    "(lane,state,failures,open_count,open_until,last_failure,last_error) "
-                    "VALUES (?,'open',?,?,?,?,?) "
+                    "(lane,state,failures,open_count,open_until,last_failure,last_error,"
+                    "failure_class,config_revision,probe_started) "
+                    "VALUES (?,'open',?,?,?,?,?,?,?,0) "
                     "ON CONFLICT(lane) DO UPDATE SET state='open',failures=excluded.failures,"
                     "open_count=excluded.open_count,open_until=excluded.open_until,"
-                    "last_failure=excluded.last_failure,last_error=excluded.last_error",
-                    (lane, failures, open_count, now + cooldown, now, summary),
+                    "last_failure=excluded.last_failure,last_error=excluded.last_error,"
+                    "failure_class=excluded.failure_class,config_revision=excluded.config_revision,"
+                    "probe_started=0",
+                    (
+                        lane, failures, open_count, now + cooldown, now, summary,
+                        failure_class, _provider_revision(lane),
+                    ),
                 )
                 logger.warning(
                     "数据源 %s 暂停 %s 分钟：%s", lane, cooldown // 60, summary)
             else:
                 conn.execute(
                     "INSERT INTO source_health "
-                    "(lane,state,failures,open_count,open_until,last_failure,last_error) "
-                    "VALUES (?,'closed',?,0,0,?,?) "
+                    "(lane,state,failures,open_count,open_until,last_failure,last_error,"
+                    "failure_class,config_revision,probe_started) "
+                    "VALUES (?,'closed',?,0,0,?,?,?,?,0) "
                     "ON CONFLICT(lane) DO UPDATE SET failures=excluded.failures,"
-                    "last_failure=excluded.last_failure,last_error=excluded.last_error",
-                    (lane, failures, now, summary),
+                    "last_failure=excluded.last_failure,last_error=excluded.last_error,"
+                    "failure_class=excluded.failure_class,config_revision=excluded.config_revision",
+                    (lane, failures, now, summary, failure_class, _provider_revision(lane)),
                 )
+
+    def reset(self, lane: str) -> dict[str, dict]:
+        """Allow one explicit recovery probe without deleting audit history."""
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "UPDATE source_health SET state='open',open_until=0,probe_started=0,"
+                "config_revision=? WHERE lane=?",
+                (_provider_revision(lane), lane),
+            )
+        return self.status(lane)
 
 
 PROVIDER_HEALTH = ProviderHealthStore()
@@ -279,6 +446,10 @@ def _hard_connectivity_error(exc: BaseException) -> bool:
 def _rate_limited(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "429" in text or "rate limit" in text or "too many requests" in text
+
+
+def _permanent_failure(exc: BaseException) -> bool:
+    return classify_provider_failure(exc) in _PERMANENT_FAILURES
 
 
 def provider_call(
@@ -307,7 +478,7 @@ def provider_call(
                 lane, exc,
                 immediate=(
                     _hard_connectivity_error(exc) or _rate_limited(exc)
-                    or isinstance(exc, EmptyProviderResponse)
+                    or isinstance(exc, EmptyProviderResponse) or _permanent_failure(exc)
                 ),
             )
             raise
@@ -344,7 +515,10 @@ def akshare_call(
                 except CircuitOpenError:
                     raise
                 except Exception as exc:
-                    immediate = _hard_connectivity_error(exc) or _rate_limited(exc)
+                    immediate = (
+                        _hard_connectivity_error(exc) or _rate_limited(exc)
+                        or _permanent_failure(exc)
+                    )
                     if immediate or attempt_number >= attempts:
                         PROVIDER_HEALTH.failure(lane, exc, immediate=immediate)
                     raise
@@ -355,8 +529,11 @@ def akshare_call(
             return result
         except CircuitOpenError:
             raise
-        except (ImportError, OSError, TypeError, ValueError) as exc:
-            immediate = _hard_connectivity_error(exc) or _rate_limited(exc)
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            immediate = (
+                _hard_connectivity_error(exc) or _rate_limited(exc)
+                or _permanent_failure(exc)
+            )
             if immediate or attempt >= attempts:
                 raise
             delay = backoff * (2 ** (attempt - 1))
@@ -433,6 +610,8 @@ class EndpointFrameCache:
         ttl_days: float,
         *,
         min_mtime: float | None = None,
+        required_nonempty: bool = False,
+        required_columns: tuple[str, ...] = (),
     ) -> pd.DataFrame | None:
         path = self.path_for(endpoint, params)
         if not path.exists():
@@ -444,7 +623,16 @@ class EndpointFrameCache:
         if age > max(0.0, ttl_days) * 86400:
             return None
         try:
-            return pd.read_parquet(path)
+            frame = pd.read_parquet(path)
+            missing = [column for column in required_columns if column not in frame.columns]
+            if (required_nonempty and frame.empty) or missing:
+                logger.warning(
+                    "接口缓存语义无效，将重新拉取: %s%s",
+                    path,
+                    f"（缺少列 {', '.join(missing)}）" if missing else "（空响应）",
+                )
+                return None
+            return frame
         except Exception as exc:
             logger.warning("接口缓存损坏，将隔离并重新拉取: %s", path)
             try:
@@ -472,9 +660,20 @@ class EndpointFrameCache:
                 logger.exception("接口缓存隔离或修复入队失败: %s", path)
             return None
 
-    def put(self, endpoint: str, params: dict, frame: pd.DataFrame) -> None:
-        if frame is None:
+    def put(
+        self,
+        endpoint: str,
+        params: dict,
+        frame: pd.DataFrame,
+        *,
+        required_nonempty: bool = False,
+        required_columns: tuple[str, ...] = (),
+    ) -> None:
+        if frame is None or (required_nonempty and frame.empty):
             return
+        missing = [column for column in required_columns if column not in frame.columns]
+        if missing:
+            raise ValueError(f"接口响应缺少必需列: {', '.join(missing)}")
         target = self.path_for(endpoint, params)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=self.root)

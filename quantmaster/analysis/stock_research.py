@@ -1157,8 +1157,12 @@ def _relative_strength_values(
     beta: float | None = None
     correlation: float | None = None
     if benchmark is not None and not benchmark.empty and "close" in bars and "close" in benchmark:
-        stock_returns = pd.to_numeric(bars["close"], errors="coerce").pct_change()
-        benchmark_returns = pd.to_numeric(benchmark["close"], errors="coerce").pct_change()
+        stock_returns = pd.to_numeric(
+            bars["close"], errors="coerce"
+        ).pct_change(fill_method=None)
+        benchmark_returns = pd.to_numeric(
+            benchmark["close"], errors="coerce"
+        ).pct_change(fill_method=None)
         aligned = pd.concat(
             [stock_returns.rename("stock"), benchmark_returns.rename("benchmark")], axis=1, join="inner"
         ).dropna().tail(250)

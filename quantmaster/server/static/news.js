@@ -104,11 +104,9 @@
   }
 
   async function streamAnnotationEvents(onEvent) {
-    await window.QuantMasterManagement.ensureSettings();
-    const csrf = window.QuantMasterManagement.state.csrf;
     return window.QuantMasterNDJSON('/api/v1/news/reanalyze/stream', {
       method: 'POST', credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({limit: 100, batch_size: 5}),
     }, onEvent);
   }
@@ -129,7 +127,10 @@
   }
 
   function statusLabel(status) {
-    return {complete: '已标注', pending: '待标注', failed: '标注失败'}[status] || status || '待标注';
+    return {
+      complete: '已标注', pending: '待标注', failed: '退避重试',
+      recovery: '恢复中', dead_letter: '死信',
+    }[status] || status || '待标注';
   }
 
   function eventTemplate(item) {
@@ -243,33 +244,49 @@
     } finally { state.loading = false; }
   }
 
-  function factorChart(series) {
-    const svg = document.getElementById('news-factor-chart');
+  function factorChart(series, scaleMax) {
+    const container = document.getElementById('news-factor-chart');
     if (!series?.length) {
-      svg.innerHTML = '<text x="0" y="48" fill="var(--muted)" font-size="11">暂无足够的已标注资讯</text>';
+      if (typeof disposeChart === 'function') disposeChart('news-factor-chart');
+      container.innerHTML = '<span class="news-chart-empty">暂无足够的已标注资讯</span>';
       return;
     }
-    const width = 320;
-    const height = 92;
-    const values = series.map(item => Number(item[1] || 0));
-    const maxAbs = Math.max(.2, ...values.map(Math.abs));
-    const points = values.map((value, index) => {
-      const x = values.length === 1 ? width / 2 : index / (values.length - 1) * width;
-      const y = height / 2 - value / maxAbs * (height / 2 - 7);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-    svg.innerHTML = `<line x1="0" y1="46" x2="320" y2="46" stroke="var(--axis)" stroke-width="1"/>
-      <polyline points="${points}" fill="none" stroke="var(--s1)" stroke-width="1.75" vector-effect="non-scaling-stroke"/>
-      <circle cx="${points.split(' ').at(-1).split(',')[0]}" cy="${points.split(' ').at(-1).split(',')[1]}" r="3" fill="var(--s1)"/>`;
+    const maxAbs = Math.max(10, Number(scaleMax) || 20);
+    if (!window.echarts?.getInstanceByDom(container)) container.replaceChildren();
+    const chart = mkChart('news-factor-chart');
+    chart.setOption(baseOpt({
+      grid: {left: 28, right: 8, top: 10, bottom: 18},
+      tooltip: {trigger: 'axis', valueFormatter: value => `${Number(value).toFixed(1)}`},
+      xAxis: {
+        type: 'category', boundaryGap: false, data: series.map(item => item[0]),
+        axisLabel: {show: false}, axisLine: {lineStyle: {color: AXIS}},
+      },
+      yAxis: {
+        type: 'value', min: -maxAbs, max: maxAbs, interval: maxAbs,
+        axisLabel: {color: MUTED, fontSize: 9, formatter: value => value > 0 ? `+${value}` : String(value)},
+        splitLine: {lineStyle: {color: GRID}},
+      },
+      series: [{
+        id: 'market-sentiment', name: '大盘情绪', type: 'line', showSymbol: false,
+        data: series.map(item => Math.max(-maxAbs, Math.min(maxAbs, Number(item[1] || 0) * 100))),
+        lineStyle: {width: 2, color: CHART_COLORS.primary},
+        markLine: {silent: true, symbol: 'none', label: {show: false},
+          lineStyle: {color: AXIS, width: 1}, data: [{yAxis: 0}]},
+      }],
+    }), {notMerge: true});
   }
 
   function renderStats(data) {
     document.getElementById('news-stat-total').textContent = Number(data.total || 0).toLocaleString();
     document.getElementById('news-stat-coverage').textContent = `${Math.round(Number(data.coverage || 0) * 100)}%`;
-    document.getElementById('news-stat-pending').textContent = `${Number(data.pending || 0)} / ${Number(data.failed || 0)}`;
+    document.getElementById('news-stat-pending').textContent =
+      `${Number(data.pending || 0)} / ${Number(data.failed || 0)} / ${Number(data.dead_letter || 0)}`;
     document.getElementById('news-stat-important').textContent = Number(data.important || 0).toLocaleString();
     document.getElementById('news-halflife-days').textContent = Number(data.halflife_days || 3).toLocaleString();
     const series = data.sentiment_series || [];
+    const scale = data.display_scale || {};
+    const marketScale = Math.max(10,Number(scale.market_abs_max) || 20);
+    const sectorScale = Math.max(10,Number(scale.sector_abs_max) || 20);
     const market = data.market_sentiment || {};
     const hasMarket = Number(market.event_count || 0) > 0;
     const current = hasMarket ? Number(market.score || 0) : null;
@@ -278,17 +295,20 @@
     number.className = `sentiment-number ${current > 5 ? 'positive' : current < -5 ? 'negative' : ''}`;
     document.getElementById('news-market-label').textContent = hasMarket ? market.label : '暂无数据';
     document.getElementById('news-market-meta').textContent = hasMarket
-      ? `${Number(market.event_count).toLocaleString()} 条有效事件 · 当前加权值`
+      ? `${Number(market.event_count).toLocaleString()} 条有效事件 · 自适应显示 · 理论范围 ±100`
       : '等待达到置信度门槛的事件';
+    document.getElementById('news-axis-low').textContent = `-${marketScale} 偏空`;
+    document.getElementById('news-axis-high').textContent = `偏多 +${marketScale}`;
     const marker = document.getElementById('news-factor-marker');
-    marker.style.left = `${current === null ? 50 : Math.max(0, Math.min(100, (current + 100) / 2))}%`;
-    factorChart(series);
+    marker.style.left = `${current === null ? 50 : Math.max(0, Math.min(100, (current + marketScale) / (2 * marketScale) * 100))}%`;
+    factorChart(series,marketScale);
     const sectors = data.sector_scores || [];
+    document.getElementById('news-sector-scale').textContent = `自适应 ±${sectorScale}`;
     document.getElementById('news-sector-scores').innerHTML = sectors.length ? sectors.map(item => {
       const score = Number(item.score || 0);
       const direction = score > 5 ? 'positive' : score < -5 ? 'negative' : 'neutral';
       const signed = `${score > 0 ? '+' : ''}${score.toFixed(1)}`;
-      const magnitude = Math.min(1, Math.abs(score) / 100).toFixed(4);
+      const magnitude = Math.min(1, Math.abs(score) / sectorScale).toFixed(4);
       return `<div class="news-sector-row" title="利好 ${Number(item.positive || 0)} 条 · 利空 ${Number(item.negative || 0)} 条">
         <span><strong>${html(item.sector)}</strong><small>${Number(item.event_count || 0)} 条 · ${html(item.label)}</small></span>
         <i><b class="${direction}" style="--sector-magnitude:${magnitude}"></b></i>
@@ -633,6 +653,26 @@
       button.disabled = false;
       button.textContent = '处理待标注';
     }
+  };
+
+  document.getElementById('news-recover-dead').onclick = async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = '恢复中…';
+    try {
+      const result = await secure('/api/v1/news/reanalyze', {
+        method: 'POST', body: {mode: 'dead_letter', limit: 20, batch_size: 5},
+      });
+      const selected = Number(result.selected || 0);
+      const completed = Number(result.completed || 0);
+      const failed = Number(result.failed || 0);
+      report(
+        selected ? `死信恢复完成：成功 ${completed}，失败 ${failed}` : (result.reason || '没有到期死信'),
+        null, failed ? 'warning' : 'success',
+      );
+      await Promise.all([loadFeed(), loadStats()]);
+    } catch (error) { report('死信恢复失败', error); }
+    finally { button.disabled = false; button.textContent = '恢复死信'; }
   };
 
   function openSourceSettings() {

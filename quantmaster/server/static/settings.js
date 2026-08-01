@@ -3,7 +3,6 @@
 
   const state = {
     loaded: false,
-    csrf: '',
     config: null,
     secretActions: { llm: 'keep', tushare: 'keep' },
     migrationTimer: null,
@@ -39,7 +38,6 @@
       headers.set('Content-Type', 'application/json');
       options.body = JSON.stringify(options.body);
     }
-    if (state.csrf) headers.set('X-CSRF-Token', state.csrf);
     return window.QuantMasterAPI(path, {...options, headers});
   }
 
@@ -87,6 +85,21 @@
     if (['automation', 'lab'].includes(name)) loadAutomationOverview();
   }
 
+  function syncReasoningEffortOptions(normalize = false) {
+    const provider = form.elements['llm.provider'].value;
+    const select = form.elements['llm.reasoning_effort'];
+    const unsupported = provider === 'anthropic' ? new Set(['none', 'minimal']) : new Set();
+    [...select.options].forEach(option => {
+      const unavailable = unsupported.has(option.value);
+      option.hidden = unavailable;
+      option.disabled = unavailable;
+    });
+    if (normalize && unsupported.has(select.value)) select.value = 'medium';
+    document.getElementById('reasoning-effort-hint').textContent = provider === 'anthropic'
+      ? 'Anthropic 从低到最大；具体级别取决于所选模型'
+      : '支持范围取决于所选模型和兼容网关';
+  }
+
   document.getElementById('settings-nav').addEventListener('click', event => {
     const button = event.target.closest('[data-settings-section]');
     if (button) switchSection(button.dataset.settingsSection);
@@ -111,6 +124,7 @@
       }
       input.removeAttribute('aria-invalid');
     });
+    syncReasoningEffortOptions(true);
     document.getElementById('settings-config-path').textContent = config.config_path;
     updateSecretStates(config);
     for (const name of ['llm', 'tushare']) {
@@ -162,7 +176,6 @@
     if (state.loaded && !force) return;
     try {
       const data = await request('/api/v1/settings');
-      state.csrf = data.csrf_token;
       state.config = data;
       state.loaded = true;
       fillForm(data);
@@ -199,6 +212,7 @@
       markDirty('凭据填写完成后自动保存…');
       return;
     }
+    if (input.name === 'llm.provider') syncReasoningEffortOptions(true);
     if (['llm.provider', 'llm.base_url'].includes(input.name) || input.id === 'llm-secret') {
       scheduleAutomaticModelCheck();
     }
@@ -401,7 +415,7 @@
       const result = await request('/api/v1/settings', {method: 'PUT', body: update});
 
       if (result.settings) {
-        state.config = {...result.settings, csrf_token: state.csrf, runtime: result.runtime};
+        state.config = {...result.settings, runtime: result.runtime};
         updateSecretStates(state.config);
       }
       for (const name of ['llm', 'tushare']) {

@@ -15,6 +15,7 @@ Tushare 是 AKShare 连续重试失败后的 A 股日线备用源；每次接口
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
 from zoneinfo import ZoneInfo
@@ -32,6 +33,10 @@ from quantmaster.data.resilience import (
 
 logger = logging.getLogger(__name__)
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
+
+
+class TushareProviderError(RuntimeError):
+    """Normalize the SDK's untyped provider exceptions at the source boundary."""
 
 
 def _require_tushare():
@@ -53,7 +58,7 @@ def _instrument_type(symbol: str) -> str:
 
         instrument = InstrumentStore().get(symbol)
         return instrument.asset_type if instrument else ""
-    except Exception:
+    except (ImportError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
         return ""
 
 
@@ -126,6 +131,8 @@ class TushareSource(DataSource):
         ttl_days: int,
         *,
         provider_lane: str = "tushare",
+        required_nonempty: bool = False,
+        required_columns: tuple[str, ...] = (),
         **params,
     ) -> pd.DataFrame:
         clean = {key: value for key, value in params.items() if value not in (None, "")}
@@ -136,7 +143,13 @@ class TushareSource(DataSource):
             if force_refresh:
                 return None
             return self.cache.get(
-                endpoint, clean, ttl_days, min_mtime=min_mtime)
+                endpoint,
+                clean,
+                ttl_days,
+                min_mtime=min_mtime,
+                required_nonempty=required_nonempty,
+                required_columns=required_columns,
+            )
 
         cached = read_cache()
         if cached is not None:
@@ -155,11 +168,29 @@ class TushareSource(DataSource):
             cached = read_cache()
             if cached is not None:
                 return cached.copy()
-            result = method(**clean)
+            try:
+                result = method(**clean)
+            except Exception as exc:  # Tushare SDK intentionally raises plain Exception
+                raise TushareProviderError(str(exc).strip() or f"{endpoint} 调用失败") from exc
             frame = result if isinstance(result, pd.DataFrame) else pd.DataFrame(result)
-            self.cache.put(endpoint, clean, frame)
+            if required_nonempty and frame.empty:
+                from quantmaster.data.resilience import EmptyProviderResponse
+
+                raise EmptyProviderResponse(f"{endpoint} 返回空数据")
+            missing = [column for column in required_columns if column not in frame.columns]
+            if missing:
+                raise ValueError(f"{endpoint} 响应缺少必需列: {', '.join(missing)}")
+            self.cache.put(
+                endpoint,
+                clean,
+                frame,
+                required_nonempty=required_nonempty,
+                required_columns=required_columns,
+            )
             return frame.copy()
 
+        if required_nonempty:
+            return provider_call(provider_lane, key, fetch, empty_opens=True)
         return provider_call(provider_lane, key, fetch)
 
     @staticmethod

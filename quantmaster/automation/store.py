@@ -30,6 +30,9 @@ DEFAULT_JOBS = {
     "periodic_news_scan": (True, {"type": "interval", "minutes": 60, "window": "07:00-23:30"}),
     "daily_close_pipeline": (True, {"type": "daily", "times": ["15:20", "15:35", "15:50"], "weekdays": True}),
     "news_digest": (True, {"type": "daily", "times": ["11:35", "15:25", "21:00"]}),
+    "news_dead_letter_recovery": (
+        True, {"type": "daily", "times": ["03:45"]},
+    ),
     "paper_rebalance_proposal": (False, {"type": "daily", "times": ["15:30"], "weekdays": True}),
 }
 
@@ -131,7 +134,7 @@ class AutomationStore:
                 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_chat_created
                     ON conversation_messages(channel,account_id,chat_id,created_at DESC);
-                PRAGMA user_version=4;
+                PRAGMA user_version=5;
             """)
             target_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(notification_targets)")}
@@ -154,6 +157,12 @@ class AutomationStore:
             if "mode" not in analysis_columns:
                 conn.execute(
                     "ALTER TABLE analysis_deliveries ADD COLUMN mode TEXT NOT NULL DEFAULT 'deep'")
+            conn.execute(
+                "UPDATE task_runs SET status='interrupted_legacy',finished_at=?,"
+                "error=CASE WHEN error='' THEN 'migrated to unified durable jobs' ELSE error END "
+                "WHERE status='running'",
+                (utc_now(),),
+            )
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -190,7 +199,7 @@ class AutomationStore:
     def targets(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM notification_targets ORDER BY rowid").fetchall()
-        return [self._decode_row(row, ("overrides",)) for row in rows]
+        return [self._decode_row(row, ("overrides",)) or {} for row in rows]
 
     def target(self, target_id: str) -> dict | None:
         with self._conn() as conn:
@@ -471,7 +480,7 @@ class AutomationStore:
     def jobs(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM job_templates ORDER BY rowid").fetchall()
-        return [self._decode_row(row, ("schedule", "args")) for row in rows]
+        return [self._decode_row(row, ("schedule", "args")) or {} for row in rows]
 
     def job(self, name: str) -> dict | None:
         with self._conn() as conn:
@@ -516,7 +525,7 @@ class AutomationStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM task_runs ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
-        return [self._decode_row(row, ("result",)) for row in rows]
+        return [self._decode_row(row, ("result",)) or {} for row in rows]
 
     def save_event(self, event: AlertEvent) -> tuple[dict, bool]:
         value = event.to_dict()
@@ -539,7 +548,10 @@ class AutomationStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM alert_events ORDER BY occurred_at DESC LIMIT ?", (limit,)).fetchall()
-        return [self._decode_row(row, ("symbols", "evidence", "source_urls", "payload")) for row in rows]
+        return [
+            self._decode_row(row, ("symbols", "evidence", "source_urls", "payload")) or {}
+            for row in rows
+        ]
 
     def enqueue(self, event_id: str, target_id: str) -> bool:
         with self._conn() as conn:
@@ -562,7 +574,10 @@ class AutomationStore:
                 "ORDER BY d.next_attempt_at LIMIT ?",
                 (time.time(), limit),
             ).fetchall()
-        return [self._decode_row(row, ("symbols", "evidence", "source_urls", "payload")) for row in rows]
+        return [
+            self._decode_row(row, ("symbols", "evidence", "source_urls", "payload")) or {}
+            for row in rows
+        ]
 
     def delivery_success(self, delivery_id: str) -> None:
         with self._conn() as conn:
@@ -727,7 +742,7 @@ class AutomationStore:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        return [self._decode_row(row, ("before_value", "after_value")) for row in rows]
+        return [self._decode_row(row, ("before_value", "after_value")) or {} for row in rows]
 
     def acquire_lease(self, name: str, owner: str, ttl: float = 30.0) -> bool:
         now = time.time()
@@ -845,6 +860,13 @@ class AutomationStore:
             rows = conn.execute(
                 "SELECT * FROM market_breadth ORDER BY observed_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def latest_breadth(self) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM market_breadth ORDER BY observed_at DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def cleanup(self, retention_days: int) -> None:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat(timespec="seconds")

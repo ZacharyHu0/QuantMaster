@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,41 @@ def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp
     assert store.runtime_state("scheduled_close") == "2026-07-30"
 
 
+def test_theme_staging_keeps_old_catalog_until_atomic_quality_commit(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    old = {
+        "code": "OLD", "name": "旧目录", "members": ["600000.SH"],
+        "source": "eastmoney-concept",
+    }
+    store.replace_themes([old])
+    staging = store.begin_theme_sync("ths:concept", "directory-hash", 1)
+    assert staging["attempted_count"] == 0
+    fresh = {
+        "code": "301558", "name": "新目录", "members": ["920130.BJ"],
+        "source": "ths:concept",
+    }
+    store.save_theme_sync_item(
+        staging["run_id"], fresh["code"], fresh["name"], payload=fresh, pages=2,
+    )
+
+    assert store.themes() == [old]
+
+    store.commit_theme_sync(staging["run_id"], [fresh], [])
+    assert store.themes() == [fresh]
+    resumed = store.begin_theme_sync("ths:concept", "directory-hash", 1)
+    assert resumed["attempted_count"] == 1
+
+
+def test_rotation_scatter_axes_use_observed_ratio_buckets():
+    script = (
+        Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
+    ).read_text(encoding="utf-8")
+
+    assert "[5,10,20,40,60,80,100]" in script
+    assert "Math.max(40" not in script
+    assert "Math.max(60" not in script
+
+
 def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_path):
     jobs = RotationJobStore(tmp_path / "jobs.sqlite")
     created = jobs.create({"scope": "all", "mode": "incremental", "source": "local"})
@@ -76,6 +112,54 @@ def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_
     assert retried["id"] != claimed["id"]
     assert retried["spec"] == claimed["spec"]
     assert any(event["type"] == "retry_of" for event in jobs.events(retried["id"]))
+
+
+def test_rotation_worker_shutdown_releases_lease_without_cancelling_job(
+    tmp_path, monkeypatch,
+):
+    jobs = RotationJobStore(tmp_path / "jobs.sqlite")
+    service = RotationService(RotationStore(tmp_path / "rotation"), jobs)
+    worker = RotationWorker(service)
+    created = jobs.create({"scope": "themes", "mode": "incremental", "source": "auto"})
+    claimed = jobs.claim(worker.identity.value)
+    assert claimed and claimed["id"] == created["id"]
+
+    def interrupted_build(_spec, *, progress, cancelled):
+        del progress
+        assert cancelled()
+        raise InterruptedError("worker stopping")
+
+    monkeypatch.setattr(service, "build", interrupted_build)
+    worker._stop.set()
+    worker._run_job(claimed)
+
+    handed_off = jobs.get(created["id"])
+    assert handed_off and handed_off["status"] == "running"
+    assert handed_off["cancel_requested"] is False
+    assert handed_off["lease_expires_at"] == 0
+    assert jobs.events(created["id"])[-1]["type"] == "lease_released"
+    reclaimed = jobs.claim("worker-next")
+    assert reclaimed and reclaimed["id"] == created["id"]
+    assert reclaimed["attempt"] == 2
+
+
+def test_rotation_schedule_marks_success_only_after_fresh_completion(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    worker = RotationWorker(service)
+    spec = RotationJobSpec(scope="close", source="auto")
+    date_key = str(pd.Timestamp.now(tz="Asia/Shanghai").date())
+
+    worker._record_scheduled_result(spec, succeeded=False)
+
+    retry = store.runtime_state("scheduled_close_retry").split("|")
+    assert retry[:2] == [date_key, "1"]
+    assert store.runtime_state("scheduled_close") == ""
+    assert worker._scheduled_retry_due("close", date_key) is False
+
+    worker._record_scheduled_result(spec, succeeded=True)
+    assert store.runtime_state("scheduled_close") == date_key
+    assert store.runtime_state("scheduled_close_retry") == ""
 
 
 def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, monkeypatch):
@@ -140,7 +224,7 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     industries = service.snapshot("industries")
     themes = service.snapshot("themes")
     etf_flows = service.snapshot("etf_flows")
-    assert temperature["meta"]["snapshot_id"] == industries["meta"]["snapshot_id"]
+    assert temperature["meta"]["batch_id"] == industries["meta"]["batch_id"]
     assert len(industries["data"]["items"]) == 4
     assert len(themes["data"]["items"]) == 1
     assert "tushare:fund_nav" in etf_flows["meta"]["sources"]
@@ -154,10 +238,62 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         progress=lambda *_: None,
         cancelled=lambda: False,
     )
-    assert set(close_result["updated"]) == {
-        "industries", "structure", "taxonomy", "temperature", "themes",
-    }
+    assert close_result["updated"] == []
+    assert close_result["outcome"] == "unchanged"
     assert trend_calls == [len(close), len(close)]
+
+
+def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues(
+    tmp_path, monkeypatch,
+):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    close, amount = _market()
+    names = {symbol: f"股票{index}" for index, symbol in enumerate(close.columns)}
+    monkeypatch.setattr(
+        "quantmaster.rotation.service._expected_market_session",
+        lambda: str(close.index[-1].date()),
+    )
+    service.loader.market_matrices = lambda **_: (
+        close, amount, names, len(close.columns), ["test:local"],
+    )
+    store.replace_themes([{
+        "code": "THS_SAMPLE",
+        "name": "受限题材",
+        "members": list(close.columns[:16]),
+        "source": "ths:concept",
+    }])
+
+    class PartialProvider:
+        def __init__(self, _store):
+            pass
+
+        @staticmethod
+        def sync_market_history(progress, cancelled, *, rebuild):
+            return {"expected_as_of": str(close.index[-1].date()), "issues": []}
+
+        @staticmethod
+        def sync_themes(progress, cancelled):
+            return {
+                "catalog": 100,
+                "available": 75,
+                "quality_status": "partial",
+                "issues": ["受限目录", "受限目录"],
+            }
+
+    monkeypatch.setattr("quantmaster.rotation.provider.RotationProvider", PartialProvider)
+    service.build(
+        RotationJobSpec(scope="themes", source="auto"),
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+    )
+
+    quality = service.snapshot("themes")["meta"]["quality"]
+    assert quality["status"] == "partial"
+    assert quality["eligible_count"] == 1
+    assert quality["expected_count"] == 100
+    assert quality["coverage"] == 0.01
+    assert quality["issues"].count("受限目录") == 1
 
 
 def test_rotation_job_cancel_queued_is_terminal(tmp_path):
@@ -280,7 +416,11 @@ def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkey
     bootstrap = RotationWorker(service)
     monkeypatch.setattr(bootstrap, "_run", lambda: bootstrap._stop.wait())
     bootstrap.start(bootstrap_local=True)
-    assert service.jobs.list()[0]["spec"] == {
+    specs = [item["spec"] for item in service.jobs.list()]
+    assert {
         "scope": "close", "mode": "incremental", "source": "local",
-    }
+    } in specs
+    assert {
+        "scope": "themes", "mode": "incremental", "source": "auto",
+    } in specs
     bootstrap.stop()

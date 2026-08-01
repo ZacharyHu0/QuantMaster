@@ -6,6 +6,7 @@ import socket
 import threading
 import uuid
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.automation.service import AutomationService
@@ -18,7 +19,7 @@ STANDBY_RETRY_SECONDS = 5.0
 class AutomationRuntime:
     def __init__(self, service: AutomationService | None = None):
         self.service = service or AutomationService()
-        self.scheduler = None
+        self.scheduler: Any | None = None
         self.owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.started = False
         self.leader = False
@@ -52,6 +53,9 @@ class AutomationRuntime:
             self.service.store.release_lease("scheduler", self.owner)
             self.leader = False
             return False
+        jobs = getattr(self.service, "jobs", None)
+        if jobs is not None:
+            jobs.start()
         self.start_channels()
         return True
 
@@ -130,7 +134,14 @@ class AutomationRuntime:
             else:
                 self.service.feishu.listen_forever(self._handle_message, stop_event)
         except Exception as exc:  # pragma: no cover - 外部 SDK/网络错误路径
-            logger.exception("%s Bot 接收线程退出", channel)
+            normal_close = self._channel_stops[channel].is_set() or any(
+                token in str(exc).casefold()
+                for token in ("normal closure", "closed normally", "close code 1000")
+            )
+            if normal_close:
+                logger.info("%s Bot 接收线程正常退出", channel)
+                return
+            logger.exception("%s Bot 接收线程异常退出", channel)
             account = self.service.store.bot_account(channel)
             if account:
                 self.service.store.set_bot_status(channel, account["account_id"], "degraded", str(exc))
@@ -189,7 +200,11 @@ class AutomationRuntime:
         job = self.service.store.job(name)
         if not job or not job["enabled"] or not self._within_schedule(job["schedule"]):
             return
-        self.service.run_task(name)
+        slot = datetime.now(self.timezone).replace(second=0, microsecond=0).isoformat()
+        self.service.run_task(
+            name,
+            idempotency_key=f"scheduler:{name}:{slot}",
+        )
 
     def reload_jobs(self) -> None:
         if not self.scheduler or not self.leader:
@@ -348,6 +363,9 @@ class AutomationRuntime:
                 self.scheduler.shutdown(wait=False)
             if self.leader:
                 self.service.store.release_lease("scheduler", self.owner)
+            jobs = getattr(self.service, "jobs", None)
+            if jobs is not None:
+                jobs.pause()
             self.scheduler, self.leader, self.started = None, False, False
         if standby_thread and standby_thread is not threading.current_thread():
             standby_thread.join(timeout=2)

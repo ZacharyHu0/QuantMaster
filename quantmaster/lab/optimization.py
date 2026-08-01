@@ -210,16 +210,17 @@ class OptimizationRunner:
             raise RuntimeError("多目标优化需要 Optuna：pip install 'quantmaster[ml]'") from exc
         started = time.monotonic()
         deadline = started + spec.budget_hours * 3600
+        root = self.artifact_root / study_id
+        root.mkdir(parents=True, exist_ok=True)
         samples = make_multi_horizon_samples(
             panel, horizons=spec.protocol.horizons,
             sequence_length=spec.sequence_length, membership=membership,
             fundamentals=fundamentals, feature_spec=spec.features,
+            storage_dir=root / "sample-store-v3",
         )
         dates = pd.DatetimeIndex(panel["close"].index)
         mature_dates = dates[:-max(spec.protocol.horizons)]
         development_folds, sealed = walk_forward_folds(mature_dates, spec.protocol)
-        root = self.artifact_root / study_id
-        root.mkdir(parents=True, exist_ok=True)
         storage_path = (root / "optuna.sqlite").resolve()
         from quantmaster.lab.ml import capabilities
 
@@ -363,7 +364,8 @@ class OptimizationRunner:
         calibration_models = fit_probability_calibrators(
             development_predictions, roundtrip_cost=cost,
         )
-        sealed_frames, artifacts = [], []
+        sealed_frames: list[pd.DataFrame] = []
+        artifacts: list[dict[str, Any]] = []
         sealed_folds = _sealed_folds(mature_dates, sealed, spec)
         for number, fold in enumerate(sealed_folds, start=1):
             if time.monotonic() >= deadline:

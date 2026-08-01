@@ -20,6 +20,51 @@ def content_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def split_factor_references(value: str) -> list[str]:
+    """Split a factor list only on top-level commas inside expression-safe syntax."""
+    result: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+    for character in str(value):
+        if escaped:
+            current.append(character)
+            escaped = False
+            continue
+        if quote:
+            current.append(character)
+            if character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            current.append(character)
+        elif character in "([{":
+            depth += 1
+            current.append(character)
+        elif character in ")]}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("因子表达式括号不匹配")
+            current.append(character)
+        elif character == "," and depth == 0:
+            item = "".join(current).strip()
+            if item:
+                result.append(item)
+            current = []
+        else:
+            current.append(character)
+    if quote or depth:
+        raise ValueError("因子表达式引号或括号不完整")
+    item = "".join(current).strip()
+    if item:
+        result.append(item)
+    return result
+
+
 class FactorStrategySpec(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -32,7 +77,7 @@ class FactorStrategySpec(ContractModel):
 
     @model_validator(mode="after")
     def validate_factors(self):
-        names = [item.strip() for item in self.factor.split(",") if item.strip()]
+        names = split_factor_references(self.factor)
         if not names:
             raise ValueError("因子策略至少需要一个因子")
         if len(names) > 20:
@@ -216,7 +261,7 @@ def build_strategy(
         )
     from quantmaster.factors.fundamental import resolve_factor
 
-    names = [item.strip() for item in spec.factor.split(",") if item.strip()]
+    names = split_factor_references(spec.factor)
     factors = [resolve_factor(name, symbols, start, end) for name in names]
     if len(factors) == 1:
         return FactorStrategy(
@@ -227,6 +272,43 @@ def build_strategy(
         factors, top_n=spec.top_n, rebalance=spec.rebalance,
         cap_weight=spec.cap_weight, weighting=spec.weighting,
     )
+
+
+def preflight_strategy(spec: BacktestSpec) -> None:
+    """Resolve strategy references locally before a durable run is accepted."""
+    strategy = spec.strategy
+    if isinstance(strategy, LabVersionStrategySpec):
+        from quantmaster.lab.store import LabStore
+
+        version = LabStore().version(strategy.version_id)
+        if version is None:
+            raise ValueError("Quant Lab 版本不存在")
+        if strategy.horizon not in tuple((version.get("spec") or {}).get("horizons") or ()):
+            raise ValueError(f"Quant Lab 版本没有 {strategy.horizon} 日预测头")
+        return
+    if not isinstance(strategy, FactorStrategySpec):
+        return
+
+    from quantmaster.factors.base import ExpressionFactor
+    from quantmaster.factors.fundamental import FUNDAMENTAL_FIELD_BY_FACTOR
+    from quantmaster.factors.library import BUILTIN_FACTORS
+    from quantmaster.lab.store import LabStore
+
+    for reference in split_factor_references(strategy.factor):
+        if reference in BUILTIN_FACTORS or reference in FUNDAMENTAL_FIELD_BY_FACTOR:
+            continue
+        stored = LabStore().factor_reference(reference)
+        if stored is not None:
+            if stored.get("kind") != "expression":
+                raise ValueError(
+                    f"Quant Lab 因子“{reference}”不可直接执行；请改用 Lab 版本策略"
+                )
+            expression = str((stored.get("spec") or {}).get("expression") or "").strip()
+            if not expression:
+                raise ValueError(f"Quant Lab 因子“{reference}”没有可执行表达式")
+            ExpressionFactor(expression)
+            continue
+        ExpressionFactor(reference)
 
 
 def signal_is_due(

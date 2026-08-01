@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-125 -125 250 250" role="img" aria-labelledby="title desc">
+  <title id="title">QuantMaster</title>
+  <desc id="desc">An eye-like orbit, target pupil, and blue square factor.</desc>
+  <g fill="none" stroke="#f4f7fb" stroke-linecap="round" stroke-linejoin="round">
+    <circle r="77" stroke-width="14"/>
+    <path d="M-108 28c25-74 98-115 170-78 20 10 37 26 48 46" stroke-width="9"/>
+  </g>
+  <rect x="67" y="-77" width="39" height="39" fill="#3987e5"/>
+  <circle r="18" fill="#f4f7fb"/>
+</svg>

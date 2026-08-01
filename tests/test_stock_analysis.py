@@ -1058,6 +1058,7 @@ def test_openai_native_search_parses_citations(monkeypatch):
     assert results[0]["title"] == "交易所公告"
     assert client.web_search_status()["supported"] is True
     assert calls[0]["json"]["include"] == ["web_search_call.action.sources"]
+    assert calls[0]["json"]["reasoning"] == {"effort": "medium"}
 
 
 def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatch):
@@ -1109,6 +1110,7 @@ def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatc
     assert calls[1] == {
         "model": "gateway-search",
         "input": "查询公告",
+        "reasoning": {"effort": "medium"},
         "tools": [{"type": "web_search"}],
     }
     assert client.web_search_status()["supported"] is True
@@ -1176,6 +1178,7 @@ def test_anthropic_native_search_resumes_pause_turn_and_parses_sources(monkeypat
     ]
     assert len(calls) == 2
     assert calls[1]["json"]["messages"][1]["role"] == "assistant"
+    assert calls[0]["json"]["output_config"] == {"effort": "medium"}
     assert client.web_search_status()["supported"] is True
 
 

@@ -253,3 +253,25 @@ def test_optuna_runner_persists_a_ridge_baseline_and_reuses_sealed_blocks(
     resumed = runner.run("study-unit", spec, panel)
     assert resumed["status"] == "completed"
     assert resumed["prediction_sha256"] == result["prediction_sha256"]
+
+
+def test_multi_horizon_sample_store_uses_memmap_and_compact_metadata(tmp_path):
+    panel = _panel(days=180, symbols=4)
+    root = tmp_path / "sample-store-v3"
+
+    samples = make_multi_horizon_samples(
+        panel,
+        sequence_length=20,
+        feature_spec=FeatureSetSpec(
+            groups=("price_volume_v2",), minimum_coverage=0.75,
+        ),
+        storage_dir=root,
+    )
+
+    assert isinstance(samples.values, np.memmap)
+    assert isinstance(samples.metadata.date_positions, np.memmap)
+    assert (root / "features.npy").is_file()
+    assert len(samples.metadata) == len(samples.values)
+    first = samples.metadata[0]
+    assert first["symbol"] in panel["close"].columns
+    assert set(first["target_dates"]) == {"1", "3", "5", "7"}

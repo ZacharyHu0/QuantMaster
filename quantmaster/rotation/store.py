@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import logging
@@ -97,9 +98,41 @@ class RotationStore:
             (strict_json_dumps({"l2_codes": [], "theme_limit": 16}), time.time()),
         )
 
+    @staticmethod
+    def _cache_v2(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE theme_sync_runs (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                directory_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_count INTEGER NOT NULL,
+                completed_count INTEGER NOT NULL DEFAULT 0,
+                issues_json TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(source,directory_hash)
+            );
+            CREATE TABLE theme_sync_items (
+                run_id TEXT NOT NULL REFERENCES theme_sync_runs(id) ON DELETE CASCADE,
+                code TEXT NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                pages INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(run_id,code)
+            );
+            CREATE INDEX idx_theme_sync_items_status
+                ON theme_sync_items(run_id,status,code);
+            """
+        )
+
     def _initialize(self) -> None:
         with self._cache() as connection:
-            migrate_schema(connection, ((1, self._cache_v1),))
+            migrate_schema(connection, ((1, self._cache_v1), (2, self._cache_v2)))
         with self._preferences() as connection:
             migrate_schema(connection, ((1, self._preferences_v1),))
 
@@ -247,6 +280,153 @@ class RotationStore:
             if isinstance(item, dict):
                 result.append(item)
         return result
+
+    def begin_theme_sync(
+        self, source: str, directory_hash: str, total_count: int,
+    ) -> dict[str, Any]:
+        """Create or resume one source-coherent theme catalog staging run."""
+        now = time.time()
+        with self._cache() as connection:
+            row = connection.execute(
+                "SELECT id,status FROM theme_sync_runs WHERE source=? AND directory_hash=?",
+                (source, directory_hash),
+            ).fetchone()
+            if row is None:
+                run_id = uuid.uuid4().hex
+                connection.execute(
+                    "INSERT INTO theme_sync_runs(id,source,directory_hash,status,total_count,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    (run_id, source, directory_hash, "running", int(total_count), now, now),
+                )
+            else:
+                run_id = str(row["id"])
+                connection.execute(
+                    "UPDATE theme_sync_runs SET status='running',total_count=?,updated_at=? "
+                    "WHERE id=?",
+                    (int(total_count), now, run_id),
+                )
+            rows = connection.execute(
+                "SELECT code,payload_json,pages FROM theme_sync_items "
+                "WHERE run_id=? AND status='complete'",
+                (run_id,),
+            ).fetchall()
+            attempted_count = int(connection.execute(
+                "SELECT COUNT(*) FROM theme_sync_items WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0])
+        items: dict[str, dict[str, Any]] = {}
+        for item in rows:
+            try:
+                payload = json.loads(str(item["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                items[str(item["code"])] = payload
+        return {
+            "run_id": run_id,
+            "items": items,
+            "attempted_count": attempted_count,
+        }
+
+    def save_theme_sync_item(
+        self,
+        run_id: str,
+        code: str,
+        name: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        error: str = "",
+        pages: int = 0,
+    ) -> None:
+        now = time.time()
+        status = "complete" if payload else "failed"
+        with self._cache() as connection:
+            connection.execute(
+                "INSERT INTO theme_sync_items(run_id,code,name,status,payload_json,error,pages,"
+                "updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,code) DO UPDATE SET "
+                "name=excluded.name,status=excluded.status,payload_json=excluded.payload_json,"
+                "error=excluded.error,pages=excluded.pages,updated_at=excluded.updated_at",
+                (
+                    run_id,
+                    str(code),
+                    str(name),
+                    status,
+                    strict_json_dumps(payload) if payload else "",
+                    str(error)[:500],
+                    max(0, int(pages)),
+                    now,
+                ),
+            )
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM theme_sync_items WHERE run_id=? AND status='complete'",
+                (run_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE theme_sync_runs SET completed_count=?,updated_at=? WHERE id=?",
+                (int(completed), now, run_id),
+            )
+
+    def commit_theme_sync(
+        self,
+        run_id: str,
+        themes: list[dict[str, Any]],
+        issues: list[str],
+    ) -> None:
+        """Atomically publish a validated staging run and its audit outcome."""
+        observed_at = time.time()
+        rows = [
+            (
+                str(theme.get("code") or "").strip().upper(),
+                str(theme.get("name") or "").strip(),
+                strict_json_dumps(theme),
+                observed_at,
+            )
+            for theme in themes
+            if str(theme.get("code") or "").strip()
+            and str(theme.get("name") or "").strip()
+            and theme.get("members")
+        ]
+        if not rows:
+            raise ValueError("题材暂存目录没有可提交的有效成分")
+        with self._cache() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM theme_catalog")
+            connection.executemany(
+                "INSERT INTO theme_catalog(code,name,payload_json,observed_at) VALUES(?,?,?,?)",
+                rows,
+            )
+            connection.execute(
+                "UPDATE theme_sync_runs SET status='completed',completed_count=?,issues_json=?,"
+                "updated_at=? WHERE id=?",
+                (len(rows), strict_json_dumps(issues), observed_at, run_id),
+            )
+            connection.commit()
+
+    def reuse_published_theme_sync(self, run_id: str, issues: list[str]) -> None:
+        """Close a resumed staging run without rewriting its published catalog.
+
+        A fully traversed partial catalog can be reused when the upstream directory
+        is unchanged.  Rewriting ``theme_catalog`` would incorrectly make the old
+        observations look freshly downloaded, so only the run audit is updated.
+        """
+        with self._cache() as connection:
+            completed = int(connection.execute(
+                "SELECT COUNT(*) FROM theme_sync_items WHERE run_id=? AND status='complete'",
+                (run_id,),
+            ).fetchone()[0])
+            connection.execute(
+                "UPDATE theme_sync_runs SET status='completed',completed_count=?,"
+                "issues_json=?,updated_at=? WHERE id=?",
+                (completed, strict_json_dumps(issues), time.time(), run_id),
+            )
+
+    def fail_theme_sync(self, run_id: str, issues: list[str]) -> None:
+        with self._cache() as connection:
+            connection.execute(
+                "UPDATE theme_sync_runs SET status='incomplete',issues_json=?,updated_at=? "
+                "WHERE id=?",
+                (strict_json_dumps(issues), time.time(), run_id),
+            )
 
     def runtime_state(self, key: str) -> str:
         with self._cache() as connection:
@@ -433,6 +613,23 @@ class RotationJobStore:
             )
         return cursor.rowcount == 1
 
+    def release_for_handoff(self, job_id: str, owner: str) -> bool:
+        """Expire an owned lease without changing the durable task outcome."""
+        now = time.time()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET lease_expires_at=0,heartbeat_at=?,updated_at=? "
+                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
+                (now, now, job_id, owner),
+            )
+            if cursor.rowcount:
+                self._event(connection, job_id, {
+                    "type": "lease_released",
+                    "owner": owner,
+                    "reason": "worker_shutdown",
+                })
+        return cursor.rowcount == 1
+
     def progress(
         self, job_id: str, owner: str, progress: int, phase: str, detail: str = "",
     ) -> None:
@@ -466,12 +663,19 @@ class RotationJobStore:
 
     def complete(self, job_id: str, owner: str, result: dict[str, Any]) -> None:
         now = time.time()
+        outcome = str(result.get("outcome") or "updated")
+        phase = {
+            "updated": "分析已更新",
+            "partial": "部分更新完成",
+            "unchanged": "数据未推进",
+        }.get(outcome, "分析已完成")
+        detail = "；".join(str(item) for item in result.get("warnings") or [])[:1000]
         with self._connect() as connection:
             cursor = connection.execute(
-                "UPDATE jobs SET status='completed',progress=100,phase='分析已更新',"
-                "detail='',result_json=?,error='',lease_expires_at=0,updated_at=? "
+                "UPDATE jobs SET status='completed',progress=100,phase=?,"
+                "detail=?,result_json=?,error='',lease_expires_at=0,updated_at=? "
                 "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
-                (strict_json_dumps(result), now, job_id, owner),
+                (phase, detail, strict_json_dumps(result), now, job_id, owner),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("任务租约已失效")
@@ -519,7 +723,9 @@ class RotationJobStore:
             self._event(connection, job_id, {"type": "retried_as", "job_id": created["id"]})
         return created
 
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+    def events(
+        self, job_id: str, after: int = 0, limit: int = 500,
+    ) -> builtins.list[dict[str, Any]]:
         if self.get(job_id) is None:
             raise KeyError(job_id)
         with self._connect() as connection:

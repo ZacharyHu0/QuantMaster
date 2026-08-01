@@ -18,6 +18,12 @@ _cached: dict[str, Any] | None = None
 _cached_at = 0.0
 
 
+def invalidate_diagnostics() -> None:
+    global _cached_at
+    with _lock:
+        _cached_at = 0.0
+
+
 def _refresh() -> None:
     global _cached, _cached_at, _refreshing
     try:
@@ -79,4 +85,3 @@ def diagnostics(*, wait_for_first: bool = True) -> dict[str, Any]:
             action="稍后刷新后台状态。",
         )],
     }
-

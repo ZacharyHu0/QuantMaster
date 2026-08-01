@@ -18,9 +18,11 @@ from quantmaster.data import registry
 from quantmaster.data.base import DataSource, Market
 from quantmaster.data.resilience import (
     PROVIDER_HEALTH,
+    CircuitOpenError,
     EndpointFrameCache,
     TushareRateLimiter,
     akshare_call,
+    classify_provider_failure,
     provider_call,
 )
 from quantmaster.data.storage import BarStore
@@ -169,6 +171,45 @@ def test_tushare_permission_gated_endpoint_can_use_an_isolated_health_lane(
 
     assert len(frame) == 1
     assert lanes == ["tushare:dc-concept"]
+
+
+def test_tushare_required_nonempty_ignores_poisoned_empty_cache(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.provider_call",
+        lambda lane, key, fetch, **kwargs: fetch(),
+    )
+    cache = EndpointFrameCache("tushare", root=tmp_path / "cache")
+    params = {
+        "trade_date": "20250529",
+        "fields": "ts_code,trade_date,open,high,low,close,vol,amount",
+    }
+    cache.put("daily", params, pd.DataFrame())
+
+    class FakePro:
+        calls = 0
+
+        def daily(self, **kwargs):
+            self.calls += 1
+            return pd.DataFrame([{
+                "ts_code": "600000.SH", "trade_date": kwargs["trade_date"],
+                "open": 10.0, "high": 10.2, "low": 9.9, "close": 10.1,
+                "vol": 100, "amount": 1000,
+            }])
+
+    source = TushareSource(cache)
+    source._api = FakePro()
+    result = source._call(
+        "daily", 1, required_nonempty=True,
+        required_columns=("ts_code", "trade_date"), **params,
+    )
+
+    assert len(result) == 1
+    assert source._api.calls == 1
+    assert len(pd.read_parquet(cache.path_for("daily", params))) == 1
 
 
 def test_current_session_rejects_endpoint_cache_written_before_close():
@@ -672,6 +713,69 @@ def test_akshare_proxy_failure_opens_circuit_before_queued_calls(isolated_config
     health = PROVIDER_HEALTH.status("akshare:eastmoney")["akshare:eastmoney"]
     assert health["state"] == "open"
     assert health["suppressed"] >= 1
+
+
+def test_permanent_provider_failure_stays_disabled_until_config_changes(isolated_config):
+    isolated_config.data.tushare_token = "old-token"
+    lane = "tushare:dc-permission-test"
+    calls = 0
+
+    def denied():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("抱歉，您没有权限访问该接口")
+
+    with pytest.raises(RuntimeError):
+        provider_call(lane, "permission", denied)
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["state"] == "disabled"
+    assert health["failure_class"] == "permission"
+
+    with pytest.raises(CircuitOpenError):
+        provider_call(lane, "blocked", denied)
+    assert calls == 1
+
+    isolated_config.data.tushare_token = "new-token"
+    assert provider_call(lane, "reconfigured", lambda: "ok") == "ok"
+    assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "closed"
+
+
+def test_tushare_endpoint_permission_wording_migrates_to_disabled(isolated_config):
+    message = "抱歉，您没有接口(dc_index)访问权限，权限详情请查看文档。"
+    assert classify_provider_failure(RuntimeError(message)) == "permission"
+
+    lane = "tushare:dc-concept-observed-wording"
+    with PROVIDER_HEALTH._conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO source_health"
+            "(lane,state,failures,open_count,open_until,last_failure,last_success,last_error,"
+            "suppressed,failure_class,config_revision,probe_started) "
+            "VALUES (?,'open',2,1,9999999999,0,0,?,0,'transient_upstream','',0)",
+            (lane, message),
+        )
+        connection.execute("PRAGMA user_version=2")
+
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["state"] == "disabled"
+    assert health["failure_class"] == "permission"
+    assert health["open_until"] == 0
+    assert health["permanent"] is True
+    with pytest.raises(CircuitOpenError, match="已因权限"):
+        provider_call(lane, "post-migration", lambda: "must-not-run")
+
+
+def test_expired_half_open_probe_is_reclaimable(isolated_config):
+    lane = "akshare:stale-probe-test"
+    with PROVIDER_HEALTH._conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO source_health"
+            "(lane,state,failures,open_count,open_until,last_failure,last_success,last_error,"
+            "suppressed,failure_class,config_revision,probe_started) "
+            "VALUES (?,'half_open',2,1,0,0,0,'offline',0,'transient_network','',0)",
+            (lane,),
+        )
+    assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "open"
+    assert provider_call(lane, "recovery", lambda: "restored") == "restored"
 
 
 def test_yahoo_daily_many_uses_one_batch_and_restores_symbol_mapping(monkeypatch):

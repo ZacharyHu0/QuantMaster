@@ -432,3 +432,21 @@ class TestResolveFactor:
             "ep", "bp", "dividend_yield", "small_cap", "roe"}
         listing = list_fundamental_factors()
         assert all(item["description"].startswith("[基本面]") for item in listing)
+
+
+def test_bulk_fundamental_failures_are_aggregated_once(monkeypatch, caplog):
+    monkeypatch.setattr(
+        fundamentals, "_load_cached_or_fetch", lambda *args, **kwargs: None,
+    )
+    symbols = [f"{number:06d}.SZ" for number in range(1000)]
+
+    with caplog.at_level(logging.WARNING, logger="quantmaster.data.fundamentals"):
+        result = fundamental_panel(
+            symbols, "2026-01-01", "2026-01-31",
+            fields=["pe_ttm", "roe"], store=object(),
+        )
+
+    warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert result == {}
+    assert len(warnings) == 1
+    assert "1000/1000" in warnings[0].getMessage()

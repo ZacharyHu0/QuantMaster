@@ -29,7 +29,7 @@ def importance_score(item: NewsItem, holdings: set[str], watchlist: set[str],
     relevance_bonus = 20 if relevance == "holding" else 10 if relevance == "watchlist" else (
         15 if SYSTEMIC_PATTERNS.search(text) else 0)
     official = item.is_official or item.source in OFFICIAL_SOURCES
-    score = base + (10 if official else 0) + relevance_bonus + (10 if corroborated else 0)
+    score = float(base + (10 if official else 0) + relevance_bonus + (10 if corroborated else 0))
     score += min(5, abs(float(item.sentiment or 0)) * 5)
     reasons = [f"{category}事件基础分 {base}", f"相关范围：{relevance}"]
     if official:

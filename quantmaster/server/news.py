@@ -84,6 +84,7 @@ class ReanalyzeRequest(StrictModel):
     ids: list[int] | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     batch_size: int = Field(default=5, ge=1, le=10)
+    mode: Literal["pending", "dead_letter"] = "pending"
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -230,6 +231,10 @@ def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
         crawler = AICrawler()
+        if value.mode == "dead_letter":
+            return crawler.recover_dead_letters(
+                ids=value.ids, limit=min(value.limit, 20), batch_size=value.batch_size,
+            )
         if value.ids is None:
             return crawler.enrich_pending(limit=value.limit, batch_size=value.batch_size)
         reset = crawler.store.reset_analysis(value.ids)
@@ -248,13 +253,31 @@ def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> Streamin
     """逐批发送真实标注进度；每个 batch 事件都包含刚刚落库的资讯。"""
     _require_csrf(request)
     crawler = AICrawler()
-    if value.ids is not None:
+    selected_ids = value.ids
+    if value.mode == "dead_letter":
+        if not crawler.store.llm_recently_healthy():
+            selected_ids = []
+        else:
+            selected_ids = crawler.store.prepare_dead_letter_recovery(
+                limit=min(value.limit, 20), ids=value.ids,
+            )
+    elif value.ids is not None:
         crawler.store.reset_analysis(value.ids)
 
     def generate() -> Iterator[str]:
         try:
+            if value.mode == "dead_letter" and not selected_ids:
+                yield strict_json_dumps({
+                    "type": "start", "total": 0, "processed": 0,
+                    "completed": 0, "failed": 0, "batch_count": 0,
+                }) + "\n"
+                yield strict_json_dumps({
+                    "type": "complete", "processed": 0, "completed": 0,
+                    "failed": 0, "completed_ids": [],
+                }) + "\n"
+                return
             for event in crawler.enrich_pending_events(
-                ids=value.ids, limit=value.limit, batch_size=value.batch_size,
+                ids=selected_ids, limit=value.limit, batch_size=value.batch_size,
             ):
                 yield strict_json_dumps(event) + "\n"
         except Exception as exc:

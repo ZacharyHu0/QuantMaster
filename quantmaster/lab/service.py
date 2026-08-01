@@ -595,7 +595,7 @@ class LabService:
                 symbols, start, end, production=False,
             )
         close = bundle.signal["close"]
-        bundle.signal.setdefault("returns", close.pct_change())
+        bundle.signal.setdefault("returns", close.pct_change(fill_method=None))
         if "amount" in bundle.signal and "volume" in bundle.signal:
             bundle.signal.setdefault("vwap", bundle.signal["amount"].div(
                 bundle.signal["volume"].replace(0, pd.NA)))

@@ -13,6 +13,7 @@
       model: claude-sonnet-5
       api_key: sk-...
       base_url: ""        # openai-compatible 时必填，如 https://api.deepseek.com/v1
+      reasoning_effort: medium
 """
 
 from __future__ import annotations
@@ -168,6 +169,7 @@ class LLMClient:
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
+            "output_config": {"effort": self.config.reasoning_effort},
             "messages": messages,
         }
         if system:
@@ -218,6 +220,7 @@ class LLMClient:
                     "model": self.config.model,
                     "max_tokens": self.config.max_tokens,
                     "temperature": self.config.temperature,
+                    "reasoning_effort": self.config.reasoning_effort,
                     "messages": messages,
                 },
                 timeout=_request_timeout(read_timeout),
@@ -343,6 +346,7 @@ class LLMClient:
         rich_payload = {
             "model": self.config.model,
             "input": query,
+            "reasoning": {"effort": self.config.reasoning_effort},
             "tools": [{"type": "web_search", "search_context_size": "medium"}],
             "tool_choice": "auto",
             "max_tool_calls": max(1, min(3, int(max_uses))),
@@ -351,6 +355,7 @@ class LLMClient:
         minimal_payload = {
             "model": self.config.model,
             "input": query,
+            "reasoning": {"effort": self.config.reasoning_effort},
             "tools": [{"type": "web_search"}],
         }
         response: Any = None
@@ -399,6 +404,7 @@ class LLMClient:
         request_payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
+            "output_config": {"effort": self.config.reasoning_effort},
             "messages": [{"role": "user", "content": query}],
             "tools": [tool],
         }

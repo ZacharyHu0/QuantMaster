@@ -8,6 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query
 
 from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
+from quantmaster.automation.runtime import get_runtime
 from quantmaster.backtest.spec import BacktestSpec
 from quantmaster.backtest.workbench import get_backtest_worker
 from quantmaster.data.maintenance import data_refresh_manager
@@ -22,14 +23,17 @@ from quantmaster.server.rotation import (
 )
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
-JobDomain = Literal["research", "data", "lab", "backtests", "rotation", "repairs"]
+JobDomain = Literal[
+    "research", "data", "lab", "backtests", "rotation", "repairs", "automation",
+]
 _DOMAINS: tuple[JobDomain, ...] = (
-    "research", "data", "lab", "backtests", "repairs", "rotation",
+    "research", "data", "lab", "backtests", "repairs", "automation", "rotation",
 )
 _ACTIVE = frozenset({"queued", "running", "cancelling", "paused", "interrupted"})
 _RETRYABLE = frozenset({
     "failed", "cancelled", "interrupted", "completed", "completed_with_errors",
     "completed_with_warnings", "paused",
+    "needs_confirmation",
 })
 
 
@@ -67,6 +71,11 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "automation":
+        automation_job = get_runtime().service.jobs.store.get(job_id)
+        if not str(automation_job.get("type") or "").startswith("automation."):
+            raise KeyError(job_id)
+        return automation_job
     if domain == "repairs":
         from quantmaster.data.repair import get_data_repair_manager
 
@@ -79,15 +88,20 @@ def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
     if domain == "rotation":
         return get_rotation_job(job_id)
     if domain == "lab":
-        value = LabStore().job(job_id)
+        raw_value = LabStore().job(job_id)
     else:
-        value = get_backtest_worker().service.store.get(job_id)
-    if value is None:
+        raw_value = get_backtest_worker().service.store.get(job_id)
+    if raw_value is None:
         raise KeyError(job_id)
-    return value
+    return dict(raw_value)
 
 
 def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
+    if domain == "automation":
+        return [
+            value for value in get_runtime().service.jobs.store.list(max(limit * 4, limit))
+            if str(value.get("type") or "").startswith("automation.")
+        ][:limit]
     if domain == "repairs":
         from quantmaster.data.repair import get_data_repair_manager
 
@@ -105,6 +119,9 @@ def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
 
 
 def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    if domain == "automation":
+        _get(domain, job_id)
+        return get_runtime().service.jobs.store.events(job_id, after, limit)
     if domain == "repairs":
         from quantmaster.data.repair import get_data_repair_manager
 
@@ -122,6 +139,9 @@ def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict
 
 
 def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "automation":
+        _get(domain, job_id)
+        return get_runtime().service.jobs.store.cancel(job_id)
     if domain == "repairs":
         from quantmaster.data.repair import get_data_repair_manager
 
@@ -138,6 +158,9 @@ def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
 
 
 def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "automation":
+        _get(domain, job_id)
+        return get_runtime().service.jobs.retry(job_id)
     if domain == "repairs":
         from quantmaster.data.repair import get_data_repair_manager
 

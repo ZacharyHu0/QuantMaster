@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250" role="img" aria-labelledby="title desc">
+  <title id="title">QuantMaster</title>
+  <desc id="desc">QuantMaster wordmark with an eye-like orbit, target pupil, and blue square factor.</desc>
+  <g transform="translate(125 125)" fill="none" stroke="#0d0d0d" stroke-linecap="round" stroke-linejoin="round">
+    <circle r="77" stroke-width="14"/>
+    <path d="M-108 28c25-74 98-115 170-78 20 10 37 26 48 46" stroke-width="9"/>
+  </g>
+  <rect x="192" y="48" width="39" height="39" fill="#3987e5"/>
+  <circle cx="125" cy="125" r="18" fill="#0d0d0d"/>
+  <text x="263" y="151" fill="#0d0d0d" font-family="Bahnschrift, Helvetica Neue, sans-serif" font-size="76" font-weight="560" letter-spacing="-2">Quant<tspan fill="#3987e5" font-weight="380">Master</tspan></text>
+</svg>

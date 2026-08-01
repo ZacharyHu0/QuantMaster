@@ -42,12 +42,37 @@ def _update(manager, **extra):
 
 def test_old_and_gui_managed_environment_priority(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
-    path.write_text("llm:\n  model: yaml-model\n", encoding="utf-8")
+    path.write_text(
+        "llm:\n  model: yaml-model\n  reasoning_effort: high\n", encoding="utf-8")
     monkeypatch.setenv("QM_LLM_MODEL", "env-model")
-    assert load_config(path).llm.model == "env-model"
+    monkeypatch.setenv("QM_LLM_REASONING_EFFORT", "low")
+    legacy = load_config(path)
+    assert legacy.llm.model == "env-model"
+    assert legacy.llm.reasoning_effort == "low"
 
-    path.write_text("managed_by_gui: true\nllm:\n  model: yaml-model\n", encoding="utf-8")
-    assert load_config(path).llm.model == "yaml-model"
+    path.write_text(
+        "managed_by_gui: true\nllm:\n  model: yaml-model\n  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    managed = load_config(path)
+    assert managed.llm.model == "yaml-model"
+    assert managed.llm.reasoning_effort == "high"
+
+
+def test_reasoning_effort_is_saved_and_validated_per_provider(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    update = _update(manager)
+    update.llm.reasoning_effort = "high"
+    result = manager.save(update)
+
+    assert "llm.reasoning_effort" in result["changed_fields"]
+    assert manager.public()["llm"]["reasoning_effort"] == "high"
+
+    raw = _update(manager).model_dump()
+    raw["llm"]["reasoning_effort"] = "none"
+    with pytest.raises(ValueError, match="Anthropic"):
+        SettingsUpdate.model_validate(raw)
+    set_config(None)
 
 
 def test_explicit_clear_blocks_environment_secret(tmp_path, monkeypatch):

@@ -61,6 +61,38 @@ def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:
     return hashlib.sha256(logical.encode("utf-8")).hexdigest()[:20]
 
 
+def _expected_market_session(now: datetime | None = None) -> str:
+    """Best local expectation used to expose stale snapshots without a network call."""
+    current = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    else:
+        current = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    cutoff = pd.Timestamp(current.date())
+    if (current.hour, current.minute) < (15, 30):
+        cutoff -= pd.Timedelta(days=1)
+    sessions = pd.bdate_range(cutoff - pd.Timedelta(days=10), cutoff)
+    return str(sessions[-1].date()) if len(sessions) else str(cutoff.date())
+
+
+def _mark_stale(
+    quality: dict[str, Any], as_of: str, expected_as_of: str,
+) -> dict[str, Any]:
+    value = dict(quality)
+    issues = list(value.get("issues") or [])
+    if (
+        str(value.get("status") or "") not in {"cold", "empty", "corrupt", "loading"}
+        and expected_as_of
+        and (not as_of or as_of < expected_as_of)
+    ):
+        value["status"] = "stale"
+        issue = f"行情仅到 {as_of or '未知日期'}，最近应完成交易日为 {expected_as_of}"
+        if issue not in issues:
+            issues.insert(0, issue)
+    value["issues"] = issues
+    return value
+
+
 def _status_quality(
     status: str,
     *,
@@ -148,6 +180,18 @@ class RotationDataLoader:
     ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
         instruments, expected_count = self._listed_instruments()
         lake_values = self._research_lake()
+        if lake_values is not None:
+            close, amount = lake_values
+            lake_as_of = str(pd.Timestamp(close.index.max()).date())
+            bar_metadata = BarStore().metadata_many()
+            newer_bar_count = sum(
+                str(meta.get("end") or "") > lake_as_of
+                for symbol, meta in bar_metadata.items()
+                if symbol.endswith((".SH", ".SZ", ".BJ"))
+                and len(symbol.rsplit(".", 1)[0]) == 6
+            )
+            if newer_bar_count >= max(1000, round(expected_count * 0.70)):
+                lake_values = None
         if lake_values is not None:
             close, amount = lake_values
             records = instruments.get_many(close.columns)
@@ -282,14 +326,17 @@ class RotationService:
         generated_at: str,
         quality: dict[str, Any],
         sources: list[str],
+        expected_as_of: str = "",
     ) -> dict[str, Any]:
         theme_taxonomy = next((
             source for source in sources
-            if source in {"eastmoney-concept", "tushare:dc-concept"}
+            if source in {"eastmoney-concept", "tushare:dc-concept", "ths:concept"}
         ), "eastmoney-concept")
         return {
             "snapshot_id": snapshot_id,
             "as_of": as_of,
+            "actual_as_of": as_of,
+            "expected_as_of": expected_as_of,
             "generated_at": generated_at,
             "algorithm_version": ALGORITHM_VERSION,
             "taxonomy_versions": {
@@ -308,6 +355,7 @@ class RotationService:
         generated_at: str,
         quality: dict[str, Any],
         sources: list[str],
+        expected_as_of: str = "",
     ) -> dict[str, Any]:
         return {
             "meta": self._meta(
@@ -316,6 +364,7 @@ class RotationService:
                 generated_at=generated_at,
                 quality=quality,
                 sources=sources,
+                expected_as_of=expected_as_of,
             ),
             "data": data,
         }
@@ -330,6 +379,13 @@ class RotationService:
         scope = spec.scope
         generated_at = _utc_now()
         computed: dict[str, dict[str, Any]] = {}
+        previous_snapshot_ids: dict[str, str] = {}
+        for kind in ("temperature", "structure", "industries", "themes", "etf_flows", "taxonomy"):
+            try:
+                previous = self.store.snapshot(kind)
+            except RotationIntegrityError:
+                previous = None
+            previous_snapshot_ids[kind] = str((previous or {}).get("meta", {}).get("snapshot_id") or "")
         need_market = scope in {"all", "close", "market", "industries", "themes"}
         provider_warnings: list[str] = []
         provider_results: dict[str, dict[str, Any]] = {}
@@ -367,6 +423,9 @@ class RotationService:
             for key, label, operation in operations:
                 try:
                     provider_results[key] = operation()
+                    provider_warnings.extend(
+                        str(issue) for issue in provider_results[key].get("issues") or []
+                    )
                 except InterruptedError:
                     raise
                 except Exception as exc:  # 外部数据源边界：记录后降级到已有快照
@@ -390,7 +449,11 @@ class RotationService:
             if cancelled():
                 raise InterruptedError("板块联动刷新已取消")
         as_of = str(close.index[-1].date()) if not close.empty else ""
-        snapshot_id = _snapshot_id(as_of, [*list(close.columns), generated_at], scope)
+        expected_as_of = str(
+            provider_results.get("market", {}).get("expected_as_of")
+            or _expected_market_session()
+        ) if need_market else ""
+        snapshot_id = _snapshot_id(as_of, list(close.columns), scope)
         compute_base = 70 if spec.source == "auto" else 34
         trend = compute_trend_matrices(close) if need_market else None
 
@@ -403,12 +466,16 @@ class RotationService:
             temperature_quality["issues"] = list(dict.fromkeys([
                 *(temperature_quality.get("issues") or []), *provider_warnings,
             ]))
+            temperature_quality = _mark_stale(
+                temperature_quality, as_of, expected_as_of,
+            )
             computed["temperature"] = self._envelope(
                 temperature,
                 snapshot_id=snapshot_id,
                 generated_at=generated_at,
                 quality=temperature_quality,
                 sources=sources,
+                expected_as_of=expected_as_of,
             )
             progress(compute_base + 7, "计算市场风格", "比较强势与低位样本收益分布")
             structure = compute_market_structure(close, names=names, trend=trend)
@@ -418,6 +485,7 @@ class RotationService:
                 generated_at=generated_at,
                 quality=temperature_quality,
                 sources=sources,
+                expected_as_of=expected_as_of,
             )
 
         l1_groups: dict[str, dict[str, Any]] = {}
@@ -453,12 +521,14 @@ class RotationService:
                     *provider_warnings,
                 ],
             )
+            industry_quality = _mark_stale(industry_quality, as_of, expected_as_of)
             computed["industries"] = self._envelope(
                 industries,
                 snapshot_id=snapshot_id,
                 generated_at=generated_at,
                 quality=industry_quality,
                 sources=[*sources, "SW2021"],
+                expected_as_of=expected_as_of,
             )
             taxonomy = taxonomy_payload(l1_groups, l2_groups)
             taxonomy["as_of"] = industries["as_of"]
@@ -468,11 +538,19 @@ class RotationService:
                 generated_at=generated_at,
                 quality=industry_quality,
                 sources=["SW2021"],
+                expected_as_of=expected_as_of,
             )
 
         if scope in {"all", "close", "themes"}:
             progress(compute_base + 17, "扫描细分题材", "合并高度重叠的概念板块")
             stored_themes = self.store.themes()
+            if spec.source == "auto" and "themes" not in provider_results and not stored_themes:
+                raise RuntimeError(
+                    next(
+                        (warning for warning in provider_warnings if "细分题材目录" in warning),
+                        "细分题材三套数据源均不可用，未生成空快照",
+                    )
+                )
             themes = _deduplicate_themes(stored_themes)
             theme_sources = list(dict.fromkeys(
                 str(item.get("source") or "") for item in stored_themes
@@ -486,15 +564,22 @@ class RotationService:
                     close, themes, names=names, amount=amount, kind="theme", trend=trend,
                 )
                 count = len(theme_data["items"])
+                provider_quality = str(
+                    provider_results.get("themes", {}).get("quality_status") or "complete"
+                )
+                catalog_expected = int(
+                    provider_results.get("themes", {}).get("catalog") or len(themes)
+                )
+                quality_issues = list(dict.fromkeys([
+                    *([] if count >= 50 else ["概念成分目录仍在积累"]),
+                    *theme_provider_issues,
+                    *provider_warnings,
+                ]))
                 theme_quality = _status_quality(
-                    "complete" if count >= 50 else "partial",
+                    "complete" if count >= 50 and provider_quality == "complete" else "partial",
                     eligible=count,
-                    expected=len(themes),
-                    issues=[
-                        *([] if count >= 50 else ["概念成分目录仍在积累"]),
-                        *theme_provider_issues,
-                        *provider_warnings,
-                    ],
+                    expected=catalog_expected,
+                    issues=quality_issues,
                 )
             else:
                 theme_data = {
@@ -513,12 +598,14 @@ class RotationService:
                     "cold",
                     issues=["尚未建立细分题材成分目录", *provider_warnings],
                 )
+            theme_quality = _mark_stale(theme_quality, as_of, expected_as_of)
             computed["themes"] = self._envelope(
                 theme_data,
                 snapshot_id=snapshot_id,
                 generated_at=generated_at,
                 quality=theme_quality,
                 sources=list(dict.fromkeys([*sources, *theme_sources])),
+                expected_as_of=expected_as_of,
             )
 
         if scope in {"all", "etf"}:
@@ -545,10 +632,7 @@ class RotationService:
             )
             etf_snapshot = _snapshot_id(
                 etf_data.get("as_of") or as_of,
-                [
-                    *(str(item.get("symbol") or "") for item in etf_data["items"]),
-                    generated_at,
-                ],
+                [str(item.get("symbol") or "") for item in etf_data["items"]],
                 "etf",
             )
             price_sources = {
@@ -570,12 +654,53 @@ class RotationService:
 
         if cancelled():
             raise InterruptedError("板块联动刷新已取消")
+        content_digests = {
+            kind: hashlib.sha256(
+                strict_json_dumps(payload.get("data") or {}, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            for kind, payload in sorted(computed.items())
+        }
+        batch_id = _snapshot_id(
+            as_of,
+            [f"{kind}:{digest}" for kind, digest in sorted(content_digests.items())],
+            "batch",
+        )
+        for kind, payload in computed.items():
+            payload["meta"]["snapshot_id"] = _snapshot_id(
+                str(payload["meta"].get("as_of") or ""),
+                [content_digests[kind]],
+                kind,
+            )
+            payload["meta"]["batch_id"] = batch_id
         progress(96, "提交分析快照", "原子更新页面所需视图")
         self.store.save_snapshots(computed)
+        changed = sorted(
+            kind for kind, payload in computed.items()
+            if str(payload.get("meta", {}).get("snapshot_id") or "")
+            != previous_snapshot_ids.get(kind, "")
+        )
+        non_complete = [
+            kind for kind, payload in computed.items()
+            if str(payload.get("meta", {}).get("quality", {}).get("status") or "")
+            not in {"complete"}
+        ]
+        outcome = "unchanged" if not changed else (
+            "partial" if provider_warnings or non_complete else "updated"
+        )
+        snapshot_id = _snapshot_id(
+            as_of,
+            [str(computed[kind]["meta"]["snapshot_id"]) for kind in sorted(computed)],
+            scope,
+        )
         return {
             "snapshot_id": snapshot_id,
             "as_of": as_of,
-            "updated": sorted(computed),
+            "expected_as_of": expected_as_of,
+            "fresh": not expected_as_of or as_of >= expected_as_of,
+            "outcome": outcome,
+            "updated": changed,
+            "computed": sorted(computed),
+            "warnings": list(dict.fromkeys(provider_warnings)),
             "tracked_count": len(close.columns),
             "expected_count": expected_count,
         }
@@ -609,6 +734,26 @@ class RotationService:
         try:
             value = self.store.snapshot(kind) or self.cold(kind)
             quality = value.get("meta", {}).get("quality", {})
+            if kind == "themes" and str(quality.get("status") or "") == "cold":
+                active = next((
+                    job for job in self.jobs.list(50)
+                    if str(job.get("status") or "") in {"queued", "running", "cancelling"}
+                    and str((job.get("spec") or {}).get("scope") or "")
+                    in {"all", "close", "themes"}
+                ), None)
+                if active is not None:
+                    quality["status"] = "loading"
+                    quality["job_id"] = str(active.get("id") or "")
+                    quality["progress"] = max(0, min(100, int(active.get("progress") or 0)))
+                    quality["issues"] = ["细分题材目录正在后台构建"]
+            if kind in {"temperature", "structure", "industries", "themes"}:
+                meta = value.setdefault("meta", {})
+                expected_as_of = _expected_market_session()
+                as_of = str(meta.get("as_of") or value.get("data", {}).get("as_of") or "")
+                meta["expected_as_of"] = expected_as_of
+                meta["actual_as_of"] = as_of
+                quality = _mark_stale(quality, as_of, expected_as_of)
+                meta["quality"] = quality
             expected = quality.get("expected_count")
             if expected is None or expected == 0:
                 # v0.13.0 snapshots serialized an unknown denominator as 0%.  Keep
@@ -725,6 +870,7 @@ class RotationWorker:
         if self._thread and self._thread.is_alive():
             return
         needs_local_snapshot = False
+        needs_theme_catalog = False
         if bootstrap_local:
             try:
                 needs_local_snapshot = self.service.store.snapshot("temperature") is None
@@ -733,6 +879,10 @@ class RotationWorker:
             now = datetime.now(ZoneInfo("Asia/Shanghai"))
             if now.weekday() < 5 and (now.hour, now.minute) >= (18, 30):
                 needs_local_snapshot = False
+            try:
+                needs_theme_catalog = not bool(self.service.store.themes())
+            except (OSError, sqlite3.Error):
+                needs_theme_catalog = True
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, name="quantmaster-rotation", daemon=True,
@@ -740,6 +890,10 @@ class RotationWorker:
         self._thread.start()
         if needs_local_snapshot:
             self.submit(RotationJobSpec(scope="close", source="local"))
+        if needs_theme_catalog:
+            # Keep network bootstrap off the startup thread. create() also reuses
+            # the same active logical job after a process or browser restart.
+            self.submit(RotationJobSpec(scope="themes", source="auto"))
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
@@ -756,6 +910,49 @@ class RotationWorker:
         self._wake.set()
         return job
 
+    def _scheduled_retry_due(self, kind: str, date_key: str) -> bool:
+        value = self.service.store.runtime_state(f"scheduled_{kind}_retry")
+        if not value:
+            return True
+        try:
+            saved_date, attempt_text, next_text = value.split("|", 2)
+            if saved_date != date_key:
+                return True
+            return int(attempt_text) < 3 and time.time() >= float(next_text)
+        except (TypeError, ValueError):
+            return True
+
+    def _record_scheduled_result(
+        self,
+        spec: RotationJobSpec,
+        *,
+        succeeded: bool,
+    ) -> None:
+        if spec.source != "auto" or spec.scope not in {"close", "etf"}:
+            return
+        kind = "close" if spec.scope == "close" else "etf"
+        date_key = str(datetime.now(ZoneInfo("Asia/Shanghai")).date())
+        retry_key = f"scheduled_{kind}_retry"
+        if succeeded:
+            self.service.store.set_runtime_state(f"scheduled_{kind}", date_key)
+            self.service.store.set_runtime_state(retry_key, "")
+            return
+        value = self.service.store.runtime_state(retry_key)
+        attempt = 0
+        if value:
+            try:
+                saved_date, attempt_text, _next_text = value.split("|", 2)
+                if saved_date == date_key:
+                    attempt = int(attempt_text)
+            except (TypeError, ValueError):
+                attempt = 0
+        attempt += 1
+        delays = (15 * 60, 45 * 60, 120 * 60)
+        next_at = time.time() + delays[min(attempt - 1, len(delays) - 1)]
+        self.service.store.set_runtime_state(
+            retry_key, f"{date_key}|{attempt}|{next_at}",
+        )
+
     def _scheduled(self) -> None:
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         if now.weekday() >= 5:
@@ -763,12 +960,18 @@ class RotationWorker:
         date_key = str(now.date())
         close_due = (now.hour, now.minute) >= (18, 30)
         etf_due = (now.hour, now.minute) >= (9, 5)
-        if close_due and self.service.store.runtime_state("scheduled_close") != date_key:
+        if (
+            close_due
+            and self.service.store.runtime_state("scheduled_close") != date_key
+            and self._scheduled_retry_due("close", date_key)
+        ):
             self.submit(RotationJobSpec(scope="close", source="auto"))
-            self.service.store.set_runtime_state("scheduled_close", date_key)
-        if etf_due and self.service.store.runtime_state("scheduled_etf") != date_key:
+        if (
+            etf_due
+            and self.service.store.runtime_state("scheduled_etf") != date_key
+            and self._scheduled_retry_due("etf", date_key)
+        ):
             self.submit(RotationJobSpec(scope="etf", source="auto"))
-            self.service.store.set_runtime_state("scheduled_etf", date_key)
 
     def _run_job(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
@@ -785,15 +988,38 @@ class RotationWorker:
                     or self.service.jobs.is_cancel_requested(job_id, owner)
                 ),
             )
-            if self._stop.is_set() or self.service.jobs.is_cancel_requested(job_id, owner):
+            if self.service.jobs.is_cancel_requested(job_id, owner):
                 self.service.jobs.fail(job_id, owner, "任务已安全取消", cancelled=True)
+            elif self._stop.is_set():
+                self.service.jobs.release_for_handoff(job_id, owner)
+                logger.info("板块联动 worker 停机，任务租约已释放 job_id=%s", job_id)
             else:
                 self.service.jobs.complete(job_id, owner, result)
+                schedule_succeeded = bool(
+                    not result.get("warnings")
+                    and result.get("fresh", True)
+                    and (
+                        spec.scope != "etf"
+                        or result.get("outcome") in {"updated", "unchanged"}
+                    )
+                )
+                self._record_scheduled_result(spec, succeeded=schedule_succeeded)
         except InterruptedError as exc:
-            self.service.jobs.fail(job_id, owner, str(exc), cancelled=True)
+            if (
+                self._stop.is_set()
+                and not self.service.jobs.is_cancel_requested(job_id, owner)
+            ):
+                self.service.jobs.release_for_handoff(job_id, owner)
+                logger.info("板块联动 worker 停机，任务等待新进程接管 job_id=%s", job_id)
+            else:
+                self.service.jobs.fail(job_id, owner, str(exc), cancelled=True)
+                if "spec" in locals():
+                    self._record_scheduled_result(spec, succeeded=False)
         except Exception as exc:
             logger.exception("板块联动刷新失败 job_id=%s", job_id)
             self.service.jobs.fail(job_id, owner, str(exc))
+            if "spec" in locals():
+                self._record_scheduled_result(spec, succeeded=False)
 
     def _run(self) -> None:
         last_schedule_check = 0.0

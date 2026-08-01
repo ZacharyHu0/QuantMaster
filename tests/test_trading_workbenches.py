@@ -17,6 +17,7 @@ from quantmaster.backtest.spec import (
     PaperAccountSpec,
     build_strategy,
     pin_decision_strategy,
+    split_factor_references,
 )
 from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
 from quantmaster.portfolio import Ledger, TradeRecord
@@ -460,3 +461,30 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "justify-self: center" in checkbox_rule
     assert ".factor-completion-option.active" in css
     assert "position: fixed" in css.split(".factor-completion-menu", 1)[1].split("}", 1)[0]
+
+
+def test_factor_reference_splitter_preserves_expression_commas():
+    assert split_factor_references(
+        "ts_corr(rank(volume), rank(close), 20), mom_20d"
+    ) == ["ts_corr(rank(volume), rank(close), 20)", "mom_20d"]
+    with pytest.raises(ValueError, match="括号"):
+        split_factor_references("rank(close), ts_mean(volume, 20")
+
+
+def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
+    client = TestClient(app)
+    worker = get_backtest_worker()
+    monkeypatch.setattr(worker, "start", lambda: None)
+    token = _issue_csrf()
+    client.cookies.set("qm_csrf", token)
+    response = client.post(
+        "/api/v1/backtests",
+        json={
+            "strategy": {"kind": "factor", "factor": "unknown_factor"},
+            "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
+            "benchmark": None,
+        },
+        headers={"X-CSRF-Token": token},
+    )
+    assert response.status_code == 422
+    assert "未知字段" in response.json()["detail"]

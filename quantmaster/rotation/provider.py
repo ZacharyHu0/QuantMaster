@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
+import re
+import time
 from collections.abc import Callable
 from datetime import date
 from typing import Any
 
+import httpx
 import pandas as pd
 
-from quantmaster.data.resilience import akshare_call
+from quantmaster.data.resilience import akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
+from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.rotation.store import RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
 
@@ -41,6 +46,7 @@ _SECTOR_OR_NON_CN_TERMS = (
 )
 _EASTMONEY_THEME_SOURCE = "eastmoney-concept"
 _TUSHARE_THEME_SOURCE = "tushare:dc-concept"
+_THS_THEME_SOURCE = "ths:concept"
 
 
 class RotationProviderCallError(RuntimeError):
@@ -51,6 +57,10 @@ class ThemeSourceUnavailable(RuntimeError):
     """A theme provider cannot currently supply a usable coherent catalog."""
 
 
+def _compact_error(exc: BaseException, limit: int = 180) -> str:
+    return (redact_sensitive_text(exc).replace("\n", " ").strip() or type(exc).__name__)[:limit]
+
+
 def _symbol(value: Any) -> str:
     text = str(value or "").strip().upper()
     if text.endswith((".SH", ".SZ", ".BJ")):
@@ -58,8 +68,10 @@ def _symbol(value: Any) -> str:
     digits = text.zfill(6) if text.isdigit() else text
     if len(digits) != 6 or not digits.isdigit():
         return ""
-    suffix = "SH" if digits.startswith(("6", "9")) else (
-        "BJ" if digits.startswith(("4", "8")) else "SZ"
+    suffix = (
+        "BJ" if digits.startswith(("4", "8", "920"))
+        else "SH" if digits.startswith(("6", "9"))
+        else "SZ"
     )
     return f"{digits}.{suffix}"
 
@@ -82,13 +94,14 @@ class RotationProvider:
     def __init__(self, store: RotationStore, source: TushareSource | None = None):
         self.store = store
         self.source = source or TushareSource()
+        self._ths_last_request = 0.0
 
     def _tushare_call(self, endpoint: str, ttl_days: int, **params) -> pd.DataFrame:
         try:
             return self.source._call(endpoint, ttl_days, **params)
         except Exception as exc:  # Tushare SDK raises a plain Exception for permissions
             raise RotationProviderCallError(
-                f"Tushare {endpoint} 调用失败：{str(exc)[:180]}"
+                f"Tushare {endpoint} 调用失败：{_compact_error(exc)}"
             ) from exc
 
     @staticmethod
@@ -99,10 +112,16 @@ class RotationProvider:
         **params,
     ) -> pd.DataFrame:
         try:
-            return akshare_call(label, function, *args, **params)
+            return akshare_call(
+                label,
+                function,
+                *args,
+                lane="akshare:eastmoney-concept",
+                **params,
+            )
         except Exception as exc:  # AKShare/requests provider boundary
             raise ThemeSourceUnavailable(
-                f"东方财富 {label} 调用失败：{str(exc)[:180]}"
+                f"东方财富 {label} 调用失败：{_compact_error(exc)}"
             ) from exc
 
     def sync_market_history(self, progress, cancelled, *, rebuild: bool = False) -> dict[str, Any]:
@@ -132,7 +151,13 @@ class RotationProvider:
         )
         if not plan.tasks:
             progress(28, "全市场日线已就绪", f"{len(existing)} 个交易日分区")
-            return {"partitions": len(existing), "tasks": 0}
+            return {
+                "partitions": len(existing),
+                "tasks": 0,
+                "expected_as_of": max(plan.target_dates, default=""),
+                "failed_tasks": [],
+                "issues": [],
+            }
 
         def on_progress(index, total, task):
             if cancelled():
@@ -140,11 +165,22 @@ class RotationProvider:
             value = 3 + round(25 * index / max(1, total))
             progress(value, "同步全市场日线", f"{index}/{total} · {task.trade_date}")
 
-        result = engine.execute(plan, cancelled=cancelled, progress=on_progress)
+        result = engine.execute(
+            plan,
+            cancelled=cancelled,
+            progress=on_progress,
+            continue_on_sync_error=True,
+        )
         return {
             "partitions": len(existing) + len(plan.tasks),
             "tasks": len(plan.tasks),
             "run_id": result["run_id"],
+            "expected_as_of": max(plan.target_dates, default=""),
+            "failed_tasks": result.get("failed_tasks", []),
+            "issues": [
+                f"{item['trade_date']} 行情同步失败：{item['error']}"
+                for item in result.get("failed_tasks", [])
+            ],
         }
 
     def sync_industry_taxonomy(self, progress, cancelled) -> dict[str, Any]:
@@ -173,8 +209,12 @@ class RotationProvider:
                     "index_member_all", 30, l1_code=l1_code, is_new="Y",
                     fields="l1_code,l1_name,l2_code,l2_name,ts_code,is_new",
                 )
-            except RotationProviderCallError:
-                logger.warning("申万行业 %s 成分同步失败，保留旧目录", l1_name, exc_info=True)
+            except RotationProviderCallError as exc:
+                logger.warning(
+                    "申万行业 %s 成分同步失败，保留旧目录：%s",
+                    l1_name,
+                    _compact_error(exc),
+                )
                 for code, item in previous.items():
                     if code == l1_code or str(item.get("parent_code") or "") == l1_code:
                         nodes[code] = item
@@ -282,21 +322,19 @@ class RotationProvider:
                 }
                 fresh_count += 1
                 member_failures = 0
-            except ThemeSourceUnavailable:
+            except ThemeSourceUnavailable as exc:
                 member_failures += 1
                 old = previous_code.get(code) or previous_name.get(name)
                 if old:
                     themes[code] = old
-                logger.warning("概念 %s 成分同步失败，保留旧快照", name, exc_info=True)
+                logger.warning(
+                    "概念 %s 成分同步失败，保留旧快照：%s",
+                    name,
+                    _compact_error(exc),
+                )
                 if fresh_count == 0 and member_failures >= 3:
                     break
             if index % 20 == 0 or index == len(rows):
-                unprocessed = {
-                    str(item.get("code") or ""): item for item in previous_matching
-                    if str(item.get("code") or "") not in themes
-                }
-                if fresh_count:
-                    self.store.replace_themes([*themes.values(), *unprocessed.values()])
                 progress(
                     39 + round(16 * index / max(1, len(rows))),
                     "扫描细分题材",
@@ -304,6 +342,11 @@ class RotationProvider:
                 )
         if not fresh_count:
             raise ThemeSourceUnavailable("东方财富概念成分连续不可用")
+        unprocessed = {
+            str(item.get("code") or ""): item for item in previous_matching
+            if str(item.get("code") or "") not in themes
+        }
+        self.store.replace_themes([*themes.values(), *unprocessed.values()])
         return {
             "catalog": len(rows),
             "available": len(themes),
@@ -387,25 +430,19 @@ class RotationProvider:
                 }
                 fresh_count += 1
                 member_failures = 0
-            except (RotationProviderCallError, ThemeSourceUnavailable):
+            except (RotationProviderCallError, ThemeSourceUnavailable) as exc:
                 member_failures += 1
                 old = previous_code.get(code) or previous_name.get(name)
                 if old:
                     themes[code] = old
                 logger.warning(
-                    "Tushare DC 概念 %s 成分同步失败，保留同源旧快照",
+                    "Tushare DC 概念 %s 成分同步失败，保留同源旧快照：%s",
                     name,
-                    exc_info=True,
+                    _compact_error(exc),
                 )
                 if fresh_count == 0 and member_failures >= 3:
                     break
             if index % 20 == 0 or index == len(rows):
-                unprocessed = {
-                    str(item.get("code") or ""): item for item in previous_matching
-                    if str(item.get("code") or "") not in themes
-                }
-                if fresh_count:
-                    self.store.replace_themes([*themes.values(), *unprocessed.values()])
                 progress(
                     39 + round(16 * index / max(1, len(rows))),
                     "扫描细分题材",
@@ -413,6 +450,11 @@ class RotationProvider:
                 )
         if not fresh_count:
             raise ThemeSourceUnavailable("Tushare DC 概念成分连续不可用")
+        unprocessed = {
+            str(item.get("code") or ""): item for item in previous_matching
+            if str(item.get("code") or "") not in themes
+        }
+        self.store.replace_themes([*themes.values(), *unprocessed.values()])
         return {
             "catalog": len(rows),
             "available": len(themes),
@@ -422,8 +464,255 @@ class RotationProvider:
             "issues": ["东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"],
         }
 
+    def _ths_page(self, client, code: str, page: int) -> str:
+        """Fetch one public THS concept page with a bounded provider-side retry."""
+        url = f"http://q.10jqka.com.cn/gn/detail/code/{code}/page/{page}/"
+
+        def fetch() -> str:
+            last_error: Exception | None = None
+            for attempt in range(3):
+                delay = 0.5 - (time.monotonic() - self._ths_last_request)
+                if delay > 0:
+                    time.sleep(delay)
+                self._ths_last_request = time.monotonic()
+                try:
+                    response = client.get(url)
+                    response.raise_for_status()
+                    if not response.text.strip():
+                        raise RuntimeError("同花顺页面为空")
+                    return response.text
+                except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+            raise RuntimeError(str(last_error or "同花顺页面请求失败"))
+
+        return provider_call(
+            "ths:concept",
+            f"concept:{code}:page:{page}",
+            fetch,
+            empty_opens=True,
+        )
+
+    @staticmethod
+    def _parse_ths_page(html: str) -> tuple[list[str], int]:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        table = soup.select_one("table.m-table")
+        if table is None:
+            raise ThemeSourceUnavailable("同花顺题材页面缺少成分表")
+        headers = [cell.get_text(" ", strip=True) for cell in table.select("thead th")]
+        try:
+            code_index = headers.index("代码")
+        except ValueError:
+            code_index = 1
+        members: list[str] = []
+        for row in table.select("tbody tr"):
+            cells = row.find_all("td")
+            if len(cells) <= code_index:
+                continue
+            value = _symbol(cells[code_index].get_text(" ", strip=True))
+            if value:
+                members.append(value)
+        info = soup.select_one(".page_info")
+        match = re.search(r"\d+\s*/\s*(\d+)", info.get_text(" ", strip=True) if info else "")
+        pages = max(1, int(match.group(1))) if match else 1
+        return members, pages
+
+    def _sync_ths_themes(
+        self,
+        progress,
+        cancelled,
+        previous_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # pragma: no cover - network
+        """Build a resumable, all-THS catalog and publish it only after quality gates."""
+        try:
+            import akshare as ak
+        except ModuleNotFoundError as exc:
+            raise ThemeSourceUnavailable("同花顺后备源所需数据扩展未安装") from exc
+        boards = akshare_call(
+            "stock_board_concept_name_ths",
+            ak.stock_board_concept_name_ths,
+            lane="ths:concept",
+        )
+        if boards is None or boards.empty or not {"name", "code"}.issubset(boards.columns):
+            raise ThemeSourceUnavailable("同花顺题材目录为空或缺少代码列")
+        rows = [
+            (str(row.get("code") or "").strip(), str(row.get("name") or "").strip())
+            for _, row in boards.drop_duplicates("code").iterrows()
+            if str(row.get("code") or "").strip() and str(row.get("name") or "").strip()
+        ]
+        directory_hash = hashlib.sha256(
+            "|".join(f"{code}:{name}" for code, name in sorted(rows)).encode("utf-8")
+        ).hexdigest()
+        staging = self.store.begin_theme_sync(_THS_THEME_SOURCE, directory_hash, len(rows))
+        run_id = str(staging["run_id"])
+        themes: dict[str, dict[str, Any]] = dict(staging["items"])
+        issues: list[str] = []
+        required = math.ceil(len(rows) * 0.90)
+        partial_required = min(required, max(75, math.ceil(len(rows) * 0.20)))
+
+        def publish_partial(extra_issues: list[str]) -> dict[str, Any]:
+            coverage = round(len(themes) / max(1, len(rows)), 4)
+            audit_issues = [
+                (
+                    f"同花顺完整题材仅覆盖 {len(themes)}/{len(rows)}；未达到完整目录门槛 "
+                    f"{required}，已按受限目录发布。"
+                ),
+                "东方财富与 Tushare 目录不可用；失败或分页不完整的题材未写入目录。",
+                *extra_issues[:30],
+            ]
+            self.store.commit_theme_sync(run_id, list(themes.values()), audit_issues)
+            return {
+                "catalog": len(rows),
+                "available": len(themes),
+                "fresh": 0,
+                "source": _THS_THEME_SOURCE,
+                "coverage": coverage,
+                "quality_status": "partial",
+                "issues": audit_issues,
+            }
+
+        previous_ths = {
+            str(item.get("code") or ""): item
+            for item in previous_items
+            if str(item.get("source") or "") == _THS_THEME_SOURCE
+            and str(item.get("code") or "")
+        }
+        can_reuse_published_partial = (
+            int(staging.get("attempted_count") or 0) >= len(rows)
+            and partial_required <= len(previous_ths) < required
+            and set(previous_ths) == set(themes)
+        )
+        if can_reuse_published_partial:
+            audit_issues = [
+                (
+                    f"同花顺完整题材仅覆盖 {len(previous_ths)}/{len(rows)}；未达到完整"
+                    f"目录门槛 {required}，继续使用已验证的受限目录。"
+                ),
+                "东方财富与 Tushare 目录不可用；失败或分页不完整的题材未写入目录。",
+            ]
+            self.store.reuse_published_theme_sync(run_id, audit_issues)
+            return {
+                "catalog": len(rows),
+                "available": len(previous_ths),
+                "fresh": 0,
+                "source": _THS_THEME_SOURCE,
+                "coverage": round(len(previous_ths) / max(1, len(rows)), 4),
+                "quality_status": "partial",
+                "issues": audit_issues,
+            }
+
+        # A previous complete traversal may already contain enough individually
+        # verified themes for a useful cold-start snapshot.  Reuse it instead of
+        # repeating thousands of pages known to require an authenticated THS
+        # session.  Never replace an existing published catalog with this subset.
+        if (
+            not previous_items
+            and int(staging.get("attempted_count") or 0) >= len(rows)
+            and partial_required <= len(themes) < required
+        ):
+            return publish_partial([])
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
+            ),
+            "Referer": "http://q.10jqka.com.cn/gn/",
+        }
+        # THS is the final public fallback when the configured providers are
+        # unavailable.  Do not inherit a stale machine-wide proxy here: such
+        # proxies can return a 200 HTML interstitial that looks like a valid
+        # response but contains no constituent table.
+        with httpx.Client(
+            timeout=12,
+            follow_redirects=True,
+            headers=headers,
+            trust_env=False,
+        ) as client:
+            for index, (code, name) in enumerate(rows, start=1):
+                if cancelled():
+                    raise InterruptedError("同花顺题材扫描已取消")
+                if code in themes:
+                    progress(
+                        39 + round(16 * index / max(1, len(rows))),
+                        "恢复细分题材扫描",
+                        f"同花顺 {index}/{len(rows)} · 已缓存 {len(themes)}",
+                    )
+                    continue
+                page_count = 0
+                try:
+                    first_html = self._ths_page(client, code, 1)
+                    first_members, page_count = self._parse_ths_page(first_html)
+                    members = list(first_members)
+                    progress(
+                        39 + round(16 * (index - 1) / max(1, len(rows))),
+                        "扫描细分题材",
+                        f"同花顺 {index}/{len(rows)} · {name} · 1/{page_count} 页",
+                    )
+                    for page in range(2, page_count + 1):
+                        if cancelled():
+                            raise InterruptedError("同花顺题材扫描已取消")
+                        page_members, _ = self._parse_ths_page(
+                            self._ths_page(client, code, page)
+                        )
+                        members.extend(page_members)
+                        progress(
+                            39 + round(16 * (index - 1) / max(1, len(rows))),
+                            "扫描细分题材",
+                            f"同花顺 {index}/{len(rows)} · {name} · {page}/{page_count} 页",
+                        )
+                    members = sorted(set(members))
+                    if not members:
+                        raise ThemeSourceUnavailable("同花顺题材成分为空")
+                    payload = {
+                        "code": code,
+                        "name": name,
+                        "members": members,
+                        "aliases": [],
+                        "source": _THS_THEME_SOURCE,
+                    }
+                    themes[code] = payload
+                    self.store.save_theme_sync_item(
+                        run_id, code, name, payload=payload, pages=page_count,
+                    )
+                except InterruptedError:
+                    raise
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    detail = (str(exc).strip() or "题材成分同步失败")[:300]
+                    self.store.save_theme_sync_item(
+                        run_id, code, name, error=detail, pages=page_count,
+                    )
+                    issues.append(f"{name}：{detail}")
+                progress(
+                    39 + round(16 * index / max(1, len(rows))),
+                    "扫描细分题材",
+                    f"同花顺 {index}/{len(rows)} · 可用 {len(themes)} · 页 {page_count}",
+                )
+        if len(themes) < required:
+            message = f"同花顺题材覆盖不足：{len(themes)}/{len(rows)}，最低要求 {required}"
+            if not previous_items and len(themes) >= partial_required:
+                return publish_partial([message, *issues])
+            self.store.fail_theme_sync(run_id, [message, *issues[:30]])
+            raise ThemeSourceUnavailable(message)
+        audit_issues = [
+            "东方财富与 Tushare DC 不可用，已整套切换为同花顺题材目录。",
+            *(issues[:30]),
+        ]
+        self.store.commit_theme_sync(run_id, list(themes.values()), audit_issues)
+        return {
+            "catalog": len(rows),
+            "available": len(themes),
+            "fresh": len(themes) - len(staging["items"]),
+            "source": _THS_THEME_SOURCE,
+            "coverage": round(len(themes) / max(1, len(rows)), 4),
+            "quality_status": "complete",
+            "issues": audit_issues,
+        }
+
     def sync_themes(self, progress, cancelled) -> dict[str, Any]:  # pragma: no cover - 网络
-        """Refresh one coherent concept taxonomy, preferring Eastmoney then Tushare."""
+        """Refresh one coherent concept taxonomy with a resumable THS third source."""
         previous_items = self.store.themes()
         try:
             return self._sync_eastmoney_themes(
@@ -433,8 +722,8 @@ class RotationProvider:
             raise
         except ThemeSourceUnavailable as eastmoney_error:
             logger.warning(
-                "东方财富概念目录不可用，尝试 Tushare DC 后备源",
-                exc_info=True,
+                "东方财富概念目录不可用，尝试 Tushare DC 后备源：%s",
+                _compact_error(eastmoney_error),
             )
             try:
                 return self._sync_tushare_themes(
@@ -443,11 +732,21 @@ class RotationProvider:
             except InterruptedError:
                 raise
             except (RotationProviderCallError, ThemeSourceUnavailable) as tushare_error:
-                raise RuntimeError(
-                    "题材目录双源不可用："
-                    f"东方财富 {str(eastmoney_error)[:100]}；"
-                    f"Tushare {str(tushare_error)[:100]}"
-                ) from tushare_error
+                logger.warning(
+                    "Tushare DC 题材目录不可用，尝试同花顺后备源：%s",
+                    _compact_error(tushare_error),
+                )
+                try:
+                    return self._sync_ths_themes(progress, cancelled, previous_items)
+                except InterruptedError:
+                    raise
+                except ThemeSourceUnavailable as ths_error:
+                    raise RuntimeError(
+                        "题材目录三源不可用："
+                        f"东方财富 {str(eastmoney_error)[:90]}；"
+                        f"Tushare {str(tushare_error)[:90]}；"
+                        f"同花顺 {str(ths_error)[:90]}"
+                    ) from ths_error
 
     def sync_etf_observations(self, progress, cancelled) -> dict[str, Any]:
         """Fetch recent bulk fund shares and closes, preserving earlier observations."""
@@ -508,11 +807,11 @@ class RotationProvider:
                     ).rename(columns={"ts_code": "symbol", "unit_nav": "nav"})
                     if not {"symbol", "nav"}.issubset(nav.columns):
                         nav = pd.DataFrame(columns=["symbol", "nav"])
-                except RotationProviderCallError:
+                except RotationProviderCallError as exc:
                     nav_available = False
                     logger.warning(
-                        "场内基金单位净值接口不可用，本轮 ETF 资金改用收盘价并逐只标记",
-                        exc_info=True,
+                        "场内基金单位净值接口不可用，本轮 ETF 资金改用收盘价并逐只标记：%s",
+                        _compact_error(exc),
                     )
             if shares.empty:
                 continue

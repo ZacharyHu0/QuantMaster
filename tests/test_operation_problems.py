@@ -121,6 +121,6 @@ def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch
     worker.run_one(run)
 
     failed = store.get(queued["id"])
-    assert failed["status"] == "failed"
+    assert failed["status"] == "needs_confirmation"
     assert failed["result"]["problem"]["can_continue"] is True
     assert failed["result"]["data_quality"]["status"] == "needs_confirmation"

@@ -3,7 +3,6 @@
 
   const btState = {activeId: '', runs: [], selected: new Set(), prompted: new Set(), timer: 0};
   const paperState = {activeId: '', accounts: []};
-  let csrfToken = '';
 
   const escapeHtml = value => typeof window.esc === 'function'
     ? window.esc(String(value ?? ''))
@@ -38,26 +37,12 @@
     return strategy?.factor || '因子策略';
   };
 
-  async function ensureCsrf() {
-    if (csrfToken) return csrfToken;
-    const settings = await api('/api/v1/settings', {cache: 'no-store'});
-    csrfToken = settings.csrf_token || '';
-    if (!csrfToken) throw new Error('未取得本机操作令牌，请刷新页面后重试。');
-    return csrfToken;
-  }
-
   async function mutate(path, method = 'POST', body) {
-    const token = await ensureCsrf();
-    try {
-      return await window.QuantMasterAPI(path, {
-        method, cache: 'no-store',
-        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch (error) {
-      if (error?.status === 403) csrfToken = '';
-      throw error;
-    }
+    return window.QuantMasterAPI(path, {
+      method, cache: 'no-store',
+      headers: {'Content-Type': 'application/json'},
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
   }
 
   function setButtonBusy(button, busy, busyLabel = '处理中…') {
@@ -425,17 +410,17 @@
 
   function renderMetrics(metrics) {
     const cells = [
-      ['累计收益', percent(metrics.total_return), metrics.total_return],
-      ['年化收益', percent(metrics.annual_return), metrics.annual_return],
-      ['最大回撤', percent(-Math.abs(Number(metrics.max_drawdown || 0))), -Math.abs(Number(metrics.max_drawdown || 0))],
-      ['夏普', number(metrics.sharpe), metrics.sharpe],
-      ['信息比率', number(metrics.information_ratio), metrics.information_ratio],
-      ['Sortino', number(metrics.sortino), metrics.sortino],
-      ['Profit Factor', number(metrics.profit_factor), metrics.profit_factor],
-      ['交易成本', number(metrics.total_trade_cost), null],
+      ['累计收益', percent(metrics.total_return), signedClass(metrics.total_return)],
+      ['年化收益', percent(metrics.annual_return), signedClass(metrics.annual_return)],
+      ['最大回撤', percent(-Math.abs(Number(metrics.max_drawdown || 0))), 'risk'],
+      ['夏普', number(metrics.sharpe), ''],
+      ['信息比率', number(metrics.information_ratio), ''],
+      ['Sortino', number(metrics.sortino), ''],
+      ['Profit Factor', number(metrics.profit_factor), ''],
+      ['交易成本', number(metrics.total_trade_cost), ''],
     ];
-    return `<div class="trading-metrics" aria-label="核心绩效">${cells.map(([label, value, signed]) =>
-      `<div class="trading-metric"><span>${label}</span><strong class="${signedClass(signed)}">${value}</strong></div>`
+    return `<div class="trading-metrics" aria-label="核心绩效">${cells.map(([label, value, tone]) =>
+      `<div class="trading-metric"><span>${label}</span><strong class="${tone}">${value}</strong></div>`
     ).join('')}</div>`;
   }
 
@@ -507,7 +492,7 @@
       if (!compareRuns && document.getElementById('bt-workbench-dd')) {
         mkChart('bt-workbench-dd').setOption(baseOpt({
           xAxis: timeAxis(), yAxis: valAxis(value => `${(value * 100).toFixed(0)}%`),
-          series: [{name: '回撤', type: 'line', data: artifact.drawdown || [], showSymbol: false, lineStyle: {width: 2, color: '#d55181'}}],
+          series: [{name: '回撤', type: 'line', data: artifact.drawdown || [], showSymbol: false, lineStyle: {width: 2, color: CHART_COLORS.danger}, areaStyle:{opacity:.16,color:CHART_COLORS.danger}}],
         }), true);
       }
     });

@@ -49,7 +49,7 @@ class TestBasics:
         anonymous = TestClient(app)
         blocked = anonymous.post("/api/v1/research/selection/daily", json={})
         assert blocked.status_code == 403
-        assert blocked.json()["problem"]["code"] == "request_security_rejected"
+        assert blocked.json()["problem"]["code"] == "csrf_missing"
 
         session = anonymous.get("/api/v1/session")
         token = session.json()["csrf_token"]
@@ -65,6 +65,13 @@ class TestBasics:
             headers={"X-CSRF-Token": token, "Origin": "https://attacker.example"},
         )
         assert cross_origin.status_code == 403
+        assert cross_origin.json()["problem"]["code"] == "origin_rejected"
+        cross_origin_read = anonymous.get(
+            "/api/v1/health/live",
+            headers={"Origin": "https://attacker.example"},
+        )
+        assert cross_origin_read.status_code == 403
+        assert cross_origin_read.json()["problem"]["code"] == "origin_rejected"
 
         untrusted_host = TestClient(app).get("/", headers={"Host": "attacker.example"})
         assert untrusted_host.status_code == 403
@@ -76,6 +83,25 @@ class TestBasics:
         assert page.headers["X-Frame-Options"] == "DENY"
         assert "script-src 'self' 'nonce-" in page.headers["Content-Security-Policy"]
         assert "%%QM_CSP_NONCE%%" not in page.text
+        assert "csrfRefreshPromise" in page.text
+        assert "csrfCodes.has(String(rejection?.problem?.code || ''))" in page.text
+
+        stale_browser = TestClient(app)
+        stale_browser.cookies.set(
+            "qm_csrf", "1.stale.invalid", domain="testserver.local", path="/",
+        )
+        refreshed_page = stale_browser.get("/")
+        refreshed_token = stale_browser.cookies.get(
+            "qm_csrf", domain="testserver.local", path="/",
+        )
+        assert refreshed_page.status_code == 200
+        assert refreshed_token and refreshed_token != "1.stale.invalid"
+        accepted_after_refresh = stale_browser.post(
+            "/api/v1/research/decision/dashboard/stream",
+            json={"universe": "demo", "start": "2023-01-01", "horizon": 99},
+            headers={"X-CSRF-Token": refreshed_token},
+        )
+        assert accepted_after_refresh.status_code == 422
 
     def test_release_info(self):
         resp = client.get("/api/v1/release")
@@ -97,6 +123,9 @@ class TestBasics:
         assert "{'A股指数':majorIndexes}" in resp.text
         assert "主要指数区块已保留" in resp.text
         assert "function marketChangeSeries" in resp.text
+        assert "function marketSparkOption" in resp.text
+        assert "id:'market-spark-latest'" in resp.text
+        assert "区间涨跌" in resp.text
         assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text
         assert "market-section-title" in resp.text
         assert "mkt-memberships" in resp.text
@@ -117,7 +146,14 @@ class TestBasics:
         assert "data-decision-kline-trigger" in resp.text
         assert "data-decision-asset-toggle" in resp.text
         assert "showKline(row.dataset.symbol" not in resp.text
-        assert "existing.getDom() !== el" in resp.text
+        assert 'src="/static/charts.js"' in resp.text
+        assert 'href="/static/charts.css"' in resp.text
+        assert 'href="/static/brand-intro.css"' in resp.text
+        assert 'src="/static/brand-intro.js"' in resp.text
+        assert 'href="/static/brand/quantmaster-favicon.svg"' in resp.text
+        assert 'src="/static/brand/quantmaster-mark-inverse.svg"' in resp.text
+        assert 'id="brand-replay"' in resp.text
+        assert "window.QuantCharts.activateTab(tab)" in resp.text
         assert "ACTIVE_TAB_STORAGE_KEY" in resp.text
         assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in resp.text
         assert "activateTab(restoredControl, {persist:false, load:false})" in resp.text
@@ -190,6 +226,29 @@ class TestBasics:
         assert client.get("/static/stock-analysis.js").status_code == 200
         assert client.get("/static/help.css").status_code == 200
         assert client.get("/static/help.js").status_code == 200
+        brand_script = client.get("/static/brand-intro.js")
+        brand_styles = client.get("/static/brand-intro.css")
+        brand_mark = client.get("/static/brand/quantmaster-mark.svg")
+        brand_logo = client.get("/static/brand/quantmaster-logo.svg")
+        assert brand_script.status_code == 200
+        assert brand_styles.status_code == 200
+        assert brand_mark.status_code == 200
+        assert brand_logo.status_code == 200
+        assert "prefers-reduced-motion: reduce" in brand_styles.text
+        assert "window.__recording === true" in brand_script.text
+        assert "window.QuantMasterBrandIntro" in brand_script.text
+        chart_script = client.get("/static/charts.js")
+        chart_styles = client.get("/static/charts.css")
+        assert chart_script.status_code == 200
+        assert chart_styles.status_code == 200
+        assert "function motionProfile(kind, count)" in chart_script.text
+        assert "count > 1000" in chart_script.text
+        assert "count > 240" in chart_script.text
+        assert "count > 60" in chart_script.text
+        assert "function replayChart(id)" in chart_script.text
+        assert "window.ResizeObserver" in chart_script.text
+        assert "prefers-reduced-motion: reduce" in chart_styles.text
+        assert "--chart-primary" in chart_styles.text
         help_content = client.get("/static/help-content.html")
         assert help_content.status_code == 200
         assert 'data-help-topic="start"' in help_content.text
@@ -344,8 +403,12 @@ class TestBasics:
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
         monkeypatch.setattr("quantmaster.data.load_history", lambda *args, **kwargs: frame)
         monkeypatch.setattr(
-            "quantmaster.data.yfinance_source.YFinanceSource.daily_many",
-            lambda self, symbols, start, end: {symbol: frame for symbol in symbols},
+            app_module,
+            "_sync_reference_market",
+            lambda symbols, start, end, refresh, store: (
+                {symbol: frame for symbol in symbols},
+                {},
+            ),
         )
         events = []
 
@@ -378,10 +441,18 @@ class TestBasics:
         monkeypatch.setattr(app_module, "_market_groups", lambda: {
             "全球市场": {symbol: "标普500"},
         })
-        monkeypatch.setattr(
-            "quantmaster.data.yfinance_source.YFinanceSource.daily_many",
-            lambda *args, **kwargs: (_ for _ in ()).throw(ConnectionError("offline")),
-        )
+        def failed_reference_sync(symbols, start, end, refresh, store):
+            for candidate in symbols:
+                store.mark_status(candidate, "stale")
+            return ({}, {
+                symbol: {
+                    "error_code": "offline",
+                    "message": "所有参考数据源离线",
+                    "source_attempts": [],
+                },
+            })
+
+        monkeypatch.setattr(app_module, "_sync_reference_market", failed_reference_sync)
         events = []
         result = app_module._market_overview_data(
             "2026-07-01", lambda *args: events.append(args))
@@ -390,6 +461,34 @@ class TestBasics:
         assert partials[0]["stage"] == "cache"
         assert result["groups"]["全球市场"][0]["symbol"] == symbol
         assert result["groups"]["全球市场"][0]["cache_status"] == "stale"
+
+    def test_market_overview_exposes_unavailable_reference_details(self, monkeypatch):
+        from quantmaster.server import app as app_module
+
+        symbol = "DX-Y.NYB.US"
+        monkeypatch.setattr(app_module, "_personal_market_symbols", lambda: ({}, {}))
+        monkeypatch.setattr(app_module, "_market_groups", lambda: {
+            "商品与汇率": {symbol: "美元指数"},
+        })
+        monkeypatch.setattr(
+            app_module,
+            "_sync_reference_market",
+            lambda symbols, start, end, refresh, store: ({}, {
+                symbol: {
+                    "error_code": "all_sources_unavailable",
+                    "message": "Yahoo 正在限流",
+                    "source_attempts": [{"source": "yfinance", "code": "429"}],
+                },
+            }),
+        )
+
+        result = app_module._market_overview_data("2026-07-01")
+
+        assert result["groups"]["商品与汇率"] == []
+        assert result["group_statuses"]["商品与汇率"]["unavailable"] == 1
+        assert result["group_statuses"]["商品与汇率"]["issues"][0]["symbol"] == symbol
+        assert result["unavailable_items"][0]["symbol"] == symbol
+        assert result["unavailable_items"][0]["message"] == "Yahoo 正在限流"
 
     def test_decision_dashboard_contract(self, panel, monkeypatch):
         symbols = list(panel["close"].columns)

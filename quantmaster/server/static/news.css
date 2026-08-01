@@ -271,6 +271,8 @@
 .news-tag.official { color: var(--s4); }
 .news-tag.pending { color: var(--s4); border-style: dashed; }
 .news-tag.failed { color: var(--bad); border-color: color-mix(in oklch, var(--bad) 46%, transparent); }
+.news-tag.dead_letter { color: var(--s4); border-color: color-mix(in oklch, var(--s4) 55%, transparent); }
+.news-tag.recovery { color: var(--s1); border-color: color-mix(in oklch, var(--s1) 50%, transparent); }
 .news-tag.sector { color: var(--s7); border-color: color-mix(in oklch, var(--s7) 42%, var(--axis)); }
 .news-tag.symbol { color: var(--s1); }
 
@@ -357,7 +359,8 @@
 
 .sentiment-axis i { position: relative; height: 3px; background: var(--grid); }
 .sentiment-axis b { position: absolute; top: 50%; left: 50%; width: 7px; height: 11px; background: var(--ink); transform: translate(-50%, -50%); transition: left 320ms var(--ease-out-expo); }
-.news-factor-chart { display: block; width: 100%; height: 82px; margin-top: 10px; overflow: visible; }
+.news-factor-chart { display: grid; place-items: center; width: 100%; height: 96px; margin-top: 10px; }
+.news-chart-empty { color: var(--muted); font-size: 10px; }
 
 .news-sector-list {
   display: grid;

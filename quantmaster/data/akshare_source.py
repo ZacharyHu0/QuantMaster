@@ -142,7 +142,10 @@ class AkshareSource(DataSource):
 
     def spot(self, symbols: list[str]) -> pd.DataFrame:  # pragma: no cover - 网络
         ak = _require_akshare()
-        raw = akshare_call("stock_zh_a_spot_em", ak.stock_zh_a_spot_em)
+        raw = akshare_call(
+            "stock_zh_a_spot_em", ak.stock_zh_a_spot_em,
+            lane="akshare:eastmoney-spot",
+        )
         raw = raw.rename(columns={"代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "change_pct"})
         codes = {s.split(".")[0] for s in symbols}
         rows = raw[raw["code"].isin(codes)][["code", "name", "price", "change_pct"]]

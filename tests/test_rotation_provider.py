@@ -175,7 +175,7 @@ def test_provider_uses_akshare_concept_code_for_member_lookup(tmp_path, monkeypa
 
 
 def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, caplog,
 ):
     monkeypatch.setitem(sys.modules, "akshare", None)
     store = RotationStore(tmp_path / "rotation")
@@ -199,6 +199,13 @@ def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
     assert result["issues"] == [
         "东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"
     ]
+    fallback_records = [
+        record for record in caplog.records
+        if "尝试 Tushare DC 后备源" in record.getMessage()
+    ]
+    assert len(fallback_records) == 1
+    assert fallback_records[0].exc_info is None
+    assert fallback_records[0].getMessage().partition("：")[2]
     themes = store.themes()
     assert {item["code"] for item in themes} == {"BK0816.DC", "BK1184.DC"}
     assert {item["source"] for item in themes} == {"tushare:dc-concept"}
@@ -227,7 +234,156 @@ def test_provider_keeps_previous_theme_catalog_when_both_sources_fail(
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("connection closed")),
     )
 
-    with pytest.raises(RuntimeError, match="题材目录双源不可用"):
+    with pytest.raises(RuntimeError, match="题材目录三源不可用"):
         provider.sync_themes(lambda *args: None, lambda: False)
 
     assert store.themes() == [previous]
+
+
+def test_ths_page_parser_reads_members_and_page_count():
+    html = """
+    <table class="m-table"><thead><tr><th>序号</th><th>代码</th><th>名称</th></tr></thead>
+    <tbody><tr><td>1</td><td>920130</td><td>北交样本</td></tr>
+    <tr><td>2</td><td>300364</td><td>深市样本</td></tr></tbody></table>
+    <span class="page_info">1/35</span>
+    """
+
+    members, pages = RotationProvider._parse_ths_page(html)
+
+    assert members == ["920130.BJ", "300364.SZ"]
+    assert pages == 35
+
+
+def test_ths_catalog_publishes_as_one_source_after_quality_gate(tmp_path, monkeypatch):
+    class FakeAkshare:
+        @staticmethod
+        def stock_board_concept_name_ths():
+            return pd.DataFrame([
+                {"name": "题材一", "code": "301001"},
+                {"name": "题材二", "code": "301002"},
+            ])
+
+    html = """
+    <table class="m-table"><thead><tr><th>序号</th><th>代码</th><th>名称</th></tr></thead>
+    <tbody><tr><td>1</td><td>600000</td><td>样本</td></tr></tbody></table>
+    <span class="page_info">1/1</span>
+    """
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.akshare_call",
+        lambda label, function, *args, **kwargs: function(*args),
+    )
+    client_options = {}
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            client_options.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("quantmaster.rotation.provider.httpx.Client", CapturingClient)
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare())
+    monkeypatch.setattr(provider, "_ths_page", lambda client, code, page: html)
+
+    result = provider._sync_ths_themes(lambda *args: None, lambda: False, [])
+
+    assert result["coverage"] == 1.0
+    assert result["source"] == "ths:concept"
+    assert client_options["trust_env"] is False
+    assert {item["source"] for item in store.themes()} == {"ths:concept"}
+
+
+def test_ths_cold_start_can_publish_only_individually_complete_partial_catalog(
+    tmp_path, monkeypatch,
+):
+    class FakeAkshare:
+        @staticmethod
+        def stock_board_concept_name_ths():
+            return pd.DataFrame([
+                {"name": f"题材{index}", "code": f"30{index:04d}"}
+                for index in range(100)
+            ])
+
+    html = """
+    <table class="m-table"><thead><tr><th>序号</th><th>代码</th></tr></thead>
+    <tbody><tr><td>1</td><td>600000</td></tr></tbody></table>
+    <span class="page_info">1/1</span>
+    """
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.akshare_call",
+        lambda label, function, *args, **kwargs: function(*args),
+    )
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare())
+
+    def page(_client, code, _page):
+        if int(code) < 300075:
+            return html
+        raise RuntimeError("高页码需要登录")
+
+    monkeypatch.setattr(provider, "_ths_page", page)
+    result = provider._sync_ths_themes(lambda *args: None, lambda: False, [])
+
+    assert result["quality_status"] == "partial"
+    assert result["available"] == 75
+    assert result["coverage"] == 0.75
+    assert len(store.themes()) == 75
+    assert {item["code"] for item in store.themes()} == {
+        f"30{index:04d}" for index in range(75)
+    }
+    assert any("受限目录" in issue for issue in result["issues"])
+
+
+def test_ths_refresh_reuses_fully_traversed_published_partial_catalog(
+    tmp_path, monkeypatch,
+):
+    class FakeAkshare:
+        @staticmethod
+        def stock_board_concept_name_ths():
+            return pd.DataFrame([
+                {"name": f"题材{index}", "code": f"30{index:04d}"}
+                for index in range(100)
+            ])
+
+    html = """
+    <table class="m-table"><thead><tr><th>序号</th><th>代码</th></tr></thead>
+    <tbody><tr><td>1</td><td>600000</td></tr></tbody></table>
+    <span class="page_info">1/1</span>
+    """
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.akshare_call",
+        lambda label, function, *args, **kwargs: function(*args),
+    )
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare())
+
+    def page(_client, code, _page):
+        if int(code) < 300075:
+            return html
+        raise RuntimeError("高页码需要登录")
+
+    monkeypatch.setattr(provider, "_ths_page", page)
+    first = provider._sync_ths_themes(lambda *args: None, lambda: False, [])
+    assert first["quality_status"] == "partial"
+
+    def unexpected_client(*args, **kwargs):
+        raise AssertionError("已完整遍历的受限目录不应再次访问题材详情页")
+
+    monkeypatch.setattr("quantmaster.rotation.provider.httpx.Client", unexpected_client)
+    second = provider._sync_ths_themes(
+        lambda *args: None, lambda: False, store.themes(),
+    )
+
+    assert second["quality_status"] == "partial"
+    assert second["catalog"] == 100
+    assert second["available"] == 75
+    assert second["coverage"] == 0.75
+    assert len(store.themes()) == 75
+    assert any("继续使用已验证的受限目录" in issue for issue in second["issues"])

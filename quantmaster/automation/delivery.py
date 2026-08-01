@@ -55,16 +55,74 @@ def _digest_counts(payload: dict[str, Any]) -> dict[str, int]:
     return result
 
 
+def _feishu_category(kind: Any, payload: dict[str, Any]) -> str:
+    if kind == "important_news":
+        return "资讯摘要" if payload.get("digest") else "重要资讯"
+    if kind == "task_failure":
+        phases = set(payload.get("phases") or [])
+        if phases == {"fetch"}:
+            return "资讯拉取异常"
+        if phases == {"analysis"}:
+            return "资讯分析异常"
+        if {"fetch", "analysis"}.issubset(phases):
+            return "资讯处理异常"
+        if str(payload.get("task") or "") in {
+            "fast_news_scan", "official_news_scan", "periodic_news_scan", "news_digest",
+        }:
+            return "资讯任务异常"
+        return "任务异常"
+    return {
+        "market_turn": "盘中变盘",
+        "market_close": "收盘状态",
+        "task_report": "任务结果",
+    }.get(str(kind), "系统提醒")
+
+
+def _feishu_result_lines(result: Any) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+    status_labels = {
+        "ok": "已完成", "completed": "已完成", "succeeded": "已完成",
+        "skipped": "已跳过", "pending_confirmation": "等待确认",
+        "failed": "失败",
+    }
+    fields = (
+        ("status", "状态"), ("reason", "说明"), ("signal_date", "信号日期"),
+        ("latest", "最新数据"), ("items", "资讯数量"), ("picks", "候选数量"),
+        ("planned", "计划调整"), ("breadth", "上涨比例"),
+        ("sample_size", "样本数量"),
+    )
+    lines: list[str] = []
+    for key, label in fields:
+        value = result.get(key)
+        if value is None or value == "":
+            continue
+        if key == "status":
+            value = status_labels.get(str(value), value)
+        elif key == "breadth":
+            value = f"{_number(value) * 100:.1f}%"
+        lines.append(f"**{label}**  {_lark_md(value)}")
+    return lines[:6]
+
+
+def _feishu_footer(kind: Any) -> str:
+    if kind == "task_failure":
+        return "系统会按计划重试；若连续出现，请检查自动化任务与数据源状态。"
+    if kind == "task_report":
+        return "可在 QuantMaster 自动化页面查看完整运行记录。"
+    return "仅作量化研究与记录，不构成投资建议。"
+
+
 def format_alert(item: dict[str, Any], channel: str) -> str:
-    labels = {
+    labels: dict[Any, str] = {
         "market_turn": "盘中变盘", "market_close": "收盘状态变化",
         "important_news": "重要资讯", "task_failure": "自动化任务失败",
         "task_report": "自动化报告",
     }
-    kind = item.get("kind")
+    kind = str(item.get("kind") or "")
     payload = item.get("payload", {})
     direction = {"up": "偏强", "down": "偏弱", "neutral": "中性"}.get(
-        item.get("direction"), "中性")
+        str(item.get("direction") or "neutral"), "中性")
     title = payload.get("title") or labels.get(kind, kind)
     lines = [f"【QuantMaster · {labels.get(item.get('kind'), '提醒')}】", str(title)]
     if kind == "important_news" and payload.get("digest"):
@@ -113,23 +171,15 @@ def format_alert(item: dict[str, Any], channel: str) -> str:
 
 def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
     """飞书主通道使用结构化卡片，便于在群聊中快速核查证据。"""
-    labels = {
-        "market_turn": "盘中变盘", "market_close": "收盘状态变化",
-        "important_news": "重要资讯", "task_failure": "自动化任务失败",
-        "task_report": "自动化报告",
-    }
-    kind = item.get("kind")
+    kind = str(item.get("kind") or "")
     payload = item.get("payload", {})
     direction = {"up": "偏强", "down": "偏弱", "neutral": "中性"}.get(
-        item.get("direction"), "中性")
+        str(item.get("direction") or "neutral"), "中性")
     template = (
         "red" if item.get("direction") == "up" or item.get("severity") == "critical"
         else "green" if item.get("direction") == "down" else "blue"
     )
-    title = _trim(
-        payload.get("title") or labels.get(kind, "QuantMaster 提醒"),
-        80,
-    )
+    category = _feishu_category(kind, payload)
     if kind == "important_news" and payload.get("digest"):
         counts = _digest_counts(payload)
         lines = [
@@ -155,22 +205,88 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
     elif kind == "important_news":
         sentiment = _number(payload.get("sentiment"))
         lines = [
+            f"**{_lark_md(payload.get('title') or '未命名资讯')}**",
+            "",
             (f"**研判**  {_news_direction(item.get('direction'))} ({sentiment:+.2f})    "
              f"**重要度**  {_number(item.get('score')):.0f}/100"),
-            f"**数据截至**  {item.get('data_as_of') or '未知'}",
         ]
         if payload.get("summary"):
             lines.extend(["", "**摘要**", _lark_md(payload["summary"])])
+        context = []
+        if payload.get("source"):
+            context.append(f"**来源**  {_lark_md(payload['source'])}")
+        if payload.get("event_type"):
+            context.append(f"**类型**  {_lark_md(payload['event_type'])}")
+        relevance = {"holding": "持仓", "watchlist": "关注", "market": "全市场"}.get(
+            str(item.get("relevance") or "market"), "全市场")
+        context.append(f"**范围**  {relevance}")
+        lines.extend(["", "    ".join(context)])
         if payload.get("sectors"):
-            lines.extend(["", "**相关板块**  " + "、".join(payload["sectors"][:5])])
+            lines.append("**相关板块**  " + "、".join(payload["sectors"][:5]))
+        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
+    elif kind == "market_turn":
+        movement = "快速走强" if item.get("direction") == "up" else "快速转弱"
+        lines = [
+            f"**{_lark_md(payload.get('title') or f'市场{movement}')}**",
+            (f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}    "
+             f"**连续确认**  {int(_number(payload.get('confirmation_count'), 1))} 次"),
+        ]
+        if payload.get("median_return") is not None:
+            lines.append(f"**15 分钟指数收益中位数**  {_number(payload['median_return']) * 100:+.2f}%")
+        if payload.get("breadth_delta_pp") is not None:
+            lines.append(f"**上涨家数比例变化**  {_number(payload['breadth_delta_pp']):+.1f} 个百分点")
+        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
+    elif kind == "market_close":
+        current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+        previous = payload.get("previous") if isinstance(payload.get("previous"), dict) else {}
+        current_state = current.get("state_label") or current.get("state") or "未知"
+        previous_state = previous.get("state_label") or previous.get("state") or "未知"
+        lines = [
+            f"**状态变化**  {_lark_md(previous_state)} → {_lark_md(current_state)}",
+            (f"**牛市分数**  {_number(previous.get('bull_score')):.1f} → "
+             f"{_number(current.get('bull_score')):.1f}    **方向**  {direction}"),
+        ]
+        if current.get("return_1d") is not None:
+            lines.append(f"**当日涨跌**  {_number(current['return_1d']) * 100:+.2f}%")
+        if current.get("advance_ratio") is not None:
+            lines.append(f"**上涨比例**  {_number(current['advance_ratio']) * 100:.1f}%")
+        lines.append(f"**数据截至**  {item.get('data_as_of') or current.get('as_of') or '未知'}")
+    elif kind == "task_failure":
+        task_label = payload.get("task_label")
+        lines = [
+            (f"**任务**  {_lark_md(task_label)}" if task_label
+             else f"**事项**  {_lark_md(payload.get('title') or '自动化任务未正常完成')}")
+        ]
+        phases = set(payload.get("phases") or [])
+        phase_labels = [label for key, label in (("fetch", "资讯拉取"), ("analysis", "新闻分析"))
+                        if key in phases]
+        if phase_labels:
+            lines.append("**异常阶段**  " + "、".join(phase_labels))
+        impact = "本轮部分结果可用，其余项目将在后续调度中重试。" if payload.get("partial") else (
+            "本轮任务未正常完成，系统将在后续调度中重试。")
+        lines.extend([
+            f"**影响**  {impact}",
+            f"**发生时间**  {item.get('occurred_at') or item.get('data_as_of') or '未知'}",
+        ])
+    elif kind == "task_report":
+        lines = [f"**{_lark_md(payload.get('title') or '自动化任务结果')}**"]
+        result_lines = _feishu_result_lines(payload.get("result"))
+        if result_lines:
+            lines.extend(["", *result_lines])
+        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
     else:
         lines = [
             f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}",
             f"**数据截至**  {item.get('data_as_of') or '未知'}",
         ]
     evidence = item.get("evidence") or []
-    if evidence and not (kind == "important_news" and payload.get("digest")):
-        lines.extend(["", "**核查依据**", *[f"• {_lark_md(value)}" for value in evidence[:5]]])
+    if evidence and not (kind == "important_news" and payload.get("digest")) \
+            and kind != "market_close":
+        evidence_title = {
+            "task_failure": "错误详情", "market_turn": "触发依据",
+            "task_report": "运行说明",
+        }.get(str(kind), "核查依据")
+        lines.extend(["", f"**{evidence_title}**", *[f"• {_lark_md(value)}" for value in evidence[:5]]])
     symbols = item.get("symbols") or []
     if symbols:
         lines.extend(["", "**相关标的**  " + "、".join(symbols[:12])])
@@ -183,13 +299,13 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
         "config": {"wide_screen_mode": True},
         "header": {
             "template": template,
-            "title": {"tag": "plain_text", "content": f"QuantMaster · {title}"},
+            "title": {"tag": "plain_text", "content": category},
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
             {"tag": "hr"},
             {"tag": "note", "elements": [{
-                "tag": "plain_text", "content": "仅作量化研究与记录，不构成投资建议。",
+                "tag": "plain_text", "content": _feishu_footer(kind),
             }]},
         ],
     }

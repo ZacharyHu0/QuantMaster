@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from typing import Literal, get_args
 
 from quantmaster.automation.models import ActorContext
 from quantmaster.automation.store import AutomationStore
@@ -165,7 +166,9 @@ class FeishuBotClient:
             if message.sender.is_bot:
                 return
             message_id = str(message.message_id or "").strip()
-            chat_type = "direct" if message.chat_type == "p2p" else "group"
+            chat_type: Literal["direct", "group"] = (
+                "direct" if message.chat_type == "p2p" else "group"
+            )
             if not message_id or not self.store.claim_inbound(
                     "feishu", message_id, chat_type=chat_type, account_id=app_id):
                 return
@@ -203,6 +206,27 @@ class FeishuBotClient:
                 return
             on_message(actor, text)
 
+        async def lifecycle_event(event) -> None:
+            """Acknowledge non-message lifecycle events without treating them as failures."""
+            event_type = str(
+                getattr(event, "event_type", "")
+                or getattr(event, "type", "")
+                or "botAdded"
+            )
+            logger.info("飞书 Bot 生命周期事件已接收: %s", event_type)
+            self.store.set_bot_status("feishu", app_id, "listening")
+
+        async def raw_event(event) -> None:
+            event_type = str(
+                getattr(event, "event_type", "")
+                or getattr(getattr(event, "header", None), "event_type", "")
+            )
+            if event_type in {
+                "im.chat.access_event.bot_p2p_chat_entered_v1",
+                "im.chat.member.user.added_v1",
+            }:
+                await lifecycle_event(event)
+
         async def serve() -> None:
             nonlocal channel
             # 允许普通群消息进入本地上下文缓存；是否回复由上面的真实 @ 检查决定。
@@ -214,6 +238,18 @@ class FeishuBotClient:
                     require_mention=False, respond_to_mention_all=False)
             channel = FeishuChannel(**options)
             channel.on("message", receive)
+            # 新版 SDK 用 botAdded 归一化会话进入/入群事件，同时保留 raw 兜底；
+            # 旧 SDK 和测试替身没有这些事件名时不做猜测性注册。
+            try:
+                from lark_oapi.channel.events import ChannelEventName
+
+                supported = set(get_args(ChannelEventName))
+                if "botAdded" in supported:
+                    channel.on("botAdded", lifecycle_event)
+                if "raw" in supported:
+                    channel.on("raw", raw_event)
+            except (ImportError, TypeError):
+                logger.debug("当前飞书 SDK 不暴露生命周期事件注册表")
             self.store.set_bot_status("feishu", app_id, "connecting")
             try:
                 await channel.start_background(timeout=30)
@@ -221,7 +257,12 @@ class FeishuBotClient:
                 logger.info("飞书 Bot 长连接已就绪")
                 await asyncio.to_thread(stop_event.wait)
             finally:
-                await channel.stop_background()
+                try:
+                    await channel.stop_background()
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    if not stop_event.is_set():
+                        raise
+                    logger.info("飞书 Bot 长连接关闭时 SDK 已先行释放资源")
                 if stop_event.is_set():
                     self.store.set_bot_status("feishu", app_id, "configured")
                     logger.info("飞书 Bot 长连接已停止")

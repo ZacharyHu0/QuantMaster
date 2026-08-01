@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -199,7 +199,11 @@ async def request_context_and_migration_lock(request: Request, call_next):
     """Apply the local security boundary, request context and migration lock."""
     from quantmaster.data.migration import migration_manager
     from quantmaster.runtime.maintenance import maintenance_barrier
-    from quantmaster.server.security import apply_security_headers, enforce_request_security
+    from quantmaster.server.security import (
+        SecurityViolation,
+        apply_security_headers,
+        enforce_request_security,
+    )
 
     request_id = _new_request_id()
     request.state.request_id = request_id
@@ -232,13 +236,26 @@ async def request_context_and_migration_lock(request: Request, call_next):
             )
         else:
             response = await call_next(request)
-    except HTTPException as exc:
+    except SecurityViolation as exc:
         problem = make_problem(
-            "request_security_rejected",
+            exc.code,
             source="本地服务",
             title="请求被安全策略拒绝",
             message=str(exc.detail),
-            action="请从本机页面刷新后重试。",
+            action=exc.action,
+            blocking=True,
+        )
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": str(exc.detail), "problem": problem, "error_id": request_id},
+        )
+    except HTTPException as exc:
+        problem = make_problem(
+            "request_rejected",
+            source="本地服务",
+            title="请求未能执行",
+            message=str(exc.detail),
+            action="请检查请求内容后重试。",
             blocking=True,
         )
         response = JSONResponse(
@@ -397,7 +414,9 @@ def _progress_stream(
 # ---------- 页面 ----------
 
 @app.get("/", include_in_schema=False)
-def index() -> HTMLResponse:
+def index(request: Request) -> HTMLResponse:
+    from quantmaster.server.security import ensure_csrf_cookie
+
     nonce = secrets.token_urlsafe(18)
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     page = (
@@ -421,10 +440,12 @@ def index() -> HTMLResponse:
         "frame-ancestors 'none'",
         "form-action 'self'",
     ))
-    return HTMLResponse(page, headers={
+    response = HTMLResponse(page, headers={
         "Cache-Control": "no-cache",
         "Content-Security-Policy": csp,
     })
+    ensure_csrf_cookie(response, request)
+    return response
 
 
 @app.get("/api/v1/session")
@@ -460,6 +481,25 @@ def diagnostic_report() -> dict:
     from quantmaster.server.diagnostics import diagnostics
 
     return diagnostics()
+
+
+@app.post("/api/v1/diagnostics/providers/{lane}/probe")
+def allow_provider_probe(lane: str) -> dict:
+    """Allow one operator-requested recovery probe for a known provider lane."""
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+    from quantmaster.server.diagnostics import invalidate_diagnostics
+
+    known = PROVIDER_HEALTH.status(lane)
+    if lane not in known:
+        raise HTTPException(404, "数据源通道不存在")
+    state = PROVIDER_HEALTH.reset(lane)[lane]
+    invalidate_diagnostics()
+    return {
+        "lane": lane,
+        "status": "probe_allowed",
+        "state": state,
+        "message": "下一次相关请求将绕过冷却并执行一次受控探测。",
+    }
 
 
 @app.get("/api/v1/release")
@@ -546,6 +586,11 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
             if checked_at else ""
         ),
         "cache_status": str((meta or {}).get("last_status") or "ready"),
+        "source": str((meta or {}).get("last_source") or "local-cache"),
+        "freshness": (
+            "stale" if str((meta or {}).get("last_status") or "ready")
+            in {"stale", "refresh_failed"} else "ready"
+        ),
     }
 
 
@@ -562,57 +607,70 @@ def _needs_market_sync(meta: dict | None, start: str, end: str, refresh: str) ->
     return time.time() - checked_at >= get_config().data.cache_days * 86400
 
 
-def _sync_yahoo_market(
+def _sync_reference_market(
     symbols: list[str], start: str, end: str, refresh: str, store,
-) -> dict[str, pd.DataFrame]:
-    """按相同缺口起点批量同步 Yahoo 标的，并逐标的校准落盘。"""
-    from quantmaster.data.registry import _align_increment, _covers_requested_range
+) -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
+    """同步全球参考标的；每个标的独立选择兼容来源和错误状态。"""
+    from quantmaster.data.reference_market import (
+        ReferenceMarketUnavailable,
+        fetch_reference,
+    )
+    from quantmaster.data.registry import _covers_requested_range
     from quantmaster.data.resilience import data_priority
-    from quantmaster.data.yfinance_source import YFinanceSource
 
-    plans: dict[str, tuple[str, str]] = {}
+    plans: dict[str, str] = {}
     for symbol in symbols:
         meta = store.metadata(symbol)
         if not _needs_market_sync(meta, start, end, refresh):
             continue
         cached = store.get(symbol)
         if cached is None or cached.empty:
-            plans[symbol] = (start, "initial")
+            plans[symbol] = start
         elif str((meta or {}).get("coverage_start") or (meta or {}).get("start") or "") > start:
-            plans[symbol] = (start, "right")
+            plans[symbol] = start
         else:
-            plans[symbol] = (
-                str(cached.index[max(0, len(cached) - 5)].date()), "right")
+            plans[symbol] = str(cached.index[max(0, len(cached) - 5)].date())
 
-    source = YFinanceSource()
-    grouped: dict[str, list[str]] = {}
-    for symbol, (fetch_start, _direction) in plans.items():
-        grouped.setdefault(fetch_start, []).append(symbol)
-    for fetch_start, batch_symbols in grouped.items():
+    failures: dict[str, dict] = {}
+
+    def sync_one(symbol: str, fetch_start: str) -> None:
         try:
             with data_priority("interactive"):
-                frames = source.daily_many(batch_symbols, fetch_start, end)
-        except Exception as exc:
-            logger.debug("Yahoo 批量同步失败 %s: %s", batch_symbols, exc)
-            for symbol in batch_symbols:
-                store.mark_status(symbol, "stale", source=source.name)
-            continue
-        for symbol in batch_symbols:
-            frame = frames.get(symbol)
+                fetched = fetch_reference(symbol, fetch_start, end)
+            frame = fetched.frame
             if frame is None or frame.empty or not _covers_requested_range(frame, fetch_start, end):
-                store.mark_status(symbol, "stale", source=source.name)
-                continue
+                raise ValueError("响应缺失有效交易日或内部过于稀疏")
             with store.lock(symbol):
                 cached = store.get(symbol)
-                try:
-                    merged = frame if cached is None or cached.empty else _align_increment(
-                        cached, frame, plans[symbol][1])
-                except Exception as exc:
-                    logger.debug("Yahoo 增量校准失败 %s: %s", symbol, exc)
-                    store.mark_status(symbol, "stale", source=source.name)
-                    continue
+                merged = frame if cached is None or cached.empty else pd.concat([cached, frame])
+                merged = merged[~merged.index.duplicated(keep="last")].sort_index()
                 store.put(symbol, merged, replace=True)
-                store.mark_checked(symbol, fetch_start, end, source=source.name)
+                store.mark_checked(symbol, fetch_start, end, source=fetched.source)
+        except ReferenceMarketUnavailable as exc:
+            failures[symbol] = {
+                "error_code": "all_sources_unavailable",
+                "message": str(exc)[:500],
+                "source_attempts": list(exc.attempts),
+            }
+            previous_source = str((store.metadata(symbol) or {}).get("last_source") or "")
+            store.mark_status(symbol, "stale", source=previous_source)
+        except Exception as exc:
+            failures[symbol] = {
+                "error_code": type(exc).__name__,
+                "message": (str(exc).strip() or "同步失败")[:500],
+                "source_attempts": [],
+            }
+            previous_source = str((store.metadata(symbol) or {}).get("last_source") or "")
+            store.mark_status(symbol, "stale", source=previous_source)
+
+    with ThreadPoolExecutor(
+        max_workers=min(6, max(1, len(plans))),
+        thread_name_prefix="reference-market",
+    ) as executor:
+        pending = [executor.submit(sync_one, symbol, fetch_start)
+                   for symbol, fetch_start in plans.items()]
+        for future in as_completed(pending):
+            future.result()
 
     result: dict[str, pd.DataFrame] = {}
     for symbol in symbols:
@@ -621,7 +679,7 @@ def _sync_yahoo_market(
             sliced = cached.loc[start:end]
             if not sliced.empty:
                 result[symbol] = sliced
-    return result
+    return result, failures
 
 
 def _market_overview_data(
@@ -641,6 +699,7 @@ def _market_overview_data(
     groups = {PERSONAL_MARKET_GROUP: personal_symbols, **_market_groups()}
     store = BarStore()
     items: dict[tuple[str, str], dict] = {}
+    failures: dict[tuple[str, str], dict] = {}
     total = sum(len(symbols) for symbols in groups.values())
     completed = 0
 
@@ -677,7 +736,7 @@ def _market_overview_data(
         batch = [symbol for symbol in yahoo_symbols
                  if any(symbol in values for values in groups.values())]
         futures[executor.submit(
-            _sync_yahoo_market, batch, start_value, end_value, refresh, store
+            _sync_reference_market, batch, start_value, end_value, refresh, store
         )] = ("__yahoo__", "", "")
         for group, symbols in groups.items():
             for symbol, name in symbols.items():
@@ -689,10 +748,10 @@ def _market_overview_data(
             group, symbol, name = futures[future]
             if group == "__yahoo__":
                 try:
-                    frames = future.result()
+                    frames, reference_failures = future.result()
                 except Exception as exc:
-                    logger.debug("Yahoo 市场批量同步失败: %s", exc)
-                    frames = {}
+                    logger.debug("全球参考市场同步失败: %s", exc)
+                    frames, reference_failures = {}, {}
                 batch_lookup: dict[str, list[tuple[str, str]]] = {}
                 for candidate_group, values in groups.items():
                     for candidate_symbol, candidate_name in values.items():
@@ -703,8 +762,18 @@ def _market_overview_data(
                     frame = frames.get(batch_symbol)
                     for batch_group, batch_name in batch_lookup[batch_symbol]:
                         completed += 1
+                        if batch_symbol in reference_failures:
+                            failures[(batch_group, batch_symbol)] = reference_failures[batch_symbol]
                         item = _market_item(
                             batch_symbol, batch_name, frame, store.metadata(batch_symbol))
+                        if item is None and batch_symbol in reference_failures:
+                            item = items.get((batch_group, batch_symbol))
+                            if item is not None:
+                                item = {
+                                    **item,
+                                    "cache_status": "stale",
+                                    "freshness": "stale",
+                                }
                         if item is not None and batch_group == PERSONAL_MARKET_GROUP:
                             item["memberships"] = personal_memberships.get(batch_symbol, [])
                         if item is not None:
@@ -721,11 +790,20 @@ def _market_overview_data(
                 continue
             completed += 1
             try:
-                _group, _symbol, _name, frame = future.result()
+                market_result = cast(
+                    tuple[str, str, str, pd.DataFrame],
+                    future.result(),
+                )
+                frame = market_result[3]
                 item = _market_item(symbol, name, frame, store.metadata(symbol))
             except Exception as exc:
                 logger.debug("市场概览跳过 %s: %s", symbol, exc)
                 item = items.get((group, symbol))
+                failures[(group, symbol)] = {
+                    "error_code": type(exc).__name__,
+                    "message": (str(exc).strip() or "同步失败")[:500],
+                    "source_attempts": [],
+                }
             if item is not None and group == PERSONAL_MARKET_GROUP:
                 item["memberships"] = personal_memberships.get(symbol, [])
             if item is not None:
@@ -743,9 +821,50 @@ def _market_overview_data(
         group: [items[(group, symbol)] for symbol in symbols if (group, symbol) in items]
         for group, symbols in groups.items()
     }
+    unavailable = []
+    group_statuses = {}
+    for group, symbols in groups.items():
+        stale = sum(
+            str(items[(group, symbol)].get("freshness")) == "stale"
+            for symbol in symbols if (group, symbol) in items
+        )
+        missing = [symbol for symbol in symbols if (group, symbol) not in items]
+        for symbol in missing:
+            missing_issue = failures.get((group, symbol), {})
+            meta = store.metadata(symbol) or {}
+            checked_at = float(meta.get("checked_at") or 0)
+            unavailable.append({
+                "group": group,
+                "symbol": symbol,
+                "name": symbols[symbol],
+                "status": "unavailable",
+                "error_code": missing_issue.get("error_code", "no_usable_data"),
+                "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
+                "source_attempts": missing_issue.get("source_attempts", []),
+                "last_success_at": (
+                    pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
+                ),
+            })
+        group_statuses[group] = {
+            "configured": len(symbols),
+            "ready": len(result[group]) - stale,
+            "stale": stale,
+            "unavailable": len(missing),
+            "issues": [
+                {
+                    "symbol": symbol,
+                    "error_code": status_issue.get("error_code", "unavailable"),
+                    "message": status_issue.get("message", "数据源未返回可用行情"),
+                }
+                for symbol in symbols
+                if (status_issue := failures.get((group, symbol)))
+            ],
+        }
     return {
         "groups": result,
         "group_counts": {group: len(symbols) for group, symbols in groups.items()},
+        "group_statuses": group_statuses,
+        "unavailable_items": unavailable,
     }
 
 
@@ -1141,7 +1260,9 @@ def backtest_run(req: BacktestRequest) -> dict:
             allow_partial=req.allow_partial,
         )
         warnings.extend(panel_warnings)
-        names = [n.strip() for n in req.factor.split(",") if n.strip()]
+        from quantmaster.backtest.spec import split_factor_references
+
+        names = split_factor_references(req.factor)
         if req.strategy == "swing":
             from quantmaster.backtest import SwingStrategy
 

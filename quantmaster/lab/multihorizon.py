@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,11 +22,49 @@ Cancelled = Callable[[], bool]
 
 
 @dataclass
+class SampleMetadata:
+    date_positions: np.ndarray
+    symbol_positions: np.ndarray
+    feature_coverage: np.ndarray
+    dates: pd.DatetimeIndex
+    symbols: pd.Index
+    horizons: tuple[int, ...]
+
+    def __len__(self) -> int:
+        return len(self.date_positions)
+
+    def __getitem__(self, position):
+        if isinstance(position, slice):
+            return [self[index] for index in range(*position.indices(len(self)))]
+        index = int(position)
+        date_position = int(self.date_positions[index])
+        return {
+            "date": self.dates[date_position].strftime("%Y-%m-%d"),
+            "symbol": str(self.symbols[int(self.symbol_positions[index])]),
+            "target_dates": {
+                str(horizon): self.dates[date_position + horizon].strftime("%Y-%m-%d")
+                for horizon in self.horizons
+            },
+            "feature_coverage": float(self.feature_coverage[index]),
+        }
+
+    def date_strings(self, positions: np.ndarray | None = None) -> np.ndarray:
+        values = self.date_positions if positions is None else self.date_positions[positions]
+        labels = self.dates.strftime("%Y-%m-%d").to_numpy()
+        return labels[np.asarray(values, dtype=np.int64)]
+
+    def latest_target_strings(self, positions: np.ndarray | None = None) -> np.ndarray:
+        values = self.date_positions if positions is None else self.date_positions[positions]
+        labels = self.dates.strftime("%Y-%m-%d").to_numpy()
+        return labels[np.asarray(values, dtype=np.int64) + max(self.horizons)]
+
+
+@dataclass
 class MultiHorizonSamples:
     values: np.ndarray
     excess_targets: np.ndarray
     raw_targets: np.ndarray
-    metadata: list[dict[str, Any]]
+    metadata: SampleMetadata
     feature_names: list[str]
     horizons: tuple[int, ...]
 
@@ -127,6 +166,7 @@ def make_multi_horizon_samples(
     sequence_length: int = 20, membership: pd.DataFrame | None = None,
     fundamentals: dict[str, pd.DataFrame] | None = None,
     feature_spec: FeatureSetSpec | None = None,
+    storage_dir: str | Path | None = None,
 ) -> MultiHorizonSamples:
     feature_spec = feature_spec or FeatureSetSpec(groups=("price_volume_v2",))
     if not horizons or any(value not in HORIZONS for value in horizons):
@@ -144,40 +184,90 @@ def make_multi_horizon_samples(
     member_values = None
     if membership is not None:
         member_values = membership.reindex(index=dates, columns=columns).fillna(False).to_numpy(bool)
-    values, raw_targets, excess_targets, metadata = [], [], [], []
     maximum_horizon = max(horizons)
-    for date_pos in range(sequence_length - 1, len(dates) - maximum_horizon):
-        target_dates = {
-            str(horizon): dates[date_pos + horizon].strftime("%Y-%m-%d") for horizon in horizons
-        }
-        for symbol_pos, symbol in enumerate(columns):
-            if member_values is not None and not member_values[date_pos, symbol_pos]:
-                continue
-            sample = cube[date_pos - sequence_length + 1:date_pos + 1, symbol_pos]
-            coverage = float(
-                validity[date_pos - sequence_length + 1:date_pos + 1, symbol_pos].mean()
-            )
-            raw = np.asarray([array[date_pos, symbol_pos] for array in raw_arrays], dtype=np.float32)
-            excess = np.asarray(
-                [array[date_pos, symbol_pos] for array in excess_arrays], dtype=np.float32,
-            )
-            if (coverage >= feature_spec.minimum_coverage and np.isfinite(sample).all()
-                    and np.isfinite(raw).all() and np.isfinite(excess).all()):
-                values.append(sample)
-                raw_targets.append(raw)
-                excess_targets.append(excess)
-                metadata.append({
-                    "date": dates[date_pos].strftime("%Y-%m-%d"),
-                    "symbol": str(symbol), "target_dates": target_dates,
-                    "feature_coverage": coverage,
-                })
-    if not values:
+
+    def eligible_samples():
+        for date_pos in range(sequence_length - 1, len(dates) - maximum_horizon):
+            for symbol_pos in range(len(columns)):
+                if member_values is not None and not member_values[date_pos, symbol_pos]:
+                    continue
+                sample = cube[date_pos - sequence_length + 1:date_pos + 1, symbol_pos]
+                coverage = float(
+                    validity[
+                        date_pos - sequence_length + 1:date_pos + 1, symbol_pos
+                    ].mean()
+                )
+                raw = np.asarray(
+                    [array[date_pos, symbol_pos] for array in raw_arrays], dtype=np.float32,
+                )
+                excess = np.asarray(
+                    [array[date_pos, symbol_pos] for array in excess_arrays], dtype=np.float32,
+                )
+                if (
+                    coverage >= feature_spec.minimum_coverage
+                    and np.isfinite(sample).all()
+                    and np.isfinite(raw).all()
+                    and np.isfinite(excess).all()
+                ):
+                    yield date_pos, symbol_pos, coverage, sample, raw, excess
+
+    sample_count = sum(1 for _ in eligible_samples())
+    if not sample_count:
         raise ValueError("清洗后没有共享多周期训练样本")
+
+    root = Path(storage_dir) if storage_dir is not None else None
+    shape = (sample_count, sequence_length, len(names))
+    estimated_bytes = (
+        int(np.prod(shape)) * np.dtype(np.float32).itemsize
+        + sample_count * len(horizons) * np.dtype(np.float32).itemsize * 2
+        + sample_count * 12
+    )
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(root).free
+        required = int(estimated_bytes * 1.2) + 256 * 1024 * 1024
+        if free < required:
+            raise RuntimeError(
+                f"Lab 样本盘空间不足：需要约 {required / 1024 ** 3:.1f} GiB，"
+                f"可用 {free / 1024 ** 3:.1f} GiB"
+            )
+
+    def allocate(name: str, dtype, array_shape: tuple[int, ...]):
+        if root is None:
+            return np.empty(array_shape, dtype=dtype)
+        return np.lib.format.open_memmap(
+            root / f"{name}.npy", mode="w+", dtype=dtype, shape=array_shape,
+        )
+
+    values = allocate("features", np.float32, shape)
+    raw_targets = allocate("raw-targets", np.float32, (sample_count, len(horizons)))
+    excess_targets = allocate("excess-targets", np.float32, (sample_count, len(horizons)))
+    date_positions = allocate("date-positions", np.int32, (sample_count,))
+    symbol_positions = allocate("symbol-positions", np.int32, (sample_count,))
+    coverages = allocate("feature-coverage", np.float32, (sample_count,))
+
+    for row, (date_pos, symbol_pos, coverage, sample, raw, excess) in enumerate(
+        eligible_samples()
+    ):
+        values[row] = sample
+        raw_targets[row] = raw
+        excess_targets[row] = excess
+        date_positions[row] = date_pos
+        symbol_positions[row] = symbol_pos
+        coverages[row] = coverage
+    for array in (
+        values, raw_targets, excess_targets, date_positions, symbol_positions, coverages,
+    ):
+        if isinstance(array, np.memmap):
+            array.flush()
     return MultiHorizonSamples(
-        values=np.stack(values).astype(np.float32),
-        excess_targets=np.stack(excess_targets).astype(np.float32),
-        raw_targets=np.stack(raw_targets).astype(np.float32),
-        metadata=metadata, feature_names=names, horizons=tuple(horizons),
+        values=values,
+        excess_targets=excess_targets,
+        raw_targets=raw_targets,
+        metadata=SampleMetadata(
+            date_positions, symbol_positions, coverages, dates, columns, tuple(horizons),
+        ),
+        feature_names=names, horizons=tuple(horizons),
     )
 
 
@@ -205,10 +295,8 @@ def make_multi_inference_samples(
 
 
 def fold_positions(samples: MultiHorizonSamples, fold: TimeFold) -> tuple[np.ndarray, np.ndarray]:
-    dates = np.asarray([item["date"] for item in samples.metadata])
-    latest_targets = np.asarray([
-        max(item["target_dates"].values()) for item in samples.metadata
-    ])
+    dates = samples.metadata.date_strings()
+    latest_targets = samples.metadata.latest_target_strings()
     train = np.flatnonzero(
         (dates >= fold.train_start) & (dates <= fold.train_end) & (latest_targets < fold.test_start)
     )
@@ -335,43 +423,105 @@ def _fit_ridge(
     samples: MultiHorizonSamples, train: np.ndarray, valid: np.ndarray,
     artifact: Path, config: dict[str, Any], roundtrip_cost: float,
 ) -> dict[str, Any]:
-    from sklearn.linear_model import Ridge
-
-    x_train = samples.values[train, -1].astype(float)
-    x_valid = samples.values[valid, -1].astype(float)
     alpha = float(config.get("alpha", 1.0))
-    excess = Ridge(alpha=alpha).fit(x_train, samples.excess_targets[train])
-    raw = Ridge(alpha=alpha).fit(x_train, samples.raw_targets[train])
+
+    def fit_targets(targets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        feature_count = samples.values.shape[-1]
+        target_count = targets.shape[1]
+        sum_x = np.zeros(feature_count, dtype=np.float64)
+        sum_y = np.zeros(target_count, dtype=np.float64)
+        xtx = np.zeros((feature_count, feature_count), dtype=np.float64)
+        xty = np.zeros((feature_count, target_count), dtype=np.float64)
+        for start in range(0, len(train), 50_000):
+            positions = train[start:start + 50_000]
+            x = np.asarray(samples.values[positions, -1], dtype=np.float64)
+            y = np.asarray(targets[positions], dtype=np.float64)
+            sum_x += x.sum(axis=0)
+            sum_y += y.sum(axis=0)
+            xtx += x.T @ x
+            xty += x.T @ y
+        count = float(len(train))
+        mean_x, mean_y = sum_x / count, sum_y / count
+        centered_xtx = xtx - count * np.outer(mean_x, mean_x)
+        centered_xty = xty - count * np.outer(mean_x, mean_y)
+        coefficient = np.linalg.solve(
+            centered_xtx + np.eye(feature_count) * alpha,
+            centered_xty,
+        )
+        intercept = mean_y - mean_x @ coefficient
+        return coefficient.T, intercept
+
+    excess_coef, excess_intercept = fit_targets(samples.excess_targets)
+    raw_coef, raw_intercept = fit_targets(samples.raw_targets)
+
+    def fit_logistic(column: int, threshold: float) -> tuple[np.ndarray, float]:
+        from sklearn.linear_model import SGDClassifier
+
+        positive = sum(
+            int((samples.raw_targets[positions, column] > threshold).sum())
+            for positions in (
+                train[start:start + 50_000] for start in range(0, len(train), 50_000)
+            )
+        )
+        if positive in {0, len(train)}:
+            probability = float(np.clip(positive / max(1, len(train)), 1e-5, 1 - 1e-5))
+            return (
+                np.zeros(samples.values.shape[-1], dtype=float),
+                math.log(probability / (1 - probability)),
+            )
+        model = SGDClassifier(
+            loss="log_loss", penalty="l2", alpha=1e-4,
+            random_state=42, average=True,
+        )
+        classes = np.asarray([0, 1])
+        first = True
+        for _epoch in range(3):
+            for start in range(0, len(train), 50_000):
+                positions = train[start:start + 50_000]
+                x = np.asarray(samples.values[positions, -1], dtype=np.float64)
+                y = (samples.raw_targets[positions, column] > threshold).astype(int)
+                model.partial_fit(x, y, classes=classes if first else None)
+                first = False
+        return model.coef_[0].astype(float), float(model.intercept_[0])
+
     up_coef, up_intercept, net_coef, net_intercept = [], [], [], []
     for column in range(len(samples.horizons)):
-        coefficient, intercept = _fit_logistic(
-            x_train, (samples.raw_targets[train, column] > 0).astype(int),
-        )
+        coefficient, intercept = fit_logistic(column, 0.0)
         up_coef.append(coefficient)
         up_intercept.append(intercept)
-        coefficient, intercept = _fit_logistic(
-            x_train, (samples.raw_targets[train, column] > roundtrip_cost).astype(int),
-        )
+        coefficient, intercept = fit_logistic(column, roundtrip_cost)
         net_coef.append(coefficient)
         net_intercept.append(intercept)
-    raw_train_prediction = raw.predict(x_train)
-    residual = samples.raw_targets[train] - raw_train_prediction
+
+    stride = max(1, math.ceil(len(train) / 200_000))
+    diagnostic_positions = train[::stride]
+    x_diagnostic = np.asarray(samples.values[diagnostic_positions, -1], dtype=np.float64)
+    raw_train_prediction = x_diagnostic @ raw_coef.T + raw_intercept
+    residual = samples.raw_targets[diagnostic_positions] - raw_train_prediction
     residual_quantiles = np.quantile(residual, (0.1, 0.5, 0.9), axis=0).T
-    mean = x_train.mean(axis=0)
-    scale = x_train.std(axis=0)
+    mean = x_diagnostic.mean(axis=0)
+    scale = x_diagnostic.std(axis=0)
     scale[scale < 1e-6] = 1.0
-    train_ood = np.sqrt(np.mean(((x_train - mean) / scale) ** 2, axis=1))
+    train_ood = np.sqrt(np.mean(((x_diagnostic - mean) / scale) ** 2, axis=1))
     threshold = float(np.quantile(train_ood, 0.995))
     np.savez_compressed(
         artifact,
-        excess_coef=excess.coef_, excess_intercept=np.atleast_1d(excess.intercept_),
-        raw_coef=raw.coef_, raw_intercept=np.atleast_1d(raw.intercept_),
+        excess_coef=excess_coef, excess_intercept=np.atleast_1d(excess_intercept),
+        raw_coef=raw_coef, raw_intercept=np.atleast_1d(raw_intercept),
         up_coef=np.asarray(up_coef), up_intercept=np.asarray(up_intercept),
         net_coef=np.asarray(net_coef), net_intercept=np.asarray(net_intercept),
         residual_quantiles=residual_quantiles, ood_mean=mean, ood_scale=scale,
         ood_threshold=np.asarray([threshold]),
     )
-    return _predict_ridge_artifact(artifact, x_valid)
+    collected: dict[str, list[np.ndarray]] = {}
+    for start in range(0, len(valid), 50_000):
+        positions = valid[start:start + 50_000]
+        predicted = _predict_ridge_artifact(
+            artifact, np.asarray(samples.values[positions, -1], dtype=np.float64),
+        )
+        for key, value in predicted.items():
+            collected.setdefault(key, []).append(value)
+    return {key: np.concatenate(parts) for key, parts in collected.items()}
 
 
 def _predict_ridge_artifact(artifact: Path, features: np.ndarray) -> dict[str, np.ndarray]:
@@ -446,15 +596,13 @@ def _internal_early_stop_positions(
     samples: MultiHorizonSamples, train: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """从训练窗尾部切出内部验证集，外层 OOF/密封标签永不参与早停。"""
-    dates = np.asarray([samples.metadata[int(position)]["date"] for position in train])
+    dates = samples.metadata.date_strings(train)
     unique_dates = np.unique(dates)
     validation_days = min(63, max(20, len(unique_dates) // 8))
     if len(unique_dates) <= validation_days + max(samples.horizons) + 20:
         raise ValueError("训练窗不足以创建独立的深度模型早停区间")
     validation_start = unique_dates[-validation_days]
-    latest_targets = np.asarray([
-        max(samples.metadata[int(position)]["target_dates"].values()) for position in train
-    ])
+    latest_targets = samples.metadata.latest_target_strings(train)
     fit = train[(dates < validation_start) & (latest_targets < validation_start)]
     early_stop = train[dates >= validation_start]
     if min(len(fit), len(early_stop)) < 20:
@@ -470,7 +618,7 @@ def _fit_torch(
     try:
         import torch
         from torch import nn
-        from torch.utils.data import DataLoader, TensorDataset
+        from torch.utils.data import DataLoader, Dataset
     except ImportError as exc:
         raise RuntimeError("共享深度模型需要安装 PyTorch：pip install 'quantmaster[ml]'") from exc
     device_setting = str(config.get("device", "auto"))
@@ -488,11 +636,22 @@ def _fit_torch(
     )
     batch_size = int(config.get("batch_size", 256))
     accumulation = max(1, int(config.get("gradient_accumulation", 1)))
-    dataset = TensorDataset(
-        torch.from_numpy(samples.values[fit_positions]),
-        torch.from_numpy(samples.excess_targets[fit_positions]),
-        torch.from_numpy(samples.raw_targets[fit_positions]),
-    )
+    class PositionDataset(Dataset):
+        def __init__(self, positions: np.ndarray):
+            self.positions = positions
+
+        def __len__(self):
+            return len(self.positions)
+
+        def __getitem__(self, index):
+            position = int(self.positions[index])
+            return (
+                torch.from_numpy(np.asarray(samples.values[position])),
+                torch.from_numpy(np.asarray(samples.excess_targets[position])),
+                torch.from_numpy(np.asarray(samples.raw_targets[position])),
+            )
+
+    dataset = PositionDataset(fit_positions)
     generator = torch.Generator().manual_seed(int(config.get("seed", 42)))
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, generator=generator,
@@ -516,9 +675,10 @@ def _fit_torch(
     epochs = max(1, int(config.get("epochs", 30)))
     patience = max(2, int(config.get("patience", 5)))
     best_loss, best_state, stale = float("inf"), None, 0
-    valid_x = torch.from_numpy(samples.values[early_stop_positions]).to(device)
-    valid_excess = torch.from_numpy(samples.excess_targets[early_stop_positions]).to(device)
-    valid_raw = torch.from_numpy(samples.raw_targets[early_stop_positions]).to(device)
+    validation_loader = DataLoader(
+        PositionDataset(early_stop_positions), batch_size=batch_size, shuffle=False,
+        pin_memory=device.type == "cuda",
+    )
     for epoch in range(epochs):
         if cancelled and cancelled():
             raise InterruptedError("训练已取消")
@@ -538,8 +698,20 @@ def _fit_torch(
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
         model.eval()
-        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-            validation_loss = float(loss_for(model(valid_x), valid_excess, valid_raw).cpu())
+        validation_total = 0.0
+        validation_count = 0
+        with torch.no_grad():
+            for valid_x, valid_excess, valid_raw in validation_loader:
+                valid_x = valid_x.to(device, non_blocking=True)
+                valid_excess = valid_excess.to(device, non_blocking=True)
+                valid_raw = valid_raw.to(device, non_blocking=True)
+                with torch.autocast(
+                    device_type=device.type, dtype=torch.float16, enabled=use_amp,
+                ):
+                    batch_loss = loss_for(model(valid_x), valid_excess, valid_raw)
+                validation_total += float(batch_loss.cpu()) * len(valid_x)
+                validation_count += len(valid_x)
+        validation_loss = validation_total / max(1, validation_count)
         if progress:
             progress(15 + int(70 * (epoch + 1) / epochs), f"共享多周期训练 {epoch + 1}/{epochs}")
         if validation_loss < best_loss - 1e-7:
@@ -556,7 +728,7 @@ def _fit_torch(
     if len(ood_positions) > 50_000:
         stride = math.ceil(len(ood_positions) / 50_000)
         ood_positions = ood_positions[::stride]
-    train_latent = _latent_numpy(model, samples.values[ood_positions], device)
+    train_latent = _latent_sample_positions(model, samples, ood_positions, device)
     ood_mean = train_latent.mean(axis=0)
     centered = train_latent - ood_mean
     covariance = np.cov(centered, rowvar=False)
@@ -573,10 +745,41 @@ def _fit_torch(
         "ood_mean": ood_mean, "ood_precision": ood_precision,
         "ood_threshold": ood_threshold,
     }, artifact)
-    return _predict_torch_model(
-        model, samples.values[valid], device,
+    return _predict_torch_sample_positions(
+        model, samples, valid, device,
         ood_mean=ood_mean, ood_precision=ood_precision, ood_threshold=ood_threshold,
     )
+
+
+def _latent_sample_positions(
+    model, samples: MultiHorizonSamples, positions: np.ndarray, device,
+    *, batch_size: int = 2048,
+) -> np.ndarray:
+    encoded = []
+    for start in range(0, len(positions), batch_size):
+        current = positions[start:start + batch_size]
+        encoded.append(_latent_numpy(model, samples.values[current], device, batch_size=batch_size))
+    return np.concatenate(encoded)
+
+
+def _predict_torch_sample_positions(
+    model, samples: MultiHorizonSamples, positions: np.ndarray, device,
+    *, ood_mean: np.ndarray | None = None,
+    ood_precision: np.ndarray | None = None,
+    ood_threshold: float | None = None,
+    batch_size: int = 2048,
+) -> dict[str, np.ndarray]:
+    collected: dict[str, list[np.ndarray]] = {}
+    for start in range(0, len(positions), batch_size):
+        current = positions[start:start + batch_size]
+        predicted = _predict_torch_model(
+            model, samples.values[current], device,
+            ood_mean=ood_mean, ood_precision=ood_precision,
+            ood_threshold=ood_threshold, batch_size=batch_size,
+        )
+        for key, value in predicted.items():
+            collected.setdefault(key, []).append(value)
+    return {key: np.concatenate(parts) for key, parts in collected.items()}
 
 
 def _latent_numpy(model, values: np.ndarray, device, *, batch_size: int = 2048) -> np.ndarray:

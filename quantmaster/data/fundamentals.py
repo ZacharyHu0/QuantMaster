@@ -151,7 +151,7 @@ def fetch_daily_indicators(
     except Exception as ak_error:
         if not get_config().data.tushare_token:
             raise
-        logger.warning("AKShare 每日指标失败，降级 Tushare daily_basic: %s", ak_error)
+        logger.debug("AKShare 每日指标失败，降级 Tushare daily_basic: %s", ak_error)
         if start or end:
             return tushare.daily_indicators(symbol, start=start, end=end)
         return tushare.daily_indicators(symbol)
@@ -183,7 +183,7 @@ def fetch_quarterly_roe(symbol: str, start_year: str = "2018") -> pd.DataFrame: 
     except Exception as ak_error:
         if not get_config().data.tushare_token:
             raise
-        logger.warning("AKShare ROE 失败，降级 Tushare fina_indicator: %s", ak_error)
+        logger.debug("AKShare ROE 失败，降级 Tushare fina_indicator: %s", ak_error)
         return tushare.quarterly_roe(symbol, start_year=start_year)
 
 
@@ -284,6 +284,7 @@ def _load_cached_or_fetch(
     cache_days: int | None = None,
     *,
     columns: list[str] | None = None,
+    log_failure: bool = True,
 ) -> pd.DataFrame | None:
     """以单标的共享锁保护缓存检查与 API 拉取，避免并行任务重复触网。"""
     with store.lock(key):
@@ -295,6 +296,7 @@ def _load_cached_or_fetch(
             end,
             cache_days,
             columns=columns,
+            log_failure=log_failure,
         )
 
 
@@ -307,6 +309,7 @@ def _load_cached_or_fetch_locked(
     cache_days: int | None = None,
     *,
     columns: list[str] | None = None,
+    log_failure: bool = True,
 ) -> pd.DataFrame | None:
     """缓存优先的加载：缓存覆盖到 end 或仍新鲜就直接用，否则才触网。
 
@@ -336,7 +339,8 @@ def _load_cached_or_fetch_locked(
     try:
         df = fetch()
     except Exception as e:
-        logger.warning("获取基本面数据失败 %s: %s", key, e)
+        log = logger.warning if log_failure else logger.debug
+        log("获取基本面数据失败 %s: %s", key, e)
         return cached
     if df is None or df.empty:
         if cached is not None and not cached.empty and meta:
@@ -386,6 +390,8 @@ def fundamental_panel(
 
     daily_frames: dict[str, pd.DataFrame] = {}
     roe_frames: dict[str, pd.DataFrame] = {}
+    daily_failures: list[str] = []
+    roe_failures: list[str] = []
     total = len(symbols)
     for number, symbol in enumerate(symbols, start=1):
         if cancelled and cancelled():
@@ -399,12 +405,13 @@ def fundamental_panel(
                 start,
                 end,
                 columns=daily_fields,
+                log_failure=False,
             )
             if df is not None and not df.empty:
                 daily_frames[symbol] = df.loc[start:end]
                 loaded = True
             else:
-                logger.warning("跳过 %s 的每日估值指标：无缓存且获取失败", symbol)
+                daily_failures.append(symbol)
         if want_roe:
             q = _load_cached_or_fetch(
                 _roe_key(symbol),
@@ -413,12 +420,13 @@ def fundamental_panel(
                 start,
                 end,
                 cache_days=get_config().data.fundamental_cache_days,
+                log_failure=False,
             )
             if q is not None and not q.empty:
                 roe_frames[symbol] = q
                 loaded = True
             else:
-                logger.warning("跳过 %s 的季度 ROE：无缓存且获取失败", symbol)
+                roe_failures.append(symbol)
         if progress:
             progress(number, total, symbol, loaded)
 
@@ -437,6 +445,17 @@ def fundamental_panel(
         result["roe"] = pd.DataFrame(
             {s: quarterly_to_daily(q, all_dates, lag_days=lag_days)["roe"] for s, q in roe_frames.items()}
         )
-    if not result:
+    if daily_failures or roe_failures:
+        details = []
+        if daily_failures:
+            details.append(
+                f"每日估值 {len(daily_failures)}/{total}（样本：{', '.join(daily_failures[:5])}）"
+            )
+        if roe_failures:
+            details.append(
+                f"季度 ROE {len(roe_failures)}/{total}（样本：{', '.join(roe_failures[:5])}）"
+            )
+        logger.warning("基本面批量加载存在缺失：%s", "；".join(details))
+    elif not result:
         logger.warning("基本面面板为空：所有标的均加载失败或字段无效")
     return result

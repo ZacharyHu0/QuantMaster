@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>QuantMaster</title>
+<link rel="icon" href="/static/brand/quantmaster-favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/brand-intro.css">
 <link rel="stylesheet" href="/static/candidates.css">
 <link rel="stylesheet" href="/static/settings.css">
 <link rel="stylesheet" href="/static/automation.css">
@@ -15,6 +17,7 @@
 <link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
+<script src="/static/charts.js"></script>
 <style nonce="%%QM_CSP_NONCE%%">
   /* 验证过的暗色图表调色板（dataviz palette, dark mode） */
   :root {
@@ -130,18 +133,38 @@
   .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
   .market-index-section { margin-bottom:var(--space-xl); padding-bottom:var(--space-xl); border-bottom:1px solid var(--border); }
   .market-index-section .mkt-grid { grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
-  .market-index-section .mkt-item .spark { height:72px; margin-top:var(--space-sm); }
+  .market-index-section .mkt-item .spark { height:84px; }
   .market-index-section .market-section-title { color:var(--ink); font-size:16px; }
-  .mkt-item { width:100%; background: var(--surface); color:inherit; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; text-align:left; font:inherit; }
-  .mkt-item:hover { border-color: var(--s1); }
+  .mkt-item {
+    container-type:inline-size; position:relative; width:100%; min-height:154px; overflow:hidden;
+    background:var(--surface); color:inherit; border:1px solid var(--border); border-radius:12px;
+    padding:12px; cursor:pointer; text-align:left; font:inherit;
+    transition:border-color 180ms var(--ease-out-quart),background-color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart);
+  }
+  .mkt-item:hover { border-color:color-mix(in oklch,var(--market-tone,var(--s1)) 58%,var(--axis)); background:color-mix(in oklch,var(--market-tone,var(--s1)) 3%,var(--surface)); }
+  .mkt-item:active { transform:translateY(1px); }
   .mkt-item:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
-  .mkt-item.stream-enter { animation:stream-in 180ms var(--ease-out-quart) both; }
+  .mkt-item.stream-enter { animation:market-card-in 360ms var(--ease-out-expo) both; animation-delay:min(calc(var(--market-order,0) * 34ms),272ms); }
   .mkt-item > span { display:block; }
-  .mkt-item .nm { color: var(--ink-2); font-size: 13px; }
-  .mkt-item .px { font-size: 18px; font-weight: 600; }
+  .mkt-item-head { display:flex !important; align-items:center; justify-content:space-between; gap:8px; }
+  .mkt-item .nm { min-width:0; overflow:hidden; color:var(--ink-2); font-size:13px; font-weight:570; text-overflow:ellipsis; white-space:nowrap; }
+  .mkt-window { flex:0 0 auto; color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; letter-spacing:.04em; }
+  .mkt-item .px { display:flex; align-items:baseline; gap:7px; margin-top:2px; color:var(--ink); font-size:20px; font-weight:650; font-variant-numeric:tabular-nums; line-height:1.25; }
+  .mkt-item .px small { font-size:12px; font-weight:650; }
+  .mkt-item .px.up small { color:var(--up); }
+  .mkt-item .px.down small { color:var(--down); }
   .mkt-memberships { color:var(--s1); font-size:11px; margin-top:var(--space-xs); }
   .mkt-item .mkt-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
-  .mkt-item .spark { height: 42px; margin-top: 4px; }
+  .mkt-spark-shell { position:relative; display:block !important; margin-top:8px; border-top:1px solid color-mix(in oklch,var(--market-tone,var(--axis)) 17%,var(--grid)); }
+  .mkt-item .spark { display:block; width:100%; height:64px; }
+  .mkt-spark-foot { display:flex !important; align-items:center; justify-content:space-between; gap:8px; min-height:17px; margin-top:1px; color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
+  .mkt-spark-foot .mkt-period-return { color:var(--ink-2); font-weight:600; }
+  .mkt-spark-foot .mkt-period-return.up { color:var(--up); }
+  .mkt-spark-foot .mkt-period-return.down { color:var(--down); }
+  @container (max-width:235px) {
+    .mkt-window { display:none; }
+    .mkt-spark-foot { font-size:8px; }
+  }
   .market-detail-panel { margin-top:var(--space-2xl); scroll-margin-top:88px; }
   .asset-workbench { padding:14px 16px; }
   .asset-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }
@@ -404,6 +427,7 @@
   .quality-warning-list { margin:0; padding:9px 28px 11px; border-top:1px solid var(--border); color:var(--s4); font-size:11px; }
   @keyframes reveal-in { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
   @keyframes stream-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes market-card-in { from { opacity:0; transform:translate3d(0,8px,0); } to { opacity:1; transform:translate3d(0,0,0); } }
   @keyframes decision-detail-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
   @keyframes tab-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
   @keyframes runtime-entry-in { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
@@ -474,10 +498,17 @@
     *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
   }
 </style>
+<link rel="stylesheet" href="/static/charts.css">
 </head>
 <body>
+<script src="/static/brand-intro.js"></script>
 <header>
-  <h1>Quant<span>Master</span></h1>
+  <h1 class="brand-title">
+    <button class="brand-replay" id="brand-replay" type="button" aria-label="重播 QuantMaster 品牌片头" title="重播品牌片头">
+      <img class="brand-replay-mark" src="/static/brand/quantmaster-mark-inverse.svg" alt="">
+      <span class="brand-word">Quant<span class="brand-word-master">Master</span></span>
+    </button>
+  </h1>
   <nav id="nav" aria-label="主要功能">
     <span class="nav-group" aria-label="观察">
       <button data-tab="market" class="active">市场</button>
@@ -1208,7 +1239,7 @@
   <div class="news-status-strip" aria-label="资讯处理状态">
     <div><span>近 30 日入库</span><strong id="news-stat-total">—</strong></div>
     <div><span>标注覆盖率</span><strong id="news-stat-coverage">—</strong></div>
-    <div><span>待处理 / 失败</span><strong id="news-stat-pending">—</strong></div>
+    <div><span>待处理 / 失败 / 死信</span><strong id="news-stat-pending">—</strong></div>
     <div><span>高重要度事件</span><strong id="news-stat-important">—</strong></div>
   </div>
 
@@ -1217,7 +1248,7 @@
     <label><span>来源组</span><select name="group"><option value="">全部来源组</option><option value="fast">快讯 · 10 分钟</option><option value="official">官方 · 15 分钟</option><option value="periodic">定期 · 60 分钟</option></select></label>
     <label><span>来源</span><select name="source" id="news-source-filter"><option value="">全部来源</option></select></label>
     <label><span>情绪</span><select name="sentiment"><option value="">全部情绪</option><option value="positive">偏正面</option><option value="neutral">中性</option><option value="negative">偏负面</option></select></label>
-    <label><span>标注</span><select name="status"><option value="">全部状态</option><option value="complete">已完成</option><option value="pending">待处理</option><option value="failed">失败</option></select></label>
+    <label><span>标注</span><select name="status"><option value="">全部状态</option><option value="complete">已完成</option><option value="pending">待处理</option><option value="failed">退避重试</option><option value="dead_letter">死信</option></select></label>
     <label><span>排序</span><select name="sort"><option value="recent">最新入库</option><option value="importance">重要度</option></select></label>
     <button class="ghost" type="submit">筛选</button>
     <button class="news-reset" id="news-reset" type="button">重置</button>
@@ -1225,7 +1256,7 @@
 
   <div class="news-workbench">
     <section class="news-feed-panel" aria-labelledby="news-feed-title">
-      <div class="news-panel-head"><div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div><button class="text-action" id="news-reanalyze" type="button">处理待标注</button></div>
+      <div class="news-panel-head"><div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div><div><button class="text-action" id="news-recover-dead" type="button">恢复死信</button><button class="text-action" id="news-reanalyze" type="button">处理待标注</button></div></div>
       <div class="news-annotation-progress" id="news-annotation-progress" role="status" aria-live="polite" hidden>
         <div class="news-annotation-head"><div><span class="news-annotation-dot" aria-hidden="true"></span><strong id="news-annotation-phase">准备标注队列</strong></div><b id="news-annotation-percent">0%</b></div>
         <p id="news-annotation-detail">正在读取待处理资讯…</p>
@@ -1236,8 +1267,8 @@
       <button class="news-load-more" id="news-load-more" type="button" hidden>加载更早资讯</button>
     </section>
     <aside class="news-analysis" aria-label="资讯量化摘要">
-      <section><div class="news-panel-head"><div><h3>大盘情绪</h3><p>质量加权 · <span id="news-halflife-days">3</span> 日半衰期</p></div><span class="state-pill">MARKET</span></div><div class="market-sentiment-readout"><div class="sentiment-number" id="news-factor-value">—</div><div class="market-sentiment-context"><strong id="news-market-label">待计算</strong><span id="news-market-meta">等待已标注事件</span></div></div><div class="sentiment-axis"><span>-100 偏空</span><i><b id="news-factor-marker"></b></i><span>偏多 +100</span></div><svg id="news-factor-chart" class="news-factor-chart" viewBox="0 0 320 92" role="img" aria-label="近 30 日大盘情绪走势"></svg></section>
-      <section><div class="news-panel-head"><div><h3>板块情绪分</h3><p>申万一级 · 绝对影响排序</p></div><span class="state-pill">-100—+100</span></div><div id="news-sector-scores" class="news-sector-list"><span class="news-muted">暂无板块标注</span></div></section>
+      <section><div class="news-panel-head"><div><h3>大盘情绪</h3><p>质量加权 · <span id="news-halflife-days">3</span> 日半衰期</p></div><span class="state-pill">MARKET</span></div><div class="market-sentiment-readout"><div class="sentiment-number" id="news-factor-value">—</div><div class="market-sentiment-context"><strong id="news-market-label">待计算</strong><span id="news-market-meta">等待已标注事件</span></div></div><div class="sentiment-axis"><span id="news-axis-low">-20 偏空</span><i><b id="news-factor-marker"></b></i><span id="news-axis-high">偏多 +20</span></div><div id="news-factor-chart" class="news-factor-chart" role="img" aria-label="近 30 日大盘情绪走势"></div></section>
+      <section><div class="news-panel-head"><div><h3>板块情绪分</h3><p>申万一级 · 绝对影响排序</p></div><span class="state-pill" id="news-sector-scale">自适应 ±20</span></div><div id="news-sector-scores" class="news-sector-list"><span class="news-muted">暂无板块标注</span></div></section>
       <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
       <section><div class="news-panel-head"><div><h3>来源运行状态</h3><p>最近一次采集结果</p></div><button class="text-action" id="news-open-sources" type="button">管理来源</button></div><div id="news-source-health" class="news-source-health"><span class="news-muted">正在读取…</span></div></section>
     </aside>
@@ -1379,6 +1410,7 @@
             <label>模型 ID<input name="llm.model" list="settings-model-list" autocomplete="off" required><datalist id="settings-model-list"></datalist><small id="model-hint">可手动输入任意模型 ID</small></label>
             <label class="field-wide">API 根地址<input name="llm.base_url" type="url" placeholder="官方服务可留空；兼容网关如 http://127.0.0.1:11434/v1"></label>
             <label class="field-wide secret-field">API Key<div><input id="llm-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="llm">清除</button></div><small id="llm-secret-state"></small></label>
+            <label>推理强度<select name="llm.reasoning_effort" required><option value="none">无</option><option value="minimal">极低</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select><small id="reasoning-effort-hint">支持范围取决于模型和网关</small></label>
             <label>最大输出 Token<input name="llm.max_tokens" type="number" min="1" max="1000000" required></label>
             <label>Temperature<input name="llm.temperature" type="number" min="0" max="2" step="0.1" required></label>
             <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
@@ -1628,55 +1660,6 @@
 </dialog>
 
 <script nonce="%%QM_CSP_NONCE%%">
-const PALETTE = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
-const INK2 = '#c3c2b7', MUTED = '#898781', GRID = '#2c2c2a', AXIS = '#383835';
-const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const charts = {};
-
-function baseOpt(extra) {
-  return Object.assign({
-    color: PALETTE,
-    animation: !REDUCED_MOTION,
-    backgroundColor: 'transparent',
-    textStyle: { color: INK2 },
-    grid: { left: 60, right: 20, top: 36, bottom: 40 },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross', label: { backgroundColor: AXIS } },
-               backgroundColor: '#1a1a19', borderColor: AXIS, textStyle: { color: '#fff', fontSize: 12 } },
-  }, extra);
-}
-function timeAxis() { return { type: 'time', axisLine: { lineStyle: { color: AXIS } }, axisLabel: { color: MUTED }, splitLine: { show: false } }; }
-function valAxis(fmt) { return { type: 'value', scale: true, axisLabel: { color: MUTED, formatter: fmt }, splitLine: { lineStyle: { color: GRID } } }; }
-function mkChart(id, reset = true) {
-  const el = document.getElementById(id);
-  if (!el) return null;
-  const existing = charts[id];
-  if (existing && (existing.isDisposed() || existing.getDom() !== el)) {
-    if (!existing.isDisposed()) existing.dispose();
-    delete charts[id];
-  }
-  if (charts[id] && !reset) return charts[id];
-  if (charts[id]) charts[id].dispose();
-  charts[id] = echarts.init(el);
-  return charts[id];
-}
-function disposeChart(id) {
-  const chart = charts[id];
-  if (chart && !chart.isDisposed()) chart.dispose();
-  delete charts[id];
-}
-let chartResizeFrame = 0;
-window.addEventListener('resize', () => {
-  if (chartResizeFrame) cancelAnimationFrame(chartResizeFrame);
-  chartResizeFrame = requestAnimationFrame(() => {
-    chartResizeFrame = 0;
-    syncDecisionDetailWidth();
-    Object.values(charts).forEach(chart => {
-      chart.resize();
-      if (chart.__quantmasterKlineData) renderKlineSeries(chart, chart.__quantmasterKlineData);
-    });
-  });
-});
-
 class QuantApiError extends Error {
   constructor(message, options = {}) {
     super(message);
@@ -1689,25 +1672,32 @@ function apiRoute(path) {
   catch (_) { return String(path || ''); }
 }
 let browserCsrfToken = '';
+let csrfRefreshPromise = null;
 function csrfCookie() {
   const item = document.cookie.split(';').map(value => value.trim())
     .find(value => value.startsWith('qm_csrf='));
   return item ? decodeURIComponent(item.slice('qm_csrf='.length)) : '';
 }
-async function ensureCsrfToken() {
+async function ensureCsrfToken(forceRefresh = false) {
   const cookie = csrfCookie();
-  if (cookie) {
+  if (!forceRefresh && cookie) {
     browserCsrfToken = cookie;
     return cookie;
   }
-  const response = await fetch('/api/v1/session', {
-    headers:{'Accept':'application/json'}, credentials:'same-origin', cache:'no-store',
-  });
-  if (!response.ok) throw new Error('无法建立本机安全会话');
-  const data = await response.json();
-  browserCsrfToken = String(data.csrf_token || '');
-  if (!browserCsrfToken) throw new Error('本机安全会话未返回操作令牌');
-  return browserCsrfToken;
+  if (!csrfRefreshPromise) {
+    csrfRefreshPromise = (async () => {
+      const response = await fetch('/api/v1/session', {
+        headers:{'Accept':'application/json'}, credentials:'same-origin', cache:'no-store',
+      });
+      if (!response.ok) throw new Error('无法建立本机安全会话');
+      const data = await response.json();
+      browserCsrfToken = String(data.csrf_token || '');
+      if (!browserCsrfToken) throw new Error('本机安全会话未返回操作令牌');
+      return browserCsrfToken;
+    })();
+  }
+  try { return await csrfRefreshPromise; }
+  finally { csrfRefreshPromise = null; }
 }
 async function protectedOptions(options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
@@ -1718,7 +1708,19 @@ async function protectedOptions(options = {}) {
   return {...options, method, headers, credentials:'same-origin'};
 }
 async function protectedFetch(path, options = {}) {
-  return fetch(path, await protectedOptions(options));
+  const prepared = await protectedOptions(options);
+  let response = await fetch(path, prepared);
+  const method = String(prepared.method || 'GET').toUpperCase();
+  if (['POST','PUT','PATCH','DELETE'].includes(method) && response.status === 403) {
+    const rejection = await response.clone().json().catch(() => ({}));
+    const csrfCodes = new Set(['csrf_missing','csrf_mismatch','csrf_expired','csrf_invalid']);
+    if (csrfCodes.has(String(rejection?.problem?.code || ''))) {
+      const headers = new Headers(prepared.headers || {});
+      headers.set('X-CSRF-Token', await ensureCsrfToken(true));
+      response = await fetch(path, {...prepared, headers});
+    }
+  }
+  return response;
 }
 function sourceForPath(path) {
   const route = apiRoute(path);
@@ -2501,6 +2503,7 @@ function activateTab(control, {persist = true, load = true} = {}) {
   if (control.closest('#nav')) control.scrollIntoView({block:'nearest', inline:'nearest'});
   Object.values(charts).forEach(c => c.resize());
   if (load) loadActiveTab(tab);
+  if (window.QuantCharts) window.QuantCharts.activateTab(tab);
   return true;
 }
 
@@ -2653,6 +2656,69 @@ function marketChangeSeries(nav) {
   return (nav || []).map(point => [point[0], +((Number(point[1]) - 1) * 100).toFixed(4)]);
 }
 
+function marketSparkSummary(series) {
+  const values = (series || []).map(point => Number(point[1])).filter(Number.isFinite);
+  const minimum = values.length ? Math.min(...values, 0) : 0;
+  const maximum = values.length ? Math.max(...values, 0) : 0;
+  const span = Math.max(0.2, maximum - minimum);
+  const padding = Math.max(0.12, span * 0.16);
+  return {
+    first:series?.[0]?.[0] ?? null,
+    lastDate:series?.at(-1)?.[0] ?? null,
+    last:values.at(-1) || 0,
+    min:minimum - padding,
+    max:maximum + padding,
+  };
+}
+
+function marketSparkDate(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replaceAll('/','.');
+}
+
+function marketSparkOption(item, changeSeries) {
+  const summary = marketSparkSummary(changeSeries);
+  const tone = summary.last > 0 ? CHART_COLORS.up
+    : summary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
+  const signed = value => `${value > 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
+  return {
+    backgroundColor:'transparent',
+    animation:!REDUCED_MOTION,
+    grid:{left:1,right:4,top:8,bottom:3},
+    xAxis:{type:'time',show:false,boundaryGap:false,min:summary.first,max:summary.lastDate},
+    yAxis:{type:'value',show:false,scale:true,min:summary.min,max:summary.max},
+    tooltip:{
+      show:true,trigger:'axis',confine:true,transitionDuration:REDUCED_MOTION ? 0 : .18,
+      axisPointer:{type:'line',snap:true,lineStyle:{color:AXIS,width:1,type:'dashed'}},
+      formatter:params => {
+        const point = params.find(value => value.seriesId === 'market-spark-trend') || params[0];
+        const value = Array.isArray(point?.value) ? Number(point.value[1]) : 0;
+        const date = Array.isArray(point?.value) ? point.value[0] : '';
+        return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b>`;
+      },
+    },
+    aria:{enabled:true,label:{description:`${item.name}区间走势图，最新区间涨跌${signed(summary.last)}`}},
+    series:[
+      {
+        id:'market-spark-trend',name:'区间走势',type:'line',data:changeSeries,
+        showSymbol:false,symbol:'none',sampling:'lttb',silent:false,
+        lineStyle:{width:2,color:tone,cap:'round',join:'round'},
+        areaStyle:{color:tone,opacity:.10,origin:'auto'},
+        emphasis:{disabled:true},
+        markLine:{silent:true,symbol:'none',label:{show:false},
+          lineStyle:{color:'rgba(195,194,183,.32)',width:1,type:'dashed'},data:[{yAxis:0}]},
+      },
+      {
+        id:'market-spark-latest',name:'最新位置',type:'scatter',silent:true,z:4,
+        data:changeSeries.length ? [changeSeries.at(-1)] : [],symbolSize:7,
+        itemStyle:{color:tone,borderColor:CHART_COLORS.surface,borderWidth:2},
+        tooltip:{show:false},
+      },
+    ],
+  };
+}
+
 function createMarketStreamRenderer(root, pinnedGroups = {}) {
   const cycle = ++marketStreamCycle, groups = new Map(), entries = new Map();
   let index = 0, count = 0;
@@ -2681,8 +2747,16 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
   }
   function draw(entry, item) {
     entry.item = item;
+    const changeSeries = marketChangeSeries(item.nav);
+    const sparkSummary = marketSparkSummary(changeSeries);
+    const sparkTone = sparkSummary.last > 0 ? CHART_COLORS.up
+      : sparkSummary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
+    const periodTone = sparkSummary.last > 0 ? 'up' : sparkSummary.last < 0 ? 'down' : '';
+    const periodReturn = `${sparkSummary.last > 0 ? '+' : ''}${sparkSummary.last.toFixed(2)}%`;
+    entry.element.style.setProperty('--market-tone',sparkTone);
     entry.element.querySelector('.nm').innerHTML =
       `${esc(item.name)} <span class="badge">${esc(item.symbol)}</span>`;
+    entry.element.querySelector('.mkt-window').textContent = `${changeSeries.length}D`;
     entry.element.querySelector('.px').className = `px ${cls(item.change_pct)}`;
     entry.element.querySelector('.px').innerHTML =
       `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
@@ -2693,22 +2767,19 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     const status = item.cache_status === 'stale' || item.cache_status === 'refresh_failed'
       ? '本地缓存 · 数据源暂不可用' : '数据截至';
     entry.element.querySelector('.mkt-meta').textContent =
-      `${status}${item.as_of ? ` ${item.as_of}` : ''}`;
+      `${status}${item.as_of ? ` ${item.as_of}` : ''}${item.source ? ` · ${item.source}` : ''}`;
+    entry.element.querySelector('.mkt-spark-period').textContent =
+      `${marketSparkDate(sparkSummary.first)}—${marketSparkDate(sparkSummary.lastDate)}`;
+    const period = entry.element.querySelector('.mkt-period-return');
+    period.className = `mkt-period-return ${periodTone}`;
+    period.textContent = `区间 ${periodReturn}`;
+    entry.element.setAttribute('aria-label',
+      `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
     queueMicrotask(() => {
       if (!document.getElementById(entry.sparkId)) return;
       const chart = mkChart(entry.sparkId);
-      const changeSeries = marketChangeSeries(item.nav);
-      chart.setOption({backgroundColor:'transparent', animation:!REDUCED_MOTION,
-        grid:{left:0,right:0,top:2,bottom:2}, xAxis:{type:'time',show:false},
-        yAxis:{type:'value',show:false,scale:true,boundaryGap:['12%','12%'],
-          min:value => Math.min(value.min,0),max:value => Math.max(value.max,0)},
-        tooltip:{show:false},
-        series:[{type:'line',data:changeSeries,showSymbol:false,
-          lineStyle:{width:2,color:item.change_pct >= 0 ? '#e66767' : '#0ca30c'},
-          markLine:{silent:true,symbol:'none',label:{show:false},
-            lineStyle:{color:'rgba(195,194,183,.36)',width:1,type:'dashed'},
-            data:[{yAxis:0}]}}]}, {notMerge:true});
+      chart.setOption(marketSparkOption(item,changeSeries),{notMerge:true});
     });
   }
   return {
@@ -2720,12 +2791,15 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
         return false;
       }
       const groupEntry = ensureGroup(group);
+      const order = Math.min(index,8);
       const sparkId = `spark-stream-${cycle}-${index++}`;
       const element = document.createElement('button');
       element.type = 'button';
       element.className = 'mkt-item stream-enter';
-      element.innerHTML = `<span class="nm"></span><span class="px"></span><span class="mkt-memberships" hidden></span><span class="mkt-meta"></span>
-        <span class="spark" id="${sparkId}"></span>`;
+      element.style.setProperty('--market-order',String(order));
+      element.innerHTML = `<span class="mkt-item-head"><span class="nm"></span><span class="mkt-window"></span></span><span class="px"></span><span class="mkt-memberships" hidden></span><span class="mkt-meta"></span>
+        <span class="mkt-spark-shell"><span class="spark" id="${sparkId}"></span></span>
+        <span class="mkt-spark-foot"><span class="mkt-spark-period"></span><span class="mkt-period-return"></span></span>`;
       groupEntry.grid.appendChild(element);
       groupEntry.size += 1;
       groupEntry.count.textContent = `${groupEntry.size} 只`;
@@ -2735,6 +2809,11 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       return true;
     },
     addAll(data) {
+      const unavailableByGroup = new Map();
+      for (const item of data.unavailable_items || []) {
+        if (!unavailableByGroup.has(item.group)) unavailableByGroup.set(item.group, []);
+        unavailableByGroup.get(item.group).push(item);
+      }
       for (const [group, items] of Object.entries(data.groups || {})) {
         for (const item of items) this.add(group, item);
         const entry = ensureGroup(group);
@@ -2742,9 +2821,12 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
         if (configured > entry.size) {
           entry.count.textContent = `${entry.size} / ${configured} 只`;
           const subject = group === PERSONAL_MARKET_GROUP ? '股票' : '标的';
+          const unavailable = unavailableByGroup.get(group) || [];
+          const examples = unavailable.slice(0, 4).map(item => item.name).join('、');
+          const reason = unavailable[0]?.message ? `；${unavailable[0].message}` : '';
           entry.empty.textContent = entry.size
-            ? `另有 ${configured - entry.size} 只${subject}暂无可绘制行情，可点击“同步最新行情”重试。`
-            : `${configured} 只${subject}暂时都没有可绘制行情；区块会保留，请同步最新行情或检查数据源。`;
+            ? `另有 ${configured - entry.size} 只${subject}暂无可绘制行情${examples ? `（${examples}）` : ''}${reason}。`
+            : `${configured} 只${subject}暂时都没有可绘制行情${examples ? `（${examples}）` : ''}${reason}；区块会保留，可同步重试。`;
           entry.empty.hidden = false;
         } else if (!configured && group === PERSONAL_MARKET_GROUP) {
           entry.empty.textContent = '暂无自选、关注或持有股票；在上方添加后，这里会显示对应走势图。';
@@ -2870,11 +2952,11 @@ function renderKlineSeries(chart, data) {
       {type:'slider',xAxisIndex:[0,1],height:16,bottom:2,borderColor:AXIS,textStyle:{color:MUTED}}],
     series:[
       {type:'candlestick',data:data.kline.map(k => k.slice(1,5)),
-        itemStyle:{color:'#e66767',color0:'#0ca30c',borderColor:'#e66767',borderColor0:'#0ca30c'}},
+        itemStyle:{color:CHART_COLORS.up,color0:CHART_COLORS.down,borderColor:CHART_COLORS.up,borderColor0:CHART_COLORS.down}},
       {name:'MA5',type:'line',data:ma(5),showSymbol:false,lineStyle:{width:1.5}},
       {name:'MA20',type:'line',data:ma(20),showSymbol:false,lineStyle:{width:1.5}},
       {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,
-        data:data.kline.map(k => ({value:k[5],itemStyle:{color:k[2] >= k[1] ? 'rgba(230,103,103,.55)' : 'rgba(12,163,12,.55)'}})),
+        data:data.kline.map(k => ({value:k[5],itemStyle:{color:k[2] >= k[1] ? 'rgba(230,103,103,.52)' : 'rgba(36,160,107,.52)'}})),
         barMaxWidth:8,silent:true},
     ],
   }), {notMerge:true});
@@ -3214,8 +3296,8 @@ function renderRegimeChart(windowKey = activeRegimeWindow) {
     xAxis:timeAxis(), yAxis:[valAxis(),{...valAxis(v => (v * 100).toFixed(0) + '%'),min:0,max:1}],
     series:[
       {name:'牛熊分',type:'line',data:history.map(r => [r.date,r.bull_score]),showSymbol:false,smooth:.16,lineStyle:{width:2}},
-      {name:'上涨宽度',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.advance_ratio]),showSymbol:false,lineStyle:{width:1.5,color:'#c98500'}},
-      {name:'站上MA20',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.above_ma20_ratio]),showSymbol:false,lineStyle:{width:1.5,color:'#199e70'}},
+      {name:'上涨宽度',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.advance_ratio]),showSymbol:false,lineStyle:{width:1.5,color:CHART_COLORS.up}},
+      {name:'站上MA20',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.above_ma20_ratio]),showSymbol:false,lineStyle:{width:1.5,color:CHART_COLORS.compare}},
     ],
   }), {notMerge:true});
 }
@@ -3613,7 +3695,7 @@ document.getElementById('bt-form').onsubmit = async e => {
     mkChart('dd-chart').setOption(baseOpt({
       xAxis: timeAxis(), yAxis: valAxis(v => (v * 100).toFixed(0) + '%'),
       series: [{ name: '回撤', type: 'line', data: data.drawdown, showSymbol: false,
-        lineStyle: { width: 2, color: '#d55181' }, areaStyle: { opacity: 0.25, color: '#d55181' } }],
+        lineStyle: { width: 2, color: CHART_COLORS.danger }, areaStyle: { opacity: 0.18, color: CHART_COLORS.danger } }],
     }));
   } catch (err) { out.innerHTML = `<div class="err" role="alert">${esc(err.message)}</div>`; }
   finally { busy(form, false); }

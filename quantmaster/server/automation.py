@@ -61,7 +61,12 @@ def automation_targets(request: Request) -> dict:
 @router.get("/api/v1/automation/jobs")
 def automation_jobs(request: Request) -> dict:
     _require_local(request)
-    return {"jobs": service().store.jobs(), "runs": service().store.recent_runs(50)}
+    runs = [
+        service().jobs.public(job)
+        for job in service().jobs.store.list(200)
+        if str(job.get("type") or "").startswith("automation.")
+    ][:50]
+    return {"jobs": service().store.jobs(), "runs": runs}
 
 
 @router.get("/api/v1/automation/audit")
@@ -130,7 +135,11 @@ def automation_job_update(name: str, value: ScheduleIn, request: Request) -> dic
 def automation_job_run(name: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return service().run_task(name, actor="web")
+        return service().run_task(
+            name,
+            actor="web",
+            idempotency_key=str(request.headers.get("Idempotency-Key") or ""),
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -211,7 +220,7 @@ def feishu_check(request: Request) -> dict:
             if refreshed_status in {"listening", "degraded"} or not channel_alive:
                 break
     refreshed = service().store.bot_account("feishu") or account or {}
-    websocket_status = refreshed.get("status")
+    websocket_status = str(refreshed.get("status") or "")
     if websocket_status == "listening" and channel_alive:
         connection_status = "success"
     elif account and runtime_detail["status"] != "running":

@@ -226,7 +226,12 @@ class TushareResearchAdapter:
             )
         else:
             raw = self._call(
-                definition, 1, trade_date=compact, fields=fields,
+                definition,
+                1,
+                trade_date=compact,
+                fields=fields,
+                required_nonempty=True,
+                required_columns=("ts_code", "trade_date"),
             )
         return self._normalize(definition, raw, trade_date)
 

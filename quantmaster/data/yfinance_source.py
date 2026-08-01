@@ -56,7 +56,10 @@ class YFinanceSource(DataSource):
                 raise_errors=True,
             )
 
-        raw = provider_call("yahoo", key, fetch, empty_opens=True)
+        try:
+            raw = provider_call("yahoo", key, fetch, empty_opens=True)
+        except yf.exceptions.YFException as exc:
+            raise RuntimeError(str(exc).strip() or f"Yahoo {ticker} 请求失败") from exc
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         return normalize_daily(raw)
@@ -81,7 +84,10 @@ class YFinanceSource(DataSource):
                 group_by="ticker",
             )
 
-        raw = provider_call("yahoo", key, fetch, empty_opens=True)
+        try:
+            raw = provider_call("yahoo", key, fetch, empty_opens=True)
+        except yf.exceptions.YFException as exc:
+            raise RuntimeError(str(exc).strip() or "Yahoo 批量请求失败") from exc
         result: dict[str, pd.DataFrame] = {}
         for symbol, ticker in mapping.items():
             try:

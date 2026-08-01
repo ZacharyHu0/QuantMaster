@@ -409,7 +409,7 @@ def _python_component(
 
     spec = component.get("spec") or {}
     bundle = ResearchDataBundle.from_legacy_panel(panel)
-    bundle.signal.setdefault("returns", panel["close"].pct_change())
+    bundle.signal.setdefault("returns", panel["close"].pct_change(fill_method=None))
     required = set(spec.get("required_features") or [])
     fundamental_fields = {"pe_ttm", "pb", "dv_ratio", "total_mv", "roe"}
     if required & fundamental_fields:

@@ -8,6 +8,7 @@ llm:
   model: claude-sonnet-5     # openai 示例: gpt-4o；deepseek 示例: deepseek-chat
   api_key: ""                # 留空则读 ANTHROPIC_API_KEY / OPENAI_API_KEY
   base_url: ""               # openai-compatible 时必填，如 https://api.deepseek.com/v1
+  reasoning_effort: medium    # 推理强度：none/minimal/low/medium/high/xhigh/max
   max_tokens: 2048
   temperature: 0.3
 

@@ -55,6 +55,7 @@ class TestLLMClient:
         assert captured["headers"]["x-api-key"] == "sk-test"
         assert captured["payload"]["system"] == "系统提示"
         assert captured["payload"]["messages"][0]["role"] == "user"
+        assert captured["payload"]["output_config"] == {"effort": "medium"}
         assert captured["timeout"].read == 60
 
     def test_per_request_read_timeout_and_timeout_error_are_structured(self, monkeypatch):
@@ -77,7 +78,7 @@ class TestLLMClient:
         captured = {}
 
         def fake_post(url, headers=None, json=None, timeout=None):
-            captured["url"] = url
+            captured.update(url=url, payload=json)
             return httpx.Response(
                 200, json={"choices": [{"message": {"content": "ok"}}]},
                 request=httpx.Request("POST", url),
@@ -85,9 +86,11 @@ class TestLLMClient:
 
         monkeypatch.setattr(httpx, "post", fake_post)
         client = LLMClient(LLMConfig(provider="openai-compatible", api_key="sk",
-                                     base_url="https://api.deepseek.com/v1"))
+                                     base_url="https://api.deepseek.com/v1",
+                                     reasoning_effort="high"))
         assert client.chat("hi") == "ok"
         assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
+        assert captured["payload"]["reasoning_effort"] == "high"
 
     def test_error_status_raises(self, monkeypatch):
         def fake_post(url, **kwargs):

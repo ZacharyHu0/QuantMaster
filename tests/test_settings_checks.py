@@ -92,6 +92,7 @@ def test_web_search_check_forces_reprobe_and_returns_only_safe_sources(monkeypat
     class SearchClient:
         def __init__(self, config):
             self.config = config
+            assert config.reasoning_effort == "high"
 
         def web_search(self, query, **kwargs):
             assert "证监会" in query
@@ -110,7 +111,9 @@ def test_web_search_check_forces_reprobe_and_returns_only_safe_sources(monkeypat
         lambda config: reset.append(config),
     )
     result = check_llm_web_search(
-        LLMSettings(provider="openai", model="gpt-search", timeout=45),
+        LLMSettings(
+            provider="openai", model="gpt-search", reasoning_effort="high", timeout=45,
+        ),
         "secret",
     )
 
