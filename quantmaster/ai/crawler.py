@@ -1017,9 +1017,19 @@ class NewsStore:
             "market_abs_max": _adaptive_sentiment_scale(market_scale_values),
             "sector_abs_max": _adaptive_sentiment_scale(sector_scale_values),
         }
+        top_symbols = sorted(
+            symbol_counts.items(), key=lambda item: (-item[1], item[0]),
+        )[:24]
+        from quantmaster.data import load_stock_names
+
+        symbol_names = load_stock_names([symbol for symbol, _count in top_symbols])
         data["top_symbols"] = [
-            {"symbol": symbol, "count": count}
-            for symbol, count in sorted(symbol_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+            {
+                "symbol": symbol,
+                "name": symbol_names.get(symbol, ""),
+                "count": count,
+            }
+            for symbol, count in top_symbols
         ]
         return data
 

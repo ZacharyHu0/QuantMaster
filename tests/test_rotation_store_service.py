@@ -125,17 +125,21 @@ def test_theme_staging_keeps_old_catalog_until_atomic_quality_commit(tmp_path):
     assert resumed["attempted_count"] == 1
 
 
-def test_rotation_scatter_axes_use_observed_ratio_buckets():
+def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
     ).read_text(encoding="utf-8")
 
-    assert "[5,10,20,40,60,80,100]" in script
+    assert "Math.ceil(maximum * 1.12 / 5) * 5" in script
     assert "Math.max(40" not in script
     assert "Math.max(60" not in script
     assert script.count('id="rotation-industry-scatter"') == 1
     assert "rotation-radar-scatter" not in script
     assert "周期坐标与 ${activeWindow} 日轨迹" in script
+    assert "dataZoom:chartZoom(history.length)" in script
+    assert "dataZoom:chartZoom(items.length)" in script
+    assert "dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1],initialPoints:260})" in script
+    assert "orient:'vertical',yAxisIndex" in script
 
 
 def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_path):

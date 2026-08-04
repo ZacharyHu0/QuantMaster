@@ -728,6 +728,8 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert personal_section.locator(".market-section-title").inner_text() == "我的股票"
         assert index_section.locator(".market-section-title").inner_text() == "主要指数"
         assert personal_section.locator(".mkt-memberships").inner_text() == "自选 · 持有"
+        assert "贵州茅台" in personal_section.locator(".nm").inner_text()
+        assert "600519.SH" in personal_section.locator(".nm").inner_text()
         assert personal_section.locator(".mkt-item").count() == 1
         assert index_section.locator(".mkt-item").count() == 1
         assert index_section.locator("canvas").is_visible()
@@ -748,6 +750,10 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
                 areaOpacity: option.series[0].areaStyle.opacity,
                 lineColor: option.series[0].lineStyle.color,
                 endpointPoints: option.series[1].data.length,
+                tooltipText: option.tooltip[0].formatter([{
+                  seriesId:'market-spark-trend', dataIndex:1,
+                  value:[1784592000000,-0.2],
+                }]),
               };
             }""",
             spark_id,
@@ -762,6 +768,12 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
             "areaOpacity": 0.1,
             "lineColor": "#24a06b",
             "endpointPoints": 1,
+            "tooltipText": (
+                "07.21<br><span style=\"color:#24a06b\">●</span> "
+                "区间涨跌&nbsp;&nbsp;<b>-0.20%</b><br>"
+                "<span style=\"color:#24a06b\">●</span> "
+                "当日涨跌&nbsp;&nbsp;<b>-0.20%</b>"
+            ),
         }
         assert page.evaluate("marketSparkMonth(1784505600000, true)") == "2026.07"
         assert page.evaluate("marketSparkMonth('1784505600000', true)") == "2026.07"

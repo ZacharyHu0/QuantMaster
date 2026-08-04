@@ -329,6 +329,27 @@ def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
     }
     assert queue["processing"] == 0
     assert queue["claims"] == {"total": 0, "active": 0, "expired": 0}
+def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkeypatch):
+    store = NewsStore(tmp_path / "news.sqlite")
+    symbols = [f"{index:06d}.SZ" for index in range(1, 21)]
+    monkeypatch.setattr(
+        "quantmaster.data.load_stock_names",
+        lambda values: {symbol: f"标的{index:02d}" for index, symbol in enumerate(values, 1)},
+    )
+    store.save([
+        NewsItem(
+            source="test", title=f"事件 {index}", content=f"事件正文 {index}",
+            symbols=[symbol], sentiment=0.1, confidence=1,
+            importance_score=100, analysis_status="complete",
+        )
+        for index, symbol in enumerate(symbols, 1)
+    ])
+
+    focused = store.stats(30)["top_symbols"]
+
+    assert len(focused) == 20
+    assert focused[0] == {"symbol": "000001.SZ", "name": "标的01", "count": 1}
+    assert focused[-1] == {"symbol": "000020.SZ", "name": "标的20", "count": 1}
 
 
 def test_annotation_stream_yields_each_persisted_batch(tmp_path):

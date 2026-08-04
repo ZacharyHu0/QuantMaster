@@ -420,7 +420,7 @@
     const symbols = data.top_symbols || [];
     const max = Math.max(1, ...symbols.map(item => item.count));
     document.getElementById('news-top-symbols').innerHTML = symbols.length ? symbols.map(item =>
-      `<div class="news-symbol-row"><strong>${html(item.symbol)}</strong><i><b style="transform:scaleX(${item.count / max})"></b></i><span>${item.count}</span></div>`
+      `<div class="news-symbol-row" title="${html(item.name || '名称待同步')} · ${html(item.symbol)} · 提及 ${Number(item.count || 0)} 次"><span class="news-symbol-identity"><strong>${html(item.name || '名称待同步')}</strong><small>${html(item.symbol)}</small></span><i><b style="transform:scaleX(${item.count / max})"></b></i><span>${item.count}</span></div>`
     ).join('') : '<span class="news-muted">暂无个股映射</span>';
   }
 

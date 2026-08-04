@@ -535,11 +535,16 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
 
     symbols: dict[str, str] = {}
     memberships: dict[str, list[str]] = {}
+
+    def usable_name(value: object, symbol: str) -> str:
+        name = str(value or "").strip()
+        return "" if name.upper() == symbol else name
+
     lists = AssetListStore().all()
     for list_name in ("favorites", "following"):
         for item in lists.get(list_name, []):
             symbol = str(item["symbol"]).upper()
-            name = str(item.get("name") or "").strip()
+            name = usable_name(item.get("name"), symbol)
             symbols.setdefault(symbol, name)
             if name and not symbols[symbol]:
                 symbols[symbol] = name
@@ -552,11 +557,14 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
         symbols.setdefault(symbol, "")
         memberships.setdefault(symbol, []).append("holdings")
 
-    missing = [symbol for symbol, name in symbols.items() if not name]
+    missing = [
+        symbol for symbol, name in symbols.items()
+        if not usable_name(name, symbol)
+    ]
     if missing:
         cached_names = load_stock_names(missing)
         for symbol in missing:
-            symbols[symbol] = cached_names.get(symbol, symbol)
+            symbols[symbol] = usable_name(cached_names.get(symbol), symbol) or symbol
     return symbols, memberships
 
 

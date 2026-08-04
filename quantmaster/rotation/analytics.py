@@ -703,7 +703,7 @@ def analyze_group_rotation(
     }
 
 
-def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 260) -> dict[str, Any]:
+def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, Any]:
     """Estimate ETF subscription/redemption flow as delta shares times NAV/close."""
     required = {"trade_date", "symbol", "shares"}
     if frame is None or frame.empty or not required.issubset(frame.columns):

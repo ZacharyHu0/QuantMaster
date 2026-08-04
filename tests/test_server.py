@@ -129,9 +129,11 @@ class TestBasics:
         assert "type:'category',data:categories,show:true" in resp.text
         assert "id:'market-spark-latest'" in resp.text
         assert "区间涨跌" in resp.text
+        assert "当日涨跌" in resp.text
         assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text
         assert "market-section-title" in resp.text
         assert "mkt-memberships" in resp.text
+        assert "名称与代码 · 标注提及次数" in resp.text
         assert "queueMarketReload" in resp.text
         assert "data:[{yAxis:0}]" in resp.text
         assert "type:'dashed'" in resp.text

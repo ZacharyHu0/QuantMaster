@@ -1289,7 +1289,7 @@
     <aside class="news-analysis" aria-label="资讯量化摘要">
       <section><div class="news-panel-head"><div><h3>大盘情绪</h3><p>质量加权 · <span id="news-halflife-days">3</span> 日半衰期</p></div><span class="state-pill">MARKET</span></div><div class="market-sentiment-readout"><div class="sentiment-number" id="news-factor-value">—</div><div class="market-sentiment-context"><strong id="news-market-label">待计算</strong><span id="news-market-meta">等待已标注事件</span></div></div><div class="sentiment-axis"><span id="news-axis-low">-20 偏空</span><i><b id="news-factor-marker"></b></i><span id="news-axis-high">偏多 +20</span></div><div id="news-factor-chart" class="news-factor-chart" role="img" aria-label="近 30 日大盘情绪走势"></div></section>
       <section><div class="news-panel-head"><div><h3>板块情绪分</h3><p>申万一级 · 绝对影响排序</p></div><span class="state-pill" id="news-sector-scale">自适应 ±20</span></div><div id="news-sector-scores" class="news-sector-list"><span class="news-muted">暂无板块标注</span></div></section>
-      <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
+      <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>名称与代码 · 标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
       <section><div class="news-panel-head"><div><h3>来源运行状态</h3><p>最近一次采集结果</p></div><button class="text-action" id="news-open-sources" type="button">管理来源</button></div><div id="news-source-health" class="news-source-health"><span class="news-muted">正在读取…</span></div></section>
     </aside>
   </div>
@@ -2723,6 +2723,12 @@ function marketSparkOption(item, changeSeries) {
   const tone = summary.last > 0 ? CHART_COLORS.up
     : summary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
   const signed = value => `${value > 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
+  const dailyChanges = changeSeries.map((point, index) => {
+    if (!index) return null;
+    const previous = 1 + Number(changeSeries[index - 1]?.[1] || 0) / 100;
+    const current = 1 + Number(point?.[1] || 0) / 100;
+    return previous ? (current / previous - 1) * 100 : null;
+  });
   return {
     backgroundColor:'transparent',
     animation:!REDUCED_MOTION,
@@ -2747,9 +2753,11 @@ function marketSparkOption(item, changeSeries) {
       axisPointer:{type:'line',snap:true,lineStyle:{color:AXIS,width:1,type:'dashed'}},
       formatter:params => {
         const point = params.find(value => value.seriesId === 'market-spark-trend') || params[0];
-        const value = Number(Array.isArray(point?.value) ? point.value.at(-1) : point?.value || 0);
-        const date = point?.axisValue ?? categories[point?.dataIndex] ?? '';
-        return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b>`;
+        const value = Array.isArray(point?.value) ? Number(point.value[1]) : 0;
+        const date = Array.isArray(point?.value) ? point.value[0] : '';
+        const daily = dailyChanges[Number(point?.dataIndex)];
+        const dailyText = Number.isFinite(daily) ? signed(daily) : '—';
+        return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b><br><span style="color:${tone}">●</span> 当日涨跌&nbsp;&nbsp;<b>${dailyText}</b>`;
       },
     },
     aria:{enabled:true,label:{description:`${item.name}区间走势图，最新区间涨跌${signed(summary.last)}`}},

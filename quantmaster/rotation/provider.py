@@ -756,11 +756,12 @@ class RotationProvider:
                     ) from ths_error
 
     def sync_etf_observations(self, progress, cancelled) -> dict[str, Any]:
-        """Fetch recent bulk fund shares and closes, preserving earlier observations."""
+        """Backfill three years of broad-ETF observations, then refresh recent sessions."""
         previous = self.store.etf_observations()
         end = pd.Timestamp(date.today())
-        start = end - pd.Timedelta(days=45 if previous.empty else 20)
-        calendar = self.source.trade_calendar(str(start.date()), str(end.date()))
+        history_start = end - pd.DateOffset(years=3, days=20)
+        recent_start = end - pd.Timedelta(days=45 if previous.empty else 20)
+        calendar = self.source.trade_calendar(str(recent_start.date()), str(end.date()))
         bootstrap_sessions = 25 if previous.empty else 6
         dates = [
             pd.Timestamp(value) for value in calendar if pd.Timestamp(value) <= end
@@ -782,6 +783,8 @@ class RotationProvider:
         ].copy()
         if "benchmark" not in basic:
             basic["benchmark"] = ""
+        if "list_date" not in basic:
+            basic["list_date"] = ""
         basic["category"] = [
             _broad_etf_category(name, benchmark)
             for name, benchmark in zip(basic["name"], basic["benchmark"], strict=True)
@@ -792,7 +795,76 @@ class RotationProvider:
         names = basic.set_index("symbol")["name"].to_dict()
         categories = basic.set_index("symbol")["category"].to_dict()
         benchmarks = basic.set_index("symbol")["benchmark"].fillna("").astype(str).to_dict()
-        rows = []
+        listing_dates = basic.set_index("symbol")["list_date"].to_dict()
+        rows: list[pd.DataFrame] = []
+        issues: list[str] = []
+
+        previous_dates = pd.Series(dtype="datetime64[ns]")
+        if not previous.empty and {"symbol", "trade_date"}.issubset(previous.columns):
+            parsed_previous = previous.copy()
+            parsed_previous["trade_date"] = pd.to_datetime(
+                parsed_previous["trade_date"], errors="coerce",
+            )
+            previous_dates = parsed_previous.groupby("symbol")["trade_date"].min()
+
+        backfill_targets: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+        for symbol in categories:
+            listed = pd.to_datetime(listing_dates.get(symbol), errors="coerce")
+            start_at = max(history_start, listed) if pd.notna(listed) else history_start
+            existing_start = previous_dates.get(symbol, pd.NaT)
+            stop_at = (
+                pd.Timestamp(existing_start) - pd.Timedelta(days=1)
+                if pd.notna(existing_start) else end
+            )
+            if start_at.normalize() <= stop_at.normalize():
+                backfill_targets.append((symbol, start_at.normalize(), stop_at.normalize()))
+
+        for index, (symbol, start_at, stop_at) in enumerate(backfill_targets, start=1):
+            if cancelled():
+                raise InterruptedError("ETF 历史份额同步已取消")
+            try:
+                shares = self._tushare_call(
+                    "fund_share", 30, ts_code=symbol,
+                    start_date=start_at.strftime("%Y%m%d"),
+                    end_date=stop_at.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,fd_share",
+                ).rename(columns={"ts_code": "symbol", "fd_share": "shares"})
+                daily = self._tushare_call(
+                    "fund_daily", 30, ts_code=symbol,
+                    start_date=start_at.strftime("%Y%m%d"),
+                    end_date=stop_at.strftime("%Y%m%d"),
+                    fields="ts_code,trade_date,close",
+                ).rename(columns={"ts_code": "symbol"})
+            except RotationProviderCallError as exc:
+                issue = f"{names.get(symbol, symbol)} 历史资金数据回填失败：{_compact_error(exc)}"
+                issues.append(issue)
+                logger.warning(issue)
+                continue
+            if not {"symbol", "trade_date", "shares"}.issubset(shares.columns):
+                continue
+            if not {"symbol", "trade_date", "close"}.issubset(daily.columns):
+                daily = pd.DataFrame(columns=["symbol", "trade_date", "close"])
+            shares["shares"] = pd.to_numeric(shares["shares"], errors="coerce") * 10_000
+            merged = shares.merge(
+                daily[["symbol", "trade_date", "close"]],
+                on=["symbol", "trade_date"], how="left",
+            )
+            merged["nav"] = float("nan")
+            merged["trade_date"] = pd.to_datetime(merged["trade_date"], errors="coerce")
+            merged["name"] = merged["symbol"].map(names).fillna(merged["symbol"])
+            merged["category"] = merged["symbol"].map(categories)
+            merged["benchmark"] = merged["symbol"].map(benchmarks).fillna("")
+            rows.append(merged[[
+                "trade_date", "symbol", "name", "category", "benchmark",
+                "shares", "nav", "close",
+            ]])
+            progress(
+                55 + round(3 * index / max(1, len(backfill_targets))),
+                "回填 ETF 历史",
+                f"{index}/{len(backfill_targets)} · {names.get(symbol, symbol)} · "
+                f"{start_at.date()}—{stop_at.date()}",
+            )
+
         nav_available = True
         for index, trade_date in enumerate(dates, start=1):
             if cancelled():
@@ -846,15 +918,17 @@ class RotationProvider:
                 "shares", "nav", "close",
             ]])
             progress(
-                55 + round(7 * index / max(1, len(dates))),
+                58 + round(4 * index / max(1, len(dates))),
                 "同步 ETF 份额",
                 f"{index}/{len(dates)} · {trade_date.date()}",
             )
-        if not rows:
+        if not rows and previous.empty:
             raise RuntimeError("ETF 份额接口未返回可用数据")
         if not previous.empty and "benchmark" not in previous:
             previous["benchmark"] = ""
-        result = pd.concat([previous, *rows], ignore_index=True)
+        result = pd.concat(
+            [*([previous] if not previous.empty else []), *rows], ignore_index=True,
+        )
         result["category"] = [
             _broad_etf_category(name, benchmark)
             for name, benchmark in zip(
@@ -869,4 +943,11 @@ class RotationProvider:
             ["trade_date", "symbol"], keep="last",
         ).sort_values(["symbol", "trade_date"])
         self.store.save_etf_observations(result)
-        return {"rows": len(result), "symbols": int(result["symbol"].nunique())}
+        available_dates = result["trade_date"].dropna()
+        return {
+            "rows": len(result),
+            "symbols": int(result["symbol"].nunique()),
+            "history_start": str(available_dates.min().date()) if not available_dates.empty else "",
+            "history_end": str(available_dates.max().date()) if not available_dates.empty else "",
+            "issues": issues,
+        }

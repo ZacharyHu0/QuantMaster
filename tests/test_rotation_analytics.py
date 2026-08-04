@@ -178,3 +178,16 @@ def test_etf_flow_preserves_disclosed_benchmark_across_windows():
     assert len(result["benchmarks"]) == 1
     assert result["benchmarks"][0]["benchmark"] == "沪深300指数"
     assert result["benchmarks"][0]["flows"]["20"] == 80.0
+def test_etf_flow_keeps_three_year_display_window():
+    dates = pd.bdate_range("2023-01-02", periods=800)
+    frame = pd.DataFrame({
+        "trade_date": dates,
+        "symbol": "510300.SH",
+        "shares": np.arange(800, dtype=float) + 1_000,
+        "close": np.linspace(3.5, 4.5, 800),
+    })
+
+    result = estimate_etf_flows(frame)
+
+    assert len(result["daily"]) == 780
+    assert result["daily"][0]["date"] == str(dates[20].date())

@@ -65,6 +65,37 @@
   const pp = value => signed(value,1,' pp');
   const windowControl = label => `<div class="rotation-window-control" aria-label="${esc(label)}">${WINDOWS.map(window => `<button type="button" data-rotation-window="${window}" aria-pressed="${String(window === activeWindow)}">${window} 日</button>`).join('')}</div>`;
 
+  function chartZoom(pointCount, {yAxisIndex = 0, initialPoints = 0} = {}) {
+    const start = initialPoints > 0 && pointCount > initialPoints
+      ? Math.max(0, 100 * (pointCount - initialPoints) / pointCount)
+      : 0;
+    const common = {start,end:100,filterMode:'none',realtime:true};
+    const slider = {
+      showDataShadow:false,showDetail:false,borderColor:AXIS,
+      backgroundColor:'rgba(195,194,183,.04)',fillerColor:'rgba(150,152,144,.16)',
+      handleStyle:{color:INK2,borderColor:AXIS},moveHandleStyle:{color:INK2},
+    };
+    return [
+      {id:'zoom-x-inside',type:'inside',xAxisIndex:0,...common},
+      {id:'zoom-x-slider',type:'slider',xAxisIndex:0,height:12,bottom:7,...common,...slider},
+      {id:'zoom-y-inside',type:'inside',yAxisIndex,start:0,end:100,filterMode:'none'},
+      {id:'zoom-y-slider',type:'slider',orient:'vertical',yAxisIndex,width:12,right:3,top:42,bottom:56,
+        start:0,end:100,filterMode:'none',...slider},
+    ];
+  }
+
+  function paddedExtent(values) {
+    const finite = values.map(Number).filter(Number.isFinite);
+    if (!finite.length) return {min:-1,max:1};
+    let min = Math.min(0,...finite), max = Math.max(0,...finite);
+    const span = max - min || Math.max(Math.abs(min),Math.abs(max),1);
+    const padding = span * .08;
+    min = min < 0 ? min - padding : 0;
+    max = max > 0 ? max + padding : 0;
+    if (min === max) return {min:min - 1,max:max + 1};
+    return {min,max};
+  }
+
   function qualityMarkup(meta) {
     const quality = meta?.quality || {status:'cold', issues:[]};
     const status = quality.status || 'cold';
@@ -158,9 +189,10 @@
     }));
     chart.setOption(baseOpt({
       legend:{top:0,textStyle:{color:INK2,fontSize:10}},
-      grid:{left:46,right:18,top:38,bottom:34}, xAxis:timeAxis(),
+      grid:{left:46,right:48,top:38,bottom:58}, xAxis:timeAxis(),
       yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
       tooltip:{trigger:'axis',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:11},valueFormatter:value => `${number(value,1)}%`},
+      dataZoom:chartZoom(history.length),
       series,
     }));
   }
@@ -184,7 +216,7 @@
         <div class="rotation-kpi"><span>有效样本</span><strong>${Number(current.eligible_count || 0).toLocaleString()}</strong><small>停牌与缺失不进分母</small></div>
       </div>
       <div class="rotation-layout two">
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>温度序列</h3><p>市场温度及 5 / 10 / 20 日均线</p></div><output>${esc(data.as_of || '')}</output></div><div class="rotation-chart tall" id="rotation-temperature-chart"></div></section>
+        <section class="rotation-section"><div class="rotation-section-head"><div><h3>温度序列</h3><p>市场温度及 5 / 10 / 20 日均线 · 拖动底部与右侧控件缩放</p></div><output>${esc(data.as_of || '')}</output></div><div class="rotation-chart tall" id="rotation-temperature-chart"></div></section>
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>四档分布</h3><p>同一有效样本互斥归类，家数严格守恒</p></div></div>
           <div class="rotation-state-list">${Object.keys(STATE_LABELS).map(state => `<div class="rotation-state-row"><strong>${STATE_LABELS[state]}</strong><div class="rotation-meter"><i style="--ratio:${Math.max(0,Math.min(1,Number(ratios[state] || 0)/100))}"></i></div><output>${percent(ratios[state])} · ${Number(current.counts?.[state] || 0).toLocaleString()}</output></div>`).join('')}</div>
         </section>
@@ -254,7 +286,7 @@
     });
     const axisMax = (offset) => {
       const maximum = Math.max(0,...values.filter((_,index) => index % 2 === offset).filter(Number.isFinite));
-      return [5,10,20,40,60,80,100].find(value => value >= maximum * 1.15) || 100;
+      return Math.min(100, Math.max(5, Math.ceil(maximum * 1.12 / 5) * 5));
     };
     const labels = new Set([...items].sort((left,right) => Math.abs(Number(signal(right).rotation_change_pp || 0)) - Math.abs(Number(signal(left).rotation_change_pp || 0))).slice(0,8).map(item => item.code));
     const trails = items.map(item => {
@@ -265,7 +297,7 @@
       ],lineStyle:{color:Number(currentSignal.rotation_change_pp) >= 0 ? CHART_COLORS.up : CHART_COLORS.down}};
     });
     return baseOpt({
-      grid:{left:50,right:22,top:24,bottom:44},
+      grid:{left:50,right:48,top:24,bottom:60},
       tooltip:{trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:11},formatter:params => {
         const item = params.data?.item;
         if (!item) return '';
@@ -278,6 +310,7 @@
         {type:'lines',coordinateSystem:'cartesian2d',silent:true,symbol:['none','arrow'],symbolSize:5,lineStyle:{width:1,opacity:.34},data:trails},
         {name:'行业',type:'scatter',data:items.map(item => ({value:[item.strong_ratio,item.weak_ratio,Math.max(7,Math.sqrt(item.eligible_count || 1)*2.2)],item,itemStyle:{color:Number(signal(item).rotation_change_pp) > 0 ? CHART_COLORS.up : Number(signal(item).rotation_change_pp) < 0 ? CHART_COLORS.down : CHART_COLORS.primary}})),symbolSize:value => value[2],label:{show:true,position:'top',color:INK2,fontSize:9,formatter:params => labels.has(params.data.item.code) ? params.data.item.name : ''}},
       ],
+      dataZoom:chartZoom(items.length),
     });
   }
 
@@ -360,7 +393,7 @@
     out.innerHTML = `
       <div class="rotation-commandbar"><div><strong>行业观察窗口</strong><span>坐标位置是当前值，箭头起点为 ${activeWindow} 个交易日前</span></div>${windowControl('行业周期观察窗口')}</div>
       <div class="rotation-kpis"><div class="rotation-kpi"><span>有效一级行业</span><strong>${l1.length}</strong><small>申万 2021 共 31 个</small></div><div class="rotation-kpi"><span>变化最快</span><strong>${esc(best?.name || '—')}</strong><small class="${tone(signal(best).rotation_change_pp)}">${pp(signal(best).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>变化末位</span><strong>${esc(worst?.name || '—')}</strong><small class="${tone(signal(worst).rotation_change_pp)}">${pp(signal(worst).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>覆盖门槛</span><strong>8 · 70%</strong><small>最少成分 · 行情覆盖</small></div></div>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>周期坐标与 ${activeWindow} 日轨迹</h3><p>横轴强势加速、纵轴低位偏弱；仅标记变化绝对值最大的行业</p></div><output>${l1.length} 个一级行业</output></div><div class="rotation-chart tall" id="rotation-industry-scatter"></div></section>
+      <section class="rotation-section"><div class="rotation-section-head"><div><h3>周期坐标与 ${activeWindow} 日轨迹</h3><p>横轴强势加速、纵轴低位偏弱；坐标按当前值与轨迹自适应，拖动底部与右侧控件缩放</p></div><output>${l1.length} 个一级行业</output></div><div class="rotation-chart tall" id="rotation-industry-scatter"></div></section>
       <section class="rotation-section"><div class="rotation-section-head"><div><h3>行业信号矩阵</h3><p>阶段固定 3 日；表格按独立证据排序，不合成综合分</p></div><label class="rotation-compact-field">排序<select data-rotation-industry-sort><option value="change" ${industrySort === 'change' ? 'selected' : ''}>轮动变化</option><option value="excess" ${industrySort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${industrySort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="weak" ${industrySort === 'weak' ? 'selected' : ''}>低位占比</option></select></label></div>
         <div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>行业</th><th>阶段（3日）</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">强势 / 低位</th><th class="numeric">覆盖</th></tr></thead><tbody>${rows.map(item => { const current = signal(item); return `<tr><td><button type="button" data-rotation-detail="industry" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)} · ${esc(item.level)}</div></td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${percent(item.strong_ratio)} / ${percent(item.weak_ratio)}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div>
       </section><section class="rotation-detail" id="rotation-industry-detail" hidden></section><details class="rotation-l2"><summary><span>二级行业关注区 <small class="rotation-l2-copy">最多 30 个，不改变一级行业汇总</small></span></summary><div id="rotation-l2-options"><div class="rotation-skeleton"><span></span></div></div></details>${issuesMarkup(meta)}`;
@@ -438,9 +471,26 @@
     if (!etfCatalog.length) { out.innerHTML = emptyMarkup(meta,data.summary?.message || data.message || '等待 ETF 份额快照。','etf'); return; }
     const currentWindow = data.summary?.windows?.[String(activeWindow)] || {};
     const categories = [...new Set(etfCatalog.map(item => item.category))].sort();
-    out.innerHTML = `<div class="rotation-commandbar"><div><strong>ETF 资金窗口</strong><span>累计资金按最近完整交易日求和；跟踪基准缺失时不猜测</span></div>${windowControl('ETF资金观察窗口')}</div><div class="rotation-kpis"><div class="rotation-kpi"><span>${activeWindow} 日净流</span><strong class="${tone(currentWindow.net_flow)}">${money(currentWindow.net_flow)}</strong><small>${currentWindow.sessions || 0} 个交易日</small></div><div class="rotation-kpi"><span>净申购 ETF</span><strong>${currentWindow.inflow_count || 0}</strong><small>窗口累计为正</small></div><div class="rotation-kpi"><span>净赎回 ETF</span><strong>${currentWindow.outflow_count || 0}</strong><small>窗口累计为负</small></div><div class="rotation-kpi"><span>收盘价降级</span><strong>${data.summary?.close_fallback_count || 0}</strong><small>净值缺失时使用</small></div></div><section class="rotation-section"><div class="rotation-section-head"><div><h3>每日与累计资金</h3><p>柱为当日净流，折线为当前本地历史累计</p></div><output>${data.daily?.length || 0} 日</output></div><div class="rotation-chart tall" id="rotation-etf-chart"></div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>跟踪基准聚合</h3><p>同一基准下的 ETF 合并，避免同质产品重复放大观感</p></div><output>${data.benchmarks?.length || 0} 个基准</output></div><div class="rotation-benchmark-grid">${[...(data.benchmarks || [])].sort((a,b) => Math.abs(Number(b.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(a.flows?.[String(activeWindow)] || 0))).slice(0,20).map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('')}</div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 贡献明细</h3><p>完整目录默认 50 行分页，逐只披露价格来源</p></div></div><div class="rotation-filterbar"><label>搜索<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="ETF 名称、代码或基准"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="flow" ${etfSort === 'flow' ? 'selected' : ''}>窗口资金</option><option value="daily" ${etfSort === 'daily' ? 'selected' : ''}>当日资金</option><option value="name" ${etfSort === 'name' ? 'selected' : ''}>名称</option></select></label></div><div id="rotation-etf-results"></div></section>${issuesMarkup(meta)}`;
+    out.innerHTML = `<div class="rotation-commandbar"><div><strong>ETF 资金窗口</strong><span>累计资金按最近完整交易日求和；跟踪基准缺失时不猜测</span></div>${windowControl('ETF资金观察窗口')}</div><div class="rotation-kpis"><div class="rotation-kpi"><span>${activeWindow} 日净流</span><strong class="${tone(currentWindow.net_flow)}">${money(currentWindow.net_flow)}</strong><small>${currentWindow.sessions || 0} 个交易日</small></div><div class="rotation-kpi"><span>净申购 ETF</span><strong>${currentWindow.inflow_count || 0}</strong><small>窗口累计为正</small></div><div class="rotation-kpi"><span>净赎回 ETF</span><strong>${currentWindow.outflow_count || 0}</strong><small>窗口累计为负</small></div><div class="rotation-kpi"><span>收盘价降级</span><strong>${data.summary?.close_fallback_count || 0}</strong><small>净值缺失时使用</small></div></div><section class="rotation-section"><div class="rotation-section-head"><div><h3>每日与累计资金</h3><p>柱为当日净流，折线为当前本地历史累计 · 支持横纵坐标缩放</p></div><output>${data.daily?.length || 0} 日</output></div><div class="rotation-chart tall" id="rotation-etf-chart"></div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>跟踪基准聚合</h3><p>同一基准下的 ETF 合并，避免同质产品重复放大观感</p></div><output>${data.benchmarks?.length || 0} 个基准</output></div><div class="rotation-benchmark-grid">${[...(data.benchmarks || [])].sort((a,b) => Math.abs(Number(b.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(a.flows?.[String(activeWindow)] || 0))).slice(0,20).map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('')}</div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 贡献明细</h3><p>完整目录默认 50 行分页，逐只披露价格来源</p></div></div><div class="rotation-filterbar"><label>搜索<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="ETF 名称、代码或基准"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="flow" ${etfSort === 'flow' ? 'selected' : ''}>窗口资金</option><option value="daily" ${etfSort === 'daily' ? 'selected' : ''}>当日资金</option><option value="name" ${etfSort === 'name' ? 'selected' : ''}>名称</option></select></label></div><div id="rotation-etf-results"></div></section>${issuesMarkup(meta)}`;
     drawEtfTable();
-    const chart = mkChart('rotation-etf-chart'); if (chart) chart.setOption(baseOpt({legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:64,right:64,top:38,bottom:34},xAxis:timeAxis(),yAxis:[{type:'value',axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{lineStyle:{color:GRID}}},{type:'value',axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{show:false}}],series:[{name:'当日净流',type:'bar',barMaxWidth:8,data:(data.daily || []).map(row => [row.date,row.flow]),itemStyle:{color:params => Number(params.value[1]) >= 0 ? CHART_COLORS.up : CHART_COLORS.down}},{name:'累计净流',type:'line',yAxisIndex:1,showSymbol:false,data:(data.daily || []).map(row => [row.date,row.cumulative]),lineStyle:{color:CHART_COLORS.primary,width:1.7}},{name:'累计 MA5',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma5]),lineStyle:{color:CHART_COLORS.warning,width:1.2}},{name:'累计 MA20',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:(data.daily || []).map(row => [row.date,row.cumulative_ma20]),lineStyle:{color:CHART_COLORS.compare,width:1.2}}]}));
+    const chart = mkChart('rotation-etf-chart');
+    const daily = data.daily || [];
+    const flowExtent = paddedExtent(daily.map(row => row.flow));
+    const cumulativeExtent = paddedExtent(daily.flatMap(row => [row.cumulative,row.cumulative_ma5,row.cumulative_ma20]));
+    if (chart) chart.setOption(baseOpt({
+      legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:70,right:92,top:38,bottom:58},xAxis:timeAxis(),
+      yAxis:[
+        {type:'value',scale:true,min:flowExtent.min,max:flowExtent.max,axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{lineStyle:{color:GRID}}},
+        {type:'value',scale:true,min:cumulativeExtent.min,max:cumulativeExtent.max,axisLabel:{color:MUTED,formatter:value => money(value)},splitLine:{show:false}},
+      ],
+      dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1],initialPoints:260}),
+      series:[
+        {name:'当日净流',type:'bar',barMaxWidth:8,data:daily.map(row => [row.date,row.flow]),itemStyle:{color:params => Number(params.value[1]) >= 0 ? CHART_COLORS.up : CHART_COLORS.down}},
+        {name:'累计净流',type:'line',yAxisIndex:1,showSymbol:false,data:daily.map(row => [row.date,row.cumulative]),lineStyle:{color:CHART_COLORS.primary,width:1.7}},
+        {name:'累计 MA5',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:daily.map(row => [row.date,row.cumulative_ma5]),lineStyle:{color:CHART_COLORS.warning,width:1.2}},
+        {name:'累计 MA20',type:'line',yAxisIndex:1,showSymbol:false,connectNulls:false,data:daily.map(row => [row.date,row.cumulative_ma20]),lineStyle:{color:CHART_COLORS.compare,width:1.2}},
+      ],
+    }));
   }
 
   function drawEtfTable() {

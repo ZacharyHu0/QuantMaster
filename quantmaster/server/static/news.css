@@ -516,12 +516,24 @@
 .news-sector-row em.negative { color: var(--news-negative); }
 .news-sector-row em.neutral { color: var(--muted); }
 
-.news-symbol-list { display: grid; gap: 9px; margin-top: 13px; }
-.news-symbol-row { display: grid; grid-template-columns: 76px 1fr 28px; align-items: center; gap: 8px; font-size: 11px; }
-.news-symbol-row strong { font-weight: 580; }
+.news-symbol-list {
+  display: grid;
+  gap: 10px;
+  max-height: 344px;
+  margin-top: 13px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.news-symbol-row { display: grid; grid-template-columns: minmax(100px, 1.25fr) 1fr 28px; align-items: center; gap: 8px; font-size: 11px; }
+.news-symbol-identity { min-width: 0; }
+.news-symbol-row strong { display: block; overflow: hidden; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.news-symbol-row small { display: block; margin-top: 1px; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
 .news-symbol-row i { height: 3px; background: var(--grid); overflow: hidden; }
 .news-symbol-row b { display: block; height: 100%; background: var(--s1); transform-origin: left; }
 .news-symbol-row span { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.news-symbol-row .news-symbol-identity { color: var(--ink-2); text-align: left; }
 
 .news-source-health { display: grid; gap: 8px; margin-top: 13px; }
 .news-source-health-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 11px; }

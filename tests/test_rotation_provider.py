@@ -11,7 +11,11 @@ from quantmaster.rotation.store import RotationStore
 
 
 class FakeTushare:
+    def __init__(self):
+        self.calls = []
+
     def _call(self, endpoint, ttl, **params):
+        self.calls.append((endpoint, params))
         if endpoint == "index_classify":
             return pd.DataFrame([
                 {"index_code": "801080.SI", "industry_name": "电子", "level": "L1"},
@@ -36,16 +40,24 @@ class FakeTushare:
                 {"ts_code": "000001.OF", "name": "普通基金", "fund_type": "混合型"},
             ])
         if endpoint == "fund_share":
-            trade_date = params["trade_date"]
-            share = 100 if trade_date == "20260729" else 110
+            dates = ([params["trade_date"]] if "trade_date" in params else
+                     ["20230710", "20260729", "20260730"])
+            shares = {"20230710": 90, "20260729": 100, "20260730": 110}
             return pd.DataFrame([
-                {"ts_code": "510300.SH", "trade_date": trade_date, "fd_share": share},
+                {"ts_code": "510300.SH", "trade_date": value,
+                 "fd_share": shares[value]}
+                for value in dates
+                if params.get("start_date", value) <= value <= params.get("end_date", value)
             ])
         if endpoint == "fund_daily":
-            trade_date = params["trade_date"]
-            close = 4.0 if trade_date == "20260729" else 4.1
+            dates = ([params["trade_date"]] if "trade_date" in params else
+                     ["20230710", "20260729", "20260730"])
+            closes = {"20230710": 3.8, "20260729": 4.0, "20260730": 4.1}
             return pd.DataFrame([
-                {"ts_code": "510300.SH", "trade_date": trade_date, "close": close},
+                {"ts_code": "510300.SH", "trade_date": value,
+                 "close": closes[value]}
+                for value in dates
+                if params.get("start_date", value) <= value <= params.get("end_date", value)
             ])
         if endpoint == "fund_nav":
             nav_date = params["nav_date"]
@@ -157,10 +169,15 @@ def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monk
     observations = store.etf_observations()
 
     assert result["symbols"] == 1
-    assert len(observations) == 2
+    assert len(observations) == 3
+    assert observations.iloc[0]["trade_date"] == pd.Timestamp("2023-07-10")
     assert observations.iloc[-1]["shares"] == 1_100_000
     assert observations.iloc[-1]["nav"] == 4.15
     assert observations.iloc[-1]["close"] == 4.1
+    assert any(
+        endpoint == "fund_share" and params.get("start_date") == "20230710"
+        for endpoint, params in provider.source.calls
+    )
 
 
 def test_provider_marks_close_fallback_when_fund_nav_is_unavailable(tmp_path, monkeypatch):
