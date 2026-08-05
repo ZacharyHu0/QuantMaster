@@ -1,4 +1,4 @@
-"""Chromium 设置中心与 CSV 主流程；按约定仅在 Ubuntu CI 执行。"""
+"""Chromium 管理主流程；只在显式浏览器 lane 执行。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from quantmaster import __version__
 from quantmaster.release import RELEASE_DATE
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "linux" and os.environ.get("QM_RUN_UI_ANY_PLATFORM") != "1",
-    reason="浏览器验收默认仅在 Ubuntu CI 执行；本地可显式启用",
+    os.environ.get("QM_RUN_UI") != "1",
+    reason="浏览器验收使用独立 lane；设置 QM_RUN_UI=1 可显式启用",
 )
 playwright_sync = pytest.importorskip("playwright.sync_api")
 

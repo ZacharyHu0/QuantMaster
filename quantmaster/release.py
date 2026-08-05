@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.45"
+VERSION = "0.13.46"
 RELEASE_DATE = "2026-08-06"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "轻量测试入口与 Node 24 CI",
+                "items": (
+                    (
+                        "常规 Pytest 不再隐式启动 15 个 Chromium 管理流程；完整浏览器场景"
+                        "保留在显式 CI lane，本地需要时可用 QM_RUN_UI=1 单独启用。"
+                    ),
+                    (
+                        "Ruff 复杂度历史上限从失真的 299 收紧到当前 94，已经消除的"
+                        "复杂函数不再允许悄然回流。"
+                    ),
+                    (
+                        "CI 与发布工作流固定到 Node 24 版 checkout、artifact 上传和下载"
+                        "action 的不可变提交，消除 Node 20 弃用警告并保持构建可复现。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.45",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "启动直达与窄屏设置体验",
