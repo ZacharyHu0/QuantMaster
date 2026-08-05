@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -61,18 +60,6 @@ def test_short_numeric_code_requires_explicit_market_choice():
     selected = resolve_instruments(["700"], selections={"700": "00700.HK"})
     assert selected["status"] == "ok"
     assert selected["resolved"][0]["instrument"]["symbol"] == "00700.HK"
-
-
-def test_legacy_name_file_is_migrated_without_losing_alias(isolated_config):
-    root = isolated_config.data_root
-    (root / "stock_names.json").write_text(
-        json.dumps({"updated_at": 1, "names": {"600519.SH": "茅台旧称"}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    store = InstrumentStore(root / "fresh.sqlite")
-
-    assert store.get("600519.SH").name == "贵州茅台"
-    assert store.resolve("茅台旧称")["instrument"]["symbol"] == "600519.SH"
 
 
 def test_tushare_routes_etf_and_csi_index(monkeypatch):

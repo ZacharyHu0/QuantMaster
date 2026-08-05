@@ -1,4 +1,4 @@
-"""Unified v1 job API and destructive legacy-route migration."""
+"""Unified v1 job API contracts."""
 
 from fastapi.testclient import TestClient
 
@@ -50,12 +50,6 @@ def test_unified_jobs_lists_gets_cancels_and_retries_backtests(monkeypatch):
         f"/api/v1/jobs/backtests/{created['id']}/events",
     ).json()["items"]
     assert any(event["type"] == "retried_as" for event in events)
-
-
-def test_legacy_unversioned_api_routes_are_removed():
-    client = TestClient(app)
-    for path in ("/api/health", "/api/backtests", "/api/settings", "/api/news"):
-        assert client.get(path).status_code == 404, path
 
 
 def test_unified_jobs_exposes_repair_events_cancel_and_retry():

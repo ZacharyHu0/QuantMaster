@@ -22,7 +22,6 @@ from quantmaster.data.resilience import (
     EndpointFrameCache,
     TushareRateLimiter,
     akshare_call,
-    classify_provider_failure,
     provider_call,
 )
 from quantmaster.data.storage import BarStore
@@ -450,26 +449,6 @@ def test_fresh_cache_does_not_hide_missing_end(tmp_path, isolated_config, monkey
     assert str(result.index.max().date()) == "2024-06-28"
 
 
-def test_old_bar_metadata_is_migrated_without_network(tmp_path):
-    root = tmp_path / "bars"
-    root.mkdir()
-    dates = pd.bdate_range("2024-01-02", periods=5)
-    pd.DataFrame({"close": range(5)}, index=dates).to_parquet(root / "600000.SH.parquet")
-    with sqlite3.connect(root / "meta.sqlite") as conn:
-        conn.execute(
-            "CREATE TABLE bar_meta (symbol TEXT PRIMARY KEY,start TEXT,end TEXT,updated_at REAL)"
-        )
-        conn.execute(
-            "INSERT INTO bar_meta VALUES ('600000.SH','2024-01-02','2024-01-08',1234)"
-        )
-
-    meta = BarStore(root=root).metadata("600000.SH")
-    assert meta["coverage_start"] == "2024-01-02"
-    assert meta["coverage_end"] == "2024-01-08"
-    assert meta["checked_at"] == 1234
-    assert meta["last_status"] == "ready"
-
-
 def test_bar_store_recovers_file_after_metadata_commit_failure(tmp_path, monkeypatch):
     root = tmp_path / "bars"
     store = BarStore(root=root)
@@ -738,30 +717,6 @@ def test_permanent_provider_failure_stays_disabled_until_config_changes(isolated
     isolated_config.data.tushare_token = "new-token"
     assert provider_call(lane, "reconfigured", lambda: "ok") == "ok"
     assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "closed"
-
-
-def test_tushare_endpoint_permission_wording_migrates_to_disabled(isolated_config):
-    message = "抱歉，您没有接口(dc_index)访问权限，权限详情请查看文档。"
-    assert classify_provider_failure(RuntimeError(message)) == "permission"
-
-    lane = "tushare:dc-concept-observed-wording"
-    with PROVIDER_HEALTH._conn() as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO source_health"
-            "(lane,state,failures,open_count,open_until,last_failure,last_success,last_error,"
-            "suppressed,failure_class,config_revision,probe_started) "
-            "VALUES (?,'open',2,1,9999999999,0,0,?,0,'transient_upstream','',0)",
-            (lane, message),
-        )
-        connection.execute("PRAGMA user_version=2")
-
-    health = PROVIDER_HEALTH.status(lane)[lane]
-    assert health["state"] == "disabled"
-    assert health["failure_class"] == "permission"
-    assert health["open_until"] == 0
-    assert health["permanent"] is True
-    with pytest.raises(CircuitOpenError, match="已因权限"):
-        provider_call(lane, "post-migration", lambda: "must-not-run")
 
 
 def test_expired_half_open_probe_is_reclaimable(isolated_config):

@@ -276,6 +276,10 @@ python tools/release_sync.py push
 依赖与构建工具记录在跨平台 `uv.lock`，CI 和
 正式发布统一使用 `uv sync --locked`；可用 `QM_CONFIG_PATH` 为 doctor/CI 指定隔离配置。
 
+从 v0.13.40 起，兼容与回归测试以 v0.13.39 当前数据/API 契约为基线，只保证后续版本
+向前演进；更早版本的数据库布局、旧路由和一次性迁移不再新增或保留发布门禁测试。
+已有用户事实数据仍不得由当前及未来版本删除，修复一律通过新的 patch 前向发布。
+
 ## 设计原则
 
 1. **站在巨人肩膀上**：数据层直接复用 [AKShare](https://github.com/akfamily/akshare)

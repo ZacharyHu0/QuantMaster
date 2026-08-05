@@ -580,13 +580,6 @@ def test_feishu_appendix_delivery_resumes_after_restart_without_reupdating_main(
     assert len(restarted_service.feishu.sent) == len(cards) - 1
 
 
-def test_legacy_stock_analysis_stream_is_not_exposed():
-    client = TestClient(app)
-    client.headers["X-CSRF-Token"] = client.get("/api/v1/session").json()["csrf_token"]
-    for path in ("/api/stock-analysis/stream", "/api/v1/research/stock-analysis/stream"):
-        assert client.post(path, json={"query": "600519"}).status_code == 404
-
-
 class FakeDeepLoader:
     def fundamental(self, symbol):
         return (

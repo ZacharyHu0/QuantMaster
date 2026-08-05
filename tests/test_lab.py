@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
@@ -251,34 +250,6 @@ def test_factor_registry_enforces_unique_names_and_resolves_runtime_aliases(tmp_
     assert ai_first["spec_json"]["name"] == "AI 候选 1"
     assert ai_second_factor["name"] == "AI 候选 2"
     assert ai_second["spec_json"]["name"] == "AI 候选 2"
-
-
-def test_factor_registry_migrates_existing_duplicate_names_without_data_loss(tmp_path):
-    path = tmp_path / "legacy-lab.sqlite"
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE factor_definitions ("
-            "id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,"
-            "kind TEXT NOT NULL, category TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
-        conn.executemany(
-            "INSERT INTO factor_definitions VALUES (?,?,?,?,?,?)",
-            [
-                ("first", "gp_1111111111", "GP 候选 1", "expression", "AI", "2026-01-01"),
-                ("second", "gp_2222222222", "GP 候选 1", "expression", "AI", "2026-01-02"),
-            ],
-        )
-
-    LabStore(path)
-
-    with sqlite3.connect(path) as conn:
-        rows = conn.execute(
-            "SELECT id,name,name_key FROM factor_definitions ORDER BY created_at"
-        ).fetchall()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-    assert rows[0][1] == "GP 候选 1"
-    assert rows[1][1] == "GP 候选 2"
-    assert len({row[2] for row in rows}) == 2
 
 
 def test_llm_miner_retries_with_longer_read_windows():

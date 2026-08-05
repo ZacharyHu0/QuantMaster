@@ -17,7 +17,6 @@ from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
 from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
-from quantmaster.config import get_config
 from quantmaster.server.app import app
 
 
@@ -687,9 +686,6 @@ def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monke
     assert removed == {"status": "ok", "warnings": []}
     assert credentials.values == {}
     assert store.bot_account("feishu") is None
-    get_config().automation.feishu_app_id = "cli_legacy"
-    monkeypatch.setenv("QM_FEISHU_APP_SECRET", "legacy-secret")
-    assert FeishuBotClient(store, credentials).bootstrap_legacy() is None
 
 
 def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):

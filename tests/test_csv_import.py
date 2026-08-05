@@ -19,13 +19,13 @@ CSV_TEXT = (
 )
 
 
-@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "gb18030"])
-def test_encoding_auto_mapping_side_and_fee_sum(encoding):
-    parsed = parse_broker_csv(CSV_TEXT.encode(encoding))
-    assert parsed.encoding in {"utf-8", "utf-8-sig", "gb18030"}
-    assert [row.record["side"] for row in parsed.rows] == ["buy", "sell"]
-    assert parsed.rows[1].record["fee"] == pytest.approx(13.5)
-    assert parsed.rows[0].record["symbol"] == "600519.SH"
+def test_encoding_auto_mapping_side_and_fee_sum():
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        parsed = parse_broker_csv(CSV_TEXT.encode(encoding))
+        assert parsed.encoding in {"utf-8", "utf-8-sig", "gb18030"}
+        assert [row.record["side"] for row in parsed.rows] == ["buy", "sell"]
+        assert parsed.rows[1].record["fee"] == pytest.approx(13.5)
+        assert parsed.rows[0].record["symbol"] == "600519.SH"
 
 
 def test_bad_rows_and_duplicates_are_reported(tmp_path):
@@ -40,13 +40,13 @@ def test_bad_rows_and_duplicates_are_reported(tmp_path):
     assert ledger.has_import_hash(first.file_hash)
 
 
-@pytest.mark.parametrize("value", ["NaN", "Inf", "-Inf"])
-def test_nonfinite_csv_numbers_are_rejected(value):
-    parsed = parse_broker_csv(
-        f"date,symbol,side,price,shares\n2024-01-02,600519,buy,{value},100\n".encode()
-    )
-    assert parsed.rows[0].record is None
-    assert "必须为正数" in parsed.rows[0].errors[0]
+def test_nonfinite_csv_numbers_are_rejected():
+    for value in ("NaN", "Inf", "-Inf"):
+        parsed = parse_broker_csv(
+            f"date,symbol,side,price,shares\n2024-01-02,600519,buy,{value},100\n".encode()
+        )
+        assert parsed.rows[0].record is None
+        assert "必须为正数" in parsed.rows[0].errors[0]
 
 
 def test_import_records_rolls_back_whole_transaction(tmp_path):

@@ -1,7 +1,6 @@
 """实盘账本与收益统计测试。"""
 
 import math
-import sqlite3
 
 import pytest
 
@@ -38,18 +37,18 @@ class TestFIFO:
         with pytest.raises(ValueError):
             ledger.add_trade(_trade("2024-01-02", "600519.SH", "short", 10.0, 100))
 
-    @pytest.mark.parametrize("field,value", [
-        ("price", math.nan), ("price", math.inf),
-        ("shares", math.nan), ("shares", math.inf),
-        ("fee", math.nan), ("fee", math.inf),
-    ])
-    def test_rejects_nonfinite_trade_numbers(self, tmp_path, field, value):
-        ledger = Ledger(path=tmp_path / "l.sqlite")
-        trade = _trade("2024-01-02", "600519.SH", "buy", 10.0, 100)
-        setattr(trade, field, value)
-        with pytest.raises(ValueError, match="有限数字"):
-            ledger.add_trade(trade)
-        assert ledger.trades().empty
+    def test_rejects_nonfinite_trade_numbers(self, tmp_path):
+        for index, (field, value) in enumerate((
+            ("price", math.nan), ("price", math.inf),
+            ("shares", math.nan), ("shares", math.inf),
+            ("fee", math.nan), ("fee", math.inf),
+        )):
+            ledger = Ledger(path=tmp_path / f"invalid-{index}.sqlite")
+            trade = _trade("2024-01-02", "600519.SH", "buy", 10.0, 100)
+            setattr(trade, field, value)
+            with pytest.raises(ValueError, match="有限数字"):
+                ledger.add_trade(trade)
+            assert ledger.trades().empty
 
     def test_sell_cannot_exceed_chronological_inventory(self, tmp_path):
         ledger = Ledger(path=tmp_path / "l.sqlite")
@@ -67,40 +66,12 @@ class TestFIFO:
         assert ledger.add_trade(sell, idempotency_key="sell-1") is True
         assert ledger.add_trade(sell, idempotency_key="sell-1") is False
 
-    def test_legacy_unmatched_sell_is_unknown_cost_anomaly_not_zero_cost_profit(self, tmp_path):
-        path = tmp_path / "legacy.sqlite"
-        with sqlite3.connect(path) as connection:
-            connection.execute(
-                "CREATE TABLE trades ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT,date TEXT,symbol TEXT,side TEXT,"
-                "price REAL,shares REAL,fee REAL,note TEXT)"
-            )
-            connection.execute(
-                "INSERT INTO trades(date,symbol,side,price,shares,fee,note) "
-                "VALUES ('2020-01-02','600519.SH','sell',1200,100,5,'legacy import')"
-            )
-
-        ledger = Ledger(path=path)
-        position = ledger.positions()[0]
-        anomaly = ledger.anomalies()[0]
-
-        assert position.shares == 0
-        assert position.realized_pnl == 0
-        assert not position.cost_basis_complete
-        assert position.unknown_cost_shares == 100
-        assert anomaly["kind"] == "unknown_cost_sell"
-        assert anomaly["details"]["accounting_effect"] == "excluded_from_realized_pnl"
-
-        ledger.add_trade(_trade("2024-01-02", "600519.SH", "buy", 10, 100))
-        with pytest.raises(ValueError, match="卖出超过可用持仓"):
-            ledger.add_trade(_trade("2024-01-03", "600519.SH", "sell", 12, 101))
-
-    @pytest.mark.parametrize("amount", [math.nan, math.inf, -math.inf])
-    def test_rejects_nonfinite_cashflows(self, tmp_path, amount):
-        ledger = Ledger(path=tmp_path / "l.sqlite")
-        with pytest.raises(ValueError, match="有限数字"):
-            ledger.add_cashflow("2024-01-02", amount)
-        assert ledger.cashflows().empty
+    def test_rejects_nonfinite_cashflows(self, tmp_path):
+        for index, amount in enumerate((math.nan, math.inf, -math.inf)):
+            ledger = Ledger(path=tmp_path / f"invalid-cash-{index}.sqlite")
+            with pytest.raises(ValueError, match="有限数字"):
+                ledger.add_cashflow("2024-01-02", amount)
+            assert ledger.cashflows().empty
 
 
 class TestCSVImport:

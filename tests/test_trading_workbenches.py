@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -21,15 +19,13 @@ from quantmaster.backtest.paper_accounts import (
 from quantmaster.backtest.spec import (
     BacktestSpec,
     DecisionStrategySpec,
-    FactorStrategySpec,
     PaperAccountSpec,
     build_strategy,
     pin_decision_strategy,
     split_factor_references,
 )
 from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
-from quantmaster.portfolio import Ledger, TradeRecord
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.portfolio import TradeRecord
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
 from quantmaster.trading_sessions import SessionExpectation
@@ -490,59 +486,6 @@ def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):
     assert restored["runtime_warning"] == ""
     assert restored["strategy_warning"] == "策略来源待批准"
     assert restored["warning"] == "策略来源待批准"
-
-
-def test_v01336_paper_schema_migrates_without_losing_account(tmp_path):
-    path = tmp_path / "paper.sqlite"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE paper_accounts ("
-            "id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,status TEXT NOT NULL,"
-            "mode TEXT NOT NULL,initial_capital REAL NOT NULL,strategy_json TEXT NOT NULL,"
-            "strategy_hash TEXT NOT NULL,universe TEXT NOT NULL,universe_json TEXT NOT NULL,"
-            "source_backtest_id TEXT NOT NULL DEFAULT '',warning TEXT NOT NULL DEFAULT '',"
-            "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO paper_accounts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                "a" * 32, "旧账户", "active", "auto", 100000,
-                json.dumps(FactorStrategySpec().model_dump(mode="json")), "hash", "demo",
-                json.dumps({"name": "demo", "symbols": ["600000.SH"]}), "", "旧策略告警",
-                "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00",
-            ),
-        )
-    store = PaperStore(path, tmp_path / "accounts")
-    account = store.account("a" * 32)
-    assert account["name"] == "旧账户"
-    assert account["strategy_warning"] == "旧策略告警"
-    assert account["runtime_warning"] == ""
-    assert account["warning"] == "旧策略告警"
-
-
-def test_legacy_paper_ledger_migration_is_idempotent_and_preserves_source(isolated_config):
-    root = isolated_config.data_root
-    source = root / "ledger_paper.sqlite"
-    legacy = Ledger(path=source)
-    wal_guard = connect_sqlite(source)
-    try:
-        wal_guard.execute("PRAGMA wal_autocheckpoint=0")
-        legacy.add_cashflow("2024-01-01", 50_000, "deposit")
-        legacy.add_trade(TradeRecord(
-            date="2024-01-02", symbol="600000.SH", side="buy", price=10, shares=100,
-        ))
-        assert source.with_name(f"{source.name}-wal").is_file()
-        before = hashlib.sha256(source.read_bytes()).hexdigest()
-        store = PaperStore()
-        first = store.migrate_legacy()
-        second = store.migrate_legacy()
-
-        assert first["id"] == second["id"]
-        assert first["status"] == "paused"
-        assert hashlib.sha256(source.read_bytes()).hexdigest() == before
-        assert len(store.ledger(first["id"]).trades()) == 1
-    finally:
-        wal_guard.close()
 
 
 def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, panel):

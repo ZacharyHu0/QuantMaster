@@ -400,25 +400,6 @@ def test_rotation_overview_reports_dimensions_without_fabricating_zero_coverage(
     assert "3/4 个维度可用" in quality["issues"][0]
 
 
-def test_rotation_service_normalizes_legacy_unknown_coverage(tmp_path):
-    store = RotationStore(tmp_path / "rotation")
-    store.save_snapshots({
-        "themes": {
-            "meta": {
-                "snapshot_id": "legacy", "as_of": "", "generated_at": "",
-                "quality": {
-                    "status": "cold", "eligible_count": 0, "expected_count": 0,
-                    "coverage": 0.0, "issues": ["旧快照"],
-                },
-            },
-            "data": {"items": []},
-        },
-    })
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
-
-    assert service.snapshot("themes")["meta"]["quality"]["coverage"] is None
-
-
 def test_rotation_snapshot_hash_failure_is_exposed_as_corrupt(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     store.save_snapshots({
@@ -480,35 +461,3 @@ def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkey
     } in specs
     bootstrap.stop()
 
-
-def test_rotation_worker_bootstrap_upgrades_legacy_algorithm_locally(
-    tmp_path, monkeypatch,
-):
-    store = RotationStore(tmp_path / "rotation")
-    store.save_snapshots({
-        "temperature": {
-            "meta": {
-                "snapshot_id": "legacy-v1",
-                "as_of": "2026-07-30",
-                "generated_at": "2026-07-30T10:00:00+00:00",
-                "algorithm_version": "QM_ROTATION_V1",
-                "quality": {"status": "complete", "issues": []},
-            },
-            "data": {"current": {"temperature": 42.0}},
-        },
-    })
-    store.replace_themes([{
-        "code": "seed", "name": "本地题材", "members": ["600000.SH"],
-    }])
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
-    worker = RotationWorker(service)
-    monkeypatch.setattr(worker, "_run", lambda: worker._stop.wait())
-
-    worker.start(bootstrap_local=True)
-
-    specs = [item["spec"] for item in service.jobs.list()]
-    assert {
-        "scope": "all", "mode": "incremental", "source": "local",
-    } in specs
-    assert service.snapshot("temperature")["meta"]["quality"]["status"] == "stale"
-    worker.stop()

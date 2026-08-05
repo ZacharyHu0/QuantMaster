@@ -40,16 +40,10 @@ def _update(manager, **extra):
     return SettingsUpdate.model_validate({**base, **extra})
 
 
-def test_old_and_gui_managed_environment_priority(tmp_path, monkeypatch):
+def test_gui_managed_config_has_priority_over_environment(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
-    path.write_text(
-        "llm:\n  model: yaml-model\n  reasoning_effort: high\n", encoding="utf-8")
     monkeypatch.setenv("QM_LLM_MODEL", "env-model")
     monkeypatch.setenv("QM_LLM_REASONING_EFFORT", "low")
-    legacy = load_config(path)
-    assert legacy.llm.model == "env-model"
-    assert legacy.llm.reasoning_effort == "low"
-
     path.write_text(
         "managed_by_gui: true\nllm:\n  model: yaml-model\n  reasoning_effort: high\n",
         encoding="utf-8",
@@ -161,12 +155,12 @@ def test_automation_settings_are_normalized_and_validated(tmp_path):
     set_config(None)
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.8", "quant.local"])
-def test_server_settings_reject_non_loopback_hosts(host):
-    raw = document_from_config(load_config()).model_dump()
-    raw["server"]["host"] = host
-    with pytest.raises(ValueError, match="回环地址"):
-        SettingsUpdate.model_validate(raw)
+def test_server_settings_reject_non_loopback_hosts():
+    for host in ("0.0.0.0", "::", "192.168.1.8", "quant.local"):
+        raw = document_from_config(load_config()).model_dump()
+        raw["server"]["host"] = host
+        with pytest.raises(ValueError, match="回环地址"):
+            SettingsUpdate.model_validate(raw)
 
 
 def test_snapshot_diff_rollback_preserves_current_secret(tmp_path):

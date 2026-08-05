@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -9,8 +13,65 @@ import pytest
 from quantmaster.config import Config, set_config
 
 
+def _finish_security_master_seed(path: Path) -> Path:
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.execute("PRAGMA journal_mode=DELETE")
+    from quantmaster.runtime.sqlite import reset_sqlite_runtime_for_tests
+
+    reset_sqlite_runtime_for_tests()
+    return path
+
+
+@pytest.fixture(scope="session")
+def _minimal_security_master(tmp_path_factory) -> Path:
+    """Build the small current-contract catalog once instead of 600 times."""
+    from quantmaster.data import instruments
+
+    path = tmp_path_factory.mktemp("catalog-seed") / "security_master.sqlite"
+    original = instruments.InstrumentStore._import_bundled_snapshot
+
+    def import_minimal(store):
+        records = instruments._seed_records()
+        records.extend([
+            {
+                "symbol": symbol,
+                "code": symbol.split(".", 1)[0],
+                "name": name,
+                "market": "CN",
+                "exchange": symbol.rsplit(".", 1)[1],
+                "asset_type": "index",
+                "currency": "CNY",
+            }
+            for symbol, name in (
+                ("000300.SH", "沪深300"),
+                ("000905.SH", "中证500"),
+                ("000852.SH", "中证1000"),
+                ("399006.SZ", "创业板指"),
+            )
+        ])
+        store.upsert(records, source="test-seed", source_priority=10)
+
+    instruments.InstrumentStore._import_bundled_snapshot = import_minimal
+    try:
+        instruments.InstrumentStore(path)
+    finally:
+        instruments.InstrumentStore._import_bundled_snapshot = original
+    return _finish_security_master_seed(path)
+
+
+@pytest.fixture(scope="session")
+def _full_security_master(tmp_path_factory) -> Path:
+    """Import the packaged catalog once for the tests that exercise the full snapshot."""
+    from quantmaster.data.instruments import InstrumentStore
+
+    path = tmp_path_factory.mktemp("full-catalog-seed") / "security_master.sqlite"
+    InstrumentStore(path)
+    return _finish_security_master_seed(path)
+
+
 @pytest.fixture(autouse=True)
-def isolated_config(tmp_path):
+def isolated_config(tmp_path, request, _minimal_security_master):
     """每个测试用独立数据目录，避免污染真实数据。"""
     from quantmaster.data.repair import reset_data_repair_manager_for_tests
     from quantmaster.rotation.service import reset_rotation_runtime_for_tests
@@ -21,6 +82,13 @@ def isolated_config(tmp_path):
     reset_sqlite_runtime_for_tests()
     cfg = Config()
     cfg.data.root = str(tmp_path / "data")
+    cfg.data_root.mkdir(parents=True, exist_ok=True)
+    seed = (
+        request.getfixturevalue("_full_security_master")
+        if request.node.path.name == "test_instruments.py"
+        else _minimal_security_master
+    )
+    shutil.copy2(seed, cfg.data_root / "security_master.sqlite")
     set_config(cfg)
     yield cfg
     reset_data_repair_manager_for_tests()
