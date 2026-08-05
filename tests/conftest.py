@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -11,6 +12,19 @@ import pandas as pd
 import pytest
 
 from quantmaster.config import Config, set_config
+
+
+def _referenced_test_symbols() -> set[str]:
+    pattern = re.compile(
+        r"(?<![A-Z0-9])\^?[A-Z0-9][A-Z0-9.^-]*\."
+        r"(?:SH|SZ|BJ|CSI|HK|US|JP|KR|SHF|DCE|CZCE|CFFEX|INE|GFEX)\b"
+    )
+    root = Path(__file__).parent
+    return {
+        symbol
+        for test_file in root.glob("test_*.py")
+        for symbol in pattern.findall(test_file.read_text(encoding="utf-8"))
+    }
 
 
 def _finish_security_master_seed(path: Path) -> Path:
@@ -50,6 +64,28 @@ def _minimal_security_master(tmp_path_factory) -> Path:
                 ("399006.SZ", "创业板指"),
             )
         ])
+        known = {str(record["symbol"]) for record in records}
+        current_names = {"000001.SZ": "平安银行", "600000.SH": "浦发银行"}
+        future_suffixes = {"SHF", "DCE", "CZCE", "CFFEX", "INE", "GFEX"}
+        for symbol in sorted(_referenced_test_symbols() - known):
+            code, suffix = symbol.rsplit(".", 1)
+            records.append({
+                "symbol": symbol,
+                "provider_symbol": symbol,
+                "code": code,
+                "name": current_names.get(symbol, ""),
+                "market": (
+                    "CN" if suffix in instruments.DOMESTIC_SUFFIXES
+                    else "FUT" if suffix in future_suffixes
+                    else suffix
+                ),
+                "exchange": suffix,
+                "asset_type": (
+                    "index" if suffix == "CSI" or symbol.startswith("^")
+                    else "future" if suffix in future_suffixes
+                    else "stock"
+                ),
+            })
         store.upsert(records, source="test-seed", source_priority=10)
 
     instruments.InstrumentStore._import_bundled_snapshot = import_minimal
