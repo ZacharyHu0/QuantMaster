@@ -43,6 +43,7 @@ class DataConfig:
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
     akshare_retries: int = 3              # 单次 AKShare 请求总尝试次数
     akshare_retry_backoff: float = 0.8    # 指数退避初始秒数（0.8/1.6/...）
+    provider_timeout: float = 45.0        # 单次上游任务含排队的硬截止秒数
     tushare_calls_per_minute: int = 120   # 2000 积分档保守全局限速
     tushare_cache_days: int = 1           # Tushare 当期接口响应缓存天数
     fundamental_cache_days: int = 7       # 季度财务数据本地缓存天数
@@ -173,6 +174,8 @@ def _apply_env(cfg: Config) -> None:
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(
         env.get("QM_AKSHARE_RETRY_BACKOFF", cfg.data.akshare_retry_backoff))
+    cfg.data.provider_timeout = float(
+        env.get("QM_DATA_PROVIDER_TIMEOUT", cfg.data.provider_timeout))
     cfg.data.tushare_calls_per_minute = int(
         env.get("QM_TUSHARE_CALLS_PER_MINUTE", cfg.data.tushare_calls_per_minute))
     cfg.data.tushare_cache_days = int(

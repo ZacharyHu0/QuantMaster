@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.43"
+VERSION = "0.13.44"
 RELEASE_DATE = "2026-08-06"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "数据接口硬超时与测试客户端前向兼容",
+                "items": (
+                    (
+                        "数据提供商任务从首次入队起共享可配置硬截止；SDK 卡住时调用方会"
+                        "有限等待、立即打开熔断并切换备用源或缓存，不再无限阻塞界面任务。"
+                    ),
+                    (
+                        "已经超时的上游线程即使迟到返回，也不能把熔断状态改写为成功；"
+                        "诊断新增各通道 active、waiting、expired 和累计超时统计。"
+                    ),
+                    (
+                        "设置中心、YAML 和 QM_DATA_PROVIDER_TIMEOUT 可管理 1–300 秒截止；"
+                        "开发测试锁定 httpx2，消除 Starlette TestClient 的旧客户端弃用告警。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.43",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "模拟账户策略管理",

@@ -23,6 +23,10 @@ def collect_operational_metrics() -> dict[str, Any]:
     }
     result["llm"] = llm_gate_status()
 
+    from quantmaster.data.resilience import PROVIDER_SCHEDULER
+
+    result["data_providers"] = PROVIDER_SCHEDULER.status()
+
     from quantmaster.backtest.paper_accounts import PaperStore
 
     paper = PaperStore()

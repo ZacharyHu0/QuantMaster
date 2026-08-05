@@ -77,6 +77,7 @@ class DataSettings(StrictModel):
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
     akshare_retry_backoff: float = Field(default=0.8, ge=0.0, le=60.0)
+    provider_timeout: float = Field(default=45.0, ge=1.0, le=300.0)
     tushare_calls_per_minute: int = Field(default=120, ge=1, le=10_000)
     tushare_cache_days: int = Field(default=1, ge=0, le=3650)
     fundamental_cache_days: int = Field(default=7, ge=0, le=3650)

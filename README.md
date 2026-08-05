@@ -127,6 +127,7 @@ llm:
 data:
   tushare_token: ""            # 可选
   akshare_retries: 3           # 失败后指数退避重试，再降级 Tushare
+  provider_timeout: 45         # 单次数据源任务含排队的硬截止秒数
   tushare_calls_per_minute: 120 # 2000 积分档保守限速
   tushare_cache_days: 1        # 当期响应缓存；已结束历史区间长期缓存
 ```

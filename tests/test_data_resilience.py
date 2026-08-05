@@ -18,8 +18,10 @@ from quantmaster.data import registry
 from quantmaster.data.base import DataSource, Market
 from quantmaster.data.resilience import (
     PROVIDER_HEALTH,
+    PROVIDER_SCHEDULER,
     CircuitOpenError,
     EndpointFrameCache,
+    ProviderTimeoutError,
     TushareRateLimiter,
     akshare_call,
     provider_call,
@@ -668,6 +670,43 @@ def test_different_provider_lanes_execute_in_parallel():
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(call, ["akshare:eastmoney", "yahoo"]))
     assert len(results) == 2
+
+
+def test_provider_timeout_opens_circuit_and_fences_late_success(isolated_config):
+    isolated_config.data.provider_timeout = 0.2
+    lane = "akshare:timeout-fence-test"
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow_provider():
+        started.set()
+        try:
+            release.wait(2)
+            return "late-success"
+        finally:
+            finished.set()
+
+    began = time.monotonic()
+    with pytest.raises(ProviderTimeoutError, match=r"0\.2 秒"):
+        provider_call(lane, "slow", slow_provider)
+    assert started.is_set()
+    assert time.monotonic() - began < 1
+    assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "open"
+    scheduler = PROVIDER_SCHEDULER.status()
+    assert scheduler["lanes"][lane]["timeout_count"] == 1
+    assert scheduler["lanes"][lane]["expired"] == 1
+
+    with pytest.raises(CircuitOpenError):
+        provider_call(lane, "must-fail-fast", lambda: pytest.fail("熔断期间不得再次触网"))
+
+    release.set()
+    assert finished.wait(1)
+    for _ in range(20):
+        if PROVIDER_SCHEDULER.status()["lanes"][lane]["active"] == 0:
+            break
+        time.sleep(0.01)
+    assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "open"
 
 
 def test_akshare_proxy_failure_opens_circuit_before_queued_calls(isolated_config):

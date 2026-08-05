@@ -22,6 +22,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -45,6 +46,16 @@ class CircuitOpenError(RuntimeError):
 
 class EmptyProviderResponse(RuntimeError):
     """提供商完成请求但没有返回任何可用数据。"""
+
+
+class ProviderTimeoutError(TimeoutError):
+    """One scheduled upstream call exceeded its shared hard deadline."""
+
+    def __init__(self, lane: str, timeout: float, *, first: bool):
+        self.lane = lane
+        self.timeout = timeout
+        self.first = first
+        super().__init__(f"{lane} 在 {timeout:g} 秒内未返回，已暂停该数据源并尝试备用数据")
 
 
 _PERMANENT_FAILURES = frozenset({"permission", "authentication", "capability_missing"})
@@ -138,6 +149,18 @@ class _ScheduledCall:
     key: str = field(compare=False)
     func: Callable[[], Any] = field(compare=False)
     future: Future = field(compare=False)
+    deadline: float = field(compare=False)
+    timeout_seconds: float = field(compare=False)
+    expired: threading.Event = field(compare=False, default_factory=threading.Event)
+    timeout_lock: threading.Lock = field(compare=False, default_factory=threading.Lock)
+    timeout_reported: bool = field(compare=False, default=False)
+
+    def timeout_error(self, lane: str) -> ProviderTimeoutError:
+        with self.timeout_lock:
+            first = not self.timeout_reported
+            self.timeout_reported = True
+            self.expired.set()
+        return ProviderTimeoutError(lane, self.timeout_seconds, first=first)
 
 
 class ProviderScheduler:
@@ -162,7 +185,8 @@ class ProviderScheduler:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._queues: dict[str, queue.PriorityQueue] = {}
-        self._inflight: dict[tuple[str, str], Future] = {}
+        self._inflight: dict[tuple[str, str], _ScheduledCall] = {}
+        self._timeout_counts: dict[str, int] = {}
         self._sequence = count()
 
     def _ensure_lane(self, lane: str) -> queue.PriorityQueue:
@@ -188,26 +212,78 @@ class ProviderScheduler:
             try:
                 if not item.future.set_running_or_notify_cancel():
                     continue
+                if item.expired.is_set() or time.monotonic() >= item.deadline:
+                    item.future.set_exception(self._expire(lane, item))
+                    continue
                 try:
-                    item.future.set_result(item.func())
+                    result = item.func()
+                    if item.expired.is_set() or time.monotonic() >= item.deadline:
+                        item.future.set_exception(self._expire(lane, item))
+                    else:
+                        item.future.set_result(result)
                 except BaseException as exc:
                     item.future.set_exception(exc)
             finally:
                 with self._lock:
-                    if self._inflight.get((lane, item.key)) is item.future:
+                    if self._inflight.get((lane, item.key)) is item:
                         self._inflight.pop((lane, item.key), None)
                 work.task_done()
 
-    def call(self, lane: str, key: str, func: Callable[[], T]) -> T:
+    def _expire(self, lane: str, item: _ScheduledCall) -> ProviderTimeoutError:
+        error = item.timeout_error(lane)
+        if error.first:
+            with self._lock:
+                self._timeout_counts[lane] = self._timeout_counts.get(lane, 0) + 1
+        return error
+
+    def call(
+        self, lane: str, key: str, func: Callable[[], T], *, timeout: float | None = None,
+    ) -> T:
+        timeout_seconds = min(300.0, max(0.01, float(
+            get_config().data.provider_timeout if timeout is None else timeout
+        )))
         work = self._ensure_lane(lane)
         with self._lock:
-            future = self._inflight.get((lane, key))
-            if future is None:
-                future = Future()
-                self._inflight[(lane, key)] = future
-                work.put(_ScheduledCall(
-                    _REQUEST_PRIORITY.get(), next(self._sequence), key, func, future))
-        return future.result()
+            item = self._inflight.get((lane, key))
+            if item is None:
+                item = _ScheduledCall(
+                    _REQUEST_PRIORITY.get(), next(self._sequence), key, func, Future(),
+                    time.monotonic() + timeout_seconds, timeout_seconds,
+                )
+                self._inflight[(lane, key)] = item
+                work.put(item)
+        if item.expired.is_set():
+            raise self._expire(lane, item)
+        remaining = item.deadline - time.monotonic()
+        if remaining <= 0:
+            raise self._expire(lane, item)
+        try:
+            return item.future.result(timeout=remaining)
+        except ProviderTimeoutError:
+            raise
+        except FutureTimeoutError as exc:
+            if item.future.done():
+                raise
+            raise self._expire(lane, item) from exc
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            lanes = sorted(set(self._queues) | set(self._timeout_counts))
+            inflight = list(self._inflight.items())
+            lane_status = {}
+            for lane in lanes:
+                items = [item for (item_lane, _key), item in inflight if item_lane == lane]
+                lane_status[lane] = {
+                    "active": sum(item.future.running() and not item.future.done() for item in items),
+                    "waiting": sum(not item.future.running() and not item.future.done() for item in items),
+                    "expired": sum(item.expired.is_set() and not item.future.done() for item in items),
+                    "timeout_count": self._timeout_counts.get(lane, 0),
+                }
+        return {
+            "timeout_seconds": float(get_config().data.provider_timeout),
+            "timeout_count": sum(item["timeout_count"] for item in lane_status.values()),
+            "lanes": lane_status,
+        }
 
 
 PROVIDER_SCHEDULER = ProviderScheduler()
@@ -333,6 +409,32 @@ class ProviderHealthStore:
                 (now + 60, now, lane),
             )
 
+    def check_available(self, lane: str, *, probe: bool = False) -> None:
+        """Fail fast for a known open circuit without reserving a half-open probe."""
+        if probe:
+            return
+        now = time.time()
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT state,open_until,config_revision FROM source_health WHERE lane=?",
+                (lane,),
+            ).fetchone()
+            if row is None or row[0] == "closed":
+                return
+            if row[0] == "disabled" and _provider_revision(lane) != str(row[2] or ""):
+                return
+            if row[0] == "disabled" or float(row[1]) > now:
+                conn.execute(
+                    "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,)
+                )
+                conn.commit()
+                if row[0] == "disabled":
+                    raise CircuitOpenError(
+                        f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测"
+                    )
+                remaining = max(1, round(float(row[1]) - now))
+                raise CircuitOpenError(f"{lane} 暂停请求，约 {remaining} 秒后探测")
+
     def success(self, lane: str) -> None:
         now = time.time()
         with self._lock, self._conn() as conn:
@@ -452,6 +554,17 @@ def _permanent_failure(exc: BaseException) -> bool:
     return classify_provider_failure(exc) in _PERMANENT_FAILURES
 
 
+def _run_scheduled_provider(lane: str, key: str, func: Callable[[], T]) -> T:
+    try:
+        result = PROVIDER_SCHEDULER.call(lane, key, func)
+    except ProviderTimeoutError as exc:
+        if exc.first:
+            PROVIDER_HEALTH.failure(lane, exc, immediate=True)
+        raise
+    PROVIDER_HEALTH.success(lane)
+    return result
+
+
 def provider_call(
     lane: str,
     key: str,
@@ -461,6 +574,8 @@ def provider_call(
     empty_opens: bool = False,
 ) -> T:
     """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
+    PROVIDER_HEALTH.check_available(lane, probe=probe)
+
     def scheduled() -> T:
         # 在真正轮到上游执行时再次看熔断状态；否则高并发会在首个失败
         # 打开熔断器前把大量请求预先排进队列。
@@ -469,7 +584,7 @@ def provider_call(
             result = func()
             if empty_opens and (result is None or getattr(result, "empty", False)):
                 raise EmptyProviderResponse(f"{lane} 返回空数据")
-        except CircuitOpenError:
+        except (CircuitOpenError, ProviderTimeoutError):
             raise
         except BaseException as exc:
             # 必须在上游 worker 取下一项前写入熔断状态，才能真正阻止
@@ -482,10 +597,9 @@ def provider_call(
                 ),
             )
             raise
-        PROVIDER_HEALTH.success(lane)
         return result
 
-    return PROVIDER_SCHEDULER.call(lane, key, scheduled)
+    return _run_scheduled_provider(lane, key, scheduled)
 
 
 def akshare_call(
@@ -508,11 +622,13 @@ def akshare_call(
     ).hexdigest()[:16]
     for attempt in range(1, attempts + 1):
         try:
+            PROVIDER_HEALTH.check_available(lane, probe=probe)
+
             def scheduled(attempt_number: int = attempt) -> T:
                 PROVIDER_HEALTH.before_call(lane, probe=probe)
                 try:
                     result = func(*args, **kwargs)
-                except CircuitOpenError:
+                except (CircuitOpenError, ProviderTimeoutError):
                     raise
                 except Exception as exc:
                     immediate = (
@@ -522,11 +638,9 @@ def akshare_call(
                     if immediate or attempt_number >= attempts:
                         PROVIDER_HEALTH.failure(lane, exc, immediate=immediate)
                     raise
-                PROVIDER_HEALTH.success(lane)
                 return result
 
-            result = PROVIDER_SCHEDULER.call(lane, key, scheduled)
-            return result
+            return _run_scheduled_provider(lane, key, scheduled)
         except CircuitOpenError:
             raise
         except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:

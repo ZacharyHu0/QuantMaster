@@ -17,6 +17,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     operations = report["metrics"]["operations"]
     assert operations["news_analysis"]["claims"]["active"] == 0
     assert operations["llm"]["waiting"] == 0
+    assert operations["data_providers"]["timeout_seconds"] == 45
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
 
