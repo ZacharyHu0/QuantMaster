@@ -3,7 +3,7 @@
 
   const DURATION = 8.6;
   const SESSION_KEY = 'quantmaster.brand-intro.v1';
-  const config = Object.assign({mode: 'app', autoplay: true, loop: false}, window.QM_BRAND_INTRO_CONFIG || {});
+  const config = Object.assign({mode: 'app', autoplay: false, loop: false}, window.QM_BRAND_INTRO_CONFIG || {});
   const query = new URLSearchParams(window.location.search);
   const recording = window.__recording === true;
   const reducedMotion = !recording && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -37,7 +37,7 @@
   const forced = recording || config.mode === 'preview' || query.get('intro') === '1';
   const explicitlySkipped = query.get('intro') === '0';
   const seen = hasSessionStorage && sessionStorage.getItem(SESSION_KEY) === 'seen';
-  const shouldAutoplay = config.autoplay !== false && !explicitlySkipped && (forced || !seen);
+  const shouldAutoplay = !explicitlySkipped && (forced || (config.autoplay === true && !seen));
 
   const overlay = document.createElement('div');
   overlay.id = 'qm-brand-intro';
@@ -407,5 +407,7 @@
     overlay.hidden = false;
     render(0);
     Promise.all([domReady, fontsReady]).then(() => play({markSeen: true}));
+  } else {
+    window.__ready = true;
   }
 })();

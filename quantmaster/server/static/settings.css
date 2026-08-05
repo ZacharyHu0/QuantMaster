@@ -254,20 +254,32 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
   .settings-heading { align-items: flex-start; flex-direction: column; }
   .settings-shell { grid-template-columns: 1fr; gap: 0; }
   .settings-nav { position: sticky; top: 58px; z-index: 6; flex-direction: row; overflow-x: auto; padding: 8px 0; background: var(--page); }
-  .settings-nav button { grid-template-columns: auto; width: auto; flex: 0 0 auto; padding: 8px 12px; border-bottom: 0; border-radius: 6px; }
+  .settings-nav button { grid-template-columns: auto; width: auto; min-height: 44px; flex: 0 0 auto; padding: 10px 12px; border-bottom: 0; border-radius: 6px; }
   .settings-nav button span { display: none; }
   .settings-content { padding-top: 14px; }
   .field-grid, .channel-grid { grid-template-columns: 1fr; }
   .check-stack { grid-template-columns: 1fr; }
   .migration-controls, .maintenance-controls { grid-template-columns: 1fr; }
   .maintenance-confirm { align-items: stretch; flex-direction: column; }
-  .save-dock { flex-wrap: wrap; bottom: 60px; }
+  .save-dock { position: static; flex-wrap: wrap; bottom: auto; }
   #settings-save-state { flex-basis: 100%; }
   .autosave-note { display: none; }
+  .settings-content button,
+  .settings-content input:not([type="checkbox"]):not([type="radio"]),
+  .settings-content select { min-height: 44px; }
+  .choice-row label { min-height: 44px; }
+  .plaintext-confirm { display: flex; align-items: center; min-height: 44px; }
   .import-heading { flex-direction: column; }
   .step-rail { width: 100%; overflow-x: auto; }
   .import-file-row { grid-template-columns: 1fr; }
   .file-drop { align-items: flex-start; flex-direction: column; }
+}
+
+@media (max-width: 680px) {
+  .group-heading { flex-direction: column; gap: 12px; }
+  .group-heading > .button-pair { width: 100%; flex-wrap: wrap; }
+  .group-heading > .button-pair > * { flex: 1 1 140px; }
+  .group-heading > button { width: 100%; }
 }
 
 @media (max-width: 520px) {

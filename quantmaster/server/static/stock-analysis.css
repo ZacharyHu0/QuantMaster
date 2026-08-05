@@ -535,7 +535,7 @@
 }
 
 .sa-depth-audit[data-depth-status="degraded"] {
-  border-left: 3px solid var(--warn, #a56a12);
+  border-color: color-mix(in oklch, var(--warn, #a56a12) 55%, var(--grid));
   background: color-mix(in oklch, var(--warn, #a56a12) 5%, var(--page));
 }
 
@@ -564,7 +564,7 @@
 .sa-deep-review-grid h4 { margin: 0; color: var(--ink-2); font-size: 10px; }
 .sa-deep-review-grid li { margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .sa-counter-review,
-.sa-open-questions { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--grid); color: var(--muted); font-size: 10px; line-height: 1.55; }
+.sa-open-questions { margin-top: 12px; padding: 10px 0 0; border-top: 1px solid var(--grid); color: var(--muted); font-size: 10px; line-height: 1.55; }
 .sa-counter-review strong,
 .sa-open-questions strong { color: var(--ink-2); }
 
