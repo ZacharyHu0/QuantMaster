@@ -1,5 +1,6 @@
 """Release metadata and automatic GitHub synchronization guard."""
 
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tools.release_sync import (
     push_config_variants,
     release_assignments,
     release_today,
+    run_git,
     validate_metadata,
     verify_previous_release_tag,
     version_tuple,
@@ -147,6 +149,18 @@ def test_push_config_ignores_invalid_resolve():
     variants = push_config_variants("example.com:443:127.0.0.1")
     assert len(variants) == 1
     assert all(key != "http.curloptResolve" for key, _ in variants[0])
+
+
+def test_git_timeout_becomes_retryable_failure(monkeypatch):
+    from tools import release_sync
+
+    def expire(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(release_sync.subprocess, "run", expire)
+    result = run_git(["push", "origin", "HEAD:main"], timeout_seconds=30)
+    assert result.returncode == 124
+    assert "timed out after 30 seconds" in result.stderr
 
 
 def test_github_push_url_defaults_to_repository_owner():

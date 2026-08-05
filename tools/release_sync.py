@@ -47,21 +47,31 @@ def run_git(
     *,
     check: bool = False,
     configs: list[tuple[str, str]] | None = None,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Git against this checkout without relying on global safe.directory."""
     command = ["git", "-c", f"safe.directory={ROOT.as_posix()}"]
     for key, value in configs or []:
         command.extend(["-c", f"{key}={value}"])
     command.extend(args)
-    return subprocess.run(
-        command,
-        cwd=ROOT,
-        check=check,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=ROOT,
+            check=check,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=str(exc.stdout or ""),
+            stderr=f"Git command timed out after {timeout_seconds} seconds",
+        )
 
 
 def git_text(args: list[str], *, required: bool = True) -> str:
@@ -479,12 +489,23 @@ def push_current_release() -> int:
         retries = max(1, min(6, int(config_value("quantmaster.releasePushRetries", "3"))))
     except ValueError:
         retries = 3
+    try:
+        push_timeout = max(
+            30,
+            min(600, int(config_value("quantmaster.releasePushTimeoutSeconds", "180"))),
+        )
+    except ValueError:
+        push_timeout = 180
     resolve = config_value("quantmaster.githubResolve")
     variants = push_config_variants(resolve)
     failures: list[str] = []
     for attempt in range(retries):
         configs = variants[attempt % len(variants)]
-        result = run_git(["push", "origin", "HEAD:main"], configs=configs)
+        result = run_git(
+            ["push", "origin", "HEAD:main"],
+            configs=configs,
+            timeout_seconds=push_timeout,
+        )
         if result.returncode == 0:
             run_git(["update-ref", "refs/remotes/origin/main", commit])
             clear_pending()
@@ -525,6 +546,7 @@ def install_hooks(args: argparse.Namespace) -> int:
         ("core.hooksPath", ".githooks"),
         ("quantmaster.releaseAutoPush", "true"),
         ("quantmaster.releasePushRetries", str(args.retries)),
+        ("quantmaster.releasePushTimeoutSeconds", str(args.push_timeout)),
         ("credential.useHttpPath", "true"),
         ("http.sslVerify", "true"),
     ]
@@ -590,6 +612,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     install_parser = subparsers.add_parser("install", help="启用仓库级 Git hooks")
     install_parser.add_argument("--retries", type=int, default=3, choices=range(1, 7))
+    install_parser.add_argument(
+        "--push-timeout",
+        type=int,
+        default=180,
+        choices=range(30, 601),
+        help="单次 git push 超时秒数（30–600，默认 180）",
+    )
     install_parser.add_argument(
         "--github-resolve",
         default="",

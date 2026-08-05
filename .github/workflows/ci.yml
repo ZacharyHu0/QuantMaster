@@ -31,6 +31,9 @@ jobs:
           components: rustfmt, clippy
       - name: Sync core environment
         run: uv sync --locked --extra dev --extra rust
+      - name: Bind PyO3 to the locked Python
+        shell: bash
+        run: echo "PYO3_PYTHON=$(uv run python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
       - name: Build native kernel
         run: uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
       - name: Install native kernel

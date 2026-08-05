@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.38"
+VERSION = "0.13.39"
 RELEASE_DATE = "2026-08-05"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台原生门禁与弱网发布韧性",
+                "items": (
+                    (
+                        "跨平台核心 CI 将 PyO3 显式绑定到 uv 锁定的 Python，避免 macOS runner"
+                        " 的较新系统 Python 越过项目版本矩阵导致原生检查失败。"
+                    ),
+                    (
+                        "发布同步为每次 git push 增加 30–600 秒可配置超时，弱网连接不再让"
+                        "提交钩子无界等待；超时继续进入既有重试和待同步恢复流程。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.38",
+        "date": "2026-08-05",
         "sections": (
             {
                 "title": "CI 恢复与跨平台门禁修复",

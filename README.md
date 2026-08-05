@@ -257,7 +257,8 @@ python tools/release_sync.py install
 `CHANGELOG.md` 顶部加入对应说明。提交发生在 `main` 且版本确实递增时，post-commit
 钩子会自动重试推送到 `origin/main`；普通功能分支和 Claude 归档分支不会自动上传。
 安装命令会为 HTTPS origin 自动绑定仓库 owner，并按完整仓库路径隔离 GitHub 凭据，
-避免系统凭据管理器误用另一个 GitHub 账号；不会把 Token 或密码写入仓库。
+避免系统凭据管理器误用另一个 GitHub 账号；不会把 Token 或密码写入仓库。弱网下单次
+`git push` 默认 180 秒超时，可在安装时用 `--push-timeout 30..600` 调整，失败后仍保留恢复标记。
 
 如果网络或授权导致 push 失败，提交仍安全保留，并在 `.git` 内标记为待同步；下一次
 发布会被 pre-commit 阻止，直到运行以下命令完成同步：
