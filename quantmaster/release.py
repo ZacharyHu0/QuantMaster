@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.37"
+VERSION = "0.13.38"
 RELEASE_DATE = "2026-08-05"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "CI 恢复与跨平台门禁修复",
+                "items": (
+                    (
+                        "跨平台核心测试显式为固定 Rust 1.94.0 工具链安装 rustfmt 与 clippy，"
+                        "不再因 runner 默认组件差异误报失败。"
+                    ),
+                    (
+                        "Ubuntu 覆盖率分片同步 quality 锁定依赖，确保 coverage 命令在每个"
+                        "隔离环境中可用并继续执行 70% 分支覆盖率门禁。"
+                    ),
+                    (
+                        "发布同步新增绑定失败 GitHub Actions run、原提交和原版本的受控恢复"
+                        "标记；只允许前向发布紧邻 patch，成功推送后自动清除。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.37",
+        "date": "2026-08-05",
         "sections": (
             {
                 "title": "稳定化基线、并发租约与可复现发布",

@@ -27,6 +27,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
       - name: Sync core environment
         run: uv sync --locked --extra dev --extra rust
       - name: Build native kernel
@@ -43,7 +45,7 @@ jobs:
         shell: bash
         run: >-
           mkdir -p reports &&
-          uv run pytest tests/test_architecture.py tests/test_runtime_foundations.py
+          uv run python -m pytest tests/test_architecture.py tests/test_runtime_foundations.py
           tests/test_runtime_jobs.py tests/test_release_sync.py tests/test_settings.py
           --timeout=180
           --junitxml=reports/core-${{ matrix.os }}-${{ matrix.python-version }}.xml
@@ -69,11 +71,11 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - name: Sync full test environment
-        run: uv sync --locked --extra dev --extra rust
+        run: uv sync --locked --extra dev --extra quality --extra rust
       - name: Run full-suite shard
         run: >-
           mkdir -p reports &&
-          uv run coverage run --parallel-mode -m pytest
+          uv run python -m coverage run --parallel-mode -m pytest
           --splits 3 --group ${{ matrix.shard }}
           --ignore=tests/test_ui_management.py
           --timeout=180
@@ -104,9 +106,9 @@ jobs:
           merge-multiple: true
       - name: Combine branch coverage
         run: |
-          uv run coverage combine
-          uv run coverage report
-          uv run coverage xml
+          uv run python -m coverage combine
+          uv run python -m coverage report
+          uv run python -m coverage xml
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -127,7 +129,7 @@ jobs:
       - name: Chromium management flows
         run: >-
           mkdir -p reports &&
-          uv run pytest tests/test_ui_management.py
+          uv run python -m pytest tests/test_ui_management.py
           --timeout=180
           --junitxml=reports/browser.xml --durations=30
       - uses: actions/upload-artifact@v4

@@ -269,7 +269,10 @@ python tools/release_sync.py push
 
 `pre-commit` 只允许待提交版本使用上海当日作为实际发布日期；`status` 与 `push` 对历史
 提交只校验内部一致且日期不在未来，因此跨日恢复不会被误阻止。开始下一版本前还必须存在
-精确指向上一提交的不可变 `v{VERSION}` tag。依赖与构建工具记录在跨平台 `uv.lock`，CI 和
+精确指向上一提交的不可变 `v{VERSION}` tag。若已推送版本的 CI 明确失败且尚未打 tag，维护者
+可用 `python tools/release_sync.py recover-ci --run-id <RUN_ID>` 将失败 run、当前提交和版本绑定
+在 `.git` 内；该授权只允许前向发布紧邻的 patch 版本，并会在新版本成功推送后自动清除。
+依赖与构建工具记录在跨平台 `uv.lock`，CI 和
 正式发布统一使用 `uv sync --locked`；可用 `QM_CONFIG_PATH` 为 doctor/CI 指定隔离配置。
 
 ## 设计原则

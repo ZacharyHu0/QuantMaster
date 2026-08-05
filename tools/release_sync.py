@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RELEASE_FILE = "quantmaster/release.py"
 CHANGELOG_FILE = "CHANGELOG.md"
 PENDING_MARKER = "quantmaster-release-sync.json"
+CI_RECOVERY_MARKER = "quantmaster-ci-recovery.json"
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 CHANGELOG_PATTERN = re.compile(
     r"^## v(?P<version>\d+\.\d+\.\d+)[（(](?P<date>\d{4}-\d{2}-\d{2})[）)]",
@@ -190,6 +191,10 @@ def pending_marker() -> Path:
     return git_path(PENDING_MARKER)
 
 
+def ci_recovery_marker() -> Path:
+    return git_path(CI_RECOVERY_MARKER)
+
+
 def write_pending(commit: str, version: str, error: str = "") -> None:
     marker = pending_marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +217,50 @@ def clear_pending() -> None:
     marker = pending_marker()
     if marker.exists():
         marker.unlink()
+
+
+def read_ci_recovery() -> tuple[dict[str, Any] | None, str]:
+    """Read the explicit forward-recovery authorization stored inside ``.git``."""
+    marker = ci_recovery_marker()
+    if not marker.exists():
+        return None, ""
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"CI 恢复标记无法读取：{exc}"
+    if not isinstance(value, dict):
+        return None, "CI 恢复标记必须是 JSON 对象"
+    return value, ""
+
+
+def clear_ci_recovery() -> None:
+    marker = ci_recovery_marker()
+    if marker.exists():
+        marker.unlink()
+
+
+def ci_recovery_errors(version: str, commit: str) -> tuple[bool, list[str]]:
+    """Validate a narrowly scoped escape hatch for a pushed release whose CI failed."""
+    recovery, read_error = read_ci_recovery()
+    if read_error:
+        return False, [read_error]
+    if recovery is None:
+        return False, []
+    errors: list[str] = []
+    if recovery.get("version") != version:
+        errors.append(
+            "CI 恢复标记版本不匹配："
+            f"{recovery.get('version', '(missing)')} != {version}"
+        )
+    if recovery.get("commit") != commit:
+        errors.append(
+            "CI 恢复标记提交不匹配："
+            f"{str(recovery.get('commit', '(missing)'))[:12]} != {commit[:12]}"
+        )
+    run_id = recovery.get("run_id")
+    if not isinstance(run_id, int) or run_id <= 0:
+        errors.append("CI 恢复标记缺少有效的 GitHub Actions run ID")
+    return not errors, errors
 
 
 def local_and_tracking_heads() -> tuple[str, str]:
@@ -247,10 +296,26 @@ def verify_previous_release_tag(version: str) -> list[str]:
     target = git_text(["rev-list", "-n", "1", tag], required=False)
     head = git_text(["rev-parse", "HEAD"])
     if not target:
+        recovered, recovery_errors = ci_recovery_errors(version, head)
+        if recovered:
+            return []
+        if recovery_errors:
+            return recovery_errors
         return [f"缺少上一版本不可变 tag {tag}；先完成该版本发布"]
     if target != head:
         return [f"上一版本 tag {tag} 未指向当前 HEAD：{target[:12]} != {head[:12]}"]
     return []
+
+
+def is_next_patch(previous: str, candidate: str) -> bool:
+    """Return whether candidate is exactly one patch after previous."""
+    previous_version = version_tuple(previous)
+    candidate_version = version_tuple(candidate)
+    return candidate_version == (
+        previous_version[0],
+        previous_version[1],
+        previous_version[2] + 1,
+    )
 
 
 def print_errors(errors: list[str], title: str) -> int:
@@ -281,6 +346,13 @@ def pre_commit() -> int:
         head_version = release_assignments(read_committed(RELEASE_FILE)).get("VERSION", "")
         if version_tuple(staged_version) <= version_tuple(head_version):
             errors.append(f"VERSION 必须递增：{staged_version} <= {head_version}")
+        head = git_text(["rev-parse", "HEAD"])
+        recovered, _ = ci_recovery_errors(head_version, head)
+        if recovered and not is_next_patch(head_version, staged_version):
+            errors.append(
+                "CI 失败恢复只允许发布下一个 patch 版本："
+                f"{head_version} -> {staged_version}"
+            )
     except (RuntimeError, ValueError, SyntaxError) as exc:
         errors.append(f"无法比较当前与待提交版本：{exc}")
     errors.extend(verify_previous_release_synced())
@@ -353,6 +425,46 @@ def github_https_push_url(origin_url: str, username: str = "") -> str:
     return f"https://{account}@github.com/{owner}/{repository}.git"
 
 
+def authorize_ci_recovery(run_id: int) -> int:
+    """Authorize one forward patch after a pushed release fails its CI run."""
+    errors: list[str] = []
+    if current_branch() != "main":
+        errors.append("CI 失败恢复只能在 main 上授权")
+    version, metadata_errors = committed_release_errors()
+    errors.extend(metadata_errors)
+    errors.extend(verify_previous_release_synced())
+    commit = git_text(["rev-parse", "HEAD"])
+    tag = f"v{version}"
+    tag_target = git_text(["rev-list", "-n", "1", tag], required=False)
+    if tag_target:
+        errors.append(f"{tag} 已存在；不需要 CI 失败恢复")
+    if run_id <= 0:
+        errors.append("GitHub Actions run ID 必须是正整数")
+    if print_errors(errors, "无法授权 CI 失败恢复"):
+        return 1
+
+    marker = ci_recovery_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "commit": commit,
+                "version": version,
+                "run_id": run_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        f"[QuantMaster] 已授权 v{version} ({commit[:8]}) 从失败 CI run "
+        f"{run_id} 前向发布一个 patch；成功推送后标记自动清除。"
+    )
+    return 0
+
+
 def push_current_release() -> int:
     if current_branch() != "main":
         print("[QuantMaster] 当前不是 main；不会自动推送。")
@@ -376,6 +488,7 @@ def push_current_release() -> int:
         if result.returncode == 0:
             run_git(["update-ref", "refs/remotes/origin/main", commit])
             clear_pending()
+            clear_ci_recovery()
             print(f"[QuantMaster] v{version} 已自动推送到 origin/main ({commit[:8]})")
             return 0
         detail = result.stderr.strip() or result.stdout.strip() or "unknown push error"
@@ -439,6 +552,7 @@ def status() -> int:
     version, metadata_errors = committed_release_errors()
     local, tracking = local_and_tracking_heads()
     marker = pending_marker()
+    recovery_marker = ci_recovery_marker()
     hooks_path = config_value("core.hooksPath")
     print(f"branch: {branch}")
     print(f"version: {version}")
@@ -447,11 +561,16 @@ def status() -> int:
     print(f"hooks: {'on' if hooks_path == '.githooks' else 'off'}")
     print(f"auto-push: {'on' if auto_push_enabled() else 'off'}")
     print(f"pending: {'yes' if marker.exists() else 'no'}")
+    print(f"ci-recovery: {'yes' if recovery_marker.exists() else 'no'}")
     errors = list(metadata_errors)
     if branch == "main" and local != tracking:
         errors.append("main 尚未与 origin/main 同步")
     if marker.exists():
         errors.append(f"存在待同步标记：{marker}")
+    if recovery_marker.exists():
+        recovered, recovery_errors = ci_recovery_errors(version, local)
+        if not recovered:
+            errors.extend(recovery_errors or [f"CI 恢复标记无效：{recovery_marker}"])
     return print_errors(errors, "发布同步状态异常")
 
 
@@ -484,6 +603,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check", help="检查工作区发布元数据")
     subparsers.add_parser("status", help="显示本地与 origin/main 同步状态")
     subparsers.add_parser("push", help="重试推送当前 main 发布提交")
+    recovery_parser = subparsers.add_parser(
+        "recover-ci",
+        help="为已推送但 CI 失败且未打 tag 的版本授权一次前向 patch",
+    )
+    recovery_parser.add_argument("--run-id", type=int, required=True)
     subparsers.add_parser("pre-commit", help=argparse.SUPPRESS)
     subparsers.add_parser("post-commit", help=argparse.SUPPRESS)
     return parser
@@ -496,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
         "check": check_worktree,
         "status": status,
         "push": push_current_release,
+        "recover-ci": lambda: authorize_ci_recovery(args.run_id),
         "pre-commit": pre_commit,
         "post-commit": post_commit,
     }

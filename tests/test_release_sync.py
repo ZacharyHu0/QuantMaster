@@ -8,7 +8,9 @@ import pytest
 from tools.release_sync import (
     CHANGELOG_FILE,
     RELEASE_FILE,
+    ci_recovery_errors,
     github_https_push_url,
+    is_next_patch,
     push_config_variants,
     release_assignments,
     release_today,
@@ -79,6 +81,39 @@ def test_previous_release_tag_must_point_to_head(monkeypatch):
     values = {("rev-list", "-n", "1", "v1.2.3"): "abc", ("rev-parse", "HEAD"): "def"}
     monkeypatch.setattr(release_sync, "git_text", lambda args, required=True: values[tuple(args)])
     assert "未指向" in verify_previous_release_tag("1.2.3")[0]
+
+
+def test_exact_ci_failure_recovery_allows_missing_previous_tag(monkeypatch):
+    from tools import release_sync
+
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    values = {("rev-list", "-n", "1", "v1.2.3"): "", ("rev-parse", "HEAD"): "abc"}
+    monkeypatch.setattr(release_sync, "git_text", lambda args, required=True: values[tuple(args)])
+    monkeypatch.setattr(
+        release_sync,
+        "read_ci_recovery",
+        lambda: ({"version": "1.2.3", "commit": "abc", "run_id": 12345}, ""),
+    )
+    assert verify_previous_release_tag("1.2.3") == []
+
+
+def test_ci_failure_recovery_rejects_mismatched_commit(monkeypatch):
+    from tools import release_sync
+
+    monkeypatch.setattr(
+        release_sync,
+        "read_ci_recovery",
+        lambda: ({"version": "1.2.3", "commit": "old", "run_id": 12345}, ""),
+    )
+    recovered, errors = ci_recovery_errors("1.2.3", "new")
+    assert recovered is False
+    assert "提交不匹配" in errors[0]
+
+
+def test_ci_failure_recovery_only_allows_next_patch():
+    assert is_next_patch("1.2.3", "1.2.4") is True
+    assert is_next_patch("1.2.3", "1.2.5") is False
+    assert is_next_patch("1.2.3", "1.3.0") is False
 
 
 def test_release_clock_uses_asia_shanghai_date_at_utc_boundary():
