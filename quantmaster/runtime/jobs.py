@@ -750,6 +750,7 @@ class UnifiedJobRuntime:
             thread_name_prefix="qm-unified-job",
         )
         self._active: set[str] = set()
+        self._reschedule_after_active: set[str] = set()
         self._lock = threading.RLock()
         self._started = False
         self._paused = threading.Event()
@@ -818,9 +819,13 @@ class UnifiedJobRuntime:
             self._schedule(job["id"])
         return job, created
 
-    def _schedule(self, job_id: str) -> None:
+    def _schedule(self, job_id: str, *, reschedule_after_active: bool = False) -> None:
         with self._lock:
-            if self.stopping or job_id in self._active:
+            if self.stopping:
+                return
+            if job_id in self._active:
+                if reschedule_after_active:
+                    self._reschedule_after_active.add(job_id)
                 return
             self._active.add(job_id)
         self._executor.submit(self._run, job_id)
@@ -911,7 +916,11 @@ class UnifiedJobRuntime:
                 heartbeat.join(timeout=1.0)
             with self._lock:
                 self._active.discard(job_id)
-            if retry_delay and not self.stopping:
+                reschedule = job_id in self._reschedule_after_active
+                self._reschedule_after_active.discard(job_id)
+            if reschedule and not self.stopping:
+                self._schedule(job_id)
+            elif retry_delay and not self.stopping:
                 timer = threading.Timer(retry_delay, self._schedule, args=(job_id,))
                 timer.name = f"unified-retry-{job_id[-8:]}"
                 timer.daemon = True
@@ -931,7 +940,7 @@ class UnifiedJobRuntime:
             raise RuntimeError("任务运行时正在维护或已经停止")
         job = self.store.retry(job_id)
         self.start()
-        self._schedule(job_id)
+        self._schedule(job_id, reschedule_after_active=True)
         return job
 
     def pause(self) -> None:

@@ -192,6 +192,38 @@ def test_runtime_pause_drains_and_resume_recovers_interrupted_job(tmp_path):
     runtime.stop()
 
 
+def test_retry_queued_before_previous_worker_cleanup_is_rescheduled(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    failed_persisted = threading.Event()
+    allow_cleanup = threading.Event()
+    original_finish = store.finish
+
+    def finish_then_pause(job_id, owner, outcome):
+        finished = original_finish(job_id, owner, outcome)
+        if outcome.status == "failed":
+            failed_persisted.set()
+            assert allow_cleanup.wait(2)
+        return finished
+
+    store.finish = finish_then_pause
+
+    def fail_once(context, spec):
+        if context.attempt == 1:
+            raise RuntimeError("review failed")
+        return JobOutcome("completed", str(spec["value"]))
+
+    runtime.register("test.retry-race", fail_once)
+    job, _ = runtime.submit("test.retry-race", {"value": 7})
+    assert failed_persisted.wait(2)
+    runtime.retry(job["id"])
+    allow_cleanup.set()
+
+    completed = _wait(store, job["id"], {"completed"})
+    assert completed["attempt"] == 2
+    runtime.stop()
+
+
 def test_unified_runtime_converts_unexpected_value_error_to_terminal_failure(tmp_path):
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     runtime = UnifiedJobRuntime(store, max_workers=1)

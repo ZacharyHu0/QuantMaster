@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.backtest import BacktestConfig, run_backtest
-from quantmaster.backtest.paper_accounts import PaperService, PaperStore
+from quantmaster.backtest.paper_accounts import (
+    PaperAutomationWorker,
+    PaperService,
+    PaperStore,
+)
 from quantmaster.backtest.spec import (
     BacktestSpec,
     DecisionStrategySpec,
+    FactorStrategySpec,
     PaperAccountSpec,
     build_strategy,
     pin_decision_strategy,
@@ -24,6 +32,7 @@ from quantmaster.portfolio import Ledger, TradeRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
+from quantmaster.trading_sessions import SessionExpectation
 
 
 def price_panel(dates, first=(10.0, 11.0), second=None):
@@ -35,6 +44,133 @@ def price_panel(dates, first=(10.0, 11.0), second=None):
         "open": close.copy(), "high": close.copy(), "low": close.copy(),
         "close": close.copy(), "volume": close * 100_000,
     }
+
+
+_ROUTE_STRATEGY = {"kind": "swing", "top_n": 3, "holding_days": 3, "cap_weight": 0.25}
+_ROUTE_ARTIFACT = {
+    "summary": {"return": 0.1},
+    "trades": [{
+        "date": "2026-08-04", "symbol": "600000.SH", "side": "buy",
+        "price": 10.0, "shares": 100, "amount": 1000.0, "cost": 1.0, "note": "open",
+    }],
+}
+
+
+class _RouteAutoWorker:
+    def __init__(self, wake_count):
+        self.wake_count = wake_count
+
+    def wake(self):
+        self.wake_count[0] += 1
+
+
+class _RouteBacktestStore:
+    def list(self, limit):
+        return [{"id": "completed", "limit": limit}]
+
+    def get(self, run_id, include_artifact=False):
+        if run_id == "missing":
+            return None
+        return {
+            "id": run_id,
+            "status": "queued" if run_id == "queued" else "completed",
+            "config": {
+                "strategy": _ROUTE_STRATEGY,
+                "universe": "demo",
+                "initial_capital": 100_000,
+            },
+            "artifact": _ROUTE_ARTIFACT if include_artifact and run_id != "queued" else None,
+        }
+
+    def events(self, run_id, after=0):
+        if run_id == "broken":
+            raise KeyError("回测不存在")
+        return [{"run_id": run_id, "after": after}]
+
+    def cancel(self, run_id):
+        if run_id == "broken":
+            raise ValueError("不能取消")
+        return {"id": run_id, "status": "cancelled"}
+
+
+class _RouteBacktestService:
+    def __init__(self):
+        self.store = _RouteBacktestStore()
+
+    def compare(self, run_ids):
+        if "broken" in run_ids:
+            raise ValueError("比较失败")
+        return {"run_ids": run_ids}
+
+
+class _RouteQueueService:
+    def __init__(self):
+        self.fail = False
+
+    def enqueue(self, spec):
+        if self.fail:
+            raise ValueError("未知字段")
+        return {"id": "new-run", "status": "queued", "name": spec.name}
+
+
+class _RouteBacktestWorker:
+    def __init__(self):
+        self.service = _RouteQueueService()
+        self.started = 0
+
+    def start(self):
+        self.started += 1
+
+
+class _RoutePaperStore:
+    def accounts(self, include_archived=False):
+        return [{"id": "account", "include_archived": include_archived}]
+
+    def account(self, account_id):
+        return None if account_id == "missing" else {
+            "id": account_id, "status": "active", "mode": "manual",
+        }
+
+    def update_account(self, account_id, status=None, mode=None):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {"id": account_id, "status": status or "active", "mode": mode or "manual"}
+
+    def confirm(self, cycle_id):
+        if cycle_id == "missing":
+            raise KeyError("周期不存在")
+        return {"id": cycle_id, "status": "confirmed"}
+
+    def cycles(self, account_id, limit=30):
+        return [{"account_id": account_id, "limit": limit}]
+
+
+class _RoutePaperService:
+    def __init__(self):
+        self.store = _RoutePaperStore()
+
+    def create_account(self, spec):
+        return {"id": "account", "status": "active", "mode": spec.mode}
+
+    def clone_account(self, account_id, name, mode):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {"id": "clone", "name": name, "status": "active", "mode": mode}
+
+    def propose(self, account_id):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {"account_id": account_id, "status": "proposed"}
+
+    def process(self, account_id):
+        if account_id == "missing":
+            raise ValueError("处理失败")
+        return {"account_id": account_id, "status": "processed"}
+
+    def report(self, account_id):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {"account_id": account_id, "warning": ""}
 
 
 def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatch):
@@ -262,6 +398,128 @@ def test_daily_orchestration_processes_all_active_and_proposes_only_auto(tmp_pat
     assert result["failed"] == 0
 
 
+def test_auto_account_runs_daily_without_manual_buttons_and_is_idempotent(tmp_path, monkeypatch):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    manual = store.create_account(account_spec("人工账户"), symbols=["600000.SH"])
+    automatic = store.create_account(
+        account_spec("自动账户").model_copy(update={"mode": "auto"}),
+        symbols=["000001.SZ"],
+    )
+    service = PaperService(store)
+    processed, proposed = [], []
+    monkeypatch.setattr(
+        service,
+        "process",
+        lambda account_id: processed.append(account_id) or {"status": "completed"},
+    )
+    monkeypatch.setattr(
+        service,
+        "propose",
+        lambda account_id: proposed.append(account_id) or {
+            "status": "confirmed", "signal_date": "2026-08-04",
+        },
+    )
+    worker = PaperAutomationWorker(
+        service,
+        poll_seconds=1,
+        session_resolver=lambda _now: SessionExpectation(
+            "2026-08-04", "unit", True, "fixture",
+        ),
+    )
+    due = datetime(2026, 8, 4, 18, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    first = worker.run_due_once(due)
+    second = worker.run_due_once(due)
+
+    assert first["status"] == "completed"
+    assert second["status"] == "already_processed"
+    assert processed == [automatic["id"]]
+    assert proposed == [automatic["id"]]
+    assert manual["id"] not in processed
+    assert store.latest_auto_run(automatic["id"])["status"] == "completed"
+
+
+def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("租约账户").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    account_id = account["id"]
+    token_one = store.claim_auto_run("2026-02-13", account_id, "worker-one", now=100)
+    assert token_one
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE paper_auto_runs SET lease_expires=0 WHERE run_date=? AND account_id=?",
+            ("2026-02-13", account_id),
+        )
+    token_two = store.claim_auto_run("2026-02-13", account_id, "worker-two", now=101)
+    assert token_two and token_two != token_one
+    assert store.complete_auto_run(
+        "2026-02-13", account_id, "worker-one", token_one, {"old": True}, now=101,
+    ) is False
+    assert store.complete_auto_run(
+        "2026-02-13", account_id, "worker-two", token_two, {"new": True}, now=101,
+    ) is True
+
+    current = 1000.0
+    for attempt in range(6):
+        token = store.claim_auto_run(
+            "2026-10-09", account_id, "worker", now=current,
+        )
+        assert token
+        assert store.fail_auto_run(
+            "2026-10-09", account_id, "worker", token, "暂时失败", now=current,
+        )
+        current += (3 * 60 * 60) + attempt
+    latest = store.latest_auto_run(account_id)
+    assert latest["status"] == "manual_recovery"
+    assert latest["attempts"] == 6
+    assert store.recover_auto_run("2026-10-09", account_id) is True
+
+
+def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("告警分层"), symbols=["600000.SH"], warning="策略来源待批准",
+    )
+    store.set_runtime_warning(account["id"], "行情暂不可用")
+    assert store.account(account["id"])["warning"] == "行情暂不可用"
+    store.clear_runtime_warning(account["id"])
+    restored = store.account(account["id"])
+    assert restored["runtime_warning"] == ""
+    assert restored["strategy_warning"] == "策略来源待批准"
+    assert restored["warning"] == "策略来源待批准"
+
+
+def test_v01336_paper_schema_migrates_without_losing_account(tmp_path):
+    path = tmp_path / "paper.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE paper_accounts ("
+            "id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,status TEXT NOT NULL,"
+            "mode TEXT NOT NULL,initial_capital REAL NOT NULL,strategy_json TEXT NOT NULL,"
+            "strategy_hash TEXT NOT NULL,universe TEXT NOT NULL,universe_json TEXT NOT NULL,"
+            "source_backtest_id TEXT NOT NULL DEFAULT '',warning TEXT NOT NULL DEFAULT '',"
+            "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO paper_accounts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "a" * 32, "旧账户", "active", "auto", 100000,
+                json.dumps(FactorStrategySpec().model_dump(mode="json")), "hash", "demo",
+                json.dumps({"name": "demo", "symbols": ["600000.SH"]}), "", "旧策略告警",
+                "2026-08-01T00:00:00+00:00", "2026-08-01T00:00:00+00:00",
+            ),
+        )
+    store = PaperStore(path, tmp_path / "accounts")
+    account = store.account("a" * 32)
+    assert account["name"] == "旧账户"
+    assert account["strategy_warning"] == "旧策略告警"
+    assert account["runtime_warning"] == ""
+    assert account["warning"] == "旧策略告警"
+
+
 def test_legacy_paper_ledger_migration_is_idempotent_and_preserves_source(isolated_config):
     root = isolated_config.data_root
     source = root / "ledger_paper.sqlite"
@@ -451,6 +709,10 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert 'list="factor-list" value="mom_20d"' not in backtest_form
     assert "生成调仓提案" in page
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
+    assert "每日自动交易" in page
+    assert "进入页面只读取历史快照，不会自动计算" in page
+    assert "void loadDecisionHistory()" in page
+    assert "document.getElementById('decision-form').requestSubmit()" not in page
 
     css = client.get("/static/trading.css").text
     checkbox_rule = css.split(
@@ -488,3 +750,126 @@ def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
     )
     assert response.status_code == 422
     assert "未知字段" in response.json()["detail"]
+
+
+def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
+    from quantmaster.server import trading
+
+    monkeypatch.setattr(trading, "_require_csrf", lambda request: None)
+    wake_count = [0]
+    monkeypatch.setattr(
+        trading, "get_paper_automation_worker", lambda: _RouteAutoWorker(wake_count),
+    )
+    strategy = _ROUTE_STRATEGY
+    backtest_service = _RouteBacktestService()
+    monkeypatch.setattr(trading, "_service", lambda: backtest_service)
+    worker = _RouteBacktestWorker()
+    monkeypatch.setattr(trading, "get_backtest_worker", lambda: worker)
+    request = object()
+    spec = BacktestSpec.model_validate({
+        "name": "route coverage", "strategy": strategy, "universe": "demo",
+        "start": "2023-01-01", "end": "2023-12-31", "benchmark": None,
+        "initial_capital": 100_000,
+    })
+
+    assert trading.create_backtest(spec, request)["id"] == "new-run"
+    assert worker.started == 1
+    worker.service.fail = True
+    with pytest.raises(trading.HTTPException) as invalid_run:
+        trading.create_backtest(spec, request)
+    assert invalid_run.value.status_code == 422
+    assert trading.list_backtests(12)["items"][0]["limit"] == 12
+    assert trading.get_backtest("completed")["status"] == "completed"
+    with pytest.raises(trading.HTTPException) as missing_run:
+        trading.get_backtest("missing")
+    assert missing_run.value.status_code == 404
+    assert trading.backtest_events("completed", after=3)["items"][0]["after"] == 3
+    with pytest.raises(trading.HTTPException) as missing_events:
+        trading.backtest_events("broken")
+    assert missing_events.value.status_code == 404
+    assert trading.cancel_backtest("completed", request)["status"] == "cancelled"
+    with pytest.raises(trading.HTTPException) as bad_cancel:
+        trading.cancel_backtest("broken", request)
+    assert bad_cancel.value.status_code == 400
+    assert trading.compare_backtests(
+        trading.CompareRequest(run_ids=["one", "two"]), request,
+    )["run_ids"] == ["one", "two"]
+    with pytest.raises(trading.HTTPException):
+        trading.compare_backtests(
+            trading.CompareRequest(run_ids=["one", "broken"]), request,
+        )
+
+    json_export = trading.export_backtest("completed")
+    assert json_export.media_type == "application/json; charset=utf-8"
+    assert b'"summary"' in json_export.body
+    csv_export = trading.export_backtest("completed", format="trades_csv")
+    assert b"600000.SH" in csv_export.body
+    with pytest.raises(trading.HTTPException) as missing_export:
+        trading.export_backtest("missing")
+    assert missing_export.value.status_code == 404
+    with pytest.raises(trading.HTTPException) as queued_export:
+        trading.export_backtest("queued")
+    assert queued_export.value.status_code == 409
+
+    paper_service = _RoutePaperService()
+    monkeypatch.setattr(trading, "get_paper_service", lambda: paper_service)
+    paper_spec = PaperAccountSpec.model_validate({
+        "name": "auto route", "strategy": strategy, "universe": "demo",
+        "initial_capital": 100_000, "mode": "auto",
+    })
+    assert trading.create_paper_account(paper_spec, request)["mode"] == "auto"
+    assert wake_count[0] == 1
+    promoted = trading.promote_backtest(
+        "completed", trading.PromoteRequest(name="promoted", mode="auto"), request,
+    )
+    assert promoted["mode"] == "auto"
+    with pytest.raises(trading.HTTPException) as promote_missing:
+        trading.promote_backtest(
+            "missing", trading.PromoteRequest(name="missing"), request,
+        )
+    assert promote_missing.value.status_code == 404
+    with pytest.raises(trading.HTTPException) as promote_queued:
+        trading.promote_backtest(
+            "queued", trading.PromoteRequest(name="queued"), request,
+        )
+    assert promote_queued.value.status_code == 409
+
+    assert trading.list_paper_accounts(True)["items"][0]["include_archived"] is True
+    assert trading.get_paper_account("account")["id"] == "account"
+    with pytest.raises(trading.HTTPException) as missing_account:
+        trading.get_paper_account("missing")
+    assert missing_account.value.status_code == 404
+    with pytest.raises(trading.HTTPException) as empty_update:
+        trading.update_paper_account("account", trading.PaperAccountUpdate(), request)
+    assert empty_update.value.status_code == 422
+    updated = trading.update_paper_account(
+        "account", trading.PaperAccountUpdate(status="paused", mode="auto"), request,
+    )
+    assert updated["status"] == "paused"
+    with pytest.raises(trading.HTTPException):
+        trading.update_paper_account(
+            "missing", trading.PaperAccountUpdate(status="paused"), request,
+        )
+    assert trading.clone_paper_account(
+        "account", trading.CloneAccountRequest(name="clone", mode="auto"), request,
+    )["id"] == "clone"
+    with pytest.raises(trading.HTTPException):
+        trading.clone_paper_account(
+            "missing", trading.CloneAccountRequest(name="clone"), request,
+        )
+    assert trading.propose_paper_cycle("account", request)["status"] == "proposed"
+    with pytest.raises(trading.HTTPException):
+        trading.propose_paper_cycle("missing", request)
+    assert trading.confirm_paper_cycle("cycle", request)["status"] == "confirmed"
+    with pytest.raises(trading.HTTPException):
+        trading.confirm_paper_cycle("missing", request)
+    assert trading.process_paper_account("account", request)["status"] == "processed"
+    with pytest.raises(trading.HTTPException):
+        trading.process_paper_account("missing", request)
+    assert trading.paper_account_report("account")["warning"] == ""
+    with pytest.raises(trading.HTTPException):
+        trading.paper_account_report("missing")
+    assert trading.paper_account_cycles("account", limit=9)["items"][0]["limit"] == 9
+    with pytest.raises(trading.HTTPException) as missing_cycles:
+        trading.paper_account_cycles("missing")
+    assert missing_cycles.value.status_code == 404

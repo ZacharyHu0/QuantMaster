@@ -30,11 +30,19 @@ def test_release_workflow_builds_native_wheels_without_maturin_develop() -> None
 
     assert "maturin develop" not in source
     assert "maturin build" in source
-    assert "if [[ -f rust/quantmaster-kernel/Cargo.lock ]]" in source
-    assert source.count("maturin build") == 2
+    assert "uv sync --locked" in source
+    assert source.count("maturin build") == 1
+    assert "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b" in source
+    assert "dtolnay/rust-toolchain@1.94.0" in source
     assert "fail_on_unmatched_files: true" in source
-    assert "if: matrix.target.make_latest" in source
     assert "retention-days: 90" in source
+
+
+def test_historical_release_is_published_without_becoming_latest() -> None:
+    source = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "make_latest: ${{ matrix.target.make_latest }}" in source
+    assert "publishing its GitHub Release requires" not in source
 
 
 def test_ci_matrix_collects_every_platform_result() -> None:

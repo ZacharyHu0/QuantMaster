@@ -7,7 +7,11 @@ import json
 import logging
 import math
 import sqlite3
+import threading
+import time
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +34,9 @@ from quantmaster.backtest.spec import (
 from quantmaster.config import get_config
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
+from quantmaster.runtime.jobs import WorkerIdentity
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import SessionExpectation, expected_session
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,8 @@ class PaperStore:
                     strategy_json TEXT NOT NULL, strategy_hash TEXT NOT NULL,
                     universe TEXT NOT NULL, universe_json TEXT NOT NULL,
                     source_backtest_id TEXT NOT NULL DEFAULT '', warning TEXT NOT NULL DEFAULT '',
+                    strategy_warning TEXT NOT NULL DEFAULT '',
+                    runtime_warning TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS paper_cycles (
                     id TEXT PRIMARY KEY, account_id TEXT NOT NULL, signal_date TEXT NOT NULL,
@@ -83,11 +91,46 @@ class PaperStore:
                 CREATE TABLE IF NOT EXISTS paper_migrations (
                     source_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL,
                     account_id TEXT NOT NULL, migrated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS paper_auto_runs (
+                    run_date TEXT NOT NULL, account_id TEXT NOT NULL,
+                    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at REAL NOT NULL DEFAULT 0,
+                    lease_owner TEXT NOT NULL DEFAULT '', lease_expires REAL NOT NULL DEFAULT 0,
+                    lease_token TEXT NOT NULL DEFAULT '', heartbeat_at REAL NOT NULL DEFAULT 0,
+                    result_json TEXT NOT NULL DEFAULT '{}', last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_date,account_id),
+                    FOREIGN KEY(account_id) REFERENCES paper_accounts(id));
                 CREATE INDEX IF NOT EXISTS idx_paper_cycles
                     ON paper_cycles(account_id,created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_paper_orders
                     ON paper_orders(account_id,status,created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_paper_auto_runs
+                    ON paper_auto_runs(status,next_retry_at,lease_expires);
             """)
+            account_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_accounts)")
+            }
+            for name in ("strategy_warning", "runtime_warning"):
+                if name not in account_columns:
+                    conn.execute(
+                        f"ALTER TABLE paper_accounts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                    )
+            run_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_auto_runs)")
+            }
+            if "lease_token" not in run_columns:
+                conn.execute(
+                    "ALTER TABLE paper_auto_runs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''"
+                )
+            if "heartbeat_at" not in run_columns:
+                conn.execute(
+                    "ALTER TABLE paper_auto_runs ADD COLUMN heartbeat_at REAL NOT NULL DEFAULT 0"
+                )
+            conn.execute(
+                "UPDATE paper_accounts SET strategy_warning=warning "
+                "WHERE strategy_warning='' AND runtime_warning='' AND warning<>''"
+            )
 
     @staticmethod
     def _account_value(row: sqlite3.Row | None) -> dict | None:
@@ -96,6 +139,9 @@ class PaperStore:
         value = dict(row)
         value["strategy"] = json.loads(value.pop("strategy_json"))
         value["universe_snapshot"] = json.loads(value.pop("universe_json"))
+        value["strategy_warning"] = str(value.get("strategy_warning") or "")
+        value["runtime_warning"] = str(value.get("runtime_warning") or "")
+        value["warning"] = value["runtime_warning"] or value["strategy_warning"]
         return value
 
     @staticmethod
@@ -139,12 +185,15 @@ class PaperStore:
         with self._conn() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO paper_accounts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO paper_accounts "
+                    "(id,name,status,mode,initial_capital,strategy_json,strategy_hash,universe,"
+                    "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
+                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         account_id, spec.name.strip(), "active", spec.mode, spec.initial_capital,
                         canonical_json(strategy), strategy_hash, spec.universe,
                         canonical_json(universe_snapshot), spec.source_backtest_id,
-                        warning[:500], now, now,
+                        warning[:500], warning[:500], "", now, now,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -196,11 +245,162 @@ class PaperStore:
         return self.account(account_id) or {}
 
     def set_warning(self, account_id: str, warning: str, *, pause: bool = False) -> None:
+        """Compatibility wrapper: operational failures are runtime warnings."""
+        self.set_runtime_warning(account_id, warning, pause=pause)
+
+    def set_runtime_warning(
+        self, account_id: str, warning: str, *, pause: bool = False,
+    ) -> None:
         with self._conn() as conn:
             conn.execute(
-                "UPDATE paper_accounts SET warning=?,status=CASE WHEN ? THEN 'paused' ELSE status END,"
-                "updated_at=? WHERE id=?", (warning[:500], int(pause), utc_now(), account_id),
+                "UPDATE paper_accounts SET runtime_warning=?,warning=?,"
+                "status=CASE WHEN ? THEN 'paused' ELSE status END,updated_at=? WHERE id=?",
+                (warning[:500], warning[:500], int(pause), utc_now(), account_id),
             )
+
+    def clear_runtime_warning(self, account_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE paper_accounts SET runtime_warning='',warning=strategy_warning,"
+                "updated_at=? WHERE id=?",
+                (utc_now(), account_id),
+            )
+
+    def claim_auto_run(
+        self,
+        run_date: str,
+        account_id: str,
+        owner: str,
+        *,
+        now: float | None = None,
+        lease_seconds: float = 90,
+    ) -> str | None:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status,attempts,next_retry_at,lease_expires FROM paper_auto_runs "
+                "WHERE run_date=? AND account_id=?",
+                (run_date, account_id),
+            ).fetchone()
+            if row is not None:
+                if str(row["status"]) == "completed":
+                    return None
+                if str(row["status"]) == "manual_recovery":
+                    return None
+                if str(row["status"]) == "running" and float(row["lease_expires"] or 0) > current:
+                    return None
+                if str(row["status"]) == "failed" and float(row["next_retry_at"] or 0) > current:
+                    return None
+            attempts = int(row["attempts"] or 0) + 1 if row is not None else 1
+            if attempts > 6:
+                return None
+            token = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO paper_auto_runs "
+                "(run_date,account_id,status,attempts,next_retry_at,lease_owner,lease_expires,"
+                "lease_token,heartbeat_at,result_json,last_error,updated_at) "
+                "VALUES (?,?, 'running', ?,0,?,?,?,?, '{}','',?) "
+                "ON CONFLICT(run_date,account_id) DO UPDATE SET status='running',"
+                "attempts=excluded.attempts,next_retry_at=0,lease_owner=excluded.lease_owner,"
+                "lease_expires=excluded.lease_expires,lease_token=excluded.lease_token,"
+                "heartbeat_at=excluded.heartbeat_at,last_error='',updated_at=excluded.updated_at",
+                (
+                    run_date, account_id, attempts, owner,
+                    current + max(15.0, float(lease_seconds)), token, current, utc_now(),
+                ),
+            )
+        return token
+
+    def heartbeat_auto_run(
+        self,
+        run_date: str,
+        account_id: str,
+        owner: str,
+        token: str,
+        *,
+        now: float | None = None,
+        lease_seconds: float = 90,
+    ) -> bool:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE paper_auto_runs SET heartbeat_at=?,lease_expires=?,updated_at=? "
+                "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
+                "AND lease_token=? AND lease_expires>?",
+                (
+                    current, current + max(15.0, float(lease_seconds)), utc_now(),
+                    run_date, account_id, owner, token, current,
+                ),
+            ).rowcount
+        return bool(changed)
+
+    def complete_auto_run(
+        self, run_date: str, account_id: str, owner: str, token: str, result: dict,
+        *, now: float | None = None,
+    ) -> bool:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE paper_auto_runs SET status='completed',next_retry_at=0,lease_owner='',"
+                "lease_expires=0,lease_token='',result_json=?,last_error='',updated_at=? "
+                "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
+                "AND lease_token=? AND lease_expires>?",
+                (canonical_json(result), utc_now(), run_date, account_id, owner, token, current),
+            ).rowcount
+        return bool(changed)
+
+    def fail_auto_run(
+        self, run_date: str, account_id: str, owner: str, token: str, error: str,
+        *, now: float | None = None,
+    ) -> bool:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM paper_auto_runs WHERE run_date=? AND account_id=? "
+                "AND status='running' AND lease_owner=? AND lease_token=? AND lease_expires>?",
+                (run_date, account_id, owner, token, current),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = max(1, int(row["attempts"] or 1))
+            delays = (5 * 60, 15 * 60, 30 * 60, 60 * 60, 2 * 60 * 60)
+            exhausted = attempts >= 6
+            next_retry = 0 if exhausted else current + delays[min(attempts - 1, len(delays) - 1)]
+            changed = conn.execute(
+                "UPDATE paper_auto_runs SET status=?,next_retry_at=?,lease_owner='',"
+                "lease_expires=0,lease_token='',last_error=?,updated_at=? "
+                "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
+                "AND lease_token=?",
+                (
+                    "manual_recovery" if exhausted else "failed", next_retry,
+                    error[:500], utc_now(), run_date, account_id, owner, token,
+                ),
+            ).rowcount
+        return bool(changed)
+
+    def recover_auto_run(self, run_date: str, account_id: str) -> bool:
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
+                "last_error='',updated_at=? WHERE run_date=? AND account_id=? "
+                "AND status='manual_recovery'",
+                (utc_now(), run_date, account_id),
+            ).rowcount
+        return bool(changed)
+
+    def latest_auto_run(self, account_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_auto_runs WHERE account_id=? "
+                "ORDER BY run_date DESC LIMIT 1",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["result"] = json.loads(value.pop("result_json") or "{}")
+        return value
 
     def create_cycle(
         self,
@@ -359,13 +559,17 @@ class PaperStore:
         with connect_sqlite(source) as source_conn, connect_sqlite(destination) as destination_conn:
             source_conn.backup(destination_conn)
         Ledger(path=destination)
+        warning = "由旧模拟账本导入；策略来源未知，已暂停。"
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO paper_accounts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO paper_accounts "
+                "(id,name,status,mode,initial_capital,strategy_json,strategy_hash,universe,"
+                "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     account_id, name, "paused", "manual", 0.0, canonical_json(strategy),
                     content_hash({"strategy": strategy, "legacy": digest}), "legacy",
-                    canonical_json(universe), "", "由旧模拟账本导入；策略来源未知，已暂停。", now, now,
+                    canonical_json(universe), "", warning, warning, "", now, now,
                 ),
             )
             conn.execute(
@@ -647,7 +851,11 @@ class PaperService:
             raw_open = day_open.get(symbol)
             raw_previous = day_previous.get(symbol) if previous is not None else None
             open_value = float(raw_open) if pd.notna(raw_open) else 0.0
-            previous_value = float(raw_previous) if pd.notna(raw_previous) else None
+            previous_value = (
+                float(raw_previous)
+                if raw_previous is not None and pd.notna(raw_previous)
+                else None
+            )
             current_shares = float(current.get(symbol, 0.0))
             target_value = total_assets * float(order["target_weight"])
             target_shares = (
@@ -764,6 +972,17 @@ class PaperService:
                 warnings.extend(nav_warnings(nav))
         if account["warning"]:
             warnings.insert(0, account["warning"])
+        automation = self.store.latest_auto_run(account_id)
+        if automation is not None:
+            automation["health"] = (
+                "needs_manual_recovery"
+                if automation.get("status") == "manual_recovery"
+                else "healthy"
+                if automation.get("status") == "completed"
+                else "retrying"
+                if automation.get("status") in {"failed", "running"}
+                else "idle"
+            )
         return {
             "account": account,
             "report": report,
@@ -772,6 +991,60 @@ class PaperService:
             "warnings": list(dict.fromkeys(warnings)),
             "data_freshness": freshness,
             "cycles": self.store.cycles(account_id),
+            "warning": account["warning"],
+            "strategy_warning": account["strategy_warning"],
+            "runtime_warning": account["runtime_warning"],
+            "automation": automation,
+        }
+
+    def run_auto_account(
+        self, account_id: str, *, expected_signal_date: str | None = None,
+    ) -> dict:
+        """Process one auto account and create/confirm its newest due proposal."""
+        account = self.store.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+        if account["status"] != "active" or account["mode"] != "auto":
+            return {
+                "status": "skipped", "account_id": account_id,
+                "message": "账户未启用自动交易。",
+            }
+        processed = self.process(account_id)
+        proposal = self.propose(account_id)
+        signal_date = str(proposal.get("signal_date") or "")
+        if expected_signal_date and signal_date < expected_signal_date:
+            raise RuntimeError(
+                f"自动交易等待 {expected_signal_date} 收盘行情；当前最新信号日为"
+                f" {signal_date or '未知'}"
+            )
+        return {
+            "status": "ok", "account_id": account_id,
+            "processed": processed, "proposal": proposal,
+        }
+
+    def run_auto_accounts(self, *, expected_signal_date: str | None = None) -> dict:
+        """Run only active accounts whose execution mode is explicitly ``auto``."""
+        items = []
+        for account in self.store.accounts():
+            if account["status"] != "active" or account["mode"] != "auto":
+                continue
+            try:
+                row = self.run_auto_account(
+                    account["id"], expected_signal_date=expected_signal_date,
+                )
+            except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                message = str(exc)[:500]
+                self.store.set_warning(account["id"], message)
+                row = {
+                    "status": "failed", "account_id": account["id"],
+                    "name": account["name"], "error": message,
+                }
+                logger.warning("模拟账户自动处理失败 account=%s: %s", account["id"], exc)
+            items.append(row)
+        return {
+            "accounts": items,
+            "processed": sum(item.get("status") == "ok" for item in items),
+            "failed": sum(item.get("status") == "failed" for item in items),
         }
 
     def run_active_accounts(self) -> dict:
@@ -786,7 +1059,7 @@ class PaperService:
                 if account["mode"] == "auto":
                     row["proposal"] = self.propose(account["id"])
                 row["status"] = "ok"
-            except Exception as exc:
+            except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                 message = str(exc)[:500]
                 self.store.set_warning(account["id"], message)
                 row.update({"status": "failed", "error": message})
@@ -799,14 +1072,175 @@ class PaperService:
         }
 
 
+@contextmanager
+def _paper_auto_heartbeat(
+    store: PaperStore,
+    run_date: str,
+    account_id: str,
+    owner: str,
+    token: str,
+) -> Iterator[threading.Event]:
+    stop = threading.Event()
+    alive = threading.Event()
+    alive.set()
+
+    def renew() -> None:
+        while not stop.wait(30.0):
+            if not store.heartbeat_auto_run(run_date, account_id, owner, token):
+                alive.clear()
+                return
+
+    thread = threading.Thread(target=renew, name="qm-paper-lease-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield alive
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
+class PaperAutomationWorker:
+    """Persistent daily runner for accounts that explicitly enable auto trading."""
+
+    def __init__(
+        self,
+        service: PaperService | None = None,
+        poll_seconds: float = 45.0,
+        session_resolver: Callable[[datetime | None], SessionExpectation] = expected_session,
+    ):
+        self.service = service or PaperService()
+        self.identity = WorkerIdentity.create("paper-auto")
+        self.poll_seconds = max(1.0, float(poll_seconds))
+        self.session_resolver = session_resolver
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._running = threading.Event()
+
+    @property
+    def idle(self) -> bool:
+        return not self._running.is_set()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._wake.set()
+        self._thread = threading.Thread(
+            target=self._run, name="quantmaster-paper-auto", daemon=True,
+        )
+        self._thread.start()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=max(0.1, timeout))
+
+    def run_due_once(self, now: datetime | None = None) -> dict:
+        expectation = self.session_resolver(now)
+        if not expectation.ready:
+            return {
+                "status": "calendar_unavailable",
+                "accounts": [],
+                "calendar": expectation.as_dict(),
+                "reason": expectation.reason,
+            }
+        run_date = expectation.session
+        accounts = [
+            account for account in self.service.store.accounts()
+            if account["status"] == "active" and account["mode"] == "auto"
+        ]
+        if not accounts:
+            return {"status": "idle", "accounts": []}
+        results = []
+        for account in accounts:
+            account_id = str(account["id"])
+            token = self.service.store.claim_auto_run(
+                run_date, account_id, self.identity.value,
+            )
+            if not token:
+                continue
+            self._running.set()
+            try:
+                with _paper_auto_heartbeat(
+                    self.service.store,
+                    run_date,
+                    account_id,
+                    self.identity.value,
+                    token,
+                ) as lease_alive:
+                    result = self.service.run_auto_account(
+                        account_id, expected_signal_date=run_date,
+                    )
+                    completed = lease_alive.is_set() and self.service.store.complete_auto_run(
+                        run_date, account_id, self.identity.value, token, result,
+                    )
+                if completed:
+                    self.service.store.clear_runtime_warning(account_id)
+                    results.append(result)
+                else:
+                    results.append({
+                        "status": "lease_lost", "account_id": account_id,
+                        "error": "自动运行租约已由其他 worker 接管",
+                    })
+            except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                message = str(exc)[:500]
+                self.service.store.set_warning(account_id, message)
+                self.service.store.fail_auto_run(
+                    run_date, account_id, self.identity.value, token, message,
+                )
+                logger.warning("每日模拟交易未完成 account=%s: %s", account_id, exc)
+                results.append({
+                    "status": "failed", "account_id": account_id, "error": message,
+                })
+            finally:
+                self._running.clear()
+        return {
+            "status": "completed" if results and not any(
+                item.get("status") == "failed" for item in results
+            ) else "partial" if results else "already_processed",
+            "accounts": results,
+            "calendar": expectation.as_dict(),
+        }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.run_due_once()
+            except (OSError, sqlite3.Error):
+                logger.exception("模拟盘每日自动执行检查失败")
+            self._wake.wait(self.poll_seconds)
+            self._wake.clear()
+
+
 _service: PaperService | None = None
 _service_root = ""
+_auto_worker: PaperAutomationWorker | None = None
+_auto_worker_root = ""
+_paper_singleton_lock = threading.RLock()
 
 
 def get_paper_service() -> PaperService:
     global _service, _service_root
     root = str(get_config().data_root.resolve())
-    if _service is None or root != _service_root:
-        _service = PaperService()
-        _service_root = root
+    with _paper_singleton_lock:
+        if _service is None or root != _service_root:
+            _service = PaperService()
+            _service_root = root
     return _service
+
+
+def get_paper_automation_worker() -> PaperAutomationWorker:
+    global _auto_worker, _auto_worker_root
+    root = str(get_config().data_root.resolve())
+    with _paper_singleton_lock:
+        if _auto_worker is None or root != _auto_worker_root:
+            if _auto_worker is not None:
+                _auto_worker.stop()
+            _auto_worker = PaperAutomationWorker(get_paper_service())
+            _auto_worker_root = root
+        return _auto_worker

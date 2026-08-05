@@ -107,6 +107,7 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
         max_tokens=settings.max_tokens,
         temperature=settings.temperature,
         timeout=settings.timeout,
+        max_concurrency=settings.max_concurrency,
     )
     reset_web_search_capability(config)
     client = LLMClient(config)

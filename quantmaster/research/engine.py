@@ -224,7 +224,11 @@ class ResearchEngine:
         blocks = []
         for dataset_id in sorted(pending_datasets):
             state = capabilities[dataset_id]["state"]
-            if state != "available":
+            if state == "temporary_failure":
+                warnings.append(
+                    f"{dataset_id} 上次同步暂时失败，本次计划将重新探测数据源"
+                )
+            elif state != "available":
                 blocks.append({
                     "dataset_id": dataset_id,
                     "state": state,

@@ -20,12 +20,16 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert temperature.status_code == 200
     assert temperature.json()["meta"]["quality"]["status"] == "cold"
     assert temperature.json()["meta"]["quality"]["coverage"] is None
-    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V1"
+    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V2"
 
     overview = client.get("/api/v1/rotation/overview").json()
     assert overview["meta"]["quality"]["coverage"] is None
     assert overview["meta"]["quality"]["available_dimensions"] == 0
     assert overview["meta"]["quality"]["total_dimensions"] == 4
+    assert overview["data"]["windows"] == [1, 3, 5, 20]
+    assert set(overview["data"]["dimensions"]) == {
+        "market", "industries", "themes", "etf",
+    }
 
     taxonomy = client.get("/api/v1/rotation/taxonomy/industries")
     assert taxonomy.status_code == 200
@@ -39,8 +43,38 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert 'id="market-temperature-view"' in page.text
     assert 'id="market-style-view"' in page.text
     assert 'id="tab-rotation"' in page.text
+    assert 'data-rotation-page="overview"' in page.text
+    assert 'id="rotation-overview-view"' in page.text
     assert 'data-rotation-page="themes"' in page.text
+    assert 'id="rotation-radar-view"' not in page.text
     assert 'src="/static/rotation.js"' in page.text
+
+
+def test_manual_rotation_refresh_allows_one_tushare_recovery_probe(monkeypatch):
+    from quantmaster.rotation.service import get_rotation_worker
+
+    client = _client()
+    calls = []
+    worker = get_rotation_worker()
+    monkeypatch.setattr(
+        "quantmaster.data.resilience.PROVIDER_HEALTH.reset",
+        lambda lane: calls.append(lane) or {},
+    )
+    monkeypatch.setattr(worker, "start", lambda: None)
+    monkeypatch.setattr(
+        worker, "submit",
+        lambda spec: {
+            "id": "rotation-probe", "status": "queued", "progress": 0,
+            "spec": spec.model_dump(mode="json"), "attempt": 1,
+        },
+    )
+    response = client.post(
+        "/api/v1/market/analytics/refresh",
+        json={"scope": "market", "mode": "incremental", "source": "auto"},
+    )
+
+    assert response.status_code == 202
+    assert calls == ["tushare"]
 
 
 def test_rotation_preferences_validate_known_l2_codes():

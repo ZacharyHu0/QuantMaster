@@ -67,6 +67,13 @@ def _safe_notification_error(value: Any, limit: int = 280) -> str:
     return message if len(message) <= limit else message[:limit - 1] + "…"
 
 
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def _topic_features(text: str) -> set[str]:
     value = text.casefold()
     features = set(re.findall(r"\b\d{6}(?:\.(?:sh|sz|bj))?\b|[a-z]{2,20}", value))
@@ -839,11 +846,9 @@ class AutomationService:
         source_errors = raw_source_errors if isinstance(raw_source_errors, dict) else {}
         raw_annotation = result.get("annotation") or {}
         annotation = raw_annotation if isinstance(raw_annotation, dict) else {}
-        try:
-            analysis_failed = max(0, int(annotation.get("failed") or 0))
-        except (TypeError, ValueError):
-            analysis_failed = 0
-        if not source_errors and not analysis_failed:
+        analysis_failed = _safe_nonnegative_int(annotation.get("failed"))
+        analysis_dead_letter = _safe_nonnegative_int(annotation.get("dead_letter"))
+        if not source_errors and not analysis_dead_letter:
             return None
 
         phases: list[str] = []
@@ -858,15 +863,30 @@ class AutomationService:
                 f"{source}: {_safe_notification_error(error)}"
                 for source, error in list(sorted(source_errors.items()))[:2]
             )
-        if analysis_failed:
+        raw_failure_details = annotation.get("failure_details") or []
+        failure_details = raw_failure_details if isinstance(raw_failure_details, list) else []
+        terminal_details = [
+            value for value in failure_details
+            if isinstance(value, dict) and _safe_nonnegative_int(value.get("dead_letter")) > 0
+        ]
+        error_codes = sorted({
+            str(value.get("code") or "unknown")[:80] for value in terminal_details
+        })
+        if analysis_dead_letter:
             phases.append("analysis")
-            try:
-                processed = max(0, int(annotation.get("processed") or 0))
-                completed = max(0, int(annotation.get("completed") or 0))
-            except (TypeError, ValueError):
-                processed = completed = 0
-            state = "全部分析失败" if processed and analysis_failed >= processed else "部分新闻分析失败"
-            evidence.append(f"{state}：失败 {analysis_failed}/{processed} 条，成功 {completed} 条")
+            processed = _safe_nonnegative_int(annotation.get("processed"))
+            completed = _safe_nonnegative_int(annotation.get("completed"))
+            evidence.append(
+                f"分析重试已耗尽：{analysis_dead_letter} 条进入死信，"
+                f"本轮成功 {completed}/{processed} 条"
+            )
+            for detail in terminal_details[:2]:
+                code = str(detail.get("code") or "unknown")[:80]
+                message = _safe_notification_error(detail.get("message") or "未知错误")
+                evidence.append(f"{code}：{message}")
+            transient = max(0, analysis_failed - analysis_dead_letter)
+            if transient:
+                evidence.append(f"另有 {transient} 条已进入退避队列，不触发重复告警")
         evidence.append(f"运行编号 {run_id[:10]}")
 
         if phases == ["fetch", "analysis"]:
@@ -874,16 +894,17 @@ class AutomationService:
         elif phases == ["fetch"]:
             phase_label = "新闻拉取异常"
         else:
-            phase_label = "新闻分析异常"
+            phase_label = "新闻分析需要处理"
         now = datetime.now(timezone.utc)
         return AlertEvent(
             kind="task_failure", score=100, severity="critical", data_as_of=now.isoformat(),
             evidence=evidence,
             dedupe_key=stable_hash({
-                "news_task_failure": name,
-                "hour": now.strftime("%Y%m%d%H"),
+                "news_pipeline_failure": True,
+                "day": now.strftime("%Y%m%d"),
                 "phases": phases,
                 "sources": sorted(source_errors),
+                "error_codes": error_codes,
             }),
             payload={
                 "title": f"{phase_label}：{NEWS_TASK_LABELS[name]}",
@@ -891,6 +912,9 @@ class AutomationService:
                 "task_label": NEWS_TASK_LABELS[name],
                 "phases": phases,
                 "partial": True,
+                "terminal": bool(analysis_dead_letter),
+                "dead_letter": analysis_dead_letter,
+                "error_codes": error_codes,
             },
         )
 
@@ -1157,52 +1181,15 @@ class AutomationService:
         return {"items": len(items)}
 
     def _task_paper_rebalance_proposal(self) -> dict:
-        from quantmaster.backtest.paper_accounts import get_paper_service
-        from quantmaster.backtest.spec import PaperAccountSpec
+        from quantmaster.backtest.paper_accounts import get_paper_automation_worker
 
-        service = get_paper_service()
-        active_result = service.run_active_accounts()
-        owner_targets = [target for target in self.store.targets()
-                         if target["chat_type"] == "direct" and target["owner_actor"] and target["target"]]
-        if not owner_targets:
-            return {
-                "status": "completed" if active_result["processed"] else "skipped",
-                "reason": "尚未绑定管理员私聊",
-                "active_accounts": active_result,
-            }
-        target = next((value for value in owner_targets if value["id"] == "feishu_owner"), owner_targets[0])
-        account = next(
-            (item for item in service.store.accounts() if item["name"] == "自动化模拟盘"), None,
-        )
-        if account is None:
-            account = service.create_account(PaperAccountSpec.model_validate({
-                "name": "自动化模拟盘",
-                "strategy": {
-                    "kind": "swing", "top_n": 5, "holding_days": 3, "cap_weight": 0.25,
-                },
-                "universe": get_config().automation.primary_universe,
-                "initial_capital": 1_000_000,
-                "mode": "manual",
-            }))
-        proposal = service.propose(account["id"])
-        if proposal.get("status") == "not_due":
-            return {"status": "skipped", "reason": proposal.get("message", "今天不是调仓日")}
-        route_key = f"{target['channel']}:{target['account_id']}:{target['target']}"
-        pending = self.store.create_pending_action(
-            kind="paper_rebalance", actor=target["owner_actor"], route_key=route_key,
-            payload={"account_id": account["id"], "cycle_id": proposal["id"]}, ttl_seconds=300,
-        )
-        event = AlertEvent(
-            kind="task_report", score=0, severity="info", data_as_of=proposal["signal_date"],
-            evidence=[f"计划调整 {len(proposal.get('orders') or [])} 只标的",
-                      f"确认码 {pending['code']}，5 分钟内在当前私聊确认"],
-            dedupe_key=stable_hash({"paper_proposal": proposal["signal_date"]}),
-            payload={"title": "模拟调仓待确认", "intent_id": pending["intent_id"]},
-        )
-        self.process_event(event, {target["id"]})
-        return {"status": "pending_confirmation", "intent_id": pending["intent_id"],
-                "planned": len(proposal.get("orders") or []),
-                "active_accounts": active_result}
+        worker = get_paper_automation_worker()
+        worker.start()
+        worker.wake()
+        return {
+            "status": "queued",
+            "reason": "已唤醒统一模拟盘 worker；账户租约与交易日校验由 worker 处理",
+        }
 
     # ---------- 私聊二阶段写入 ----------
 

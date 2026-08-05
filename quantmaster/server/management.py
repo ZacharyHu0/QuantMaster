@@ -117,6 +117,7 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
         result.setdefault("warnings", []).append("Quant Lab 配置已保存，但 Worker 热应用失败")
     if "data.root" in changed:
         try:
+            from quantmaster.backtest.paper_accounts import get_paper_automation_worker
             from quantmaster.backtest.workbench import get_backtest_worker
             from quantmaster.data.maintenance import data_refresh_manager
             from quantmaster.research.jobs import get_research_job_manager
@@ -124,6 +125,7 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
             data_refresh_manager.start()
             get_research_job_manager().start()
             get_backtest_worker().start()
+            get_paper_automation_worker().start()
             apply_status["data_workers"] = {"status": "applied"}
         except Exception as exc:
             apply_status["data_workers"] = {

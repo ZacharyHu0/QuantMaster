@@ -1048,7 +1048,7 @@ def test_openai_native_search_parses_citations(monkeypatch):
             }
 
     monkeypatch.setattr(
-        "quantmaster.ai.llm.httpx.post",
+        "quantmaster.ai.llm.httpx.Client.post",
         lambda *args, **kwargs: calls.append(kwargs) or Response(),
     )
     client = LLMClient(LLMConfig(provider="openai", model="gpt-test", api_key="secret"))
@@ -1093,7 +1093,7 @@ def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatc
         }),
     ])
     monkeypatch.setattr(
-        "quantmaster.ai.llm.httpx.post",
+        "quantmaster.ai.llm.httpx.Client.post",
         lambda *args, **kwargs: calls.append(kwargs["json"]) or next(responses),
     )
     client = LLMClient(LLMConfig(
@@ -1159,7 +1159,7 @@ def test_anthropic_native_search_resumes_pause_turn_and_parses_sources(monkeypat
     )
 
     monkeypatch.setattr(
-        "quantmaster.ai.llm.httpx.post",
+        "quantmaster.ai.llm.httpx.Client.post",
         lambda *args, **kwargs: calls.append(kwargs) or next(responses),
     )
     client = LLMClient(
@@ -1191,7 +1191,7 @@ def test_unsupported_gateway_search_is_cached_then_reprobed(monkeypatch):
         text = "web_search is unsupported"
 
     monkeypatch.setattr(
-        "quantmaster.ai.llm.httpx.post",
+        "quantmaster.ai.llm.httpx.Client.post",
         lambda *args, **kwargs: calls.append(kwargs) or Response(),
     )
     client = LLMClient(

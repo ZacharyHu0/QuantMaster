@@ -123,7 +123,10 @@ class TestBasics:
         assert "{'A股指数':majorIndexes}" in resp.text
         assert "主要指数区块已保留" in resp.text
         assert "function marketChangeSeries" in resp.text
+        assert "function marketSparkParsedDate" in resp.text
+        assert "function marketSparkMonth" in resp.text
         assert "function marketSparkOption" in resp.text
+        assert "type:'category',data:categories,show:true" in resp.text
         assert "id:'market-spark-latest'" in resp.text
         assert "区间涨跌" in resp.text
         assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text

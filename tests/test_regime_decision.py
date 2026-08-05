@@ -177,6 +177,8 @@ def test_decision_snapshots_are_reproducible(panel, tmp_path):
     store.save(report, "demo")
     assert store.latest("demo") == report
     assert len(store.history("demo")) == 1
+    assert len(store.history("demo", horizon=3)) == 1
+    assert store.history("demo", horizon=1) == []
     assert store.history("other") == []
 
 

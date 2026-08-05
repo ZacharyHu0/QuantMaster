@@ -111,6 +111,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('[name="llm.base_url"]').fill("http://127.0.0.1:9/v1")
         page.locator('[name="llm.model"]').fill("manual-local-model")
         page.locator('[name="llm.reasoning_effort"]').select_option("high")
+        page.locator('[name="llm.max_concurrency"]').fill("2")
         page.locator('[data-check="llm-models"]').click()
         model_check = page.locator('[data-check-result="llm-models"]')
         playwright_sync.expect(model_check).to_have_class(
@@ -121,6 +122,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert "检测中" not in check_text
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
         assert page.locator('[name="llm.reasoning_effort"]').input_value() == "high"
+        assert page.locator('[name="llm.max_concurrency"]').input_value() == "2"
         _wait_for_class(page.locator("#settings-save-state"), "saved")
 
         page.locator('[data-settings-section="automation"]').click()
@@ -650,22 +652,22 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
             metrics = page.evaluate(
                 """() => {
                   const scroller = document.querySelector('.decision-table-scroll');
-                  const shell = document.querySelector('.decision-detail-shell');
-                  const chart = document.querySelector('.decision-kline-canvas');
-                  const scrollRect = scroller.getBoundingClientRect();
-                  const shellRect = shell.getBoundingClientRect();
-                  const chartRect = chart.getBoundingClientRect();
-                  return {
+                      const shell = document.querySelector('.decision-detail-shell');
+                      const chart = document.querySelector('.decision-kline-canvas');
+                      const scrollRect = scroller.getBoundingClientRect();
+                      const shellRect = shell.getBoundingClientRect();
+                      const chartRect = chart.getBoundingClientRect();
+                      return {
                     clientWidth: scroller.clientWidth,
                     scrollWidth: scroller.scrollWidth,
                     scrollLeft: scroller.scrollLeft,
                     scrollRight: scrollRect.right,
                     shellLeft: shellRect.left,
                     shellRight: shellRect.right,
-                    shellWidth: shellRect.width,
-                    chartRight: chartRect.right,
-                    documentFits: document.documentElement.scrollWidth <= window.innerWidth,
-                  };
+                        shellWidth: shellRect.width,
+                        chartRight: chartRect.right,
+                        documentFits: document.documentElement.scrollWidth <= window.innerWidth,
+                      };
                 }"""
             )
             assert metrics["shellWidth"] <= metrics["clientWidth"] + 1, metrics
@@ -739,6 +741,10 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
               return {
                 series: option.series.map(item => item.name),
                 tooltip: option.tooltip[0].show,
+                axisType: option.xAxis[0].type,
+                axisVisible: option.xAxis[0].show,
+                axisDates: option.xAxis[0].data,
+                axisLabelSize: option.xAxis[0].axisLabel.fontSize,
                 areaOpacity: option.series[0].areaStyle.opacity,
                 lineColor: option.series[0].lineStyle.color,
                 endpointPoints: option.series[1].data.length,
@@ -749,10 +755,17 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert spark_option == {
             "series": ["区间走势", "最新位置"],
             "tooltip": True,
+            "axisType": "category",
+            "axisVisible": True,
+            "axisDates": [1784505600000, 1784592000000],
+            "axisLabelSize": 9,
             "areaOpacity": 0.1,
             "lineColor": "#24a06b",
             "endpointPoints": 1,
         }
+        assert page.evaluate("marketSparkMonth(1784505600000, true)") == "2026.07"
+        assert page.evaluate("marketSparkMonth('1784505600000', true)") == "2026.07"
+        assert page.evaluate("marketSparkMonth(1784505600000, false)") == "07月"
         assert index_section.bounding_box()["y"] < personal_section.bounding_box()["y"]
 
         page.set_viewport_size({"width": 390, "height": 844})
@@ -1141,9 +1154,13 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         assert page.url.endswith("#market/style")
 
         page.get_by_role("button", name="轮动", exact=True).click()
-        page.locator("#rotation-radar-view").wait_for(state="visible")
-        assert page.url.endswith("#rotation/radar")
-        _wait_for_text(page.locator("#rotation-radar-content"), "等待")
+        page.locator("#rotation-overview-view").wait_for(state="visible")
+        assert page.url.endswith("#rotation/overview")
+        _wait_for_text(page.locator("#rotation-overview-content"), "等待")
+        assert page.locator("#rotation-overview-view #rotation-industry-scatter").count() == 0
+        page.goto(f"{url}/#rotation/radar")
+        page.locator("#rotation-overview-view").wait_for(state="visible")
+        assert page.url.endswith("#rotation/overview")
         assert "· 0%" not in page.locator(
             '[data-rotation-meta="rotation"] .rotation-meta-line'
         ).inner_text()
@@ -1151,11 +1168,13 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page.locator("#rotation-industry-view").wait_for(state="visible")
         page.get_by_role("tab", name="细分题材", exact=True).click()
         page.locator("#rotation-themes-view").wait_for(state="visible")
-        _wait_for_text(page.locator("#rotation-themes-content"), "等待")
+        playwright_sync.expect(page.locator("#rotation-themes-content")).to_contain_text(
+            re.compile("等待|计算"), timeout=30_000,
+        )
         theme_meta = page.locator(
             '[data-rotation-meta="rotation"] .rotation-meta-line'
         ).inner_text()
-        assert "等待快照" in theme_meta
+        assert "等待快照" in theme_meta or "正在计算" in theme_meta
         assert "· 0%" not in theme_meta
         page.get_by_role("tab", name="宽基资金", exact=True).click()
         page.locator("#rotation-etf-view").wait_for(state="visible")

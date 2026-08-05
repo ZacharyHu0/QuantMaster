@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from quantmaster.ai.crawler import AICrawler, NewsStore
 from quantmaster.ai.news_sources import NewsSourceStore
@@ -84,7 +84,19 @@ class ReanalyzeRequest(StrictModel):
     ids: list[int] | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     batch_size: int = Field(default=5, ge=1, le=10)
-    mode: Literal["pending", "dead_letter"] = "pending"
+    mode: Literal["pending", "failed", "dead_letter"] = "pending"
+
+    @field_validator("ids")
+    @classmethod
+    def validate_ids(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        selected = list(dict.fromkeys(value))
+        if len(selected) > 1000:
+            raise ValueError("一次最多处理 1000 个资讯 ID")
+        if any(item <= 0 for item in selected):
+            raise ValueError("资讯 ID 必须是正整数")
+        return selected
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -233,7 +245,16 @@ def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
         crawler = AICrawler()
         if value.mode == "dead_letter":
             return crawler.recover_dead_letters(
-                ids=value.ids, limit=min(value.limit, 20), batch_size=value.batch_size,
+                ids=value.ids,
+                limit=None if value.ids is None else value.limit,
+                batch_size=value.batch_size,
+                manual=True,
+            )
+        if value.mode == "failed":
+            return crawler.retry_failed(
+                ids=value.ids,
+                limit=None if value.ids is None else value.limit,
+                batch_size=value.batch_size,
             )
         if value.ids is None:
             return crawler.enrich_pending(limit=value.limit, batch_size=value.batch_size)
@@ -254,30 +275,21 @@ def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> Streamin
     _require_csrf(request)
     crawler = AICrawler()
     selected_ids = value.ids
-    if value.mode == "dead_letter":
-        if not crawler.store.llm_recently_healthy():
-            selected_ids = []
-        else:
-            selected_ids = crawler.store.prepare_dead_letter_recovery(
-                limit=min(value.limit, 20), ids=value.ids,
-            )
-    elif value.ids is not None:
+    if value.mode == "pending" and value.ids is not None:
         crawler.store.reset_analysis(value.ids)
 
     def generate() -> Iterator[str]:
         try:
-            if value.mode == "dead_letter" and not selected_ids:
-                yield strict_json_dumps({
-                    "type": "start", "total": 0, "processed": 0,
-                    "completed": 0, "failed": 0, "batch_count": 0,
-                }) + "\n"
-                yield strict_json_dumps({
-                    "type": "complete", "processed": 0, "completed": 0,
-                    "failed": 0, "completed_ids": [],
-                }) + "\n"
-                return
             for event in crawler.enrich_pending_events(
-                ids=selected_ids, limit=value.limit, batch_size=value.batch_size,
+                ids=selected_ids,
+                limit=(
+                    len(selected_ids) if selected_ids is not None
+                    else None if value.mode in {"failed", "dead_letter"}
+                    else value.limit
+                ),
+                batch_size=value.batch_size,
+                mode=value.mode,
+                manual=value.mode in {"failed", "dead_letter"},
             ):
                 yield strict_json_dumps(event) + "\n"
         except Exception as exc:

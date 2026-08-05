@@ -63,10 +63,14 @@ def test_reasoning_effort_is_saved_and_validated_per_provider(tmp_path):
     manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
     update = _update(manager)
     update.llm.reasoning_effort = "high"
+    update.llm.max_concurrency = 3
     result = manager.save(update)
 
     assert "llm.reasoning_effort" in result["changed_fields"]
+    assert "llm.max_concurrency" in result["changed_fields"]
+    assert result["restart_required"] == []
     assert manager.public()["llm"]["reasoning_effort"] == "high"
+    assert manager.public()["llm"]["max_concurrency"] == 3
 
     raw = _update(manager).model_dump()
     raw["llm"]["reasoning_effort"] = "none"
@@ -190,6 +194,8 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
     update = _update(manager)
     update.news.annotation_batch_size = 7
     update.news.annotation_items_per_run = 35
+    update.news.annotation_timeout = 150
+    update.news.annotation_reasoning_effort = "medium"
     update.lab.enabled = False
     update.lab.horizons = [3, 7]
     result = manager.save(update)
@@ -197,6 +203,7 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
     assert result["restart_required"] == []
     assert {
         "news.annotation_batch_size", "news.annotation_items_per_run",
+        "news.annotation_timeout",
         "lab.enabled", "lab.horizons",
     }.issubset(result["changed_fields"])
     assert manager.public()["config_revision"] == result["config_revision"]

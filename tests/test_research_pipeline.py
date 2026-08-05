@@ -313,6 +313,28 @@ def test_planner_merges_provider_work_and_expands_warmup():
     assert not plan.capability_blocks
 
 
+def test_planner_retries_temporary_provider_failure_instead_of_permanently_blocking():
+    class TemporaryFailureAdapter(FakePlanningAdapter):
+        def capabilities(self):
+            values = super().capabilities()
+            for value in values:
+                if value["dataset_id"] == "stock_bars":
+                    value.update({
+                        "state": "temporary_failure",
+                        "detail": "tushare 暂停请求，约 1800 秒后探测",
+                    })
+            return values
+
+    engine = ResearchEngine(adapter=TemporaryFailureAdapter())
+    plan = engine.plan(
+        "2024-03-01", "2024-03-05", asset_classes=(AssetClass.STOCK,),
+        datasets=("stock_bars",), mode="incremental",
+    )
+
+    assert not plan.capability_blocks
+    assert any("重新探测数据源" in warning for warning in plan.warnings)
+
+
 def test_engine_executes_offline_from_local_trading_dates_and_publishes_diagnostics():
     lake = ResearchLake()
     bars = synthetic_bars(days=32, symbols=4)

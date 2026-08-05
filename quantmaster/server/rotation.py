@@ -86,6 +86,13 @@ def market_structure() -> dict[str, Any]:
 
 @router.post("/market/analytics/refresh", status_code=202)
 def refresh_market_analytics(value: RotationRefreshRequest) -> dict[str, Any]:
+    if value.source == "auto":
+        # A button click is an explicit operator recovery attempt.  Let the first
+        # Tushare call enter the circuit's half-open probe instead of repeatedly
+        # rebuilding a stale snapshot throughout the previous cooldown window.
+        from quantmaster.data.resilience import PROVIDER_HEALTH
+
+        PROVIDER_HEALTH.reset("tushare")
     worker = get_rotation_worker()
     worker.start()
     job = worker.submit(RotationJobSpec.model_validate(value.model_dump(mode="json")))

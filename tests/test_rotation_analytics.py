@@ -10,6 +10,7 @@ from quantmaster.rotation.analytics import (
     compute_market_temperature,
     compute_trend_matrices,
     estimate_etf_flows,
+    map_theme_industries,
 )
 from quantmaster.rotation.taxonomy import strict_l1_groups
 
@@ -81,7 +82,37 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
         assert item["eligible_count"] <= item["member_count"]
         assert item["grade"] in {"A", "B", "C", "D"}
         assert item["stage"] in result["summary"]["stages"]
+        assert set(item["signals"]) == {"1", "3", "5", "20"}
+        for signal in item["signals"].values():
+            assert signal["rotation_change_pp"] == round(
+                signal["strong_change_pp"] - signal["weak_change_pp"], 2,
+            )
+            assert signal["member_return"] is not None
+            assert signal["excess_return"] is not None
+            assert 0 <= signal["advance_ratio"] <= 1
+            assert signal["amount_activity"] is not None
         assert len(result["details"][item["code"]]["history"]) >= 20
+    assert result["definition"]["windows"] == [1, 3, 5, 20]
+
+
+def test_theme_industry_mapping_uses_member_overlap_and_auditable_thresholds():
+    symbols = [f"{600000 + index:06d}.SH" for index in range(16)]
+    industries = {
+        "801080.SI": {"name": "电子", "level": "L1", "members": symbols[:8]},
+        "801750.SI": {"name": "计算机", "level": "L1", "members": symbols[8:]},
+    }
+    themes = {
+        "strong": {"members": [*symbols[:6], *symbols[8:10]]},
+        "thin": {"members": [symbols[0], symbols[8], symbols[9], symbols[10]]},
+    }
+
+    result = map_theme_industries(themes, industries)
+
+    assert result["strong"]["primary_industry"]["code"] == "801080.SI"
+    assert result["strong"]["primary_industry"]["overlap_count"] == 6
+    assert result["strong"]["industry_mapping_coverage"] == 1.0
+    assert result["thin"]["primary_industry"]["code"] == "801750.SI"
+    assert result["thin"]["primary_industry"]["overlap_count"] == 3
 
 
 def test_stage_rules_are_deterministic_at_boundaries():
@@ -116,8 +147,34 @@ def test_etf_flow_uses_nav_then_marks_close_fallback():
 
     by_symbol = {item["symbol"]: item for item in result["items"]}
     assert by_symbol["510300.SH"]["flow"] == 41.0
+    assert by_symbol["510300.SH"]["flows"]["1"] == 41.0
+    assert by_symbol["510300.SH"]["flows"]["3"] is None
     assert by_symbol["510300.SH"]["price_source"] == "nav"
     assert by_symbol["159915.SZ"]["flow"] == -11.0
     assert result["summary"]["nav_count"] == 1
     assert result["summary"]["close_fallback_count"] == 1
+    assert result["summary"]["windows"]["1"]["net_flow"] == 30.0
+    assert result["definition"]["windows"] == [1, 3, 5, 20]
     assert result["daily"][-1]["cumulative_ma5"] is None
+
+
+def test_etf_flow_preserves_disclosed_benchmark_across_windows():
+    rows = []
+    for offset, trade_date in enumerate(pd.bdate_range("2026-07-01", periods=21)):
+        rows.append({
+            "trade_date": trade_date,
+            "symbol": "510300.SH",
+            "name": "沪深300ETF",
+            "benchmark": "" if offset < 10 else "沪深300指数",
+            "category": "大盘宽基",
+            "shares": 100 + offset,
+            "nav": 4.0,
+        })
+
+    result = estimate_etf_flows(pd.DataFrame(rows))
+
+    assert result["items"][0]["benchmark"] == "沪深300指数"
+    assert result["items"][0]["flows"]["20"] == 80.0
+    assert len(result["benchmarks"]) == 1
+    assert result["benchmarks"][0]["benchmark"] == "沪深300指数"
+    assert result["benchmarks"][0]["flows"]["20"] == 80.0

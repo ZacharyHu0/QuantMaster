@@ -31,6 +31,8 @@ class LLMConfig:
     max_tokens: int = 2048
     temperature: float = 0.3
     timeout: float = 60.0
+    max_concurrency: int = 1              # 所有 LLM 请求共享的全局并发上限
+    queue_timeout: float = 30.0           # 并发闸门 FIFO 排队最长等待秒数
 
 
 @dataclass
@@ -77,6 +79,8 @@ class NewsConfig:
     annotation_enabled: bool = True
     annotation_batch_size: int = 10
     annotation_items_per_run: int = 100
+    annotation_timeout: float = 180.0
+    annotation_reasoning_effort: str = "medium"
     factor_halflife_days: float = 3.0
     factor_min_confidence: float = 0.35
 
@@ -159,6 +163,10 @@ def _apply_env(cfg: Config) -> None:
     cfg.llm.base_url = env.get("QM_LLM_BASE_URL", cfg.llm.base_url)
     cfg.llm.reasoning_effort = env.get(
         "QM_LLM_REASONING_EFFORT", cfg.llm.reasoning_effort)
+    cfg.llm.max_concurrency = int(
+        env.get("QM_LLM_MAX_CONCURRENCY", cfg.llm.max_concurrency))
+    cfg.llm.queue_timeout = float(
+        env.get("QM_LLM_QUEUE_TIMEOUT", cfg.llm.queue_timeout))
     cfg.data.tushare_token = env.get("TUSHARE_TOKEN", cfg.data.tushare_token)
     cfg.data.root = env.get("QM_DATA_ROOT", cfg.data.root)
     cfg.data.akshare_retries = int(
@@ -225,7 +233,8 @@ def _apply_managed_secrets(cfg: Config, raw: dict) -> None:
 
 def load_config(path: str | Path | None = None) -> Config:
     cfg = Config()
-    candidates = [Path(path)] if path else DEFAULT_CONFIG_PATHS
+    explicit = path or os.environ.get("QM_CONFIG_PATH", "").strip()
+    candidates = [Path(explicit)] if explicit else DEFAULT_CONFIG_PATHS
     raw: dict = {}
     for candidate in candidates:
         if candidate.is_file():

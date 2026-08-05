@@ -75,7 +75,7 @@ class DecisionStore:
 
     def history(
         self, universe: str | None = None, limit: int = 30,
-        profile: str | None = None,
+        profile: str | None = None, horizon: int | None = None,
     ) -> list[dict[str, Any]]:
         if limit < 1:
             return []
@@ -86,6 +86,9 @@ class DecisionStore:
         if profile:
             filters.append("profile=?")
             values.append(profile)
+        if horizon is not None:
+            filters.append("horizon=?")
+            values.append(int(horizon))
         query = "SELECT payload FROM selection_snapshots "
         if filters:
             query += "WHERE " + " AND ".join(filters) + " "

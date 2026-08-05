@@ -13,6 +13,7 @@ from tools.release_sync import (
     release_assignments,
     release_today,
     validate_metadata,
+    verify_previous_release_tag,
     version_tuple,
 )
 
@@ -58,6 +59,26 @@ def test_validate_metadata_reports_mismatch_and_stale_date():
     errors = validate_metadata(release, changelog, today=date(2026, 7, 28))
     assert any("实际发布日期" in error for error in errors)
     assert any("顶部版本" in error for error in errors)
+
+
+def test_historical_metadata_allows_past_date_but_rejects_future_date():
+    release, changelog = valid_sources()
+    assert validate_metadata(
+        release, changelog, today=date(2026, 7, 28), require_today=False,
+    ) == []
+    errors = validate_metadata(
+        release, changelog, today=date(2026, 7, 26), require_today=False,
+    )
+    assert any("不得晚于" in error for error in errors)
+
+
+def test_previous_release_tag_must_point_to_head(monkeypatch):
+    from tools import release_sync
+
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    values = {("rev-list", "-n", "1", "v1.2.3"): "abc", ("rev-parse", "HEAD"): "def"}
+    monkeypatch.setattr(release_sync, "git_text", lambda args, required=True: values[tuple(args)])
+    assert "未指向" in verify_previous_release_tag("1.2.3")[0]
 
 
 def test_release_clock_uses_asia_shanghai_date_at_utc_boundary():

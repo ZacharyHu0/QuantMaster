@@ -763,7 +763,7 @@
   }
 
   function renderCycles(cycles) {
-    if (!cycles?.length) return '<div class="trading-empty"><strong>暂无调仓周期</strong><span>收盘后生成提案，确认前不会写入成交。</span></div>';
+    if (!cycles?.length) return '<div class="trading-empty"><strong>暂无调仓周期</strong><span>自动账户将在每日收盘数据就绪后生成；手动账户可使用上方按钮。</span></div>';
     return cycles.slice(0, 12).map(cycle => `<section class="paper-cycle" data-cycle-id="${cycle.id}">
       <div class="paper-cycle-head"><div><strong>信号日 ${escapeHtml(cycle.signal_date)}</strong><span class="trading-status ${cycle.status}">${statusLabel[cycle.status] || cycle.status}</span><span>${cycle.execution_date ? `最近处理 ${escapeHtml(cycle.execution_date)}` : '尚未到执行日'}</span></div>
         <div class="paper-cycle-actions">${cycle.status === 'proposed' ? '<button class="trading-primary" type="button" data-cycle-confirm>确认并等待开盘</button>' : ''}</div></div>
@@ -796,7 +796,8 @@
     const account = paperState.accounts.find(item => item.id === accountId);
     if (!account) return;
     document.getElementById('paper-account-title').textContent = account.name;
-    document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · 快照 ${account.strategy_hash.slice(0, 10)}`;
+    const executionMode = account.mode === 'auto' ? '每日自动交易' : '手动运行';
+    document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${executionMode} · 快照 ${account.strategy_hash.slice(0, 10)}`;
     paperActions.hidden = false;
     document.getElementById('paper-propose').disabled = account.status !== 'active';
     document.getElementById('paper-process').disabled = account.status !== 'active';
@@ -807,7 +808,7 @@
     try {
       const payload = await api(`/api/v1/paper/accounts/${accountId}/report`, {cache: 'no-store'});
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderPaperSummary(payload.report)}
-        <div class="trading-history-head"><h3>订单周期</h3><span>确认只会排队，下一可用交易日开盘才撮合</span></div>${renderCycles(payload.cycles)}`;
+        <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
     } catch (error) {
       renderError(paperOut, error, '账户报告读取失败');

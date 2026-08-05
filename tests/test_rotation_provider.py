@@ -85,6 +85,44 @@ class FakeTushare:
         return pd.DatetimeIndex(["2026-07-29", "2026-07-30"])
 
 
+def test_market_history_stops_at_latest_completed_session(tmp_path, monkeypatch):
+    observed: dict[str, str] = {}
+
+    class FakeCatalog:
+        def partitions(self, **kwargs):
+            observed["catalog_end"] = kwargs["end"]
+            return []
+
+    class FakeLake:
+        catalog = FakeCatalog()
+
+    class FakePlan:
+        tasks = ()
+        target_dates = ("2026-08-03",)
+
+    class FakeEngine:
+        def __init__(self, *, lake):
+            assert isinstance(lake, FakeLake)
+
+        def plan(self, start, end, **kwargs):
+            observed["plan_end"] = end
+            return FakePlan()
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.service._expected_market_session",
+        lambda: "2026-08-03",
+    )
+    monkeypatch.setattr("quantmaster.research.lake.ResearchLake", FakeLake)
+    monkeypatch.setattr("quantmaster.research.engine.ResearchEngine", FakeEngine)
+
+    result = RotationProvider(
+        RotationStore(tmp_path / "rotation"), FakeTushare(),
+    ).sync_market_history(lambda *_: None, lambda: False)
+
+    assert observed == {"catalog_end": "2026-08-03", "plan_end": "2026-08-03"}
+    assert result["expected_as_of"] == "2026-08-03"
+
+
 def test_provider_builds_strict_l1_l2_taxonomy(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     provider = RotationProvider(store, FakeTushare())

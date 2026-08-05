@@ -105,8 +105,10 @@ def _feishu_result_lines(result: Any) -> list[str]:
     return lines[:6]
 
 
-def _feishu_footer(kind: Any) -> str:
+def _feishu_footer(kind: Any, payload: dict[str, Any] | None = None) -> str:
     if kind == "task_failure":
+        if (payload or {}).get("terminal"):
+            return "已停止自动重试的资讯可在 QuantMaster 资讯分析队列中核查并恢复。"
         return "系统会按计划重试；若连续出现，请检查自动化任务与数据源状态。"
     if kind == "task_report":
         return "可在 QuantMaster 自动化页面查看完整运行记录。"
@@ -262,7 +264,11 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
                         if key in phases]
         if phase_labels:
             lines.append("**异常阶段**  " + "、".join(phase_labels))
-        impact = "本轮部分结果可用，其余项目将在后续调度中重试。" if payload.get("partial") else (
+        impact = (
+            f"{int(payload.get('dead_letter') or 0)} 条资讯已停止自动重试，请核查后恢复。"
+            if payload.get("terminal") else
+            "本轮部分结果可用，其余项目将在后续调度中重试。"
+        ) if payload.get("partial") else (
             "本轮任务未正常完成，系统将在后续调度中重试。")
         lines.extend([
             f"**影响**  {impact}",
@@ -305,7 +311,7 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
             {"tag": "hr"},
             {"tag": "note", "elements": [{
-                "tag": "plain_text", "content": _feishu_footer(kind),
+                "tag": "plain_text", "content": _feishu_footer(kind, payload),
             }]},
         ],
     }

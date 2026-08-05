@@ -14,6 +14,11 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert report["status"] == "ok"
     assert report["counts"]["high"] == 0
     assert report["metrics"]["sqlite_checked"] >= 2
+    operations = report["metrics"]["operations"]
+    assert operations["news_analysis"]["claims"]["active"] == 0
+    assert operations["llm"]["waiting"] == 0
+    assert operations["trading_calendar"]["ready"] is False
+    assert "rotation_snapshots" in operations
 
 
 def test_deep_doctor_reports_corrupt_sqlite_as_high_risk(isolated_config):
@@ -50,3 +55,16 @@ def test_api_doctor_flattens_lazy_included_routers():
     included = SimpleNamespace(original_router=nested, include_context=context)
 
     assert _route_paths([included, object()]) == {"/api/v1/jobs"}
+
+
+def test_operational_metrics_degrade_without_hiding_failure(monkeypatch):
+    from quantmaster import operational_diagnostics
+
+    monkeypatch.setattr(
+        operational_diagnostics,
+        "collect_operational_metrics",
+        lambda: (_ for _ in ()).throw(RuntimeError("metrics offline")),
+    )
+    assert operational_diagnostics.safe_operational_metrics() == {
+        "status": "degraded", "error": "RuntimeError: metrics offline",
+    }

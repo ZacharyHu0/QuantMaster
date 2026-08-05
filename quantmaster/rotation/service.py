@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import sqlite3
@@ -10,6 +11,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,11 +23,13 @@ from quantmaster.data.instruments import InstrumentStore
 from quantmaster.data.storage import BarStore
 from quantmaster.rotation.analytics import (
     ALGORITHM_VERSION,
+    ROTATION_WINDOWS,
     analyze_group_rotation,
     compute_market_structure,
     compute_market_temperature,
     compute_trend_matrices,
     estimate_etf_flows,
+    map_theme_industries,
 )
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.store import (
@@ -41,6 +45,7 @@ from quantmaster.rotation.taxonomy import (
 )
 from quantmaster.runtime.jobs import WorkerIdentity
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.trading_sessions import expected_session
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
@@ -62,17 +67,9 @@ def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:
 
 
 def _expected_market_session(now: datetime | None = None) -> str:
-    """Best local expectation used to expose stale snapshots without a network call."""
-    current = now or datetime.now(ZoneInfo("Asia/Shanghai"))
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-    else:
-        current = current.astimezone(ZoneInfo("Asia/Shanghai"))
-    cutoff = pd.Timestamp(current.date())
-    if (current.hour, current.minute) < (15, 30):
-        cutoff -= pd.Timedelta(days=1)
-    sessions = pd.bdate_range(cutoff - pd.Timedelta(days=10), cutoff)
-    return str(sessions[-1].date()) if len(sessions) else str(cutoff.date())
+    """Latest completed session backed by an official or verified local calendar."""
+    expectation = expected_session(now)
+    return expectation.session if expectation.ready else ""
 
 
 def _mark_stale(
@@ -308,6 +305,129 @@ def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any
     return result
 
 
+def _load_l1_groups(store: RotationStore, expected_count: int) -> dict[str, dict[str, Any]]:
+    strict_l1 = dict(SW2021_L1)
+    dedicated_l1 = {
+        str(node.get("code")): node for node in store.taxonomy_nodes("L1")
+        if node.get("members")
+        and strict_l1.get(str(node.get("code"))) == str(node.get("name") or "")
+    }
+    dedicated_count = sum(len(node.get("members") or []) for node in dedicated_l1.values())
+    return (
+        dedicated_l1
+        if dedicated_count >= max(1000, round(expected_count * 0.70))
+        else strict_l1_groups(load_cached_industry_map())
+    )
+
+
+def _signal_row(item: dict[str, Any], window: int) -> dict[str, Any]:
+    signal = dict((item.get("signals") or {}).get(str(window)) or {})
+    return {
+        "code": str(item.get("code") or ""),
+        "name": str(item.get("name") or ""),
+        "level": str(item.get("level") or ""),
+        "stage": str(item.get("stage") or ""),
+        "stage_label": str(item.get("stage_label") or ""),
+        "eligible_count": int(item.get("eligible_count") or 0),
+        "member_count": int(item.get("member_count") or 0),
+        "strong_ratio": item.get("strong_ratio"),
+        "weak_ratio": item.get("weak_ratio"),
+        "primary_industry": item.get("primary_industry"),
+        "signal": signal,
+    }
+
+
+def _rank_window(items: list[dict[str, Any]], window: int) -> dict[str, Any]:
+    available = [
+        item for item in items
+        if (item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp")
+        is not None
+    ]
+
+    def key(item: dict[str, Any]) -> tuple[Any, ...]:
+        signal = (item.get("signals") or {}).get(str(window)) or {}
+        return (
+            float(signal.get("rotation_change_pp") or 0.0),
+            float(signal.get("excess_return") or 0.0),
+            int(item.get("eligible_count") or 0),
+            str(item.get("name") or ""),
+        )
+
+    ranked = sorted(available, key=key, reverse=True)
+    return {
+        "available": len(ranked),
+        "improving_count": sum(
+            float((item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp") or 0) > 0
+            for item in ranked
+        ),
+        "retreating_count": sum(
+            float((item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp") or 0) < 0
+            for item in ranked
+        ),
+        "leaders": [_signal_row(item, window) for item in ranked[:10]],
+        "laggards": [_signal_row(item, window) for item in reversed(ranked[-10:])],
+    }
+
+
+def _resonance_rows(
+    industries: list[dict[str, Any]],
+    themes: list[dict[str, Any]],
+    window: int,
+) -> list[dict[str, Any]]:
+    themes_by_industry: dict[str, list[dict[str, Any]]] = {}
+    for theme in themes:
+        primary = theme.get("primary_industry") or {}
+        code = str(primary.get("code") or "")
+        if code:
+            themes_by_industry.setdefault(code, []).append(theme)
+    rows: list[dict[str, Any]] = []
+    for industry in industries:
+        code = str(industry.get("code") or "")
+        industry_signal = (industry.get("signals") or {}).get(str(window)) or {}
+        industry_change = industry_signal.get("rotation_change_pp")
+        linked: list[dict[str, Any]] = []
+        for theme in themes_by_industry.get(code, []):
+            theme_signal = (theme.get("signals") or {}).get(str(window)) or {}
+            change = theme_signal.get("rotation_change_pp")
+            if change is not None:
+                linked.append({
+                    "code": str(theme.get("code") or ""),
+                    "name": str(theme.get("name") or ""),
+                    "rotation_change_pp": float(change),
+                })
+        changes: list[float] = [float(item["rotation_change_pp"]) for item in linked]
+        theme_median = round(float(median(changes)), 2) if changes else None
+        if industry_change is None or len(linked) < 2:
+            status = "insufficient"
+        elif float(industry_change) > 0 and float(theme_median or 0) > 0:
+            status = "improving"
+        elif float(industry_change) < 0 and float(theme_median or 0) < 0:
+            status = "retreating"
+        else:
+            status = "diverging"
+        linked.sort(key=lambda item: (-abs(item["rotation_change_pp"]), item["name"]))
+        rows.append({
+            "code": code,
+            "name": str(industry.get("name") or code),
+            "status": status,
+            "industry_change_pp": industry_change,
+            "industry_excess_return": industry_signal.get("excess_return"),
+            "linked_theme_count": len(linked),
+            "improving_theme_count": sum(item["rotation_change_pp"] > 0 for item in linked),
+            "retreating_theme_count": sum(item["rotation_change_pp"] < 0 for item in linked),
+            "theme_median_change_pp": theme_median,
+            "themes": linked[:3],
+        })
+    order = {"improving": 0, "diverging": 1, "retreating": 2, "insufficient": 3}
+    rows.sort(key=lambda item: (
+        order[item["status"]],
+        -float(item.get("industry_change_pp") or 0.0),
+        -int(item.get("linked_theme_count") or 0),
+        item["name"],
+    ))
+    return rows
+
+
 class RotationService:
     def __init__(
         self,
@@ -317,6 +437,8 @@ class RotationService:
         self.store = store or RotationStore()
         self.jobs = jobs or RotationJobStore()
         self.loader = RotationDataLoader(self.store)
+        self._overview_cache_key: tuple[str, ...] = ()
+        self._overview_cache: dict[str, Any] | None = None
 
     @staticmethod
     def _meta(
@@ -388,6 +510,9 @@ class RotationService:
             previous_snapshot_ids[kind] = str((previous or {}).get("meta", {}).get("snapshot_id") or "")
         need_market = scope in {"all", "close", "market", "industries", "themes"}
         provider_warnings: list[str] = []
+        provider_issues: dict[str, list[str]] = {
+            "market": [], "industries": [], "themes": [], "etf": [],
+        }
         provider_results: dict[str, dict[str, Any]] = {}
         if spec.source == "auto":
             from quantmaster.rotation.provider import RotationProvider
@@ -423,14 +548,18 @@ class RotationService:
             for key, label, operation in operations:
                 try:
                     provider_results[key] = operation()
-                    provider_warnings.extend(
+                    issues = [
                         str(issue) for issue in provider_results[key].get("issues") or []
-                    )
+                    ]
+                    provider_issues[key].extend(issues)
+                    provider_warnings.extend(issues)
                 except InterruptedError:
                     raise
                 except Exception as exc:  # 外部数据源边界：记录后降级到已有快照
                     logger.warning("%s 同步失败，板块联动将使用本地覆盖", label, exc_info=True)
-                    provider_warnings.append(f"{label}同步失败：{str(exc)[:160]}")
+                    warning = f"{label}同步失败：{str(exc)[:160]}"
+                    provider_issues[key].append(warning)
+                    provider_warnings.append(warning)
         close = pd.DataFrame()
         amount = pd.DataFrame()
         names: dict[str, str] = {}
@@ -464,7 +593,7 @@ class RotationService:
             )
             temperature_quality = temperature.pop("quality")
             temperature_quality["issues"] = list(dict.fromkeys([
-                *(temperature_quality.get("issues") or []), *provider_warnings,
+                *(temperature_quality.get("issues") or []), *provider_issues["market"],
             ]))
             temperature_quality = _mark_stale(
                 temperature_quality, as_of, expected_as_of,
@@ -492,20 +621,7 @@ class RotationService:
         l2_groups: dict[str, dict[str, Any]] = {}
         if scope in {"all", "close", "industries"}:
             progress(compute_base + 12, "聚合申万行业", "严格过滤申万 2021 层级")
-            strict_l1 = dict(SW2021_L1)
-            dedicated_l1 = {
-                str(node.get("code")): node for node in self.store.taxonomy_nodes("L1")
-                if node.get("members")
-                and strict_l1.get(str(node.get("code"))) == str(node.get("name") or "")
-            }
-            dedicated_count = sum(
-                len(node.get("members") or []) for node in dedicated_l1.values()
-            )
-            l1_groups = (
-                dedicated_l1
-                if dedicated_count >= max(1000, round(expected_count * 0.70))
-                else strict_l1_groups(load_cached_industry_map())
-            )
+            l1_groups = _load_l1_groups(self.store, expected_count)
             l2_groups = merge_l2_groups(l1_groups, self.store.taxonomy_nodes("L2"))
             industries = analyze_group_rotation(
                 close, {**l1_groups, **l2_groups}, names=names, amount=amount,
@@ -518,7 +634,8 @@ class RotationService:
                 expected=31 + len(l2_groups),
                 issues=[
                     *([] if count >= 28 else ["部分行业未达到 8 只成分与 70% 行情覆盖门槛"]),
-                    *provider_warnings,
+                    *provider_issues["market"],
+                    *provider_issues["industries"],
                 ],
             )
             industry_quality = _mark_stale(industry_quality, as_of, expected_as_of)
@@ -560,8 +677,18 @@ class RotationService:
                 provider_results.get("themes", {}).get("issues") or []
             )
             if themes:
+                if not l1_groups:
+                    l1_groups = _load_l1_groups(self.store, expected_count)
                 theme_data = analyze_group_rotation(
                     close, themes, names=names, amount=amount, kind="theme", trend=trend,
+                )
+                industry_links = map_theme_industries(themes, l1_groups)
+                for item in theme_data["items"]:
+                    item.update(industry_links.get(str(item.get("code")), {}))
+                for code, item in theme_data["details"].items():
+                    item.update(industry_links.get(str(code), {}))
+                theme_data["definition"]["industry_mapping"] = (
+                    "申万一级行业真实成分交集；主行业至少 3 只且占已映射成员 25%"
                 )
                 count = len(theme_data["items"])
                 provider_quality = str(
@@ -573,7 +700,8 @@ class RotationService:
                 quality_issues = list(dict.fromkeys([
                     *([] if count >= 50 else ["概念成分目录仍在积累"]),
                     *theme_provider_issues,
-                    *provider_warnings,
+                    *provider_issues["market"],
+                    *provider_issues["themes"],
                 ]))
                 theme_quality = _status_quality(
                     "complete" if count >= 50 and provider_quality == "complete" else "partial",
@@ -596,7 +724,11 @@ class RotationService:
                 }
                 theme_quality = _status_quality(
                     "cold",
-                    issues=["尚未建立细分题材成分目录", *provider_warnings],
+                    issues=[
+                        "尚未建立细分题材成分目录",
+                        *provider_issues["market"],
+                        *provider_issues["themes"],
+                    ],
                 )
             theme_quality = _mark_stale(theme_quality, as_of, expected_as_of)
             computed["themes"] = self._envelope(
@@ -627,7 +759,7 @@ class RotationService:
                         [f"{close_fallback_count} 只宽基 ETF 缺少单位净值，已使用收盘价"]
                         if close_fallback_count else []
                     ),
-                    *provider_warnings,
+                    *provider_issues["etf"],
                 ],
             )
             etf_snapshot = _snapshot_id(
@@ -733,7 +865,24 @@ class RotationService:
     def snapshot(self, kind: str) -> dict[str, Any]:
         try:
             value = self.store.snapshot(kind) or self.cold(kind)
+            meta = value.setdefault("meta", {})
             quality = value.get("meta", {}).get("quality", {})
+            stored_algorithm = str(meta.get("algorithm_version") or "")
+            if (
+                stored_algorithm != ALGORITHM_VERSION
+                and str(quality.get("status") or "") not in {"cold", "corrupt", "empty"}
+            ):
+                quality = dict(quality)
+                quality["status"] = "stale"
+                quality["issues"] = list(dict.fromkeys([
+                    (
+                        f"快照缺少算法版本，正在升级到 {ALGORITHM_VERSION}"
+                        if not stored_algorithm
+                        else f"快照算法为 {stored_algorithm}，正在升级到 {ALGORITHM_VERSION}"
+                    ),
+                    *(quality.get("issues") or []),
+                ]))
+                meta["quality"] = quality
             if kind == "themes" and str(quality.get("status") or "") == "cold":
                 active = next((
                     job for job in self.jobs.list(50)
@@ -747,7 +896,6 @@ class RotationService:
                     quality["progress"] = max(0, min(100, int(active.get("progress") or 0)))
                     quality["issues"] = ["细分题材目录正在后台构建"]
             if kind in {"temperature", "structure", "industries", "themes"}:
-                meta = value.setdefault("meta", {})
                 expected_as_of = _expected_market_session()
                 as_of = str(meta.get("as_of") or value.get("data", {}).get("as_of") or "")
                 meta["expected_as_of"] = expected_as_of
@@ -792,13 +940,32 @@ class RotationService:
 
     def overview(self) -> dict[str, Any]:
         temperature = self.snapshot("temperature")
+        structure = self.snapshot("structure")
         industries = self.snapshot("industries")
         themes = self.snapshot("themes")
         etf = self.snapshot("etf_flows")
-        metas = [value["meta"] for value in (temperature, industries, themes, etf)]
+        snapshots = (temperature, structure, industries, themes, etf)
+        metas = [value["meta"] for value in snapshots]
+        cache_key = tuple(str(meta.get("snapshot_id") or "") for meta in metas)
+        if self._overview_cache is not None and cache_key == self._overview_cache_key:
+            return copy.deepcopy(self._overview_cache)
         generated = max((str(meta.get("generated_at") or "") for meta in metas), default="")
         as_of = max((str(meta.get("as_of") or "") for meta in metas), default="")
-        qualities = [str(meta.get("quality", {}).get("status") or "cold") for meta in metas]
+        market_parts = [
+            str(value["meta"].get("quality", {}).get("status") or "cold")
+            for value in (temperature, structure)
+        ]
+        market_status = (
+            "complete" if all(value == "complete" for value in market_parts)
+            else "cold" if all(value == "cold" for value in market_parts)
+            else "partial"
+        )
+        qualities = [
+            market_status,
+            str(industries["meta"].get("quality", {}).get("status") or "cold"),
+            str(themes["meta"].get("quality", {}).get("status") or "cold"),
+            str(etf["meta"].get("quality", {}).get("status") or "cold"),
+        ]
         status = "complete" if all(value == "complete" for value in qualities) else (
             "cold" if all(value == "cold" for value in qualities) else "partial"
         )
@@ -813,12 +980,86 @@ class RotationService:
             if str(item.get("level")) == "L1"
             or str(item.get("code") or "").upper() in selected_l2
         ]
+        l1_industries = [
+            item for item in industries["data"].get("items", [])
+            if str(item.get("level")) == "L1"
+        ]
+        theme_items = list(themes["data"].get("items", []))
+        rankings = {
+            str(window): {
+                "industries": _rank_window(l1_industries, window),
+                "themes": _rank_window(theme_items, window),
+            }
+            for window in ROTATION_WINDOWS
+        }
+        resonance = {
+            str(window): _resonance_rows(l1_industries, theme_items, window)
+            for window in ROTATION_WINDOWS
+        }
+        temperature_history = list(temperature["data"].get("history") or [])
+        temperature_changes = {}
+        for window in ROTATION_WINDOWS:
+            if len(temperature_history) > window:
+                latest = temperature_history[-1].get("temperature")
+                previous = temperature_history[-1 - window].get("temperature")
+                temperature_changes[str(window)] = (
+                    round(float(latest) - float(previous), 2)
+                    if latest is not None and previous is not None else None
+                )
+            else:
+                temperature_changes[str(window)] = None
+
+        def dimension_meta(value: dict[str, Any]) -> dict[str, Any]:
+            meta = value.get("meta") or {}
+            quality = meta.get("quality") or {}
+            return {
+                "as_of": str(meta.get("as_of") or ""),
+                "status": str(quality.get("status") or "cold"),
+                "eligible_count": quality.get("eligible_count"),
+                "expected_count": quality.get("expected_count"),
+                "coverage": quality.get("coverage"),
+                "sources": list(meta.get("sources") or []),
+                "issues": list(quality.get("issues") or []),
+            }
+
+        market_dimension = dimension_meta(temperature)
+        market_dimension.update({
+            "status": market_status,
+            "structure_status": market_parts[1],
+            "issues": list(dict.fromkeys([
+                *market_dimension["issues"],
+                *(structure.get("meta", {}).get("quality", {}).get("issues") or []),
+            ])),
+        })
+
         data = {
             "as_of": as_of,
             "temperature": temperature["data"].get("current"),
             "industries": visible_industries[:8],
-            "themes": themes["data"].get("items", [])[:8],
+            "themes": theme_items[:8],
             "etf": etf["data"].get("summary", {}),
+            "windows": list(ROTATION_WINDOWS),
+            "dimensions": {
+                "market": market_dimension,
+                "industries": dimension_meta(industries),
+                "themes": dimension_meta(themes),
+                "etf": dimension_meta(etf),
+            },
+            "market": {
+                "temperature": temperature["data"].get("current"),
+                "temperature_changes": temperature_changes,
+                "structure": structure["data"].get("current"),
+            },
+            "distributions": {
+                "industries": industries["data"].get("summary", {}),
+                "themes": themes["data"].get("summary", {}),
+            },
+            "rankings": rankings,
+            "resonance": resonance,
+            "etf_context": {
+                "summary": etf["data"].get("summary", {}),
+                "benchmarks": etf["data"].get("benchmarks", []),
+            },
         }
         overview_quality = _status_quality(status, issues=(
             [
@@ -832,7 +1073,7 @@ class RotationService:
             "total_dimensions": len(dimension_names),
             "dimension_statuses": dict(zip(dimension_names, qualities, strict=True)),
         })
-        return {
+        result = {
             "meta": self._meta(
                 snapshot_id=_snapshot_id(
                     as_of,
@@ -848,6 +1089,9 @@ class RotationService:
             ),
             "data": data,
         }
+        self._overview_cache_key = cache_key
+        self._overview_cache = copy.deepcopy(result)
+        return result
 
     def detail(self, kind: str, code: str) -> dict[str, Any] | None:
         snapshot = self.snapshot(kind)
@@ -870,14 +1114,34 @@ class RotationWorker:
         if self._thread and self._thread.is_alive():
             return
         needs_local_snapshot = False
+        needs_algorithm_upgrade = False
         needs_theme_catalog = False
         if bootstrap_local:
             try:
-                needs_local_snapshot = self.service.store.snapshot("temperature") is None
+                temperature = self.service.store.snapshot("temperature")
+                needs_local_snapshot = temperature is None
+                snapshots = [
+                    self.service.store.snapshot(kind)
+                    for kind in (
+                        "temperature", "structure", "industries", "themes", "etf_flows",
+                    )
+                ]
+                needs_algorithm_upgrade = any(
+                    value is not None
+                    and str(value.get("meta", {}).get("algorithm_version") or "")
+                    != ALGORITHM_VERSION
+                    and str(value.get("meta", {}).get("quality", {}).get("status") or "")
+                    not in {"cold", "corrupt", "empty"}
+                    for value in snapshots
+                )
             except RotationIntegrityError:
                 needs_local_snapshot = True
+                needs_algorithm_upgrade = True
             now = datetime.now(ZoneInfo("Asia/Shanghai"))
-            if now.weekday() < 5 and (now.hour, now.minute) >= (18, 30):
+            if (
+                not needs_algorithm_upgrade
+                and now.weekday() < 5 and (now.hour, now.minute) >= (18, 30)
+            ):
                 needs_local_snapshot = False
             try:
                 needs_theme_catalog = not bool(self.service.store.themes())
@@ -888,7 +1152,9 @@ class RotationWorker:
             target=self._run, name="quantmaster-rotation", daemon=True,
         )
         self._thread.start()
-        if needs_local_snapshot:
+        if needs_algorithm_upgrade:
+            self.submit(RotationJobSpec(scope="all", source="local"))
+        elif needs_local_snapshot:
             self.submit(RotationJobSpec(scope="close", source="local"))
         if needs_theme_catalog:
             # Keep network bootstrap off the startup thread. create() also reuses

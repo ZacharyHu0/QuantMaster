@@ -133,10 +133,10 @@
   .mkt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
   .market-index-section { margin-bottom:var(--space-xl); padding-bottom:var(--space-xl); border-bottom:1px solid var(--border); }
   .market-index-section .mkt-grid { grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
-  .market-index-section .mkt-item .spark { height:84px; }
+  .market-index-section .mkt-item .spark { height:88px; }
   .market-index-section .market-section-title { color:var(--ink); font-size:16px; }
   .mkt-item {
-    container-type:inline-size; position:relative; width:100%; min-height:154px; overflow:hidden;
+    container-type:inline-size; position:relative; width:100%; min-height:162px; overflow:hidden;
     background:var(--surface); color:inherit; border:1px solid var(--border); border-radius:12px;
     padding:12px; cursor:pointer; text-align:left; font:inherit;
     transition:border-color 180ms var(--ease-out-quart),background-color 180ms var(--ease-out-quart),transform 120ms var(--ease-out-quart);
@@ -156,7 +156,7 @@
   .mkt-memberships { color:var(--s1); font-size:11px; margin-top:var(--space-xs); }
   .mkt-item .mkt-meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .mkt-spark-shell { position:relative; display:block !important; margin-top:8px; border-top:1px solid color-mix(in oklch,var(--market-tone,var(--axis)) 17%,var(--grid)); }
-  .mkt-item .spark { display:block; width:100%; height:64px; }
+  .mkt-item .spark { display:block; width:100%; height:72px; }
   .mkt-spark-foot { display:flex !important; align-items:center; justify-content:space-between; gap:8px; min-height:17px; margin-top:1px; color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
   .mkt-spark-foot .mkt-period-return { color:var(--ink-2); font-weight:600; }
   .mkt-spark-foot .mkt-period-return.up { color:var(--up); }
@@ -579,24 +579,24 @@
 <section class="tab active" id="tab-market">
   <div class="rotation-local-nav" data-rotation-nav="market">
     <div class="rotation-local-tabs" role="tablist" aria-label="市场视图">
-      <button type="button" role="tab" data-market-page="quotes" aria-selected="true" aria-controls="market-quotes-view">行情</button>
-      <button type="button" role="tab" data-market-page="temperature" aria-selected="false" aria-controls="market-temperature-view">市场温度</button>
-      <button type="button" role="tab" data-market-page="style" aria-selected="false" aria-controls="market-style-view">市场风格</button>
+      <button id="market-quotes-tab" type="button" role="tab" data-market-page="quotes" aria-selected="true" aria-controls="market-quotes-view" tabindex="0">行情</button>
+      <button id="market-temperature-tab" type="button" role="tab" data-market-page="temperature" aria-selected="false" aria-controls="market-temperature-view" tabindex="-1">市场温度</button>
+      <button id="market-style-tab" type="button" role="tab" data-market-page="style" aria-selected="false" aria-controls="market-style-view" tabindex="-1">市场风格</button>
     </div>
     <div class="rotation-local-meta" data-rotation-meta="market">
       <div class="rotation-meta-line"><span>行情与联动快照独立更新</span></div>
       <button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
     </div>
   </div>
-  <section class="rotation-view" id="market-temperature-view" data-market-view="temperature" role="tabpanel" hidden>
+  <section class="rotation-view" id="market-temperature-view" data-market-view="temperature" role="tabpanel" aria-labelledby="market-temperature-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">MARKET BREADTH</span><h2>市场温度</h2>
         <p>用全市场个股趋势分层计算扩散比例，同时展示证据缺口与样本覆盖；折线不是 K 线。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>QM_ROTATION_V1</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl>
     </div>
     <div id="market-temperature-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
-  <section class="rotation-view" id="market-style-view" data-market-view="style" role="tabpanel" hidden>
+  <section class="rotation-view" id="market-style-view" data-market-view="style" role="tabpanel" aria-labelledby="market-style-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">COHORT STRUCTURE</span><h2>市场风格</h2>
         <p>比较强势与低位样本的收益分布，以 0.25 个百分点死区过滤噪声，连续三日才确认状态。</p></div>
@@ -604,7 +604,7 @@
     </div>
     <div id="market-style-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
-  <div id="market-quotes-view" data-market-view="quotes" role="tabpanel">
+  <div id="market-quotes-view" data-market-view="quotes" role="tabpanel" aria-labelledby="market-quotes-tab">
   <form class="controls" id="mkt-refresh">
     <button class="primary" type="submit">同步最新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
@@ -654,10 +654,10 @@
 <section class="tab" id="tab-rotation">
   <div class="rotation-local-nav" data-rotation-nav="rotation">
     <div class="rotation-local-tabs" role="tablist" aria-label="板块联动视图">
-      <button type="button" role="tab" data-rotation-page="radar" aria-selected="true" aria-controls="rotation-radar-view">轮动雷达</button>
-      <button type="button" role="tab" data-rotation-page="industry" aria-selected="false" aria-controls="rotation-industry-view">行业周期</button>
-      <button type="button" role="tab" data-rotation-page="themes" aria-selected="false" aria-controls="rotation-themes-view">细分题材</button>
-      <button type="button" role="tab" data-rotation-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view">宽基资金</button>
+      <button id="rotation-overview-tab" type="button" role="tab" data-rotation-page="overview" aria-selected="true" aria-controls="rotation-overview-view" tabindex="0">轮动总览</button>
+      <button id="rotation-industry-tab" type="button" role="tab" data-rotation-page="industry" aria-selected="false" aria-controls="rotation-industry-view" tabindex="-1">行业周期</button>
+      <button id="rotation-themes-tab" type="button" role="tab" data-rotation-page="themes" aria-selected="false" aria-controls="rotation-themes-view" tabindex="-1">细分题材</button>
+      <button id="rotation-etf-tab" type="button" role="tab" data-rotation-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">宽基资金</button>
     </div>
     <div class="rotation-local-meta" data-rotation-meta="rotation">
       <div class="rotation-meta-line"><span>申万 2021 一级 · 东方财富概念 · ETF 份额</span></div>
@@ -665,37 +665,37 @@
     </div>
   </div>
 
-  <section class="rotation-view" id="rotation-radar-view" data-rotation-view="radar" role="tabpanel">
+  <section class="rotation-view" id="rotation-overview-view" data-rotation-view="overview" role="tabpanel" aria-labelledby="rotation-overview-tab">
     <div class="rotation-masthead">
-      <div><span class="rotation-eyebrow">ROTATION OVERVIEW</span><h2>轮动雷达</h2>
-        <p>把市场温度、行业生命周期、题材宽度和 ETF 资金放在同一快照语境中；各维度仍保留独立质量状态。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="overview"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>QM_ROTATION_V1</dd></dl>
+      <div><span class="rotation-eyebrow">ROTATION WORKBENCH</span><h2>轮动总览</h2>
+        <p>用全量行业与题材识别多周期改善、转弱和成分共振；ETF 资金只作为整体风险偏好背景。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="overview"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl>
     </div>
-    <div id="rotation-radar-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
+    <div id="rotation-overview-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
 
-  <section class="rotation-view" id="rotation-industry-view" data-rotation-view="industry" role="tabpanel" hidden>
+  <section class="rotation-view" id="rotation-industry-view" data-rotation-view="industry" role="tabpanel" aria-labelledby="rotation-industry-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">SW2021 CYCLE MAP</span><h2>行业周期</h2>
-        <p>横轴为强势加速占比，纵轴为低位偏弱占比，气泡大小代表有效成分数；二级关注区不改写一级总量。</p></div>
+        <p>周期坐标仅在这里展示；阶段固定采用 3 日判定，1 / 3 / 5 / 20 日窗口用于轨迹、变化和相对强弱。</p></div>
       <dl class="rotation-asof" data-rotation-asof="industries"><dt>快照</dt><dd>等待刷新</dd><dt>口径</dt><dd>申万 2021</dd></dl>
     </div>
     <div id="rotation-industry-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
 
-  <section class="rotation-view" id="rotation-themes-view" data-rotation-view="themes" role="tabpanel" hidden>
+  <section class="rotation-view" id="rotation-themes-view" data-rotation-view="themes" role="tabpanel" aria-labelledby="rotation-themes-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">CONCEPT LIFECYCLE</span><h2>细分题材</h2>
-        <p>自动目录按生命周期与市场宽度评分；默认展示 Top 16，也可搜索完整目录。分级仅表达数据状态，不代表交易优先级。</p></div>
+        <p>完整目录按多周期变化、相对收益、上涨宽度与真实申万成分交集核查；默认每页展示 50 条。</p></div>
       <dl class="rotation-asof" data-rotation-asof="themes"><dt>快照</dt><dd>等待刷新</dd><dt>来源</dt><dd>东方财富概念</dd></dl>
     </div>
     <div id="rotation-themes-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
 
-  <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etf-flows" role="tabpanel" hidden>
+  <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etf-flows" role="tabpanel" aria-labelledby="rotation-etf-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">ETF SHARE FLOW</span><h2>宽基资金</h2>
-        <p>资金估算采用“份额变化 × 当日净值”，净值缺失时才使用收盘价，并逐只标记降级来源。</p></div>
+        <p>资金估算采用“份额变化 × 当日净值”，同时按观察窗口与原始跟踪基准聚合；净值缺失才使用收盘价。</p></div>
       <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待 09:05</dd><dt>公式</dt><dd>Δ份额 × 净值</dd></dl>
     </div>
     <div id="rotation-etf-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
@@ -826,8 +826,8 @@
     <label>入选数量<input name="top_n" type="number" value="10" min="1" max="50"></label>
     <button class="primary" type="submit">生成今日决策</button>
   </form>
-  <div class="hint">收盘后生成信号，默认保存本次快照；实际交易按 T+1 开盘执行。首次加载行业映射可能稍慢。</div>
-  <div id="decision-out"><div class="msg">选择参数后生成市场与选股决策。</div></div>
+  <div class="hint">进入页面只读取历史快照，不会自动计算；确认候选与参数后再生成，并按 T+1 开盘执行。</div>
+  <div id="decision-out"><div class="msg">正在等待读取之前的决策；选择参数后可手动生成今日决策。</div></div>
 </section>
 
 <!-- ================= AI Quant Lab ================= -->
@@ -1195,8 +1195,8 @@
 <section class="tab" id="tab-paper">
   <div class="trading-heading">
     <div><span class="trading-eyebrow">PAPER EXECUTION DESK</span><h2>模拟盘</h2>
-      <p>一个账户对应一份不可变策略快照。先看调仓提案，再确认订单，下一交易日开盘才会撮合。</p></div>
-    <div class="trading-rule"><strong>提案</strong><span>不写账本</span><i aria-hidden="true">→</i><strong>确认</strong><span>进入待开盘</span></div>
+      <p>一个账户对应一份不可变策略快照。自动账户每日在收盘数据就绪后完成撮合、生成并确认新提案；手动账户仍保留逐步操作。</p></div>
+    <div class="trading-rule"><strong>收盘后</strong><span>生成并确认</span><i aria-hidden="true">→</i><strong>次日开盘</strong><span>自动模拟成交</span></div>
   </div>
   <div class="paper-layout">
     <aside class="paper-accounts" aria-labelledby="paper-accounts-title">
@@ -1211,7 +1211,7 @@
         <label data-paper-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
         <label>初始资金<input name="initial_capital" type="number" value="1000000" min="10000" step="10000" required></label>
-        <label class="wide paper-auto"><input name="auto" type="checkbox"><span><strong>自动确认提案</strong><small>仅为该账户开启；遇到硬错误会自动暂停。</small></span></label>
+        <label class="wide paper-auto"><input name="auto" type="checkbox"><span><strong>每日自动交易</strong><small>每日 18:30 后自动撮合、生成并确认提案；失败会退避重试。</small></span></label>
         <button class="trading-primary wide" type="submit">创建模拟账户</button>
       </form>
       <div id="paper-account-list" class="paper-account-list" aria-live="polite"><div class="trading-skeleton"></div></div>
@@ -1256,7 +1256,27 @@
 
   <div class="news-workbench">
     <section class="news-feed-panel" aria-labelledby="news-feed-title">
-      <div class="news-panel-head"><div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div><div><button class="text-action" id="news-recover-dead" type="button">恢复死信</button><button class="text-action" id="news-reanalyze" type="button">处理待标注</button></div></div>
+      <div class="news-panel-head">
+        <div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div>
+        <div class="news-queue-legend" aria-label="分析状态说明"><span><i class="failed"></i>退避：等待自动重试</span><span><i class="dead"></i>死信：已暂停重试</span></div>
+      </div>
+      <div class="news-queue-bar" aria-label="资讯分析队列">
+        <div class="news-queue-summary" aria-live="polite"><span>分析队列</span><strong id="news-queue-summary">正在读取队列状态…</strong></div>
+        <div class="news-queue-actions">
+          <button class="news-queue-action pending" id="news-reanalyze" type="button" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4.75 14 10l-8 5.25V4.75Z"/></svg>
+            <span><strong data-action-label>处理待标注</strong><small>尚未尝试的资讯</small></span><b id="news-pending-action-count">—</b>
+          </button>
+          <button class="news-queue-action failed" id="news-retry-failed" type="button" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.6 7.25A6 6 0 1 0 15.3 13M15.6 3.8v3.45h-3.45"/></svg>
+            <span><strong data-action-label>重试失败项</strong><small>全部重试 · 分批写入</small></span><b id="news-failed-action-count">—</b>
+          </button>
+          <button class="news-queue-action dead" id="news-recover-dead" type="button" disabled>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.25v7.5m0 0 3-3m-3 3-3-3M4 13.25v2.5h12v-2.5"/></svg>
+            <span><strong data-action-label>恢复死信</strong><small id="news-dead-action-hint">到期项全部分批恢复</small></span><b id="news-dead-action-count">—</b>
+          </button>
+        </div>
+      </div>
       <div class="news-annotation-progress" id="news-annotation-progress" role="status" aria-live="polite" hidden>
         <div class="news-annotation-head"><div><span class="news-annotation-dot" aria-hidden="true"></span><strong id="news-annotation-phase">准备标注队列</strong></div><b id="news-annotation-percent">0%</b></div>
         <p id="news-annotation-detail">正在读取待处理资讯…</p>
@@ -1414,6 +1434,8 @@
             <label>最大输出 Token<input name="llm.max_tokens" type="number" min="1" max="1000000" required></label>
             <label>Temperature<input name="llm.temperature" type="number" min="0" max="2" step="0.1" required></label>
             <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
+            <label>全局并发上限<input name="llm.max_concurrency" type="number" min="1" max="16" step="1" required><small>所有自动任务与手动分析共享；重型模型建议设为 1。</small></label>
+            <label>排队超时（秒）<input name="llm.queue_timeout" type="number" min="1" max="300" step="1" required><small>FIFO 等待超过此时间会返回可重试错误，不会无限占用线程。</small></label>
           </div>
           <div class="check-result" data-check-result="llm-models">等待检测</div>
           <div class="check-result" data-check-result="llm-web-search">联网搜索尚未检测</div>
@@ -1486,6 +1508,8 @@
             <label class="toggle-field"><span><strong>自动标注新资讯</strong><small>模型不可用时保留在待处理队列。</small></span><input name="news.annotation_enabled" type="checkbox" role="switch"></label>
             <label>单批标注条数<input name="news.annotation_batch_size" type="number" min="1" max="50" step="1" required><small>每次 LLM 请求包含的资讯数量。</small></label>
             <label>每轮处理上限<input name="news.annotation_items_per_run" type="number" min="1" max="1000" step="1" required><small>限制一次后台运行消费的待标注数量。</small></label>
+            <label>资讯分析超时（秒）<input name="news.annotation_timeout" type="number" min="5" max="600" step="1" required><small>仅用于资讯标注；重型模型建议 120–180 秒。</small></label>
+            <label>资讯推理强度<select name="news.annotation_reasoning_effort" required><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select><small>与通用模型设置分离，默认“中”以减少结构化标注超时。</small></label>
           </div>
         </section>
 
@@ -2486,9 +2510,7 @@ function loadActiveTab(tab) {
   if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
   if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
   if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
-  if (tab === 'decision' && !decisionLoaded && !decisionLoading) {
-    document.getElementById('decision-form').requestSubmit();
-  }
+  if (tab === 'decision' && !decisionLoaded && !decisionLoading) void loadDecisionHistory();
 }
 
 function activateTab(control, {persist = true, load = true} = {}) {
@@ -2671,37 +2693,69 @@ function marketSparkSummary(series) {
   };
 }
 
+function marketSparkParsedDate(value) {
+  const normalized = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return new Date(normalized);
+}
+
 function marketSparkDate(value) {
-  const parsed = new Date(value);
+  const parsed = marketSparkParsedDate(value);
   if (Number.isNaN(parsed.getTime())) return '—';
   return parsed.toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replaceAll('/','.');
 }
 
+function marketSparkMonth(value, includeYear = true) {
+  const parsed = marketSparkParsedDate(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  const month = String(parsed.getMonth() + 1).padStart(2,'0');
+  return includeYear ? `${parsed.getFullYear()}.${month}` : `${month}月`;
+}
+
 function marketSparkOption(item, changeSeries) {
   const summary = marketSparkSummary(changeSeries);
+  const categories = changeSeries.map(point => point[0]);
+  const values = changeSeries.map(point => Number(point[1]));
+  const lastIndex = categories.length - 1;
+  const tickIndexes = new Set(categories.length < 3
+    ? categories.map((_,index) => index)
+    : [0,Math.round(lastIndex / 2),lastIndex]);
+  const firstYear = categories.length ? marketSparkParsedDate(categories[0]).getFullYear() : null;
   const tone = summary.last > 0 ? CHART_COLORS.up
     : summary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
   const signed = value => `${value > 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
   return {
     backgroundColor:'transparent',
     animation:!REDUCED_MOTION,
-    grid:{left:1,right:4,top:8,bottom:3},
-    xAxis:{type:'time',show:false,boundaryGap:false,min:summary.first,max:summary.lastDate},
+    grid:{left:22,right:22,top:8,bottom:19},
+    xAxis:{
+      type:'category',data:categories,show:true,boundaryGap:false,
+      axisLine:{show:false},axisTick:{show:false},splitLine:{show:false},
+      axisLabel:{
+        show:true,color:MUTED,fontSize:9,margin:5,hideOverlap:true,
+        showMinLabel:true,showMaxLabel:true,
+        interval:index => tickIndexes.has(index),
+        formatter:(value,index) => {
+          if (index === 0 || index === lastIndex) return marketSparkMonth(value,true);
+          const year = marketSparkParsedDate(value).getFullYear();
+          return marketSparkMonth(value,year !== firstYear);
+        },
+      },
+    },
     yAxis:{type:'value',show:false,scale:true,min:summary.min,max:summary.max},
     tooltip:{
       show:true,trigger:'axis',confine:true,transitionDuration:REDUCED_MOTION ? 0 : .18,
       axisPointer:{type:'line',snap:true,lineStyle:{color:AXIS,width:1,type:'dashed'}},
       formatter:params => {
         const point = params.find(value => value.seriesId === 'market-spark-trend') || params[0];
-        const value = Array.isArray(point?.value) ? Number(point.value[1]) : 0;
-        const date = Array.isArray(point?.value) ? point.value[0] : '';
+        const value = Number(Array.isArray(point?.value) ? point.value.at(-1) : point?.value || 0);
+        const date = point?.axisValue ?? categories[point?.dataIndex] ?? '';
         return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b>`;
       },
     },
     aria:{enabled:true,label:{description:`${item.name}区间走势图，最新区间涨跌${signed(summary.last)}`}},
     series:[
       {
-        id:'market-spark-trend',name:'区间走势',type:'line',data:changeSeries,
+        id:'market-spark-trend',name:'区间走势',type:'line',data:values,
         showSymbol:false,symbol:'none',sampling:'lttb',silent:false,
         lineStyle:{width:2,color:tone,cap:'round',join:'round'},
         areaStyle:{color:tone,opacity:.10,origin:'auto'},
@@ -2711,7 +2765,7 @@ function marketSparkOption(item, changeSeries) {
       },
       {
         id:'market-spark-latest',name:'最新位置',type:'scatter',silent:true,z:4,
-        data:changeSeries.length ? [changeSeries.at(-1)] : [],symbolSize:7,
+        data:changeSeries.length ? [[categories.at(-1),values.at(-1)]] : [],symbolSize:7,
         itemStyle:{color:tone,borderColor:CHART_COLORS.surface,borderWidth:2},
         tooltip:{show:false},
       },
@@ -2996,7 +3050,8 @@ document.getElementById('kline-frequency').addEventListener('click', e => {
 loadMarket();
 
 /* ---------- 决策 ---------- */
-let decisionLoaded = false, decisionLoading = false;
+let decisionLoaded = false, decisionLoading = false, decisionHistoryLoading = false;
+let decisionHistoryKey = '', decisionViewRequest = 0;
 function fixed(v, digits = 2) { return v == null || !Number.isFinite(+v) ? '—' : (+v).toFixed(digits); }
 function directionLabel(value) { return value === 'up' ? '上行' : value === 'down' ? '下行' : '震荡'; }
 function actionLabel(value) { return value === 'buy' ? '入选' : value === 'watch' ? '观察' : '回避'; }
@@ -3307,6 +3362,12 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
   const market = data.market, current = market.current;
   const selectionReady = Boolean(data.selection), selection = data.selection || {};
   const sectorsReady = Array.isArray(market.sectors), historyReady = Array.isArray(data.history);
+  // A complete render into the canonical output owns the view.  Fence any
+  // slower history/candidate bootstrap so it cannot replace this DOM later.
+  if (selectionReady && historyReady && out === document.getElementById('decision-out')) {
+    decisionLoaded = true;
+    decisionViewRequest += 1;
+  }
   const validation = Object.fromEntries((market.forecast_validation || []).map(v => [v.horizon_days, v]));
   const tone = current.trend_score > .2 ? 'up' : current.trend_score < -.2 ? 'down' : '';
   const picks = selection.picks || [];
@@ -3382,6 +3443,81 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
   mountDecisionKline();
 }
 
+function renderDecisionHistory(snapshots, target = document.getElementById('decision-out')) {
+  disposeChart('regime-chart');
+  closeDecisionKline();
+  if (!snapshots.length) {
+    target.innerHTML = `<div class="panel ready-preview"><div class="ready-preview-head"><strong>尚无匹配的历史决策</strong><span class="state-pill">未计算</span></div>
+      <div class="hint">当前候选、策略画像与持有周期没有已保存快照。确认参数后点击“生成今日决策”。</div></div>`;
+    return;
+  }
+  const latest = snapshots[0], picks = latest.picks || [];
+  const snapshot = latest.model_snapshot || null;
+  const validation = latest.validation_summary || {};
+  const regime = latest.market_regime || {};
+  target.innerHTML = `
+    <div class="panel ready-preview reveal">
+      <div class="ready-preview-head"><strong>上一次已保存的决策</strong><span class="state-pill">只读 · 未重新计算</span></div>
+      <div class="decision-summary">
+        <div class="regime-block"><div><div class="eyebrow">${esc(latest.signal_date)} · 历史快照</div><div class="regime-name">${esc(regime.state_label || latest.profile_label || decisionProfileLabel(latest.profile))}</div></div>
+          <div class="regime-score"><strong>${picks.length}</strong><span class="hint">入选标的</span></div></div>
+        <div class="metric-strip">
+          <div class="metric-cell"><div class="k">建议仓位</div><div class="v">${pct(latest.recommended_exposure)}</div></div>
+          <div class="metric-cell"><div class="k">决策周期</div><div class="v">${latest.holding_horizon_days} 日</div></div>
+          <div class="metric-cell"><div class="k">策略画像</div><div class="v">${esc(latest.profile_label || decisionProfileLabel(latest.profile))}</div></div>
+          <div class="metric-cell"><div class="k">校准 Brier</div><div class="v">${fixed(validation.brier_score, 3)}</div></div>
+        </div>
+      </div>
+      <div class="hint">这是本地已保存结果。只有点击“生成今日决策”才会读取候选行情、重新计算并写入新快照。</div>
+    </div>
+    ${decisionModelEvidenceMarkup(snapshot, latest)}
+    <div class="panel reveal reveal-delay">
+      <div class="panel-heading"><h3>${esc(latest.signal_date)} 入选</h3><span class="state-pill">历史决策 · T+1 执行口径</span></div>
+      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead><tbody>
+        ${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击展开行情">
+          <td>${p.rank}</td><td><button class="decision-symbol-trigger" type="button" data-decision-kline-trigger="${esc(p.symbol)}" aria-expanded="false" aria-controls="decision-kline-detail"><strong>${esc(p.name || '名称待同步')}</strong><span class="reason">${esc(p.symbol)} · ${esc(p.industry)} · ${fixed(p.last_close,2)}</span></button></td>
+          <td>${fixed(p.score, 1)}</td><td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${pct(p.probability_up)}</td>
+          <td class="${cls(p.expected_return_net ?? p.expected_return)}">${pct(p.expected_return_net ?? p.expected_return)}</td><td>${pct(p.confidence)}<div class="reason">一致 ${pct(p.model_agreement)}</div></td>
+          <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td><td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || '<tr><td colspan="9" class="msg">该历史快照没有入选标的</td></tr>'}
+      </tbody></table></div><div class="hint">${esc(latest.risk_note || '历史决策风险说明未记录。')}</div>
+    </div>
+    <div class="panel reveal reveal-delay"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">相同候选与参数</span></div>
+      <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
+        ${snapshots.map(item => `<tr><td class="snapshot-date">${esc(item.signal_date)}</td><td class="snapshot-period">${item.holding_horizon_days} 日<div class="reason">${esc(decisionProfileLabel(item.profile))}</div></td><td class="snapshot-exposure">${pct(item.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(item.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('')}
+      </tbody></table></div></div>`;
+  mountDecisionKline();
+}
+
+async function loadDecisionHistory({force = false} = {}) {
+  if (decisionLoading || decisionHistoryLoading) return;
+  const form = document.getElementById('decision-form');
+  const fd = new FormData(form);
+  const params = new URLSearchParams({
+    universe:String(fd.get('universe') || ''), profile:String(fd.get('profile') || ''),
+    horizon:String(fd.get('horizon') || '3'), limit:'10',
+  });
+  const key = params.toString();
+  if (!force && key === decisionHistoryKey) return;
+  decisionHistoryLoading = true;
+  const request = ++decisionViewRequest;
+  const out = document.getElementById('decision-out');
+  out.innerHTML = '<div class="trading-skeleton" aria-label="正在读取历史决策"></div>';
+  try {
+    const data = await api(`/api/v1/research/selection/history?${key}`, {cache:'no-store'});
+    if (request !== decisionViewRequest) return;
+    decisionHistoryKey = key;
+    renderDecisionHistory(data.snapshots || [], out);
+  } catch (error) {
+    if (request === decisionViewRequest) out.innerHTML = `<div class="err">历史决策读取失败：${esc(error.message)}</div>`;
+  } finally {
+    decisionHistoryLoading = false;
+    if (request !== decisionViewRequest && !decisionLoaded && !decisionLoading
+        && document.getElementById('tab-decision').classList.contains('active')) {
+      queueMicrotask(() => loadDecisionHistory({force:true}));
+    }
+  }
+}
+
 function createDecisionStreamRenderer(root) {
   const state = {market:null, sectors:null, policy:null, selection:null, history:null};
   let completed = 0, total = 0, successful = 0, preview = null, symbols = null, count = null;
@@ -3434,6 +3570,7 @@ function createDecisionStreamRenderer(root) {
 async function loadDecision(form) {
   if (decisionLoading) return;
   decisionLoading = true;
+  decisionViewRequest += 1;
   closeDecisionKline();
   const out = document.getElementById('decision-out');
   busy(form, true, '生成中…');
@@ -3478,6 +3615,21 @@ if (storedDecisionProfile && DECISION_PROFILES[storedDecisionProfile]) {
 }
 decisionForm.addEventListener('change', event => {
   if (event.target.name === 'profile') localStorage.setItem(DECISION_PROFILE_STORAGE_KEY, event.target.value);
+  if (['universe', 'profile', 'horizon'].includes(event.target.name)) {
+    decisionViewRequest += 1;
+    decisionLoaded = false;
+    decisionHistoryKey = '';
+    if (document.getElementById('tab-decision').classList.contains('active')) {
+      void loadDecisionHistory({force:true});
+    }
+  }
+});
+document.addEventListener('quantmaster:candidates-updated', () => {
+  if (!decisionLoaded && document.getElementById('tab-decision').classList.contains('active')) {
+    decisionViewRequest += 1;
+    decisionHistoryKey = '';
+    void loadDecisionHistory({force:true});
+  }
 });
 decisionForm.onsubmit = e => { e.preventDefault(); loadDecision(e.target); };
 document.getElementById('decision-out').addEventListener('click', e => {

@@ -58,6 +58,48 @@ def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp
     assert store.runtime_state("scheduled_close") == "2026-07-30"
 
 
+def test_rotation_overview_cache_invalidates_on_snapshot_id(tmp_path, monkeypatch):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+
+    def payload(kind, snapshot_id):
+        data = {"as_of": "2026-08-04", "items": []}
+        if kind == "temperature":
+            data.update({"current": {}, "history": []})
+        elif kind == "structure":
+            data["current"] = {}
+        elif kind == "etf_flows":
+            data.update({"summary": {}, "benchmarks": []})
+        return {
+            "meta": {
+                "snapshot_id": snapshot_id, "as_of": "2026-08-04",
+                "generated_at": "2026-08-04T10:00:00+00:00",
+                "algorithm_version": "QM_ROTATION_V2", "sources": ["unit"],
+                "quality": {"status": "complete", "issues": []},
+            },
+            "data": data,
+        }
+
+    store.save_snapshots({kind: payload(kind, "one") for kind in (
+        "temperature", "structure", "industries", "themes", "etf_flows",
+    )})
+    from quantmaster.rotation import service as service_module
+
+    calls = []
+    original = service_module._rank_window
+    monkeypatch.setattr(
+        service_module, "_rank_window",
+        lambda *args, **kwargs: calls.append(1) or original(*args, **kwargs),
+    )
+    service.overview()
+    first_count = len(calls)
+    service.overview()
+    assert len(calls) == first_count
+    store.save_snapshots({"themes": payload("themes", "two")})
+    service.overview()
+    assert len(calls) > first_count
+
+
 def test_theme_staging_keeps_old_catalog_until_atomic_quality_commit(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     old = {
@@ -91,6 +133,9 @@ def test_rotation_scatter_axes_use_observed_ratio_buckets():
     assert "[5,10,20,40,60,80,100]" in script
     assert "Math.max(40" not in script
     assert "Math.max(60" not in script
+    assert script.count('id="rotation-industry-scatter"') == 1
+    assert "rotation-radar-scatter" not in script
+    assert "周期坐标与 ${activeWindow} 日轨迹" in script
 
 
 def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_path):
@@ -227,9 +272,15 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert temperature["meta"]["batch_id"] == industries["meta"]["batch_id"]
     assert len(industries["data"]["items"]) == 4
     assert len(themes["data"]["items"]) == 1
+    assert set(industries["data"]["items"][0]["signals"]) == {"1", "3", "5", "20"}
+    assert themes["data"]["items"][0]["primary_industry"] is not None
     assert "tushare:fund_nav" in etf_flows["meta"]["sources"]
     assert etf_flows["meta"]["quality"]["status"] == "complete"
-    assert service.overview()["data"]["temperature"] is not None
+    overview = service.overview()
+    assert overview["data"]["temperature"] is not None
+    assert overview["data"]["rankings"]["5"]["industries"]["available"] == 4
+    assert len(overview["data"]["resonance"]["5"]) == 4
+    assert overview["data"]["etf_context"]["summary"]["windows"]["1"]["net_flow"] == 20.5
     assert updates[-1][0] == 96
     assert trend_calls == [len(close)]
 
@@ -424,3 +475,36 @@ def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkey
         "scope": "themes", "mode": "incremental", "source": "auto",
     } in specs
     bootstrap.stop()
+
+
+def test_rotation_worker_bootstrap_upgrades_legacy_algorithm_locally(
+    tmp_path, monkeypatch,
+):
+    store = RotationStore(tmp_path / "rotation")
+    store.save_snapshots({
+        "temperature": {
+            "meta": {
+                "snapshot_id": "legacy-v1",
+                "as_of": "2026-07-30",
+                "generated_at": "2026-07-30T10:00:00+00:00",
+                "algorithm_version": "QM_ROTATION_V1",
+                "quality": {"status": "complete", "issues": []},
+            },
+            "data": {"current": {"temperature": 42.0}},
+        },
+    })
+    store.replace_themes([{
+        "code": "seed", "name": "本地题材", "members": ["600000.SH"],
+    }])
+    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    worker = RotationWorker(service)
+    monkeypatch.setattr(worker, "_run", lambda: worker._stop.wait())
+
+    worker.start(bootstrap_local=True)
+
+    specs = [item["spec"] for item in service.jobs.list()]
+    assert {
+        "scope": "all", "mode": "incremental", "source": "local",
+    } in specs
+    assert service.snapshot("temperature")["meta"]["quality"]["status"] == "stale"
+    worker.stop()

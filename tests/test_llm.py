@@ -3,7 +3,13 @@
 import httpx
 import pytest
 
-from quantmaster.ai.llm import LLMClient, LLMError, parse_json_reply
+from quantmaster.ai.llm import (
+    LLMClient,
+    LLMError,
+    _HTTPClientPool,
+    _LLMRequestGate,
+    parse_json_reply,
+)
 from quantmaster.config import LLMConfig
 
 
@@ -47,7 +53,10 @@ class TestLLMClient:
                 request=httpx.Request("POST", url),
             )
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
         client = LLMClient(LLMConfig(provider="anthropic", api_key="sk-test",
                                      model="claude-sonnet-5"))
         reply = client.chat("你好", system="系统提示")
@@ -65,7 +74,10 @@ class TestLLMClient:
             captured["timeout"] = kwargs["timeout"]
             raise httpx.ReadTimeout("slow", request=httpx.Request("POST", url))
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
         client = LLMClient(LLMConfig(provider="openai", api_key="sk", timeout=60))
         with pytest.raises(LLMError) as caught:
             client.chat("hi", timeout=180)
@@ -84,7 +96,10 @@ class TestLLMClient:
                 request=httpx.Request("POST", url),
             )
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
         client = LLMClient(LLMConfig(provider="openai-compatible", api_key="sk",
                                      base_url="https://api.deepseek.com/v1",
                                      reasoning_effort="high"))
@@ -94,12 +109,102 @@ class TestLLMClient:
 
     def test_error_status_raises(self, monkeypatch):
         def fake_post(url, **kwargs):
-            return httpx.Response(429, text="rate limited",
+            return httpx.Response(429, text="rate limited", headers={"Retry-After": "75"},
                                   request=httpx.Request("POST", url))
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
         client = LLMClient(LLMConfig(provider="openai", api_key="sk"))
         with pytest.raises(LLMError, match="429") as caught:
             client.chat("hi")
         assert caught.value.retryable is True
         assert caught.value.status_code == 429
+        assert caught.value.code == "http_429"
+        assert caught.value.retry_after == 75
+
+    def test_global_concurrency_limit_serializes_clients(self, monkeypatch):
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        active = maximum = 0
+        lock = threading.Lock()
+
+        def fake_post(url, **kwargs):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.04)
+            with lock:
+                active -= 1
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
+        config = LLMConfig(provider="openai", api_key="sk", max_concurrency=1)
+        clients = [LLMClient(config), LLMClient(config)]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            assert list(executor.map(lambda client: client.chat("hi"), clients)) == ["ok", "ok"]
+        assert maximum == 1
+
+
+def test_request_gate_is_fifo_and_queue_wait_is_bounded():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    gate = _LLMRequestGate()
+    order = []
+    first_waiting = threading.Event()
+    second_waiting = threading.Event()
+
+    def waiter(name, ready):
+        ready.set()
+        with gate.slot(1, 5):
+            order.append(name)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with gate.slot(1, 5):
+            first = executor.submit(waiter, "first", first_waiting)
+            assert first_waiting.wait(1)
+            second = executor.submit(waiter, "second", second_waiting)
+            assert second_waiting.wait(1)
+        first.result(timeout=2)
+        second.result(timeout=2)
+    assert order == ["first", "second"]
+    assert gate.status() == {"active": 0, "waiting": 0, "timeout_count": 0}
+
+    with gate.slot(1, 5), pytest.raises(TimeoutError, match="llm_queue_timeout"):
+        gate.slot(1, 1).__enter__()
+    assert gate.status()["timeout_count"] == 1
+
+
+def test_http_pool_retires_hot_replaced_client_after_inflight_request(monkeypatch):
+    clients = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.closed = 0
+            clients.append(self)
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
+    pool = _HTTPClientPool()
+    with pool.client(("openai", "https://one")) as first:
+        with pool.client(("openai", "https://two")) as second:
+            assert first.closed == 0
+            assert second.closed == 0
+        assert first.closed == 0
+    assert first.closed == 1
+    pool.close()
+    assert second.closed == 1

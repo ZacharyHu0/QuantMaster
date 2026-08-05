@@ -7,10 +7,6 @@ permissions:
 on:
   push:
     tags: ["v*"]
-    branches: ["main"]
-    paths:
-      - ".github/release-backfill.json"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -153,34 +149,30 @@ jobs:
         with:
           ref: ${{ matrix.target.target_sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
+          version: "0.11.32"
           python-version: "3.12"
-          cache: pip
-      - uses: dtolnay/rust-toolchain@stable
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: Install
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip maturin pyinstaller
-          python -m pip install -e ".[data,tushare,rust]"
-          if [[ -f rust/quantmaster-kernel/Cargo.lock ]]; then
-            maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
-          else
-            maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --out dist/native
-          fi
-          python -m pip install --no-index --find-links dist/native quantmaster-kernel
+          uv sync --locked --extra data --extra tushare --extra rust --extra release
+          uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
+          uv pip install --no-index --find-links dist/native quantmaster-kernel
       - name: Verify native research kernel
-        run: python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
+        run: uv run python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
       - name: Verify tag matches application version
         shell: bash
         env:
           RELEASE_TAG: ${{ matrix.target.tag }}
         run: |
-          test "$RELEASE_TAG" = "v$(python -c 'from quantmaster import __version__; print(__version__)')"
+          test "$RELEASE_TAG" = "v$(uv run python -c 'from quantmaster import __version__; print(__version__)')"
       - name: Build
         working-directory: packaging
-        run: pyinstaller quantmaster.spec --noconfirm
+        run: uv run pyinstaller quantmaster.spec --noconfirm
       - name: Rename artifact
         shell: bash
         run: mv "packaging/dist/${{ matrix.platform.artifact }}" "${{ matrix.platform.asset }}"
@@ -190,7 +182,6 @@ jobs:
           path: ${{ matrix.platform.asset }}
           retention-days: 90
       - name: Attach to release
-        if: matrix.target.make_latest
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.target.tag }}
@@ -199,10 +190,3 @@ jobs:
           body_path: CHANGELOG.md
           fail_on_unmatched_files: true
           make_latest: ${{ matrix.target.make_latest }}
-      - name: Record historical artifact handoff
-        if: matrix.target.make_latest == false
-        shell: bash
-        run: |
-          echo "::warning::${{ matrix.target.tag }} was built as a historical artifact; publishing its GitHub Release requires an operator token with Workflows permission."
-          echo "### Historical artifact: ${{ matrix.target.tag }} / ${{ matrix.platform.os }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "The verified binary is retained as workflow artifact \`${{ matrix.target.tag }}-${{ matrix.platform.asset }}\` for 90 days." >> "$GITHUB_STEP_SUMMARY"

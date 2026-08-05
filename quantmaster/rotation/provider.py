@@ -129,8 +129,17 @@ class RotationProvider:
         from quantmaster.research.contracts import ArtifactKind, AssetClass, Frequency
         from quantmaster.research.engine import ResearchEngine
         from quantmaster.research.lake import ResearchLake
+        from quantmaster.rotation.service import _expected_market_session
 
-        end = date.today().isoformat()
+        # Before the close, today's official calendar entry is already open but
+        # the daily endpoint legitimately has no completed bar yet.  Planning to
+        # the same completed-session boundary used by snapshot freshness avoids
+        # turning that expected empty response into a provider circuit failure.
+        end = _expected_market_session()
+        if not end:
+            raise RuntimeError(
+                "无法确认最近完成交易日；请配置 Tushare 日历或先同步全市场日线"
+            )
         start = (pd.Timestamp(end) - pd.DateOffset(years=3, days=20)).date().isoformat()
         lake = ResearchLake()
         existing = lake.catalog.partitions(
@@ -364,11 +373,9 @@ class RotationProvider:
         """Use the permission-gated Tushare DC catalog as the second provider."""
         end = pd.Timestamp(date.today())
         start = end - pd.Timedelta(days=14)
-        # Use candidate weekdays instead of the core Tushare trade-calendar lane.  The
-        # DC permission probe must not depend on or poison the 2000-point data channel.
-        sessions = list(pd.bdate_range(start, end))
+        sessions = list(self.source.trade_calendar(str(start.date()), str(end.date())))
         if not sessions:
-            sessions = [end]
+            raise ThemeSourceUnavailable("官方交易日历没有可查询的题材日期")
         boards = pd.DataFrame()
         trade_date = ""
         for session in reversed(sessions[-7:]):
@@ -784,6 +791,7 @@ class RotationProvider:
             raise RuntimeError("基金目录中没有可核查的宽基 ETF")
         names = basic.set_index("symbol")["name"].to_dict()
         categories = basic.set_index("symbol")["category"].to_dict()
+        benchmarks = basic.set_index("symbol")["benchmark"].fillna("").astype(str).to_dict()
         rows = []
         nav_available = True
         for index, trade_date in enumerate(dates, start=1):
@@ -798,6 +806,10 @@ class RotationProvider:
                 "fund_daily", 1, trade_date=compact,
                 fields="ts_code,trade_date,close",
             ).rename(columns={"ts_code": "symbol"})
+            if not {"symbol", "shares"}.issubset(shares.columns):
+                continue
+            if not {"symbol", "close"}.issubset(daily.columns):
+                daily = pd.DataFrame(columns=["symbol", "close"])
             nav = pd.DataFrame(columns=["symbol", "nav"])
             if nav_available:
                 try:
@@ -828,8 +840,10 @@ class RotationProvider:
             merged["trade_date"] = trade_date.normalize()
             merged["name"] = merged["symbol"].map(names).fillna(merged["symbol"])
             merged["category"] = merged["symbol"].map(categories)
+            merged["benchmark"] = merged["symbol"].map(benchmarks).fillna("")
             rows.append(merged[[
-                "trade_date", "symbol", "name", "category", "shares", "nav", "close",
+                "trade_date", "symbol", "name", "category", "benchmark",
+                "shares", "nav", "close",
             ]])
             progress(
                 55 + round(7 * index / max(1, len(dates))),
@@ -838,10 +852,16 @@ class RotationProvider:
             )
         if not rows:
             raise RuntimeError("ETF 份额接口未返回可用数据")
+        if not previous.empty and "benchmark" not in previous:
+            previous["benchmark"] = ""
         result = pd.concat([previous, *rows], ignore_index=True)
         result["category"] = [
-            _broad_etf_category(name)
-            for name in result.get("name", pd.Series("", index=result.index))
+            _broad_etf_category(name, benchmark)
+            for name, benchmark in zip(
+                result.get("name", pd.Series("", index=result.index)),
+                result.get("benchmark", pd.Series("", index=result.index)),
+                strict=True,
+            )
         ]
         result = result[result["category"] != ""]
         result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce")

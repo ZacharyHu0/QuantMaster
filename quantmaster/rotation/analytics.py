@@ -14,7 +14,8 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-ALGORITHM_VERSION = "QM_ROTATION_V1"
+ALGORITHM_VERSION = "QM_ROTATION_V2"
+ROTATION_WINDOWS = (1, 3, 5, 20)
 MIN_HISTORY = 30
 EPS = 1e-12
 
@@ -410,6 +411,89 @@ def _representatives(
     ]
 
 
+def _amount_activity(
+    amount: pd.DataFrame | None,
+    symbols: list[str],
+    *,
+    current_position: int,
+    window: int,
+    member_count: int,
+) -> float | None:
+    """Return the median per-stock amount expansion versus the prior 20 sessions."""
+    if amount is None or amount.empty:
+        return None
+    recent_start = current_position - window + 1
+    baseline_end = recent_start
+    baseline_start = baseline_end - 20
+    if recent_start < 0 or baseline_start < 0:
+        return None
+    recent = amount.iloc[recent_start:current_position + 1][symbols]
+    baseline = amount.iloc[baseline_start:baseline_end][symbols]
+    recent_min = max(1, math.ceil(window * 0.70))
+    valid_recent = recent.count() >= recent_min
+    valid_baseline = baseline.count() >= 14
+    recent_mean = recent.mean(axis=0, skipna=True)
+    baseline_mean = baseline.mean(axis=0, skipna=True)
+    ratios = (recent_mean / baseline_mean - 1.0).where(
+        valid_recent & valid_baseline & (baseline_mean > EPS)
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(ratios) < 8 or len(ratios) / max(1, member_count) < 0.70:
+        return None
+    return _number(ratios.median(), 4)
+
+
+def map_theme_industries(
+    themes: dict[str, dict[str, Any]],
+    industries: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Map themes to auditable SW2021 L1 overlaps without guessing from names."""
+    industry_members = {
+        str(code): set(item.get("members") or [])
+        for code, item in industries.items()
+        if str(item.get("level") or "L1") == "L1" and item.get("members")
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for code, theme in themes.items():
+        members = set(theme.get("members") or [])
+        overlaps: list[dict[str, Any]] = [
+            {
+                "code": industry_code,
+                "name": str(industries[industry_code].get("name") or industry_code),
+                "overlap_count": len(members & values),
+            }
+            for industry_code, values in industry_members.items()
+            if members & values
+        ]
+        overlaps.sort(key=lambda item: (-item["overlap_count"], item["name"], item["code"]))
+        mapped_members = set().union(*(
+            members & values for values in industry_members.values()
+        )) if industry_members else set()
+        mapped_count = len(mapped_members)
+        links: list[dict[str, Any]] = []
+        for item in overlaps[:3]:
+            links.append({
+                **item,
+                "theme_share": _number(
+                    item["overlap_count"] / mapped_count if mapped_count else 0.0, 4,
+                ),
+            })
+        primary = links[0] if links else None
+        if (
+            primary is None
+            or int(primary["overlap_count"]) < 3
+            or float(primary.get("theme_share") or 0) < 0.25
+        ):
+            primary = None
+        result[str(code)] = {
+            "industry_links": links,
+            "primary_industry": primary,
+            "industry_mapping_coverage": _number(
+                mapped_count / len(members) if members else 0.0, 4,
+            ),
+        }
+    return result
+
+
 def analyze_group_rotation(
     close: pd.DataFrame,
     groups: dict[str, dict[str, Any]],
@@ -431,8 +515,18 @@ def analyze_group_rotation(
     if valid_dates.empty:
         raise ValueError("没有可用于板块聚合的交易日")
     current_date = valid_dates.index[-1]
-    previous_position = max(0, trend.close.index.get_loc(current_date) - 3)
-    previous_date = trend.close.index[previous_position]
+    current_position = int(trend.close.index.get_loc(current_date))
+    window_dates = {
+        window: trend.close.index[current_position - window]
+        for window in ROTATION_WINDOWS
+        if current_position >= window
+    }
+    universe_returns: dict[int, float | None] = {}
+    for window, previous_date in window_dates.items():
+        values = (
+            trend.close.loc[current_date] / trend.close.loc[previous_date] - 1.0
+        ).where(trend.eligible.loc[current_date]).replace([np.inf, -np.inf], np.nan).dropna()
+        universe_returns[window] = _number(values.median(), 4) if len(values) >= 8 else None
     amount_clean = None
     if amount is not None and not amount.empty:
         amount_clean = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
@@ -450,20 +544,84 @@ def analyze_group_rotation(
             continue
         strong_now = 100.0 * float(masks["strong_up"].loc[current_date, symbols].sum()) / eligible_count
         weak_now = 100.0 * float(masks["weak"].loc[current_date, symbols].sum()) / eligible_count
-        eligible_before = int(trend.eligible.loc[previous_date, symbols].sum())
-        if eligible_before:
-            strong_before = (
-                100.0 * float(masks["strong_up"].loc[previous_date, symbols].sum())
-                / eligible_before
-            )
-            weak_before = (
-                100.0 * float(masks["weak"].loc[previous_date, symbols].sum())
-                / eligible_before
-            )
-        else:
-            strong_before, weak_before = strong_now, weak_now
-        delta_strong, delta_weak = strong_now - strong_before, weak_now - weak_before
-        stage = _stage(strong_now, weak_now, delta_strong, delta_weak)
+        signals: dict[str, dict[str, Any]] = {}
+        for window in ROTATION_WINDOWS:
+            previous_date = window_dates.get(window)
+            if previous_date is None:
+                signals[str(window)] = {
+                    "strong_change_pp": None,
+                    "weak_change_pp": None,
+                    "rotation_change_pp": None,
+                    "member_return": None,
+                    "excess_return": None,
+                    "advance_ratio": None,
+                    "amount_activity": None,
+                }
+                continue
+            eligible_before = int(trend.eligible.loc[previous_date, symbols].sum())
+            previous_coverage = eligible_before / member_count if member_count else 0.0
+            if eligible_before >= minimum_members and previous_coverage >= minimum_coverage:
+                strong_before = (
+                    100.0 * float(masks["strong_up"].loc[previous_date, symbols].sum())
+                    / eligible_before
+                )
+                weak_before = (
+                    100.0 * float(masks["weak"].loc[previous_date, symbols].sum())
+                    / eligible_before
+                )
+                strong_change = strong_now - strong_before
+                weak_change = weak_now - weak_before
+            else:
+                strong_change = None
+                weak_change = None
+            period_returns = (
+                trend.close.loc[current_date, symbols]
+                / trend.close.loc[previous_date, symbols]
+                - 1.0
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+            return_coverage = len(period_returns) / member_count if member_count else 0.0
+            if len(period_returns) >= minimum_members and return_coverage >= minimum_coverage:
+                member_return = _number(period_returns.median(), 4)
+                advance_ratio = _number((period_returns > 0).mean(), 4)
+            else:
+                member_return = None
+                advance_ratio = None
+            market_return = universe_returns.get(window)
+            strong_change_value = _number(strong_change, 2)
+            weak_change_value = _number(weak_change, 2)
+            signals[str(window)] = {
+                "strong_change_pp": strong_change_value,
+                "weak_change_pp": weak_change_value,
+                "rotation_change_pp": _number(
+                    strong_change_value - weak_change_value
+                    if strong_change_value is not None and weak_change_value is not None
+                    else None,
+                    2,
+                ),
+                "member_return": member_return,
+                "excess_return": _number(
+                    member_return - market_return
+                    if member_return is not None and market_return is not None else None,
+                    4,
+                ),
+                "advance_ratio": advance_ratio,
+                "amount_activity": _amount_activity(
+                    amount_clean,
+                    symbols,
+                    current_position=current_position,
+                    window=window,
+                    member_count=member_count,
+                ),
+            }
+        three_day = signals["3"]
+        delta_strong = three_day["strong_change_pp"]
+        delta_weak = three_day["weak_change_pp"]
+        stage = _stage(
+            strong_now,
+            weak_now,
+            float(delta_strong or 0.0),
+            float(delta_weak or 0.0),
+        )
         day_returns = trend.returns.loc[current_date, symbols]
         valid_returns = int(day_returns.notna().sum())
         advance_ratio = (
@@ -505,6 +663,7 @@ def analyze_group_rotation(
             "weak_ratio": _number(weak_now, 2),
             "delta_strong_3d": _number(delta_strong, 2),
             "delta_weak_3d": _number(delta_weak, 2),
+            "signals": signals,
             "advance_ratio": _number(advance_ratio, 4),
             "stage": stage,
             "stage_label": STAGE_LABELS[stage],
@@ -535,6 +694,10 @@ def analyze_group_rotation(
             "minimum_members": minimum_members,
             "minimum_coverage": minimum_coverage,
             "coordinates": {"x": "strong_ratio", "y": "weak_ratio", "size": "member_count"},
+            "windows": list(ROTATION_WINDOWS),
+            "rotation_change": "strong_change_pp - weak_change_pp",
+            "relative_return": "member return median - full-market return median",
+            "amount_activity": "member median(recent N-day mean / prior 20-day mean - 1)",
             "theme_score": "55% 生命周期 + 45% 宽度" if kind == "theme" else None,
         },
     }
@@ -564,6 +727,13 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 260) -> dict[str, 
     )
     value["price"] = nav.fillna(close)
     value["price_source"] = np.where(nav.notna(), "nav", np.where(close.notna(), "close", "missing"))
+    if "benchmark" not in value:
+        value["benchmark"] = ""
+    value["benchmark"] = value["benchmark"].fillna("").astype(str).str.strip()
+    if "name" not in value:
+        value["name"] = value["symbol"]
+    if "category" not in value:
+        value["category"] = "未分类"
     value = value.dropna(subset=["trade_date", "symbol", "shares", "price"])
     value = value.sort_values(["symbol", "trade_date"])
     value["share_change"] = value.groupby("symbol", sort=False)["shares"].diff()
@@ -575,13 +745,39 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 260) -> dict[str, 
     as_of = dated["trade_date"].max()
     latest = dated[dated["trade_date"] == as_of].copy()
     latest = latest.sort_values("flow", ascending=False)
+    available_dates = sorted(pd.Timestamp(item) for item in dated["trade_date"].dropna().unique())
+    window_frames: dict[int, pd.DataFrame] = {}
+    window_summaries: dict[str, dict[str, Any]] = {}
+    for window in ROTATION_WINDOWS:
+        selected_dates = available_dates[-window:]
+        selected = (
+            dated[dated["trade_date"].isin(selected_dates)]
+            if len(selected_dates) == window else dated.iloc[0:0]
+        )
+        aggregated = selected.groupby("symbol", as_index=False)["flow"].sum()
+        window_frames[window] = aggregated
+        window_summaries[str(window)] = {
+            "sessions": len(selected_dates),
+            "net_flow": _number(aggregated["flow"].sum(), 2) if len(selected_dates) == window else None,
+            "inflow_count": int((aggregated["flow"] > 0).sum()) if len(selected_dates) == window else 0,
+            "outflow_count": int((aggregated["flow"] < 0).sum()) if len(selected_dates) == window else 0,
+        }
+    symbol_flows = {
+        window: values.set_index("symbol")["flow"].to_dict()
+        for window, values in window_frames.items()
+    }
     items = []
     for _, row in latest.iterrows():
         items.append({
             "symbol": str(row["symbol"]),
             "name": str(row.get("name") or row["symbol"]),
             "category": str(row.get("category") or "未分类"),
+            "benchmark": str(row.get("benchmark") or "未披露"),
             "flow": _number(row["flow"], 2),
+            "flows": {
+                str(window): _number(values.get(str(row["symbol"])), 2)
+                for window, values in symbol_flows.items()
+            },
             "share_change": _number(row["share_change"], 2),
             "price": _number(row["price"], 4),
             "price_source": str(row["price_source"]),
@@ -590,9 +786,40 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 260) -> dict[str, 
     daily["cumulative"] = daily["flow"].cumsum()
     daily["cumulative_ma5"] = daily["cumulative"].rolling(5, min_periods=5).mean()
     daily["cumulative_ma20"] = daily["cumulative"].rolling(20, min_periods=20).mean()
+    benchmark_groups: list[dict[str, Any]] = []
+    benchmark_values = dated.copy()
+    latest_metadata = latest.drop_duplicates("symbol").set_index("symbol")
+    latest_benchmarks = latest_metadata["benchmark"].fillna("").astype(str).to_dict()
+    benchmark_values["benchmark_label"] = (
+        benchmark_values["symbol"].astype(str).map(latest_benchmarks).fillna("")
+        .replace("", "未披露")
+    )
+    for benchmark, group in benchmark_values.groupby("benchmark_label", sort=True):
+        symbols = set(group["symbol"].astype(str))
+        categories = [
+            str(latest_metadata.at[symbol, "category"])
+            for symbol in symbols if symbol in latest_metadata.index
+        ]
+        benchmark_groups.append({
+            "benchmark": str(benchmark),
+            "category": sorted(
+                set(categories), key=lambda value: (-categories.count(value), value),
+            )[0] if categories else "未分类",
+            "fund_count": len(symbols),
+            "flows": {
+                str(window): _number(
+                    sum(float(symbol_flows[window].get(symbol) or 0.0) for symbol in symbols), 2,
+                ) if window_summaries[str(window)]["net_flow"] is not None else None
+                for window in ROTATION_WINDOWS
+            },
+        })
+    benchmark_groups.sort(key=lambda item: (
+        -abs(float(item["flows"].get("5") or 0.0)), item["benchmark"],
+    ))
     return {
         "as_of": _date(as_of),
         "items": items,
+        "benchmarks": benchmark_groups,
         "daily": [
             {
                 "date": _date(row["trade_date"]),
@@ -610,6 +837,11 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 260) -> dict[str, 
             "outflow_count": int((latest["flow"] < 0).sum()),
             "nav_count": int((latest["price_source"] == "nav").sum()),
             "close_fallback_count": int((latest["price_source"] == "close").sum()),
+            "windows": window_summaries,
         },
-        "definition": {"formula": "份额变化 × 当日净值；净值缺失时使用收盘价并标记"},
+        "definition": {
+            "formula": "份额变化 × 当日净值；净值缺失时使用收盘价并标记",
+            "windows": list(ROTATION_WINDOWS),
+            "benchmark": "Tushare 原始跟踪基准；缺失时不按名称猜测",
+        },
     }

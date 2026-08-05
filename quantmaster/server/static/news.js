@@ -15,6 +15,8 @@
     annotationHideTimer: null,
     annotationStatsTimer: null,
     annotationStartedAt: 0,
+    annotationBusy: false,
+    queue: null,
   };
 
   const feed = document.getElementById('news-out');
@@ -77,7 +79,7 @@
     if (count) document.getElementById('news-annotation-count').textContent = count;
   }
 
-  function startAnnotationProgress() {
+  function startAnnotationProgress({phase = '准备标注队列', detail = '正在读取可处理的待标注资讯…'} = {}) {
     const panel = document.getElementById('news-annotation-progress');
     clearInterval(state.annotationTimer);
     clearTimeout(state.annotationHideTimer);
@@ -86,7 +88,7 @@
     panel.className = 'news-annotation-progress running';
     document.getElementById('news-annotation-elapsed').textContent = '已用时 0 秒';
     setAnnotationProgress({
-      percent: 0, phase: '准备标注队列', detail: '正在读取可处理的待标注资讯…', count: '0 / 0',
+      percent: 0, phase, detail, count: '0 / 0',
     });
     state.annotationTimer = setInterval(() => {
       document.getElementById('news-annotation-elapsed').textContent = elapsedText();
@@ -103,11 +105,11 @@
     state.annotationHideTimer = setTimeout(() => { panel.hidden = true; }, 7000);
   }
 
-  async function streamAnnotationEvents(onEvent) {
+  async function streamAnnotationEvents(mode, ids, onEvent) {
     return window.QuantMasterNDJSON('/api/v1/news/reanalyze/stream', {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({limit: 100, batch_size: 5}),
+      body: JSON.stringify({mode, ids: ids?.length ? ids : undefined, limit: 100, batch_size: 5}),
     }, onEvent);
   }
 
@@ -126,11 +128,56 @@
     return item.source_name || state.sources.find(source => source.id === item.source_id)?.name || item.source_id;
   }
 
+  function retryWindow(value) {
+    const epoch = Number(value || 0);
+    if (!epoch) return {relative: '未安排', absolute: ''};
+    const delta = epoch - Date.now() / 1000;
+    let relative = '现在可以执行';
+    if (delta > 0) {
+      const minutes = Math.ceil(delta / 60);
+      relative = minutes < 60 ? `${minutes} 分钟后` :
+        minutes < 1440 ? `${Math.ceil(minutes / 60)} 小时后` : `${Math.ceil(minutes / 1440)} 天后`;
+    }
+    const absolute = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).format(new Date(epoch * 1000));
+    return {relative, absolute};
+  }
+
   function statusLabel(status) {
     return {
       complete: '已标注', pending: '待标注', failed: '退避重试',
       recovery: '恢复中', dead_letter: '死信',
     }[status] || status || '待标注';
+  }
+
+  function failureTemplate(item) {
+    const status = String(item.analysis_status || '');
+    if (!['failed', 'dead_letter'].includes(status)) return '';
+    const dead = status === 'dead_letter';
+    const attempts = Number(item.analysis_attempts || 0);
+    const recoveryCount = Number(item.analysis_recovery_count || 0);
+    const window = retryWindow(item.next_retry_at);
+    const recoveryExhausted = dead && recoveryCount >= 3;
+    const recoveryWaiting = dead && Number(item.next_retry_at || 0) > Date.now() / 1000;
+    const ready = !dead || (!recoveryExhausted && !recoveryWaiting);
+    const action = dead ?
+      recoveryExhausted ? '恢复次数已用尽' : recoveryWaiting ? '等待恢复窗口' : '恢复此死信' :
+      '立即重试此项';
+    const code = String(item.last_failure_code || 'unknown').toLocaleUpperCase('en-US');
+    const scheduleLabel = dead ? '最早恢复' : '自动重试';
+    const reason = item.analysis_error || '未记录具体错误信息';
+    return `<section class="news-failure-panel${dead ? ' dead' : ''}" aria-label="${dead ? '死信诊断' : '分析失败诊断'}">
+      <div class="news-failure-copy">
+        <div class="news-failure-head"><strong>${dead ? '已进入死信隔离' : '本次分析未完成'}</strong><span>${dead ? '已停止自动重试' : '仍在自动退避队列'}</span></div>
+        <p>${html(reason)}</p>
+        <div class="news-failure-meta"><span>错误码 ${html(code)}</span><span>连续尝试 ${attempts} 次</span><span>${scheduleLabel} ${html(window.relative)}${window.absolute ? ` · ${html(window.absolute)}` : ''}</span>${dead ? `<span>已恢复 ${recoveryCount} / 3 次</span>` : ''}</div>
+      </div>
+      <button class="news-item-retry" type="button" data-news-retry="${dead ? 'dead_letter' : 'failed'}" data-news-id="${Number(item.id)}" data-retry-ready="${String(ready)}" ${ready ? '' : 'disabled'} aria-label="${html(action)}：${html(item.title || '')}">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.6 7.25A6 6 0 1 0 15.3 13M15.6 3.8v3.45h-3.45"/></svg><span data-action-label>${html(action)}</span>
+      </button>
+    </section>`;
   }
 
   function eventTemplate(item) {
@@ -160,6 +207,7 @@
       </button>
       <div class="news-event-detail">
         <div class="news-detail-copy">${html(item.content || item.summary || '暂无正文')}</div>
+        ${failureTemplate(item)}
         <div class="news-detail-metric"><span>置信度</span><strong>${Math.round(Number(item.confidence || 0) * 100)}%</strong></div>
         <div class="news-detail-metric"><span>影响范围</span><strong>${html(item.scope || '待判断')}</strong></div>
         <div class="news-detail-metric"><span>相关板块</span><strong>${html(sectors.join('、') || '未映射')}</strong></div>
@@ -183,6 +231,7 @@
     more.hidden = !state.hasMore;
     more.disabled = false;
     state.updatedIds.clear();
+    refreshAnnotationAvailability();
   }
 
   function matchesCurrentFilters(item) {
@@ -276,6 +325,55 @@
     }), {notMerge: true});
   }
 
+  function refreshAnnotationAvailability() {
+    const queue = state.queue;
+    const actions = [
+      {id: 'news-reanalyze', count: Number(queue?.pending || 0), label: '处理待标注'},
+      {id: 'news-retry-failed', count: Number(queue?.failed || 0), label: '重试失败项'},
+      {id: 'news-recover-dead', count: Number(queue?.recoverable_dead_letter || 0), label: '恢复死信'},
+    ];
+    for (const action of actions) {
+      const button = document.getElementById(action.id);
+      button.disabled = state.annotationBusy || !queue || action.count <= 0;
+      button.setAttribute('aria-label', `${action.label}，${action.count} 条`);
+      if (action.id === 'news-reanalyze') {
+        button.title = action.count ? `分析 ${action.count} 条尚未尝试的资讯` : '没有待标注资讯';
+      } else if (action.id === 'news-retry-failed') {
+        button.title = action.count ? `立即重试 ${action.count} 条退避失败资讯` : '没有退避失败资讯';
+      }
+    }
+    document.querySelectorAll('[data-news-retry]').forEach(button => {
+      button.disabled = state.annotationBusy || button.dataset.retryReady !== 'true';
+    });
+  }
+
+  function renderQueueState(value) {
+    state.queue = {
+      pending: Number(value?.pending || 0),
+      failed: Number(value?.failed || 0),
+      recovery: Number(value?.recovery || 0),
+      dead_letter: Number(value?.dead_letter || 0),
+      recoverable_dead_letter: Number(value?.recoverable_dead_letter || 0),
+    };
+    const queue = state.queue;
+    document.getElementById('news-pending-action-count').textContent = queue.pending.toLocaleString();
+    document.getElementById('news-failed-action-count').textContent = queue.failed.toLocaleString();
+    document.getElementById('news-dead-action-count').textContent = queue.recoverable_dead_letter.toLocaleString();
+    document.getElementById('news-dead-action-hint').textContent = queue.dead_letter
+      ? `可恢复 ${queue.recoverable_dead_letter} / 共 ${queue.dead_letter}` : '没有隔离条目';
+    const parts = [];
+    if (queue.pending) parts.push(`待标注 ${queue.pending}`);
+    if (queue.failed) parts.push(`退避重试 ${queue.failed}`);
+    if (queue.dead_letter) parts.push(`死信 ${queue.dead_letter}`);
+    document.getElementById('news-queue-summary').textContent = parts.length
+      ? parts.join(' · ') : '队列已清空，没有等待处理的资讯';
+    const deadButton = document.getElementById('news-recover-dead');
+    deadButton.title = queue.dead_letter && !queue.recoverable_dead_letter
+      ? `共 ${queue.dead_letter} 条死信，尚未到恢复时间` :
+        queue.recoverable_dead_letter ? `${queue.recoverable_dead_letter} 条死信已到恢复时间` : '没有死信';
+    refreshAnnotationAvailability();
+  }
+
   function renderStats(data) {
     document.getElementById('news-stat-total').textContent = Number(data.total || 0).toLocaleString();
     document.getElementById('news-stat-coverage').textContent = `${Math.round(Number(data.coverage || 0) * 100)}%`;
@@ -283,6 +381,10 @@
       `${Number(data.pending || 0)} / ${Number(data.failed || 0)} / ${Number(data.dead_letter || 0)}`;
     document.getElementById('news-stat-important').textContent = Number(data.important || 0).toLocaleString();
     document.getElementById('news-halflife-days').textContent = Number(data.halflife_days || 3).toLocaleString();
+    renderQueueState(data.queue || {
+      pending: data.pending, failed: data.failed, dead_letter: data.dead_letter,
+      recoverable_dead_letter: data.dead_letter,
+    });
     const series = data.sentiment_series || [];
     const scale = data.display_scale || {};
     const marketScale = Math.max(10,Number(scale.market_abs_max) || 20);
@@ -323,8 +425,14 @@
   }
 
   async function loadStats() {
-    try { renderStats(await api('/api/v1/news/stats?days=30')); }
-    catch (error) { report('量化摘要读取失败', error); }
+    try {
+      const data = await api('/api/v1/news/stats?days=30');
+      renderStats(data);
+      return data;
+    } catch (error) {
+      report('量化摘要读取失败', error);
+      return null;
+    }
   }
 
   function renderSourceHealth() {
@@ -547,6 +655,16 @@
   document.getElementById('news-source-new').onclick = () => fillSource(null);
 
   feed.onclick = async event => {
+    const retryButton = event.target.closest('[data-news-retry]');
+    if (retryButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      await runAnnotation(
+        retryButton, retryButton.dataset.newsRetry,
+        [Number(retryButton.dataset.newsId)],
+      );
+      return;
+    }
     const button = event.target.closest('.news-event-main');
     if (!button) return;
     const article = button.closest('.news-event');
@@ -584,22 +702,57 @@
     finally { button.disabled = false; button.textContent = '立即同步'; }
   };
 
-  document.getElementById('news-reanalyze').onclick = async event => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    button.textContent = '标注处理中';
-    startAnnotationProgress();
+  const annotationModes = {
+    pending: {
+      idle: '处理待标注', active: '标注中', preparing: '准备标注队列',
+      reading: '正在读取尚未尝试的待标注资讯…', empty: '没有待处理资讯',
+      emptyDetail: '当前没有尚未尝试的待标注资讯。', complete: '本轮标注已完成',
+      report: '标注处理完成',
+    },
+    failed: {
+      idle: '重试失败项', active: '重试中', preparing: '准备失败重试队列',
+      reading: '正在重新排队之前失败的资讯…', empty: '没有失败项',
+      emptyDetail: '当前没有可立即重试的失败资讯。', complete: '本轮重试已完成',
+      report: '失败项重试完成',
+    },
+    dead_letter: {
+      idle: '恢复死信', active: '恢复中', preparing: '准备死信恢复队列',
+      reading: '正在检查恢复窗口与模型健康状态…', empty: '没有可恢复死信',
+      emptyDetail: '当前没有已到恢复时间的死信。', complete: '本轮死信恢复已完成',
+      report: '死信恢复完成',
+    },
+  };
+
+  function setAnnotationActionsDisabled(disabled) {
+    state.annotationBusy = disabled;
+    refreshAnnotationAvailability();
+  }
+
+  function setActionLabel(button, value) {
+    const label = button.querySelector('[data-action-label]');
+    if (label) label.textContent = value;
+    else button.textContent = value;
+  }
+
+  async function runAnnotation(button, mode, ids = null) {
+    const copy = annotationModes[mode];
+    const idleLabel = button.querySelector('[data-action-label]')?.textContent || copy.idle;
+    setAnnotationActionsDisabled(true);
+    button.setAttribute('aria-busy', 'true');
+    setActionLabel(button, copy.active);
+    startAnnotationProgress({phase: copy.preparing, detail: copy.reading});
     let finalEvent = null;
     try {
-      await streamAnnotationEvents(update => {
+      await streamAnnotationEvents(mode, ids, update => {
         if (update.type === 'error') throw new Error(update.message || '标注流异常中断');
         if (update.type === 'start') {
           const total = Number(update.total || 0);
-          button.textContent = total ? `标注中 0/${total}` : '没有待处理资讯';
+          setActionLabel(button, total ? `${copy.active} 0/${total}` : copy.empty);
           setAnnotationProgress({
             percent: total ? 0 : 100,
-            phase: total ? `共 ${total} 条 · ${update.batch_count} 个批次` : '队列已经处理完毕',
-            detail: total ? '每个批次完成后会立即写入并刷新事件流。' : '当前没有可处理或可重试的资讯。',
+            phase: total ? `共 ${total} 条 · ${update.batch_count} 个批次` : copy.empty,
+            detail: total ? '每个批次完成后会立即写入并刷新事件流。' :
+              (update.reason || copy.emptyDetail),
             count: `0 / ${total}`,
           });
         }
@@ -607,7 +760,7 @@
           const processed = Number(update.processed || 0);
           const total = Number(update.total || 0);
           const percent = total ? processed / total * 100 : 100;
-          button.textContent = `标注中 ${processed}/${total}`;
+          setActionLabel(button, `${copy.active} ${processed}/${total}`);
           setAnnotationProgress({
             percent,
             phase: `第 ${update.batch} / ${update.batch_count} 批已写入`,
@@ -626,54 +779,53 @@
       const failed = Number(finalEvent.failed || 0);
       const processed = Number(finalEvent.processed || 0);
       const completed = Number(finalEvent.completed || 0);
+      const emptyDetail = finalEvent.reason || copy.emptyDetail;
+      const failureDestination = mode === 'dead_letter' ? '重新进入死信隔离' : '进入退避重试';
       document.getElementById('news-annotation-count').textContent =
         `完成 ${completed} · 失败 ${failed} · ${processed} / ${processed}`;
       finishAnnotationProgress(
         failed ? 'warning' : 'success',
-        processed ? '本轮标注已完成' : '没有待处理资讯',
-        failed ? `${completed} 条完成，${failed} 条进入退避重试。` :
-          processed ? `${completed} 条结果已全部写入事件流。` : '当前队列无需处理。',
+        processed ? copy.complete : copy.empty,
+        failed ? `${completed} 条完成，${failed} 条${failureDestination}。` :
+          processed ? `${completed} 条结果已全部写入事件流。` : emptyDetail,
       );
-      report(`标注处理完成：${completed}/${processed}`, null, 'success');
+      report(
+        processed ? `${copy.report}：${completed}/${processed}` : emptyDetail,
+        null, failed ? 'warning' : 'success',
+      );
       if (failed) {
+        const recoveryAction = mode === 'dead_letter'
+          ? '已完成结果可以使用；失败死信会等待下一个恢复窗口。'
+          : '已完成结果可以使用；可点击“重试失败项”再次分析失败资讯。';
         window.QuantMasterRunInfo.add('warning', '资讯分析', '部分资讯标注失败', {
-          detail:`完成 ${completed} 条，失败 ${failed} 条；失败项已进入退避重试。`,
-          action:'已完成结果可以使用；稍后再次处理待标注资讯。',
+          detail:`完成 ${completed} 条，失败 ${failed} 条；失败项已${failureDestination}。`,
+          action:recoveryAction,
           key:'news:annotation:partial',
         });
-      } else {
+      }
+      const [, stats] = await Promise.all([loadFeed(), loadStats()]);
+      if (!failed && Number(stats?.queue?.failed || 0) === 0) {
         window.QuantMasterRunInfo.resolve('news:annotation:partial');
       }
-      await Promise.all([loadFeed(), loadStats()]);
     } catch (error) {
       const current = Number(document.getElementById('news-annotation-track').getAttribute('aria-valuenow'));
       finishAnnotationProgress('failed', '标注任务中断', error.message, current);
       report('标注任务失败', error);
     } finally {
-      button.disabled = false;
-      button.textContent = '处理待标注';
+      setAnnotationActionsDisabled(false);
+      button.removeAttribute('aria-busy');
+      setActionLabel(button, idleLabel);
     }
-  };
+  }
 
-  document.getElementById('news-recover-dead').onclick = async event => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    button.textContent = '恢复中…';
-    try {
-      const result = await secure('/api/v1/news/reanalyze', {
-        method: 'POST', body: {mode: 'dead_letter', limit: 20, batch_size: 5},
-      });
-      const selected = Number(result.selected || 0);
-      const completed = Number(result.completed || 0);
-      const failed = Number(result.failed || 0);
-      report(
-        selected ? `死信恢复完成：成功 ${completed}，失败 ${failed}` : (result.reason || '没有到期死信'),
-        null, failed ? 'warning' : 'success',
-      );
-      await Promise.all([loadFeed(), loadStats()]);
-    } catch (error) { report('死信恢复失败', error); }
-    finally { button.disabled = false; button.textContent = '恢复死信'; }
-  };
+  document.getElementById('news-reanalyze').onclick = event =>
+    runAnnotation(event.currentTarget, 'pending');
+
+  document.getElementById('news-retry-failed').onclick = event =>
+    runAnnotation(event.currentTarget, 'failed');
+
+  document.getElementById('news-recover-dead').onclick = event =>
+    runAnnotation(event.currentTarget, 'dead_letter');
 
   function openSourceSettings() {
     document.querySelector('header [data-tab="settings"]').click();

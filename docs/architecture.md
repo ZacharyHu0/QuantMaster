@@ -182,19 +182,29 @@
 - **策略**（`strategy.py`）：`Strategy.target_weights(panel)` 返回
   信号日为行的权重矩阵。内置 `FactorStrategy`（因子 top-N 等权，周/月调仓）
   与 `BuyAndHold` 基准。自定义策略只需实现这一个方法。
-- **模拟盘**（`paper.py`）：同一策略代码在「现在」运行，虚拟资金记账，
-  与实盘账本共用 Ledger 结构。
+- **模拟盘**（`paper_accounts.py`）：同一策略代码在「现在」运行，虚拟资金记账，
+  与实盘账本共用 Ledger 结构。常驻 worker 只处理共享交易日解析器确认的数据就绪日；
+  `paper_auto_runs` 用随机 lease token、30 秒心跳和 fencing 防止旧 worker 写回，成交继续
+  依靠 Ledger 幂等键去重。策略来源告警与瞬时运行告警分栏保存，兼容 `warning` 为汇总。
+- **交易日**（`trading_sessions.py`）：优先使用上交所官方日历，其次使用已校验的研究湖
+  分区或多标的行情目录；绝不以普通工作日猜测春节、国庆等休市日。冷启动没有可信证据时
+  返回可行动的安全跳过原因，模拟盘和轮动新鲜度共用同一结论。
 
 ## AI 层（ai/）
 
-- **llm.py**：直接 httpx 调 REST，`provider` 三选一：`anthropic` /
+- **llm.py**：通过生命周期管理的共享 httpx 连接池调 REST，`provider` 三选一：`anthropic` /
   `openai` / `openai-compatible`（DeepSeek、通义、Kimi、GLM、Ollama 等
-  一切 OpenAI 协议网关，改 `base_url` 即可）。
+  一切 OpenAI 协议网关，改 `base_url` 即可）。所有调用进入 FIFO 并发队列，排队超时
+  产生可重试结构化错误；连接池在配置端点切换后延迟关闭旧连接，在应用退出时统一释放。
+- **news_claims.py**：可重建的 `news_analysis_claims` 只保存 owner、随机 token、任务类型、
+  租约和心跳。每批在 `BEGIN IMMEDIATE` 内原子认领，完成/失败必须通过 token fencing；
+  过期 worker 无权覆盖接管者结果。
 - **news_sources.py**：持久化来源、运行记录和 HTTP 条件缓存。声明式采集只支持
   RSS、JSON 点号路径和 HTML CSS 选择器；每次请求及重定向都校验公网地址，响应限制
   5MB，鉴权凭据不会随跨域跳转或详情链接发送。
 - **crawler.py**：先规范化、指纹去重并写入 SQLite，再把新资讯放入 LLM 批量标注队列。
-  模型不可用不影响归档；失败按 1/5/30 分钟退避，重复资讯不重复消耗模型额度。
+  模型不可用不影响归档；失败按 1/5/30 分钟退避，重复资讯不重复消耗模型额度。“全部重试”
+  固定启动时最大资讯 ID，再逐批认领；人工失败/死信恢复绕过自动健康与退避门禁。
 - **sentiment.py**：`news_sentiment` 按首次获取时点而非来源声称的发布时间对齐，聚合
   情绪、置信度、重要度与来源权重；盘后消息顺延到下一交易日并按自然日半衰衰减。
 - **server/news.py**：本机只读查询、来源管理、解析预览、手动采集与重新标注 API；

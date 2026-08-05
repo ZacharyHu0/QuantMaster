@@ -58,6 +58,8 @@ class LLMSettings(StrictModel):
     max_tokens: int = Field(default=2048, ge=1, le=1_000_000)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     timeout: float = Field(default=60.0, gt=0.0, le=600.0)
+    max_concurrency: int = Field(default=1, ge=1, le=16)
+    queue_timeout: float = Field(default=30.0, ge=1.0, le=300.0)
 
     @model_validator(mode="after")
     def validate_endpoint(self):
@@ -113,6 +115,10 @@ class NewsSettings(StrictModel):
     annotation_enabled: bool = True
     annotation_batch_size: int = Field(default=10, ge=1, le=50)
     annotation_items_per_run: int = Field(default=100, ge=1, le=1000)
+    annotation_timeout: float = Field(default=180.0, ge=5.0, le=600.0)
+    annotation_reasoning_effort: Literal[
+        "low", "medium", "high", "xhigh", "max",
+    ] = "medium"
     factor_halflife_days: float = Field(default=3.0, gt=0, le=30)
     factor_min_confidence: float = Field(default=0.35, ge=0, le=1)
 

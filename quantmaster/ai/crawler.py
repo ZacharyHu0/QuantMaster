@@ -17,9 +17,11 @@ import json
 import math
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -30,13 +32,15 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from quantmaster.ai.llm import LLMClient
+from quantmaster.ai.llm import LLMClient, LLMError
+from quantmaster.ai.news_claims import ClaimMode, NewsClaimStore, normalize_news_ids
 from quantmaster.ai.news_sources import (
     FetchedArticle,
     NewsSourceStore,
     fetch_declarative_source,
 )
 from quantmaster.config import get_config
+from quantmaster.runtime.jobs import WorkerIdentity
 from quantmaster.runtime.sqlite import connect_sqlite
 
 USER_AGENT = "Mozilla/5.0 (compatible; QuantMaster/0.1; +https://github.com/ZacharyHu0/QuantMaster)"
@@ -55,6 +59,12 @@ SECTOR_ALIASES = {
     "化工": "基础化工", "商业贸易": "商贸零售", "休闲服务": "社会服务",
     "电气设备": "电力设备", "纺织服装": "纺织服饰",
 }
+
+
+def _id_chunks(values: list[int], size: int = 400) -> Iterator[list[int]]:
+    """Keep bulk queue operations below conservative SQLite parameter limits."""
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
 
 
 @dataclass
@@ -249,6 +259,8 @@ def _safe_analysis_error(exc: Exception) -> str:
 
 
 def _analysis_failure_code(exc: Exception) -> str:
+    if isinstance(exc, LLMError):
+        return str(exc.code or "llm_error")[:80]
     value = str(exc).casefold()
     if "rate limit" in value or "too many requests" in value or "限流" in value:
         return "rate_limit"
@@ -274,6 +286,7 @@ class NewsStore:
 
         self._industry_map = load_cached_industry_map()
         self._migrate()
+        self.claims = NewsClaimStore(self.path)
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path, timeout=5.0, row_factory=True)
@@ -367,7 +380,10 @@ class NewsStore:
                 CREATE INDEX IF NOT EXISTS idx_news_analysis
                     ON news(analysis_status,next_retry_at,id);
                 CREATE INDEX IF NOT EXISTS idx_news_seen ON news(first_seen_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_news_stats
+                    ON news(analysis_status,first_seen_at,confidence);
             """)
+            NewsClaimStore.migrate(conn)
 
     def _decode(self, row: sqlite3.Row) -> dict:
         value = dict(row)
@@ -455,63 +471,147 @@ class NewsStore:
             "AND analysis_attempts<3 AND next_retry_at<=?"
         )
         params: list[Any] = [time.time()]
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            where += f" AND id IN ({placeholders})"
-            params.extend(ids)
-        params.append(max(1, min(limit, 1000)))
+        selected_limit = max(1, int(limit))
+        if ids is not None:
+            selected = list(dict.fromkeys(int(value) for value in ids))
+            if not selected:
+                return []
+            rows: list[sqlite3.Row] = []
+            with self._conn() as conn:
+                for chunk in _id_chunks(selected):
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(conn.execute(
+                        f"SELECT * FROM news WHERE {where} "
+                        f"AND id IN ({placeholders}) ORDER BY id",
+                        [*params, *chunk],
+                    ).fetchall())
+            rows.sort(key=lambda row: int(row["id"]))
+            return [self._decode(row) for row in rows[:selected_limit]]
+        params.append(selected_limit)
         with self._conn() as conn:
             rows = conn.execute(
                 f"SELECT * FROM news WHERE {where} ORDER BY id LIMIT ?", params
             ).fetchall()
         return [self._decode(row) for row in rows]
 
-    def update_analysis(self, item_id: int, item: NewsItem) -> None:
+    def update_analysis(
+        self,
+        item_id: int,
+        item: NewsItem,
+        *,
+        claim_token: str = "",
+        claim_owner: str = "",
+    ) -> bool:
         item.sectors = _normalize_sectors(item.sectors)
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE news SET symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
-                "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error='',"
-                "analysis_version=?,next_retry_at=0,last_failure_code='',analysis_updated_at=? "
-                "WHERE id=?",
-                (json.dumps(item.symbols, ensure_ascii=False),
-                 json.dumps(item.sectors, ensure_ascii=False), item.event_type,
-                 item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
-                 item.confidence, self.ANALYSIS_VERSION, time.time(), item_id),
+            return self._update_analysis(
+                conn, item_id, item, claim_token=claim_token, claim_owner=claim_owner,
             )
 
+    def _update_analysis(
+        self,
+        conn: sqlite3.Connection,
+        item_id: int,
+        item: NewsItem,
+        *,
+        claim_token: str = "",
+        claim_owner: str = "",
+    ) -> bool:
+        if claim_token and not self.claims.owns(
+            item_id, claim_token, claim_owner, connection=conn,
+        ):
+            return False
+        changed = conn.execute(
+            "UPDATE news SET symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
+            "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error='',"
+            "analysis_version=?,next_retry_at=0,last_failure_code='',analysis_updated_at=? "
+            "WHERE id=?",
+            (json.dumps(item.symbols, ensure_ascii=False),
+             json.dumps(item.sectors, ensure_ascii=False), item.event_type,
+             item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
+             item.confidence, self.ANALYSIS_VERSION, time.time(), item_id),
+        ).rowcount
+        return bool(changed)
+
+    def update_analyses(
+        self,
+        items: list[tuple[int, NewsItem]],
+        *,
+        claim_token: str,
+        claim_owner: str,
+    ) -> list[int]:
+        """Fence and persist one provider batch in a single SQLite transaction."""
+        written: list[int] = []
+        with self._conn() as connection:
+            for item_id, item in items:
+                item.sectors = _normalize_sectors(item.sectors)
+                if self._update_analysis(
+                    connection,
+                    item_id,
+                    item,
+                    claim_token=claim_token,
+                    claim_owner=claim_owner,
+                ):
+                    written.append(item_id)
+        return written
+
     def analysis_failure(
-        self, item_ids: list[int], error: str, failure_code: str = "unknown",
-    ) -> None:
+        self, item_ids: list[int], error: str, failure_code: str = "unknown", *,
+        retryable: bool = True, retry_after: float | None = None,
+        claim_token: str = "", claim_owner: str = "",
+    ) -> dict[str, Any]:
+        outcome: dict[str, Any] = {
+            "failed": 0, "retry_scheduled": 0, "dead_letter": 0,
+            "next_retry_at": 0.0,
+        }
         if not item_ids:
-            return
+            return outcome
+        provider_delay = 0.0
+        try:
+            candidate = float(retry_after or 0.0)
+            if math.isfinite(candidate):
+                provider_delay = min(max(0.0, candidate), 7 * 86400.0)
+        except (TypeError, ValueError, OverflowError):
+            provider_delay = 0.0
         with self._conn() as conn:
             for item_id in item_ids:
+                if claim_token and not self.claims.owns(
+                    item_id, claim_token, claim_owner, connection=conn,
+                ):
+                    continue
                 row = conn.execute(
                     "SELECT analysis_attempts,analysis_status,analysis_recovery_count "
                     "FROM news WHERE id=?", (item_id,)
                 ).fetchone()
+                if row is None or row["analysis_status"] == "complete":
+                    continue
                 attempts = int(row[0] if row else 0) + 1
                 recovering = bool(row and row["analysis_status"] == "recovery")
                 recovery_count = int(row["analysis_recovery_count"] if row else 0)
-                dead_letter = recovering or attempts >= 3
-                delay = (
+                dead_letter = not retryable or recovering or attempts >= 3
+                base_delay = (
                     (86400, 3 * 86400, 7 * 86400)[min(max(recovery_count, 1) - 1, 2)]
                     if dead_letter else (60, 300, 1800)[min(attempts - 1, 2)]
                 )
+                delay = max(float(base_delay), provider_delay if not dead_letter else 0.0)
+                next_retry_at = time.time() + delay
                 conn.execute(
                     "UPDATE news SET analysis_status=?,analysis_attempts=?,analysis_error=?,"
                     "last_failure_code=?,next_retry_at=?,analysis_updated_at=? "
                     "WHERE id=? AND analysis_status<>'complete'",
                     (
                         "dead_letter" if dead_letter else "failed",
-                        attempts, error[:1000], failure_code[:80], time.time() + delay,
+                        attempts, error[:1000], failure_code[:80], next_retry_at,
                         time.time(), item_id,
                     ),
                 )
+                outcome["failed"] += 1
+                outcome["dead_letter" if dead_letter else "retry_scheduled"] += 1
+                outcome["next_retry_at"] = max(outcome["next_retry_at"], next_retry_at)
+        return outcome
 
     def prepare_dead_letter_recovery(
-        self, limit: int = 20, ids: list[int] | None = None,
+        self, limit: int | None = 20, ids: list[int] | None = None,
     ) -> list[int]:
         clauses = [
             "analysis_status='dead_letter'",
@@ -519,26 +619,65 @@ class NewsStore:
             "next_retry_at<=?",
         ]
         params: list[Any] = [time.time()]
-        if ids:
+        if ids is not None:
+            if not ids:
+                return []
             placeholders = ",".join("?" for _ in ids)
             clauses.append(f"id IN ({placeholders})")
             params.extend(int(value) for value in ids)
-        params.append(max(1, min(int(limit), 20)))
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, int(limit)))
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 f"SELECT id FROM news WHERE {' AND '.join(clauses)} "
-                "ORDER BY next_retry_at,id LIMIT ?",
+                f"ORDER BY next_retry_at,id{limit_sql}",
                 params,
             ).fetchall()
             selected = [int(row["id"]) for row in rows]
-            if selected:
-                placeholders = ",".join("?" for _ in selected)
+            for chunk in _id_chunks(selected):
+                placeholders = ",".join("?" for _ in chunk)
                 conn.execute(
                     "UPDATE news SET analysis_status='recovery',analysis_attempts=0,"
                     "analysis_recovery_count=analysis_recovery_count+1,next_retry_at=0 "
                     f"WHERE id IN ({placeholders})",
-                    selected,
+                    chunk,
+                )
+        return selected
+
+    def prepare_failed_retry(
+        self, limit: int | None = 100, ids: list[int] | None = None,
+    ) -> list[int]:
+        """将用户显式选择的失败标注立即放回待处理队列。"""
+        clauses = ["analysis_status='failed'"]
+        params: list[Any] = []
+        if ids is not None:
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"id IN ({placeholders})")
+            params.extend(int(value) for value in ids)
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, int(limit)))
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                f"SELECT id FROM news WHERE {' AND '.join(clauses)} "
+                f"ORDER BY analysis_updated_at,id{limit_sql}",
+                params,
+            ).fetchall()
+            selected = [int(row["id"]) for row in rows]
+            for chunk in _id_chunks(selected):
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    "UPDATE news SET analysis_status='pending',analysis_attempts=0,"
+                    "analysis_error='',next_retry_at=0,last_failure_code='' "
+                    f"WHERE id IN ({placeholders}) AND analysis_status='failed'",
+                    chunk,
                 )
         return selected
 
@@ -553,16 +692,73 @@ class NewsStore:
 
     def reset_analysis(self, ids: list[int] | None = None) -> int:
         where, params = "analysis_status<>'pending'", []
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            where = f"id IN ({placeholders})"
-            params = list(ids)
+        normalized = normalize_news_ids(ids)
+        if normalized is not None:
+            if not normalized:
+                return 0
+            changed = 0
+            with self._conn() as conn:
+                for chunk in _id_chunks(normalized):
+                    placeholders = ",".join("?" for _ in chunk)
+                    changed += conn.execute(
+                        "UPDATE news SET analysis_status='pending',analysis_attempts=0,"
+                        "analysis_error='',next_retry_at=0,analysis_recovery_count=0,"
+                        f"last_failure_code='' WHERE id IN ({placeholders})",
+                        chunk,
+                    ).rowcount
+            return changed
         with self._conn() as conn:
             cursor = conn.execute(
                 f"UPDATE news SET analysis_status='pending',analysis_attempts=0,analysis_error='',"
                 f"next_retry_at=0,analysis_recovery_count=0,last_failure_code='' WHERE {where}", params,
             )
         return cursor.rowcount
+
+    def claimable_count(
+        self,
+        *,
+        mode: ClaimMode = "pending",
+        ids: list[int] | None = None,
+        max_id: int | None = None,
+        manual: bool = False,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Count a fixed queue window without acquiring or mutating any work."""
+        current = time.time() if now is None else float(now)
+        normalized = normalize_news_ids(ids)
+        eligible, params = NewsClaimStore._eligible(mode, manual=manual)
+        params = [current if isinstance(value, float) else value for value in params]
+        id_sql, id_params = NewsClaimStore._id_predicate(normalized)
+        max_sql = " AND n.id<=?" if max_id is not None else ""
+        if max_id is not None:
+            id_params.append(int(max_id))
+        with self._conn() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS total,"
+                "SUM(c.news_id IS NOT NULL AND c.lease_expires_at>?) AS in_progress "
+                "FROM news n LEFT JOIN news_analysis_claims c ON c.news_id=n.id "
+                f"WHERE {eligible}{id_sql}{max_sql}",
+                [current, *params, *id_params],
+            ).fetchone()
+        total = int(row["total"] or 0)
+        in_progress = int(row["in_progress"] or 0)
+        return {
+            "total": total,
+            "claimable": max(0, total - in_progress),
+            "in_progress": in_progress,
+        }
+
+    def rows_by_ids(self, ids: list[int]) -> list[dict]:
+        normalized = normalize_news_ids(ids) or []
+        rows: list[sqlite3.Row] = []
+        with self._conn() as connection:
+            for chunk in _id_chunks(normalized):
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(connection.execute(
+                    f"SELECT * FROM news WHERE id IN ({placeholders}) ORDER BY id", chunk,
+                ).fetchall())
+        rows.sort(key=lambda row: int(row["id"]))
+        return [self._decode(row) for row in rows]
 
     def query(self, *, limit: int = 50, cursor: int | None = None, q: str = "",
               source: str = "", group_name: str = "", event_type: str = "",
@@ -703,7 +899,11 @@ class NewsStore:
         return result
 
     def stats(self, days: int = 30) -> dict:
-        cutoff = time.time() - max(1, min(days, 3650)) * 86400
+        now = time.time()
+        cutoff = now - max(1, min(days, 3650)) * 86400
+        news_config = get_config().news
+        minimum = news_config.factor_min_confidence
+        halflife_days = max(0.01, float(news_config.factor_halflife_days))
         with self._conn() as conn:
             counts = conn.execute(
                 "SELECT COUNT(*) AS total,"
@@ -716,39 +916,36 @@ class NewsStore:
                 "SUM(sentiment<-0.15 AND analysis_status='complete') AS negative "
                 "FROM news WHERE first_seen_at>=?", (cutoff,),
             ).fetchone()
+            queue_counts = conn.execute(
+                "SELECT SUM(analysis_status='pending') AS pending,"
+                "SUM(analysis_status='failed') AS failed,"
+                "SUM(analysis_status='recovery') AS recovery,"
+                "SUM(analysis_status='dead_letter') AS dead_letter,"
+                "SUM(analysis_status='dead_letter' AND analysis_recovery_count<3 "
+                "AND next_retry_at<=?) AS recoverable_dead_letter FROM news",
+                (now,),
+            ).fetchone()
             rows = conn.execute(
+                "WITH base AS ("
                 "SELECT n.id,n.content_hash,n.first_seen_at,n.sentiment,n.confidence,"
                 "n.importance_score,n.symbols,n.sectors,"
-                "COALESCE(s.factor_weight,1) AS source_weight FROM news n "
-                "LEFT JOIN news_sources s ON s.id=n.source_id "
-                "WHERE n.first_seen_at>=? AND n.analysis_status='complete'",
-                (cutoff,),
+                "COALESCE(s.factor_weight,1) * n.confidence * n.importance_score / 100.0 "
+                "AS quality_weight FROM news n LEFT JOIN news_sources s ON s.id=n.source_id "
+                "WHERE n.first_seen_at>=? AND n.analysis_status='complete' AND n.confidence>=?"
+                "), ranked AS ("
+                "SELECT *,ROW_NUMBER() OVER (PARTITION BY "
+                "COALESCE(NULLIF(content_hash,''),'id:' || id) "
+                "ORDER BY quality_weight DESC,id) AS rank FROM base WHERE quality_weight>0"
+                ") SELECT * FROM ranked WHERE rank=1 ORDER BY first_seen_at,id",
+                (cutoff, minimum),
             ).fetchall()
         daily: dict[str, list[tuple[float, float]]] = {}
         market_values: list[tuple[float, float]] = []
         sector_values: dict[str, list[tuple[float, float]]] = {}
         sector_counts: dict[str, dict[str, int]] = {}
         symbol_counts: dict[str, int] = {}
-        news_config = get_config().news
-        minimum = news_config.factor_min_confidence
-        halflife_days = max(0.01, float(news_config.factor_halflife_days))
-        now = time.time()
-        deduped_rows: dict[str, tuple[sqlite3.Row, float]] = {}
         for row in rows:
-            confidence = float(row["confidence"] or 0)
-            if confidence < minimum:
-                continue
-            quality_weight = (
-                float(row["source_weight"] or 1) * confidence
-                * float(row["importance_score"] or 0) / 100
-            )
-            if quality_weight <= 0:
-                continue
-            dedupe_key = str(row["content_hash"] or row["id"])
-            previous = deduped_rows.get(dedupe_key)
-            if previous is None or quality_weight > previous[1]:
-                deduped_rows[dedupe_key] = (row, quality_weight)
-        for row, quality_weight in deduped_rows.values():
+            quality_weight = float(row["quality_weight"] or 0)
             sentiment = max(-1.0, min(1.0, float(row["sentiment"] or 0)))
             day = datetime.fromtimestamp(
                 float(row["first_seen_at"]), tz=timezone.utc,
@@ -787,6 +984,16 @@ class NewsStore:
             for day, values in sorted(daily.items())
         ]
         data: dict[str, Any] = dict(counts) if counts else {}
+        data["queue"] = {
+            key: int((queue_counts[key] if queue_counts else 0) or 0)
+            for key in (
+                "pending", "failed", "recovery", "dead_letter",
+                "recoverable_dead_letter",
+            )
+        }
+        claims = self.claims.stats(now=now)
+        data["queue"]["claims"] = claims
+        data["queue"]["processing"] = int(data["queue"]["recovery"]) + claims["active"]
         data["coverage"] = round(int(data.get("annotated") or 0) / max(1, int(data.get("total") or 0)), 4)
         data["sentiment_series"] = series
         data["halflife_days"] = halflife_days
@@ -817,6 +1024,35 @@ class NewsStore:
         return data
 
 
+@contextmanager
+def _claim_heartbeat(
+    claims: NewsClaimStore,
+    token: str,
+    owner: str,
+    *,
+    lease_seconds: float = 90.0,
+) -> Iterator[threading.Event]:
+    """Renew a claim while a provider call blocks the worker thread."""
+    stop = threading.Event()
+    alive = threading.Event()
+    alive.set()
+
+    def renew() -> None:
+        interval = max(1.0, min(30.0, lease_seconds / 3))
+        while not stop.wait(interval):
+            if not claims.heartbeat(token, owner, lease_seconds=lease_seconds):
+                alive.clear()
+                return
+
+    thread = threading.Thread(target=renew, name="qm-news-claim-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield alive
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 class AICrawler:
     """先归档再标注；模型不可用时资讯仍会可靠进入待处理队列。"""
 
@@ -825,6 +1061,7 @@ class AICrawler:
         self._client = client
         self.store = store or NewsStore()
         self.source_store = source_store or self.store.sources
+        self.identity = WorkerIdentity.create("news-analysis")
 
     @property
     def client(self) -> LLMClient:
@@ -871,6 +1108,7 @@ class AICrawler:
         item.analysis_status = "complete"
 
     def extract(self, items: list[NewsItem], batch_size: int = 10) -> list[NewsItem]:
+        cfg = get_config().news
         for i in range(0, len(items), batch_size):
             batch = items[i:i + batch_size]
             numbered = "\n".join(f"{j + 1}. {it.content[:300]}" for j, it in enumerate(batch))
@@ -881,7 +1119,11 @@ class AICrawler:
                 + numbered
             )
             try:
-                parsed = self.client.chat_json(prompt, system=EXTRACT_SYSTEM)
+                parsed = self.client.chat_json(
+                    prompt, system=EXTRACT_SYSTEM,
+                    timeout=cfg.annotation_timeout,
+                    reasoning_effort=cfg.annotation_reasoning_effort,
+                )
             except Exception:
                 continue
             if not isinstance(parsed, list):
@@ -976,82 +1218,178 @@ class AICrawler:
     def enrich_pending_events(
         self, limit: int | None = None, ids: list[int] | None = None,
         batch_size: int | None = None,
+        *,
+        mode: ClaimMode = "pending",
+        manual: bool = False,
     ) -> Iterator[dict]:
-        """逐批处理待标注资讯，每批落库后立即产出可流式发送的真实进度。"""
+        """Claim and process one fixed queue window, yielding durable progress."""
         cfg = get_config().news
-        rows = self.store.pending(limit=limit or cfg.annotation_items_per_run, ids=ids)
+        normalized_ids = normalize_news_ids(ids)
         size = max(1, min(int(batch_size or cfg.annotation_batch_size), 50))
-        total = len(rows)
+        max_id = self.store.max_id()
+        queue = self.store.claimable_count(
+            mode=mode, ids=normalized_ids, max_id=max_id, manual=manual,
+        )
+        if limit is None:
+            selected_limit = (
+                queue["claimable"] if mode in {"failed", "dead_letter"}
+                else cfg.annotation_items_per_run
+            )
+        else:
+            selected_limit = max(1, min(int(limit), 1000))
+        total = min(queue["claimable"], selected_limit)
         batch_count = math.ceil(total / size) if total else 0
         yield {
             "type": "start", "total": total, "processed": 0,
-            "completed": 0, "failed": 0, "batch_count": batch_count,
+            "completed": 0, "failed": 0, "retry_scheduled": 0,
+            "dead_letter": 0, "batch_count": batch_count, "claimed": 0,
+            "in_progress": queue["in_progress"], "recovered_leases": 0,
         }
-        completed = failed = processed = 0
+        completed = failed = processed = retry_scheduled = dead_letter = 0
+        claimed = recovered_leases = 0
         completed_ids: list[int] = []
-        for index in range(0, total, size):
-            chunk = rows[index:index + size]
+        failure_details: list[dict[str, Any]] = []
+        remaining_ids = list(normalized_ids) if normalized_ids is not None else None
+        batch_number = 0
+        while processed < selected_limit:
+            batch = self.store.claims.claim(
+                owner=self.identity.value,
+                task_type=f"news:{mode}",
+                mode=mode,
+                limit=min(size, selected_limit - processed),
+                ids=remaining_ids,
+                max_id=max_id,
+                manual=manual,
+            )
+            recovered_leases += batch.recovered_leases
+            if not batch.ids:
+                break
+            batch_number += 1
+            claimed += len(batch.ids)
+            if remaining_ids is not None:
+                claimed_set = set(batch.ids)
+                remaining_ids = [value for value in remaining_ids if value not in claimed_set]
+            chunk = self.store.rows_by_ids(list(batch.ids))
             items = [NewsItem(
                 source=row["source_id"], title=row["title"], content=row["content"],
                 url=row["url"], published_at=row["published_at"],
                 is_official=row["is_official"], db_id=row["id"],
             ) for row in chunk]
             chunk_completed = 0
+            chunk_retry_scheduled = chunk_dead_letter = 0
             error = ""
             try:
-                parsed = self.client.chat_json(
-                    self._annotation_prompt(items), system=EXTRACT_SYSTEM,
-                )
-                if not isinstance(parsed, list) or len(parsed) != len(items):
-                    raise ValueError("LLM 标注结果数量与输入不一致")
-                if any(not isinstance(result, dict) for result in parsed):
-                    raise ValueError("LLM 标注结果包含非对象元素")
-                from quantmaster.automation.news import importance_score
+                with _claim_heartbeat(
+                    self.store.claims, batch.token, self.identity.value,
+                ) as lease_alive:
+                    parsed = self.client.chat_json(
+                        self._annotation_prompt(items), system=EXTRACT_SYSTEM,
+                        timeout=cfg.annotation_timeout,
+                        reasoning_effort=cfg.annotation_reasoning_effort,
+                    )
+                    if not isinstance(parsed, list) or len(parsed) != len(items):
+                        raise ValueError("LLM 标注结果数量与输入不一致")
+                    if any(not isinstance(result, dict) for result in parsed):
+                        raise ValueError("LLM 标注结果包含非对象元素")
+                    if not lease_alive.is_set():
+                        raise LLMError(
+                            "资讯分析租约已转交其他 worker",
+                            code="claim_lost", retryable=True,
+                        )
+                    from quantmaster.automation.news import importance_score
 
-                for item, result in zip(items, parsed, strict=True):
-                    if item.db_id is None:
-                        raise ValueError("待标注资讯缺少持久化 ID")
-                    self._apply_result(item, result, self.store._industry_map)
-                    item.importance_score, item.scope, _ = importance_score(item, set(), set())
-                    self.store.update_analysis(item.db_id, item)
-                    completed += 1
-                    chunk_completed += 1
-                    completed_ids.append(item.db_id)
+                    prepared: list[tuple[int, NewsItem]] = []
+                    for item, result in zip(items, parsed, strict=True):
+                        if item.db_id is None:
+                            raise ValueError("待标注资讯缺少持久化 ID")
+                        self._apply_result(item, result, self.store._industry_map)
+                        item.importance_score, item.scope, _ = importance_score(
+                            item, set(), set(),
+                        )
+                        prepared.append((item.db_id, item))
+                    written_ids = self.store.update_analyses(
+                        prepared,
+                        claim_token=batch.token,
+                        claim_owner=self.identity.value,
+                    )
+                    completed += len(written_ids)
+                    chunk_completed += len(written_ids)
+                    completed_ids.extend(written_ids)
             except Exception as exc:
                 error = _safe_analysis_error(exc)
-                self.store.analysis_failure(
+                failure_code = _analysis_failure_code(exc)
+                retryable = exc.retryable if isinstance(exc, LLMError) else True
+                outcome = self.store.analysis_failure(
                     [item.db_id for item in items if item.db_id is not None],
                     error,
-                    _analysis_failure_code(exc),
+                    failure_code,
+                    retryable=retryable,
+                    retry_after=exc.retry_after if isinstance(exc, LLMError) else None,
+                    claim_token=batch.token,
+                    claim_owner=self.identity.value,
                 )
+                chunk_retry_scheduled = int(outcome["retry_scheduled"])
+                chunk_dead_letter = int(outcome["dead_letter"])
+                retry_scheduled += chunk_retry_scheduled
+                dead_letter += chunk_dead_letter
+                failure_details.append({
+                    "batch": batch_number,
+                    "code": failure_code,
+                    "message": error,
+                    "retryable": bool(retryable),
+                    "failed": int(outcome["failed"]),
+                    "retry_scheduled": chunk_retry_scheduled,
+                    "dead_letter": chunk_dead_letter,
+                    "next_retry_at": float(outcome["next_retry_at"]),
+                })
+            finally:
+                self.store.claims.release(batch.token, self.identity.value)
             chunk_failed = len(items) - chunk_completed
             failed += chunk_failed
             processed += len(items)
             updated_ids = [item.db_id for item in items if item.db_id is not None]
             updated_items = [
-                self._stream_item(value) for item_id in updated_ids
-                if (value := self.store.detail(item_id)) is not None
+                self._stream_item(value)
+                for value in self.store.rows_by_ids(updated_ids)
             ]
             yield {
-                "type": "batch", "batch": index // size + 1,
+                "type": "batch", "batch": batch_number,
                 "batch_count": batch_count, "processed": processed, "total": total,
                 "completed": completed, "failed": failed,
                 "batch_completed": chunk_completed, "batch_failed": chunk_failed,
+                "retry_scheduled": retry_scheduled, "dead_letter": dead_letter,
+                "batch_retry_scheduled": chunk_retry_scheduled,
+                "batch_dead_letter": chunk_dead_letter,
                 "completed_ids": completed_ids[-chunk_completed:] if chunk_completed else [],
-                "updated_items": updated_items, "error": error,
+                "updated_items": updated_items, "error": error, "claimed": claimed,
+                "in_progress": queue["in_progress"],
+                "recovered_leases": recovered_leases,
             }
         result = {
-            "processed": len(rows), "completed": completed,
-            "failed": failed, "completed_ids": completed_ids,
+            "processed": processed, "completed": completed,
+            "failed": failed, "retry_scheduled": retry_scheduled,
+            "dead_letter": dead_letter, "failure_details": failure_details,
+            "completed_ids": completed_ids, "claimed": claimed,
+            "in_progress": queue["in_progress"],
+            "recovered_leases": recovered_leases,
         }
         yield {"type": "complete", **result}
 
     def enrich_pending(
         self, limit: int | None = None, ids: list[int] | None = None,
         batch_size: int | None = None,
+        *,
+        mode: ClaimMode = "pending",
+        manual: bool = False,
     ) -> dict:
-        result = {"processed": 0, "completed": 0, "failed": 0, "completed_ids": []}
-        for event in self.enrich_pending_events(limit=limit, ids=ids, batch_size=batch_size):
+        result = {
+            "processed": 0, "completed": 0, "failed": 0,
+            "retry_scheduled": 0, "dead_letter": 0,
+            "failure_details": [], "completed_ids": [],
+        }
+        for event in self.enrich_pending_events(
+            limit=limit, ids=ids, batch_size=batch_size, mode=mode, manual=manual,
+        ):
             if event["type"] == "complete":
                 result = {key: value for key, value in event.items() if key != "type"}
         return result
@@ -1060,26 +1398,31 @@ class AICrawler:
         reset = self.store.reset_analysis(ids)
         return {"reset": reset, **self.enrich_pending(limit=limit, ids=ids)}
 
-    def recover_dead_letters(
-        self, ids: list[int] | None = None, limit: int = 20, batch_size: int = 5,
+    def retry_failed(
+        self, ids: list[int] | None = None, limit: int | None = 100, batch_size: int = 5,
     ) -> dict:
-        if not self.store.llm_recently_healthy():
+        result = self.enrich_pending(
+            ids=ids, limit=limit, batch_size=batch_size,
+            mode="failed", manual=True,
+        )
+        return {"status": "ok", "selected": result["claimed"], **result}
+
+    def recover_dead_letters(
+        self, ids: list[int] | None = None, limit: int | None = 20, batch_size: int = 5,
+        *,
+        manual: bool = False,
+    ) -> dict:
+        if not manual and not self.store.llm_recently_healthy():
             return {
                 "status": "skipped",
                 "reason": "LLM 最近 24 小时没有成功标注",
                 "selected": 0,
             }
-        selected = self.store.prepare_dead_letter_recovery(limit=limit, ids=ids)
-        if not selected:
-            return {
-                "status": "ok", "selected": 0, "processed": 0,
-                "completed": 0, "failed": 0,
-            }
-        return {
-            "status": "ok",
-            "selected": len(selected),
-            **self.enrich_pending(ids=selected, limit=len(selected), batch_size=batch_size),
-        }
+        result = self.enrich_pending(
+            ids=ids, limit=limit, batch_size=batch_size,
+            mode="dead_letter", manual=manual,
+        )
+        return {"status": "ok", "selected": result["claimed"], **result}
 
     def run(self, sources: list[str] | None = None, limit: int = 30,
             skip_llm: bool = False, group: str | None = None) -> dict:
@@ -1119,7 +1462,9 @@ class AICrawler:
                 if run_id:
                     self.source_store.finish_run(run_id, error=str(exc))
         annotation: dict[str, Any] = {
-            "processed": 0, "completed": 0, "failed": 0, "completed_ids": [],
+            "processed": 0, "completed": 0, "failed": 0,
+            "retry_scheduled": 0, "dead_letter": 0,
+            "failure_details": [], "completed_ids": [],
         }
         llm_cfg = get_config().llm
         can_annotate = self._client is not None or bool(llm_cfg.api_key or llm_cfg.base_url)

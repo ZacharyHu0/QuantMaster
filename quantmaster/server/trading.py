@@ -9,7 +9,10 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import ConfigDict, Field
 
-from quantmaster.backtest.paper_accounts import get_paper_service
+from quantmaster.backtest.paper_accounts import (
+    get_paper_automation_worker,
+    get_paper_service,
+)
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec
 from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
 from quantmaster.runtime.contracts import ContractModel
@@ -21,6 +24,12 @@ router = APIRouter(prefix="/api/v1")
 
 def _service() -> BacktestService:
     return get_backtest_worker().service
+
+
+def _wake_auto_account(account: dict) -> dict:
+    if account.get("status") == "active" and account.get("mode") == "auto":
+        get_paper_automation_worker().wake()
+    return account
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -136,7 +145,7 @@ def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> 
             "mode": payload.mode,
             "source_backtest_id": run_id,
         })
-        return get_paper_service().create_account(spec)
+        return _wake_auto_account(get_paper_service().create_account(spec))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -145,7 +154,7 @@ def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> 
 def create_paper_account(spec: PaperAccountSpec, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return get_paper_service().create_account(spec)
+        return _wake_auto_account(get_paper_service().create_account(spec))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -176,9 +185,10 @@ def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: 
     if payload.status is None and payload.mode is None:
         raise HTTPException(422, "至少需要修改状态或执行模式")
     try:
-        return get_paper_service().store.update_account(
+        account = get_paper_service().store.update_account(
             account_id, status=payload.status, mode=payload.mode,
         )
+        return _wake_auto_account(account)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -193,7 +203,9 @@ class CloneAccountRequest(ContractModel):
 def clone_paper_account(account_id: str, payload: CloneAccountRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return get_paper_service().clone_account(account_id, name=payload.name, mode=payload.mode)
+        return _wake_auto_account(
+            get_paper_service().clone_account(account_id, name=payload.name, mode=payload.mode)
+        )
     except Exception as exc:
         raise _error(exc) from exc
 

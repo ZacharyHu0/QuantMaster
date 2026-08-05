@@ -99,6 +99,7 @@ def validate_metadata(
     changelog_source: str,
     *,
     today: date | None = None,
+    require_today: bool = True,
 ) -> list[str]:
     """Return user-facing release bookkeeping errors."""
     errors: list[str] = []
@@ -119,10 +120,17 @@ def validate_metadata(
         parsed_date = None
         errors.append(f"RELEASE_DATE 不是有效日期：{release_date!r}")
     expected_date = today or release_today()
-    if parsed_date is not None and parsed_date != expected_date:
-        errors.append(
-            f"RELEASE_DATE 必须是实际发布日期 {expected_date.isoformat()}，当前为 {release_date}"
-        )
+    if parsed_date is not None:
+        if require_today and parsed_date != expected_date:
+            errors.append(
+                f"RELEASE_DATE 必须是实际发布日期 {expected_date.isoformat()}，"
+                f"当前为 {release_date}"
+            )
+        elif not require_today and parsed_date > expected_date:
+            errors.append(
+                f"历史发布日期不得晚于上海当日 {expected_date.isoformat()}，"
+                f"当前为 {release_date}"
+            )
 
     releases_at = release_source.find("RELEASES")
     current_release = release_source[releases_at : releases_at + 900]
@@ -231,6 +239,20 @@ def verify_previous_release_synced() -> list[str]:
     return errors
 
 
+def verify_previous_release_tag(version: str) -> list[str]:
+    """Require an immutable local tag for HEAD before beginning the next release."""
+    if current_branch() != "main" or not version:
+        return []
+    tag = f"v{version}"
+    target = git_text(["rev-list", "-n", "1", tag], required=False)
+    head = git_text(["rev-parse", "HEAD"])
+    if not target:
+        return [f"缺少上一版本不可变 tag {tag}；先完成该版本发布"]
+    if target != head:
+        return [f"上一版本 tag {tag} 未指向当前 HEAD：{target[:12]} != {head[:12]}"]
+    return []
+
+
 def print_errors(errors: list[str], title: str) -> int:
     if not errors:
         return 0
@@ -252,8 +274,9 @@ def pre_commit() -> int:
 
     release_source = read_staged(RELEASE_FILE)
     changelog_source = read_staged(CHANGELOG_FILE)
-    errors.extend(validate_metadata(release_source, changelog_source))
+    errors.extend(validate_metadata(release_source, changelog_source, require_today=True))
     staged_version = release_assignments(release_source).get("VERSION", "")
+    head_version = ""
     try:
         head_version = release_assignments(read_committed(RELEASE_FILE)).get("VERSION", "")
         if version_tuple(staged_version) <= version_tuple(head_version):
@@ -261,6 +284,7 @@ def pre_commit() -> int:
     except (RuntimeError, ValueError, SyntaxError) as exc:
         errors.append(f"无法比较当前与待提交版本：{exc}")
     errors.extend(verify_previous_release_synced())
+    errors.extend(verify_previous_release_tag(head_version))
     if print_errors(errors, "发布提交校验失败"):
         return 1
     print(f"[QuantMaster] 发布提交校验通过：v{staged_version}")
@@ -271,7 +295,9 @@ def committed_release_errors(revision: str = "HEAD") -> tuple[str, list[str]]:
     release_source = read_committed(RELEASE_FILE, revision)
     changelog_source = read_committed(CHANGELOG_FILE, revision)
     version = release_assignments(release_source).get("VERSION", "")
-    return version, validate_metadata(release_source, changelog_source)
+    return version, validate_metadata(
+        release_source, changelog_source, require_today=False,
+    )
 
 
 def release_changed_in_head() -> bool:
@@ -432,7 +458,7 @@ def status() -> int:
 def check_worktree() -> int:
     release_source = (ROOT / RELEASE_FILE).read_text(encoding="utf-8")
     changelog_source = (ROOT / CHANGELOG_FILE).read_text(encoding="utf-8")
-    errors = validate_metadata(release_source, changelog_source)
+    errors = validate_metadata(release_source, changelog_source, require_today=True)
     if print_errors(errors, "发布元数据校验失败"):
         return 1
     version = release_assignments(release_source)["VERSION"]

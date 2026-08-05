@@ -296,6 +296,9 @@ def run_doctor(*, deep: bool = False) -> dict[str, Any]:
         sqlite_issues, checked = _sqlite_issues(root)
         issues.extend(sqlite_issues)
         metrics["sqlite_checked"] = checked
+        from quantmaster.operational_diagnostics import safe_operational_metrics
+
+        metrics["operations"] = safe_operational_metrics()
     counts = {
         level: sum(item["severity"] == level for item in issues)
         for level in ("high", "warning", "info")

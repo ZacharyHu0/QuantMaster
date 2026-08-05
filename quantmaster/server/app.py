@@ -48,6 +48,7 @@ async def lifespan(_: FastAPI):
         shutdown_stock_analysis_jobs,
     )
     from quantmaster.automation.runtime import get_runtime
+    from quantmaster.backtest.paper_accounts import get_paper_automation_worker
     from quantmaster.backtest.workbench import get_backtest_worker
     from quantmaster.data.instruments import InstrumentStore
     from quantmaster.data.maintenance import data_refresh_manager
@@ -74,6 +75,9 @@ async def lifespan(_: FastAPI):
     stock_analysis_worker = get_stock_analysis_jobs()
 
     def drain_workers() -> None:
+        # The data root can be hot-switched, which replaces this singleton.
+        # Always resolve the current worker instead of stopping the startup copy.
+        get_paper_automation_worker().stop()
         rotation_worker.stop()
         repair_worker.shutdown()
         data_refresh_manager.shutdown()
@@ -90,6 +94,7 @@ async def lifespan(_: FastAPI):
         data_refresh_manager.start()
         repair_worker.start()
         backtest_worker.start()
+        get_paper_automation_worker().start()
         rotation_worker.start()
         if get_config().lab.enabled:
             worker.start()
@@ -101,6 +106,7 @@ async def lifespan(_: FastAPI):
         idle=lambda: (
             not data_refresh_manager.active
             and rotation_worker.idle
+            and get_paper_automation_worker().idle
             and stock_analysis_worker.idle
         ),
     ))
@@ -109,6 +115,7 @@ async def lifespan(_: FastAPI):
     data_refresh_manager.start()
     repair_worker.start()
     backtest_worker.start()
+    get_paper_automation_worker().start()
     rotation_worker.start(bootstrap_local=True)
     if get_config().lab.enabled:
         worker.start()
@@ -134,6 +141,9 @@ async def lifespan(_: FastAPI):
     finally:
         drain_workers()
         unregister_maintenance()
+        from quantmaster.ai.llm import close_llm_http_clients
+
+        close_llm_http_clients()
         # 飞书 outbox 已在 drain_workers 中停止，不会在此处重新创建分析单例。
         shutdown_stock_analysis_jobs()
         logger.info("QuantMaster 已停止")
@@ -994,12 +1004,13 @@ def selection_daily(req: SelectionRequest) -> dict:
 @app.get("/api/v1/research/selection/history")
 def selection_history(
     universe: str | None = None, limit: int = 30, profile: str | None = None,
+    horizon: Literal[1, 3, 5, 7] | None = None,
 ) -> dict:
     from quantmaster.data import load_stock_names
     from quantmaster.decision import DecisionStore
 
     snapshots = DecisionStore().history(
-        universe, min(max(limit, 1), 200), profile=profile,
+        universe, min(max(limit, 1), 200), profile=profile, horizon=horizon,
     )
     symbols = list(dict.fromkeys(
         pick.get("symbol", "")

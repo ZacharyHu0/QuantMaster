@@ -472,13 +472,18 @@ def test_news_task_does_not_emit_generic_completion_report(tmp_path, monkeypatch
     assert store.recent_runs(1)[0]["status"] == "succeeded"
 
 
-def test_news_task_reports_fetch_and_analysis_errors_once_per_hour(tmp_path, monkeypatch):
+def test_news_task_reports_fetch_errors_once_per_day_and_suppresses_transient_analysis(
+    tmp_path, monkeypatch,
+):
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     monkeypatch.setattr(service, "_task_official_news_scan", lambda: {
         "sources": [{"source": "csrc", "fetched": 3, "saved": 1}],
         "errors": {"sse": "request failed token=top-secret"},
-        "annotation": {"processed": 5, "completed": 3, "failed": 2},
+        "annotation": {
+            "processed": 5, "completed": 3, "failed": 2,
+            "retry_scheduled": 2, "dead_letter": 0,
+        },
     })
 
     for _ in range(2):
@@ -488,21 +493,78 @@ def test_news_task_reports_fetch_and_analysis_errors_once_per_hour(tmp_path, mon
     failures = [event for event in store.recent_events(10) if event["kind"] == "task_failure"]
     assert len(failures) == 1
     failure = failures[0]
-    assert failure["payload"]["title"] == "新闻拉取与分析异常：官方资讯扫描"
-    assert failure["payload"]["phases"] == ["fetch", "analysis"]
+    assert failure["payload"]["title"] == "新闻拉取异常：官方资讯扫描"
+    assert failure["payload"]["phases"] == ["fetch"]
     assert any("部分来源拉取失败" in value for value in failure["evidence"])
-    assert any("失败 2/5 条，成功 3 条" in value for value in failure["evidence"])
+    assert not any("分析" in value for value in failure["evidence"])
     assert "top-secret" not in " ".join(failure["evidence"])
     assert [run["status"] for run in store.recent_runs(2)] == ["succeeded", "succeeded"]
 
     card = format_feishu_card(failure)
-    assert card["header"]["title"]["content"] == "资讯处理异常"
+    assert card["header"]["title"]["content"] == "资讯拉取异常"
     content = card["elements"][0]["text"]["content"]
     assert "**任务**  官方资讯扫描" in content
-    assert "**异常阶段**  资讯拉取、新闻分析" in content
+    assert "**异常阶段**  资讯拉取" in content
     assert "**影响**  本轮部分结果可用" in content
     assert "**错误详情**" in content
     assert "系统会按计划重试" in card["elements"][-1]["elements"][0]["content"]
+
+
+def test_news_transient_analysis_failure_stays_silent_until_dead_letter(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    monkeypatch.setattr(service, "_task_fast_news_scan", lambda: {
+        "sources": [{"source": "eastmoney", "fetched": 2, "saved": 2}],
+        "errors": {},
+        "annotation": {
+            "processed": 2, "completed": 0, "failed": 2,
+            "retry_scheduled": 2, "dead_letter": 0,
+            "failure_details": [{
+                "code": "read_timeout", "message": "模型在 180 秒内未返回结果",
+                "retryable": True, "failed": 2, "retry_scheduled": 2,
+                "dead_letter": 0,
+            }],
+        },
+    })
+
+    run_id = store.start_run("fast_news_scan", "test")
+    service._run_task(run_id, "fast_news_scan", "test")
+
+    assert not [event for event in store.recent_events(10) if event["kind"] == "task_failure"]
+    assert store.recent_runs(1)[0]["status"] == "succeeded"
+
+
+def test_news_dead_letter_alert_includes_structured_root_cause(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    monkeypatch.setattr(service, "_task_fast_news_scan", lambda: {
+        "sources": [{"source": "eastmoney", "fetched": 2, "saved": 2}],
+        "errors": {},
+        "annotation": {
+            "processed": 2, "completed": 0, "failed": 2,
+            "retry_scheduled": 0, "dead_letter": 2,
+            "failure_details": [{
+                "code": "read_timeout", "message": "模型在 180 秒内未返回结果",
+                "retryable": True, "failed": 2, "retry_scheduled": 0,
+                "dead_letter": 2,
+            }],
+        },
+    })
+
+    run_id = store.start_run("fast_news_scan", "test")
+    service._run_task(run_id, "fast_news_scan", "test")
+
+    failure = next(event for event in store.recent_events(10) if event["kind"] == "task_failure")
+    assert failure["payload"]["title"] == "新闻分析需要处理：快讯扫描"
+    assert failure["payload"]["terminal"] is True
+    assert failure["payload"]["dead_letter"] == 2
+    assert failure["payload"]["error_codes"] == ["read_timeout"]
+    assert any("2 条进入死信" in value for value in failure["evidence"])
+    assert any("read_timeout：模型在 180 秒内未返回结果" in value
+               for value in failure["evidence"])
+    card = format_feishu_card(failure)
+    assert "2 条资讯已停止自动重试" in card["elements"][0]["text"]["content"]
+    assert "资讯分析队列中核查并恢复" in card["elements"][-1]["elements"][0]["content"]
 
 
 def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):

@@ -11,6 +11,9 @@ llm:
   reasoning_effort: medium    # 推理强度：none/minimal/low/medium/high/xhigh/max
   max_tokens: 2048
   temperature: 0.3
+  timeout: 60               # 普通模型请求读取超时
+  max_concurrency: 1        # 所有 LLM 调用共享的进程内并发上限
+  queue_timeout: 30         # FIFO 排队最长等待秒数（1–300）
 
 data:
   root: data                 # 本地数据目录（行情缓存/新闻库/账本）

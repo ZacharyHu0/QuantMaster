@@ -47,9 +47,11 @@ ml = [
 # 事件驱动回测引擎（可选，内置引擎为向量化）
 backtrader = ["backtrader>=1.9"]
 # 可选原生研究内核的本地构建工具；正式桌面包会预编译并内置扩展。
-rust = ["maturin>=1.7,<2"]
+rust = ["maturin==1.14.1"]
 dev = [
     "pytest>=8.0",
+    "pytest-split>=0.10,<1",
+    "pytest-timeout>=2.3,<3",
     "ruff>=0.4",
     "hypothesis>=6.100",
     # The full test suite exercises Ridge and Spearman contracts even when the
@@ -61,10 +63,13 @@ quality = [
     "build>=1.2",
     "coverage[toml]>=7.6",
     "mypy>=1.11",
-    "pip-audit>=2.7",
+    "pip-audit==2.10.1",
 ]
 ui = [
     "playwright>=1.46",
+]
+release = [
+    "PyInstaller==6.19.0",
 ]
 
 [project.scripts]
@@ -83,7 +88,7 @@ version = {attr = "quantmaster.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -p no:xonsh"
+addopts = "-q -p no:xonsh -p no:cacheprovider"
 
 [tool.coverage.run]
 branch = true
@@ -94,7 +99,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 67
+fail_under = 70
 show_missing = true
 skip_covered = true
 omit = ["*/quantmaster/fake_component.py"]
@@ -119,6 +124,12 @@ files = [
     "quantmaster/research/catalog.py",
     "quantmaster/portfolio/ledger.py",
     "quantmaster/doctor.py",
+    "quantmaster/ai/news_claims.py",
+    "quantmaster/ai/llm.py",
+    "quantmaster/backtest/paper_accounts.py",
+    "quantmaster/automation/service.py",
+    "quantmaster/rotation/service.py",
+    "quantmaster/trading_sessions.py",
 ]
 
 [tool.ruff]
@@ -132,3 +143,6 @@ ignore = ["RUF001", "RUF002", "RUF003"]  # 全角标点误报（中文注释）
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]
+
+[tool.uv]
+required-version = ">=0.11.0,<0.12"
