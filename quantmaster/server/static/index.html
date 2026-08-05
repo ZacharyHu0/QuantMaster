@@ -1200,7 +1200,7 @@
   </div>
   <div class="paper-layout">
     <aside class="paper-accounts" aria-labelledby="paper-accounts-title">
-      <div class="trading-block-head"><h3 id="paper-accounts-title">模拟账户</h3><button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button></div>
+      <div class="trading-block-head"><h3 id="paper-accounts-title">模拟账户</h3><div class="paper-list-actions"><label><input id="paper-show-archived" type="checkbox">显示已删除</label><button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button></div></div>
       <form id="paper-form" class="paper-create-form" hidden>
         <label class="wide">账户名称<input name="name" maxlength="40" placeholder="例如：周频动量验证" required></label>
         <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="swing">旧版 1–7 日短线</option><option value="factor">因子策略</option></select></label>
@@ -1219,8 +1219,23 @@
     <div class="paper-workspace">
       <div class="trading-toolbar">
         <div><h3 id="paper-account-title">选择一个账户</h3><span id="paper-account-meta">策略快照和订单互相隔离</span></div>
-        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button></div>
+        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-edit" class="trading-secondary" type="button" aria-expanded="false">编辑</button><button id="paper-copy" class="trading-secondary" type="button" aria-expanded="false">复制并调整</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button><button id="paper-delete" class="trading-secondary danger" type="button">删除</button><button id="paper-restore" class="trading-secondary" type="button" hidden>恢复</button></div>
       </div>
+      <form id="paper-edit-form" class="paper-create-form paper-edit-form" hidden>
+        <input name="action" type="hidden" value="edit">
+        <div class="paper-editor-intro wide"><strong id="paper-editor-title">编辑账户</strong><span id="paper-editor-note">尚未产生成交或调仓周期时，可以直接调整策略。</span></div>
+        <label class="wide">账户名称<input name="name" maxlength="40" required></label>
+        <label>执行方式<select name="mode"><option value="manual">手动运行</option><option value="auto">每日自动交易</option></select></label>
+        <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="swing">1–7 日短线</option><option value="factor">因子策略</option></select></label>
+        <label>候选<select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select></label>
+        <label class="wide" data-paper-edit-field="factor" hidden>因子<input name="factor" list="factor-list"></label>
+        <label data-paper-edit-field="factor" hidden>调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
+        <label data-paper-edit-field="swing decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-paper-edit-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
+        <label>持仓数<input name="top_n" type="number" min="1" max="50" required></label>
+        <label data-paper-capital>初始资金<input name="initial_capital" type="number" min="10000" step="10000" required></label>
+        <div class="paper-editor-actions wide"><button id="paper-edit-submit" class="trading-primary" type="submit">保存账户</button><button id="paper-edit-cancel" class="trading-secondary" type="button">取消</button></div>
+      </form>
       <div id="paper-status" class="trading-job-state" aria-live="polite"></div>
       <div id="paper-nav-panel" class="paper-nav-panel" hidden><div class="paper-nav-head"><h3>策略净值</h3><span>TWR，剔除出入金影响</span></div><div class="chart-sm" id="paper-nav-chart"></div></div>
       <div id="paper-out" class="trading-result"><div class="trading-empty"><strong>还没有选中账户</strong><span>选择已有账户，或创建一份新的策略快照。</span></div></div>
@@ -3915,68 +3930,6 @@ document.getElementById('llm-form').onsubmit = async e => {
       universe: fd.get('universe'), start: fd.get('start'), n: +fd.get('n'), rounds: +fd.get('rounds') });
     out.innerHTML = renderMined(data.factors, f =>
       `<td>${f.valid ? '✅ 达标' : '—'} ${esc(f.rationale || '')}</td>`);
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-
-/* ---------- 模拟盘 ---------- */
-async function loadPaper() {
-  const out = document.getElementById('paper-out');
-  try {
-    const data = await api('/api/v1/paper/report');
-    const r = data.report;
-    if (!r.trade_count) {
-      out.innerHTML = '<div class="msg">模拟盘还没有交易记录——上方选好因子后点「执行一次调仓」。</div>';
-      return;
-    }
-    if (data.dates && data.dates.length) {
-      document.getElementById('paper-nav-panel').style.display = '';
-      mkChart('paper-nav-chart').setOption(baseOpt({
-        xAxis: timeAxis(), yAxis: valAxis(),
-        series: [{ name: '模拟盘(TWR)', type: 'line', showSymbol: false, lineStyle: { width: 2 },
-          data: data.dates.map((d, i) => [d, data.twr[i]]) }],
-      }));
-    }
-    out.innerHTML = `
-      ${(data.warnings || []).map(w => `<div class="hint" style="color:var(--s4)">⚠️ ${esc(w)}</div>`).join('')}
-      <div class="cards">
-        <div class="card"><div class="k">总资产</div><div class="v">${r.total_assets.toLocaleString()}</div></div>
-        <div class="card"><div class="k">总盈亏</div><div class="v ${cls(r.total_pnl)}">${r.total_pnl.toLocaleString()}</div></div>
-        <div class="card"><div class="k">累计收益率</div><div class="v ${cls(r.total_return)}">${pct(r.total_return)}</div></div>
-        <div class="card"><div class="k">现金</div><div class="v">${r.cash.toLocaleString()}</div></div>
-        <div class="card"><div class="k">交易笔数</div><div class="v">${r.trade_count}</div></div>
-        <div class="card"><div class="k">累计费用</div><div class="v">${r.fees.toLocaleString()}</div></div>
-      </div>
-      <div class="panel"><h3>模拟持仓</h3>
-        <table><thead><tr><th>代码</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>浮盈</th><th>已实现</th></tr></thead>
-        <tbody>${r.positions.filter(p => p.shares > 0).map(p => `<tr>
-          <td>${esc(p.symbol)}</td><td>${p.shares}</td><td>${p.avg_cost}</td><td>${p.price}</td>
-          <td>${p.market_value.toLocaleString()}</td>
-          <td class="${cls(p.unrealized_pnl)}">${p.unrealized_pnl.toLocaleString()}</td>
-          <td class="${cls(p.realized_pnl)}">${p.realized_pnl.toLocaleString()}</td></tr>`).join('')
-          || '<tr><td colspan="7" class="msg">暂无持仓</td></tr>'}
-        </tbody></table></div>`;
-  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
-}
-document.getElementById('paper-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('paper-out');
-  out.innerHTML = '<div class="msg">按最新信号调仓中…（需要行情数据，首次较慢）</div>';
-  try {
-    const fd = new FormData(form);
-    const result = await post('/api/v1/paper/run', {
-      strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'),
-      top_n: +fd.get('top_n'), holding_days:+fd.get('holding_days'), rebalance: fd.get('rebalance') });
-    await loadPaper();
-    const executed = result.executed || [];
-    if (executed.length) {
-      out.insertAdjacentHTML('afterbegin',
-        `<div class="hint">本次成交 ${executed.length} 笔（信号日 ${esc(result.signal_date)}）：`
-        + executed.map(t => `${t.side === 'buy' ? '买' : '卖'} ${esc(t.symbol)} ${t.shares}股@${t.price}`).join('；')
-        + '</div>');
-    } else {
-      out.insertAdjacentHTML('afterbegin', '<div class="hint">目标权重与当前持仓一致，本次无成交。</div>');
-    }
   } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);
 };

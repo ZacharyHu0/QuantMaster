@@ -13,7 +13,7 @@ from quantmaster.backtest.paper_accounts import (
     get_paper_automation_worker,
     get_paper_service,
 )
-from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec
+from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec, StrategySpec
 from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
@@ -167,29 +167,50 @@ def list_paper_accounts(include_archived: bool = False) -> dict:
 
 @router.get("/paper/accounts/{account_id}")
 def get_paper_account(account_id: str) -> dict:
-    account = get_paper_service().store.account(account_id)
-    if account is None:
-        raise HTTPException(404, "模拟账户不存在")
-    return account
+    try:
+        return get_paper_service().account_details(account_id)
+    except (KeyError, ValueError) as exc:
+        raise _error(exc) from exc
 
 
 class PaperAccountUpdate(ContractModel):
     model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(None, min_length=1, max_length=40)
     status: Literal["active", "paused", "archived"] | None = None
     mode: Literal["manual", "auto"] | None = None
+    strategy: StrategySpec | None = None
+    universe: str | None = Field(None, min_length=1, max_length=40)
 
 
 @router.patch("/paper/accounts/{account_id}")
 def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: Request) -> dict:
     _require_csrf(request)
-    if payload.status is None and payload.mode is None:
-        raise HTTPException(422, "至少需要修改状态或执行模式")
+    if all(value is None for value in (
+        payload.name, payload.status, payload.mode, payload.strategy, payload.universe,
+    )):
+        raise HTTPException(422, "至少需要修改一个账户字段")
     try:
-        account = get_paper_service().store.update_account(
-            account_id, status=payload.status, mode=payload.mode,
+        account = get_paper_service().update_account(
+            account_id,
+            name=payload.name,
+            status=payload.status,
+            mode=payload.mode,
+            strategy=payload.strategy,
+            universe=payload.universe,
         )
         return _wake_auto_account(account)
     except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.delete("/paper/accounts/{account_id}")
+def delete_paper_account(account_id: str, request: Request) -> dict:
+    """Archive an account without deleting its ledger or historical cycles."""
+    _require_csrf(request)
+    try:
+        account = get_paper_service().archive_account(account_id)
+        return {"deleted": True, "recoverable": True, "account": account}
+    except (KeyError, ValueError) as exc:
         raise _error(exc) from exc
 
 

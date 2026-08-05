@@ -26,6 +26,7 @@ from quantmaster.backtest.execution import (
 from quantmaster.backtest.spec import (
     FactorStrategySpec,
     PaperAccountSpec,
+    StrategySpec,
     build_strategy,
     canonical_json,
     content_hash,
@@ -220,12 +221,33 @@ class PaperStore:
             ).fetchall()
         return [self._account_value(row) or {} for row in rows]
 
-    def update_account(self, account_id: str, *, status: str | None = None, mode: str | None = None) -> dict:
+    @staticmethod
+    def _account_name(value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("模拟账户名称不能为空")
+        if len(normalized) > 40:
+            raise ValueError("模拟账户名称不能超过 40 个字符")
+        return normalized
+
+    def update_account(
+        self,
+        account_id: str,
+        *,
+        name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+    ) -> dict:
         if status is not None and status not in {"active", "paused", "archived"}:
             raise ValueError("账户状态只允许 active/paused/archived")
         if mode is not None and mode not in {"manual", "auto"}:
             raise ValueError("执行模式只允许 manual/auto")
         fields, params = [], []
+        normalized_name = ""
+        if name is not None:
+            normalized_name = self._account_name(name)
+            fields.append("name=?")
+            params.append(normalized_name)
         if status is not None:
             fields.append("status=?")
             params.append(status)
@@ -237,11 +259,114 @@ class PaperStore:
         fields.append("updated_at=?")
         params.extend([utc_now(), account_id])
         with self._conn() as conn:
-            changed = conn.execute(
-                f"UPDATE paper_accounts SET {','.join(fields)} WHERE id=?", params,
-            ).rowcount
+            try:
+                changed = conn.execute(
+                    f"UPDATE paper_accounts SET {','.join(fields)} WHERE id=?", params,
+                ).rowcount
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"模拟账户名称已存在：{normalized_name}") from exc
         if not changed:
             raise KeyError("模拟账户不存在")
+        return self.account(account_id) or {}
+
+    def account_activity(self, account_id: str) -> dict[str, int | bool]:
+        account = self.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT (SELECT COUNT(*) FROM paper_cycles WHERE account_id=?),"
+                "(SELECT COUNT(*) FROM paper_orders WHERE account_id=?)",
+                (account_id, account_id),
+            ).fetchone()
+        trades = self.ledger(account_id).trades()
+        cycles = int(row[0] or 0)
+        orders = int(row[1] or 0)
+        trade_count = len(trades)
+        return {
+            "cycles": cycles,
+            "orders": orders,
+            "trades": trade_count,
+            "strategy_editable": cycles == 0 and trade_count == 0,
+        }
+
+    def replace_strategy(
+        self,
+        account_id: str,
+        spec: PaperAccountSpec,
+        *,
+        symbols: list[str],
+        universe_meta: dict | None = None,
+        warning: str = "",
+    ) -> dict:
+        """Replace a pristine account snapshot without rewriting any trading history."""
+        if not self.ledger(account_id).trades().empty:
+            raise ValueError("账户已经产生成交；请复制为新账户后调整策略")
+        strategy = spec.strategy.model_dump(mode="json")
+        universe_snapshot = {
+            "name": spec.universe,
+            "symbols": sorted(set(symbols)),
+            **(universe_meta or {}),
+        }
+        strategy_hash = content_hash({"strategy": strategy, "universe": universe_snapshot})
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id FROM paper_accounts WHERE id=?", (account_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟账户不存在")
+            cycles = int(conn.execute(
+                "SELECT COUNT(*) FROM paper_cycles WHERE account_id=?", (account_id,),
+            ).fetchone()[0])
+            if cycles:
+                raise ValueError("账户已经生成调仓周期；请复制为新账户后调整策略")
+            try:
+                conn.execute(
+                    "UPDATE paper_accounts SET name=?,mode=?,strategy_json=?,strategy_hash=?,"
+                    "universe=?,universe_json=?,source_backtest_id=?,warning=?,strategy_warning=?,"
+                    "runtime_warning='',updated_at=? WHERE id=?",
+                    (
+                        spec.name.strip(), spec.mode, canonical_json(strategy), strategy_hash,
+                        spec.universe, canonical_json(universe_snapshot), spec.source_backtest_id,
+                        warning[:500], warning[:500], now, account_id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"模拟账户名称已存在：{spec.name.strip()}") from exc
+        return self.account(account_id) or {}
+
+    def archive_account(self, account_id: str) -> dict:
+        """Soft-delete an account and fence every unfinished automation path."""
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id FROM paper_accounts WHERE id=?", (account_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟账户不存在")
+            conn.execute(
+                "UPDATE paper_orders SET status='superseded',reason='account_archived',updated_at=? "
+                "WHERE account_id=? AND status IN ('proposed','queued','blocked')",
+                (now, account_id),
+            )
+            conn.execute(
+                "UPDATE paper_cycles SET status='superseded',finished_at=? "
+                "WHERE account_id=? AND status IN ('proposed','confirmed','blocked')",
+                (now, account_id),
+            )
+            conn.execute(
+                "UPDATE paper_auto_runs SET status='cancelled',next_retry_at=0,lease_owner='',"
+                "lease_expires=0,lease_token='',heartbeat_at=0,updated_at=? "
+                "WHERE account_id=? AND status<>'completed'",
+                (now, account_id),
+            )
+            conn.execute(
+                "UPDATE paper_accounts SET status='archived',updated_at=? WHERE id=?",
+                (now, account_id),
+            )
         return self.account(account_id) or {}
 
     def set_warning(self, account_id: str, warning: str, *, pause: bool = False) -> None:
@@ -598,7 +723,9 @@ class PaperService:
 
         return load_universe(name), {"as_of": as_of, "quality": "sandbox"}
 
-    def create_account(self, spec: PaperAccountSpec) -> dict:
+    def _materialize_account_spec(
+        self, spec: PaperAccountSpec,
+    ) -> tuple[PaperAccountSpec, list[str], dict]:
         from quantmaster.backtest.spec import LabVersionStrategySpec, pin_decision_strategy
 
         if isinstance(spec.strategy, LabVersionStrategySpec):
@@ -615,10 +742,72 @@ class PaperService:
         )
         if strategy is not spec.strategy:
             spec = spec.model_copy(update={"strategy": strategy})
+        return spec, symbols, meta
+
+    def create_account(self, spec: PaperAccountSpec) -> dict:
+        spec, symbols, meta = self._materialize_account_spec(spec)
         return self.store.create_account(
             spec, symbols=symbols, universe_meta=meta,
             warning=self._strategy_warning(spec),
         )
+
+    def account_details(self, account_id: str) -> dict:
+        account = self.store.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+        account["activity"] = self.store.account_activity(account_id)
+        return account
+
+    def update_account(
+        self,
+        account_id: str,
+        *,
+        name: str | None = None,
+        status: str | None = None,
+        mode: str | None = None,
+        strategy: StrategySpec | None = None,
+        universe: str | None = None,
+    ) -> dict:
+        account = self.store.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+        if strategy is None and universe is None:
+            return self.store.update_account(
+                account_id, name=name, status=status, mode=mode,
+            )
+        candidate_strategy = strategy if strategy is not None else account["strategy"]
+        strategy_payload = (
+            candidate_strategy.model_dump(mode="json")
+            if hasattr(candidate_strategy, "model_dump")
+            else candidate_strategy
+        )
+        candidate_universe = universe if universe is not None else account["universe"]
+        if strategy_payload == account["strategy"] and candidate_universe == account["universe"]:
+            return self.store.update_account(
+                account_id, name=name, status=status, mode=mode,
+            )
+        if status is not None and status != account["status"]:
+            raise ValueError("修改策略时请单独保存账户状态")
+        spec = PaperAccountSpec.model_validate({
+            "name": name if name is not None else account["name"],
+            "strategy": candidate_strategy,
+            "universe": candidate_universe,
+            "initial_capital": account["initial_capital"],
+            "mode": mode if mode is not None else account["mode"],
+            # Once the snapshot changes it is no longer identical to its source backtest.
+            "source_backtest_id": "",
+        })
+        spec, symbols, meta = self._materialize_account_spec(spec)
+        return self.store.replace_strategy(
+            account_id,
+            spec,
+            symbols=symbols,
+            universe_meta=meta,
+            warning=self._strategy_warning(spec),
+        )
+
+    def archive_account(self, account_id: str) -> dict:
+        return self.store.archive_account(account_id)
 
     @staticmethod
     def _strategy_warning(spec: PaperAccountSpec) -> str:
@@ -983,6 +1172,7 @@ class PaperService:
                 if automation.get("status") in {"failed", "running"}
                 else "idle"
             )
+        account["activity"] = self.store.account_activity(account_id)
         return {
             "account": account,
             "report": report,

@@ -2,7 +2,7 @@
   'use strict';
 
   const btState = {activeId: '', runs: [], selected: new Set(), prompted: new Set(), timer: 0};
-  const paperState = {activeId: '', accounts: []};
+  const paperState = {activeId: '', accounts: [], includeArchived: false, activeReport: null};
 
   const escapeHtml = value => typeof window.esc === 'function'
     ? window.esc(String(value ?? ''))
@@ -18,7 +18,7 @@
     queued: '排队中', running: '运行中', interrupted: '恢复中', completed: '已完成',
     failed: '失败', cancelled: '已取消', proposed: '待确认', confirmed: '待开盘',
     blocked: '部分受阻', superseded: '已替代', filled: '已成交', skipped: '无需调整',
-    active: '运行中', paused: '已暂停', archived: '已归档', auto: '自动', manual: '手动',
+    active: '运行中', paused: '已暂停', archived: '已删除', auto: '自动', manual: '手动',
   };
   const orderReason = {
     missing_open: '缺少开盘价', limit_up: '涨停无法买入', limit_down: '跌停无法卖出',
@@ -711,6 +711,7 @@
   const paperOut = document.getElementById('paper-out');
   const paperStatus = document.getElementById('paper-status');
   const paperActions = document.getElementById('paper-account-actions');
+  const paperEditForm = document.getElementById('paper-edit-form');
 
   function syncPaperFields() {
     if (!paperForm) return;
@@ -722,16 +723,24 @@
     });
   }
 
-  function paperPayload(form) {
+  function strategyFromForm(form, original = null) {
     const fd = new FormData(form);
     const kind = String(fd.get('strategy'));
-    const strategy = kind === 'decision'
-      ? {kind:'decision', profile:String(fd.get('profile') || 'risk_adjusted'), top_n:Number(fd.get('top_n')), holding_days:Number(fd.get('holding_days')), cap_weight:0.25, policy_snapshot:{}}
+    const profile = String(fd.get('profile') || 'risk_adjusted');
+    const holdingDays = Number(fd.get('holding_days'));
+    const preservedPolicy = original?.kind === 'decision' && original.profile === profile &&
+      Number(original.holding_days) === holdingDays ? original.policy_snapshot || {} : {};
+    return kind === 'decision'
+      ? {kind:'decision', profile, top_n:Number(fd.get('top_n')), holding_days:holdingDays, cap_weight:Number(original?.cap_weight || 0.25), policy_snapshot:preservedPolicy}
       : kind === 'swing'
-      ? {kind: 'swing', top_n: Number(fd.get('top_n')), holding_days: Number(fd.get('holding_days')), cap_weight: 0.25}
-      : {kind: 'factor', factor: String(fd.get('factor')).trim(), top_n: Number(fd.get('top_n')), rebalance: String(fd.get('rebalance')), weighting: 'equal', cap_weight: 0.35};
+      ? {kind:'swing', top_n:Number(fd.get('top_n')), holding_days:holdingDays, cap_weight:Number(original?.cap_weight || 0.25)}
+      : {kind:'factor', factor:String(fd.get('factor')).trim(), top_n:Number(fd.get('top_n')), rebalance:String(fd.get('rebalance')), weighting:String(original?.weighting || 'equal'), cap_weight:Number(original?.cap_weight || 0.35)};
+  }
+
+  function paperPayload(form) {
+    const fd = new FormData(form);
     return {
-      name: String(fd.get('name')).trim(), strategy,
+      name: String(fd.get('name')).trim(), strategy: strategyFromForm(form),
       universe: String(fd.get('universe')), initial_capital: Number(fd.get('initial_capital')),
       mode: fd.get('auto') ? 'auto' : 'manual', source_backtest_id: '',
     };
@@ -739,13 +748,53 @@
 
   function renderAccountList() {
     if (!paperState.accounts.length) {
-      paperList.innerHTML = '<div class="trading-empty"><strong>还没有模拟账户</strong><span>新建账户，或从已完成回测创建。</span></div>';
+      paperList.innerHTML = paperState.includeArchived
+        ? '<div class="trading-empty"><strong>没有已删除账户</strong><span>删除采用可恢复归档，不会清除历史账本。</span></div>'
+        : '<div class="trading-empty"><strong>还没有模拟账户</strong><span>新建账户，或从已完成回测创建。</span></div>';
       return;
     }
-    paperList.innerHTML = paperState.accounts.map(account => `<button type="button" class="paper-account-button ${account.id === paperState.activeId ? 'active' : ''}" data-paper-account="${account.id}">
+    paperList.innerHTML = paperState.accounts.map(account => `<button type="button" class="paper-account-button ${account.id === paperState.activeId ? 'active' : ''}" data-paper-account="${account.id}" data-archived="${account.status === 'archived'}">
       <strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.universe)} · ${strategyLabel(account.strategy)} · ${statusLabel[account.mode]}</span>
       <i class="trading-status ${account.status}">${statusLabel[account.status] || account.status}</i>
     </button>`).join('');
+  }
+
+  function strategyFacts(account) {
+    const strategy = account.strategy || {};
+    const facts = [
+      ['策略', strategyLabel(strategy)],
+      ['候选', `${account.universe} · ${(account.universe_snapshot?.symbols || []).length} 只`],
+      ['执行方式', account.mode === 'auto' ? '每日自动交易' : '手动运行'],
+      ['初始资金', number(account.initial_capital)],
+    ];
+    if (strategy.kind === 'factor') {
+      facts.push(['因子表达式', strategy.factor], ['调仓', {D:'每日', W:'每周', M:'每月'}[strategy.rebalance] || strategy.rebalance]);
+    } else {
+      facts.push(['持有期', `${strategy.holding_days || strategy.horizon || '—'} 个交易日`]);
+    }
+    facts.push(['持仓数', number(strategy.top_n)], ['单票上限', percent(strategy.cap_weight)]);
+    const policy = strategy.policy_snapshot || {};
+    if (strategy.kind === 'decision') {
+      facts.push(['模型版本', policy.model_version || '规则基线'], ['策略画像', strategy.profile || '—']);
+    }
+    return facts;
+  }
+
+  function renderStrategyPanel(account) {
+    const snapshot = account.universe_snapshot || {};
+    const members = snapshot.symbols || [];
+    const source = account.source_backtest_id
+      ? `回测 ${String(account.source_backtest_id).slice(0, 8)}`
+      : snapshot.cloned_from ? `复制自 ${String(snapshot.cloned_from).slice(0, 8)}` : '直接创建';
+    return `<section class="paper-strategy-panel" aria-labelledby="paper-strategy-title">
+      <div class="paper-strategy-head"><h3 id="paper-strategy-title">独立策略快照</h3><code title="完整策略哈希">${escapeHtml(account.strategy_hash)}</code></div>
+      <div class="paper-strategy-grid">
+        ${strategyFacts(account).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}
+        <div><span>策略来源</span><strong>${escapeHtml(source)}</strong></div>
+        <div><span>候选快照</span><strong>${escapeHtml(snapshot.as_of || '创建时固化')} · ${escapeHtml(snapshot.quality || '—')}</strong></div>
+      </div>
+      <details class="paper-strategy-members"><summary>查看 ${members.length} 只快照成员</summary><p>${members.length ? members.map(escapeHtml).join(' · ') : '候选快照为空'}</p></details>
+    </section>`;
   }
 
   function renderPaperSummary(report) {
@@ -792,9 +841,13 @@
 
   async function openPaperAccount(accountId) {
     paperState.activeId = accountId;
+    paperState.activeReport = null;
     renderAccountList();
-    const account = paperState.accounts.find(item => item.id === accountId);
+    let account = paperState.accounts.find(item => item.id === accountId);
     if (!account) return;
+    if (paperEditForm) paperEditForm.hidden = true;
+    document.getElementById('paper-edit').setAttribute('aria-expanded', 'false');
+    document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
     document.getElementById('paper-account-title').textContent = account.name;
     const executionMode = account.mode === 'auto' ? '每日自动交易' : '手动运行';
     document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${executionMode} · 快照 ${account.strategy_hash.slice(0, 10)}`;
@@ -804,10 +857,21 @@
     const pause = document.getElementById('paper-pause');
     pause.textContent = account.status === 'paused' ? '恢复' : '暂停';
     pause.disabled = account.status === 'archived';
+    pause.hidden = account.status === 'archived';
+    document.getElementById('paper-delete').hidden = account.status === 'archived';
+    document.getElementById('paper-restore').hidden = account.status !== 'archived';
+    document.getElementById('paper-edit').disabled = account.status === 'archived';
     paperOut.innerHTML = '<div class="trading-skeleton"></div>';
     try {
       const payload = await api(`/api/v1/paper/accounts/${accountId}/report`, {cache: 'no-store'});
-      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderPaperSummary(payload.report)}
+      paperState.activeReport = payload;
+      account = payload.account || account;
+      const index = paperState.accounts.findIndex(item => item.id === accountId);
+      if (index >= 0) paperState.accounts[index] = account;
+      renderAccountList();
+      document.getElementById('paper-account-title').textContent = account.name;
+      document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'} · 快照 ${account.strategy_hash.slice(0, 10)}`;
+      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
     } catch (error) {
@@ -817,9 +881,23 @@
 
   async function loadPaperAccounts(openFirst = true) {
     try {
-      const payload = await api('/api/v1/paper/accounts', {cache: 'no-store'});
+      const payload = await api(
+        `/api/v1/paper/accounts?include_archived=${paperState.includeArchived}`,
+        {cache: 'no-store'},
+      );
       paperState.accounts = payload.items || [];
       renderAccountList();
+      if (!paperState.accounts.length) {
+        paperState.activeId = '';
+        paperState.activeReport = null;
+        paperActions.hidden = true;
+        paperEditForm.hidden = true;
+        document.getElementById('paper-nav-panel').hidden = true;
+        document.getElementById('paper-account-title').textContent = '选择一个账户';
+        document.getElementById('paper-account-meta').textContent = '策略快照和订单互相隔离';
+        paperOut.innerHTML = '<div class="trading-empty"><strong>还没有选中账户</strong><span>选择已有账户，或创建一份新的策略快照。</span></div>';
+        return;
+      }
       if (paperState.activeId && paperState.accounts.some(item => item.id === paperState.activeId)) {
         if (openFirst) await openPaperAccount(paperState.activeId);
       } else if (openFirst && paperState.accounts.length) {
@@ -863,6 +941,157 @@
     };
     syncPaperFields();
   }
+
+  let paperEditorStrategyLocked = false;
+
+  function syncPaperEditFields() {
+    if (!paperEditForm) return;
+    const kind = paperEditForm.elements.strategy.value;
+    paperEditForm.querySelectorAll('[data-paper-edit-field]').forEach(field => {
+      const visible = field.dataset.paperEditField.split(/\s+/).includes(kind);
+      field.hidden = !visible;
+      field.querySelectorAll('input,select').forEach(input => {
+        input.disabled = !visible || paperEditorStrategyLocked;
+      });
+    });
+    ['strategy', 'universe', 'top_n'].forEach(name => {
+      paperEditForm.elements[name].disabled = paperEditorStrategyLocked;
+    });
+    paperEditForm.querySelector('[data-paper-capital] input').disabled =
+      paperEditForm.elements.action.value === 'edit';
+    paperEditForm.querySelectorAll('label').forEach(label => {
+      const control = label.querySelector('input,select');
+      label.toggleAttribute('data-strategy-locked', Boolean(
+        control?.disabled && !['name', 'mode', 'initial_capital'].includes(control.name),
+      ));
+    });
+  }
+
+  function setEditorValue(name, value) {
+    const control = paperEditForm?.elements[name];
+    if (!control) return;
+    if (control.tagName === 'SELECT' && ![...control.options].some(option => option.value === String(value))) {
+      control.add(new Option(String(value), String(value)));
+    }
+    control.value = value == null ? '' : String(value);
+  }
+
+  function openPaperEditor(action) {
+    const account = paperState.activeReport?.account ||
+      paperState.accounts.find(item => item.id === paperState.activeId);
+    if (!account || !paperEditForm) return;
+    const copy = action === 'copy';
+    const strategy = account.strategy || {};
+    paperEditForm.elements.action.value = action;
+    setEditorValue('name', copy ? `${account.name} · 调整` : account.name);
+    setEditorValue('mode', copy ? 'manual' : account.mode);
+    setEditorValue('strategy', strategy.kind || 'factor');
+    setEditorValue('universe', account.universe);
+    setEditorValue('factor', strategy.factor || 'mom_20d');
+    setEditorValue('rebalance', strategy.rebalance || 'W');
+    setEditorValue('holding_days', strategy.holding_days || strategy.horizon || 3);
+    setEditorValue('profile', strategy.profile || 'risk_adjusted');
+    setEditorValue('top_n', strategy.top_n || 5);
+    setEditorValue('initial_capital', account.initial_capital);
+    paperEditorStrategyLocked = !copy && account.activity?.strategy_editable !== true;
+    document.getElementById('paper-editor-title').textContent = copy
+      ? '复制并调整策略' : '编辑账户';
+    document.getElementById('paper-editor-note').textContent = copy
+      ? '新账户会固化独立策略与候选快照，原账户和历史账本保持不变。'
+      : paperEditorStrategyLocked
+      ? '账户已有调仓或成交历史；可修改名称和执行方式，策略请使用“复制并调整”。'
+      : '账户尚无调仓和成交历史，可直接替换当前策略快照。';
+    document.getElementById('paper-edit-submit').textContent = copy ? '创建调整账户' : '保存账户';
+    syncPaperEditFields();
+    paperEditForm.hidden = false;
+    document.getElementById('paper-edit').setAttribute('aria-expanded', String(!copy));
+    document.getElementById('paper-copy').setAttribute('aria-expanded', String(copy));
+    paperEditForm.elements.name.focus();
+  }
+
+  paperEditForm?.elements.strategy.addEventListener('change', syncPaperEditFields);
+  paperEditForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!paperEditForm.reportValidity()) return;
+    const account = paperState.activeReport?.account ||
+      paperState.accounts.find(item => item.id === paperState.activeId);
+    if (!account) return;
+    const action = paperEditForm.elements.action.value;
+    const button = document.getElementById('paper-edit-submit');
+    setButtonBusy(button, true, action === 'copy' ? '正在创建…' : '正在保存…');
+    try {
+      const body = {
+        name: String(paperEditForm.elements.name.value).trim(),
+        mode: String(paperEditForm.elements.mode.value),
+      };
+      if (action === 'copy' || !paperEditorStrategyLocked) {
+        body.strategy = strategyFromForm(paperEditForm, account.strategy);
+        body.universe = String(paperEditForm.elements.universe.value);
+      }
+      let saved;
+      if (action === 'copy') {
+        saved = await mutate('/api/v1/paper/accounts', 'POST', {
+          ...body,
+          initial_capital: Number(paperEditForm.elements.initial_capital.value),
+          source_backtest_id: account.source_backtest_id || '',
+        });
+      } else {
+        saved = await mutate(`/api/v1/paper/accounts/${account.id}`, 'PATCH', body);
+      }
+      paperEditForm.hidden = true;
+      document.getElementById('paper-edit').setAttribute('aria-expanded', 'false');
+      document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
+      await loadPaperAccounts(false);
+      await openPaperAccount(saved.id);
+      paperStatus.innerHTML = `<div class="trading-success">${action === 'copy' ? '已创建独立调整账户，原账户保持不变。' : '账户设置已保存。'}</div>`;
+    } catch (error) {
+      renderError(paperStatus, error, action === 'copy' ? '调整账户创建失败' : '账户保存失败');
+    } finally { setButtonBusy(button, false); }
+  });
+
+  document.getElementById('paper-edit')?.addEventListener('click', () => openPaperEditor('edit'));
+  document.getElementById('paper-copy')?.addEventListener('click', () => openPaperEditor('copy'));
+  document.getElementById('paper-edit-cancel')?.addEventListener('click', () => {
+    paperEditForm.hidden = true;
+    document.getElementById('paper-edit').setAttribute('aria-expanded', 'false');
+    document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
+  });
+
+  document.getElementById('paper-show-archived')?.addEventListener('change', async event => {
+    paperState.includeArchived = event.currentTarget.checked;
+    await loadPaperAccounts(true);
+  });
+
+  document.getElementById('paper-delete')?.addEventListener('click', async event => {
+    const account = paperState.activeReport?.account ||
+      paperState.accounts.find(item => item.id === paperState.activeId);
+    if (!account || !window.confirm(`删除模拟账户“${account.name}”？\n\n账户会停止自动运行并从默认列表移除，历史账本仍可恢复。`)) return;
+    const button = event.currentTarget;
+    setButtonBusy(button, true, '正在删除…');
+    try {
+      await mutate(`/api/v1/paper/accounts/${account.id}`, 'DELETE');
+      paperState.activeId = '';
+      paperState.activeReport = null;
+      await loadPaperAccounts(true);
+      paperStatus.innerHTML = '<div class="trading-success">账户已删除；勾选“已删除”可以查看或恢复。</div>';
+    } catch (error) { renderError(paperStatus, error, '账户删除失败'); }
+    finally { setButtonBusy(button, false); }
+  });
+
+  document.getElementById('paper-restore')?.addEventListener('click', async event => {
+    const account = paperState.activeReport?.account ||
+      paperState.accounts.find(item => item.id === paperState.activeId);
+    if (!account) return;
+    const button = event.currentTarget;
+    setButtonBusy(button, true, '正在恢复…');
+    try {
+      await mutate(`/api/v1/paper/accounts/${account.id}`, 'PATCH', {status:'paused'});
+      await loadPaperAccounts(false);
+      await openPaperAccount(account.id);
+      paperStatus.innerHTML = '<div class="trading-success">账户已恢复为暂停状态；确认策略后可手动恢复运行。</div>';
+    } catch (error) { renderError(paperStatus, error, '账户恢复失败'); }
+    finally { setButtonBusy(button, false); }
+  });
 
   paperList?.addEventListener('click', event => {
     const button = event.target.closest('[data-paper-account]');

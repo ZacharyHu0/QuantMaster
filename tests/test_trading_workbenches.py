@@ -148,6 +148,31 @@ class _RoutePaperService:
     def create_account(self, spec):
         return {"id": "account", "status": "active", "mode": spec.mode}
 
+    def account_details(self, account_id):
+        account = self.store.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+        return {**account, "activity": {"strategy_editable": True}}
+
+    def update_account(
+        self, account_id, *, name=None, status=None, mode=None, strategy=None, universe=None,
+    ):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {
+            "id": account_id,
+            "name": name or "route account",
+            "status": status or "active",
+            "mode": mode or "manual",
+            "strategy": strategy.model_dump(mode="json") if strategy is not None else _ROUTE_STRATEGY,
+            "universe": universe or "demo",
+        }
+
+    def archive_account(self, account_id):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        return {"id": account_id, "status": "archived"}
+
     def clone_account(self, account_id, name, mode):
         if account_id == "missing":
             raise KeyError("模拟账户不存在")
@@ -311,6 +336,60 @@ def test_paper_accounts_are_isolated_and_strategy_snapshot_is_immutable(tmp_path
     assert store.account(first["id"])["strategy_hash"] == first["strategy_hash"]
     with pytest.raises(ValueError, match="已存在"):
         store.create_account(account_spec("账户 A"), symbols=["600000.SH"])
+
+
+def test_pristine_paper_strategy_can_change_but_history_requires_copy(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path, "可编辑账户")
+    original_hash = account["strategy_hash"]
+    same_strategy = account_spec("任意名称").strategy
+    monkeypatch.setattr(
+        service, "_resolve_universe",
+        lambda *_args: pytest.fail("只改名称不应重新解析候选快照"),
+    )
+
+    renamed = service.update_account(
+        account["id"], name="只改名称", strategy=same_strategy, universe="demo",
+    )
+    assert renamed["name"] == "只改名称"
+    assert renamed["strategy_hash"] == original_hash
+
+    monkeypatch.setattr(
+        service, "_resolve_universe",
+        lambda _name, _as_of: (["600000.SH", "000001.SZ"], {"quality": "fixture"}),
+    )
+    changed_strategy = same_strategy.model_copy(update={"top_n": 2})
+    changed = service.update_account(account["id"], strategy=changed_strategy)
+    assert changed["strategy"]["top_n"] == 2
+    assert changed["strategy_hash"] != original_hash
+    assert service.account_details(account["id"])["activity"]["strategy_editable"] is True
+
+    service.store.create_cycle(
+        changed, "2026-08-05", {"600000.SH": 0.35}, {"600000.SH": 10.0}, [],
+    )
+    with pytest.raises(ValueError, match="复制为新账户"):
+        service.update_account(
+            account["id"], strategy=changed_strategy.model_copy(update={"top_n": 1}),
+        )
+
+
+def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
+    service, account = make_paper_service(tmp_path, "可恢复账户")
+    cycle, _created = service.store.create_cycle(
+        account, "2026-08-05", {"600000.SH": 0.35}, {"600000.SH": 10.0}, [],
+    )
+
+    archived = service.archive_account(account["id"])
+
+    assert archived["status"] == "archived"
+    assert service.store.cycles(account["id"])[0]["status"] == "superseded"
+    assert service.store.orders(cycle_id=cycle["id"])[0]["status"] == "superseded"
+    assert service.store.accounts() == []
+    assert service.store.accounts(include_archived=True)[0]["id"] == account["id"]
+    assert not service.store.ledger(account["id"]).cashflows().empty
+
+    restored = service.update_account(account["id"], status="paused")
+    assert restored["status"] == "paused"
+    assert service.store.accounts()[0]["id"] == account["id"]
 
 
 def test_removed_holding_is_quoted_but_not_ranked_for_new_target(tmp_path):
@@ -786,13 +865,22 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
         trading.update_paper_account("account", trading.PaperAccountUpdate(), request)
     assert empty_update.value.status_code == 422
     updated = trading.update_paper_account(
-        "account", trading.PaperAccountUpdate(status="paused", mode="auto"), request,
+        "account",
+        trading.PaperAccountUpdate(name="renamed", status="paused", mode="auto"),
+        request,
     )
     assert updated["status"] == "paused"
+    assert updated["name"] == "renamed"
     with pytest.raises(trading.HTTPException):
         trading.update_paper_account(
             "missing", trading.PaperAccountUpdate(status="paused"), request,
         )
+    deleted = trading.delete_paper_account("account", request)
+    assert deleted["deleted"] is True and deleted["recoverable"] is True
+    assert deleted["account"]["status"] == "archived"
+    with pytest.raises(trading.HTTPException) as missing_delete:
+        trading.delete_paper_account("missing", request)
+    assert missing_delete.value.status_code == 404
     assert trading.clone_paper_account(
         "account", trading.CloneAccountRequest(name="clone", mode="auto"), request,
     )["id"] == "clone"
