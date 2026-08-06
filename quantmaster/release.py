@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.21.1"
+VERSION = "1.0.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "首个正式探索版",
+                "items": (
+                    (
+                        "完成本轮稳定性、数据源、模拟盘、可观测性和测试技术债收口，"
+                        "QuantMaster 进入 1.x 前向迭代。"
+                    ),
+                    (
+                        "1.0.0 固化当前用户事实数据与公开接口基线；0.x 问题不再维护，"
+                        "后续修复只通过新的 SemVer 版本发布。"
+                    ),
+                    (
+                        "项目仍定位为探索级量化研究工具，不承诺生产可用性，所有指标与"
+                        "模型输出均不构成投资建议。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.21.1",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "诊断契约同步",
@@ -201,25 +224,6 @@ RELEASES = (
                     ),
                     (
                         "保留既有研究模块导入契约，并将新证据模块纳入 mypy 检查。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.17.1",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "模拟盘自动化解耦",
-                "items": (
-                    (
-                        "每日模拟交易 worker、租约心跳与进程内单例迁入独立模块，"
-                        "账户存储和交易服务不再同时承担调度职责。"
-                    ),
-                    (
-                        "服务端、自动化入口和回归测试统一使用新模块，并将该边界"
-                        "纳入 mypy 检查。"
                     ),
                 ),
             },
