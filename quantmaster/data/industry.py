@@ -1,8 +1,7 @@
 """行业分类：股票 -> 行业 的映射，用于因子行业中性化与持仓行业分布。
 
-数据源：东方财富行业板块（akshare，免费）。映射本地 JSON 缓存，默认 30 天
-有效（行业调整不频繁）。也可以用 save_industry_map 写入自己的映射
-（如申万分类的授权数据）。
+数据源：优先使用所选 free-stockdb 本地申万一级板块，随后回退 Tushare 和
+东方财富。映射本地 JSON 缓存，默认 30 天有效（行业调整不频繁）。
 """
 
 from __future__ import annotations
@@ -51,7 +50,18 @@ def _save_industry_blocks(blocks: dict[str, dict]) -> None:
 
 
 def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
-    """优先用 2000 积分 Tushare 申万行业，失败后回退东方财富。"""
+    """按设置优先使用 free-stockdb，失败后回退 Tushare/东方财富。"""
+    if get_config().data.primary_provider == "free-stockdb":
+        try:
+            from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+            local_mapping = FreeStockDBSource().industry_map()
+            if local_mapping:
+                return local_mapping
+            logger.warning("free-stockdb 申万一级行业映射为空，继续使用备用源")
+        except Exception as exc:
+            logger.warning("free-stockdb 行业映射不可用，继续使用备用源: %s", exc)
+
     tushare_mapping: dict[str, str] = {}
     if get_config().data.tushare_token:
         try:

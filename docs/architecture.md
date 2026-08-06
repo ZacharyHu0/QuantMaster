@@ -81,8 +81,9 @@
 - **统一数据结构**：所有数据源输出同一种日线/分钟线 DataFrame
   （index=交易日，columns=open/high/low/close/volume/amount/turnover），
   上层模块完全不感知数据来自哪家。
-- **数据源优先级与降级**：每个市场配置一列数据源（如 A 股 = [AKShare, Tushare]），
-  逐个尝试，全部失败时回退本地缓存。新增数据源只需实现 `DataSource.daily()`
+- **数据源优先级与降级**：A 股默认使用用户安装的 free-stockdb SDK 和本地数据，
+  随后回退 AKShare、Tushare 与本地缓存；主源可在设置中切换。QuantMaster 不捆绑
+  free-stockdb 程序、数据或同步源。新增数据源只需实现 `DataSource.daily()`
   并注册到 `registry._factories()`。
 - **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
   隔离目录并增量归档。SQLite 分别记录实际数据边界、已检查覆盖边界、检查时间、
@@ -104,14 +105,15 @@
 - **批量与维护**：Yahoo 全球参考标的使用单次批量下载；设置中心的增量同步任务
   持久化范围、逐标的进度和失败摘要，可在标的边界取消，服务重启后手动续跑。
 - **基本面与行业降级**：AKShare 估值/ROE 失败时使用 `daily_basic` /
-  `fina_indicator`；行业优先使用申万 2021 `index_classify + index_member_all`，
-  按一级行业分批拉取，规避单次 2000 行上限并缓存 30 天。
-- **题材双源**：细分题材优先使用 AKShare 东方财富完整概念目录；连接不可用时尝试
+  `fina_indicator`；默认从 free-stockdb 板块索引读取申万一级映射，失败后使用
+  Tushare `index_classify + index_member_all` 或东方财富，并缓存 30 天。
+- **题材多源**：选择 free-stockdb 为主源时，概念目录直接读取其本地板块索引；不可用时
+  使用 AKShare 东方财富完整概念目录，再尝试
   Tushare `dc_index + dc_member`（当前需 6000 积分）。两套目录按整套口径切换，不混合
   板块代码；权限型接口使用独立健康通道，失败不会熔断 Tushare 核心行情，双源都失败
   时保留上次可用目录。
-- **分钟线口径**：本地归档使用不复权价格，避免后续增量与变化后的前复权
-  基准拼接产生假跳空；1 分钟免费源回溯有限，需要每日运行 `qm fetch` 积累。
+- **分钟线口径**：free-stockdb SDK 提供 1/5/15/30/60 分钟聚合，其他来源作为后备；
+  本地归档统一使用不复权价格，避免复权基准变化造成假跳空。
 
 ## 研究生产层（research/）
 
@@ -226,6 +228,7 @@
 | Qlib | 表达式因子 + IC 分析范式 | 安装重（C 扩展/数据格式绑定），学习曲线陡 |
 | vn.py | 无（定位不同） | 面向实盘交易网关/CTP，研究功能弱 |
 | backtrader | 事件驱动思想 | 逐 bar 事件循环慢，且无 A 股规则；保留为可选依赖 |
+| free-stockdb | SDK、分钟行情和行业/概念板块本地数据 | 用户自行安装和维护数据，QuantMaster 只调用 |
 | AKShare | 整个数据层直接复用 | —— 直接作为依赖使用 |
 
 自研向量化回测 + 表达式引擎合计不到一千行，换来的是：安装只需

@@ -125,6 +125,9 @@ llm:
   base_url: ""                 # openai-compatible 时填网关地址，如 https://api.deepseek.com/v1
   reasoning_effort: medium      # 或环境变量 QM_LLM_REASONING_EFFORT
 data:
+  primary_provider: free-stockdb # free-stockdb | akshare | tushare
+  free_stockdb_sdk_path: ""  # 用户安装的 free-stockdb/pybao 目录
+  free_stockdb_url: http://127.0.0.1:7899
   tushare_token: ""            # 可选
   akshare_retries: 3           # 失败后指数退避重试，再降级 Tushare
   provider_timeout: 45         # 单次数据源任务含排队的硬截止秒数
@@ -165,8 +168,12 @@ TEST 在入围顺序冻结后才读取一次且不回流选参。非 PIT 特征�
 基准，成交量与成交额不缩放。需要重建历史库时，在「设置 → 数据与缓存」预览并确认
 手动增量同步；已缓存标的只拉取尾部 5 个交易日的重叠区间，未缓存标的才按所选起点初始化，任务可取消、续跑和重试失败项。
 
-数据源默认顺序是 **AKShare → Tushare 备用 → 本地旧缓存兜底**。东方财富、新浪、
-中证、Yahoo 与 Tushare 分通道调度，不同上游可并行，同一真实上游保持保守并发；
+数据源默认顺序是 **free-stockdb → AKShare → Tushare → 本地缓存**，也可在设置中
+把 AKShare 或 Tushare 设为主源。QuantMaster 复用用户自行安装的
+[free-stockdb](https://github.com/hello245m/free-stockdb) `StockDBClient` 与本地数据，
+提供前复权日线、1/5/15/30/60 分钟线、申万行业和概念板块；只配置 SDK 目录与本地服务地址，
+不复制其程序、数据包或上游同步源。东方财富、新浪、中证、Yahoo 与 Tushare 分通道调度，
+不同上游可并行，同一真实上游保持保守并发；
 代理、限流或连续失败会持久化熔断并汇总日志，避免重启后再次制造错误风暴。全球参考
 市场使用一次 Yahoo 批量请求。行业抓取仍按成功板块分别保存，单个板块失败不会清空其他结果。
 Tushare 使用仓库 2000 积分说明中可用的前复权日线、指数、每日指标、财务指标
@@ -286,8 +293,9 @@ python tools/release_sync.py push
 
 ## 设计原则
 
-1. **站在巨人肩膀上**：数据层直接复用 [AKShare](https://github.com/akfamily/akshare)
-   （A 股免费数据事实标准）与 yfinance；因子研究流程借鉴
+1. **站在巨人肩膀上**：数据层直接复用
+   [free-stockdb](https://github.com/hello245m/free-stockdb)、
+   [AKShare](https://github.com/akfamily/akshare) 与 yfinance；因子研究流程借鉴
    [Microsoft Qlib](https://github.com/microsoft/qlib) 的「表达式因子 + IC 分析」范式；
    可恢复的多目标优化、滚动模型与工件化工作流参考
    [Freqtrade](https://github.com/freqtrade/freqtrade) 的 Hyperopt / FreqAI 思路，并按

@@ -289,7 +289,7 @@ def test_provider_keeps_previous_theme_catalog_when_both_sources_fail(
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("connection closed")),
     )
 
-    with pytest.raises(RuntimeError, match="题材目录三源不可用"):
+    with pytest.raises(RuntimeError, match="题材目录全部不可用"):
         provider.sync_themes(lambda *args: None, lambda: False)
 
     assert store.themes() == [previous]

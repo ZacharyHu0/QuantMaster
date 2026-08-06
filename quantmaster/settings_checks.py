@@ -183,7 +183,10 @@ def check_storage(data: DataSettings) -> dict[str, Any]:
                        path=str(root))
 
 
-def check_data_sources(timeout: float = 8.0) -> dict[str, Any]:
+def check_data_sources(
+    timeout: float = 8.0,
+    data: DataSettings | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     sources: dict[str, Any] = {}
     probes = {
@@ -226,6 +229,25 @@ def check_data_sources(timeout: float = 8.0) -> dict[str, Any]:
         for future in as_completed(futures):
             package, result = future.result()
             sources[package] = result
+
+    if data is not None:
+        try:
+            from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+            details = FreeStockDBSource(
+                data.free_stockdb_url,
+                min(float(timeout), data.free_stockdb_timeout),
+                data.free_stockdb_sdk_path,
+            ).probe()
+            engine = str(details.get("engine") or "free-stockdb")
+            sources["free-stockdb"] = {
+                "status": "success", "message": f"本地服务可用（{engine}）",
+            }
+        except Exception as exc:
+            sources["free-stockdb"] = {
+                "status": "warning",
+                "message": f"本地服务未运行，将自动降级（{type(exc).__name__}）",
+            }
 
     from quantmaster.data.instruments import instrument_diagnostics
     from quantmaster.data.resilience import PROVIDER_HEALTH

@@ -73,6 +73,10 @@ class LLMSettings(StrictModel):
 
 class DataSettings(StrictModel):
     root: str = Field(default="data", min_length=1, max_length=4096)
+    primary_provider: Literal["free-stockdb", "akshare", "tushare"] = "free-stockdb"
+    free_stockdb_sdk_path: str = Field(default="", max_length=4096)
+    free_stockdb_url: str = Field(default="http://127.0.0.1:7899", max_length=2048)
+    free_stockdb_timeout: float = Field(default=3.0, ge=0.5, le=30.0)
     cache_days: int = Field(default=1, ge=0, le=3650)
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
@@ -88,6 +92,22 @@ class DataSettings(StrictModel):
         if "\x00" in value:
             raise ValueError("数据目录包含非法字符")
         return str(Path(value).expanduser())
+
+    @field_validator("free_stockdb_sdk_path")
+    @classmethod
+    def validate_free_stockdb_sdk_path(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("free-stockdb SDK 路径包含非法字符")
+        return str(Path(value).expanduser()) if value.strip() else ""
+
+    @field_validator("free_stockdb_url")
+    @classmethod
+    def validate_free_stockdb_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("free-stockdb 地址必须是完整的 http(s) URL")
+        return normalized
 
 
 class TradeSettings(StrictModel):

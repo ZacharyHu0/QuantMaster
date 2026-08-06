@@ -104,6 +104,9 @@ def _provider_revision(lane: str) -> str:
     credential = ""
     if provider == "tushare":
         credential = get_config().data.tushare_token
+    elif provider == "free-stockdb":
+        data = get_config().data
+        credential = f"{data.free_stockdb_url}|{data.free_stockdb_sdk_path}"
     payload = json.dumps({
         "lane": lane,
         "package_version": version,

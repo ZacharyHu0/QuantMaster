@@ -4,13 +4,35 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.54"
+VERSION = "0.14.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "free-stockdb 本地行情与板块数据",
+                "items": (
+                    (
+                        "默认复用用户安装的 free-stockdb 成熟 SDK 与本地数据，补充前复权日线、"
+                        "1/5/15/30/60 分钟线、行情快照、申万行业和概念板块。"
+                    ),
+                    (
+                        "主数据源、SDK 目录和服务地址均可设置；不捆绑 free-stockdb 程序、"
+                        "数据包或上游同步源，不可用时自动回退现有来源。"
+                    ),
+                    (
+                        "GitHub Release 仅展示当前版本变更，仓库 CHANGELOG 继续保留完整历史。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.54",
         "date": RELEASE_DATE,
         "sections": (
             {

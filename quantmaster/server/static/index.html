@@ -982,6 +982,10 @@
           <div class="group-heading"><div><h3>数据与缓存</h3><p>数据目录变更必须经过校验与迁移任务，原目录始终保留。</p></div><div class="button-pair"><button class="ghost check-button" type="button" data-check="storage">检测目录</button><button class="ghost check-button" type="button" data-check="data-sources">检测数据源</button></div></div>
           <div class="field-grid">
             <label class="field-wide">当前数据根目录<input name="data.root" readonly><small>要更换目录，请使用下方迁移工具。</small></label>
+            <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
+            <label>free-stockdb 超时（秒）<input name="data.free_stockdb_timeout" type="number" min="0.5" max="30" step="0.5" required><small>仅用于本机 HTTP 兼容接口。</small></label>
+            <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="例如 D:\free-stockdb\pybao"><small>指向用户自行安装的 pybao 或 stock_sdk.py；QuantMaster 不捆绑程序、数据和同步源。</small></label>
+            <label class="field-wide">free-stockdb 服务地址<input name="data.free_stockdb_url" type="url" required placeholder="http://127.0.0.1:7899"><small>SDK 使用其中的主机和端口；也可改为自己的兼容服务。</small></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button><button type="button" class="ghost check-button" data-check="tushare">检测</button></div><small id="tushare-secret-state"></small></label>
             <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
             <label>分钟缓存（分钟）<input name="data.intraday_cache_minutes" type="number" min="0" required></label>

@@ -230,7 +230,7 @@ def check_setting(kind: Literal[
     if kind == "storage":
         return check_storage(document.data)
     if kind == "data-sources":
-        return check_data_sources(document.llm.timeout)
+        return check_data_sources(document.llm.timeout, document.data)
     if kind == "lab":
         return check_lab(document.lab, document.data, tushare_secret)
     return check_server(document.server)

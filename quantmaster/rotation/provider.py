@@ -20,6 +20,8 @@ from typing import Any
 import httpx
 import pandas as pd
 
+from quantmaster.config import get_config
+from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.resilience import akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
@@ -45,6 +47,7 @@ _SECTOR_OR_NON_CN_TERMS = (
     "法国", "美国", "黄金", "白银", "商品", "债", "货币",
 )
 _EASTMONEY_THEME_SOURCE = "eastmoney-concept"
+_FREE_STOCKDB_THEME_SOURCE = "free-stockdb:concept"
 _TUSHARE_THEME_SOURCE = "tushare:dc-concept"
 _THS_THEME_SOURCE = "ths:concept"
 
@@ -274,6 +277,39 @@ class RotationProvider:
             {str(item.get("code") or ""): item for item in matching},
             {str(item.get("name") or ""): item for item in matching},
         )
+
+    def _sync_free_stockdb_themes(
+        self,
+        progress,
+        cancelled,
+    ) -> dict[str, Any]:  # pragma: no cover - 本地外部数据服务
+        """Publish the coherent concept catalog maintained by free-stockdb."""
+        if cancelled():
+            raise InterruptedError("free-stockdb 题材同步已取消")
+        progress(39, "扫描细分题材", "读取 free-stockdb 本地板块目录")
+        try:
+            themes = FreeStockDBSource().themes()
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            raise ThemeSourceUnavailable(
+                f"free-stockdb 概念目录不可用：{_compact_error(exc)}"
+            ) from exc
+        if not themes:
+            raise ThemeSourceUnavailable("free-stockdb 概念目录为空")
+        if cancelled():
+            raise InterruptedError("free-stockdb 题材同步已取消")
+        self.store.replace_themes(themes)
+        progress(55, "扫描细分题材", f"free-stockdb 可用 {len(themes)} 个概念板块")
+        return {
+            "catalog": len(themes),
+            "available": len(themes),
+            "fresh": len(themes),
+            "source": _FREE_STOCKDB_THEME_SOURCE,
+            "coverage": 1.0,
+            "quality_status": "complete",
+            "issues": [],
+        }
 
     def _sync_eastmoney_themes(
         self,
@@ -719,8 +755,20 @@ class RotationProvider:
         }
 
     def sync_themes(self, progress, cancelled) -> dict[str, Any]:  # pragma: no cover - 网络
-        """Refresh one coherent concept taxonomy with a resumable THS third source."""
+        """Refresh one coherent concept taxonomy through configured fallbacks."""
         previous_items = self.store.themes()
+        free_stockdb_error: ThemeSourceUnavailable | None = None
+        if get_config().data.primary_provider == "free-stockdb":
+            try:
+                return self._sync_free_stockdb_themes(progress, cancelled)
+            except InterruptedError:
+                raise
+            except ThemeSourceUnavailable as exc:
+                free_stockdb_error = exc
+                logger.warning(
+                    "free-stockdb 概念目录不可用，尝试东方财富后备源：%s",
+                    _compact_error(exc),
+                )
         try:
             return self._sync_eastmoney_themes(
                 progress, cancelled, previous_items,
@@ -748,8 +796,13 @@ class RotationProvider:
                 except InterruptedError:
                     raise
                 except ThemeSourceUnavailable as ths_error:
+                    prefix = (
+                        f"free-stockdb {str(free_stockdb_error)[:90]}；"
+                        if free_stockdb_error else ""
+                    )
                     raise RuntimeError(
-                        "题材目录三源不可用："
+                        "题材目录全部不可用："
+                        f"{prefix}"
                         f"东方财富 {str(eastmoney_error)[:90]}；"
                         f"Tushare {str(tushare_error)[:90]}；"
                         f"同花顺 {str(ths_error)[:90]}"

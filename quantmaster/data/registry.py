@@ -252,12 +252,20 @@ def _session_refresh_due(
 
 def _factories() -> dict[Market, list]:
     from quantmaster.data.akshare_source import AkshareSource
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
     from quantmaster.data.tushare_source import TushareSource
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    ak, yf, tu = AkshareSource, YFinanceSource, TushareSource
+    ak, free, yf, tu = AkshareSource, FreeStockDBSource, YFinanceSource, TushareSource
+    orders = {
+        "free-stockdb": [free, ak, tu],
+        "akshare": [ak, tu, free],
+        "tushare": [tu, ak, free],
+    }
+    selected = str(get_config().data.primary_provider).strip().lower()
+    cn = orders.get(selected, orders["free-stockdb"])
     return {
-        Market.CN: [ak, tu],
+        Market.CN: cn,
         Market.HK: [ak, yf],
         Market.US: [yf],
         Market.JP: [yf],
@@ -276,6 +284,34 @@ def get_source(market: Market) -> DataSource:
         except Exception as e:  # pragma: no cover - 依赖安装情况
             errors.append(f"{factory.__name__}: {e}")
     raise RuntimeError(f"市场 {market.value} 无可用数据源: {errors}")
+
+
+def load_spot(symbols: list[str]) -> pd.DataFrame:
+    """加载 A 股快照；按设置主源优先，并用后续来源补齐缺失标的。"""
+    requested = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    by_code = {symbol.partition(".")[0].zfill(6): symbol for symbol in requested}
+    rows: dict[str, dict] = {}
+    errors: list[str] = []
+    for factory in _factories().get(Market.CN, []):
+        missing = [symbol for code, symbol in by_code.items() if code not in rows]
+        if not missing:
+            break
+        try:
+            source = factory()
+            snapshot = source.spot(missing)
+            for _, value in snapshot.iterrows():
+                code = str(value.get("code") or "").zfill(6)
+                if code in by_code and code not in rows:
+                    item = value.to_dict()
+                    item["code"] = code
+                    item["source"] = source.name
+                    rows[code] = item
+        except Exception as exc:
+            errors.append(f"{factory.__name__}: {exc}")
+            logger.debug("快照数据源 %s 失败: %s", factory.__name__, exc)
+    if not rows:
+        raise RuntimeError(f"实时快照不可用: {errors or ['没有可用数据']}")
+    return pd.DataFrame(rows.values()).reset_index(drop=True)
 
 
 def _load_history_locked(

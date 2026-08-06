@@ -55,11 +55,11 @@ def cached_stock_names(symbols: list[str]) -> dict[str, str]:
 
 def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover - 网络
     """从独立的 A 股快照补齐缺失名称，并写回证券主数据。"""
-    from quantmaster.data.akshare_source import AkshareSource
+    from quantmaster.data.registry import load_spot
 
     store = InstrumentStore()
     requested = {str(symbol).upper() for symbol in symbols}
-    snapshot = AkshareSource().spot(list(requested))
+    snapshot = load_spot(list(requested))
     records = []
     for _, row in snapshot.iterrows():
         code = str(row.get("code", "")).zfill(6)
@@ -69,10 +69,11 @@ def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover
             current = store.get(symbol)
             if current and name and name.lower() != "nan":
                 value = current.to_dict()
-                value.update({"name": name, "source": "akshare:spot", "source_priority": 40})
+                source = f"{row.get('source') or 'market'}:spot"
+                value.update({"name": name, "source": source, "source_priority": 40})
                 records.append(value)
-    store.upsert(records, source="akshare:spot", source_priority=40)
-    store.update_sync_state("akshare:spot", status="success", record_count=len(records))
+    store.upsert(records, source="market:spot", source_priority=40)
+    store.update_sync_state("market:spot", status="success", record_count=len(records))
     return store.names(requested)
 
 
@@ -84,7 +85,7 @@ def load_stock_names(symbols: list[str], refresh: bool = False) -> dict[str, str
         try:
             cached.update(fetch_stock_names(requested))
         except Exception as exc:
-            store.update_sync_state("akshare:spot", status="error", error=str(exc))
+            store.update_sync_state("market:spot", status="error", error=str(exc))
             logger.warning("证券名称刷新失败，继续使用本地主数据: %s", exc)
     _write_legacy_cache(cached)
     return cached

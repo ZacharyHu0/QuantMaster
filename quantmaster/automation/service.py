@@ -967,8 +967,7 @@ class AutomationService:
     # ---------- 任务实现 ----------
 
     def _task_intraday_monitor(self) -> dict:
-        from quantmaster.data import load_intraday
-        from quantmaster.data.akshare_source import AkshareSource
+        from quantmaster.data import load_intraday, load_spot
         from quantmaster.data.universe import load_universe
 
         now = pd.Timestamp.now(tz=get_config().automation.timezone).tz_localize(None)
@@ -985,7 +984,7 @@ class AutomationService:
         breadth_source = "live"
         warning = ""
         try:
-            spot = AkshareSource().spot(symbols)
+            spot = load_spot(symbols)
             changes = pd.to_numeric(spot.get("change_pct"), errors="coerce").dropna()
             previous = self.store.latest_breadth()
             expected = len(symbols)

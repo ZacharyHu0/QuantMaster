@@ -39,6 +39,8 @@ def test_release_workflow_publishes_once_with_supply_chain_evidence() -> None:
     assert "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373" in source
     assert "SHA256SUMS" in source
     assert "make_latest: true" in source
+    assert "body_path: .release-notes.md" in source
+    assert "awk '/^## v/" in source
 
 
 def test_ci_matrix_collects_every_platform_result_and_audits_rust() -> None:

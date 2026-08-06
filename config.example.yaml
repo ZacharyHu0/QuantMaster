@@ -17,6 +17,10 @@ llm:
 
 data:
   root: data                 # 本地数据目录（行情缓存/新闻库/账本）
+  primary_provider: free-stockdb # free-stockdb | akshare | tushare
+  free_stockdb_sdk_path: ""  # 用户安装的 free-stockdb/pybao 目录；不随本项目分发
+  free_stockdb_url: http://127.0.0.1:7899 # 本地服务地址，可自行调整
+  free_stockdb_timeout: 3    # HTTP 兼容接口快速降级超时
   tushare_token: ""          # 可选：https://tushare.pro 注册获取
   cache_days: 1              # 日线缓存有效期（天）
   intraday_cache_minutes: 5  # 当日分钟线缓存刷新间隔

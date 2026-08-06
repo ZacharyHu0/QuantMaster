@@ -38,6 +38,10 @@ class LLMConfig:
 @dataclass
 class DataConfig:
     root: str = "data"                    # 本地数据目录（缓存/数据库）
+    primary_provider: str = "free-stockdb"  # free-stockdb | akshare | tushare
+    free_stockdb_sdk_path: str = ""       # 用户安装的 pybao/stock_sdk.py 目录
+    free_stockdb_url: str = "http://127.0.0.1:7899"
+    free_stockdb_timeout: float = 3.0      # 本地服务不可用时快速降级
     tushare_token: str = ""
     cache_days: int = 1                   # 日线缓存有效期（天）
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
@@ -170,6 +174,14 @@ def _apply_env(cfg: Config) -> None:
         env.get("QM_LLM_QUEUE_TIMEOUT", cfg.llm.queue_timeout))
     cfg.data.tushare_token = env.get("TUSHARE_TOKEN", cfg.data.tushare_token)
     cfg.data.root = env.get("QM_DATA_ROOT", cfg.data.root)
+    cfg.data.primary_provider = env.get(
+        "QM_DATA_PRIMARY_PROVIDER", cfg.data.primary_provider).strip().lower()
+    cfg.data.free_stockdb_sdk_path = env.get(
+        "QM_FREE_STOCKDB_SDK_PATH", cfg.data.free_stockdb_sdk_path).strip()
+    cfg.data.free_stockdb_url = env.get(
+        "QM_FREE_STOCKDB_URL", cfg.data.free_stockdb_url).strip().rstrip("/")
+    cfg.data.free_stockdb_timeout = float(
+        env.get("QM_FREE_STOCKDB_TIMEOUT", cfg.data.free_stockdb_timeout))
     cfg.data.akshare_retries = int(
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(
