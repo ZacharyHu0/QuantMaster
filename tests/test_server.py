@@ -431,6 +431,22 @@ class TestBasics:
         assert resp.status_code == 200
         assert resp.json() == {"snapshots": []}
 
+    def test_selection_history_accepts_integer_horizon_from_query_string(self):
+        resp = client.get(
+            "/api/v1/research/selection/history",
+            params={
+                "universe": "demo", "profile": "risk_adjusted",
+                "horizon": "3", "limit": "10",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"snapshots": []}
+
+        invalid = client.get(
+            "/api/v1/research/selection/history", params={"horizon": "2"},
+        )
+        assert invalid.status_code == 422
+
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
         from quantmaster.server import app as app_module
 

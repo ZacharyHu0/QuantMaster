@@ -97,6 +97,34 @@ def test_free_stockdb_cross_section_discloses_optional_field_coverage(monkeypatc
     assert source.board_hierarchy()[0]["level"] == "L1"
 
 
+def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+
+    def positional(**kwargs):
+        client.calls.append(kwargs)
+        fields = kwargs["fields"].split(",")
+        values = {
+            "date": 20260806, "open": 10, "high": 11, "low": 9,
+            "close": 10.5, "volume": 100, "amount": 1_000_000,
+            "float_mv": 2_000_000, "total_mv": 3_000_000,
+            "pe_ttm": 20, "pb": 2, "is_st": False,
+        }
+        return {
+            code: [[values[field] for field in fields]]
+            for code in kwargs["code"]
+        }
+
+    client.get_data = positional
+    frame = source.daily_cross_section(
+        ["600519.SH", "000001.SZ"], "2026-08-06", "2026-08-06",
+    )
+
+    assert frame.shape == (2, 13)
+    assert frame["symbol"].tolist() == ["000001.SZ", "600519.SH"]
+    assert frame["amount"].tolist() == [1_000_000, 1_000_000]
+    assert frame["is_st"].tolist() == [False, False]
+
+
 def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(

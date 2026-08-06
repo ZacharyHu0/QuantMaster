@@ -4,14 +4,33 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.2.0"
-RELEASE_DATE = "2026-08-06"
+VERSION = "1.2.1"
+RELEASE_DATE = "2026-08-07"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "盘后扫描真实数据兼容修复",
+                "items": (
+                    (
+                        "兼容 free-stockdb SDK 在指定字段时返回的位置数组，真实全 A 股"
+                        "日频截面不再被误判为空；板块成员研究湖改用复合关系键。"
+                    ),
+                    (
+                        "历史决策接口显式解析查询字符串中的持有周期，修复浏览器传入"
+                        "合法 horizon=3 仍返回 422 的问题。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.2.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "free-stockdb 盘后研究引擎",
@@ -204,28 +223,6 @@ RELEASES = (
                     (
                         "模拟盘账户栏重新整理新建与归档控件；策略、候选和调仓频率可直接"
                         "修改并按 15:00 分界排入后续交易日，净值横轴固定使用日期标签。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.20.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "free-stockdb 托管运行时",
-                "items": (
-                    (
-                        "可选托管用户自行安装的 free-stockdb 完整发行包，随 QuantMaster "
-                        "启停并按用户设置的盘后时间执行增量更新。"
-                    ),
-                    (
-                        "发行包目录、托管开关、自动更新和时间均可配置；不下载或捆绑程序、"
-                        "数据包及同步源，维护失败时继续使用后备数据源。"
-                    ),
-                    (
-                        "长时间更新可随应用退出而终止，运行状态进入诊断与设置热应用结果。"
                     ),
                 ),
             },

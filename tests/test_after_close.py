@@ -189,6 +189,26 @@ def test_strategy_health_never_promotes_research_to_trading(service) -> None:
     assert health["status"] == "observation"
 
 
+def test_board_membership_lake_uses_relationship_key(service) -> None:
+    from quantmaster.research.contracts import ArtifactKind, AssetClass, Frequency
+    from quantmaster.research.lake import ResearchLake
+
+    snapshot = service.scan()
+    boards = service.source.board_hierarchy()
+    AfterCloseService._write_research_lake(
+        service, snapshot, service.source.frame, boards,
+    )
+    frame = ResearchLake().read_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "after_close_board_membership", snapshot.as_of_date,
+    )
+
+    assert not frame.empty
+    assert "component_symbol" in frame
+    assert frame["symbol"].is_unique
+    assert frame["component_symbol"].duplicated().any()
+
+
 def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 

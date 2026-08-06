@@ -480,6 +480,7 @@ class AfterCloseService:
         ).hexdigest()[:24]
         existing_snapshot = self.store.get(snapshot_id)
         if existing_snapshot is not None:
+            self._write_research_lake(existing_snapshot, frame, boards)
             self.evaluate_pending(frame)
             progress(100, "盘后扫描完成", f"复用不可变快照 {snapshot_id}")
             return existing_snapshot
@@ -555,7 +556,9 @@ class AfterCloseService:
                 input_hashes={"after_close": snapshot.input_hash}, run_id=snapshot.snapshot_id,
             )
             rows = [
-                {"trade_date": snapshot.as_of_date, "symbol": symbol,
+                {"trade_date": snapshot.as_of_date,
+                 "symbol": f"{board.get('code') or ''}:{symbol}",
+                 "component_symbol": symbol,
                  "board_code": str(board.get("code") or ""),
                  "board_name": str(board.get("name") or ""),
                  "board_level": str(board.get("level") or ""),

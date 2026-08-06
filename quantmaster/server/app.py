@@ -345,8 +345,8 @@ async def request_context_and_migration_lock(request: Request, call_next):
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-from quantmaster.server.automation import router as automation_router  # noqa: E402
 from quantmaster.server.after_close import router as after_close_router  # noqa: E402
+from quantmaster.server.automation import router as automation_router  # noqa: E402
 from quantmaster.server.jobs import router as jobs_router  # noqa: E402
 from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
@@ -1131,11 +1131,13 @@ def selection_history(
     universe: str | None = None,
     limit: int = 30,
     profile: str | None = None,
-    horizon: Literal[1, 3, 5, 7] | None = None,
+    horizon: int | None = None,
 ) -> dict:
     from quantmaster.data import load_stock_names
     from quantmaster.decision import DecisionStore
 
+    if horizon is not None and horizon not in {1, 3, 5, 7}:
+        raise HTTPException(422, "horizon 只支持 1、3、5、7")
     snapshots = DecisionStore().history(
         universe,
         min(max(limit, 1), 200),

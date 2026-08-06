@@ -253,6 +253,27 @@ class FreeStockDBSource(DataSource):
             records.append(record)
         return records
 
+    @classmethod
+    def _records_for_fields(cls, payload, fields: str) -> list[dict]:
+        """Decode SDK rows returned as positional arrays when fields is supplied."""
+        names = [item.strip() for item in fields.split(",") if item.strip()]
+        if not isinstance(payload, list) or not names:
+            return cls._records(payload)
+        records: list[dict] = []
+        fallback: list[Any] = []
+        for item in payload:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == len(names)
+                and len(item) > 2
+            ):
+                records.append(dict(zip(names, item, strict=True)))
+            else:
+                fallback.append(item)
+        if fallback:
+            records.extend(cls._records(fallback))
+        return records
+
     def _query_http(
         self,
         table: str,
@@ -400,10 +421,13 @@ class FreeStockDBSource(DataSource):
         elif isinstance(payload, dict):
             for symbol, code in zip(ordered, codes, strict=True):
                 values = payload.get(code, payload.get(symbol))
-                for item in self._records(values):
+                for item in self._records_for_fields(values, fields):
                     records.append({**item, "symbol": symbol})
         elif len(ordered) == 1:
-            records = [{**item, "symbol": ordered[0]} for item in self._records(payload)]
+            records = [
+                {**item, "symbol": ordered[0]}
+                for item in self._records_for_fields(payload, fields)
+            ]
         frame = pd.DataFrame(records)
         for column in columns:
             if column not in frame:
