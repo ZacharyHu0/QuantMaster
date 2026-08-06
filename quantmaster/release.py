@@ -4,13 +4,47 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.1.1"
+VERSION = "1.1.3"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "项目验证环境规范",
+                "items": (
+                    (
+                        "仓库规范明确要求使用项目 `.venv` 执行 Python 验证；完整测试在"
+                        "受限 Windows 环境可指定工作区内的 pytest 临时目录。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.1.2",
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "生产回测 PIT 数据复用",
+                "items": (
+                    (
+                        "生产级回测与 Quant Lab 共享本地 PIT 成交数据集；已完整归档的"
+                        "历史区间不再逐标的重复请求 Tushare。"
+                    ),
+                    (
+                        "PIT 缓存保留未复权成交价、复权信号、涨跌停与停牌约束，并沿用"
+                        "原子写入和完整性校验；当日数据仍按收盘刷新规则重新核验。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.1.1",
         "date": RELEASE_DATE,
         "sections": (
             {

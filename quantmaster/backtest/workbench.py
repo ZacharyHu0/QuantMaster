@@ -411,10 +411,17 @@ class BacktestService:
             if resolved_tier == "production":
                 from quantmaster.data.research import load_research_bundle
 
-                def research_progress(done: int, total: int, symbol: str, success: bool) -> None:
+                def research_progress(
+                    done: int, total: int, symbol: str, success: bool, detail: str = "",
+                ) -> None:
+                    request_estimate = max(0, total - done) * 4
+                    suffix = f" · {detail}" if detail else ""
+                    if detail == "下载 PIT 缺口":
+                        minutes = (request_estimate + 119) // 120
+                        suffix += f" · 余约 {request_estimate} 请求 / {minutes} 分钟（120/分）"
                     checkpoint(
                         18 + int(18 * done / max(1, total)), "加载原始成交/PIT约束",
-                        f"{done}/{total} · {symbol}{'' if success else ' 失败'}",
+                        f"{done}/{total} · {symbol}{'' if success else ' 失败'}{suffix}",
                     )
 
                 research_bundle = load_research_bundle(

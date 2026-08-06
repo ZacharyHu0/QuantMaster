@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from quantmaster.backtest.spec import BacktestSpec, LabVersionStrategySpec
 from quantmaster.cli import build_parser
 from quantmaster.config import Config, set_config
-from quantmaster.data.research import ResearchDataBundle
+from quantmaster.data.research import PitDataStore, ResearchDataBundle, load_research_bundle
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.lab.multihorizon import (
     apply_probability_calibrators,
@@ -151,6 +151,69 @@ def test_research_daily_separates_stable_signal_and_suspension_interval(monkeypa
     assert result["raw"].loc["2024-01-04", "close"] == 5.0
     assert result["signal"].loc["2024-01-04", "close"] == 10.0
     assert bool(result["suspended"].loc["2024-01-03", "suspended"]) is True
+
+
+def test_production_pit_store_reuses_complete_symbol_inputs(tmp_path):
+    class Source:
+        def __init__(self):
+            self.calls = 0
+            self.requested = []
+
+        def trade_calendar(self, start, end):
+            return pd.date_range(start, end, freq="D")
+
+        def research_daily(self, symbol, start, end, *, calendar=None):
+            self.calls += 1
+            self.requested.append((start, end))
+            assert calendar is not None
+            raw = pd.DataFrame({
+                "open": range(10, 10 + len(calendar)),
+                "high": range(11, 11 + len(calendar)),
+                "low": range(9, 9 + len(calendar)),
+                "close": range(10, 10 + len(calendar)),
+                "volume": 1000, "amount": 10000,
+            }, index=calendar, dtype=float)
+            signal = raw.copy()
+            signal[["open", "high", "low", "close"]] *= 2
+            return {
+                "signal": signal,
+                "raw": raw,
+                "adj_factor": pd.DataFrame({"adj_factor": 2.0}, index=calendar),
+                "limits": pd.DataFrame({"up_limit": raw["close"] * 1.1,
+                                        "down_limit": raw["close"] * 0.9}),
+                "suspended": pd.DataFrame({"suspended": False}, index=calendar),
+            }
+
+    store = PitDataStore(tmp_path / "pit")
+    source = Source()
+    dates = pd.date_range("2024-01-02", "2024-01-04", freq="D")
+    membership = pd.DataFrame({"600000.SH": True}, index=dates)
+    first = load_research_bundle(
+        ["600000.SH"], "2024-01-02", "2024-01-04", membership=membership,
+        source=source, store=store,
+    )
+    second = load_research_bundle(
+        ["600000.SH"], "2024-01-02", "2024-01-04", membership=membership,
+        source=source, store=store,
+    )
+
+    assert source.calls == 1
+    assert first.manifest_hash == second.manifest_hash
+    assert first.manifest["pit_cache"]["downloaded"] == 1
+    assert second.manifest["pit_cache"] == {
+        "dataset": "pit_execution/v1", "hits": 1, "downloaded": 0,
+        "estimated_requests": 0,
+    }
+    pd.testing.assert_frame_equal(first.execution["raw_close"], second.execution["raw_close"])
+
+    extended_dates = pd.date_range("2024-01-02", "2024-01-05", freq="D")
+    extended_membership = pd.DataFrame({"600000.SH": True}, index=extended_dates)
+    load_research_bundle(
+        ["600000.SH"], "2024-01-02", "2024-01-05", membership=extended_membership,
+        source=source, store=store,
+    )
+    assert source.calls == 2
+    assert source.requested[-1] == ("2024-01-05", "2024-01-05")
 
 
 def test_study_ledger_persists_protocol_and_resume_state(tmp_path):

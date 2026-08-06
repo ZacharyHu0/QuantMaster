@@ -574,9 +574,11 @@ class LabService:
         quality = str(snapshot["payload"].get("research_quality") or "sandbox")
         symbols = list(panel["close"].columns)
         if quality == "production":
-            def relay(done: int, total: int, symbol: str, success: bool) -> None:
+            def relay(
+                done: int, total: int, symbol: str, success: bool, detail: str = "",
+            ) -> None:
                 if progress:
-                    detail = f"{done}/{total} · {symbol}"
+                    detail = f"{done}/{total} · {symbol}" + (f" · {detail}" if detail else "")
                     if not success:
                         detail += " · 严格数据门禁失败"
                     progress(
@@ -1004,9 +1006,11 @@ class LabService:
                     symbol for symbol in membership if membership[symbol].any()
                 )
 
-                def research_progress(done: int, total: int, symbol: str, success: bool) -> None:
+                def research_progress(
+                    done: int, total: int, symbol: str, success: bool, detail: str = "",
+                ) -> None:
                     if progress:
-                        detail = f"{done}/{total} · {symbol}"
+                        detail = f"{done}/{total} · {symbol}" + (f" · {detail}" if detail else "")
                         if not success:
                             detail += " · 数据门禁失败"
                         progress(

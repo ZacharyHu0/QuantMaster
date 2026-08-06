@@ -252,7 +252,9 @@ class TushareSource(DataSource):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
         return self._normalize_market_frame(merged).loc[start:end]
 
-    def research_daily(self, symbol: str, start: str, end: str) -> dict[str, pd.DataFrame]:
+    def research_daily(
+        self, symbol: str, start: str, end: str, *, calendar: pd.DatetimeIndex | None = None,
+    ) -> dict[str, pd.DataFrame]:
         """返回不可变总收益信号流与真实成交约束，供 production 研究使用。
 
         与 ``daily`` 不同，总收益价格直接使用 ``raw_price * adj_factor``，不会因
@@ -300,7 +302,8 @@ class TushareSource(DataSource):
         signal = raw_frame.copy()
         for column in ("open", "high", "low", "close"):
             signal[column] = raw_frame[column] * merged["adj_factor"]
-        suspension_index = self.trade_calendar(start, end).union(merged.index).sort_values()
+        suspension_index = (calendar if calendar is not None else self.trade_calendar(start, end))
+        suspension_index = suspension_index.union(merged.index).sort_values()
         suspended = pd.Series(False, index=suspension_index, name="suspended")
         if not suspensions.empty and "trade_date" in suspensions:
             suspension_types = (

@@ -1,5 +1,14 @@
 # QuantMaster repository instructions
 
+## Verification environment
+
+- Run Python validation through the project virtual environment: `./.venv/Scripts/python.exe`
+  on Windows (or the platform-equivalent `.venv` interpreter). Do not use a system Python for
+  project tests, linting, or scripts.
+- Full-only suites require `--full`. In restricted Windows environments, use a writable
+  workspace-local pytest base directory, for example
+  `./.venv/Scripts/python.exe -m pytest --full --basetemp .pytest-tmp <target>`.
+
 ## Release bookkeeping
 
 - Every repository modification, including documentation and test changes, must increment
