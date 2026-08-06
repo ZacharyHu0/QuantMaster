@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -31,6 +32,7 @@ router = APIRouter(prefix="/api/v1")
 settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
+logger = logging.getLogger(__name__)
 
 
 def _local(request: Request) -> bool:
@@ -99,8 +101,11 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
             }
         elif any(field.startswith("automation.") for field in changed):
             apply_status["automation"] = runtime.apply_config(changed)
-    except Exception as exc:  # 配置已安全保存；运行态失败降级为可操作警告。
-        apply_status["automation"] = {"status": "degraded", "message": str(exc)[:300]}
+    except Exception:  # 配置已安全保存；运行态失败降级为可操作警告。
+        logger.warning("自动化运行时热应用失败", exc_info=True)
+        apply_status["automation"] = {
+            "status": "degraded", "message": "运行时热应用失败，请重启服务",
+        }
         result.setdefault("warnings", []).append("自动化配置已保存，但运行时热应用失败")
     try:
         worker = get_worker()
@@ -112,8 +117,11 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
                 apply_status["lab"] = {"status": "disabled"}
         elif any(field.startswith("lab.") for field in changed) or "automation.timezone" in changed:
             apply_status["lab"] = worker.apply_config(changed)
-    except Exception as exc:
-        apply_status["lab"] = {"status": "degraded", "message": str(exc)[:300]}
+    except Exception:
+        logger.warning("Quant Lab Worker 热应用失败", exc_info=True)
+        apply_status["lab"] = {
+            "status": "degraded", "message": "Worker 热应用失败，请重启服务",
+        }
         result.setdefault("warnings", []).append("Quant Lab 配置已保存，但 Worker 热应用失败")
     if "data.root" in changed:
         try:
@@ -127,9 +135,10 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
             get_backtest_worker().start()
             get_paper_automation_worker().start()
             apply_status["data_workers"] = {"status": "applied"}
-        except Exception as exc:
+        except Exception:
+            logger.warning("数据目录切换后后台执行器恢复失败", exc_info=True)
             apply_status["data_workers"] = {
-                "status": "degraded", "message": str(exc)[:300],
+                "status": "degraded", "message": "后台执行器恢复失败，请重启服务",
             }
             result.setdefault("warnings", []).append(
                 "数据目录已切换，但部分后台执行器需要重启服务后恢复"

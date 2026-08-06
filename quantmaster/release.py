@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.2"
+VERSION = "0.14.3"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "代码扫描安全边界收敛",
+                "items": (
+                    (
+                        "限制 GitHub Actions 默认权限，集中加固文件路径边界，并阻止内部异常"
+                        "文本进入资讯、诊断、决策和板块 API。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.2",
         "date": RELEASE_DATE,
         "sections": (
             {

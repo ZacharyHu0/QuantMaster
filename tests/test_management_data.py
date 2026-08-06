@@ -166,6 +166,8 @@ def test_migration_preflight_rejects_nested_and_nonempty(tmp_path):
     cfg.data.root = str(source)
     set_config(cfg)
     manager = DataMigrationManager(RootSwitcher())
+    with pytest.raises(MigrationError, match="绝对路径"):
+        manager.create("relative-data", "copy")
     with pytest.raises(MigrationError, match="嵌套"):
         manager.create(source / "nested", "copy")
     target = tmp_path / "occupied"

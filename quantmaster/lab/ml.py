@@ -19,6 +19,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.paths import confined_path
 
 MODEL_KINDS = ("ridge", "mlp", "tcn", "gru", "transformer", "dae")
 Progress = Callable[[int, str], None]
@@ -545,14 +546,12 @@ def _artifact_manifest(model: dict[str, Any]) -> tuple[dict[str, Any], Path]:
     if not manifest_name:
         raise ValueError("学习模型没有推理清单")
     root = Path(get_config().data_root).resolve()
-    manifest_path = (root / manifest_name).resolve()
-    if not manifest_path.is_relative_to(root):
-        raise ValueError("模型清单路径越出数据目录")
+    manifest_path = confined_path(root, manifest_name, label="模型清单")
     if not manifest_path.is_file():
         raise FileNotFoundError(f"模型清单不存在：{manifest_name}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    artifact_path = (root / str(manifest.get("artifact") or "")).resolve()
-    if not artifact_path.is_relative_to(root) or not artifact_path.is_file():
+    artifact_path = confined_path(root, manifest.get("artifact"), label="模型工件")
+    if not artifact_path.is_file():
         raise FileNotFoundError("模型工件不存在或路径不安全")
     expected = str(manifest.get("artifact_sha256") or "")
     actual = artifact_sha256(artifact_path)
@@ -568,8 +567,8 @@ def predict_panel(
     manifest_name = str(model.get("manifest") or "")
     if manifest_name:
         root = Path(get_config().data_root).resolve()
-        candidate = (root / manifest_name).resolve()
-        if candidate.is_relative_to(root) and candidate.is_file():
+        candidate = confined_path(root, manifest_name, label="模型清单")
+        if candidate.is_file():
             preview = json.loads(candidate.read_text(encoding="utf-8"))
             if int(preview.get("schema_version", 1)) == 2:
                 from quantmaster.lab.multihorizon import predict_multi_bundle

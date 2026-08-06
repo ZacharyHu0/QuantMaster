@@ -22,8 +22,18 @@ from quantmaster.runtime.maintenance import (
     MaintenanceParticipant,
     maintenance_barrier,
 )
+from quantmaster.runtime.paths import confined_path
 from quantmaster.runtime.process import ProcessLimitError, ProcessLimits, run_restricted_process
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+
+
+def test_confined_path_accepts_manifest_files_and_rejects_traversal(tmp_path):
+    assert confined_path(tmp_path, "lab_artifacts/model/manifest-v2.json") == (
+        tmp_path / "lab_artifacts" / "model" / "manifest-v2.json"
+    ).resolve()
+    for unsafe in ("../secret", "/absolute/file", "C:\\Windows\\file", "model/../../secret"):
+        with pytest.raises(ValueError, match="路径"):
+            confined_path(tmp_path, unsafe)
 
 
 def test_connection_factory_context_releases_database_handle(tmp_path):

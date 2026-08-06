@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ _ready = threading.Event()
 _refreshing = False
 _cached: dict[str, Any] | None = None
 _cached_at = 0.0
+logger = logging.getLogger(__name__)
 
 
 def invalidate_diagnostics() -> None:
@@ -31,7 +33,8 @@ def _refresh() -> None:
         from quantmaster.operational_diagnostics import safe_operational_metrics
 
         report["components"] = safe_operational_metrics()
-    except Exception as exc:  # final diagnostic boundary: never break liveness/readiness
+    except Exception:  # final diagnostic boundary: never break liveness/readiness
+        logger.warning("完整诊断收集失败", exc_info=True)
         report = {
             "level": "warning",
             "checked_at": datetime.now(UTC).isoformat(),
@@ -40,7 +43,7 @@ def _refresh() -> None:
                 severity="warning",
                 source="后台状态",
                 title="完整诊断暂不可用",
-                message=str(exc)[:300] or "诊断任务未完成",
+                message="诊断任务未完成，请查看本机日志",
                 action="稍后重试并查看服务日志。",
             )],
         }

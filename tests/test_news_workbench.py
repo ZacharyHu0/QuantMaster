@@ -888,9 +888,9 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
             request,
         )
     assert credential_error.value.status_code == 409
-    assert "secret-value" not in str(
-        news_module._error(RuntimeError("Bearer secret-value")).detail
-    )
+    public_error = str(news_module._error(RuntimeError("Bearer secret-value")).detail)
+    assert public_error == "资讯请求执行失败，请查看本机日志"
+    assert "secret-value" not in public_error
 
     assert news_module.news_stats(request, days=9999) == {"days": 3650}
     queried = news_module.news_query(

@@ -128,7 +128,15 @@ class _BarLock(AbstractContextManager["_BarLock"]):
 
 
 def _safe_name(symbol: str) -> str:
-    return re.sub(r"[^0-9A-Za-z._^-]", "_", symbol)
+    safe = os.path.basename(symbol)
+    if (
+        not safe
+        or safe in {".", ".."}
+        or safe != symbol
+        or re.fullmatch(r"[0-9A-Za-z._^-]{1,64}", safe) is None
+    ):
+        raise ValueError("标的代码包含非法字符")
+    return safe
 
 
 def _file_sha256(path: Path) -> str:
@@ -576,4 +584,9 @@ class IntradayBarStore(BarStore):
         if self.frequency == "1d":
             raise ValueError("IntradayBarStore 仅用于分钟线")
         base = Path(root) if root else get_config().data_root / "bars" / "intraday"
-        super().__init__(base / self.frequency)
+        directory = {
+            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "60m": "60m",
+        }.get(self.frequency)
+        if directory is None:  # validate_frequency 已拒绝未知值；保留显式安全边界。
+            raise ValueError("IntradayBarStore 收到未知分钟频率")
+        super().__init__(base / directory)

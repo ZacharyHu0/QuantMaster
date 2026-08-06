@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -20,6 +21,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 
+logger = logging.getLogger(__name__)
 DecisionProfile = Literal["risk_adjusted", "short_term", "stable"]
 EPS = 1e-12
 
@@ -311,8 +313,9 @@ def resolve_policy(
             if role not in selected or rank > selected[role][0]:
                 selected[role] = (rank, deployment, component)
         components.extend(value[2] for value in selected.values())
-    except Exception as exc:
-        warnings.append(f"Quant Lab Champion 暂不可用，已使用规则基线：{exc}")
+    except Exception:
+        logger.warning("Quant Lab Champion 解析失败，已使用规则基线", exc_info=True)
+        warnings.append("Quant Lab Champion 暂不可用，已使用规则基线")
 
     available = {item["role"] for item in components}
     requested = {
@@ -471,12 +474,19 @@ def hybrid_score_bundle(
                 raise ValueError("没有满足覆盖率的有效预测")
             scores[role] = values
             active_components.append(component)
-        except Exception as exc:
+        except Exception:
+            logger.warning(
+                "决策组件执行失败 role=%s name=%s",
+                role, component.get("name", ""), exc_info=True,
+            )
             component["status"] = "fallback"
-            component["fallback_reason"] = str(exc)
-            warnings.append(f"{component.get('name', role)} 未参与正式评分：{exc}")
+            component["fallback_reason"] = "组件执行失败，请查看本机日志"
+            warnings.append(f"{component.get('name', role)} 未参与正式评分")
             if role == "ml":
-                shadow = {"name": component.get("name", "学习模型"), "status": "failed", "reason": str(exc)}
+                shadow = {
+                    "name": component.get("name", "学习模型"),
+                    "status": "failed", "reason": "组件执行失败，请查看本机日志",
+                }
 
     total_weight = sum(float(item.get("weight", 0)) for item in active_components)
     if total_weight <= 0:

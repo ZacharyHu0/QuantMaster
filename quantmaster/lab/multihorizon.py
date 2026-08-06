@@ -16,6 +16,7 @@ import pandas as pd
 from quantmaster.lab.ml import artifact_sha256, engineer_features, normalize_features
 from quantmaster.lab.research import HORIZONS, FeatureSetSpec, TimeFold
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.paths import confined_path
 
 Progress = Callable[[int, str], None]
 Cancelled = Callable[[], bool]
@@ -863,16 +864,16 @@ def predict_multi_bundle(
     from quantmaster.config import get_config
 
     root = Path(get_config().data_root).resolve()
-    manifest_path = (root / str(model.get("manifest") or "")).resolve()
-    if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
+    manifest_path = confined_path(root, model.get("manifest"), label="共享模型清单")
+    if not manifest_path.is_file():
         raise FileNotFoundError("共享模型 manifest 不存在或越出数据目录")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     horizons = tuple(int(value) for value in manifest.get("horizons") or ())
     if int(manifest.get("schema_version", 0)) != 2 or horizon not in horizons:
         raise ValueError("模型不是兼容的 schema v2 多周期工件")
     live = manifest.get("live_artifact") or {}
-    artifact = (root / str(live.get("artifact") or "")).resolve()
-    if not artifact.is_relative_to(root) or not artifact.is_file():
+    artifact = confined_path(root, live.get("artifact"), label="共享模型工件")
+    if not artifact.is_file():
         raise FileNotFoundError("共享模型 live 工件不存在")
     if hashlib.sha256(artifact.read_bytes()).hexdigest() != live.get("artifact_sha256"):
         raise ValueError("共享模型 live 工件完整性校验失败")

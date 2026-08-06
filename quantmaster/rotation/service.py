@@ -908,13 +908,16 @@ class RotationService:
                 # them readable while correcting the public meaning immediately.
                 quality["coverage"] = None
             return value
-        except RotationIntegrityError as exc:
+        except RotationIntegrityError:
             logger.error("板块联动快照完整性失败 kind=%s", kind, exc_info=True)
             value = self.cold(kind)
             value["meta"]["quality"] = _status_quality(
-                "corrupt", issues=[str(exc), "请重新生成联动快照；损坏内容不会参与计算"],
+                "corrupt", issues=[
+                    "板块联动快照完整性校验失败",
+                    "请重新生成联动快照；损坏内容不会参与计算",
+                ],
             )
-            value["data"]["message"] = str(exc)
+            value["data"]["message"] = "板块联动快照损坏，已停止使用"
             return value
 
     def taxonomy(self) -> dict[str, Any]:

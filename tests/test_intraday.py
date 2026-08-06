@@ -3,6 +3,7 @@
 from typing import ClassVar
 
 import pandas as pd
+import pytest
 
 from quantmaster.data import registry
 from quantmaster.data.base import DataSource, Market, normalize_bars
@@ -52,6 +53,8 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
     assert FakeSource.calls == ["5m"]
     assert not list(store.root.glob("*.tmp"))
     assert IntradayBarStore("15m", root=tmp_path / "intraday").root != store.root
+    with pytest.raises(ValueError, match="非法字符"):
+        store.path_for_repair("../escape")
 
 
 def test_multisymbol_intraday_panel(monkeypatch):

@@ -45,7 +45,18 @@ class MigrationTask:
 
 
 def _resolved(path: str | Path) -> Path:
-    return Path(path).expanduser().resolve()
+    raw = os.fspath(path).strip()
+    if not raw or "\x00" in raw:
+        raise MigrationError("数据目录路径无效")
+    try:
+        candidate = Path(raw).expanduser()  # lgtm[py/path-injection]
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MigrationError("数据目录路径无效") from exc
+    if not candidate.is_absolute():
+        raise MigrationError("数据目录必须使用绝对路径")
+    # 本地 CSRF 管理操作有意允许用户选择任意绝对数据目录；_preflight 会拒绝
+    # 嵌套、覆盖、符号链接和不可用目标。
+    return candidate.resolve()
 
 
 def _is_sqlite_sidecar(path: Path) -> bool:

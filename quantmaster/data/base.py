@@ -15,6 +15,7 @@ symbol 约定（跨市场统一标识）：
 from __future__ import annotations
 
 import enum
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -22,6 +23,7 @@ import pandas as pd
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
+_SYMBOL_PATTERN = re.compile(r"[0-9A-Za-z._^-]{1,48}")
 
 
 class Market(enum.StrEnum):
@@ -98,6 +100,14 @@ def validate_frequency(frequency: str) -> str:
     value = aliases.get(value, value.replace("min", "m"))
     if value != "1d" and value not in INTRADAY_FREQUENCIES:
         raise ValueError(f"不支持的频率 {frequency!r}，可选: 1d/{'/'.join(INTRADAY_FREQUENCIES)}")
+    return value
+
+
+def validate_symbol(symbol: str) -> str:
+    """Validate the canonical market identifier accepted by file-backed stores."""
+    value = symbol.strip()
+    if _SYMBOL_PATTERN.fullmatch(value) is None:
+        raise ValueError("标的代码仅支持 1–48 位字母、数字及 ._^- 字符")
     return value
 
 

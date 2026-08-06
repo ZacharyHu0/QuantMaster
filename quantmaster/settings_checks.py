@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import socket
 import tempfile
@@ -22,6 +23,8 @@ from quantmaster.settings import (
     ServerSettings,
     normalize_api_base,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _result(status: str, message: str, started: float, **details: Any) -> dict[str, Any]:
@@ -178,9 +181,9 @@ def check_storage(data: DataSettings) -> dict[str, Any]:
             __import__("os").fsync(handle.fileno())
         usage = __import__("shutil").disk_usage(root)
         return _result("success", "目录可写", started, path=str(root), free_bytes=usage.free)
-    except OSError as exc:
-        return _result("error", f"目录不可写：{exc.strerror or type(exc).__name__}", started,
-                       path=str(root))
+    except OSError:
+        logger.info("设置检查发现数据目录不可写", exc_info=True)
+        return _result("error", "目录不可写，请检查本机权限", started, path=str(root))
 
 
 def _check_free_stockdb(data: DataSettings | None, timeout: float) -> dict[str, Any]:
@@ -291,8 +294,9 @@ def check_server(settings: ServerSettings) -> dict[str, Any]:
     try:
         sock.bind((host, settings.port))
         status, message, available = "success", "host/port 合法且端口可用", True
-    except OSError as exc:
-        status, message, available = "warning", f"地址合法，但端口当前不可绑定：{exc.strerror or exc}", False
+    except OSError:
+        logger.info("设置检查无法绑定服务端口", exc_info=True)
+        status, message, available = "warning", "地址合法，但端口当前不可绑定", False
     finally:
         sock.close()
     return _result(status, message, started, host=settings.host,

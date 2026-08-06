@@ -421,6 +421,7 @@ def test_rotation_snapshot_hash_failure_is_exposed_as_corrupt(tmp_path):
     )
     assert public["meta"]["quality"]["status"] == "corrupt"
     assert "损坏内容不会参与计算" in public["meta"]["quality"]["issues"][-1]
+    assert "哈希不匹配" not in str(public)
 
 
 def test_rotation_etf_file_corruption_is_not_treated_as_empty(tmp_path):

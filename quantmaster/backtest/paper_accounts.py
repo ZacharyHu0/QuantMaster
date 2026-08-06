@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import sqlite3
 import threading
 import time
@@ -160,9 +161,13 @@ class PaperStore:
         return value
 
     def ledger_path(self, account_id: str) -> Path:
-        if not account_id or any(char not in "0123456789abcdef" for char in account_id):
+        try:
+            safe_id = os.path.basename(uuid.UUID(account_id).hex)
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("模拟账户 ID 非法") from None
+        if safe_id != account_id:
             raise ValueError("模拟账户 ID 非法")
-        directory = self.account_root / account_id
+        directory = self.account_root / safe_id
         directory.mkdir(parents=True, exist_ok=True)
         return directory / "ledger.sqlite"
 

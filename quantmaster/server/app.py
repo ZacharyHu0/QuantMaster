@@ -913,12 +913,19 @@ def market_overview_stream(
 def market_history(symbol: str, start: str = "2023-01-01", end: str | None = None,
                    frequency: str = "1d") -> dict:
     from quantmaster.data import load_bars
+    from quantmaster.data.base import validate_frequency, validate_symbol
 
     end = end or str(pd.Timestamp.now().date())
     try:
+        symbol = validate_symbol(symbol)
+        frequency = validate_frequency(frequency)
+    except ValueError:
+        raise HTTPException(422, "标的代码或行情频率无效") from None
+    try:
         df = load_bars(symbol, start, end, frequency=frequency)
-    except Exception as e:
-        raise HTTPException(404, f"获取 {symbol} 失败: {e}") from e
+    except Exception:
+        logger.warning("行情历史读取失败 symbol=%s frequency=%s", symbol, frequency, exc_info=True)
+        raise HTTPException(404, f"获取 {symbol} 失败，请查看本机日志") from None
     return {
         "symbol": symbol,
         "frequency": frequency,

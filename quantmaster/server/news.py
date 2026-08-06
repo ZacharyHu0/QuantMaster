@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import logging
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Literal
@@ -20,6 +20,7 @@ from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter(prefix="/api/v1/news")
+logger = logging.getLogger(__name__)
 
 
 class StrictModel(ContractModel):
@@ -100,16 +101,12 @@ class ReanalyzeRequest(StrictModel):
 
 
 def _error(exc: Exception) -> HTTPException:
+    logger.warning("资讯 API 请求失败（%s）", type(exc).__name__, exc_info=True)
     if isinstance(exc, KeyError):
-        return HTTPException(404, str(exc).strip("'"))
+        return HTTPException(404, "资讯资源不存在")
     if isinstance(exc, CredentialError):
-        return HTTPException(409, str(exc))
-    message = re.sub(
-        r"(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+",
-        r"\1***", str(exc),
-    )
-    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1***", message)
-    return HTTPException(400, message[:500])
+        return HTTPException(409, "凭据操作失败，请检查本机凭据设置")
+    return HTTPException(400, "资讯请求执行失败，请查看本机日志")
 
 
 def _epoch(value: str | None, *, end: bool = False) -> float | None:

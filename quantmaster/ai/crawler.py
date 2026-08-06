@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -47,6 +48,7 @@ from quantmaster.config import get_config
 from quantmaster.runtime.jobs import WorkerIdentity
 from quantmaster.runtime.sqlite import connect_sqlite
 
+logger = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (compatible; QuantMaster/0.1; +https://github.com/ZacharyHu0/QuantMaster)"
 
 # 与行情、因子模块使用的申万 2021 一级行业口径保持一致。模型输出只接受该白名单，
@@ -264,14 +266,18 @@ def _adaptive_sentiment_scale(values: list[float], default: int = 20) -> int:
 
 
 def _safe_analysis_error(exc: Exception) -> str:
-    message = str(exc).strip() or "标注服务未返回结果"
-    message = re.sub(
-        r"(?i)((?:api[_-]?key|token|authorization)\s*[=:]\s*)[^\s,;]+",
-        r"\1***", message,
-    )
-    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1***", message)
-    message = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***", message)
-    return message[:497] + "…" if len(message) > 500 else message
+    code = _analysis_failure_code(exc)
+    if code in {"rate_limit", "http_429", "queue_timeout"}:
+        return "资讯分析服务繁忙，已安排重试"
+    if code in {"timeout", "read_timeout", "network"}:
+        return "资讯分析网络超时，已安排重试"
+    if code in {"authentication", "http_401", "http_403"}:
+        return "资讯分析凭据不可用，请检查本机设置"
+    if code == "claim_lost":
+        return "资讯分析租约已转交其他任务"
+    if code == "invalid_batch_shape":
+        return "资讯分析结果格式不兼容"
+    return "资讯分析失败，请查看本机日志"
 
 
 def _analysis_failure_code(exc: Exception) -> str:
@@ -1271,6 +1277,7 @@ class AICrawler:
                     chunk_completed += len(written_ids)
                     completed_ids.extend(written_ids)
             except Exception as exc:
+                logger.warning("资讯分析批次失败", exc_info=True)
                 error = _safe_analysis_error(exc)
                 failure_code = _analysis_failure_code(exc)
                 retryable = exc.retryable if isinstance(exc, LLMError) else True
@@ -1412,10 +1419,12 @@ class AICrawler:
                 if run_id:
                     self.source_store.finish_run(run_id, fetched=len(items), saved=saved, pending=saved)
                 source_results.append({"source": source_id, "fetched": len(items), "saved": saved})
-            except Exception as exc:
-                errors[source_id] = str(exc)
+            except Exception:
+                logger.warning("资讯来源抓取失败 source=%s", source_id, exc_info=True)
+                public_error = "资讯来源抓取失败，请查看本机日志"
+                errors[source_id] = public_error
                 if run_id:
-                    self.source_store.finish_run(run_id, error=str(exc))
+                    self.source_store.finish_run(run_id, error=public_error)
         annotation: dict[str, Any] = {
             "processed": 0, "completed": 0, "failed": 0,
             "retry_scheduled": 0, "dead_letter": 0,

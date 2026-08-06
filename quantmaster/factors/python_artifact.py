@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantmaster.runtime.paths import confined_path
 from quantmaster.runtime.process import (
     ProcessLimitError,
     ProcessLimits,
@@ -281,9 +282,10 @@ def execute_python_factor_artifact(
     data_root: str | Path, artifact: dict[str, Any], features: dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
     root = Path(data_root).resolve()
-    source_path = (root / str(artifact.get("source", ""))).resolve()
-    if root not in source_path.parents:
-        raise PythonFactorPolicyError("工件路径越界")
+    try:
+        source_path = confined_path(root, artifact.get("source"), label="Python 因子工件")
+    except ValueError as exc:
+        raise PythonFactorPolicyError("工件路径越界") from exc
     source = source_path.read_text(encoding="utf-8")
     expected = str(artifact.get("source_sha256") or "")
     actual = hashlib.sha256(source.encode("utf-8")).hexdigest()

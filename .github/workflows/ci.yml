@@ -9,6 +9,9 @@ env:
   UV_VERSION: "0.11.32"
   RUST_TOOLCHAIN: "1.94.0"
 
+permissions:
+  contents: read
+
 jobs:
   core:
     timeout-minutes: 15
