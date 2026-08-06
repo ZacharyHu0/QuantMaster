@@ -219,6 +219,9 @@ class TestBasics:
         assert "unhandledrejection" in app_script
         assert 'id="release-trigger"' in resp.text
         assert 'id="release-popover"' in resp.text
+        assert 'id="free-stockdb-release"' in resp.text
+        assert '/api/v1/settings/free-stockdb/vendor-notice' in app_script
+        assert 'qm-free-stockdb-release-seen' in app_script
         assert f'v{__version__}' not in resp.text  # 版本由 data 属性无闪烁注入，脚本负责呈现
         assert f'data-version="{__version__}"' in resp.text
         assert f'data-release-date="{RELEASE_DATE}"' in resp.text
@@ -238,6 +241,10 @@ class TestBasics:
         ])
         assert 'class="header-settings" data-tab="settings"' in resp.text
         assert resp.text.index('class="header-help"') < resp.text.index('class="header-settings"')
+        help_markup = resp.text.split('class="header-help"', 1)[1].split("</button>", 1)[0]
+        assert 'aria-label="手册"' in help_markup
+        assert "<span>手册</span>" in help_markup
+        assert "<circle" not in help_markup
         settings_markup = resp.text.split('class="header-settings"', 1)[1].split("</button>", 1)[0]
         assert "header-settings-label" not in settings_markup
         assert settings_markup.count("<rect x=\"10.65\"") == 8
@@ -260,16 +267,23 @@ class TestBasics:
         assert "window.QuantMasterBrandIntro" in brand_script.text
         chart_script = client.get("/static/charts.js")
         chart_styles = client.get("/static/charts.css")
+        settings_script = client.get("/static/settings.js")
         assert chart_script.status_code == 200
         assert chart_styles.status_code == 200
+        assert settings_script.status_code == 200
         assert "function motionProfile(kind, count)" in chart_script.text
         assert "count > 1000" in chart_script.text
         assert "count > 240" in chart_script.text
         assert "count > 60" in chart_script.text
         assert "function replayChart(id)" in chart_script.text
+        assert "data-chart-replay" not in chart_script.text
+        assert "qm-chart-replay" not in chart_styles.text
         assert "window.ResizeObserver" in chart_script.text
         assert "prefers-reduced-motion: reduce" in chart_styles.text
         assert "--chart-primary" in chart_styles.text
+        assert "scheduleFreeStockDbPoll" in settings_script.text
+        assert "freeStockDbPollFailures < 5" in settings_script.text
+        assert "update_result === 'failed'" in settings_script.text
         help_content = client.get("/static/help-content.html")
         assert help_content.status_code == 200
         assert 'data-help-topic="start"' in help_content.text

@@ -564,6 +564,7 @@ def test_news_api_csrf_and_ui_contract():
     assert 'id="news-dead-action-count"' in page
     assert 'name="llm.max_concurrency"' in page
     assert 'name="news.annotation_timeout"' in page
+    assert 'name="news.annotation_model"' in page
     assert 'name="news.annotation_reasoning_effort"' in page
     assert 'data-settings-section="sources"' in page
     assert "/static/news.js" in page

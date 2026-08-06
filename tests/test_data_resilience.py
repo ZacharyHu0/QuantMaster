@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar
 
+import httpx
 import pandas as pd
 import pytest
 
@@ -628,6 +629,96 @@ def test_failed_full_refresh_keeps_previous_cache(tmp_path, monkeypatch):
     pd.testing.assert_frame_equal(result, cached, check_freq=False)
     pd.testing.assert_frame_equal(store.get("600000.SH"), cached, check_freq=False)
     assert store.metadata("600000.SH")["last_status"] == "refresh_failed"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("timed out"),
+        httpx.HTTPStatusError(
+            "bad gateway",
+            request=httpx.Request("GET", "http://stockdb.invalid"),
+            response=httpx.Response(502),
+        ),
+    ],
+)
+def test_full_refresh_httpx_failures_continue_to_fallback(
+    tmp_path, monkeypatch, failure,
+):
+    store = BarStore(root=tmp_path / "bars")
+
+    class Broken(DataSource):
+        name = "broken"
+        markets = (Market.CN,)
+
+        def daily(self, symbol, start, end):
+            raise failure
+
+    class Fallback(DataSource):
+        name = "fallback"
+        markets = (Market.CN,)
+
+        def daily(self, symbol, start, end):
+            index = pd.bdate_range(start, end)
+            return pd.DataFrame({
+                "open": 10.0, "high": 10.0, "low": 10.0,
+                "close": 10.0, "volume": 1.0,
+            }, index=index)
+
+    monkeypatch.setattr(registry, "_factories", lambda: {
+        Market.CN: [Broken, Fallback],
+    })
+    result = registry.load_history(
+        "600000.SH", "2024-01-02", "2024-01-12",
+        store=store, refresh="full",
+    )
+
+    assert not result.empty
+    assert store.metadata("600000.SH")["last_source"] == "fallback"
+
+
+def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
+    tmp_path, monkeypatch,
+):
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    store = BarStore(root=tmp_path / "bars")
+    calls: list[list[str]] = []
+
+    def bars(start: str, end: str) -> pd.DataFrame:
+        index = pd.bdate_range(start, end)
+        return pd.DataFrame({
+            "open": 10.0, "high": 10.0, "low": 10.0,
+            "close": 10.0, "volume": 1.0,
+        }, index=index)
+
+    monkeypatch.setattr(registry, "BarStore", lambda: store)
+    monkeypatch.setattr(FreeStockDBSource, "native_batch_available", lambda _self: True)
+
+    def daily_many(_self, symbols, start, end):
+        calls.append(list(symbols))
+        return {symbols[0]: bars(start, end)}
+
+    monkeypatch.setattr(FreeStockDBSource, "daily_many", daily_many)
+
+    class Fallback(DataSource):
+        name = "fallback"
+        markets = (Market.CN,)
+
+        def daily(self, symbol, start, end):
+            return bars(start, end)
+
+    monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Fallback]})
+    panel = registry.load_bar_panel(
+        ["600000.SH", "000001.SZ"], "2024-01-02", "2024-01-12",
+        field="close",
+    )
+
+    assert calls == [["600000.SH", "000001.SZ"]]
+    assert list(panel.columns) == ["600000.SH", "000001.SZ"]
+    assert store.metadata("600000.SH")["last_source"] == "free-stockdb"
+    assert store.metadata("000001.SZ")["last_source"] == "fallback"
 
 
 def test_successful_fallback_is_recorded_as_ready(tmp_path, monkeypatch):

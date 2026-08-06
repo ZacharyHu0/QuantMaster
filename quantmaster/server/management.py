@@ -183,6 +183,32 @@ def settings_runtime(request: Request) -> dict:
     return _runtime_status()
 
 
+@router.get("/settings/free-stockdb")
+def free_stockdb_status(request: Request) -> dict:
+    _require_local(request)
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    return free_stockdb_runtime.status()
+
+
+@router.get("/settings/free-stockdb/vendor-notice")
+def free_stockdb_vendor_notice(request: Request) -> dict:
+    _require_local(request)
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    return free_stockdb_runtime.check_vendor_notice()
+
+
+@router.post("/settings/free-stockdb/update")
+def update_free_stockdb(request: Request, response: Response) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    accepted = free_stockdb_runtime.request_update("manual")
+    response.status_code = 202 if accepted else 200
+    return {"accepted": accepted, **free_stockdb_runtime.status()}
+
+
 @router.post("/settings/validate")
 def validate_settings(request: Request, document: SettingsDocument) -> dict:
     _require_csrf(request)
@@ -202,7 +228,8 @@ def save_settings(request: Request, update: SettingsUpdate) -> dict:
 
 
 def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutations]:
-    source = body.get("settings") if isinstance(body.get("settings"), dict) else body
+    settings_value = body.get("settings")
+    source: dict[str, Any] = settings_value if isinstance(settings_value, dict) else body
     clean = {key: source[key] for key in (
         "config_version", "llm", "data", "trade", "news", "server", "automation", "lab")
              if key in source}

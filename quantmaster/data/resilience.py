@@ -104,9 +104,13 @@ def _provider_revision(lane: str) -> str:
     credential = ""
     if provider == "tushare":
         credential = get_config().data.tushare_token
-    elif provider == "free-stockdb":
+    elif provider in {"free-stockdb", "free-stockdb-online"}:
         data = get_config().data
-        credential = f"{data.free_stockdb_url}|{data.free_stockdb_sdk_path}"
+        url = (
+            data.free_stockdb_online_url
+            if provider == "free-stockdb-online" else data.free_stockdb_url
+        )
+        credential = f"{url}|{data.free_stockdb_sdk_path}"
     payload = json.dumps({
         "lane": lane,
         "package_version": version,
@@ -183,6 +187,8 @@ class ProviderScheduler:
         "tushare": 4,
         "tushare:fx-reference": 1,
         "ths:concept": 1,
+        "free-stockdb": 16,
+        "free-stockdb-online": 1,
     }
 
     def __init__(self) -> None:

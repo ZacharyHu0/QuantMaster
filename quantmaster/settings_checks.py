@@ -201,6 +201,9 @@ def _check_free_stockdb(data: DataSettings | None, timeout: float) -> dict[str, 
         return {
             "free-stockdb": {
                 "status": "success", "message": f"本地服务可用（{engine}）",
+                "engine": engine,
+                "sdk_path": str(details.get("sdk_path") or ""),
+                "service_url": str(details.get("service_url") or data.free_stockdb_url),
             },
         }
     except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:

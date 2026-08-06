@@ -10,40 +10,6 @@
 }
 
 .qm-chart-frame { position: relative; isolation: isolate; }
-.qm-chart-frame > h3,
-.qm-chart-frame > h4 { padding-right: 64px; }
-.qm-chart-frame:has(> .panel-heading) > .qm-chart-replay { top: 56px; right: 16px; }
-
-.qm-chart-replay {
-  position: absolute;
-  z-index: 3;
-  top: 12px;
-  right: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 28px;
-  border: 1px solid var(--axis);
-  border-radius: 6px;
-  background: color-mix(in oklch, var(--surface) 92%, var(--page));
-  color: var(--muted);
-  padding: 3px 7px;
-  cursor: pointer;
-  font: inherit;
-  font-size: 10px;
-  line-height: 1;
-  transition: color 180ms var(--ease-out-quart), border-color 180ms var(--ease-out-quart), transform 120ms var(--ease-out-quart);
-}
-.qm-chart-replay svg { width: 13px; height: 13px; fill: currentColor; }
-.qm-chart-replay:hover { color: var(--ink); border-color: var(--muted); }
-.qm-chart-replay:active { transform: scale(.96); }
-.qm-chart-replay:focus-visible { outline: 2px solid var(--chart-primary); outline-offset: 2px; }
-
-.rotation-section.qm-chart-frame .qm-chart-replay { top: 14px; right: 16px; }
-.rotation-section.qm-chart-frame .rotation-section-head { padding-right: 62px; }
-.trading-chart-block.qm-chart-frame .qm-chart-replay { top: 11px; right: 16px; }
-.paper-nav-panel.qm-chart-frame .qm-chart-replay { top: 9px; right: 16px; }
-.news-dashboard section.qm-chart-frame .qm-chart-replay { top: 12px; right: 12px; }
 
 .qm-chart-fade { animation: qm-chart-fade 180ms var(--ease-out-quart) both; }
 .qm-enter { animation: qm-enter 360ms var(--ease-out-expo) both; animation-delay: min(calc(var(--qm-order, 0) * 34ms), 320ms); }
@@ -78,20 +44,10 @@ tbody tr:hover { background-color: color-mix(in oklch, var(--chart-primary) 5%, 
 }
 @keyframes qm-chart-fade { from { opacity: .35; } to { opacity: 1; } }
 
-@media (max-width: 640px) {
-  .qm-chart-replay span { display: none; }
-  .qm-chart-replay { width: 30px; justify-content: center; padding-inline: 0; }
-}
-
-@media (pointer: coarse) {
-  .qm-chart-replay { min-width: 44px; min-height: 44px; justify-content: center; }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .qm-enter,
   .qm-row-enter,
   .qm-chart-fade { animation: none !important; }
-  .qm-chart-replay,
   .sentiment-axis b,
   .rotation-meter i { transition: none !important; }
 }

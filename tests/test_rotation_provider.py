@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -218,6 +219,10 @@ def test_provider_uses_akshare_concept_code_for_member_lookup(tmp_path, monkeypa
         return function(**kwargs)
 
     monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.get_config",
+        lambda: SimpleNamespace(data=SimpleNamespace(primary_provider="akshare")),
+    )
     monkeypatch.setattr("quantmaster.rotation.provider.akshare_call", direct_call)
     store = RotationStore(tmp_path / "rotation")
     provider = RotationProvider(store, FakeTushare())
@@ -233,6 +238,10 @@ def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
     tmp_path, monkeypatch, caplog,
 ):
     monkeypatch.setitem(sys.modules, "akshare", None)
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.get_config",
+        lambda: SimpleNamespace(data=SimpleNamespace(primary_provider="akshare")),
+    )
     store = RotationStore(tmp_path / "rotation")
     store.replace_themes([{
         "code": "EM_OLD", "name": "东方财富旧目录", "members": ["600000.SH"],
@@ -270,6 +279,10 @@ def test_provider_keeps_previous_theme_catalog_when_both_sources_fail(
     tmp_path, monkeypatch,
 ):
     monkeypatch.setitem(sys.modules, "akshare", None)
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.get_config",
+        lambda: SimpleNamespace(data=SimpleNamespace(primary_provider="akshare")),
+    )
 
     class UnavailableTushare(FakeTushare):
         def _call(self, endpoint, ttl, **params):

@@ -25,6 +25,13 @@
     lastRuntime: null,
   };
   const form = document.getElementById('settings-form');
+  let freeStockDbPollTimer = null;
+  let freeStockDbPollFailures = 0;
+
+  function scheduleFreeStockDbPoll(delay = 1000) {
+    if (freeStockDbPollTimer !== null) return;
+    freeStockDbPollTimer = setTimeout(pollFreeStockDbSidecar, delay);
+  }
 
   function html(value) {
     return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -88,6 +95,7 @@
   function syncReasoningEffortOptions(normalize = false) {
     const provider = form.elements['llm.provider'].value;
     const select = form.elements['llm.reasoning_effort'];
+    const newsSelect = form.elements['news.annotation_reasoning_effort'];
     const unsupported = provider === 'anthropic' ? new Set(['none', 'minimal']) : new Set();
     [...select.options].forEach(option => {
       const unavailable = unsupported.has(option.value);
@@ -95,9 +103,15 @@
       option.disabled = unavailable;
     });
     if (normalize && unsupported.has(select.value)) select.value = 'medium';
+    [...newsSelect.options].forEach(option => {
+      option.hidden = false;
+      option.disabled = false;
+    });
     document.getElementById('reasoning-effort-hint').textContent = provider === 'anthropic'
       ? 'Anthropic 从低到最大；具体级别取决于所选模型'
       : '支持范围取决于所选模型和兼容网关';
+    document.getElementById('news-reasoning-effort-hint').textContent =
+      '完整七档使用 API 原文；实际支持范围取决于资讯模型和网关。';
   }
 
   document.getElementById('settings-nav').addEventListener('click', event => {
@@ -148,6 +162,20 @@
     note.textContent = restart.length
       ? `${restart.join(' / ')} 已保存，重启服务后生效`
       : '停顿片刻或离开字段后自动生效';
+    const stockdb = runtime.free_stockdb;
+    const stockdbStatus = document.getElementById('free-stockdb-sidecar-status');
+    if (stockdb && stockdbStatus) {
+      const elapsed = Number.isFinite(stockdb.elapsed_seconds) ? ` · 已用 ${stockdb.elapsed_seconds} 秒` : '';
+      const engine = stockdb.sdk_engine ? ` · ${stockdb.sdk_engine}` : '';
+      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
+      const failed = ['error', 'degraded'].includes(stockdb.state) || stockdb.update_result === 'failed';
+      stockdbStatus.className = `field-wide check-result ${failed ? 'error' : stockdb.state === 'running' && stockdb.update_result !== 'native_required' ? 'success' : ''}`;
+      const active = ['queued', 'updating', 'restarting'].includes(stockdb.state)
+        || ['queued', 'stopping', 'syncing', 'restarting'].includes(stockdb.phase);
+      const updateButton = document.getElementById('free-stockdb-update-now');
+      if (updateButton) updateButton.disabled = active;
+      if (active) scheduleFreeStockDbPoll();
+    }
     const labels = {
       running: '运行中', standby: '等待调度租约', disabled: '已停用',
       draining: '停止领取新任务', degraded: '运行异常', applied: '已应用',
@@ -1088,6 +1116,40 @@
   document.getElementById('migration-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.taskId;
     if (id) await request(`/api/v1/data/migrations/${id}/cancel`, {method: 'POST'});
+  });
+
+  async function pollFreeStockDbSidecar() {
+    if (freeStockDbPollTimer !== null) clearTimeout(freeStockDbPollTimer);
+    freeStockDbPollTimer = null;
+    try {
+      const status = await request('/api/v1/settings/free-stockdb');
+      freeStockDbPollFailures = 0;
+      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      const active = ['queued', 'updating', 'restarting'].includes(status.state)
+        || ['queued', 'stopping', 'syncing', 'restarting'].includes(status.phase);
+      document.getElementById('free-stockdb-update-now').disabled = active;
+      if (active) scheduleFreeStockDbPoll();
+    } catch (error) {
+      freeStockDbPollFailures += 1;
+      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      if (freeStockDbPollFailures < 5) {
+        scheduleFreeStockDbPoll(Math.min(8000, 500 * (2 ** freeStockDbPollFailures)));
+      } else {
+        document.getElementById('free-stockdb-update-now').disabled = false;
+      }
+    }
+  }
+
+  document.getElementById('free-stockdb-update-now').addEventListener('click', async event => {
+    event.target.disabled = true;
+    try {
+      const status = await request('/api/v1/settings/free-stockdb/update', {method: 'POST'});
+      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      scheduleFreeStockDbPoll(250);
+    } catch (error) {
+      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      event.target.disabled = false;
+    }
   });
 
   async function openSettings(section = 'llm') {

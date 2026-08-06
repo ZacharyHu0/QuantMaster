@@ -39,13 +39,16 @@ class LLMConfig:
 class DataConfig:
     root: str = "data"                    # 本地数据目录（缓存/数据库）
     primary_provider: str = "free-stockdb"  # free-stockdb | akshare | tushare
-    free_stockdb_sdk_path: str = ""       # 用户安装的 pybao/stock_sdk.py 目录
+    free_stockdb_sdk_path: str = ""       # 留空自动发现 runtime 根目录下的 pybao
     free_stockdb_url: str = "http://127.0.0.1:7899"
     free_stockdb_timeout: float = 3.0      # 本地服务不可用时快速降级
     free_stockdb_root: str = "runtime/free-stockdb"
     free_stockdb_managed: bool = True
-    free_stockdb_auto_update: bool = True
+    free_stockdb_auto_update: bool = True  # 无静默更新器时按计划显示提醒
     free_stockdb_update_time: str = "18:30"
+    free_stockdb_online_enabled: bool = True
+    free_stockdb_online_url: str = "http://8.138.149.215:7899"
+    free_stockdb_online_timeout: float = 4.0
     tushare_token: str = ""
     cache_days: int = 1                   # 日线缓存有效期（天）
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
@@ -89,7 +92,8 @@ class NewsConfig:
     annotation_batch_size: int = 10
     annotation_items_per_run: int = 100
     annotation_timeout: float = 180.0
-    annotation_reasoning_effort: str = "medium"
+    annotation_model: str = ""
+    annotation_reasoning_effort: str = "low"
     factor_halflife_days: float = 3.0
     factor_min_confidence: float = 0.35
 
@@ -196,6 +200,13 @@ def _apply_env(cfg: Config) -> None:
     ).strip().lower() in {"1", "true", "yes", "on"}
     cfg.data.free_stockdb_update_time = env.get(
         "QM_FREE_STOCKDB_UPDATE_TIME", cfg.data.free_stockdb_update_time).strip()
+    cfg.data.free_stockdb_online_enabled = env.get(
+        "QM_FREE_STOCKDB_ONLINE_ENABLED", str(cfg.data.free_stockdb_online_enabled)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.free_stockdb_online_url = env.get(
+        "QM_FREE_STOCKDB_ONLINE_URL", cfg.data.free_stockdb_online_url).strip().rstrip("/")
+    cfg.data.free_stockdb_online_timeout = float(env.get(
+        "QM_FREE_STOCKDB_ONLINE_TIMEOUT", cfg.data.free_stockdb_online_timeout))
     cfg.data.akshare_retries = int(
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(

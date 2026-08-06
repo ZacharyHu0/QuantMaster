@@ -289,18 +289,10 @@ function decorateChart(id) {
   el.setAttribute('role', 'img');
   var frame = el.closest('.panel, .rotation-section, .trading-chart-block, .paper-nav-panel, .news-dashboard section');
   if (!frame) frame = el.parentElement;
-  if (!frame || frame.querySelector('[data-chart-replay="' + id + '"]')) return;
+  if (!frame) return;
   frame.classList.add('qm-chart-frame');
   var heading = frame.querySelector('h2, h3, h4');
   if (heading && !el.getAttribute('aria-label')) el.setAttribute('aria-label', heading.textContent.trim());
-  var button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'qm-chart-replay';
-  button.dataset.chartReplay = id;
-  button.setAttribute('aria-label', '重播' + (heading ? heading.textContent.trim() : '图表') + '动画');
-  button.title = '重播图表动画';
-  button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 5.1A5.5 5.5 0 1 0 13.5 9h-1.4a4.1 4.1 0 1 1-.7-2.3L9.5 6.5V7.8h4.6V3.2h-1.3v1.9Z"/></svg><span>重播</span>';
-  frame.appendChild(button);
 }
 
 function captureInteraction(chart) {
@@ -387,11 +379,6 @@ function activateChartTab(tab) {
     });
   });
 }
-
-document.addEventListener('click', function (event) {
-  var button = event.target.closest('[data-chart-replay]');
-  if (button) replayChart(button.dataset.chartReplay);
-});
 
 if (window.MutationObserver) {
   new MutationObserver(function (mutations) {

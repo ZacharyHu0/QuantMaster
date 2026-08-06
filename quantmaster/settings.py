@@ -81,6 +81,11 @@ class DataSettings(StrictModel):
     free_stockdb_managed: bool = True
     free_stockdb_auto_update: bool = True
     free_stockdb_update_time: str = Field(default="18:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    free_stockdb_online_enabled: bool = True
+    free_stockdb_online_url: str = Field(
+        default="http://8.138.149.215:7899", max_length=2048,
+    )
+    free_stockdb_online_timeout: float = Field(default=4.0, ge=0.5, le=30.0)
     cache_days: int = Field(default=1, ge=0, le=3650)
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
@@ -111,7 +116,7 @@ class DataSettings(StrictModel):
             raise ValueError("free-stockdb 目录包含非法字符")
         return str(Path(value).expanduser())
 
-    @field_validator("free_stockdb_url")
+    @field_validator("free_stockdb_url", "free_stockdb_online_url")
     @classmethod
     def validate_free_stockdb_url(cls, value: str) -> str:
         normalized = value.strip().rstrip("/")
@@ -148,9 +153,10 @@ class NewsSettings(StrictModel):
     annotation_batch_size: int = Field(default=10, ge=1, le=50)
     annotation_items_per_run: int = Field(default=100, ge=1, le=1000)
     annotation_timeout: float = Field(default=180.0, ge=5.0, le=600.0)
+    annotation_model: str = Field(default="", max_length=200)
     annotation_reasoning_effort: Literal[
-        "low", "medium", "high", "xhigh", "max",
-    ] = "medium"
+        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    ] = "low"
     factor_halflife_days: float = Field(default=3.0, gt=0, le=30)
     factor_min_confidence: float = Field(default=0.35, ge=0, le=1)
 
@@ -288,7 +294,6 @@ class SettingsDocument(StrictModel):
         if value != CONFIG_VERSION:
             raise ValueError(f"不支持的配置版本: {value}")
         return value
-
 
 class SettingsUpdate(SettingsDocument):
     secrets: SecretMutations = Field(default_factory=SecretMutations)

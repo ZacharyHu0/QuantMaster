@@ -41,6 +41,20 @@ _BOARD_CATEGORIES = {
 }
 
 
+def resolve_free_stockdb_sdk_path(value: str | None = None) -> Path | None:
+    """Resolve an explicit SDK path or discover it beside the managed runtime."""
+    cfg = get_config().data
+    configured = str(cfg.free_stockdb_sdk_path if value is None else value).strip()
+    if configured:
+        path = Path(configured).expanduser()
+        resolved = path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+        return resolved if resolved.is_file() else resolved / "stock_sdk.py"
+    root = Path(cfg.free_stockdb_root).expanduser()
+    root = root.resolve() if root.is_absolute() else (Path.cwd() / root).resolve()
+    candidate = root / "pybao" / "stock_sdk.py"
+    return candidate if candidate.is_file() else None
+
+
 def _compact_time(value: str | None, *, intraday: bool) -> str:
     if not value:
         return ""
@@ -82,9 +96,8 @@ class FreeStockDBSource(DataSource):
         cfg = get_config().data
         self.base_url = (base_url or cfg.free_stockdb_url).strip().rstrip("/") + "/"
         self.timeout = float(timeout if timeout is not None else cfg.free_stockdb_timeout)
-        self.sdk_path = str(
-            sdk_path if sdk_path is not None else cfg.free_stockdb_sdk_path
-        ).strip()
+        resolved_sdk = resolve_free_stockdb_sdk_path(sdk_path)
+        self.sdk_path = str(resolved_sdk) if resolved_sdk is not None else ""
         self._trust_env = urlparse(self.base_url).hostname not in {
             "127.0.0.1", "localhost", "::1",
         }
@@ -137,6 +150,10 @@ class FreeStockDBSource(DataSource):
             self._client = None
         return self._client
 
+    def native_batch_available(self) -> bool:
+        """Whether the native SDK can serve a true multi-symbol request."""
+        return self._sdk_client() is not None
+
     def _sdk_data(
         self,
         code: str | list[str],
@@ -164,7 +181,7 @@ class FreeStockDBSource(DataSource):
             separators=(",", ":"),
         )
         return provider_call(
-            "free-stockdb",
+            self.name,
             key,
             lambda: client.get_data(
                 code=code,
@@ -190,7 +207,7 @@ class FreeStockDBSource(DataSource):
                 response.raise_for_status()
                 return response.json()
 
-        return provider_call("free-stockdb", key, fetch, probe=probe)
+        return provider_call(self.name, key, fetch, probe=probe)
 
     @staticmethod
     def _records(payload) -> list[dict]:
@@ -313,6 +330,33 @@ class FreeStockDBSource(DataSource):
             records = self._records(payload)
         return self._frame(records, intraday=False).loc[start:end]
 
+    def daily_many(
+        self, symbols: list[str], start: str, end: str,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch many A-share histories in one native SDK request."""
+        ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        if not ordered:
+            return {}
+        codes = [symbol.partition(".")[0].zfill(6) for symbol in ordered]
+        begin = _compact_time(start, intraday=False)
+        finish = _compact_time(end, intraday=False)
+        payload = self._sdk_data(codes, begin, finish, "1d", fq="qfq")
+        if payload is None:
+            return super().daily_many(ordered, start, end)
+        if not isinstance(payload, dict):
+            if len(ordered) == 1:
+                return {ordered[0]: self._frame(self._records(payload), intraday=False).loc[start:end]}
+            return {}
+        result: dict[str, pd.DataFrame] = {}
+        for symbol, code in zip(ordered, codes, strict=True):
+            values = payload.get(code)
+            if values is None:
+                values = payload.get(symbol)
+            frame = self._frame(self._records(values), intraday=False).loc[start:end]
+            if not frame.empty:
+                result[symbol] = frame
+        return result
+
     def intraday(
         self, symbol: str, start: str, end: str, frequency: str = "5m",
     ) -> pd.DataFrame:
@@ -426,7 +470,7 @@ class FreeStockDBSource(DataSource):
         def fetch():
             return client.rd.get("板块*").do()
 
-        rows = provider_call("free-stockdb", "sdk:boards", fetch)
+        rows = provider_call(self.name, "sdk:boards", fetch)
         boards = self._board_records(rows)
         if category is None:
             return boards
@@ -461,8 +505,26 @@ class FreeStockDBSource(DataSource):
         if client is not None:
             today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
             self._sdk_data("000001", today, today, "1d", fq=None, probe=True)
-            return {"status": "ok", "engine": "stock_sdk"}
+            return {
+                "status": "ok", "engine": "stock_sdk",
+                "sdk_path": self.sdk_path, "service_url": self.base_url.rstrip("/"),
+            }
         payload = self._request({"cmd": "ping"}, probe=True)
         result = payload if isinstance(payload, dict) else {"status": "ok"}
         result.setdefault("engine", "http-compatible")
+        result.setdefault("sdk_path", self.sdk_path)
+        result.setdefault("service_url", self.base_url.rstrip("/"))
         return result
+
+
+class FreeStockDBOnlineSource(FreeStockDBSource):
+    """Public trial endpoint used only after the local database misses."""
+
+    name = "free-stockdb-online"
+
+    def __init__(self):
+        cfg = get_config().data
+        super().__init__(
+            base_url=cfg.free_stockdb_online_url,
+            timeout=cfg.free_stockdb_online_timeout,
+        )

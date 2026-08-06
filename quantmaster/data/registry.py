@@ -14,6 +14,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import StrEnum
 
+import httpx
 import pandas as pd
 
 from quantmaster.config import get_config
@@ -140,7 +141,7 @@ def _full_refresh(
 ) -> pd.DataFrame:
     market = guess_market(symbol)
     errors: list[str] = []
-    for factory in _factories().get(market, []):
+    for factory in _request_factories(priority=priority, allow_online=False).get(market, []):
         try:
             source = factory()
             with data_priority(priority), bypass_endpoint_cache():
@@ -158,7 +159,9 @@ def _full_refresh(
             if stored is None:
                 raise RuntimeError(f"{source.name} 日线写入后无法读取")
             return stored.loc[start:end]
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (
+            httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError,
+        ) as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
     if cached is not None and not cached.empty:
@@ -196,7 +199,7 @@ def _fetch_segment(
         store.mark_checked(symbol, start, end, source=source.name)
         return store.get(symbol), errors, True
 
-    for factory in _factories().get(market, []):
+    for factory in _request_factories(priority=priority, allow_online=True).get(market, []):
         try:
             source = factory()
             with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
@@ -261,13 +264,24 @@ def _session_refresh_due(
 
 def _factories() -> dict[Market, list]:
     from quantmaster.data.akshare_source import AkshareSource
-    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.free_stockdb_source import (
+        FreeStockDBOnlineSource,
+        FreeStockDBSource,
+    )
     from quantmaster.data.tushare_source import TushareSource
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    ak, free, yf, tu = AkshareSource, FreeStockDBSource, YFinanceSource, TushareSource
+    ak, free, online, yf, tu = (
+        AkshareSource, FreeStockDBSource, FreeStockDBOnlineSource,
+        YFinanceSource, TushareSource,
+    )
+    local_first = (
+        [free, online, ak, tu]
+        if get_config().data.free_stockdb_online_enabled
+        else [free, ak, tu]
+    )
     orders = {
-        "free-stockdb": [free, ak, tu],
+        "free-stockdb": local_first,
         "akshare": [ak, tu, free],
         "tushare": [tu, ak, free],
     }
@@ -281,6 +295,18 @@ def _factories() -> dict[Market, list]:
         Market.KR: [yf],
         Market.FUTURES: [ak, yf],
         Market.INDEX: [tu, ak, yf],
+    }
+
+
+def _request_factories(
+    *, priority: str, allow_online: bool,
+) -> dict[Market, list]:
+    factories = _factories()
+    if allow_online and priority == "interactive":
+        return factories
+    return {
+        market: [factory for factory in ordered if factory.name != "free-stockdb-online"]
+        for market, ordered in factories.items()
     }
 
 
@@ -331,13 +357,16 @@ def get_source(
     )
 
 
-def load_spot(symbols: list[str]) -> pd.DataFrame:
+def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
     """加载 A 股快照；按设置主源优先，并用后续来源补齐缺失标的。"""
     requested = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     by_code = {symbol.partition(".")[0].zfill(6): symbol for symbol in requested}
     rows: dict[str, dict] = {}
     errors: list[str] = []
-    for factory in _factories().get(Market.CN, []):
+    allow_online = priority == "interactive" and len(requested) <= 20
+    for factory in _request_factories(
+        priority=priority, allow_online=allow_online,
+    ).get(Market.CN, []):
         missing = [symbol for code, symbol in by_code.items() if code not in rows]
         if not missing:
             break
@@ -504,7 +533,7 @@ def load_intraday(
 
     market = guess_market(symbol)
     errors = []
-    for factory in _factories().get(market, []):
+    for factory in _request_factories(priority=priority, allow_online=True).get(market, []):
         try:
             source = factory()
             if not source.supports_capability(DataCapability.INTRADAY):
@@ -573,6 +602,48 @@ def load_bar_panel(
     failures: list[tuple[str, str]] = []
     total = len(symbols)
 
+    def notify_progress(completed: int, symbol: str, success: bool) -> None:
+        if progress is None:
+            return
+        try:
+            progress(completed, total, symbol, success)
+        except Exception as exc:
+            logger.warning("行情进度回调失败（不影响数据加载）: %s", exc)
+
+    # A fresh local database can satisfy an uncached A-share universe in one SDK
+    # round trip. Existing/partial caches still use the normal per-symbol merge
+    # path so adjustment alignment and coverage checks remain authoritative.
+    if frequency == "1d" and daily_store is not None and symbols:
+        batch_symbols = [
+            symbol for symbol in symbols
+            if guess_market(symbol) == Market.CN
+            and ((cached := daily_store.get(symbol)) is None or cached.empty)
+        ]
+        if batch_symbols:
+            try:
+                from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+                source = FreeStockDBSource()
+                if source.native_batch_available():
+                    with data_priority(priority):
+                        batch = source.daily_many(batch_symbols, start, end)
+                    for symbol in batch_symbols:
+                        frame = batch.get(symbol)
+                        if frame is None or frame.empty or not _is_complete_refresh(
+                            frame, None, start, end,
+                        ):
+                            continue
+                        with daily_store.lock(symbol):
+                            daily_store.put(symbol, frame, replace=True)
+                            daily_store.mark_checked(
+                                symbol, start, end, source=source.name,
+                                replace_coverage=True,
+                            )
+                        frames[symbol] = frame.loc[start:end]
+                        notify_progress(len(frames), symbol, True)
+            except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError):
+                logger.debug("free-stockdb 批量预取失败，回退逐标的加载", exc_info=True)
+
     def one(symbol: str) -> pd.DataFrame:
         if frequency == "1d":
             assert daily_store is not None
@@ -586,10 +657,11 @@ def load_bar_panel(
             store=intraday_store, priority=priority,
         )
 
-    workers = min(max(1, int(max_workers)), 8, max(1, total))
+    pending = [symbol for symbol in symbols if symbol not in frames]
+    workers = min(max(1, int(max_workers)), 8, max(1, len(pending)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-panel") as executor:
-        futures = {executor.submit(one, symbol): symbol for symbol in symbols}
-        for completed, future in enumerate(as_completed(futures), start=1):
+        futures = {executor.submit(one, symbol): symbol for symbol in pending}
+        for completed, future in enumerate(as_completed(futures), start=len(frames) + 1):
             symbol = futures[future]
             success = False
             try:
@@ -599,11 +671,7 @@ def load_bar_panel(
                     success = True
             except Exception as exc:
                 failures.append((symbol, str(exc)))
-            if progress:
-                try:
-                    progress(completed, total, symbol, success)
-                except Exception as exc:
-                    logger.warning("行情进度回调失败（不影响数据加载）: %s", exc)
+            notify_progress(completed, symbol, success)
     if failures:
         samples = "；".join(f"{symbol}: {error}" for symbol, error in failures[:5])
         logger.warning(

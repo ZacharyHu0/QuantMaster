@@ -107,6 +107,25 @@ class TestLLMClient:
         assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
         assert captured["payload"]["reasoning_effort"] == "high"
 
+    def test_per_request_model_override(self, monkeypatch):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs["json"])
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "{}"}}]},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
+        client = LLMClient(LLMConfig(provider="openai", api_key="sk", model="large"))
+        assert client.chat_json("extract", model="small", reasoning_effort="minimal") == {}
+        assert captured["model"] == "small"
+        assert captured["reasoning_effort"] == "minimal"
+
     def test_error_status_raises(self, monkeypatch):
         def fake_post(url, **kwargs):
             return httpx.Response(429, text="rate limited", headers={"Retry-After": "75"},

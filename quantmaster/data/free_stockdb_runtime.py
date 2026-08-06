@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 import socket
 import subprocess
 import threading
@@ -14,18 +16,26 @@ from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from quantmaster.config import get_config
 
 logger = logging.getLogger(__name__)
+
+_VENDOR_HOME = "https://a.123128.xyz/"
+_VENDOR_NOTICE_TTL = 6 * 60 * 60
 
 
 class FreeStockDBRuntime:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._update_lock = threading.Lock()
+        self._vendor_lock = threading.Lock()
         self._stop = threading.Event()
         self._process: subprocess.Popen[bytes] | None = None
         self._updater_process: subprocess.Popen[bytes] | None = None
         self._thread: threading.Thread | None = None
+        self._update_thread: threading.Thread | None = None
         self._status: dict[str, Any] = {"state": "stopped", "message": "尚未启动"}
 
     @staticmethod
@@ -70,6 +80,7 @@ class FreeStockDBRuntime:
 
     def _start_service(self) -> bool:
         root, executable, _ = self._paths()
+        config_path = root / "stockdb.conf"
         endpoint = self._endpoint()
         if endpoint is None:
             self._set_status("disabled", "服务地址不是本机回环地址，不执行进程托管")
@@ -79,13 +90,15 @@ class FreeStockDBRuntime:
         if self._listening():
             self._set_status("running", "本地服务已运行", managed=bool(self._process))
             return True
-        if not executable.is_file() or not (root / "stockdb.conf").is_file() or not (root / "data").is_dir():
+        if not executable.is_file() or not config_path.is_file() or not (root / "data").is_dir():
             self._set_status("missing", f"等待完整发行包：{root}", managed=False)
             logger.warning("free-stockdb 未就绪，等待完整发行包：%s", root)
             return False
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._process = subprocess.Popen(
-            [str(executable)], cwd=root, stdin=subprocess.DEVNULL,
+            # 无参数模式会启动托盘程序并打开 free-stockdb 官网。显式传入
+            # 配置文件会进入可托管的前台服务器模式，不创建网页或托盘窗口。
+            [str(executable), str(config_path)], cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=creationflags,
         )
@@ -127,18 +140,24 @@ class FreeStockDBRuntime:
         self._process = None
         return not self._listening()
 
-    def _run_updater(self, updater: Path, root: Path) -> int:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    def _run_updater(self, updater: Path, root: Path, *, trigger: str) -> int:
+        # 当前发行包没有公开、可验证的静默参数。手动触发时保留原生窗口，
+        # 避免隐藏的模态完成框令 sidecar 永久等待。
         process = subprocess.Popen(
             [str(updater)], cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
         )
         with self._lock:
             self._updater_process = process
         deadline = time.monotonic() + 6 * 60 * 60
+        started = time.monotonic()
         try:
             while process.poll() is None:
+                self._set_status(
+                    "updating", "正在同步 free-stockdb 本地数据",
+                    phase="syncing", elapsed_seconds=int(time.monotonic() - started),
+                    trigger=trigger, update_result="running",
+                )
                 if self._stop.wait(0.5):
                     self._terminate_process(process, timeout=5)
                     return -1
@@ -154,6 +173,83 @@ class FreeStockDBRuntime:
     def _marker_path(self) -> Path:
         return self._root() / ".quantmaster-update.json"
 
+    @staticmethod
+    def _vendor_cache_path() -> Path:
+        root = Path(get_config().data.root).expanduser()
+        root = root.resolve() if root.is_absolute() else (Path.cwd() / root).resolve()
+        return root / "free_stockdb_vendor_notice.json"
+
+    @staticmethod
+    def _parse_vendor_notice(document: str) -> dict[str, str]:
+        data_match = re.search(r"数据更新至\s*[:：]\s*(\d{4}-\d{2}-\d{2})", document)
+        version_match = re.search(
+            r"最新版本\s*v?([^<（(,，]+)", document, flags=re.IGNORECASE,
+        )
+        announcement_match = re.search(
+            r"<span\b[^>]*>(.*?)</span>", document,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        version = html.unescape(version_match.group(1)).strip() if version_match else ""
+        version = re.sub(r"\s+", " ", version).rstrip("。；; ")
+        announcement = announcement_match.group(1) if announcement_match else ""
+        announcement = re.sub(r"<[^>]+>", " ", announcement)
+        announcement = re.sub(r"\s+", " ", html.unescape(announcement)).strip()
+        return {
+            "data_date": data_match.group(1) if data_match else "",
+            "version": version,
+            "announcement": announcement,
+        }
+
+    def _read_vendor_cache(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self._vendor_cache_path().read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def check_vendor_notice(self, *, force: bool = False) -> dict[str, Any]:
+        """Read the vendor announcement without ever opening the vendor website."""
+        cached = self._read_vendor_cache()
+        checked_at = str(cached.get("checked_at") or "")
+        if checked_at and not force:
+            try:
+                age = datetime.now(ZoneInfo("Asia/Shanghai")) - datetime.fromisoformat(checked_at)
+                if age.total_seconds() < _VENDOR_NOTICE_TTL:
+                    return cached
+            except ValueError:
+                pass
+        if not self._vendor_lock.acquire(blocking=False):
+            return cached or {"status": "checking", "url": _VENDOR_HOME}
+        try:
+            with httpx.Client(timeout=4.0, follow_redirects=True) as client:
+                response = client.get(_VENDOR_HOME)
+                response.raise_for_status()
+            details = self._parse_vendor_notice(response.text)
+            now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+            fingerprint = (
+                f"{details['data_date']}|{details['version']}|{details['announcement']}"
+            )
+            notice: dict[str, Any] = {
+                "status": "ok", "checked_at": now, "url": _VENDOR_HOME,
+                "data_date": details["data_date"], "version": details["version"],
+                "announcement": details["announcement"],
+                "fingerprint": fingerprint,
+            }
+            path = self._vendor_cache_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(notice, ensure_ascii=False), encoding="utf-8")
+            temp.replace(path)
+            return notice
+        except (httpx.HTTPError, OSError) as exc:
+            logger.info("free-stockdb 官方动态暂不可用：%s", exc)
+            return {
+                **cached, "status": "stale" if cached else "unavailable",
+                "url": _VENDOR_HOME, "error": type(exc).__name__,
+            }
+        finally:
+            self._vendor_lock.release()
+
     def _last_update_date(self) -> str:
         try:
             value = json.loads(self._marker_path().read_text(encoding="utf-8"))
@@ -162,29 +258,51 @@ class FreeStockDBRuntime:
             return ""
 
     def _record_update(self, code: int) -> None:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
         payload = {
-            "date": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+            "date": now.date().isoformat(),
+            "updated_at": now.isoformat(),
             "exit_code": code,
         }
         self._marker_path().write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    def update_now(self) -> bool:
+    def update_now(self, trigger: str = "manual") -> bool:
+        if not self._update_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._update_now_locked(trigger=trigger)
+        finally:
+            self._update_lock.release()
+
+    def _update_now_locked(self, *, trigger: str) -> bool:
         root, _, updater = self._paths()
+        if self._stop.is_set():
+            return False
         if not updater.is_file():
             self._set_status("missing", f"未找到更新器：{updater}")
             return False
         with self._lock:
             if self._status.get("state") == "updating":
                 return False
-            self._set_status("updating", "正在增量更新本地数据")
+            self._set_status(
+                "updating", "正在停止本地数据库", phase="stopping",
+                trigger=trigger, update_result="running",
+            )
         if self._process is None and self._listening():
             self._set_status("degraded", "7899 由外部进程占用，无法安全执行自动更新")
             logger.warning("free-stockdb 由外部进程运行，跳过自动更新以避免终止非托管进程")
             return False
-        self._stop_service()
+        if not self._stop_service():
+            self._set_status(
+                "degraded", "本地数据库未能安全停止，已取消数据更新",
+                phase="stopping", trigger=trigger, update_result="failed",
+            )
+            return False
+        if self._stop.is_set():
+            return False
         code = -1
         try:
-            code = self._run_updater(updater, root)
+            code = self._run_updater(updater, root, trigger=trigger)
             if code == 0:
                 self._record_update(code)
                 logger.info("free-stockdb 增量更新完成")
@@ -193,14 +311,52 @@ class FreeStockDBRuntime:
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.error("free-stockdb 自动更新失败：%s", exc)
         finally:
+            restored = False
             if not self._stop.is_set():
-                self._start_service()
+                self._set_status(
+                    "updating", "数据同步结束，正在恢复本地服务", phase="restarting",
+                    trigger=trigger, update_result="running",
+                )
+                restored = self._start_service()
             try:
                 from quantmaster.data.resilience import PROVIDER_HEALTH
                 PROVIDER_HEALTH.reset("free-stockdb")
             except (ImportError, RuntimeError):
                 logger.warning("free-stockdb 重启后重置数据源熔断失败", exc_info=True)
+            if restored:
+                self._set_status(
+                    "running",
+                    "更新完成，本地服务已恢复" if code == 0 else "更新失败，本地服务已恢复",
+                    phase="completed", update_result="success" if code == 0 else "failed",
+                    exit_code=code, trigger=trigger,
+                )
+            elif not self._stop.is_set():
+                self._set_status(
+                    "error", "更新结束，但本地服务恢复失败", phase="completed",
+                    update_result="failed", exit_code=code, trigger=trigger,
+                )
         return code == 0
+
+    def request_update(self, trigger: str = "manual") -> bool:
+        """Queue one non-blocking sidecar update; duplicate requests are coalesced."""
+        with self._lock:
+            if self._status.get("state") in {"queued", "updating"} or self._update_lock.locked():
+                return False
+            if self._stop.is_set():
+                return False
+            self._set_status(
+                "queued", "即将启动原生数据更新器", trigger=trigger,
+                phase="queued", update_result="queued",
+            )
+            worker = threading.Thread(
+                target=self.update_now,
+                args=(trigger,),
+                name="free-stockdb-update-sidecar",
+                daemon=True,
+            )
+            self._update_thread = worker
+        worker.start()
+        return True
 
     @staticmethod
     def _scheduled_at(now: datetime) -> datetime:
@@ -216,8 +372,15 @@ class FreeStockDBRuntime:
             scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
             if (cfg.free_stockdb_auto_update and scheduled_today
                     and self._last_update_date() != now.date().isoformat()):
-                if not self.update_now():
-                    self._stop.wait(300)
+                if self._listening():
+                    self._set_status(
+                        "running",
+                        "今日数据需要更新；当前更新器仅支持原生窗口，请在设置页手动触发",
+                        managed=bool(self._process), phase="native_required",
+                        update_result="native_required", trigger="schedule",
+                    )
+                target = self._scheduled_at(now)
+                self._stop.wait(max(1.0, min(300.0, (target - now).total_seconds())))
                 continue
             target = self._scheduled_at(now)
             wait = max(1.0, min(300.0, (target - now).total_seconds()))
@@ -246,6 +409,10 @@ class FreeStockDBRuntime:
         if thread and thread is not threading.current_thread():
             thread.join(timeout=2)
         self._thread = None
+        update_thread = self._update_thread
+        if update_thread and update_thread is not threading.current_thread():
+            update_thread.join(timeout=7)
+        self._update_thread = None
         self._stop_service()
         self._set_status("stopped", "QuantMaster 已停止托管服务")
 
@@ -255,7 +422,33 @@ class FreeStockDBRuntime:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return dict(self._status)
+            status = dict(self._status)
+        root, _, updater = self._paths()
+        try:
+            marker = json.loads(self._marker_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            marker = {}
+        try:
+            timezone = ZoneInfo(get_config().automation.timezone)
+            next_update = self._scheduled_at(datetime.now(timezone)).isoformat()
+        except (ValueError, TypeError):
+            next_update = ""
+        from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
+
+        sdk_path = resolve_free_stockdb_sdk_path()
+        status.update({
+            "managed": bool(self._process),
+            "service_url": get_config().data.free_stockdb_url,
+            "sdk_engine": "stock_sdk" if sdk_path and sdk_path.is_file() else "http-compatible",
+            "sdk_path": str(sdk_path or ""),
+            "update_capability": "native_only" if updater.is_file() else "unavailable",
+            "updater_path": str(updater),
+            "root": str(root),
+            "last_update_at": str(marker.get("updated_at") or marker.get("date") or ""),
+            "next_update_at": next_update,
+            "vendor_notice": self._read_vendor_cache(),
+        })
+        return status
 
 
 free_stockdb_runtime = FreeStockDBRuntime()

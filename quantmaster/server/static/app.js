@@ -728,6 +728,12 @@ async function streamJson(path, opts, onProgress) {
   const panel = document.getElementById('release-popover');
   const list = document.getElementById('release-list');
   const dateElement = document.getElementById('release-date');
+  const vendorPanel = document.getElementById('free-stockdb-release');
+  const vendorSummary = document.getElementById('free-stockdb-release-summary');
+  const vendorState = document.getElementById('free-stockdb-release-state');
+  const vendorLink = document.getElementById('free-stockdb-release-link');
+  const vendorUnread = document.getElementById('free-stockdb-release-unread');
+  let vendorFingerprint = '';
 
   function renderSummary(data) {
     if (!data?.version) return;
@@ -755,9 +761,32 @@ async function streamJson(path, opts, onProgress) {
       </section>`).join('') || '<div class="msg">暂无更新日志。</div>';
   }
 
+  function renderVendorNotice(notice) {
+    if (!notice || (!notice.data_date && !notice.version)) return;
+    vendorFingerprint = String(notice.fingerprint || `${notice.data_date || ''}|${notice.version || ''}|${notice.announcement || ''}`);
+    const details = [];
+    if (notice.announcement) details.push(notice.announcement);
+    if (notice.data_date) details.push(`数据更新至 ${notice.data_date}`);
+    if (notice.version) details.push(`最新版本 ${notice.version}`);
+    vendorSummary.textContent = details.join(' · ');
+    vendorState.textContent = notice.status === 'stale' ? '最近一次官方动态' : '官方动态';
+    vendorLink.href = String(notice.url || '').startsWith('https://a.123128.xyz/')
+      ? notice.url : 'https://a.123128.xyz/';
+    vendorPanel.hidden = false;
+    try {
+      vendorUnread.hidden = localStorage.getItem('qm-free-stockdb-release-seen') === vendorFingerprint;
+    } catch (_) {
+      vendorUnread.hidden = false;
+    }
+  }
+
   function setOpen(open) {
     panel.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
+    if (open && vendorFingerprint) {
+      try { localStorage.setItem('qm-free-stockdb-release-seen', vendorFingerprint); } catch (_) {}
+      vendorUnread.hidden = true;
+    }
   }
 
   trigger.addEventListener('click', event => {
@@ -785,6 +814,7 @@ async function streamJson(path, opts, onProgress) {
   }).catch(() => {
     list.innerHTML = '<div class="msg">更新日志暂不可用，版本信息仍可正常查看。</div>';
   });
+  api('/api/v1/settings/free-stockdb/vendor-notice').then(renderVendorNotice).catch(() => {});
 })();
 
 /* ---------- 导航 ---------- */

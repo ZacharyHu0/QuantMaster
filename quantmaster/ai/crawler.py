@@ -1084,6 +1084,7 @@ class AICrawler:
                     prompt, system=EXTRACT_SYSTEM,
                     timeout=cfg.annotation_timeout,
                     reasoning_effort=cfg.annotation_reasoning_effort,
+                    model=cfg.annotation_model or None,
                 )
             except Exception:
                 continue
@@ -1247,6 +1248,7 @@ class AICrawler:
                         self._annotation_prompt(items), system=EXTRACT_SYSTEM,
                         timeout=cfg.annotation_timeout,
                         reasoning_effort=cfg.annotation_reasoning_effort,
+                        model=cfg.annotation_model or None,
                     )
                     if not isinstance(parsed, list) or len(parsed) != len(items):
                         raise ValueError("LLM 标注结果数量与输入不一致")

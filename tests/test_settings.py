@@ -67,6 +67,8 @@ def test_reasoning_effort_is_saved_and_validated_per_provider(tmp_path):
     assert manager.public()["llm"]["max_concurrency"] == 3
 
     raw = _update(manager).model_dump()
+    raw["news"]["annotation_reasoning_effort"] = "none"
+    assert SettingsUpdate.model_validate(raw).news.annotation_reasoning_effort == "none"
     raw["llm"]["reasoning_effort"] = "none"
     with pytest.raises(ValueError, match="Anthropic"):
         SettingsUpdate.model_validate(raw)
@@ -189,6 +191,7 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
     update.news.annotation_batch_size = 7
     update.news.annotation_items_per_run = 35
     update.news.annotation_timeout = 150
+    update.news.annotation_model = "lightweight-model"
     update.news.annotation_reasoning_effort = "medium"
     update.lab.enabled = False
     update.lab.horizons = [3, 7]
@@ -197,7 +200,7 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
     assert result["restart_required"] == []
     assert {
         "news.annotation_batch_size", "news.annotation_items_per_run",
-        "news.annotation_timeout",
+        "news.annotation_timeout", "news.annotation_model",
         "lab.enabled", "lab.horizons",
     }.issubset(result["changed_fields"])
     assert manager.public()["config_revision"] == result["config_revision"]
@@ -248,6 +251,44 @@ def test_settings_api_requires_local_csrf_and_never_returns_secret(monkeypatch, 
     assert "never-echo-this" not in rejected.text
     remote = TestClient(app, client=("203.0.113.8", 50000))
     assert remote.get("/api/v1/settings").status_code == 403
+
+
+def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypatch):
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    local = TestClient(app)
+    status = {
+        "state": "queued", "phase": "queued", "message": "queued",
+        "update_capability": "native_only",
+    }
+    monkeypatch.setattr(free_stockdb_runtime, "status", lambda: dict(status))
+    monkeypatch.setattr(
+        free_stockdb_runtime,
+        "check_vendor_notice",
+        lambda: {"status": "ok", "data_date": "2026-08-06", "version": "3.0.0"},
+    )
+    accepted = iter((True, False))
+    monkeypatch.setattr(
+        free_stockdb_runtime, "request_update", lambda _trigger: next(accepted),
+    )
+
+    assert local.get("/api/v1/settings/free-stockdb").status_code == 200
+    vendor_notice = local.get("/api/v1/settings/free-stockdb/vendor-notice")
+    assert vendor_notice.status_code == 200
+    assert vendor_notice.json()["data_date"] == "2026-08-06"
+    assert local.post("/api/v1/settings/free-stockdb/update").status_code == 403
+    settings = local.get("/api/v1/settings").json()
+    headers = {"X-CSRF-Token": settings["csrf_token"]}
+    queued = local.post("/api/v1/settings/free-stockdb/update", headers=headers)
+    duplicate = local.post("/api/v1/settings/free-stockdb/update", headers=headers)
+
+    assert queued.status_code == 202
+    assert queued.json()["accepted"] is True
+    assert duplicate.status_code == 200
+    assert duplicate.json()["accepted"] is False
+    remote = TestClient(app, client=("203.0.113.8", 50000))
+    assert remote.get("/api/v1/settings/free-stockdb").status_code == 403
+    assert remote.get("/api/v1/settings/free-stockdb/vendor-notice").status_code == 403
 
 
 def test_settings_web_search_probe_route_requires_csrf_and_uses_safe_check(monkeypatch):

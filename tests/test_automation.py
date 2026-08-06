@@ -756,6 +756,7 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
         raise RuntimeError("eastmoney circuit open")
 
     monkeypatch.setattr("quantmaster.data.akshare_source.AkshareSource.spot", unavailable)
+    monkeypatch.setattr("quantmaster.data.load_spot", unavailable)
     result = service._task_intraday_monitor()
 
     assert result["status"] == "degraded"

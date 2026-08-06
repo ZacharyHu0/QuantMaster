@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 import quantmaster.data.free_stockdb_source as free_stockdb
-from quantmaster.data.free_stockdb_source import FreeStockDBSource
+from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource, FreeStockDBSource
 
 
 class _FakeReader:
@@ -82,3 +82,96 @@ def test_free_stockdb_board_data_feeds_industry_and_concepts(monkeypatch) -> Non
         "aliases": [],
         "source": "free-stockdb:concept",
     }]
+
+
+def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        free_stockdb,
+        "provider_call",
+        lambda lane, _key, function, **_kwargs: calls.append(lane) or function(),
+    )
+    source = FreeStockDBOnlineSource()
+    source._sdk_checked = True
+    source._client = _FakeClient()
+
+    result = source.daily("600519.SH", "2026-08-05", "2026-08-05")
+
+    assert not result.empty
+    assert calls == ["free-stockdb-online"]
+
+
+def test_cn_source_order_uses_online_only_after_local(monkeypatch) -> None:
+    from quantmaster.config import get_config
+    from quantmaster.data.base import Market
+    from quantmaster.data.registry import _factories
+
+    monkeypatch.setattr(get_config().data, "free_stockdb_online_enabled", True)
+    names = [source.name for source in _factories()[Market.CN]]
+
+    assert names[:4] == [
+        "free-stockdb", "free-stockdb-online", "akshare", "tushare",
+    ]
+
+
+def test_sdk_path_auto_discovers_managed_pybao_and_explicit_path_wins(
+    tmp_path, monkeypatch,
+) -> None:
+    from quantmaster.config import get_config
+
+    managed = tmp_path / "managed"
+    managed_sdk = managed / "pybao" / "stock_sdk.py"
+    managed_sdk.parent.mkdir(parents=True)
+    managed_sdk.write_text("# managed", encoding="utf-8")
+    explicit = tmp_path / "custom" / "stock_sdk.py"
+    explicit.parent.mkdir()
+    explicit.write_text("# explicit", encoding="utf-8")
+    monkeypatch.setattr(get_config().data, "free_stockdb_root", str(managed))
+    monkeypatch.setattr(get_config().data, "free_stockdb_sdk_path", "")
+
+    assert free_stockdb.resolve_free_stockdb_sdk_path() == managed_sdk
+    assert free_stockdb.resolve_free_stockdb_sdk_path(str(explicit)) == explicit
+
+
+def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+
+    def batch(**kwargs):
+        client.calls.append(kwargs)
+        return {
+            code: [{
+                "date": "20260805", "open": 10, "high": 11, "low": 9,
+                "close": 10.5, "volume": 100,
+            }]
+            for code in kwargs["code"]
+            if code != "000858"
+        }
+
+    client.get_data = batch
+    result = source.daily_many(
+        ["600519.SH", "000858.SZ"], "2026-08-05", "2026-08-05",
+    )
+
+    assert list(result) == ["600519.SH"]
+    assert client.calls[0]["code"] == ["600519", "000858"]
+
+
+def test_online_source_is_filtered_outside_interactive_requests(monkeypatch) -> None:
+    from quantmaster.config import get_config
+    from quantmaster.data.base import Market
+    from quantmaster.data.registry import _request_factories
+
+    monkeypatch.setattr(get_config().data, "free_stockdb_online_enabled", True)
+    normal = [source.name for source in _request_factories(
+        priority="normal", allow_online=True,
+    )[Market.CN]]
+    interactive = [source.name for source in _request_factories(
+        priority="interactive", allow_online=True,
+    )[Market.CN]]
+    full = [source.name for source in _request_factories(
+        priority="interactive", allow_online=False,
+    )[Market.CN]]
+
+    assert "free-stockdb-online" not in normal
+    assert "free-stockdb-online" in interactive
+    assert "free-stockdb-online" not in full

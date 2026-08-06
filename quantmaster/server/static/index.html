@@ -57,15 +57,15 @@
   <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
     <span id="release-version">版本</span>
     <time class="release-date" id="release-date" hidden><span class="release-year"></span><span class="release-day"></span></time>
+    <span class="release-unread" id="free-stockdb-release-unread" aria-label="free-stockdb 有新动态" hidden></span>
   </button>
   <div class="header-actions">
-    <button class="header-help" data-tab="help" type="button" aria-label="帮助" title="量化研究与交易手册">
+    <button class="header-help" data-tab="help" type="button" aria-label="手册" title="打开量化研究与交易手册">
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/>
-        <path d="M9.7 9a2.45 2.45 0 0 1 4.75.78c0 1.85-2.45 2.05-2.45 3.72" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-        <circle cx="12" cy="17" r="1" fill="currentColor"/>
+        <path d="M4 5.25A2.25 2.25 0 0 1 6.25 3H11a2 2 0 0 1 2 2v15a2.75 2.75 0 0 0-2.75-2.75H4V5.25Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+        <path d="M20 5.25A2.25 2.25 0 0 0 17.75 3H13v17a2.75 2.75 0 0 1 2.75-2.75H20V5.25Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
       </svg>
-      <span>帮助</span>
+      <span>手册</span>
     </button>
     <button class="header-settings" data-tab="settings" type="button" aria-label="设置" title="设置">
       <svg class="settings-gear" viewBox="0 0 24 24" aria-hidden="true">
@@ -92,6 +92,11 @@
       <h2 id="release-popover-title">更新日志</h2>
       <span>QuantMaster</span>
     </div>
+    <section class="vendor-release" id="free-stockdb-release" hidden>
+      <div class="vendor-release-heading"><strong>free-stockdb</strong><span id="free-stockdb-release-state">官方动态</span></div>
+      <p id="free-stockdb-release-summary"></p>
+      <a id="free-stockdb-release-link" href="https://a.123128.xyz/" target="_blank" rel="noopener noreferrer">查看官网详情</a>
+    </section>
     <div id="release-list"><div class="msg">正在读取更新日志…</div></div>
   </aside>
 </header>
@@ -990,7 +995,7 @@
             <label>模型 ID<input name="llm.model" list="settings-model-list" autocomplete="off" required><datalist id="settings-model-list"></datalist><small id="model-hint">可手动输入任意模型 ID</small></label>
             <label class="field-wide">API 根地址<input name="llm.base_url" type="url" placeholder="官方服务可留空；兼容网关如 http://127.0.0.1:11434/v1"></label>
             <label class="field-wide secret-field">API Key<div><input id="llm-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="llm">清除</button></div><small id="llm-secret-state"></small></label>
-            <label>推理强度<select name="llm.reasoning_effort" required><option value="none">无</option><option value="minimal">极低</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select><small id="reasoning-effort-hint">支持范围取决于模型和网关</small></label>
+            <label>推理强度<select name="llm.reasoning_effort" required><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><small id="reasoning-effort-hint">支持范围取决于模型和网关</small></label>
             <label>最大输出 Token<input name="llm.max_tokens" type="number" min="1" max="1000000" required></label>
             <label>Temperature<input name="llm.temperature" type="number" min="0" max="2" step="0.1" required></label>
             <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
@@ -1009,9 +1014,14 @@
             <label>free-stockdb 超时（秒）<input name="data.free_stockdb_timeout" type="number" min="0.5" max="30" step="0.5" required><small>仅用于本机 HTTP 兼容接口。</small></label>
             <label class="field-wide">free-stockdb 本地目录<input name="data.free_stockdb_root" required placeholder="runtime/free-stockdb"><small>完整发行包目录，需包含 stockdb.exe、数据更新.exe、stockdb.conf 和 data。</small></label>
             <label class="toggle-field"><span><strong>托管本地服务</strong><small>随 QuantMaster 自动启停 stockdb。</small></span><input name="data.free_stockdb_managed" type="checkbox" role="switch"></label>
-            <label class="toggle-field"><span><strong>自动增量更新</strong><small>更新时请求自动切换后备源。</small></span><input name="data.free_stockdb_auto_update" type="checkbox" role="switch"></label>
-            <label>每日更新时间<input name="data.free_stockdb_update_time" type="time" required><small>默认盘后 18:30；错过时会在下次启动补跑。</small></label>
-            <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="例如 D:\free-stockdb\pybao"><small>指向用户自行安装的 pybao 或 stock_sdk.py；QuantMaster 不捆绑程序、数据和同步源。</small></label>
+            <label class="toggle-field"><span><strong>更新提醒</strong><small>到达更新时间后在 QuantMaster 内提示；当前更新器需手动确认原生窗口。</small></span><input name="data.free_stockdb_auto_update" type="checkbox" role="switch"></label>
+            <label>每日更新时间<input name="data.free_stockdb_update_time" type="time" required><small>默认盘后 18:30；当天未更新时显示提醒。</small></label>
+            <label class="toggle-field"><span><strong>启用在线补缺</strong><small>仅在本地缺数时低并发访问 free-stockdb-online。</small></span><input name="data.free_stockdb_online_enabled" type="checkbox" role="switch"></label>
+            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required><small>公开体验节点，不用于全市场高频批量任务。</small></label>
+            <label>在线补缺超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
+            <div class="field-wide check-result" id="free-stockdb-sidecar-status">free-stockdb sidecar 状态尚未读取</div>
+            <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">启动原生更新器</button></div>
+            <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="留空则自动使用本地目录下的 pybao"><small>显式路径优先；留空时自动发现 &lt;本地目录&gt;/pybao/stock_sdk.py。</small></label>
             <label class="field-wide">free-stockdb 服务地址<input name="data.free_stockdb_url" type="url" required placeholder="http://127.0.0.1:7899"><small>SDK 使用其中的主机和端口；也可改为自己的兼容服务。</small></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button><button type="button" class="ghost check-button" data-check="tushare">检测</button></div><small id="tushare-secret-state"></small></label>
             <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
@@ -1078,7 +1088,8 @@
             <label>单批标注条数<input name="news.annotation_batch_size" type="number" min="1" max="50" step="1" required><small>每次 LLM 请求包含的资讯数量。</small></label>
             <label>每轮处理上限<input name="news.annotation_items_per_run" type="number" min="1" max="1000" step="1" required><small>限制一次后台运行消费的待标注数量。</small></label>
             <label>资讯分析超时（秒）<input name="news.annotation_timeout" type="number" min="5" max="600" step="1" required><small>仅用于资讯标注；重型模型建议 120–180 秒。</small></label>
-            <label>资讯推理强度<select name="news.annotation_reasoning_effort" required><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select><small>与通用模型设置分离，默认“中”以减少结构化标注超时。</small></label>
+            <label>资讯模型 ID<input name="news.annotation_model" list="settings-model-list" autocomplete="off" placeholder="留空则使用通用模型"><small>可选择较轻量模型；留空时跟随模型服务设置。</small></label>
+            <label>资讯推理强度<select name="news.annotation_reasoning_effort" required><option value="none">none</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select><small id="news-reasoning-effort-hint">与通用设置分离，默认 low。</small></label>
           </div>
         </section>
 

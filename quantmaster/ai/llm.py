@@ -301,10 +301,10 @@ class LLMClient:
 
     def _request_anthropic(
         self, messages: list[dict], system: str | None, read_timeout: float,
-        reasoning_effort: str,
+        reasoning_effort: str, model: str,
     ) -> str:
         payload = {
-            "model": self.config.model,
+            "model": model,
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "output_config": {"effort": reasoning_effort},
@@ -342,7 +342,7 @@ class LLMClient:
 
     def _request_openai(
         self, messages: list[dict], system: str | None, read_timeout: float,
-        reasoning_effort: str,
+        reasoning_effort: str, model: str,
     ) -> str:
         if system:
             messages = [{"role": "system", "content": system}, *messages]
@@ -356,7 +356,7 @@ class LLMClient:
                 url,
                 headers=headers,
                 json={
-                    "model": self.config.model,
+                    "model": model,
                     "max_tokens": self.config.max_tokens,
                     "temperature": self.config.temperature,
                     "reasoning_effort": reasoning_effort,
@@ -608,25 +608,31 @@ class LLMClient:
         *,
         timeout: float | None = None,
         reasoning_effort: str | None = None,
+        model: str | None = None,
     ) -> str:
         """单轮/多轮对话，返回纯文本回复。"""
         messages = list(history or [])
         messages.append({"role": "user", "content": prompt})
         read_timeout = max(1.0, float(timeout or self.config.timeout))
         effort = str(reasoning_effort or self.config.reasoning_effort)
+        selected_model = str(model or self.config.model).strip()
         if self.config.provider == "anthropic":
-            return self._request_anthropic(messages, system, read_timeout, effort)
-        return self._request_openai(messages, system, read_timeout, effort)
+            return self._request_anthropic(
+                messages, system, read_timeout, effort, selected_model,
+            )
+        return self._request_openai(
+            messages, system, read_timeout, effort, selected_model,
+        )
 
     def chat_json(
         self, prompt: str, system: str | None = None, *, timeout: float | None = None,
-        reasoning_effort: str | None = None,
+        reasoning_effort: str | None = None, model: str | None = None,
     ) -> dict | list:
         """要求模型输出 JSON 并解析（自动剥离 markdown 代码块围栏）。"""
         hint = "\n\n只输出合法的 JSON，不要输出任何其他文字、解释或 markdown 围栏。"
         text = self.chat(
             prompt + hint, system=system, timeout=timeout,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, model=model,
         )
         return parse_json_reply(text)
 
