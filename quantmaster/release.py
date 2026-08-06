@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.17.2"
+VERSION = "0.17.3"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "技术债门禁收紧",
+                "items": (
+                    (
+                        "复杂度存量从 94 降至 93，宽异常实际存量从 204 校准至 200；"
+                        "两个门禁现在都会阻止基线在代码改善后继续虚高。"
+                    ),
+                    (
+                        "个股研究任务的静态进度分支改为数据映射，保持事件文案与"
+                        "进度百分比不变。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.17.2",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "个股研究证据边界",
@@ -174,21 +193,6 @@ RELEASES = (
                     (
                         "限制 GitHub Actions 默认权限，集中加固文件路径边界，并阻止内部异常"
                         "文本进入资讯、诊断、决策和板块 API。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.2",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "数据源边界收敛",
-                "items": (
-                    (
-                        "将 free-stockdb 行业降级与诊断探针拆为独立边界，保持 v0.14 功能不变，"
-                        "恢复复杂度质量基线。"
                     ),
                 ),
             },

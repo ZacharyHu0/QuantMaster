@@ -22,6 +22,14 @@ from quantmaster.runtime.jobs import (
 )
 
 STOCK_ANALYSIS_TASK_TYPE = "market.stock_analysis"
+_STATIC_EVENT_PROGRESS = {
+    "analysis_started": (3, "确认标的", "任务规格已锁定"),
+    "evidence_collection_started": (8, "联网取证", "六类证据并发采集"),
+    "final_review_started": (92, "交叉复核", "检查证据冲突、时点和空白"),
+    "deep_final_review_started": (95, "深度证伪终审", "核查未知项、催化剂和结论失效条件"),
+    "final_review_completed": (98, "终审完成", "正在保存可核查报告"),
+    "analysis_completed": (99, "保存报告", "完整报告已生成"),
+}
 
 
 class StockAnalysisJobs:
@@ -85,10 +93,9 @@ class StockAnalysisJobs:
     ) -> tuple[int, str, str]:
         dimension = str(payload.get("dimension") or "")
         label = DIMENSION_LABELS.get(dimension, ("", dimension or "证据"))[1]
-        if event_type == "analysis_started":
-            return 3, "确认标的", "任务规格已锁定"
-        if event_type == "evidence_collection_started":
-            return 8, "联网取证", "六类证据并发采集"
+        static_progress = _STATIC_EVENT_PROGRESS.get(event_type)
+        if static_progress:
+            return static_progress
         if event_type == "evidence_search_started":
             return max(current, 18), "联网搜索", f"第 {payload.get('round') or 1} 轮受限搜索"
         if event_type == "evidence_collection_completed":
@@ -102,14 +109,6 @@ class StockAnalysisJobs:
             completed = max(1, min(len(DIMENSION_ORDER), int(payload.get("completed") or 1)))
             state = "降级交付" if event_type.endswith("degraded") else "完成"
             return 28 + completed * 10, f"{label}{state}", f"六维已交付 {completed}/{len(DIMENSION_ORDER)}"
-        if event_type == "final_review_started":
-            return 92, "交叉复核", "检查证据冲突、时点和空白"
-        if event_type == "deep_final_review_started":
-            return 95, "深度证伪终审", "核查未知项、催化剂和结论失效条件"
-        if event_type == "final_review_completed":
-            return 98, "终审完成", "正在保存可核查报告"
-        if event_type == "analysis_completed":
-            return 99, "保存报告", "完整报告已生成"
         return current, "分析进行中", str(payload.get("message") or "")[:300]
 
     def _handle(self, context: JobContext, persisted_spec: dict[str, Any]) -> JobOutcome:

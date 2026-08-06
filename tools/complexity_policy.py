@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = 94
+BASELINE = 93
 
 
 def main() -> int:
@@ -32,6 +32,12 @@ def main() -> int:
     count = len(findings)
     if count > BASELINE:
         print(f"Ruff C901 inventory grew: {count} > audited baseline {BASELINE}", file=sys.stderr)
+        return 1
+    if count < BASELINE:
+        print(
+            f"Ruff C901 baseline is stale: {count} < {BASELINE}; lower BASELINE",
+            file=sys.stderr,
+        )
         return 1
     print(f"complexity policy ok: {count}/{BASELINE} historical C901 findings")
     return 0

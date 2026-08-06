@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "quantmaster"
 
-# Reductions are always accepted.  Any new file or any per-file increase fails CI and
-# requires replacing the broad catch with classified exceptions or an explicit boundary.
+# Any new file, increase or unrecorded reduction fails CI. Reductions must lower the
+# matching baseline in the same release so the ratchet cannot silently drift upward.
 BASELINE = {
     "quantmaster/ai/crawler.py": 3,
     "quantmaster/ai/news_sources.py": 2,
@@ -18,7 +18,7 @@ BASELINE = {
     "quantmaster/automation/commands.py": 2,
     "quantmaster/automation/runtime.py": 2,
     "quantmaster/automation/service.py": 7,
-    "quantmaster/backtest/paper_accounts.py": 2,
+    "quantmaster/backtest/paper_accounts.py": 1,
     "quantmaster/backtest/spec.py": 1,
     "quantmaster/backtest/validation.py": 1,
     "quantmaster/backtest/workbench.py": 2,
@@ -34,7 +34,7 @@ BASELINE = {
     "quantmaster/data/registry.py": 6,
     "quantmaster/data/repair.py": 1,
     "quantmaster/data/research.py": 1,
-    "quantmaster/data/resilience.py": 3,
+    "quantmaster/data/resilience.py": 2,
     "quantmaster/data/storage.py": 1,
     "quantmaster/data/tushare_source.py": 2,
     "quantmaster/decision/hybrid.py": 3,
@@ -54,12 +54,12 @@ BASELINE = {
     "quantmaster/research/jobs.py": 3,
     "quantmaster/research/kernel.py": 3,
     "quantmaster/research/lake.py": 2,
-    "quantmaster/rotation/provider.py": 3,
+    "quantmaster/rotation/provider.py": 2,
     "quantmaster/rotation/service.py": 2,
     "quantmaster/runtime/maintenance.py": 2,
     "quantmaster/runtime/process.py": 2,
     "quantmaster/runtime/sqlite.py": 2,
-    "quantmaster/server/app.py": 19,
+    "quantmaster/server/app.py": 18,
     "quantmaster/server/automation.py": 11,
     "quantmaster/server/diagnostics.py": 1,
     "quantmaster/server/lab.py": 14,
@@ -114,6 +114,10 @@ def analyze() -> list[str]:
         if len(handlers) > allowed:
             violations.append(
                 f"{relative}: broad catches {len(handlers)} exceed audited baseline {allowed}"
+            )
+        elif len(handlers) < allowed:
+            violations.append(
+                f"{relative}: broad catch baseline is stale ({len(handlers)} < {allowed})"
             )
         if relative.startswith(STRICT_PREFIXES):
             for handler in handlers:
