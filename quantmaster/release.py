@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.53"
+VERSION = "0.13.54"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "静态资产测试契约修正",
+                "items": (
+                    (
+                        "仪表盘与交易工作台测试改为从同源 app.js 验证脚本契约，"
+                        "不再假定主脚本内联于 HTML。"
+                    ),
+                    (
+                        "保持页面结构与脚本行为分别验收，避免静态资产拆分后的错误"
+                        "测试阻断有效发布。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.53",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "前端资产边界与 CSP 收紧",

@@ -125,43 +125,45 @@ class TestBasics:
 
     def test_index_serves_html(self):
         resp = client.get("/")
+        app_script = client.get("/static/app.js").text
+        app_styles = client.get("/static/app.css").text
         assert resp.status_code == 200
         assert "QuantMaster" in resp.text
         assert 'data-tab="decision"' in resp.text
         assert 'id="kline-frequency"' in resp.text
         assert 'class="panel market-detail-panel" id="kline-panel"' in resp.text
         assert 'id="major-indexes" data-market-group="A股指数"' in resp.text
-        assert "{'A股指数':majorIndexes}" in resp.text
-        assert "主要指数区块已保留" in resp.text
-        assert "function marketChangeSeries" in resp.text
-        assert "function marketSparkParsedDate" in resp.text
-        assert "function marketSparkMonth" in resp.text
-        assert "function marketSparkOption" in resp.text
-        assert "type:'category',data:categories,show:true" in resp.text
-        assert "id:'market-spark-latest'" in resp.text
-        assert "区间涨跌" in resp.text
-        assert "当日涨跌" in resp.text
-        assert "PERSONAL_MARKET_GROUP = '我的股票'" in resp.text
+        assert "{'A股指数':majorIndexes}" in app_script
+        assert "主要指数区块已保留" in app_script
+        assert "function marketChangeSeries" in app_script
+        assert "function marketSparkParsedDate" in app_script
+        assert "function marketSparkMonth" in app_script
+        assert "function marketSparkOption" in app_script
+        assert "type:'category',data:categories,show:true" in app_script
+        assert "id:'market-spark-latest'" in app_script
+        assert "区间涨跌" in app_script
+        assert "当日涨跌" in app_script
+        assert "PERSONAL_MARKET_GROUP = '我的股票'" in app_script
         assert "market-section-title" in resp.text
-        assert "mkt-memberships" in resp.text
+        assert "mkt-memberships" in app_script
         assert "名称与代码 · 标注提及次数" in resp.text
-        assert "queueMarketReload" in resp.text
-        assert "data:[{yAxis:0}]" in resp.text
-        assert "type:'dashed'" in resp.text
-        assert "prefers-reduced-motion" in resp.text
-        assert "--scrollbar-track: #151514" in resp.text
-        assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in resp.text
-        assert "scrollbar-gutter:stable" in resp.text
-        assert 'class="backtest-trades-scroll"' in resp.text
-        assert "createLoadProgress" in resp.text
-        assert "createMarketStreamRenderer" in resp.text
-        assert "createDecisionStreamRenderer" in resp.text
-        assert "function loadKlineSeries" in resp.text
-        assert "function renderKlineSeries" in resp.text
-        assert "function openDecisionKline" in resp.text
-        assert "data-decision-kline-trigger" in resp.text
-        assert "data-decision-asset-toggle" in resp.text
-        assert "showKline(row.dataset.symbol" not in resp.text
+        assert "queueMarketReload" in app_script
+        assert "data:[{yAxis:0}]" in app_script
+        assert "type:'dashed'" in app_script
+        assert "prefers-reduced-motion" in app_styles
+        assert "--scrollbar-track: #151514" in app_styles
+        assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in app_styles
+        assert "scrollbar-gutter:stable" in app_styles
+        assert 'class="backtest-trades-scroll"' in app_script
+        assert "createLoadProgress" in app_script
+        assert "createMarketStreamRenderer" in app_script
+        assert "createDecisionStreamRenderer" in app_script
+        assert "function loadKlineSeries" in app_script
+        assert "function renderKlineSeries" in app_script
+        assert "function openDecisionKline" in app_script
+        assert "data-decision-kline-trigger" in app_script
+        assert "data-decision-asset-toggle" in app_script
+        assert "showKline(row.dataset.symbol" not in app_script
         assert 'src="/static/charts.js"' in resp.text
         assert 'href="/static/charts.css"' in resp.text
         assert 'href="/static/brand-intro.css"' in resp.text
@@ -169,15 +171,15 @@ class TestBasics:
         assert 'href="/static/brand/quantmaster-favicon.svg"' in resp.text
         assert 'src="/static/brand/quantmaster-mark-inverse.svg"' in resp.text
         assert 'id="brand-replay"' in resp.text
-        assert "window.QuantCharts.activateTab(tab)" in resp.text
-        assert "ACTIVE_TAB_STORAGE_KEY" in resp.text
-        assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in resp.text
-        assert "activateTab(restoredControl, {persist:false, load:false})" in resp.text
-        assert 'class="snapshot-table"' in resp.text
-        assert 'class="snapshot-period"' in resp.text
-        assert 'class="snapshot-pick"' in resp.text
-        assert "event.partial" in resp.text
-        assert "/api/v1/research/decision/dashboard/stream" in resp.text
+        assert "window.QuantCharts.activateTab(tab)" in app_script
+        assert "ACTIVE_TAB_STORAGE_KEY" in app_script
+        assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in app_script
+        assert "activateTab(restoredControl, {persist:false, load:false})" in app_script
+        assert 'class="snapshot-table"' in app_script
+        assert 'class="snapshot-period"' in app_script
+        assert 'class="snapshot-pick"' in app_script
+        assert "event.partial" in app_script
+        assert "/api/v1/research/decision/dashboard/stream" in app_script
         assert 'id="asset-workbench"' in resp.text
         assert 'id="tab-candidates"' in resp.text
         assert 'id="candidate-workspace"' in resp.text
@@ -192,26 +194,26 @@ class TestBasics:
         assert 'src="/static/help.js"' in resp.text
         assert f'data-trading-days="{TRADING_DAYS}"' in resp.text
         assert f'data-risk-free="{RISK_FREE}"' in resp.text
-        assert 'data-regime-window="10y"' in resp.text
-        assert "名称 / 代码 / 板块" in resp.text
+        assert 'data-regime-window="10y"' in app_script
+        assert "名称 / 代码 / 板块" in app_script
         assert 'id="runtime-info"' in resp.text
         assert 'id="data-refresh-preview"' in resp.text
         assert 'id="data-refresh-start-button"' in resp.text
         assert 'id="data-refresh-resume"' in resp.text
         assert 'id="runtime-drawer-frame"' in resp.text
-        assert "window.QuantMasterRunInfo" in resp.text
-        assert "window.QuantMasterProblemDialog" in resp.text
-        assert "window.QuantMasterNDJSON" in resp.text
-        assert "runtimeInfo.sync('health'" in resp.text
+        assert "window.QuantMasterRunInfo" in app_script
+        assert "window.QuantMasterProblemDialog" in app_script
+        assert "window.QuantMasterNDJSON" in app_script
+        assert "runtimeInfo.sync('health'" in app_script
         assert 'id="operation-problem-dialog"' in resp.text
-        assert 'class="quality-summary"' in resp.text
+        assert 'class="quality-summary"' in app_script
         assert 'data-runtime-filter="problem"' in resp.text
         assert 'data-runtime-filter="running"' in resp.text
-        assert '<summary>诊断信息</summary>' in resp.text
-        assert "runtimeInfo.begin(source, '正在加载数据'" in resp.text
-        assert "if (safeLevel === 'error') setExpanded(true)" not in resp.text
-        assert "window.QuantMasterAPI" in resp.text
-        assert "unhandledrejection" in resp.text
+        assert '<summary>诊断信息</summary>' in app_script
+        assert "runtimeInfo.begin(source, '正在加载数据'" in app_script
+        assert "if (safeLevel === 'error') setExpanded(true)" not in app_script
+        assert "window.QuantMasterAPI" in app_script
+        assert "unhandledrejection" in app_script
         assert 'id="release-trigger"' in resp.text
         assert 'id="release-popover"' in resp.text
         assert f'v{__version__}' not in resp.text  # 版本由 data 属性无闪烁注入，脚本负责呈现

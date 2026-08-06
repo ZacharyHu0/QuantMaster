@@ -733,8 +733,9 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
     assert "每日自动交易" in page
     assert "进入页面只读取历史快照，不会自动计算" in page
-    assert "void loadDecisionHistory()" in page
-    assert "document.getElementById('decision-form').requestSubmit()" not in page
+    app_script = client.get("/static/app.js").text
+    assert "void loadDecisionHistory()" in app_script
+    assert "document.getElementById('decision-form').requestSubmit()" not in app_script
 
     css = client.get("/static/trading.css").text
     checkbox_rule = css.split(
