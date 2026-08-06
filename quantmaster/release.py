@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.50"
+VERSION = "0.13.51"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Rust 原生内核安全升级",
+                "items": (
+                    (
+                        "PyO3 从 0.24.2 升级到 0.29.2，修复 RustSec 报告的迭代器"
+                        "越界读取与 Python 可调用闭包线程安全问题。"
+                    ),
+                    (
+                        "保留 cargo-audit 作为发布门禁且不添加漏洞豁免；原生内核仍由"
+                        "三平台一致性任务验证后进入桌面包。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.50",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "面向未来的可复现发布链",
