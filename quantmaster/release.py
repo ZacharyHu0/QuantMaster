@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 RELEASE_DATE = "2026-08-07"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "行情缓存旧文件名迁移",
+                "items": (
+                    (
+                        "自动识别安全规则升级前将等号替换为下划线的行情文件；仅在目录"
+                        "归属唯一且内容哈希匹配时原子迁移，避免误报文件缺失和无效联网重拉。"
+                    ),
+                    (
+                        "本地缓存经独立校验或重写恢复后，会关闭对应的旧修复告警并保留"
+                        "审计事件，不再让已恢复数据持续显示为失败。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.2.2",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -200,18 +219,6 @@ RELEASES = (
                         "项目仍定位为探索级量化研究工具，不承诺生产可用性，所有指标与"
                         "模型输出均不构成投资建议。"
                     ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.21.1",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "诊断契约同步",
-                "items": (
-                    "同步模拟盘 schema v2 的深度诊断断言，恢复完整 CI。",
                 ),
             },
         ),

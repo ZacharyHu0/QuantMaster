@@ -144,6 +144,11 @@ def _safe_name(symbol: str) -> str:
     return safe
 
 
+def _legacy_safe_name(symbol: str) -> str:
+    """Filename used before strict symbol validation preserved ``=`` and ``#``."""
+    return re.sub(r"[^0-9A-Za-z._^-]", "_", symbol)
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -237,6 +242,69 @@ class BarStore:
         """Resolve a repair target without exposing arbitrary path construction."""
         return self._path(symbol).resolve()
 
+    def _restore_legacy_path(
+        self, symbol: str, target: Path, metadata: dict,
+    ) -> bool:
+        """Atomically adopt a uniquely owned, hash-matched pre-hardening filename."""
+        legacy_name = _legacy_safe_name(symbol)
+        if legacy_name == _safe_name(symbol):
+            return False
+        legacy = confined_path(
+            self.root, f"{legacy_name}.parquet", label="旧版行情缓存",
+        )
+        with self.lock(symbol):
+            if target.is_file() or not legacy.is_file():
+                return False
+            expected_hash = str(metadata.get("content_sha256") or "")
+            actual_hash = _file_sha256(legacy)
+            if not expected_hash or actual_hash != expected_hash:
+                logger.warning(
+                    "Legacy bar migration rejected symbol=%s reason=hash mismatch",
+                    symbol,
+                )
+                return False
+            with self._conn() as connection:
+                rows = connection.execute(
+                    "SELECT symbol FROM bar_meta WHERE symbol<>?", (symbol,),
+                ).fetchall()
+            conflicts = [
+                str(row[0]) for row in rows
+                if _legacy_safe_name(str(row[0])) == legacy_name
+            ]
+            if conflicts:
+                logger.warning(
+                    "Legacy bar migration rejected symbol=%s conflicts=%s",
+                    symbol, ",".join(conflicts[:5]),
+                )
+                return False
+            os.replace(legacy, target)
+            _sync_directory(self.root)
+            logger.info(
+                "Legacy bar cache migrated symbol=%s from=%s to=%s",
+                symbol, legacy.name, target.name,
+            )
+            return True
+
+    def _resolve_integrity_repair(
+        self, symbol: str, content_hash: str, reason: str,
+    ) -> None:
+        if self.root.name != "bars":
+            return
+        try:
+            from quantmaster.data.repair import resolve_repair
+
+            resolve_repair(
+                "bar", f"{self.root.resolve()}::{symbol}",
+                result={
+                    "state": "validated", "reason": reason,
+                    "content_sha256": content_hash,
+                },
+            )
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            logger.warning(
+                "Unable to reconcile bar repair symbol=%s: %s", symbol, exc,
+            )
+
     def lock(self, symbol: str) -> AbstractContextManager:
         """返回跨 BarStore 实例共享的单标的锁，覆盖读取、拉取和原子替换。"""
         return _BarLock(self.root, symbol)
@@ -251,6 +319,9 @@ class BarStore:
         """Read a cache file and report missing/corrupt/orphaned states explicitly."""
         path = self._path(symbol)
         metadata = self.metadata(symbol)
+        migrated = False
+        if not path.exists() and metadata is not None:
+            migrated = self._restore_legacy_path(symbol, path, metadata)
         if not path.exists():
             if metadata is None:
                 return BarReadResult(None, "missing")
@@ -297,7 +368,15 @@ class BarStore:
                 )
             if not unchanged:
                 self._backfill_file_identity(symbol, path, value, actual_hash)
-            return BarReadResult(value, "ready", content_sha256=expected_hash or actual_hash)
+            content_hash = expected_hash or actual_hash
+            if migrated and metadata is not None:
+                self.mark_status(
+                    symbol, "ready", source=str(metadata.get("last_source") or ""),
+                )
+                self._resolve_integrity_repair(
+                    symbol, content_hash, "legacy_filename_migrated",
+                )
+            return BarReadResult(value, "ready", content_sha256=content_hash)
         except (OSError, ValueError, TypeError, ImportError) as exc:
             reason = f"bar file cannot be read: {type(exc).__name__}: {exc}"
             self._record_integrity_failure(symbol, reason, metadata or {}, enqueue_repair)
@@ -492,6 +571,9 @@ class BarStore:
                     self._commit_metadata(conn, metadata, clear_intent=True)
                 backup.unlink(missing_ok=True)
                 _sync_directory(self.root)
+                self._resolve_integrity_repair(
+                    symbol, content_hash, "cache_rewritten",
+                )
             finally:
                 temp_path.unlink(missing_ok=True)
 

@@ -315,6 +315,37 @@ class DataRepairManager:
         self._wakeup.set()
         return self.get(repair_id)
 
+    def resolve(
+        self, kind: str, target: str, *, result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Close a stale repair after an independent integrity check succeeds."""
+        now = time.time()
+        key = _idempotency_key(kind, target)
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM data_repairs WHERE idempotency_key=?", (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            status = str(row["status"])
+            if status == "completed":
+                return self._decode(row)
+            if status not in {"queued", "failed", "cancelled", "quarantined"}:
+                return self._decode(row)
+            repair_id = str(row["id"])
+            attempt = int(row["attempt"])
+            connection.execute(
+                "UPDATE data_repairs SET status='completed',owner='',lease_expires=0,"
+                "result_json=?,last_error='',completed_at=?,updated_at=?,"
+                "cancel_requested=0 WHERE id=?",
+                (_canonical(result), now, now, repair_id),
+            )
+            self._event(connection, repair_id, attempt, {
+                "type": "resolved_by_validation", "result": result,
+            })
+        return self.get(repair_id)
+
     def cancel(self, repair_id: str) -> dict[str, Any]:
         now = time.time()
         with self._conn() as connection:
@@ -652,3 +683,10 @@ def enqueue_repair(
     return get_data_repair_manager().enqueue(
         kind, target, reason=reason, spec=spec, source=source,
     )
+
+
+def resolve_repair(
+    kind: str, target: str, *, result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reconcile a queued or terminal repair with independently validated data."""
+    return get_data_repair_manager().resolve(kind, target, result=result)
