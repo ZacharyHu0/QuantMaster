@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.52"
+VERSION = "0.13.53"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "前端资产边界与 CSP 收紧",
+                "items": (
+                    (
+                        "仪表盘内联样式与主脚本拆分为独立同源静态资产，HTML 模板由"
+                        "约 281 KB 收敛到约 108 KB，职责边界更清晰。"
+                    ),
+                    (
+                        "内容安全策略不再依赖逐请求 nonce，脚本与样式仅允许同源文件；"
+                        "现有动态样式属性继续受单独兼容策略约束。"
+                    ),
+                    (
+                        "安全契约直接验证外部主脚本的 CSRF 自动续期逻辑，避免模板拆分"
+                        "削弱本地服务的请求保护。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.52",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "候选池保存后导航竞态修复",

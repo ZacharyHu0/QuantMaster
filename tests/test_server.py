@@ -81,10 +81,19 @@ class TestBasics:
         page = anonymous.get("/")
         assert page.headers["X-Content-Type-Options"] == "nosniff"
         assert page.headers["X-Frame-Options"] == "DENY"
-        assert "script-src 'self' 'nonce-" in page.headers["Content-Security-Policy"]
+        csp = page.headers["Content-Security-Policy"]
+        assert "script-src 'self'" in csp
+        assert "style-src 'self'" in csp
+        assert "'nonce-" not in csp
         assert "%%QM_CSP_NONCE%%" not in page.text
-        assert "csrfRefreshPromise" in page.text
-        assert "csrfCodes.has(String(rejection?.problem?.code || ''))" in page.text
+        assert '<link rel="stylesheet" href="/static/app.css">' in page.text
+        assert '<script src="/static/app.js"></script>' in page.text
+        assert "<script nonce=" not in page.text
+        assert anonymous.get("/static/app.css").status_code == 200
+        app_script = anonymous.get("/static/app.js")
+        assert app_script.status_code == 200
+        assert "csrfRefreshPromise" in app_script.text
+        assert "csrfCodes.has(String(rejection?.problem?.code || ''))" in app_script.text
 
         stale_browser = TestClient(app)
         stale_browser.cookies.set(

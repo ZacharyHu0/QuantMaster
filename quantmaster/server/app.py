@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import queue
-import secrets
 import sqlite3
 import threading
 import time
@@ -427,20 +426,18 @@ def _progress_stream(
 def index(request: Request) -> HTMLResponse:
     from quantmaster.server.security import ensure_csrf_cookie
 
-    nonce = secrets.token_urlsafe(18)
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     page = (
         template.replace("%%QM_VERSION%%", __version__)
         .replace("%%QM_RELEASE_DATE%%", RELEASE_DATE)
         .replace("%%QM_TRADING_DAYS%%", str(TRADING_DAYS))
         .replace("%%QM_RISK_FREE%%", str(RISK_FREE))
-        .replace("%%QM_CSP_NONCE%%", nonce)
     )
     csp = "; ".join((
         "default-src 'self'",
-        f"script-src 'self' 'nonce-{nonce}'",
+        "script-src 'self'",
         "script-src-attr 'none'",
-        f"style-src 'self' 'nonce-{nonce}'",
+        "style-src 'self'",
         "style-src-attr 'unsafe-inline'",
         "img-src 'self' data:",
         "connect-src 'self'",
