@@ -785,6 +785,61 @@ def test_news_stats_deduplicates_in_sql_and_uses_stats_index(tmp_path):
     assert any("idx_news_stats" in str(tuple(row)) for row in plan)
 
 
+def test_news_storage_backfills_dimensions_once_and_keeps_them_current(tmp_path):
+    path = tmp_path / "news.sqlite"
+    store = NewsStore(path)
+    store._industry_map = {}
+    store.save([
+        NewsItem(
+            source="unit", title="维度投影", content="维度投影正文",
+            symbols=["600519.SH"], sectors=["食品饮料"], sentiment=0.4,
+            confidence=0.9, importance_score=80, analysis_status="complete",
+        )
+    ])
+    item_id = store.max_id()
+    with store._conn() as connection:
+        connection.execute("DELETE FROM news_store_meta")
+        connection.execute("UPDATE news SET content_hash='' WHERE id=?", (item_id,))
+
+    migrated = NewsStore(path)
+    with migrated._conn() as connection:
+        content_hash = connection.execute(
+            "SELECT content_hash FROM news WHERE id=?", (item_id,),
+        ).fetchone()[0]
+        symbols = connection.execute(
+            "SELECT symbol FROM news_analysis_symbols WHERE news_id=?", (item_id,),
+        ).fetchall()
+        sectors = connection.execute(
+            "SELECT sector FROM news_analysis_sectors WHERE news_id=?", (item_id,),
+        ).fetchall()
+        connection.execute(
+            "UPDATE news SET content_hash='migration-ran-once' WHERE id=?", (item_id,),
+        )
+    assert content_hash
+    assert [row[0] for row in symbols] == ["600519.SH"]
+    assert "食品饮料" in {row[0] for row in sectors}
+
+    reopened = NewsStore(path)
+    with reopened._conn() as connection:
+        assert connection.execute(
+            "SELECT content_hash FROM news WHERE id=?", (item_id,),
+        ).fetchone()[0] == "migration-ran-once"
+
+    updated = NewsItem(
+        source="unit", title="更新维度", content="更新维度正文",
+        symbols=["000001.SZ"], sectors=["银行"], sentiment=-0.2,
+        confidence=0.8, importance_score=70,
+    )
+    assert reopened.update_analysis(item_id, updated)
+    with reopened._conn() as connection:
+        assert [row[0] for row in connection.execute(
+            "SELECT symbol FROM news_analysis_symbols WHERE news_id=?", (item_id,),
+        )] == ["000001.SZ"]
+        assert [row[0] for row in connection.execute(
+            "SELECT sector FROM news_analysis_sectors WHERE news_id=?", (item_id,),
+        )] == ["银行"]
+
+
 def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch):
     from quantmaster.server import news as news_module
 

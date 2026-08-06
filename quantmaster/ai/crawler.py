@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -23,12 +22,10 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -38,6 +35,13 @@ from quantmaster.ai.news_sources import (
     FetchedArticle,
     NewsSourceStore,
     fetch_declarative_source,
+)
+from quantmaster.ai.news_storage import (
+    aggregate_news_stats,
+    migrate_news_schema,
+    news_content_hash,
+    news_fingerprint,
+    replace_news_dimensions,
 )
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import WorkerIdentity
@@ -225,9 +229,21 @@ def _normalize_sectors(values: list[Any]) -> list[str]:
 
 def _sentiment_snapshot(values: list[tuple[float, float]]) -> dict[str, Any]:
     total_weight = sum(weight for _score, weight in values)
+    return _sentiment_snapshot_from_totals(
+        sum(score * weight for score, weight in values),
+        total_weight,
+        len(values),
+    )
+
+
+def _sentiment_snapshot_from_totals(
+    weighted_score: float,
+    total_weight: float,
+    event_count: int,
+) -> dict[str, Any]:
     if total_weight <= 0:
         return {"value": 0.0, "score": 0.0, "label": "暂无数据", "event_count": 0}
-    value = sum(score * weight for score, weight in values) / total_weight
+    value = weighted_score / total_weight
     label = (
         "明显偏多" if value >= 0.35 else "偏多" if value >= 0.1
         else "明显偏空" if value <= -0.35 else "偏空" if value <= -0.1
@@ -235,7 +251,7 @@ def _sentiment_snapshot(values: list[tuple[float, float]]) -> dict[str, Any]:
     )
     return {
         "value": round(value, 4), "score": round(value * 100, 2),
-        "label": label, "event_count": len(values),
+        "label": label, "event_count": event_count,
     }
 
 
@@ -291,99 +307,37 @@ class NewsStore:
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path, timeout=5.0, row_factory=True)
 
+    def _replace_dimensions(
+        self,
+        connection: sqlite3.Connection,
+        item_id: int,
+        item: NewsItem,
+    ) -> None:
+        replace_news_dimensions(
+            connection,
+            item_id,
+            item.symbols,
+            item.sectors,
+            industry_map=self._industry_map,
+            normalize_sectors=_normalize_sectors,
+        )
+
     @staticmethod
     def fingerprint(item: NewsItem) -> str:
-        title = re.sub(r"\W+", "", item.title.casefold())
-        identity = f"{item.url.strip().lower()}|{title}|{item.published_at.strip()}"
-        return hashlib.sha256(f"{item.source}|{identity}".encode()).hexdigest()
+        return news_fingerprint(item.source, item.title, item.url, item.published_at)
 
     @staticmethod
     def content_hash(item: NewsItem) -> str:
-        text = re.sub(r"\s+", "", (item.content or item.title).casefold())
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return news_content_hash(item.content, item.title)
 
     def _migrate(self) -> None:
         with self._conn() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS news ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,title TEXT,content TEXT,"
-                "url TEXT,published_at TEXT,symbols TEXT,sectors TEXT,event_type TEXT,"
-                "sentiment REAL,summary TEXT,"
-                "created_at REAL,importance_score REAL DEFAULT 0,scope TEXT DEFAULT '',"
-                "urgency TEXT DEFAULT '',confidence REAL DEFAULT 0,fingerprint TEXT DEFAULT '',"
-                "is_official INTEGER DEFAULT 0,source_id TEXT DEFAULT '',"
-                "content_hash TEXT DEFAULT '',first_seen_at REAL DEFAULT 0,last_seen_at REAL DEFAULT 0,"
-                "raw_cache_key TEXT DEFAULT '',analysis_status TEXT DEFAULT 'pending',"
-                "analysis_attempts INTEGER DEFAULT 0,analysis_error TEXT DEFAULT '',"
-                "analysis_version INTEGER DEFAULT 1,next_retry_at REAL DEFAULT 0,"
-                "parser_version TEXT DEFAULT '1',analysis_recovery_count INTEGER DEFAULT 0,"
-                "last_failure_code TEXT DEFAULT '',analysis_updated_at REAL DEFAULT 0,"
-                "UNIQUE(source,title,published_at))"
-            )
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(news)")}
-            additions = {
-                "importance_score": "REAL DEFAULT 0", "scope": "TEXT DEFAULT ''",
-                "urgency": "TEXT DEFAULT ''", "confidence": "REAL DEFAULT 0",
-                "sectors": "TEXT DEFAULT '[]'",
-                "fingerprint": "TEXT DEFAULT ''", "is_official": "INTEGER DEFAULT 0",
-                "source_id": "TEXT DEFAULT ''", "content_hash": "TEXT DEFAULT ''",
-                "first_seen_at": "REAL DEFAULT 0", "last_seen_at": "REAL DEFAULT 0",
-                "raw_cache_key": "TEXT DEFAULT ''", "analysis_status": "TEXT DEFAULT 'pending'",
-                "analysis_attempts": "INTEGER DEFAULT 0", "analysis_error": "TEXT DEFAULT ''",
-                "analysis_version": "INTEGER DEFAULT 1", "next_retry_at": "REAL DEFAULT 0",
-                "parser_version": "TEXT DEFAULT '1'",
-                "analysis_recovery_count": "INTEGER DEFAULT 0",
-                "last_failure_code": "TEXT DEFAULT ''",
-                "analysis_updated_at": "REAL DEFAULT 0",
-            }
-            for name, sql_type in additions.items():
-                if name not in columns:
-                    conn.execute(f"ALTER TABLE news ADD COLUMN {name} {sql_type}")
-            conn.execute("UPDATE news SET source_id=source WHERE source_id='' OR source_id IS NULL")
-            conn.execute("UPDATE news SET first_seen_at=created_at WHERE first_seen_at=0")
-            conn.execute("UPDATE news SET last_seen_at=created_at WHERE last_seen_at=0")
-            conn.execute(
-                "UPDATE news SET analysis_status='dead_letter' "
-                "WHERE analysis_status='failed' AND analysis_attempts>=3"
-            )
-            conn.execute(
-                "UPDATE news SET analysis_updated_at=last_seen_at "
-                "WHERE analysis_status='complete' AND analysis_updated_at=0"
-            )
-            rows = conn.execute(
-                "SELECT id,source,title,content,url,published_at,fingerprint,content_hash,"
-                "summary,confidence,symbols,analysis_status FROM news"
-            ).fetchall()
-            for row in rows:
-                item = NewsItem(
-                    source=row["source"], title=row["title"] or "", content=row["content"] or "",
-                    url=row["url"] or "", published_at=row["published_at"] or "",
-                )
-                fingerprint = row["fingerprint"] or self.fingerprint(item)
-                content_hash = self.content_hash(item)
-                status = row["analysis_status"] or "pending"
-                has_analysis = (
-                    row["summary"] or row["confidence"]
-                    or row["symbols"] not in {"", "[]", None}
-                )
-                if status == "pending" and has_analysis:
-                    status = "complete"
-                conn.execute(
-                    "UPDATE news SET fingerprint=?,content_hash=?,analysis_status=? WHERE id=?",
-                    (fingerprint, content_hash, status, row["id"]),
-                )
-            conn.executescript("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_news_fingerprint_unique
-                    ON news(fingerprint) WHERE fingerprint<>'';
-                CREATE INDEX IF NOT EXISTS idx_news_recent ON news(id DESC);
-                CREATE INDEX IF NOT EXISTS idx_news_source ON news(source_id,id DESC);
-                CREATE INDEX IF NOT EXISTS idx_news_analysis
-                    ON news(analysis_status,next_retry_at,id);
-                CREATE INDEX IF NOT EXISTS idx_news_seen ON news(first_seen_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_news_stats
-                    ON news(analysis_status,first_seen_at,confidence);
-            """)
             NewsClaimStore.migrate(conn)
+            migrate_news_schema(
+                conn,
+                industry_map=self._industry_map,
+                normalize_sectors=_normalize_sectors,
+            )
 
     def _decode(self, row: sqlite3.Row) -> dict:
         value = dict(row)
@@ -443,9 +397,11 @@ class NewsStore:
                         [content, item.url, item.url, now, item.raw_cache_key, item.raw_cache_key,
                          *analysis_params, row["id"]],
                     )
+                    if analysis_sql:
+                        self._replace_dimensions(conn, int(row["id"]), item)
                     continue
                 try:
-                    conn.execute(
+                    cursor = conn.execute(
                         "INSERT INTO news "
                         "(source,title,content,url,published_at,symbols,sectors,event_type,sentiment,summary,"
                         "created_at,importance_score,scope,urgency,confidence,fingerprint,is_official,"
@@ -460,6 +416,9 @@ class NewsStore:
                          content_hash, now, now, item.raw_cache_key, status,
                          self.ANALYSIS_VERSION, "1"),
                     )
+                    if cursor.lastrowid is None:
+                        raise sqlite3.IntegrityError("资讯写入未返回记录 ID")
+                    self._replace_dimensions(conn, int(cursor.lastrowid), item)
                     saved += 1
                 except sqlite3.IntegrityError:
                     continue
@@ -531,6 +490,8 @@ class NewsStore:
              item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
              item.confidence, self.ANALYSIS_VERSION, time.time(), item_id),
         ).rowcount
+        if changed:
+            self._replace_dimensions(conn, item_id, item)
         return bool(changed)
 
     def update_analyses(
@@ -691,7 +652,8 @@ class NewsStore:
         return latest == 0 or latest >= time.time() - max(1, int(hours)) * 3600
 
     def reset_analysis(self, ids: list[int] | None = None) -> int:
-        where, params = "analysis_status<>'pending'", []
+        where = "analysis_status<>'pending'"
+        params: list[Any] = []
         normalized = normalize_news_ids(ids)
         if normalized is not None:
             if not normalized:
@@ -925,64 +887,47 @@ class NewsStore:
                 "AND next_retry_at<=?) AS recoverable_dead_letter FROM news",
                 (now,),
             ).fetchone()
-            rows = conn.execute(
-                "WITH base AS ("
-                "SELECT n.id,n.content_hash,n.first_seen_at,n.sentiment,n.confidence,"
-                "n.importance_score,n.symbols,n.sectors,"
-                "COALESCE(s.factor_weight,1) * n.confidence * n.importance_score / 100.0 "
-                "AS quality_weight FROM news n LEFT JOIN news_sources s ON s.id=n.source_id "
-                "WHERE n.first_seen_at>=? AND n.analysis_status='complete' AND n.confidence>=?"
-                "), ranked AS ("
-                "SELECT *,ROW_NUMBER() OVER (PARTITION BY "
-                "COALESCE(NULLIF(content_hash,''),'id:' || id) "
-                "ORDER BY quality_weight DESC,id) AS rank FROM base WHERE quality_weight>0"
-                ") SELECT * FROM ranked WHERE rank=1 ORDER BY first_seen_at,id",
-                (cutoff, minimum),
-            ).fetchall()
-        daily: dict[str, list[tuple[float, float]]] = {}
-        market_values: list[tuple[float, float]] = []
-        sector_values: dict[str, list[tuple[float, float]]] = {}
-        sector_counts: dict[str, dict[str, int]] = {}
+            aggregate_rows = aggregate_news_stats(
+                conn,
+                cutoff=cutoff,
+                minimum_confidence=minimum,
+                now=now,
+                halflife_days=halflife_days,
+            )
+        series: list[tuple[str, float]] = []
+        market_aggregate = {
+            "weighted_score": 0.0,
+            "total_weight": 0.0,
+            "event_count": 0,
+        }
+        sector_scores: list[dict[str, Any]] = []
         symbol_counts: dict[str, int] = {}
-        for row in rows:
-            quality_weight = float(row["quality_weight"] or 0)
-            sentiment = max(-1.0, min(1.0, float(row["sentiment"] or 0)))
-            day = datetime.fromtimestamp(
-                float(row["first_seen_at"]), tz=timezone.utc,
-            ).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-            daily.setdefault(day, []).append((sentiment, quality_weight))
-            age_days = max(0.0, (now - float(row["first_seen_at"] or now)) / 86400)
-            current_weight = quality_weight * 0.5 ** (age_days / halflife_days)
-            market_values.append((sentiment, current_weight))
-            try:
-                symbols = json.loads(row["symbols"] or "[]")
-            except (TypeError, json.JSONDecodeError):
-                symbols = []
-            try:
-                stored_sectors = json.loads(row["sectors"] or "[]")
-            except (TypeError, json.JSONDecodeError):
-                stored_sectors = []
-            sectors = _normalize_sectors([
-                *(stored_sectors if isinstance(stored_sectors, list) else []),
-                *(self._industry_map.get(str(symbol), "") for symbol in symbols),
-            ])
-            for sector in sectors:
-                sector_values.setdefault(sector, []).append((sentiment, current_weight))
-                counts_for_sector = sector_counts.setdefault(
-                    sector, {"event_count": 0, "positive": 0, "negative": 0},
-                )
-                counts_for_sector["event_count"] += 1
-                if sentiment > 0.15:
-                    counts_for_sector["positive"] += 1
-                elif sentiment < -0.15:
-                    counts_for_sector["negative"] += 1
-            for symbol in symbols:
-                symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-        series: list[tuple[str, float]] = [
-            (day, round(sum(score * weight for score, weight in values) /
-                        sum(weight for _score, weight in values), 4))
-            for day, values in sorted(daily.items())
-        ]
+        for row in aggregate_rows:
+            item_type = str(row["item_type"])
+            item_key = str(row["item_key"] or "")
+            weighted_score = float(row["weighted_score"] or 0)
+            total_weight = float(row["total_weight"] or 0)
+            event_count = int(row["event_count"] or 0)
+            if item_type == "daily" and total_weight > 0:
+                series.append((item_key, round(weighted_score / total_weight, 4)))
+            elif item_type == "market":
+                market_aggregate = {
+                    "weighted_score": weighted_score,
+                    "total_weight": total_weight,
+                    "event_count": event_count,
+                }
+            elif item_type == "sector":
+                sector_scores.append({
+                    "sector": item_key,
+                    **_sentiment_snapshot_from_totals(
+                        weighted_score, total_weight, event_count,
+                    ),
+                    "positive": int(row["positive"] or 0),
+                    "negative": int(row["negative"] or 0),
+                })
+            elif item_type == "symbol":
+                symbol_counts[item_key] = event_count
+        series.sort(key=lambda item: item[0])
         data: dict[str, Any] = dict(counts) if counts else {}
         data["queue"] = {
             key: int((queue_counts[key] if queue_counts else 0) or 0)
@@ -997,15 +942,15 @@ class NewsStore:
         data["coverage"] = round(int(data.get("annotated") or 0) / max(1, int(data.get("total") or 0)), 4)
         data["sentiment_series"] = series
         data["halflife_days"] = halflife_days
-        data["market_sentiment"] = _sentiment_snapshot(market_values)
-        data["sector_scores"] = sorted((
-            {
-                "sector": sector,
-                **_sentiment_snapshot(values),
-                **sector_counts[sector],
-            }
-            for sector, values in sector_values.items()
-        ), key=lambda item: (-abs(float(item["score"])), str(item["sector"])))
+        data["market_sentiment"] = _sentiment_snapshot_from_totals(
+            float(market_aggregate["weighted_score"]),
+            float(market_aggregate["total_weight"]),
+            int(market_aggregate["event_count"]),
+        )
+        data["sector_scores"] = sorted(
+            sector_scores,
+            key=lambda item: (-abs(float(item["score"])), str(item["sector"])),
+        )
         market_scale_values = [
             float(data["market_sentiment"].get("score") or 0),
             *(float(item[1]) * 100 for item in series),
