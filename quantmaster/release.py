@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.17.1"
+VERSION = "0.17.2"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,24 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "个股研究证据边界",
+                "items": (
+                    (
+                        "证据账本、严格 JSON、内容哈希与证据校验迁入独立模块，"
+                        "深度研究编排文件减少约 180 行基础设施实现。"
+                    ),
+                    (
+                        "保留既有研究模块导入契约，并将新证据模块纳入 mypy 检查。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.17.1",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "模拟盘自动化解耦",
@@ -171,24 +189,6 @@ RELEASES = (
                     (
                         "将 free-stockdb 行业降级与诊断探针拆为独立边界，保持 v0.14 功能不变，"
                         "恢复复杂度质量基线。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.1",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "free-stockdb 首个可发布补丁",
-                "items": (
-                    (
-                        "保留 v0.14 的 SDK 分钟行情与行业/概念板块接入，并将外部故障处理"
-                        "收敛为明确异常类型。"
-                    ),
-                    (
-                        "恢复宽异常质量门禁，不扩大技术债基线。"
                     ),
                 ),
             },

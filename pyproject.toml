@@ -126,6 +126,7 @@ files = [
     "quantmaster/doctor.py",
     "quantmaster/ai/news_claims.py",
     "quantmaster/ai/llm.py",
+    "quantmaster/analysis/stock_evidence.py",
     "quantmaster/backtest/paper_accounts.py",
     "quantmaster/backtest/paper_automation.py",
     "quantmaster/automation/service.py",
