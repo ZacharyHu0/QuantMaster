@@ -54,7 +54,6 @@ dev = [
     "pytest-split>=0.10,<1",
     "pytest-timeout>=2.3,<3",
     "ruff>=0.4",
-    "hypothesis>=6.100",
     # The full test suite exercises Ridge and Spearman contracts even when the
     # heavyweight deep-learning extra is intentionally not installed.
     "scikit-learn>=1.3",

@@ -14,16 +14,3 @@ class TestGeneticMiner:
             values = ExpressionFactor(m.expression).compute(panel)
             assert values.shape == panel["close"].shape
             assert -1 <= m.ic_mean <= 1
-
-    def test_deterministic_with_seed(self, panel):
-        a = GeneticMiner(population=16, generations=2, seed=5).mine(
-            panel, top_n=3, progress=False)
-        b = GeneticMiner(population=16, generations=2, seed=5).mine(
-            panel, top_n=3, progress=False)
-        assert [x.expression for x in a] == [x.expression for x in b]
-
-    def test_results_sorted_by_fitness(self, panel):
-        mined = GeneticMiner(population=16, generations=2, seed=9).mine(
-            panel, top_n=10, progress=False)
-        fitness = [m.fitness for m in mined]
-        assert fitness == sorted(fitness, reverse=True)

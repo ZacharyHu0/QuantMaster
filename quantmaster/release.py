@@ -4,13 +4,41 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.16.0"
+VERSION = "0.16.1"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Windows 一键启动",
+                "items": (
+                    (
+                        "仓库根目录新增 qm-serve.cmd，固定使用项目 .venv 中的 Python "
+                        "启动服务，避免 Conda base 或旧版全局 qm 命令干扰。"
+                    ),
+                ),
+            },
+            {
+                "title": "数值测试去重",
+                "items": (
+                    (
+                        "本地快速集从 249 项收敛到 175 项，资讯与 LLM 集成测试转入"
+                        "完整 lane，默认开发反馈不再加载重型边界。"
+                    ),
+                    (
+                        "合并净值、行业中性、样本外验证、绩效和遗传因子挖掘的重复"
+                        "等价用例，移除未再使用的 Hypothesis 依赖。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.16.0",
         "date": RELEASE_DATE,
         "sections": (
             {
