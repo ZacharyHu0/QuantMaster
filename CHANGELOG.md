@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.18.0（2026-08-06）
+
+### 模拟盘单一契约
+- 删除旧单账本 `PaperTrader`、`/paper/run`、`/paper/report` 与 `qm paper run`，模拟交易统一使用可管理的独立账户、提案、确认和开盘撮合流程
+- 修复 `qm paper propose` 读取创建参数的问题，并更新当前 CLI 指南
+
 ## v0.17.3（2026-08-06）
 
 ### 技术债门禁收紧

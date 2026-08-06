@@ -182,16 +182,6 @@ def test_decision_snapshots_are_reproducible(panel, tmp_path):
     assert store.history("other") == []
 
 
-def test_paper_trader_accepts_preloaded_panel(panel):
-    from quantmaster.backtest.paper import PaperTrader
-
-    trader = PaperTrader(initial_capital=100_000, name="swing_test")
-    result = trader.run_once(
-        SwingStrategy(top_n=4, holding_days=3), list(panel["close"].columns), panel=panel)
-    assert result["target_weights"]
-    assert result["signal_date"] <= str(panel["close"].index[-1].date())
-
-
 def test_swing_strategy_runs_through_a_share_backtest(panel):
     from quantmaster.backtest import BacktestConfig, run_backtest
 

@@ -13,7 +13,7 @@
     qm mine --generations 8                     遗传规划挖因子
     qm mine-llm --rounds 2                      LLM 挖因子
     qm crawl [--skip-llm]                       抓取财经快讯
-    qm paper run --factor mom_20d               兼容命令：生成模拟调仓提案
+    qm paper create --name 动量观察 --factor mom_20d  创建独立模拟账户
     qm ledger import trades.csv                 导入券商成交
     qm ledger report                            实盘收益报告
     qm ledger nav                               实盘每日净值（TWR）与基准对比
@@ -472,6 +472,9 @@ def cmd_paper(args) -> None:
             account_id = accounts[0]["id"]
         _print_json(service.report(account_id))
         return
+    if args.paper_cmd == "propose":
+        _print_json(service.propose(args.account))
+        return
 
     strategy = (
         {"kind": "decision", "profile": args.profile, "top_n": args.top,
@@ -491,22 +494,6 @@ def cmd_paper(args) -> None:
         }))
         _print_json(account)
         return
-    if args.paper_cmd == "propose":
-        _print_json(service.propose(args.account))
-        return
-
-    account = next(
-        (item for item in service.store.accounts() if item["name"] == "CLI 默认账户"), None,
-    )
-    if account is None:
-        account = service.create_account(PaperAccountSpec.model_validate({
-            "name": "CLI 默认账户", "strategy": strategy, "universe": args.universe,
-            "initial_capital": args.capital, "mode": "manual",
-        }))
-    _print_json({
-        **service.propose(account["id"]),
-        "notice": "run 现在只生成提案；使用 confirm 后等待 process 按下一交易日开盘撮合。",
-    })
 
 
 def cmd_daily(args) -> None:
@@ -1005,8 +992,6 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
         command.add_argument("--capital", type=float, default=1_000_000)
 
-    pr = psub.add_parser("run", help="兼容命令：为 CLI 默认账户生成提案")
-    paper_strategy_args(pr)
     pc = psub.add_parser("create", help="创建不可变策略快照账户")
     pc.add_argument("--name", required=True)
     pc.add_argument("--mode", default="manual", choices=["manual", "auto"])

@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.17.3"
+VERSION = "0.18.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,24 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "模拟盘单一契约",
+                "items": (
+                    (
+                        "删除旧单账本 PaperTrader、/paper/run、/paper/report 与 qm paper run，"
+                        "模拟交易统一使用可管理的独立账户、提案、确认和开盘撮合流程。"
+                    ),
+                    (
+                        "修复 qm paper propose 读取创建参数的问题，并更新当前 CLI 指南。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.17.3",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "技术债门禁收紧",
@@ -178,21 +196,6 @@ RELEASES = (
                     ),
                     (
                         "行情缓存统一经过受限路径解析，运行诊断不再向 API 返回底层异常文本。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.3",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "代码扫描安全边界收敛",
-                "items": (
-                    (
-                        "限制 GitHub Actions 默认权限，集中加固文件路径边界，并阻止内部异常"
-                        "文本进入资讯、诊断、决策和板块 API。"
                     ),
                 ),
             },

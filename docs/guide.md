@@ -271,9 +271,11 @@ Bearer 或自定义 Header 凭据字段，不能写进普通请求头。
 ## 7. 模拟盘 → 实盘
 
 ```bash
-# 每个交易日收盘后跑一次（可挂 cron / 计划任务）
-qm paper run --factor mom_20d --top 5
-qm paper report
+# 为策略创建独立账户；返回的 id 用于后续命令
+qm paper create --name 动量观察 --factor mom_20d --top 5 --mode auto
+qm paper accounts
+qm paper propose --account <account-id>
+qm paper report --account <account-id>
 
 # 实盘：把券商 App 导出的成交记录整理成 CSV 导入
 #   表头: date,symbol,side,price,shares,fee
