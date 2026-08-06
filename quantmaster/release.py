@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.21.0"
+VERSION = "0.21.1"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,18 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "诊断契约同步",
+                "items": (
+                    "同步模拟盘 schema v2 的深度诊断断言，恢复完整 CI。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.21.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "恐贪与 RSI 趋势仪表盘",
@@ -208,25 +220,6 @@ RELEASES = (
                     (
                         "服务端、自动化入口和回归测试统一使用新模块，并将该边界"
                         "纳入 mypy 检查。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.17.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "运行时发布元数据瘦身",
-                "items": (
-                    (
-                        "release.py 只保留应用实际展示的最近 10 个版本，完整发布历史"
-                        "继续由 CHANGELOG 保存，源码从 2784 行降至约 200 行。"
-                    ),
-                    (
-                        "版本接口与发布钩子契约保持不变，不再解析或加载 100 余份已经"
-                        "退出支持范围的历史 Python 字面量。"
                     ),
                 ),
             },
