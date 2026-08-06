@@ -994,6 +994,97 @@ function marketOpportunity(rsi) {
   return {code:'neutral', label:'暂无极端信号'};
 }
 
+function indicatorNumber(value) {
+  if (value == null || value === '') return Number.NaN;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function rsiVisualClass(value) {
+  const threshold = Number(marketFearGreed?.thresholds?.rsi_add ?? 22);
+  const parsed = indicatorNumber(value);
+  return Number.isFinite(parsed) && parsed < threshold ? 'oversold' : '';
+}
+
+function fearGreedGaugeOption(data) {
+  const score = indicatorNumber(data?.score);
+  const available = Number.isFinite(score);
+  const value = available ? Math.max(0,Math.min(100,score)) : 0;
+  return {
+    backgroundColor:'transparent', animation:!REDUCED_MOTION,
+    series:[{
+      type:'gauge', min:0, max:100, startAngle:205, endAngle:-25,
+      center:['50%','70%'], radius:'96%', splitNumber:10,
+      axisLine:{lineStyle:{width:11,color:[
+        [.10,CHART_COLORS.danger],[.25,CHART_COLORS.warning],
+        [.55,CHART_COLORS.neutral],[.75,CHART_COLORS.primary],[1,CHART_COLORS.down],
+      ]}},
+      pointer:{show:available,length:'62%',width:4,itemStyle:{color:CHART_COLORS.ink}},
+      anchor:{show:available,size:8,itemStyle:{color:CHART_COLORS.ink,borderColor:CHART_COLORS.surface,borderWidth:2}},
+      axisTick:{distance:-15,length:4,lineStyle:{color:CHART_COLORS.surface,width:1}},
+      splitLine:{distance:-16,length:8,lineStyle:{color:CHART_COLORS.surface,width:1}},
+      axisLabel:{distance:-31,color:MUTED,fontSize:9,
+        formatter:value => [0,10,50,100].includes(value) ? value : ''},
+      title:{offsetCenter:[0,'49%'],color:MUTED,fontSize:11},
+      detail:{offsetCenter:[0,'16%'],color:CHART_COLORS.ink,fontSize:28,fontWeight:700,
+        formatter:() => available ? value.toFixed(1) : '—'},
+      data:[{value,name:data?.rating_label || '暂不可用'}],
+    }],
+  };
+}
+
+function fearGreedHistoryOption(data) {
+  const history = Array.isArray(data?.history) ? data.history.filter(point =>
+    point?.date && Number.isFinite(Number(point?.score))) : [];
+  return baseOpt({
+    animation:!REDUCED_MOTION,
+    grid:{left:38,right:14,top:18,bottom:28},
+    tooltip:{trigger:'axis',confine:true,formatter:params => {
+      const point = params[0];
+      return `${marketSparkDate(point?.value?.[0])}<br>恐贪指数&nbsp;&nbsp;<b>${Number(point?.value?.[1]).toFixed(1)}</b>`;
+    }},
+    xAxis:timeAxis(),
+    yAxis:{...valAxis(),min:0,max:100,interval:25},
+    graphic:history.length ? [] : [{type:'text',left:'center',top:'middle',
+      style:{text:'历史数据暂缺',fill:MUTED,fontSize:11}}],
+    series:[{
+      name:'CNN 恐贪',type:'line',showSymbol:false,sampling:'lttb',smooth:.12,
+      data:history.map(point => [point.date,Number(point.score)]),
+      lineStyle:{width:2,color:CHART_COLORS.primary},
+      areaStyle:{color:CHART_COLORS.primary,opacity:.08},
+      markLine:{silent:true,symbol:'none',label:{show:true,formatter:'罕见恐惧 10',color:CHART_COLORS.warning,fontSize:9},
+        lineStyle:{color:CHART_COLORS.warning,width:1,type:'dashed'},data:[{yAxis:10}]},
+    }],
+  });
+}
+
+function renderFearGreedVisuals(root = document) {
+  root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
+    const chart = mkChart(element.id, false);
+    if (chart) chart.setOption(fearGreedGaugeOption(marketFearGreed),{notMerge:true});
+  });
+  root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
+    const chart = mkChart(element.id, false);
+    if (chart) chart.setOption(fearGreedHistoryOption(marketFearGreed),{notMerge:true});
+  });
+}
+
+function rsiSparkMarkup(history, current) {
+  const values = (Array.isArray(history) ? history : []).slice(-90)
+    .map(point => Number(point?.[1])).filter(Number.isFinite);
+  if (values.length < 2) return '<span class="hint">RSI 曲线暂缺</span>';
+  const width = 160, height = 36, inset = 2;
+  const path = values.map((value,index) => {
+    const x = inset + index * (width - inset * 2) / Math.max(1,values.length - 1);
+    const y = inset + (100 - Math.max(0,Math.min(100,value))) * (height - inset * 2) / 100;
+    return `${index ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+  const thresholdY = inset + (100 - 22) * (height - inset * 2) / 100;
+  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+    <line class="mkt-rsi-threshold" x1="${inset}" x2="${width-inset}" y1="${thresholdY.toFixed(2)}" y2="${thresholdY.toFixed(2)}"></line>
+    <path class="mkt-rsi-path ${rsiVisualClass(current)}" d="${path}"></path></svg>`;
+}
+
 function refreshSentimentBindings(root = document) {
   const score = marketFearGreed?.score == null
     ? Number.NaN : Number(marketFearGreed.score);
@@ -1009,6 +1100,7 @@ function refreshSentimentBindings(root = document) {
     node.classList.add(signal.code);
     node.textContent = signal.label;
   });
+  renderFearGreedVisuals(root);
 }
 
 function acceptMarketFearGreed(data) {
@@ -1197,7 +1289,12 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       ? '本地缓存 · 数据源暂不可用' : '数据截至';
     entry.element.querySelector('.mkt-meta').textContent =
       `${status}${item.as_of ? ` ${item.as_of}` : ''}${item.source ? ` · ${item.source}` : ''}`;
-    entry.element.querySelector('.mkt-rsi').textContent = fixed(item.rsi_14, 1);
+    const rsi = entry.element.querySelector('.mkt-rsi');
+    rsi.textContent = fixed(item.rsi_14, 1);
+    rsi.classList.toggle('oversold',rsiVisualClass(item.rsi_14) === 'oversold');
+    const rsiSpark = entry.element.querySelector('.mkt-rsi-spark');
+    rsiSpark.innerHTML = rsiSparkMarkup(item.rsi_history,item.rsi_14);
+    rsiSpark.setAttribute('aria-label',`${item.name} 最近 ${Math.min(90,item.rsi_history?.length || 0)} 个交易日 RSI 曲线，当前 ${fixed(item.rsi_14,1)}，参考线 22`);
     const opportunity = entry.element.querySelector('[data-opportunity-rsi]');
     opportunity.dataset.opportunityRsi = item.rsi_14 == null ? '' : String(item.rsi_14);
     refreshSentimentBindings(entry.element);
@@ -1231,7 +1328,8 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       element.className = 'mkt-item stream-enter';
       element.style.setProperty('--market-order',String(order));
       element.innerHTML = `<span class="mkt-item-head"><span class="nm"></span><span class="mkt-window"></span></span><span class="px"></span><span class="mkt-memberships" hidden></span><span class="mkt-meta"></span>
-        <span class="mkt-indicators"><span>RSI14 <b class="mkt-rsi">—</b></span><span class="state-pill opportunity-signal" data-opportunity-rsi=""></span></span>
+        <span class="mkt-indicators"><span class="mkt-rsi-reading"><span>RSI(14)</span><b class="mkt-rsi">—</b></span><span class="state-pill opportunity-signal" data-opportunity-rsi=""></span></span>
+        <span class="mkt-rsi-spark" role="img"></span>
         <span class="mkt-spark-shell"><span class="spark" id="${sparkId}"></span></span>
         <span class="mkt-spark-foot"><span class="mkt-spark-period"></span><span class="mkt-period-return"></span></span>`;
       groupEntry.grid.appendChild(element);
@@ -1738,6 +1836,36 @@ function renderRegimeChart(windowKey = activeRegimeWindow) {
   }), {notMerge:true});
 }
 
+function renderDecisionRsiChart(market, sectors) {
+  const chart = mkChart('decision-rsi-chart', false);
+  if (!chart) return;
+  const marketData = (market?.past || []).filter(row =>
+    row?.date && Number.isFinite(Number(row?.rsi_14))).map(row => [row.date,Number(row.rsi_14)]);
+  const sectorSeries = (sectors || []).map((sector,index) => ({
+    name:String(sector.sector || `板块 ${index + 1}`), type:'line', showSymbol:false,
+    data:(sector.rsi_history || []).filter(point => point?.[0] && Number.isFinite(Number(point?.[1])))
+      .map(point => [point[0],Number(point[1])]),
+    lineStyle:{width:1.2,color:PALETTE[index % PALETTE.length],opacity:.72},
+    emphasis:{focus:'series',lineStyle:{width:2.4,opacity:1}},
+  }));
+  chart.setOption(baseOpt({
+    animation:!REDUCED_MOTION,
+    grid:{left:38,right:16,top:42,bottom:30},
+    legend:{type:'scroll',top:0,left:0,right:0,textStyle:{color:MUTED,fontSize:10},pageTextStyle:{color:MUTED}},
+    tooltip:{trigger:'axis',confine:true,valueFormatter:value => Number(value).toFixed(1)},
+    xAxis:timeAxis(),
+    yAxis:{...valAxis(),min:0,max:100,interval:25},
+    graphic:marketData.length ? [] : [{type:'text',left:'center',top:'middle',
+      style:{text:'RSI 历史数据暂缺',fill:MUTED,fontSize:11}}],
+    series:[{
+      name:'候选等权大盘',type:'line',showSymbol:false,sampling:'lttb',data:marketData,
+      lineStyle:{width:2.8,color:CHART_COLORS.ink},z:4,
+      markLine:{silent:true,symbol:'none',label:{show:true,formatter:'抄底观察 22',color:CHART_COLORS.warning,fontSize:9},
+        lineStyle:{color:CHART_COLORS.warning,width:1,type:'dashed'},data:[{yAxis:22}]},
+    },...sectorSeries],
+  }),{notMerge:true});
+}
+
 function renderDecision(data, target = document.getElementById('decision-out')) {
   const out = target;
   const market = data.market, current = market.current;
@@ -1771,12 +1899,28 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <div class="metric-cell"><div class="k">上涨宽度</div><div class="v">${pct(current.advance_ratio)}</div></div>
         <div class="metric-cell"><div class="k">站上 MA20</div><div class="v">${pct(current.above_ma20_ratio)}</div></div>
         <div class="metric-cell"><div class="k">校准 Brier</div><div class="v">${fixed(validationSummary.brier_score, 3)}</div></div>
-        <div class="metric-cell"><div class="k">日线 RSI(14)</div><div class="v">${fixed(current.rsi_14, 1)}</div></div>
+        <div class="metric-cell rsi-primary ${rsiVisualClass(current.rsi_14)}"><div class="k">日线 RSI(14)</div><div class="v">${fixed(current.rsi_14, 1)}</div></div>
         <div class="metric-cell"><div class="k">CNN 恐贪</div><div class="v"><span data-fear-greed-score>—</span> <small data-fear-greed-label>读取中</small></div></div>
         <div class="metric-cell"><div class="k">决策周期</div><div class="v">${selectionReady ? `${selection.holding_horizon_days} 日` : '计算中'}</div></div>
       </div>
     </div>
     ${decisionModelEvidenceMarkup(snapshot, selection)}
+    <div class="indicator-dashboard reveal reveal-delay">
+      <section class="panel">
+        <div class="panel-heading"><h3>CNN 恐贪指数</h3><span class="state-pill" data-fear-greed-label data-fear-greed-prefix="全球背景 · ">读取中</span></div>
+        <div class="decision-fear-greed-visuals">
+          <div class="fear-greed-gauge" id="fear-greed-gauge-decision" data-fear-greed-gauge role="img" aria-label="CNN 当日恐贪指数仪表盘"></div>
+          <div class="fear-greed-history-wrap"><div class="indicator-chart-head"><strong>历史曲线</strong><span>10 为罕见恐惧参考线</span></div>
+            <div class="fear-greed-history" id="fear-greed-history-decision" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线"></div></div>
+        </div>
+        <div class="hint">美国市场风险情绪，仅作全球背景；不代表 A 股或具体板块。</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h3>大盘与板块 RSI(14)</h3><span class="state-pill">日线 · 22 抄底观察线</span></div>
+        <div class="rsi-current-callout ${rsiVisualClass(current.rsi_14)}"><strong>${fixed(current.rsi_14,1)}</strong><span>候选等权大盘当前 RSI</span></div>
+        <div class="decision-rsi-chart" id="decision-rsi-chart" role="img" aria-label="大盘与板块日线 RSI 历史曲线"></div>
+      </section>
+    </div>
     <div class="decision-grid reveal reveal-delay">
       <div class="panel"><div class="panel-heading regime-heading">
         <div class="regime-heading-title"><h3>牛熊分与市场宽度</h3><span class="state-pill" id="regime-window-count">3M</span></div>
@@ -1811,7 +1955,7 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
     <div class="decision-grid reveal reveal-delay">
       <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill" data-fear-greed-label data-fear-greed-prefix="CNN 恐贪 · ">CNN 恐贪读取中</span></div>
         <div class="table-scroll"><table><thead><tr><th>板块</th><th>成分</th><th>状态</th><th>牛熊分</th><th>RSI14</th><th>机会提示</th><th>上涨宽度</th></tr></thead><tbody>
-        ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td>${fixed(s.rsi_14,1)}</td><td><span class="state-pill opportunity-signal" data-opportunity-rsi="${fixed(s.rsi_14,2)}"></span></td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="7" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
+        ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td><span class="rsi-badge ${rsiVisualClass(s.rsi_14)}">${fixed(s.rsi_14,1)}</span></td><td><span class="state-pill opportunity-signal" data-opportunity-rsi="${fixed(s.rsi_14,2)}"></span></td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="7" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
         </tbody></table></div></div>
       <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
         <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
@@ -1822,6 +1966,7 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
   regimeHistory = market.past || [];
   refreshSentimentBindings(out);
   renderRegimeChart(activeRegimeWindow);
+  renderDecisionRsiChart(market,market.sectors || []);
   mountDecisionKline();
 }
 

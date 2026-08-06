@@ -132,15 +132,24 @@
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
   </form>
   <section class="panel market-sentiment-panel" id="market-fear-greed" aria-live="polite">
-    <div class="market-sentiment-value">
-      <span class="eyebrow">CNN FEAR &amp; GREED</span>
-      <div><strong data-fear-greed-score>—</strong><span data-fear-greed-label>读取中</span></div>
+    <div class="market-sentiment-head">
+      <div class="market-sentiment-value">
+        <span class="eyebrow">CNN FEAR &amp; GREED</span>
+        <div><strong data-fear-greed-score>—</strong><span data-fear-greed-label>读取中</span></div>
+      </div>
+      <div class="market-sentiment-copy">
+        <strong id="market-fear-greed-status">全球风险背景</strong>
+        <p id="market-fear-greed-note">CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。</p>
+      </div>
+      <a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a>
     </div>
-    <div class="market-sentiment-copy">
-      <strong id="market-fear-greed-status">全球风险背景</strong>
-      <p id="market-fear-greed-note">CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。</p>
+    <div class="market-sentiment-visuals">
+      <div class="fear-greed-gauge" id="fear-greed-gauge-market" data-fear-greed-gauge role="img" aria-label="CNN 当日恐贪指数仪表盘"></div>
+      <div class="fear-greed-history-wrap">
+        <div class="indicator-chart-head"><strong>恐贪历史曲线</strong><span>0–100 · 10 为罕见恐惧参考线</span></div>
+        <div class="fear-greed-history" id="fear-greed-history-market" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线"></div>
+      </div>
     </div>
-    <a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a>
   </section>
   <section class="market-section market-index-section" id="major-indexes" data-market-group="A股指数" data-market-order="0" aria-labelledby="major-indexes-title">
     <div class="market-section-head"><div class="market-section-heading">
@@ -728,18 +737,21 @@
 <section class="tab" id="tab-paper">
   <div class="trading-heading">
     <div><span class="trading-eyebrow">PAPER EXECUTION DESK</span><h2>模拟盘</h2>
-      <p>每个账户独立保存策略和候选快照；产生调仓历史前可直接编辑，之后复制为新账户再调整。自动账户每日在收盘数据就绪后运行，手动账户保留逐步操作。</p></div>
+      <p>每个账户独立保存策略、候选快照和分段历史；策略、候选与调仓频率可随时修改，保存后按 15:00 分界排入后续真实交易日开盘。自动账户每日运行，手动账户保留逐步操作。</p></div>
     <div class="trading-rule"><strong>收盘后</strong><span>生成并确认</span><i aria-hidden="true">→</i><strong>次日开盘</strong><span>自动模拟成交</span></div>
   </div>
   <div class="paper-layout">
     <aside class="paper-accounts" aria-labelledby="paper-accounts-title">
-      <div class="trading-block-head"><h3 id="paper-accounts-title">模拟账户</h3><div class="paper-list-actions"><label><input id="paper-show-archived" type="checkbox">显示已删除</label><button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button></div></div>
+      <div class="trading-block-head paper-list-head">
+        <div class="paper-list-title-row"><h3 id="paper-accounts-title">模拟账户</h3><label><input id="paper-show-archived" type="checkbox">显示已删除</label></div>
+        <button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button>
+      </div>
       <form id="paper-form" class="paper-create-form" hidden>
         <label class="wide">账户名称<input name="name" maxlength="40" placeholder="例如：周频动量验证" required></label>
         <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="swing">旧版 1–7 日短线</option><option value="factor">因子策略</option></select></label>
         <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
         <label class="wide" data-paper-field="factor" hidden>因子<input name="factor" list="factor-list" value="mom_20d"></label>
-        <label data-paper-field="factor" hidden>调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
+        <label data-paper-field="factor" hidden>调仓频率<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
         <label data-paper-field="swing decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
         <label data-paper-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
@@ -762,7 +774,7 @@
         <label>策略<select name="strategy"><option value="decision">Hybrid v2 决策</option><option value="swing">1–7 日短线</option><option value="factor">因子策略</option></select></label>
         <label>候选<select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select></label>
         <label class="wide" data-paper-edit-field="factor" hidden>因子<input name="factor" list="factor-list"></label>
-        <label data-paper-edit-field="factor" hidden>调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
+        <label data-paper-edit-field="factor" hidden>调仓频率<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
         <label data-paper-edit-field="swing decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
         <label data-paper-edit-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" min="1" max="50" required></label>

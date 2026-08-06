@@ -23,10 +23,13 @@ def test_uptrend_regime_has_macd_and_probabilistic_future():
         100 * np.exp(np.linspace(0, 0.35, len(dates)) + 0.01 * np.sin(np.arange(len(dates)))),
         index=dates,
     )
-    bars = pd.DataFrame({
-        "close": close, "volume": 1e6 * (1 + 0.1 * np.sin(np.arange(len(dates)) / 3)),
-        "amount": close * 1e6,
-    })
+    bars = pd.DataFrame(
+        {
+            "close": close,
+            "volume": 1e6 * (1 + 0.1 * np.sin(np.arange(len(dates)) / 3)),
+            "amount": close * 1e6,
+        }
+    )
     report = analyze_bars(bars)
     assert report["current"]["state"] in {"up", "strong_up"}
     assert report["current"]["macd"] is not None
@@ -49,6 +52,7 @@ def test_market_and_sector_views(panel):
     assert set(sectors["sector"]) == {"行业A", "行业B"}
     assert sectors["bull_score"].between(0, 100).all()
     assert sectors["rsi_14"].between(0, 100).all()
+    assert sectors["rsi_history"].map(len).min() > 0
 
 
 def test_swing_scores_have_no_forward_dependency(panel):
@@ -78,18 +82,36 @@ def test_hybrid_profiles_snapshot_and_storage_are_reproducible(panel, tmp_path):
     symbols = list(panel["close"].columns)
     industries = {symbol: f"行业{index % 3}" for index, symbol in enumerate(symbols)}
     risk_policy = resolve_policy(
-        "demo", 3, "risk_adjusted", symbols=symbols, store=lab,
+        "demo",
+        3,
+        "risk_adjusted",
+        symbols=symbols,
+        store=lab,
     )
     stable_policy = resolve_policy(
-        "demo", 3, "stable", symbols=symbols, store=lab,
+        "demo",
+        3,
+        "stable",
+        symbols=symbols,
+        store=lab,
     )
     risk = hybrid_daily_selection(
-        panel, top_n=4, horizon=3, profile="risk_adjusted", universe="demo",
-        industry_map=industries, policy_snapshot=risk_policy,
+        panel,
+        top_n=4,
+        horizon=3,
+        profile="risk_adjusted",
+        universe="demo",
+        industry_map=industries,
+        policy_snapshot=risk_policy,
     )
     stable = hybrid_daily_selection(
-        panel, top_n=4, horizon=3, profile="stable", universe="demo",
-        industry_map=industries, policy_snapshot=stable_policy,
+        panel,
+        top_n=4,
+        horizon=3,
+        profile="stable",
+        universe="demo",
+        industry_map=industries,
+        policy_snapshot=stable_policy,
     )
     assert risk["model_version"].startswith("hybrid-v2:risk_adjusted:")
     assert stable["model_version"].startswith("hybrid-v2:stable:")
@@ -108,11 +130,17 @@ def test_hybrid_strategy_uses_profile_risk_limits(panel, tmp_path):
     from quantmaster.lab.store import LabStore
 
     policy = resolve_policy(
-        "demo", 5, "stable", symbols=list(panel["close"].columns),
+        "demo",
+        5,
+        "stable",
+        symbols=list(panel["close"].columns),
         store=LabStore(tmp_path / "lab.sqlite"),
     )
     weights = HybridDecisionStrategy(
-        top_n=4, holding_days=5, profile="stable", universe="demo",
+        top_n=4,
+        holding_days=5,
+        profile="stable",
+        universe="demo",
         policy_snapshot=policy,
     ).target_weights(panel)
     signals = weights.dropna(how="all")
@@ -124,17 +152,27 @@ def test_profile_constraints_survive_missing_factor_component():
     class OnlyMlStore:
         @staticmethod
         def active_deployments():
-            return [{
-                "id": "deployment", "version_id": "learned", "universe": "demo",
-                "horizon": 3, "profile": "all", "scope": "exact", "role": "ml",
-                "created_at": "2026-07-27T00:00:00+00:00",
-            }]
+            return [
+                {
+                    "id": "deployment",
+                    "version_id": "learned",
+                    "universe": "demo",
+                    "horizon": 3,
+                    "profile": "all",
+                    "scope": "exact",
+                    "role": "ml",
+                    "created_at": "2026-07-27T00:00:00+00:00",
+                }
+            ]
 
         @staticmethod
         def version(version_id):
             return {
-                "id": version_id, "name": "ML Champion", "status": "approved",
-                "content_hash": "hash", "validation": {},
+                "id": version_id,
+                "name": "ML Champion",
+                "status": "approved",
+                "content_hash": "hash",
+                "validation": {},
                 "spec": {"kind": "learned", "model": {"manifest": "unused.json"}},
             }
 
@@ -189,8 +227,8 @@ def test_swing_strategy_runs_through_a_share_backtest(panel):
 
     strategy = SwingStrategy(top_n=4, holding_days=3)
     result = run_backtest(
-        panel, strategy.target_weights(panel),
-        BacktestConfig(initial_capital=100_000, allow_fractional=True))
+        panel, strategy.target_weights(panel), BacktestConfig(initial_capital=100_000, allow_fractional=True)
+    )
     assert result.trades
     assert result.nav.notna().all()
     assert result.metrics["total_return"] == round(float(result.nav.iloc[-1] - 1), 4)

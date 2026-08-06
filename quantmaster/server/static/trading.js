@@ -24,6 +24,7 @@
     missing_open: '缺少开盘价', limit_up: '涨停无法买入', limit_down: '跌停无法卖出',
     suspended: '停牌无法成交', missing_actual_limit: '缺少真实涨跌停价',
     insufficient_cash: '现金不足', t_plus_one: 'T+1 可卖数量不足', newer_cycle: '被新提案替代',
+    strategy_changed: '策略修改后已替代',
   };
   const strategyLabel = strategy => {
     if (strategy?.kind === 'decision') {
@@ -768,7 +769,7 @@
       ['初始资金', number(account.initial_capital)],
     ];
     if (strategy.kind === 'factor') {
-      facts.push(['因子表达式', strategy.factor], ['调仓', {D:'每日', W:'每周', M:'每月'}[strategy.rebalance] || strategy.rebalance]);
+      facts.push(['因子表达式', strategy.factor], ['调仓频率', {D:'每日', W:'每周', M:'每月'}[strategy.rebalance] || strategy.rebalance]);
     } else {
       facts.push(['持有期', `${strategy.holding_days || strategy.horizon || '—'} 个交易日`]);
     }
@@ -784,13 +785,11 @@
     const snapshot = account.universe_snapshot || {};
     const members = snapshot.symbols || [];
     const management = account.management || {};
-    const strategyEditable = management.strategy_editable ??
-      account.activity?.strategy_editable === true;
     const managementState = account.status === 'archived'
       ? ['只读归档', '策略和历史账本仍可查看；恢复账户或复制策略后继续。', 'archived']
-      : strategyEditable
-      ? ['可直接编辑', '当前没有调仓或成交历史，可以修改这份策略快照。', 'editable']
-      : ['历史已锁定', '为避免改写历史，请使用“复制策略”创建独立账户。', 'locked'];
+      : management.pending_strategy_change
+      ? ['切换待执行', `新策略将在 ${management.strategy_effective_after || '后续交易日'} 信号日之后执行。`, 'pending']
+      : ['可直接编辑', '修改会建立新策略分段，旧周期和成交历史保持原样。', 'editable'];
     const source = account.source_backtest_id
       ? `回测 ${String(account.source_backtest_id).slice(0, 8)}`
       : snapshot.cloned_from ? `复制自 ${String(snapshot.cloned_from).slice(0, 8)}` : '直接创建';
@@ -841,9 +840,23 @@
     panel.hidden = false;
     requestAnimationFrame(() => {
       if (typeof mkChart !== 'function') return;
+      const dates = payload.dates.map(value => String(value || '').slice(0, 10));
+      const spansYears = dates.length > 1 && dates[0].slice(0, 4) !== dates.at(-1).slice(0, 4);
       mkChart('paper-nav-chart').setOption(baseOpt({
-        xAxis: timeAxis(), yAxis: valAxis(),
-        series: [{name: '模拟盘 TWR', type: 'line', showSymbol: false, lineStyle: {width: 2}, data: payload.dates.map((date, index) => [date, payload.twr[index]])}],
+        grid: {left: 46, right: 20, top: 24, bottom: 32},
+        tooltip: {trigger: 'axis', confine: true, formatter: params => {
+          const point = params[0];
+          return `${dates[point?.dataIndex] || ''}<br>模拟盘 TWR&nbsp;&nbsp;<b>${Number(point?.value).toFixed(4)}</b>`;
+        }},
+        xAxis: {
+          type: 'category', data: dates, boundaryGap: false,
+          axisTick: {show: false}, axisLine: {lineStyle: {color: AXIS}},
+          axisLabel: {color: MUTED, hideOverlap: true, showMinLabel: true, showMaxLabel: true,
+            formatter: value => spansYears ? value.replaceAll('-', '.') : value.slice(5).replace('-', '.')},
+        },
+        yAxis: valAxis(),
+        series: [{name: '模拟盘 TWR', type: 'line', showSymbol: dates.length < 8,
+          symbolSize: 5, lineStyle: {width: 2}, data: payload.twr}],
       }), true);
     });
   }
@@ -881,12 +894,8 @@
       renderAccountList();
       document.getElementById('paper-account-title').textContent = account.name;
       document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'} · 快照 ${account.strategy_hash.slice(0, 10)}`;
-      const strategyEditable = account.management?.strategy_editable ??
-        account.activity?.strategy_editable === true;
-      edit.textContent = strategyEditable ? '编辑账户与策略' : '编辑账户';
-      edit.title = strategyEditable
-        ? '当前没有交易历史，可直接修改账户和策略'
-        : '策略已有历史，只能修改账户信息；调整策略请复制账户';
+      edit.textContent = '编辑账户与策略';
+      edit.title = '修改策略、候选或调仓频率后，按 15:00 分界排入后续真实交易日开盘';
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
@@ -1009,16 +1018,12 @@
     setEditorValue('profile', strategy.profile || 'risk_adjusted');
     setEditorValue('top_n', strategy.top_n || 5);
     setEditorValue('initial_capital', account.initial_capital);
-    paperEditorStrategyLocked = !copy && !(
-      account.management?.strategy_editable ?? account.activity?.strategy_editable === true
-    );
+    paperEditorStrategyLocked = false;
     document.getElementById('paper-editor-title').textContent = copy
       ? '复制并调整策略' : '编辑账户';
     document.getElementById('paper-editor-note').textContent = copy
       ? '新账户会固化独立策略与候选快照，原账户和历史账本保持不变。'
-      : paperEditorStrategyLocked
-      ? '账户已有调仓或成交历史；可修改名称和执行方式，策略请使用“复制并调整”。'
-      : '账户尚无调仓和成交历史，可直接替换当前策略快照。';
+      : '可修改策略、候选和调仓频率；保存后建立新分段，并自动排入后续真实交易日开盘。';
     document.getElementById('paper-edit-submit').textContent = copy ? '创建调整账户' : '保存账户';
     syncPaperEditFields();
     paperEditForm.hidden = false;
@@ -1061,7 +1066,13 @@
       document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
       await loadPaperAccounts(false);
       await openPaperAccount(saved.id);
-      paperStatus.innerHTML = `<div class="trading-success">${action === 'copy' ? '已创建独立调整账户，原账户保持不变。' : '账户设置已保存。'}</div>`;
+      const transition = saved.transition;
+      const savedMessage = transition?.status === 'waiting_data'
+        ? transition.message
+        : transition?.signal_date
+        ? `账户设置已保存；新策略按 ${transition.signal_date} 作为信号日，随后首个真实交易日开盘执行。`
+        : '账户设置已保存。';
+      paperStatus.innerHTML = `<div class="${transition?.status === 'waiting_data' ? 'trading-warning' : 'trading-success'}">${action === 'copy' ? '已创建独立调整账户，原账户保持不变。' : escapeHtml(savedMessage)}</div>`;
     } catch (error) {
       renderError(paperStatus, error, action === 'copy' ? '调整账户创建失败' : '账户保存失败');
     } finally { setButtonBusy(button, false); }

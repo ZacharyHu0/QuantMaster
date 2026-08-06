@@ -37,18 +37,29 @@ def price_panel(dates, first=(10.0, 11.0), second=None):
     close_rows = [first] * len(index) if second is None else [first] * (len(index) - 1) + [second]
     close = pd.DataFrame(close_rows, index=index, columns=columns, dtype=float)
     return {
-        "open": close.copy(), "high": close.copy(), "low": close.copy(),
-        "close": close.copy(), "volume": close * 100_000,
+        "open": close.copy(),
+        "high": close.copy(),
+        "low": close.copy(),
+        "close": close.copy(),
+        "volume": close * 100_000,
     }
 
 
 _ROUTE_STRATEGY = {"kind": "swing", "top_n": 3, "holding_days": 3, "cap_weight": 0.25}
 _ROUTE_ARTIFACT = {
     "summary": {"return": 0.1},
-    "trades": [{
-        "date": "2026-08-04", "symbol": "600000.SH", "side": "buy",
-        "price": 10.0, "shares": 100, "amount": 1000.0, "cost": 1.0, "note": "open",
-    }],
+    "trades": [
+        {
+            "date": "2026-08-04",
+            "symbol": "600000.SH",
+            "side": "buy",
+            "price": 10.0,
+            "shares": 100,
+            "amount": 1000.0,
+            "cost": 1.0,
+            "note": "open",
+        }
+    ],
 }
 
 
@@ -123,9 +134,15 @@ class _RoutePaperStore:
         return [{"id": "account", "include_archived": include_archived}]
 
     def account(self, account_id):
-        return None if account_id == "missing" else {
-            "id": account_id, "status": "active", "mode": "manual",
-        }
+        return (
+            None
+            if account_id == "missing"
+            else {
+                "id": account_id,
+                "status": "active",
+                "mode": "manual",
+            }
+        )
 
     def update_account(self, account_id, status=None, mode=None):
         if account_id == "missing":
@@ -155,7 +172,14 @@ class _RoutePaperService:
         return {**account, "activity": {"strategy_editable": True}}
 
     def update_account(
-        self, account_id, *, name=None, status=None, mode=None, strategy=None, universe=None,
+        self,
+        account_id,
+        *,
+        name=None,
+        status=None,
+        mode=None,
+        strategy=None,
+        universe=None,
     ):
         if account_id == "missing":
             raise KeyError("模拟账户不存在")
@@ -201,7 +225,8 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
         @staticmethod
         def get(run_id, include_artifact=False):
             return {
-                "id": run_id, "status": "completed",
+                "id": run_id,
+                "status": "completed",
                 "artifact": {"metric": float("nan"), "values": [float("inf")]},
             }
 
@@ -216,14 +241,22 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
 
 
 def account_spec(name="日频验证", *, rebalance="D"):
-    return PaperAccountSpec.model_validate({
-        "name": name,
-        "strategy": {
-            "kind": "factor", "factor": "rank(close)", "top_n": 1,
-            "rebalance": rebalance, "weighting": "equal", "cap_weight": 0.35,
-        },
-        "universe": "demo", "initial_capital": 100_000, "mode": "manual",
-    })
+    return PaperAccountSpec.model_validate(
+        {
+            "name": name,
+            "strategy": {
+                "kind": "factor",
+                "factor": "rank(close)",
+                "top_n": 1,
+                "rebalance": rebalance,
+                "weighting": "equal",
+                "cap_weight": 0.35,
+            },
+            "universe": "demo",
+            "initial_capital": 100_000,
+            "mode": "manual",
+        }
+    )
 
 
 def make_paper_service(tmp_path, name="日频验证", *, rebalance="D"):
@@ -281,7 +314,9 @@ def test_backtest_and_paper_share_first_open_fill_semantics(tmp_path):
     weights = pd.DataFrame(float("nan"), index=dates, columns=panel["close"].columns)
     weights.loc[dates[-2]] = pd.Series(proposal["target_weights"])
     backtest = run_backtest(
-        panel, weights, BacktestConfig(initial_capital=100_000),
+        panel,
+        weights,
+        BacktestConfig(initial_capital=100_000),
     )
     matching = next(trade for trade in backtest.trades if trade.symbol == paper_trade["symbol"])
 
@@ -328,9 +363,15 @@ def test_paper_accounts_are_isolated_and_strategy_snapshot_is_immutable(tmp_path
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     first = store.create_account(account_spec("账户 A"), symbols=["600000.SH"])
     second = store.create_account(account_spec("账户 B"), symbols=["000001.SZ"])
-    store.ledger(first["id"]).add_trade(TradeRecord(
-        date="2024-01-02", symbol="600000.SH", side="buy", price=10, shares=100,
-    ))
+    store.ledger(first["id"]).add_trade(
+        TradeRecord(
+            date="2024-01-02",
+            symbol="600000.SH",
+            side="buy",
+            price=10,
+            shares=100,
+        )
+    )
     assert len(store.ledger(first["id"]).trades()) == 1
     assert store.ledger(second["id"]).trades().empty
     assert store.account(first["id"])["strategy_hash"] == first["strategy_hash"]
@@ -338,51 +379,82 @@ def test_paper_accounts_are_isolated_and_strategy_snapshot_is_immutable(tmp_path
         store.create_account(account_spec("账户 A"), symbols=["600000.SH"])
 
 
-def test_pristine_paper_strategy_can_change_but_history_requires_copy(tmp_path, monkeypatch):
+def test_paper_strategy_change_preserves_history_and_schedules_transition(
+    tmp_path,
+    monkeypatch,
+    panel,
+):
     service, account = make_paper_service(tmp_path, "可编辑账户")
     original_hash = account["strategy_hash"]
     same_strategy = account_spec("任意名称").strategy
     monkeypatch.setattr(
-        service, "_resolve_universe",
+        service,
+        "_resolve_universe",
         lambda *_args: pytest.fail("只改名称不应重新解析候选快照"),
     )
 
     renamed = service.update_account(
-        account["id"], name="只改名称", strategy=same_strategy, universe="demo",
+        account["id"],
+        name="只改名称",
+        strategy=same_strategy,
+        universe="demo",
     )
     assert renamed["name"] == "只改名称"
     assert renamed["strategy_hash"] == original_hash
 
     monkeypatch.setattr(
-        service, "_resolve_universe",
-        lambda _name, _as_of: (["600000.SH", "000001.SZ"], {"quality": "fixture"}),
+        service,
+        "_resolve_universe",
+        lambda _name, _as_of: (["600000.SH", "600001.SH"], {"quality": "fixture"}),
     )
+    monkeypatch.setattr(service, "_strategy_change_signal_date", lambda: "2026-08-06")
+    recent_index = pd.bdate_range(end="2026-08-06", periods=len(panel["close"]))
+    recent_panel = {name: values.set_axis(recent_index) for name, values in panel.items()}
+    monkeypatch.setattr("quantmaster.data.load_panel", lambda *_args, **_kwargs: recent_panel)
     changed_strategy = same_strategy.model_copy(update={"top_n": 2})
     changed = service.update_account(account["id"], strategy=changed_strategy)
     assert changed["strategy"]["top_n"] == 2
     assert changed["strategy_hash"] != original_hash
+    assert changed["transition"]["status"] == "confirmed", changed["transition"]
+    assert changed["transition"]["signal_date"] == "2026-08-06"
     details = service.account_details(account["id"])
-    assert details["activity"]["strategy_editable"] is True
+    assert details["management"]["strategy_editable"] is True
+    assert details["management"]["pending_strategy_change"] is False
     assert details["management"] == {
         "strategy_editable": True,
+        "pending_strategy_change": False,
+        "strategy_effective_after": "",
         "can_archive": True,
         "can_restore": False,
         "delete_mode": "archive",
     }
 
-    service.store.create_cycle(
-        changed, "2026-08-05", {"600000.SH": 0.35}, {"600000.SH": 10.0}, [],
+    prior_cycles = service.store.cycles(account["id"])
+    changed_again = service.update_account(
+        account["id"],
+        strategy=changed_strategy.model_copy(update={"top_n": 1}),
     )
-    with pytest.raises(ValueError, match="复制为新账户"):
-        service.update_account(
-            account["id"], strategy=changed_strategy.model_copy(update={"top_n": 1}),
-        )
+    assert changed_again["strategy"]["top_n"] == 1
+    assert any(
+        cycle["status"] == "superseded"
+        for cycle in service.store.cycles(account["id"])
+        if cycle["id"] in {item["id"] for item in prior_cycles}
+    )
+
+    before_close = datetime(2026, 8, 6, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+    after_close = datetime(2026, 8, 6, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert PaperService._strategy_change_signal_date(before_close) == "2026-08-06"
+    assert PaperService._strategy_change_signal_date(after_close) == "2026-08-07"
 
 
 def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
     service, account = make_paper_service(tmp_path, "可恢复账户")
     cycle, _created = service.store.create_cycle(
-        account, "2026-08-05", {"600000.SH": 0.35}, {"600000.SH": 10.0}, [],
+        account,
+        "2026-08-05",
+        {"600000.SH": 0.35},
+        {"600000.SH": 10.0},
+        [],
     )
 
     archived = service.archive_account(account["id"])
@@ -395,6 +467,8 @@ def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
     assert not service.store.ledger(account["id"]).cashflows().empty
     assert service.account_details(account["id"])["management"] == {
         "strategy_editable": False,
+        "pending_strategy_change": False,
+        "strategy_effective_after": "",
         "can_archive": False,
         "can_restore": True,
         "delete_mode": "archive",
@@ -408,12 +482,19 @@ def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
 def test_removed_holding_is_quoted_but_not_ranked_for_new_target(tmp_path):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     account = store.create_account(
-        account_spec("候选边界"), symbols=["600000.SH", "000002.SZ"],
+        account_spec("候选边界"),
+        symbols=["600000.SH", "000002.SZ"],
     )
     ledger = store.ledger(account["id"])
-    ledger.add_trade(TradeRecord(
-        date="2023-12-29", symbol="000001.SZ", side="buy", price=10, shares=100,
-    ))
+    ledger.add_trade(
+        TradeRecord(
+            date="2023-12-29",
+            symbol="000001.SZ",
+            side="buy",
+            price=10,
+            shares=100,
+        )
+    )
     service = PaperService(store)
     dates = pd.bdate_range("2024-01-01", periods=5)
     panel = price_panel(dates, first=(10.0, 100.0))
@@ -435,26 +516,36 @@ def test_unapproved_strategy_is_allowed_with_persistent_warning():
 
 
 def test_paper_creation_reuses_resolved_symbols_when_pinning_decision(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     symbols = ["600000.SH", "000001.SZ"]
     service = PaperService(PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts"))
     monkeypatch.setattr(
-        service, "_resolve_universe",
+        service,
+        "_resolve_universe",
         lambda name, as_of: (symbols, {"as_of": as_of, "quality": "sandbox"}),
     )
     monkeypatch.setattr(
         "quantmaster.data.universe.load_universe",
         lambda name: pytest.fail("候选已经解析，不应在固化策略时重复读取"),
     )
-    spec = PaperAccountSpec.model_validate({
-        "name": "一次解析",
-        "strategy": {
-            "kind": "decision", "profile": "risk_adjusted", "top_n": 5,
-            "holding_days": 3, "cap_weight": 0.25, "policy_snapshot": {},
-        },
-        "universe": "large-custom", "initial_capital": 100_000, "mode": "manual",
-    })
+    spec = PaperAccountSpec.model_validate(
+        {
+            "name": "一次解析",
+            "strategy": {
+                "kind": "decision",
+                "profile": "risk_adjusted",
+                "top_n": 5,
+                "holding_days": 3,
+                "cap_weight": 0.25,
+                "policy_snapshot": {},
+            },
+            "universe": "large-custom",
+            "initial_capital": 100_000,
+            "mode": "manual",
+        }
+    )
 
     account = service.create_account(spec)
 
@@ -470,11 +561,13 @@ def test_daily_orchestration_processes_all_active_and_proposes_only_auto(tmp_pat
     service = PaperService(store)
     processed, proposed = [], []
     monkeypatch.setattr(
-        service, "process",
+        service,
+        "process",
         lambda account_id: processed.append(account_id) or {"status": "idle"},
     )
     monkeypatch.setattr(
-        service, "propose",
+        service,
+        "propose",
         lambda account_id: proposed.append(account_id) or {"status": "not_due"},
     )
 
@@ -503,15 +596,22 @@ def test_auto_account_runs_daily_without_manual_buttons_and_is_idempotent(tmp_pa
     monkeypatch.setattr(
         service,
         "propose",
-        lambda account_id: proposed.append(account_id) or {
-            "status": "confirmed", "signal_date": "2026-08-04",
-        },
+        lambda account_id: (
+            proposed.append(account_id)
+            or {
+                "status": "confirmed",
+                "signal_date": "2026-08-04",
+            }
+        ),
     )
     worker = PaperAutomationWorker(
         service,
         poll_seconds=1,
         session_resolver=lambda _now: SessionExpectation(
-            "2026-08-04", "unit", True, "fixture",
+            "2026-08-04",
+            "unit",
+            True,
+            "fixture",
         ),
     )
     due = datetime(2026, 8, 4, 18, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -543,21 +643,45 @@ def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
         )
     token_two = store.claim_auto_run("2026-02-13", account_id, "worker-two", now=101)
     assert token_two and token_two != token_one
-    assert store.complete_auto_run(
-        "2026-02-13", account_id, "worker-one", token_one, {"old": True}, now=101,
-    ) is False
-    assert store.complete_auto_run(
-        "2026-02-13", account_id, "worker-two", token_two, {"new": True}, now=101,
-    ) is True
+    assert (
+        store.complete_auto_run(
+            "2026-02-13",
+            account_id,
+            "worker-one",
+            token_one,
+            {"old": True},
+            now=101,
+        )
+        is False
+    )
+    assert (
+        store.complete_auto_run(
+            "2026-02-13",
+            account_id,
+            "worker-two",
+            token_two,
+            {"new": True},
+            now=101,
+        )
+        is True
+    )
 
     current = 1000.0
     for attempt in range(6):
         token = store.claim_auto_run(
-            "2026-10-09", account_id, "worker", now=current,
+            "2026-10-09",
+            account_id,
+            "worker",
+            now=current,
         )
         assert token
         assert store.fail_auto_run(
-            "2026-10-09", account_id, "worker", token, "暂时失败", now=current,
+            "2026-10-09",
+            account_id,
+            "worker",
+            token,
+            "暂时失败",
+            now=current,
         )
         current += (3 * 60 * 60) + attempt
     latest = store.latest_auto_run(account_id)
@@ -569,7 +693,9 @@ def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
 def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     account = store.create_account(
-        account_spec("告警分层"), symbols=["600000.SH"], warning="策略来源待批准",
+        account_spec("告警分层"),
+        symbols=["600000.SH"],
+        warning="策略来源待批准",
     )
     store.set_runtime_warning(account["id"], "行情暂不可用")
     assert store.account(account["id"])["warning"] == "行情暂不可用"
@@ -583,24 +709,42 @@ def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):
 def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, panel):
     store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
     service = BacktestService(store)
-    spec = BacktestSpec.model_validate({
-        "name": "合成行情",
-        "strategy": {
-            "kind": "factor", "factor": "rank(close)", "top_n": 2,
-            "rebalance": "D", "weighting": "equal", "cap_weight": 0.35,
-        },
-        "universe": "demo", "start": "2023-01-02", "end": "2023-08-01",
-        "benchmark": None, "initial_capital": 100_000,
-    })
+    spec = BacktestSpec.model_validate(
+        {
+            "name": "合成行情",
+            "strategy": {
+                "kind": "factor",
+                "factor": "rank(close)",
+                "top_n": 2,
+                "rebalance": "D",
+                "weighting": "equal",
+                "cap_weight": 0.35,
+            },
+            "universe": "demo",
+            "start": "2023-01-02",
+            "end": "2023-08-01",
+            "benchmark": None,
+            "initial_capital": 100_000,
+        }
+    )
     run = store.create(spec)
     manifest, payload = service.run(
-        run, panel=panel, progress=lambda value, phase, detail: store.update(
-            run["id"], value, phase, detail,
-        ), cancelled=lambda: False,
+        run,
+        panel=panel,
+        progress=lambda value, phase, detail: store.update(
+            run["id"],
+            value,
+            phase,
+            detail,
+        ),
+        cancelled=lambda: False,
     )
     path = store.write_artifact(run["id"], payload["artifact"])
     store.finish(
-        run["id"], manifest=manifest, result=payload["summary"], artifact_path=str(path),
+        run["id"],
+        manifest=manifest,
+        result=payload["summary"],
+        artifact_path=str(path),
     )
     completed = store.get(run["id"], include_artifact=True)
     assert completed["status"] == "completed"
@@ -608,10 +752,12 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
     assert store.events(run["id"])[-1]["type"] == "completed"
 
     strict_path = store.write_artifact(
-        "strict-json", {"nan": float("nan"), "infinity": [float("inf")]},
+        "strict-json",
+        {"nan": float("nan"), "infinity": [float("inf")]},
     )
     assert json.loads(strict_path.read_text(encoding="utf-8")) == {
-        "nan": None, "infinity": [None],
+        "nan": None,
+        "infinity": [None],
     }
     assert "NaN" not in strict_path.read_text(encoding="utf-8")
     assert "Infinity" not in strict_path.read_text(encoding="utf-8")
@@ -629,12 +775,16 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
 
 def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_path):
     store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    spec = BacktestSpec.model_validate({
-        "name": "租约测试",
-        "strategy": {"kind": "factor", "factor": "rank(close)", "top_n": 1},
-        "universe": "demo", "start": "2023-01-02", "end": "2023-02-01",
-        "benchmark": None,
-    })
+    spec = BacktestSpec.model_validate(
+        {
+            "name": "租约测试",
+            "strategy": {"kind": "factor", "factor": "rank(close)", "top_n": 1},
+            "universe": "demo",
+            "start": "2023-01-02",
+            "end": "2023-02-01",
+            "benchmark": None,
+        }
+    )
     created = store.create(spec)
     assert store.claim_next("worker-a")["id"] == created["id"]
     assert store.heartbeat(created["id"], "worker-a")
@@ -648,53 +798,90 @@ def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_pat
     assert store.interrupt_stale(stale_after_seconds=30) == 1
     assert store.claim_next("worker-b")["id"] == created["id"]
     assert not store.update(
-        created["id"], 50, "旧 worker", expected_worker="worker-a",
+        created["id"],
+        50,
+        "旧 worker",
+        expected_worker="worker-a",
     )
     assert not store.finish(
-        created["id"], error="stale result", expected_worker="worker-a",
+        created["id"],
+        error="stale result",
+        expected_worker="worker-a",
     )
     assert store.get(created["id"])["worker"] == "worker-b"
     assert store.get(created["id"])["status"] == "running"
 
 
 def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
-    tmp_path, panel, monkeypatch,
+    tmp_path,
+    panel,
+    monkeypatch,
 ):
     from quantmaster.decision import resolve_policy
     from quantmaster.lab.store import LabStore
 
     symbols = list(panel["close"].columns)
     policy = resolve_policy(
-        "demo", 1, "stable", symbols=symbols,
+        "demo",
+        1,
+        "stable",
+        symbols=symbols,
         store=LabStore(tmp_path / "lab.sqlite"),
     )
-    decision = DecisionStrategySpec.model_validate({
-        "kind": "decision", "profile": "stable", "top_n": 3,
-        "holding_days": 1, "cap_weight": 0.25, "policy_snapshot": policy,
-    })
+    decision = DecisionStrategySpec.model_validate(
+        {
+            "kind": "decision",
+            "profile": "stable",
+            "top_n": 3,
+            "holding_days": 1,
+            "cap_weight": 0.25,
+            "policy_snapshot": policy,
+        }
+    )
     strategy = build_strategy(
-        decision, symbols, "2023-01-02", "2023-08-01", universe="demo",
+        decision,
+        symbols,
+        "2023-01-02",
+        "2023-08-01",
+        universe="demo",
     )
     weights = strategy.target_weights(panel)
     assert not weights.dropna(how="all").empty
     assert weights.fillna(0).sum(axis=1).max() <= 0.65 + 1e-9
 
     backtest_store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    run = BacktestService(backtest_store).enqueue(BacktestSpec.model_validate({
-        "name": "Hybrid 快照", "strategy": decision.model_dump(mode="json"),
-        "universe": "demo", "start": "2023-01-02", "end": "2023-08-01",
-        "benchmark": None, "initial_capital": 100_000,
-    }))
+    run = BacktestService(backtest_store).enqueue(
+        BacktestSpec.model_validate(
+            {
+                "name": "Hybrid 快照",
+                "strategy": decision.model_dump(mode="json"),
+                "universe": "demo",
+                "start": "2023-01-02",
+                "end": "2023-08-01",
+                "benchmark": None,
+                "initial_capital": 100_000,
+            }
+        )
+    )
     assert run["config"]["strategy"]["policy_snapshot"]["policy_hash"] == policy["policy_hash"]
 
     paper = PaperService(PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts"))
     monkeypatch.setattr(
-        paper, "_resolve_universe", lambda name, as_of: (symbols, {"quality": "sandbox"}),
+        paper,
+        "_resolve_universe",
+        lambda name, as_of: (symbols, {"quality": "sandbox"}),
     )
-    account = paper.create_account(PaperAccountSpec.model_validate({
-        "name": "Hybrid 模拟", "strategy": decision.model_dump(mode="json"),
-        "universe": "demo", "initial_capital": 100_000, "mode": "manual",
-    }))
+    account = paper.create_account(
+        PaperAccountSpec.model_validate(
+            {
+                "name": "Hybrid 模拟",
+                "strategy": decision.model_dump(mode="json"),
+                "universe": "demo",
+                "initial_capital": 100_000,
+                "mode": "manual",
+            }
+        )
+    )
     proposal = paper.propose(account["id"], panel=panel)
     assert proposal["status"] == "proposed"
     stored_policy = paper.store.account(account["id"])["strategy"]["policy_snapshot"]
@@ -704,7 +891,8 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
     tampered["risk"]["max_exposure"] = 1.0
     with pytest.raises(ValueError, match="完整性"):
         pin_decision_strategy(
-            decision.model_copy(update={"policy_snapshot": tampered}), "demo",
+            decision.model_copy(update={"policy_snapshot": tampered}),
+            "demo",
         )
 
 
@@ -715,14 +903,19 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     payload = {
         "name": "接口回测",
         "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3, "cap_weight": 0.25},
-        "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
-        "benchmark": None, "initial_capital": 100_000,
+        "universe": "demo",
+        "start": "2023-01-01",
+        "end": "2023-12-31",
+        "benchmark": None,
+        "initial_capital": 100_000,
     }
     assert client.post("/api/v1/backtests", json=payload).status_code == 403
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
     created = client.post(
-        "/api/v1/backtests", json=payload, headers={"X-CSRF-Token": token},
+        "/api/v1/backtests",
+        json=payload,
+        headers={"X-CSRF-Token": token},
     )
     assert created.status_code == 202
     assert created.json()["status"] == "queued"
@@ -752,7 +945,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
 
     css = client.get("/static/trading.css").text
     checkbox_rule = css.split(
-        '.trading-history-row input[type="checkbox"]', 1,
+        '.trading-history-row input[type="checkbox"]',
+        1,
     )[1].split("}", 1)[0]
     assert "min-width: 18px" in checkbox_rule
     assert "padding: 0" in checkbox_rule
@@ -762,9 +956,10 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
 
 
 def test_factor_reference_splitter_preserves_expression_commas():
-    assert split_factor_references(
-        "ts_corr(rank(volume), rank(close), 20), mom_20d"
-    ) == ["ts_corr(rank(volume), rank(close), 20)", "mom_20d"]
+    assert split_factor_references("ts_corr(rank(volume), rank(close), 20), mom_20d") == [
+        "ts_corr(rank(volume), rank(close), 20)",
+        "mom_20d",
+    ]
     with pytest.raises(ValueError, match="括号"):
         split_factor_references("rank(close), ts_mean(volume, 20")
 
@@ -779,7 +974,9 @@ def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
         "/api/v1/backtests",
         json={
             "strategy": {"kind": "factor", "factor": "unknown_factor"},
-            "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
+            "universe": "demo",
+            "start": "2023-01-01",
+            "end": "2023-12-31",
             "benchmark": None,
         },
         headers={"X-CSRF-Token": token},
@@ -794,7 +991,9 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     monkeypatch.setattr(trading, "_require_csrf", lambda request: None)
     wake_count = [0]
     monkeypatch.setattr(
-        trading, "get_paper_automation_worker", lambda: _RouteAutoWorker(wake_count),
+        trading,
+        "get_paper_automation_worker",
+        lambda: _RouteAutoWorker(wake_count),
     )
     strategy = _ROUTE_STRATEGY
     backtest_service = _RouteBacktestService()
@@ -802,11 +1001,17 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     worker = _RouteBacktestWorker()
     monkeypatch.setattr(trading, "get_backtest_worker", lambda: worker)
     request = object()
-    spec = BacktestSpec.model_validate({
-        "name": "route coverage", "strategy": strategy, "universe": "demo",
-        "start": "2023-01-01", "end": "2023-12-31", "benchmark": None,
-        "initial_capital": 100_000,
-    })
+    spec = BacktestSpec.model_validate(
+        {
+            "name": "route coverage",
+            "strategy": strategy,
+            "universe": "demo",
+            "start": "2023-01-01",
+            "end": "2023-12-31",
+            "benchmark": None,
+            "initial_capital": 100_000,
+        }
+    )
 
     assert trading.create_backtest(spec, request)["id"] == "new-run"
     assert worker.started == 1
@@ -828,11 +1033,13 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
         trading.cancel_backtest("broken", request)
     assert bad_cancel.value.status_code == 400
     assert trading.compare_backtests(
-        trading.CompareRequest(run_ids=["one", "two"]), request,
+        trading.CompareRequest(run_ids=["one", "two"]),
+        request,
     )["run_ids"] == ["one", "two"]
     with pytest.raises(trading.HTTPException):
         trading.compare_backtests(
-            trading.CompareRequest(run_ids=["one", "broken"]), request,
+            trading.CompareRequest(run_ids=["one", "broken"]),
+            request,
         )
 
     json_export = trading.export_backtest("completed")
@@ -849,24 +1056,35 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
 
     paper_service = _RoutePaperService()
     monkeypatch.setattr(trading, "get_paper_service", lambda: paper_service)
-    paper_spec = PaperAccountSpec.model_validate({
-        "name": "auto route", "strategy": strategy, "universe": "demo",
-        "initial_capital": 100_000, "mode": "auto",
-    })
+    paper_spec = PaperAccountSpec.model_validate(
+        {
+            "name": "auto route",
+            "strategy": strategy,
+            "universe": "demo",
+            "initial_capital": 100_000,
+            "mode": "auto",
+        }
+    )
     assert trading.create_paper_account(paper_spec, request)["mode"] == "auto"
     assert wake_count[0] == 1
     promoted = trading.promote_backtest(
-        "completed", trading.PromoteRequest(name="promoted", mode="auto"), request,
+        "completed",
+        trading.PromoteRequest(name="promoted", mode="auto"),
+        request,
     )
     assert promoted["mode"] == "auto"
     with pytest.raises(trading.HTTPException) as promote_missing:
         trading.promote_backtest(
-            "missing", trading.PromoteRequest(name="missing"), request,
+            "missing",
+            trading.PromoteRequest(name="missing"),
+            request,
         )
     assert promote_missing.value.status_code == 404
     with pytest.raises(trading.HTTPException) as promote_queued:
         trading.promote_backtest(
-            "queued", trading.PromoteRequest(name="queued"), request,
+            "queued",
+            trading.PromoteRequest(name="queued"),
+            request,
         )
     assert promote_queued.value.status_code == 409
 
@@ -887,7 +1105,9 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     assert updated["name"] == "renamed"
     with pytest.raises(trading.HTTPException):
         trading.update_paper_account(
-            "missing", trading.PaperAccountUpdate(status="paused"), request,
+            "missing",
+            trading.PaperAccountUpdate(status="paused"),
+            request,
         )
     deleted = trading.delete_paper_account("account", request)
     assert deleted["deleted"] is True and deleted["recoverable"] is True
@@ -895,12 +1115,19 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     with pytest.raises(trading.HTTPException) as missing_delete:
         trading.delete_paper_account("missing", request)
     assert missing_delete.value.status_code == 404
-    assert trading.clone_paper_account(
-        "account", trading.CloneAccountRequest(name="clone", mode="auto"), request,
-    )["id"] == "clone"
+    assert (
+        trading.clone_paper_account(
+            "account",
+            trading.CloneAccountRequest(name="clone", mode="auto"),
+            request,
+        )["id"]
+        == "clone"
+    )
     with pytest.raises(trading.HTTPException):
         trading.clone_paper_account(
-            "missing", trading.CloneAccountRequest(name="clone"), request,
+            "missing",
+            trading.CloneAccountRequest(name="clone"),
+            request,
         )
     assert trading.propose_paper_cycle("account", request)["status"] == "proposed"
     with pytest.raises(trading.HTTPException):

@@ -396,11 +396,14 @@
 }
 
 .paper-create-form { margin: 0 -20px 16px; padding: 16px 20px; border-top: 1px solid var(--trade-line); border-bottom: 1px solid var(--trade-line); }
-.paper-list-actions,
-.paper-list-actions label,
+.paper-list-title-row,
+.paper-list-title-row label,
 .paper-editor-actions { display: flex; align-items: center; gap: 8px; }
-.paper-list-actions label { color: var(--muted); font-size: 10px; cursor: pointer; }
-.paper-list-actions input { width: 16px; height: 16px; margin: 0; accent-color: var(--trade-accent); }
+.paper-list-head { display: grid; gap: 10px; align-items: stretch; }
+.paper-list-title-row { justify-content: space-between; min-width: 0; }
+.paper-list-title-row label { flex: 0 0 auto; color: var(--muted); font-size: 10px; cursor: pointer; white-space: nowrap; }
+.paper-list-title-row input { width: 16px; height: 16px; margin: 0; accent-color: var(--trade-accent); }
+.paper-list-head #paper-new-toggle { width: 100%; min-height: 38px; padding-block: 7px; }
 .paper-auto { flex-direction: row !important; align-items: flex-start; padding: 8px 0; }
 .paper-auto input { flex: 0 0 auto; width: 18px; min-height: 18px; margin: 1px 2px 0 0; accent-color: var(--trade-accent); }
 .paper-auto > span { display: flex; flex-direction: column; gap: 3px; color: var(--ink-2) !important; }
@@ -536,7 +539,6 @@
   .trading-progress .trading-secondary { grid-row: auto; grid-column: auto; width: 100%; }
   .trading-progress-track { grid-column: auto; }
   .paper-cycle-head { align-items: flex-start; flex-direction: column; }
-  .paper-list-actions { flex-wrap: wrap; justify-content: flex-end; }
   #paper-account-actions { justify-content: flex-start; }
   #paper-account-actions button { flex: 1 1 auto; }
   .paper-editor-actions { align-items: stretch; flex-direction: column; }

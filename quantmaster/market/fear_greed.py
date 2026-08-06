@@ -20,6 +20,7 @@ CNN_GRAPH_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 CNN_PAGE_URL = "https://edition.cnn.com/markets/fear-and-greed"
 CACHE_TTL_SECONDS = 30 * 60
 MAX_RESPONSE_BYTES = 512 * 1024
+MAX_HISTORY_POINTS = 370
 RSI_ADD_THRESHOLD = 22.0
 FEAR_GREED_RARE_THRESHOLD = 10.0
 
@@ -77,6 +78,29 @@ def _iso_timestamp(value: object) -> str:
     return str(value or "")[:80]
 
 
+def _history(payload: dict[str, object]) -> list[dict[str, object]]:
+    historical = payload.get("fear_and_greed_historical")
+    if not isinstance(historical, dict) or not isinstance(historical.get("data"), list):
+        return []
+    points: list[dict[str, object]] = []
+    for raw in historical["data"][-MAX_HISTORY_POINTS:]:
+        if not isinstance(raw, dict):
+            continue
+        score = _float_or_nan(raw.get("y"))
+        if not math.isfinite(score) or not 0 <= score <= 100:
+            continue
+        rating = str(raw.get("rating") or "").strip().lower()[:40]
+        points.append(
+            {
+                "date": _iso_timestamp(raw.get("x"))[:10],
+                "score": round(score, 2),
+                "rating": rating,
+                "rating_label": _RATING_LABELS.get(rating, rating or "未分类"),
+            }
+        )
+    return points
+
+
 def parse_cnn_fear_greed(payload: object) -> dict[str, object]:
     """校验 CNN graphdata 响应并收敛为稳定的小型契约。"""
     if not isinstance(payload, dict):
@@ -96,6 +120,7 @@ def parse_cnn_fear_greed(payload: object) -> dict[str, object]:
         "rating": rating,
         "rating_label": _RATING_LABELS.get(rating, rating or "未分类"),
         "as_of": _iso_timestamp(current.get("timestamp")),
+        "history": _history(payload),
         "fetched_at": datetime.now(UTC).isoformat(),
         "source": "CNN Fear & Greed Index",
         "source_url": CNN_PAGE_URL,
@@ -118,6 +143,8 @@ def _read_cache(path: Path) -> dict[str, Any] | None:
 
 
 def _cache_is_fresh(value: dict[str, Any]) -> bool:
+    if not isinstance(value.get("history"), list):
+        return False
     try:
         fetched_at = datetime.fromisoformat(str(value["fetched_at"]).replace("Z", "+00:00"))
     except (KeyError, TypeError, ValueError):
@@ -149,6 +176,7 @@ def _unavailable() -> dict[str, object]:
         "rating": "",
         "rating_label": "暂不可用",
         "as_of": "",
+        "history": [],
         "source": "CNN Fear & Greed Index",
         "source_url": CNN_PAGE_URL,
         "scope": "美国市场风险情绪（作为全球背景参考，不代表 A 股或具体板块）",

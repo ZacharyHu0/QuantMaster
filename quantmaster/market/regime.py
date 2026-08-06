@@ -58,9 +58,15 @@ def indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
     result["momentum_20d"] = close.pct_change(20, fill_method=None)
     delta = close.diff()
     average_gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-    average_loss = (-delta.clip(upper=0)).ewm(
-        alpha=1 / 14, adjust=False, min_periods=14,
-    ).mean()
+    average_loss = (
+        (-delta.clip(upper=0))
+        .ewm(
+            alpha=1 / 14,
+            adjust=False,
+            min_periods=14,
+        )
+        .mean()
+    )
     relative_strength = average_gain / average_loss.replace(0, np.nan)
     result["rsi_14"] = 100 - 100 / (1 + relative_strength)
     result.loc[(average_loss == 0) & (average_gain > 0), "rsi_14"] = 100.0
@@ -75,23 +81,20 @@ def indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
     result["volatility_20d"] = result["return_1d"].rolling(20, min_periods=10).std()
 
     vol = result["volatility_20d"].replace(0, np.nan)
-    ma_component = ((result["ema_10"] / result["ema_30"] - 1) /
-                    (vol * math.sqrt(10) + EPS)).clip(-2, 2) / 2
+    ma_component = ((result["ema_10"] / result["ema_30"] - 1) / (vol * math.sqrt(10) + EPS)).clip(-2, 2) / 2
     macd_component = (result["macd_hist"] / (close * vol + EPS)).clip(-2, 2) / 2
-    momentum_component = (result["momentum_5d"] /
-                          (vol * math.sqrt(5) + EPS)).clip(-2, 2) / 2
-    result["trend_score"] = (
-        0.45 * ma_component + 0.35 * macd_component + 0.20 * momentum_component
-    ).clip(-1, 1)
+    momentum_component = (result["momentum_5d"] / (vol * math.sqrt(5) + EPS)).clip(-2, 2) / 2
+    result["trend_score"] = (0.45 * ma_component + 0.35 * macd_component + 0.20 * momentum_component).clip(
+        -1, 1
+    )
     result["bull_score"] = ((result["trend_score"] + 1) * 50).clip(0, 100)
 
     for field in ("volume", "amount"):
         if field in bars:
             values = pd.to_numeric(bars[field], errors="coerce").reindex(result.index)
             result[field] = values
-            result[f"{field}_ratio_5_20"] = (
-                values.rolling(5, min_periods=3).mean()
-                / (values.rolling(20, min_periods=10).mean() + EPS)
+            result[f"{field}_ratio_5_20"] = values.rolling(5, min_periods=3).mean() / (
+                values.rolling(20, min_periods=10).mean() + EPS
             )
     result["state"] = result["trend_score"].apply(
         lambda value: _state(float(value)) if pd.notna(value) else "unknown"
@@ -140,20 +143,21 @@ def _forecast(frame: pd.DataFrame, horizons: tuple[int, ...]) -> list[dict[str, 
         probability_up = 1.0 / (1.0 + math.exp(-2.2 * signal))
         expected = signal * vol * math.sqrt(horizon) * 0.55
         confidence = min(0.90, (0.45 + 0.35 * abs(score)) * (0.65 + 0.35 * stability) * decay)
-        result.append({
-            "horizon_days": horizon,
-            "direction": "up" if probability_up >= 0.55 else (
-                "down" if probability_up <= 0.45 else "range"),
-            "probability_up": round(probability_up, 4),
-            "expected_return": round(expected, 4),
-            "confidence": round(confidence, 4),
-        })
+        result.append(
+            {
+                "horizon_days": horizon,
+                "direction": "up"
+                if probability_up >= 0.55
+                else ("down" if probability_up <= 0.45 else "range"),
+                "probability_up": round(probability_up, 4),
+                "expected_return": round(expected, 4),
+                "confidence": round(confidence, 4),
+            }
+        )
     return result
 
 
-def _forecast_validation(
-    frame: pd.DataFrame, horizons: tuple[int, ...]
-) -> list[dict[str, Any]]:
+def _forecast_validation(frame: pd.DataFrame, horizons: tuple[int, ...]) -> list[dict[str, Any]]:
     """用已发生的后续收益评价历史概率；末尾未知未来严格剔除。"""
     rows: list[dict[str, Any]] = []
     for horizon in horizons:
@@ -164,31 +168,44 @@ def _forecast_validation(
         valid = probability.notna() & forward_return.notna()
         sample_count = int(valid.sum())
         if sample_count == 0:
-            rows.append({
-                "horizon_days": horizon, "samples": 0,
-                "direction_accuracy": None, "brier_score": None,
-            })
+            rows.append(
+                {
+                    "horizon_days": horizon,
+                    "samples": 0,
+                    "direction_accuracy": None,
+                    "brier_score": None,
+                }
+            )
             continue
         actual_up = (forward_return[valid] > 0).astype(float)
         predicted_up = (probability[valid] >= 0.5).astype(float)
-        rows.append({
-            "horizon_days": horizon,
-            "samples": sample_count,
-            "direction_accuracy": round(float((predicted_up == actual_up).mean()), 4),
-            "brier_score": round(float(((probability[valid] - actual_up) ** 2).mean()), 4),
-            "average_forward_return": round(float(forward_return[valid].mean()), 4),
-        })
+        rows.append(
+            {
+                "horizon_days": horizon,
+                "samples": sample_count,
+                "direction_accuracy": round(float((predicted_up == actual_up).mean()), 4),
+                "brier_score": round(float(((probability[valid] - actual_up) ** 2).mean()), 4),
+                "average_forward_return": round(float(forward_return[valid].mean()), 4),
+            }
+        )
     return rows
 
 
-def analyze_bars(
-    bars: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 7)
-) -> dict[str, Any]:
+def analyze_bars(bars: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 7)) -> dict[str, Any]:
     """返回当前、过去逐日状态和未来 1-7 日概率展望。"""
     frame = indicator_frame(bars)
     past_columns = [
-        "close", "return_1d", "trend_score", "bull_score", "state", "rsi_14",
-        "macd", "macd_signal", "macd_hist", "volume_ratio_5_20", "amount_ratio_5_20",
+        "close",
+        "return_1d",
+        "trend_score",
+        "bull_score",
+        "state",
+        "rsi_14",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "volume_ratio_5_20",
+        "amount_ratio_5_20",
     ]
     past = frame[[c for c in past_columns if c in frame]].copy()
     return {
@@ -222,14 +239,14 @@ def analyze_market(
     """候选等权市场状态；用宽度修正单一指数可能造成的失真。"""
     bars, breadth = _market_bars(panel)
     frame = indicator_frame(bars)
-    breadth_score = (
-        (breadth["advance_ratio"] - 0.5) * 1.2
-        + (breadth["above_ma20_ratio"] - 0.5) * 0.8
-    ).clip(-1, 1)
+    breadth_score = ((breadth["advance_ratio"] - 0.5) * 1.2 + (breadth["above_ma20_ratio"] - 0.5) * 0.8).clip(
+        -1, 1
+    )
     frame["trend_score"] = (0.70 * frame["trend_score"] + 0.30 * breadth_score).clip(-1, 1)
     frame["bull_score"] = (frame["trend_score"] + 1) * 50
     frame["state"] = frame["trend_score"].apply(
-        lambda value: _state(float(value)) if pd.notna(value) else "unknown")
+        lambda value: _state(float(value)) if pd.notna(value) else "unknown"
+    )
     frame = frame.join(breadth)
     report = {
         "current": _current(frame),
@@ -239,17 +256,17 @@ def analyze_market(
         "forecast_note": "候选等权趋势 + 市场宽度的规则型概率展望，不代表确定收益。",
     }
     last = frame.dropna(subset=["trend_score"]).iloc[-1]
-    report["current"].update({
-        "advance_ratio": _number(last.get("advance_ratio")),
-        "above_ma20_ratio": _number(last.get("above_ma20_ratio")),
-        "universe_size": int(panel["close"].shape[1]),
-    })
+    report["current"].update(
+        {
+            "advance_ratio": _number(last.get("advance_ratio")),
+            "above_ma20_ratio": _number(last.get("above_ma20_ratio")),
+            "universe_size": int(panel["close"].shape[1]),
+        }
+    )
     return report
 
 
-def analyze_sectors(
-    panel: dict[str, pd.DataFrame], industry_map: dict[str, str]
-) -> pd.DataFrame:
+def analyze_sectors(panel: dict[str, pd.DataFrame], industry_map: dict[str, str]) -> pd.DataFrame:
     """按行业聚合当前牛熊/趋势/宽度，返回强弱排序。"""
     close = panel["close"]
     rows: list[dict[str, Any]] = []
@@ -261,13 +278,25 @@ def analyze_sectors(
     for sector, symbols in groups.items():
         if len(symbols) < 2:
             continue
-        sub = {name: values.loc[:, values.columns.intersection(symbols)]
-               for name, values in panel.items() if isinstance(values, pd.DataFrame)}
+        sub = {
+            name: values.loc[:, values.columns.intersection(symbols)]
+            for name, values in panel.items()
+            if isinstance(values, pd.DataFrame)
+        }
         try:
-            current = analyze_market(sub, horizons=(1,))["current"]
+            report = analyze_market(sub, horizons=(1,))
+            current = report["current"]
         except ValueError:
             continue
-        rows.append({"sector": sector, "members": len(symbols), **current})
+        history = report["past"]["rsi_14"].dropna().tail(180)
+        rows.append(
+            {
+                "sector": sector,
+                "members": len(symbols),
+                "rsi_history": [[str(index.date()), _number(value, 2)] for index, value in history.items()],
+                **current,
+            }
+        )
     if not rows:
         return pd.DataFrame(columns=["sector", "members", "state", "bull_score"])
     return pd.DataFrame(rows).sort_values(["bull_score", "members"], ascending=[False, False])

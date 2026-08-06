@@ -100,17 +100,19 @@ async def lifespan(_: FastAPI):
         if get_config().lab.enabled:
             worker.start()
 
-    unregister_maintenance = maintenance_barrier.register(MaintenanceParticipant(
-        name=f"web-background-components:{uuid.uuid4().hex}",
-        drain=drain_workers,
-        resume=resume_workers,
-        idle=lambda: (
-            not data_refresh_manager.active
-            and rotation_worker.idle
-            and get_paper_automation_worker().idle
-            and stock_analysis_worker.idle
-        ),
-    ))
+    unregister_maintenance = maintenance_barrier.register(
+        MaintenanceParticipant(
+            name=f"web-background-components:{uuid.uuid4().hex}",
+            drain=drain_workers,
+            resume=resume_workers,
+            idle=lambda: (
+                not data_refresh_manager.active
+                and rotation_worker.idle
+                and get_paper_automation_worker().idle
+                and stock_analysis_worker.idle
+            ),
+        )
+    )
     research_worker.start()
     stock_analysis_worker.start()
     data_refresh_manager.start()
@@ -123,17 +125,20 @@ async def lifespan(_: FastAPI):
     cfg = get_config()
     runtime_status = runtime.status()
     worker_status = worker.status()
-    channels = ",".join(
-        name for name, active in runtime_status.get("channels", {}).items() if active
-    ) or "disabled"
+    channels = (
+        ",".join(name for name, active in runtime_status.get("channels", {}).items() if active) or "disabled"
+    )
     log_path = current_log_path()
     logger.info(
         "QuantMaster %s 已就绪 · http://%s:%s",
-        __version__, cfg.server.host, cfg.server.port,
+        __version__,
+        cfg.server.host,
+        cfg.server.port,
     )
     logger.info(
         "自动化 %s · Bot %s · Lab %s · 完整日志 %s",
-        runtime_status.get("status", "unknown"), channels,
+        runtime_status.get("status", "unknown"),
+        channels,
         worker_status.get("status", "unknown"),
         str(log_path) if log_path else "仅终端",
     )
@@ -152,7 +157,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="QuantMaster", version=__version__, lifespan=lifespan,
+    title="QuantMaster",
+    version=__version__,
+    lifespan=lifespan,
     default_response_class=JSONResponse,
 )
 
@@ -186,11 +193,15 @@ async def safe_validation_error(request: Request, exc: RequestValidationError):
             blocking=True,
         ),
     }
-    if (request.url.path.startswith("/api/v1/settings") or
-            request.url.path.startswith("/api/v1/news/sources") or
-            request.url.path.startswith("/api/v1/automation/channels/")):
-        errors = [{key: value for key, value in item.items() if key not in {"input", "ctx"}}
-                  for item in exc.errors()]
+    if (
+        request.url.path.startswith("/api/v1/settings")
+        or request.url.path.startswith("/api/v1/news/sources")
+        or request.url.path.startswith("/api/v1/automation/channels/")
+    ):
+        errors = [
+            {key: value for key, value in item.items() if key not in {"input", "ctx"}}
+            for item in exc.errors()
+        ]
         content["detail"] = jsonable_encoder(errors)
         return JSONResponse(status_code=422, content=content)
     content["detail"] = jsonable_encoder(exc.errors())
@@ -220,16 +231,26 @@ async def request_context_and_migration_lock(request: Request, call_next):
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
-    allowed = (path in {
-                   "/api/v1/health/live", "/api/v1/health/ready",
-                   "/api/v1/diagnostics", "/api/v1/release", "/api/v1/session", "/",
-               } or
-               path.startswith(("/static/", "/api/v1/data/migrations")) or
-               (path == "/api/v1/settings" and request.method == "GET"))
+    allowed = (
+        path
+        in {
+            "/api/v1/health/live",
+            "/api/v1/health/ready",
+            "/api/v1/diagnostics",
+            "/api/v1/release",
+            "/api/v1/session",
+            "/",
+        }
+        or path.startswith(("/static/", "/api/v1/data/migrations"))
+        or (path == "/api/v1/settings" and request.method == "GET")
+    )
     try:
         enforce_request_security(request)
-        if ((migration_manager.active or maintenance_barrier.active)
-                and path.startswith("/api/v1/") and not allowed):
+        if (
+            (migration_manager.active or maintenance_barrier.active)
+            and path.startswith("/api/v1/")
+            and not allowed
+        ):
             problem = make_problem(
                 "data_migration_active",
                 severity="warning",
@@ -242,7 +263,8 @@ async def request_context_and_migration_lock(request: Request, call_next):
             response = JSONResponse(
                 status_code=423,
                 content={
-                    "detail": problem["message"], "problem": problem,
+                    "detail": problem["message"],
+                    "problem": problem,
                     "error_id": request_id,
                 },
             )
@@ -277,7 +299,9 @@ async def request_context_and_migration_lock(request: Request, call_next):
     except Exception:
         logger.exception(
             "未处理的接口异常 request_id=%s method=%s path=%s",
-            request_id, request.method, path,
+            request_id,
+            request.method,
+            path,
         )
         problem = make_problem(
             "unhandled_server_error",
@@ -300,9 +324,13 @@ async def request_context_and_migration_lock(request: Request, call_next):
     if response.status_code >= 400:
         logger.warning(
             "接口返回失败 request_id=%s method=%s path=%s status=%s",
-            request_id, request.method, path, response.status_code,
+            request_id,
+            request.method,
+            path,
+            response.status_code,
         )
     return response
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -344,14 +372,18 @@ ProgressEmitter = Callable[..., None]
 
 
 def _progress_stream(
-    task: Callable[[ProgressEmitter], dict], request_id: str | None = None,
+    task: Callable[[ProgressEmitter], dict],
+    request_id: str | None = None,
 ) -> StreamingResponse:
     """在线程中执行同步数据任务，以 NDJSON 持续发送真实阶段进度。"""
     request_id = request_id or _new_request_id()
     events: queue.Queue[dict | None] = queue.Queue()
 
     def emit(
-        progress: int, phase: str, detail: str = "", partial: dict | None = None,
+        progress: int,
+        phase: str,
+        detail: str = "",
+        partial: dict | None = None,
         level: str = "info",
     ) -> None:
         event = {
@@ -370,18 +402,25 @@ def _progress_stream(
 
     def run() -> None:
         try:
-            events.put({
-                "type": "result", "data": task(emit), "request_id": request_id,
-            })
+            events.put(
+                {
+                    "type": "result",
+                    "data": task(emit),
+                    "request_id": request_id,
+                }
+            )
         except OperationProblem as exc:
             logger.warning(
                 "流式数据任务被业务门禁阻止 request_id=%s code=%s",
-                request_id, exc.problem.get("code"),
+                request_id,
+                exc.problem.get("code"),
             )
             event = {
-                "type": "error", "message": exc.problem["message"],
+                "type": "error",
+                "message": exc.problem["message"],
                 "problem": exc.problem,
-                "error_id": request_id, "request_id": request_id,
+                "error_id": request_id,
+                "request_id": request_id,
             }
             if exc.data_quality is not None:
                 event["data_quality"] = exc.data_quality
@@ -397,11 +436,15 @@ def _progress_stream(
                 action="重试一次；如仍失败，请复制请求编号排查后端日志。",
                 blocking=True,
             )
-            events.put({
-                "type": "error", "message": message,
-                "problem": problem,
-                "error_id": request_id, "request_id": request_id,
-            })
+            events.put(
+                {
+                    "type": "error",
+                    "message": message,
+                    "problem": problem,
+                    "error_id": request_id,
+                    "request_id": request_id,
+                }
+            )
         finally:
             events.put(None)
 
@@ -415,15 +458,18 @@ def _progress_stream(
             yield strict_json_dumps(jsonable_encoder(event)) + "\n"
 
     return StreamingResponse(
-        generate(), media_type="application/x-ndjson",
+        generate(),
+        media_type="application/x-ndjson",
         headers={
-            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
             "X-Request-ID": request_id,
         },
     )
 
 
 # ---------- 页面 ----------
+
 
 @app.get("/", include_in_schema=False)
 def index(request: Request) -> HTMLResponse:
@@ -436,24 +482,29 @@ def index(request: Request) -> HTMLResponse:
         .replace("%%QM_TRADING_DAYS%%", str(TRADING_DAYS))
         .replace("%%QM_RISK_FREE%%", str(RISK_FREE))
     )
-    csp = "; ".join((
-        "default-src 'self'",
-        "script-src 'self'",
-        "script-src-attr 'none'",
-        "style-src 'self'",
-        "style-src-attr 'unsafe-inline'",
-        "img-src 'self' data:",
-        "connect-src 'self'",
-        "font-src 'self'",
-        "object-src 'none'",
-        "base-uri 'none'",
-        "frame-ancestors 'none'",
-        "form-action 'self'",
-    ))
-    response = HTMLResponse(page, headers={
-        "Cache-Control": "no-cache",
-        "Content-Security-Policy": csp,
-    })
+    csp = "; ".join(
+        (
+            "default-src 'self'",
+            "script-src 'self'",
+            "script-src-attr 'none'",
+            "style-src 'self'",
+            "style-src-attr 'unsafe-inline'",
+            "img-src 'self' data:",
+            "connect-src 'self'",
+            "font-src 'self'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+            "form-action 'self'",
+        )
+    )
+    response = HTMLResponse(
+        page,
+        headers={
+            "Cache-Control": "no-cache",
+            "Content-Security-Policy": csp,
+        },
+    )
     ensure_csrf_cookie(response, request)
     return response
 
@@ -558,10 +609,7 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
         symbols.setdefault(symbol, "")
         memberships.setdefault(symbol, []).append("holdings")
 
-    missing = [
-        symbol for symbol, name in symbols.items()
-        if not usable_name(name, symbol)
-    ]
+    missing = [symbol for symbol, name in symbols.items() if not usable_name(name, symbol)]
     if missing:
         cached_names = load_stock_names(missing)
         for symbol in missing:
@@ -575,12 +623,12 @@ def _market_groups() -> dict[str, dict[str, str]]:
 
     return {
         "A股指数": dict(A_SHARE_INDEXES),
-        "全球市场": {key: value[1] for key, value in GLOBAL_REFS.items()
-                     if "=" not in key and "-" not in key},
+        "全球市场": {
+            key: value[1] for key, value in GLOBAL_REFS.items() if "=" not in key and "-" not in key
+        },
         "商品与汇率": {
             **{key: value for key, value in FUTURES_MAIN.items() if not key.startswith("IF")},
-            **{key: value[1] for key, value in GLOBAL_REFS.items()
-               if "=" in key or "-" in key},
+            **{key: value[1] for key, value in GLOBAL_REFS.items() if "=" in key or "-" in key},
         },
     }
 
@@ -595,30 +643,31 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         return None
     checked_at = (meta or {}).get("checked_at")
     rsi = None
+    rsi_history: list[list] = []
     try:
-        rsi = indicator_frame(pd.DataFrame({"close": close}))["rsi_14"].iloc[-1]
-        rsi = round(float(rsi), 2) if pd.notna(rsi) else None
+        rsi_series = indicator_frame(pd.DataFrame({"close": close}))["rsi_14"].dropna()
+        rsi_history = _series_to_points(rsi_series.tail(180))
+        if not rsi_series.empty and pd.notna(rsi_series.iloc[-1]):
+            rsi = round(float(rsi_series.iloc[-1]), 2)
     except ValueError:
         rsi = None
     return {
         "symbol": symbol,
         "name": name,
         "last": round(float(close.iloc[-1]), 3),
-        "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
-        if len(close) > 1 else 0.0,
+        "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2) if len(close) > 1 else 0.0,
         "nav": _series_to_points(close / close.iloc[0]),
         "as_of": str(close.index[-1].date()),
-        "checked_at": (
-            pd.Timestamp.fromtimestamp(float(checked_at)).isoformat()
-            if checked_at else ""
-        ),
+        "checked_at": (pd.Timestamp.fromtimestamp(float(checked_at)).isoformat() if checked_at else ""),
         "cache_status": str((meta or {}).get("last_status") or "ready"),
         "source": str((meta or {}).get("last_source") or "local-cache"),
         "rsi_14": rsi,
+        "rsi_history": rsi_history,
         "opportunity": classify_opportunity(rsi),
         "freshness": (
-            "stale" if str((meta or {}).get("last_status") or "ready")
-            in {"stale", "refresh_failed"} else "ready"
+            "stale"
+            if str((meta or {}).get("last_status") or "ready") in {"stale", "refresh_failed"}
+            else "ready"
         ),
     }
 
@@ -637,7 +686,11 @@ def _needs_market_sync(meta: dict | None, start: str, end: str, refresh: str) ->
 
 
 def _sync_reference_market(
-    symbols: list[str], start: str, end: str, refresh: str, store,
+    symbols: list[str],
+    start: str,
+    end: str,
+    refresh: str,
+    store,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
     """同步全球参考标的；每个标的独立选择兼容来源和错误状态。"""
     from quantmaster.data.reference_market import (
@@ -696,8 +749,7 @@ def _sync_reference_market(
         max_workers=min(6, max(1, len(plans))),
         thread_name_prefix="reference-market",
     ) as executor:
-        pending = [executor.submit(sync_one, symbol, fetch_start)
-                   for symbol, fetch_start in plans.items()]
+        pending = [executor.submit(sync_one, symbol, fetch_start) for symbol, fetch_start in plans.items()]
         for future in as_completed(pending):
             future.result()
 
@@ -738,8 +790,7 @@ def _market_overview_data(
             cached = store.get(symbol, columns=["close"])
             if cached is None:
                 continue
-            item = _market_item(
-                symbol, name, cached.loc[start_value:end_value], store.metadata(symbol))
+            item = _market_item(symbol, name, cached.loc[start_value:end_value], store.metadata(symbol))
             if item is None:
                 continue
             if group == PERSONAL_MARKET_GROUP:
@@ -747,7 +798,9 @@ def _market_overview_data(
             items[(group, symbol)] = item
             if progress:
                 progress(
-                    2, "读取本地市场缓存", f"{name} · 已显示本地数据",
+                    2,
+                    "读取本地市场缓存",
+                    f"{name} · 已显示本地数据",
                     {"kind": "market_item", "stage": "cache", "group": group, "item": item},
                 )
 
@@ -755,18 +808,23 @@ def _market_overview_data(
 
     def one(group: str, symbol: str, name: str):
         frame = load_history(
-            symbol, start_value, end_value, store=store,
-            refresh=refresh, priority="interactive",
+            symbol,
+            start_value,
+            end_value,
+            store=store,
+            refresh=refresh,
+            priority="interactive",
         )
         return group, symbol, name, frame
 
     futures = {}
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-sync") as executor:
-        batch = [symbol for symbol in yahoo_symbols
-                 if any(symbol in values for values in groups.values())]
-        futures[executor.submit(
-            _sync_reference_market, batch, start_value, end_value, refresh, store
-        )] = ("__yahoo__", "", "")
+        batch = [symbol for symbol in yahoo_symbols if any(symbol in values for values in groups.values())]
+        futures[executor.submit(_sync_reference_market, batch, start_value, end_value, refresh, store)] = (
+            "__yahoo__",
+            "",
+            "",
+        )
         for group, symbols in groups.items():
             for symbol, name in symbols.items():
                 if symbol in yahoo_symbols:
@@ -786,15 +844,15 @@ def _market_overview_data(
                     for candidate_symbol, candidate_name in values.items():
                         if candidate_symbol in yahoo_symbols:
                             batch_lookup.setdefault(candidate_symbol, []).append(
-                                (candidate_group, candidate_name))
+                                (candidate_group, candidate_name)
+                            )
                 for batch_symbol in batch:
                     frame = frames.get(batch_symbol)
                     for batch_group, batch_name in batch_lookup[batch_symbol]:
                         completed += 1
                         if batch_symbol in reference_failures:
                             failures[(batch_group, batch_symbol)] = reference_failures[batch_symbol]
-                        item = _market_item(
-                            batch_symbol, batch_name, frame, store.metadata(batch_symbol))
+                        item = _market_item(batch_symbol, batch_name, frame, store.metadata(batch_symbol))
                         if item is None and batch_symbol in reference_failures:
                             item = items.get((batch_group, batch_symbol))
                             if item is not None:
@@ -809,11 +867,18 @@ def _market_overview_data(
                             items[(batch_group, batch_symbol)] = item
                         if progress:
                             progress(
-                                3 + round(94 * completed / max(1, total)), "同步市场行情",
+                                3 + round(94 * completed / max(1, total)),
+                                "同步市场行情",
                                 f"{completed}/{total} · {batch_name} · "
                                 f"{'已更新' if item else '沿用缓存或跳过'}",
-                                {"kind": "market_item", "stage": "updated",
-                                 "group": batch_group, "item": item} if item else None,
+                                {
+                                    "kind": "market_item",
+                                    "stage": "updated",
+                                    "group": batch_group,
+                                    "item": item,
+                                }
+                                if item
+                                else None,
                                 "info" if item else "warning",
                             )
                 continue
@@ -839,10 +904,12 @@ def _market_overview_data(
                 items[(group, symbol)] = item
             if progress:
                 progress(
-                    3 + round(94 * completed / max(1, total)), "同步市场行情",
+                    3 + round(94 * completed / max(1, total)),
+                    "同步市场行情",
                     f"{completed}/{total} · {name} · {'已更新' if item else '已跳过'}",
                     {"kind": "market_item", "stage": "updated", "group": group, "item": item}
-                    if item is not None else None,
+                    if item is not None
+                    else None,
                     "info" if item else "warning",
                 )
 
@@ -855,25 +922,28 @@ def _market_overview_data(
     for group, symbols in groups.items():
         stale = sum(
             str(items[(group, symbol)].get("freshness")) == "stale"
-            for symbol in symbols if (group, symbol) in items
+            for symbol in symbols
+            if (group, symbol) in items
         )
         missing = [symbol for symbol in symbols if (group, symbol) not in items]
         for symbol in missing:
             missing_issue = failures.get((group, symbol), {})
             meta = store.metadata(symbol) or {}
             checked_at = float(meta.get("checked_at") or 0)
-            unavailable.append({
-                "group": group,
-                "symbol": symbol,
-                "name": symbols[symbol],
-                "status": "unavailable",
-                "error_code": missing_issue.get("error_code", "no_usable_data"),
-                "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
-                "source_attempts": missing_issue.get("source_attempts", []),
-                "last_success_at": (
-                    pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
-                ),
-            })
+            unavailable.append(
+                {
+                    "group": group,
+                    "symbol": symbol,
+                    "name": symbols[symbol],
+                    "status": "unavailable",
+                    "error_code": missing_issue.get("error_code", "no_usable_data"),
+                    "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
+                    "source_attempts": missing_issue.get("source_attempts", []),
+                    "last_success_at": (
+                        pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
+                    ),
+                }
+            )
         group_statuses[group] = {
             "configured": len(symbols),
             "ready": len(result[group]) - stale,
@@ -899,7 +969,8 @@ def _market_overview_data(
 
 @app.get("/api/v1/market/overview")
 def market_overview(
-    start: str | None = None, refresh: Literal["auto", "incremental"] = "auto",
+    start: str | None = None,
+    refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
     """个人股票与全球参考市场概览。"""
     return _market_overview_data(start, refresh=refresh)
@@ -931,8 +1002,9 @@ def market_overview_stream(
 
 
 @app.get("/api/v1/market/history/{symbol}")
-def market_history(symbol: str, start: str = "2023-01-01", end: str | None = None,
-                   frequency: str = "1d") -> dict:
+def market_history(
+    symbol: str, start: str = "2023-01-01", end: str | None = None, frequency: str = "1d"
+) -> dict:
     from quantmaster.data import load_bars
     from quantmaster.data.base import validate_frequency, validate_symbol
 
@@ -951,10 +1023,14 @@ def market_history(symbol: str, start: str = "2023-01-01", end: str | None = Non
         "symbol": symbol,
         "frequency": frequency,
         "kline": [
-            [str(idx.date()) if frequency == "1d" else str(idx),
-             round(row["open"], 3), round(row["close"], 3),
-             round(row["low"], 3), round(row["high"], 3),
-             round(row.get("volume", 0.0), 0)]
+            [
+                str(idx.date()) if frequency == "1d" else str(idx),
+                round(row["open"], 3),
+                round(row["close"], 3),
+                round(row["low"], 3),
+                round(row["high"], 3),
+                round(row.get("volume", 0.0), 0),
+            ]
             for idx, row in df.iterrows()
         ],
     }
@@ -983,10 +1059,8 @@ def market_regime(req: RegimeRequest) -> dict:
         report = analyze_market(panel)
         past = report.pop("past").tail(req.history)
         report["past"] = [
-            {"date": str(idx.date()), **{
-                key: _json_scalar(value)
-                for key, value in row.items()
-            }} for idx, row in past.iterrows()
+            {"date": str(idx.date()), **{key: _json_scalar(value) for key, value in row.items()}}
+            for idx, row in past.iterrows()
         ]
         report["sectors"] = []
         if req.sectors:
@@ -1023,8 +1097,13 @@ def selection_daily(req: SelectionRequest) -> dict:
         mapping = load_industry_map() if req.include_industry else {}
         names = load_stock_names(symbols)
         report = hybrid_daily_selection(
-            panel, top_n=req.top_n, horizon=req.horizon, profile=req.profile,
-            universe=req.universe, industry_map=mapping, name_map=names,
+            panel,
+            top_n=req.top_n,
+            horizon=req.horizon,
+            profile=req.profile,
+            universe=req.universe,
+            industry_map=mapping,
+            name_map=names,
         )
         if req.save:
             from quantmaster.decision import DecisionStore
@@ -1037,20 +1116,28 @@ def selection_daily(req: SelectionRequest) -> dict:
 
 @app.get("/api/v1/research/selection/history")
 def selection_history(
-    universe: str | None = None, limit: int = 30, profile: str | None = None,
+    universe: str | None = None,
+    limit: int = 30,
+    profile: str | None = None,
     horizon: Literal[1, 3, 5, 7] | None = None,
 ) -> dict:
     from quantmaster.data import load_stock_names
     from quantmaster.decision import DecisionStore
 
     snapshots = DecisionStore().history(
-        universe, min(max(limit, 1), 200), profile=profile, horizon=horizon,
+        universe,
+        min(max(limit, 1), 200),
+        profile=profile,
+        horizon=horizon,
     )
-    symbols = list(dict.fromkeys(
-        pick.get("symbol", "")
-        for snapshot in snapshots for pick in snapshot.get("picks", [])
-        if pick.get("symbol")
-    ))
+    symbols = list(
+        dict.fromkeys(
+            pick.get("symbol", "")
+            for snapshot in snapshots
+            for pick in snapshot.get("picks", [])
+            if pick.get("symbol")
+        )
+    )
     names = load_stock_names(symbols) if symbols else {}
     for snapshot in snapshots:
         for pick in snapshot.get("picks", []):
@@ -1081,7 +1168,8 @@ def decision_dashboard(req: DecisionDashboardRequest) -> dict:
 
 
 def _decision_dashboard_data(
-    req: DecisionDashboardRequest, progress: ProgressEmitter | None = None,
+    req: DecisionDashboardRequest,
+    progress: ProgressEmitter | None = None,
 ) -> dict:
     from quantmaster.data import load_panel, load_stock_names
     from quantmaster.data.industry import load_industry_map
@@ -1101,14 +1189,16 @@ def _decision_dashboard_data(
                 "同步候选行情",
                 f"{completed}/{total} · {symbol} · {'已就绪' if success else '已跳过'}",
                 {
-                    "kind": "decision_symbol", "symbol": symbol,
-                    "success": success, "completed": completed, "total": total,
+                    "kind": "decision_symbol",
+                    "symbol": symbol,
+                    "success": success,
+                    "completed": completed,
+                    "total": total,
                 },
                 "info" if success else "warning",
             )
 
-    panel = load_panel(
-        symbols, req.start, end, progress=on_symbol if progress else None)
+    panel = load_panel(symbols, req.start, end, progress=on_symbol if progress else None)
     if progress:
         progress(67, "加载行业与名称", "优先复用本地缓存")
     mapping = load_industry_map()
@@ -1118,44 +1208,58 @@ def _decision_dashboard_data(
     market = analyze_market(panel)
     past = market.pop("past").tail(req.history)
     market["past"] = [
-        {"date": str(idx.date()), **{
-            key: _json_scalar(value) for key, value in row.items()
-        }} for idx, row in past.iterrows()
+        {"date": str(idx.date()), **{key: _json_scalar(value) for key, value in row.items()}}
+        for idx, row in past.iterrows()
     ]
     if progress:
         # 中间态先给最近约一年，足够默认 3M 视图且避免把最长 10Y 历史
         # 在 partial 与最终 result 中重复传输两遍；最终事件仍返回完整窗口。
         preview_market = {**market, "past": market["past"][-260:]}
         progress(
-            84, "市场状态已就绪", "牛熊、宽度与未来概率可先查看",
+            84,
+            "市场状态已就绪",
+            "牛熊、宽度与未来概率可先查看",
             {"kind": "decision_market", "market": preview_market},
         )
         progress(86, "聚合板块强弱", "按行业计算趋势与上涨宽度")
-    market["sectors"] = analyze_sectors(panel, mapping).head(
-        req.sector_top).to_dict(orient="records")
+    market["sectors"] = analyze_sectors(panel, mapping).head(req.sector_top).to_dict(orient="records")
     if progress:
         progress(
-            90, "板块数据已就绪", f"已生成 {len(market['sectors'])} 个板块状态",
+            90,
+            "板块数据已就绪",
+            f"已生成 {len(market['sectors'])} 个板块状态",
             {"kind": "decision_sectors", "sectors": market["sectors"]},
         )
         progress(91, "匹配 Quant Lab Champion", f"{req.profile} · {req.horizon} 日")
     policy = resolve_policy(
-        req.universe, req.horizon, req.profile, symbols=list(panel["close"].columns),
+        req.universe,
+        req.horizon,
+        req.profile,
+        symbols=list(panel["close"].columns),
     )
     if progress:
         progress(
-            92, "决策模型已就绪", policy["profile_label"],
+            92,
+            "决策模型已就绪",
+            policy["profile_label"],
             {"kind": "decision_policy", "policy": policy},
         )
         progress(93, "生成每日候选", f"目标持有 {req.horizon} 日")
     selection = hybrid_daily_selection(
-        panel, top_n=req.top_n, horizon=req.horizon, profile=req.profile,
-        universe=req.universe, industry_map=mapping, name_map=names,
+        panel,
+        top_n=req.top_n,
+        horizon=req.horizon,
+        profile=req.profile,
+        universe=req.universe,
+        industry_map=mapping,
+        name_map=names,
         policy_snapshot=policy,
     )
     if progress:
         progress(
-            96, "每日候选已就绪", f"已生成 {len(selection.get('picks', []))} 只候选",
+            96,
+            "每日候选已就绪",
+            f"已生成 {len(selection.get('picks', []))} 只候选",
             {"kind": "decision_selection", "selection": selection},
         )
     store = DecisionStore()
@@ -1171,7 +1275,9 @@ def _decision_dashboard_data(
                 pick["name"] = names.get(pick.get("symbol"), "名称待同步")
     if progress:
         progress(
-            99, "历史快照已就绪", f"已读取 {len(history)} 条本地记录",
+            99,
+            "历史快照已就绪",
+            f"已读取 {len(history)} 条本地记录",
             {"kind": "decision_history", "history": history},
         )
     result = {
@@ -1188,15 +1294,18 @@ def _decision_dashboard_data(
 
 @app.post("/api/v1/research/decision/dashboard/stream")
 def decision_dashboard_stream(
-    req: DecisionDashboardRequest, request: Request,
+    req: DecisionDashboardRequest,
+    request: Request,
 ) -> StreamingResponse:
     """决策工作台流式进度；最终 result 事件携带完整原接口响应。"""
     return _progress_stream(
-        lambda emit: _decision_dashboard_data(req, emit), _request_id(request),
+        lambda emit: _decision_dashboard_data(req, emit),
+        _request_id(request),
     )
 
 
 # ---------- 因子 ----------
+
 
 @app.get("/api/v1/research/factors")
 def factors_list() -> dict:
@@ -1229,7 +1338,7 @@ class FactorTestRequest(ContractModel):
     start: str = "2022-01-01"
     end: str | None = None
     quantiles: int = 5
-    neutralize: bool = False          # 行业中性化（行业内去均值）
+    neutralize: bool = False  # 行业中性化（行业内去均值）
 
 
 @app.post("/api/v1/research/factors/test")
@@ -1254,20 +1363,21 @@ def factors_test(req: FactorTestRequest) -> dict:
             if mapping:
                 values = industry_neutralize(values, mapping)
                 neutralized = True
-        report = analyze_factor(values, panel["close"], name=factor.name,
-                                quantiles=req.quantiles)
+        report = analyze_factor(values, panel["close"], name=factor.name, quantiles=req.quantiles)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
     return {
         "summary": report.summary(),
         "neutralized": neutralized,
         "ic_series": _series_to_points(report.ic_series.rolling(20, min_periods=5).mean()),
-        "quantile_nav": {col: _series_to_points(report.quantile_returns[col])
-                         for col in report.quantile_returns.columns},
+        "quantile_nav": {
+            col: _series_to_points(report.quantile_returns[col]) for col in report.quantile_returns.columns
+        },
     }
 
 
 # ---------- 回测 ----------
+
 
 class BacktestRequest(ContractModel):
     strategy: Literal["factor", "swing"] = "factor"
@@ -1301,7 +1411,9 @@ def backtest_run(req: BacktestRequest) -> dict:
         symbols = load_universe(req.universe)
         panel = load_panel(symbols, req.start, end)
         quality, panel_warnings = assess_panel_quality(
-            panel, symbols, minimum_symbols=req.top_n,
+            panel,
+            symbols,
+            minimum_symbols=req.top_n,
             allow_partial=req.allow_partial,
         )
         warnings.extend(panel_warnings)
@@ -1315,16 +1427,25 @@ def backtest_run(req: BacktestRequest) -> dict:
         elif len(names) > 1:
             strategy = MultiFactorStrategy(
                 [resolve_factor(n, symbols, req.start, end) for n in names],
-                top_n=req.top_n, rebalance=req.rebalance, weighting=req.weighting)
+                top_n=req.top_n,
+                rebalance=req.rebalance,
+                weighting=req.weighting,
+            )
         else:
             if not names:
                 raise ValueError("因子表达式不能为空")
-            strategy = FactorStrategy(resolve_factor(names[0], symbols, req.start, end),
-                                      top_n=req.top_n, rebalance=req.rebalance)
+            strategy = FactorStrategy(
+                resolve_factor(names[0], symbols, req.start, end), top_n=req.top_n, rebalance=req.rebalance
+            )
         weights = strategy.target_weights(panel)
-        warnings.extend(assess_signal_quality(
-            panel, weights, quality, allow_partial=req.allow_partial,
-        ))
+        warnings.extend(
+            assess_signal_quality(
+                panel,
+                weights,
+                quality,
+                allow_partial=req.allow_partial,
+            )
+        )
         benchmark = None
         if req.benchmark:
             try:
@@ -1336,22 +1457,27 @@ def backtest_run(req: BacktestRequest) -> dict:
                 logger.warning("基准 %s 加载失败: %s", req.benchmark, e)
                 quality["benchmark_status"] = "unavailable"
                 quality["status"] = "partial"
-                warnings.append(make_problem(
-                    "benchmark_unavailable",
-                    severity="warning",
-                    source="策略回测",
-                    title="基准数据不可用",
-                    message=f"{req.benchmark} 未能加载，超额收益和信息比率将不可用。",
-                    action="回测主体结果仍可使用；需要相对收益时请刷新基准行情后重试。",
-                    problem_id=f"backtest:benchmark:{req.benchmark}",
-                ))
+                warnings.append(
+                    make_problem(
+                        "benchmark_unavailable",
+                        severity="warning",
+                        source="策略回测",
+                        title="基准数据不可用",
+                        message=f"{req.benchmark} 未能加载，超额收益和信息比率将不可用。",
+                        action="回测主体结果仍可使用；需要相对收益时请刷新基准行情后重试。",
+                        problem_id=f"backtest:benchmark:{req.benchmark}",
+                    )
+                )
         else:
             quality["benchmark_status"] = "not_requested"
-        result = run_backtest(panel, weights,
-                              BacktestConfig(initial_capital=req.initial_capital,
-                                             stop_loss=req.stop_loss,
-                                             take_profit=req.take_profit),
-                              benchmark_close=benchmark)
+        result = run_backtest(
+            panel,
+            weights,
+            BacktestConfig(
+                initial_capital=req.initial_capital, stop_loss=req.stop_loss, take_profit=req.take_profit
+            ),
+            benchmark_close=benchmark,
+        )
         if not result.trades:
             problem = make_problem(
                 "no_valid_trades",
@@ -1379,8 +1505,7 @@ def backtest_run(req: BacktestRequest) -> dict:
         "strategy": strategy.name,
         "metrics": result.metrics,
         "nav": _series_to_points(result.nav),
-        "benchmark_nav": _series_to_points(result.benchmark_nav)
-        if result.benchmark_nav is not None else [],
+        "benchmark_nav": _series_to_points(result.benchmark_nav) if result.benchmark_nav is not None else [],
         "drawdown": _series_to_points(-drawdown),
         "trades": [t.__dict__ for t in result.trades[-200:]],
         "yearly": report["yearly"],
@@ -1416,8 +1541,10 @@ def factors_validate(req: ValidateRequest) -> dict:
         result = train_test_ic(factor, panel, split=req.split)
         segments = walk_forward_ic(factor, panel, n_splits=req.n_splits)
         result["segments"] = [
-            {k: (None if pd.isna(v) else (float(v) if isinstance(v, (int, float)) else str(v)))
-             for k, v in row.items()}
+            {
+                k: (None if pd.isna(v) else (float(v) if isinstance(v, (int, float)) else str(v)))
+                for k, v in row.items()
+            }
             for _, row in segments.iterrows()
         ]
     except Exception as e:
@@ -1426,6 +1553,7 @@ def factors_validate(req: ValidateRequest) -> dict:
 
 
 # ---------- 因子挖掘 ----------
+
 
 class MineRequest(ContractModel):
     universe: str = "demo"
@@ -1446,8 +1574,7 @@ def mine_genetic(req: MineRequest) -> dict:
     end = req.end or str(pd.Timestamp.now().date())
     try:
         panel = load_panel(load_universe(req.universe), req.start, end)
-        miner = GeneticMiner(population=req.population, generations=req.generations,
-                             seed=req.seed)
+        miner = GeneticMiner(population=req.population, generations=req.generations, seed=req.seed)
         mined = miner.mine(panel, top_n=req.top_n, progress=False)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
@@ -1526,14 +1653,16 @@ def _asset_lists_payload() -> dict:
             continue
         item = {"symbol": position.symbol, **quote(position.symbol)}
         last = item["last"] if item["last"] is not None else position.avg_cost
-        item.update({
-            "shares": round(position.shares, 2),
-            "avg_cost": round(position.avg_cost, 4),
-            "market_value": round(position.shares * last, 2),
-            "unrealized_pnl": round(position.shares * (last - position.avg_cost), 2),
-            "pnl_pct": round(last / position.avg_cost - 1, 4) if position.avg_cost else None,
-            "realized_pnl": round(position.realized_pnl, 2),
-        })
+        item.update(
+            {
+                "shares": round(position.shares, 2),
+                "avg_cost": round(position.avg_cost, 4),
+                "market_value": round(position.shares * last, 2),
+                "unrealized_pnl": round(position.shares * (last - position.avg_cost), 2),
+                "pnl_pct": round(last / position.avg_cost - 1, 4) if position.avg_cost else None,
+                "realized_pnl": round(position.realized_pnl, 2),
+            }
+        )
         holdings.append(item)
     payload["holdings"] = sorted(holdings, key=lambda item: item["market_value"], reverse=True)
     return payload
@@ -1547,7 +1676,8 @@ def asset_lists_get() -> dict:
 
 @app.post("/api/v1/portfolio/lists/{list_name}")
 def asset_lists_add(
-    list_name: Literal["favorites", "following"], item: AssetListIn,
+    list_name: Literal["favorites", "following"],
+    item: AssetListIn,
 ) -> dict:
     from quantmaster.portfolio import AssetListStore
 
@@ -1560,7 +1690,8 @@ def asset_lists_add(
 
 @app.delete("/api/v1/portfolio/lists/{list_name}/{symbol}")
 def asset_lists_remove(
-    list_name: Literal["favorites", "following"], symbol: str,
+    list_name: Literal["favorites", "following"],
+    symbol: str,
 ) -> dict:
     from quantmaster.portfolio import AssetListStore
 
@@ -1569,6 +1700,7 @@ def asset_lists_remove(
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return _asset_lists_payload()
+
 
 class TradeIn(ContractModel):
     date: str = Field(min_length=10, max_length=10)
@@ -1634,8 +1766,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     ledger = Ledger()
     trades = ledger.trades()
     if trades.empty:
-        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0,
-                "assets": [], "pnl": []}
+        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0, "assets": [], "pnl": []}
     symbols = sorted(trades["symbol"].unique())
     start = str(pd.to_datetime(trades["date"]).min().date())
     end = str(pd.Timestamp.now().date())
@@ -1648,8 +1779,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
             logger.warning("实盘净值缺行情 %s: %s", symbol, e)
     nav = daily_nav(ledger, pd.DataFrame(prices))
     if nav.empty:
-        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0,
-                "assets": [], "pnl": []}
+        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0, "assets": [], "pnl": []}
     payload = {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0}
     try:
         bench = load_history(benchmark, start, end, store=store)["close"]

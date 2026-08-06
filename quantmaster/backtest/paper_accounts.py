@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -35,9 +35,10 @@ from quantmaster.config import get_config
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.trading_sessions import SHANGHAI
 
 logger = logging.getLogger(__name__)
-PAPER_SCHEMA_VERSION = 1
+PAPER_SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -47,9 +48,7 @@ def utc_now() -> str:
 class PaperStore:
     def __init__(self, path: str | Path | None = None, account_root: str | Path | None = None):
         self.path = Path(path) if path else get_config().data_root / "paper.sqlite"
-        self.account_root = (
-            Path(account_root) if account_root else get_config().data_root / "paper_accounts"
-        )
+        self.account_root = Path(account_root) if account_root else get_config().data_root / "paper_accounts"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.account_root.mkdir(parents=True, exist_ok=True)
         self._migrate()
@@ -59,7 +58,9 @@ class PaperStore:
 
     def _migrate(self) -> None:
         def schema_v1(conn: sqlite3.Connection) -> None:
-            execute_sql_script(conn, """
+            execute_sql_script(
+                conn,
+                """
                 CREATE TABLE IF NOT EXISTS paper_accounts (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
                     mode TEXT NOT NULL, initial_capital REAL NOT NULL,
@@ -106,33 +107,31 @@ class PaperStore:
                     ON paper_orders(account_id,status,created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_paper_auto_runs
                     ON paper_auto_runs(status,next_retry_at,lease_expires);
-            """)
-            account_columns = {
-                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_accounts)")
-            }
+            """,
+            )
+            account_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(paper_accounts)")}
             for name in ("strategy_warning", "runtime_warning"):
                 if name not in account_columns:
-                    conn.execute(
-                        f"ALTER TABLE paper_accounts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
-                    )
-            run_columns = {
-                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_auto_runs)")
-            }
+                    conn.execute(f"ALTER TABLE paper_accounts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(paper_auto_runs)")}
             if "lease_token" not in run_columns:
-                conn.execute(
-                    "ALTER TABLE paper_auto_runs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE paper_auto_runs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
             if "heartbeat_at" not in run_columns:
-                conn.execute(
-                    "ALTER TABLE paper_auto_runs ADD COLUMN heartbeat_at REAL NOT NULL DEFAULT 0"
-                )
+                conn.execute("ALTER TABLE paper_auto_runs ADD COLUMN heartbeat_at REAL NOT NULL DEFAULT 0")
             conn.execute(
                 "UPDATE paper_accounts SET strategy_warning=warning "
                 "WHERE strategy_warning='' AND runtime_warning='' AND warning<>''"
             )
 
+        def schema_v2(conn: sqlite3.Connection) -> None:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(paper_accounts)")}
+            if "strategy_effective_after" not in columns:
+                conn.execute(
+                    "ALTER TABLE paper_accounts ADD COLUMN strategy_effective_after TEXT NOT NULL DEFAULT ''"
+                )
+
         with self._conn() as conn:
-            migrate_schema(conn, ((PAPER_SCHEMA_VERSION, schema_v1),))
+            migrate_schema(conn, ((1, schema_v1), (PAPER_SCHEMA_VERSION, schema_v2)))
 
     @staticmethod
     def _account_value(row: sqlite3.Row | None) -> dict | None:
@@ -143,6 +142,7 @@ class PaperStore:
         value["universe_snapshot"] = json.loads(value.pop("universe_json"))
         value["strategy_warning"] = str(value.get("strategy_warning") or "")
         value["runtime_warning"] = str(value.get("runtime_warning") or "")
+        value["strategy_effective_after"] = str(value.get("strategy_effective_after") or "")
         value["warning"] = value["runtime_warning"] or value["strategy_warning"]
         return value
 
@@ -196,10 +196,21 @@ class PaperStore:
                     "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
                     "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        account_id, spec.name.strip(), "active", spec.mode, spec.initial_capital,
-                        canonical_json(strategy), strategy_hash, spec.universe,
-                        canonical_json(universe_snapshot), spec.source_backtest_id,
-                        warning[:500], warning[:500], "", now, now,
+                        account_id,
+                        spec.name.strip(),
+                        "active",
+                        spec.mode,
+                        spec.initial_capital,
+                        canonical_json(strategy),
+                        strategy_hash,
+                        spec.universe,
+                        canonical_json(universe_snapshot),
+                        spec.source_backtest_id,
+                        warning[:500],
+                        warning[:500],
+                        "",
+                        now,
+                        now,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -221,9 +232,7 @@ class PaperStore:
     def accounts(self, include_archived: bool = False) -> list[dict]:
         where = "" if include_archived else "WHERE status<>'archived'"
         with self._conn() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM paper_accounts {where} ORDER BY created_at DESC"
-            ).fetchall()
+            rows = conn.execute(f"SELECT * FROM paper_accounts {where} ORDER BY created_at DESC").fetchall()
         return [self._account_value(row) or {} for row in rows]
 
     @staticmethod
@@ -266,7 +275,8 @@ class PaperStore:
         with self._conn() as conn:
             try:
                 changed = conn.execute(
-                    f"UPDATE paper_accounts SET {','.join(fields)} WHERE id=?", params,
+                    f"UPDATE paper_accounts SET {','.join(fields)} WHERE id=?",
+                    params,
                 ).rowcount
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"模拟账户名称已存在：{normalized_name}") from exc
@@ -303,10 +313,9 @@ class PaperStore:
         symbols: list[str],
         universe_meta: dict | None = None,
         warning: str = "",
+        effective_after: str = "",
     ) -> dict:
-        """Replace a pristine account snapshot without rewriting any trading history."""
-        if not self.ledger(account_id).trades().empty:
-            raise ValueError("账户已经产生成交；请复制为新账户后调整策略")
+        """Start a new strategy segment while preserving every historical cycle and trade."""
         strategy = spec.strategy.model_dump(mode="json")
         universe_snapshot = {
             "name": spec.universe,
@@ -318,29 +327,52 @@ class PaperStore:
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT id FROM paper_accounts WHERE id=?", (account_id,),
+                "SELECT id FROM paper_accounts WHERE id=?",
+                (account_id,),
             ).fetchone()
             if row is None:
                 raise KeyError("模拟账户不存在")
-            cycles = int(conn.execute(
-                "SELECT COUNT(*) FROM paper_cycles WHERE account_id=?", (account_id,),
-            ).fetchone()[0])
-            if cycles:
-                raise ValueError("账户已经生成调仓周期；请复制为新账户后调整策略")
+            conn.execute(
+                "UPDATE paper_orders SET status='superseded',reason='strategy_changed',"
+                "updated_at=? WHERE account_id=? AND status IN ('proposed','queued','blocked')",
+                (now, account_id),
+            )
+            conn.execute(
+                "UPDATE paper_cycles SET status='superseded',finished_at=? WHERE account_id=? "
+                "AND status IN ('proposed','confirmed','blocked')",
+                (now, account_id),
+            )
             try:
                 conn.execute(
                     "UPDATE paper_accounts SET name=?,mode=?,strategy_json=?,strategy_hash=?,"
                     "universe=?,universe_json=?,source_backtest_id=?,warning=?,strategy_warning=?,"
-                    "runtime_warning='',updated_at=? WHERE id=?",
+                    "runtime_warning='',strategy_effective_after=?,updated_at=? WHERE id=?",
                     (
-                        spec.name.strip(), spec.mode, canonical_json(strategy), strategy_hash,
-                        spec.universe, canonical_json(universe_snapshot), spec.source_backtest_id,
-                        warning[:500], warning[:500], now, account_id,
+                        spec.name.strip(),
+                        spec.mode,
+                        canonical_json(strategy),
+                        strategy_hash,
+                        spec.universe,
+                        canonical_json(universe_snapshot),
+                        spec.source_backtest_id,
+                        warning[:500],
+                        warning[:500],
+                        effective_after,
+                        now,
+                        account_id,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"模拟账户名称已存在：{spec.name.strip()}") from exc
         return self.account(account_id) or {}
+
+    def clear_strategy_transition(self, account_id: str, strategy_hash: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE paper_accounts SET strategy_effective_after='',updated_at=? "
+                "WHERE id=? AND strategy_hash=?",
+                (utc_now(), account_id, strategy_hash),
+            )
 
     def archive_account(self, account_id: str) -> dict:
         """Soft-delete an account and fence every unfinished automation path."""
@@ -348,7 +380,8 @@ class PaperStore:
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT id FROM paper_accounts WHERE id=?", (account_id,),
+                "SELECT id FROM paper_accounts WHERE id=?",
+                (account_id,),
             ).fetchone()
             if row is None:
                 raise KeyError("模拟账户不存在")
@@ -379,7 +412,11 @@ class PaperStore:
         self.set_runtime_warning(account_id, warning, pause=pause)
 
     def set_runtime_warning(
-        self, account_id: str, warning: str, *, pause: bool = False,
+        self,
+        account_id: str,
+        warning: str,
+        *,
+        pause: bool = False,
     ) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -436,8 +473,14 @@ class PaperStore:
                 "lease_expires=excluded.lease_expires,lease_token=excluded.lease_token,"
                 "heartbeat_at=excluded.heartbeat_at,last_error='',updated_at=excluded.updated_at",
                 (
-                    run_date, account_id, attempts, owner,
-                    current + max(15.0, float(lease_seconds)), token, current, utc_now(),
+                    run_date,
+                    account_id,
+                    attempts,
+                    owner,
+                    current + max(15.0, float(lease_seconds)),
+                    token,
+                    current,
+                    utc_now(),
                 ),
             )
         return token
@@ -459,15 +502,27 @@ class PaperStore:
                 "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
                 "AND lease_token=? AND lease_expires>?",
                 (
-                    current, current + max(15.0, float(lease_seconds)), utc_now(),
-                    run_date, account_id, owner, token, current,
+                    current,
+                    current + max(15.0, float(lease_seconds)),
+                    utc_now(),
+                    run_date,
+                    account_id,
+                    owner,
+                    token,
+                    current,
                 ),
             ).rowcount
         return bool(changed)
 
     def complete_auto_run(
-        self, run_date: str, account_id: str, owner: str, token: str, result: dict,
-        *, now: float | None = None,
+        self,
+        run_date: str,
+        account_id: str,
+        owner: str,
+        token: str,
+        result: dict,
+        *,
+        now: float | None = None,
     ) -> bool:
         current = time.time() if now is None else float(now)
         with self._conn() as conn:
@@ -481,8 +536,14 @@ class PaperStore:
         return bool(changed)
 
     def fail_auto_run(
-        self, run_date: str, account_id: str, owner: str, token: str, error: str,
-        *, now: float | None = None,
+        self,
+        run_date: str,
+        account_id: str,
+        owner: str,
+        token: str,
+        error: str,
+        *,
+        now: float | None = None,
     ) -> bool:
         current = time.time() if now is None else float(now)
         with self._conn() as conn:
@@ -503,8 +564,14 @@ class PaperStore:
                 "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
                 "AND lease_token=?",
                 (
-                    "manual_recovery" if exhausted else "failed", next_retry,
-                    error[:500], utc_now(), run_date, account_id, owner, token,
+                    "manual_recovery" if exhausted else "failed",
+                    next_retry,
+                    error[:500],
+                    utc_now(),
+                    run_date,
+                    account_id,
+                    owner,
+                    token,
                 ),
             ).rowcount
         return bool(changed)
@@ -522,8 +589,7 @@ class PaperStore:
     def latest_auto_run(self, account_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM paper_auto_runs WHERE account_id=? "
-                "ORDER BY run_date DESC LIMIT 1",
+                "SELECT * FROM paper_auto_runs WHERE account_id=? ORDER BY run_date DESC LIMIT 1",
                 (account_id,),
             ).fetchone()
         if row is None:
@@ -548,15 +614,21 @@ class PaperStore:
                     "(id,account_id,signal_date,status,strategy_hash,target_json,reference_json,"
                     "warning_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
-                        cycle_id, account["id"], signal_date, "proposed", account["strategy_hash"],
-                        canonical_json(target_weights), canonical_json(reference_prices),
-                        canonical_json(warnings), now,
+                        cycle_id,
+                        account["id"],
+                        signal_date,
+                        "proposed",
+                        account["strategy_hash"],
+                        canonical_json(target_weights),
+                        canonical_json(reference_prices),
+                        canonical_json(warnings),
+                        now,
                     ),
                 )
             except sqlite3.IntegrityError:
                 row = conn.execute(
-                    "SELECT * FROM paper_cycles WHERE account_id=? AND signal_date=? "
-                    "AND strategy_hash=?", (account["id"], signal_date, account["strategy_hash"]),
+                    "SELECT * FROM paper_cycles WHERE account_id=? AND signal_date=? AND strategy_hash=?",
+                    (account["id"], signal_date, account["strategy_hash"]),
                 ).fetchone()
                 return self._cycle_value(row) or {}, False
             for symbol in sorted(target_weights):
@@ -565,9 +637,16 @@ class PaperStore:
                     "(id,cycle_id,account_id,symbol,target_weight,side,status,idempotency_key,"
                     "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
-                        uuid.uuid4().hex, cycle_id, account["id"], symbol,
-                        float(target_weights[symbol]), "rebalance", "proposed",
-                        f"paper:{cycle_id}:{symbol}", now, now,
+                        uuid.uuid4().hex,
+                        cycle_id,
+                        account["id"],
+                        symbol,
+                        float(target_weights[symbol]),
+                        "rebalance",
+                        "proposed",
+                        f"paper:{cycle_id}:{symbol}",
+                        now,
+                        now,
                     ),
                 )
         return self.cycle(cycle_id) or {}, True
@@ -626,12 +705,12 @@ class PaperStore:
                 (now, cycle["account_id"], cycle_id),
             )
             conn.execute(
-                "UPDATE paper_cycles SET status='confirmed',confirmed_at=? "
-                "WHERE id=? AND status='proposed'", (now, cycle_id),
+                "UPDATE paper_cycles SET status='confirmed',confirmed_at=? WHERE id=? AND status='proposed'",
+                (now, cycle_id),
             )
             conn.execute(
-                "UPDATE paper_orders SET status='queued',updated_at=? "
-                "WHERE cycle_id=? AND status='proposed'", (now, cycle_id),
+                "UPDATE paper_orders SET status='queued',updated_at=? WHERE cycle_id=? AND status='proposed'",
+                (now, cycle_id),
             )
         return self.cycle(cycle_id) or {}
 
@@ -659,7 +738,8 @@ class PaperStore:
             conn.execute(
                 "UPDATE paper_cycles SET status=?,execution_date=CASE WHEN ?='' THEN "
                 "execution_date ELSE ? END,finished_at=CASE WHEN ?='' THEN finished_at ELSE ? END "
-                "WHERE id=?", (status, execution_date, execution_date, finished, finished, cycle_id),
+                "WHERE id=?",
+                (status, execution_date, execution_date, finished, finished, cycle_id),
             )
         return self.cycle(cycle_id) or {}
 
@@ -670,7 +750,8 @@ class PaperStore:
         source_key = str(source.resolve())
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT account_id FROM paper_migrations WHERE source_path=?", (source_key,),
+                "SELECT account_id FROM paper_migrations WHERE source_path=?",
+                (source_key,),
             ).fetchone()
         if row:
             return self.account(row["account_id"])
@@ -697,9 +778,21 @@ class PaperStore:
                 "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
                 "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    account_id, name, "paused", "manual", 0.0, canonical_json(strategy),
-                    content_hash({"strategy": strategy, "legacy": digest}), "legacy",
-                    canonical_json(universe), "", warning, warning, "", now, now,
+                    account_id,
+                    name,
+                    "paused",
+                    "manual",
+                    0.0,
+                    canonical_json(strategy),
+                    content_hash({"strategy": strategy, "legacy": digest}),
+                    "legacy",
+                    canonical_json(universe),
+                    "",
+                    warning,
+                    warning,
+                    "",
+                    now,
+                    now,
                 ),
             )
             conn.execute(
@@ -721,7 +814,8 @@ class PaperService:
 
             snapshot = load_csi800_members_as_of(as_of)
             return snapshot["symbols"], {
-                "as_of": snapshot["as_of"], "snapshot_dates": snapshot["snapshot_dates"],
+                "as_of": snapshot["as_of"],
+                "snapshot_dates": snapshot["snapshot_dates"],
                 "quality": "production",
             }
         from quantmaster.data.universe import load_universe
@@ -729,7 +823,8 @@ class PaperService:
         return load_universe(name), {"as_of": as_of, "quality": "sandbox"}
 
     def _materialize_account_spec(
-        self, spec: PaperAccountSpec,
+        self,
+        spec: PaperAccountSpec,
     ) -> tuple[PaperAccountSpec, list[str], dict]:
         from quantmaster.backtest.spec import LabVersionStrategySpec, pin_decision_strategy
 
@@ -740,10 +835,13 @@ class PaperService:
             )
 
         symbols, meta = self._resolve_universe(
-            spec.universe, str(pd.Timestamp.now().date()),
+            spec.universe,
+            str(pd.Timestamp.now().date()),
         )
         strategy = pin_decision_strategy(
-            spec.strategy, spec.universe, symbols=symbols,
+            spec.strategy,
+            spec.universe,
+            symbols=symbols,
         )
         if strategy is not spec.strategy:
             spec = spec.model_copy(update={"strategy": strategy})
@@ -752,7 +850,9 @@ class PaperService:
     def create_account(self, spec: PaperAccountSpec) -> dict:
         spec, symbols, meta = self._materialize_account_spec(spec)
         return self.store.create_account(
-            spec, symbols=symbols, universe_meta=meta,
+            spec,
+            symbols=symbols,
+            universe_meta=meta,
             warning=self._strategy_warning(spec),
         )
 
@@ -768,7 +868,9 @@ class PaperService:
         archived = account["status"] == "archived"
         account["activity"] = activity
         account["management"] = {
-            "strategy_editable": bool(activity["strategy_editable"]) and not archived,
+            "strategy_editable": not archived,
+            "pending_strategy_change": bool(account.get("strategy_effective_after")),
+            "strategy_effective_after": account.get("strategy_effective_after", ""),
             "can_archive": not archived,
             "can_restore": archived,
             "delete_mode": "archive",
@@ -790,7 +892,10 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if strategy is None and universe is None:
             return self.store.update_account(
-                account_id, name=name, status=status, mode=mode,
+                account_id,
+                name=name,
+                status=status,
+                mode=mode,
             )
         candidate_strategy = strategy if strategy is not None else account["strategy"]
         strategy_payload = (
@@ -801,27 +906,61 @@ class PaperService:
         candidate_universe = universe if universe is not None else account["universe"]
         if strategy_payload == account["strategy"] and candidate_universe == account["universe"]:
             return self.store.update_account(
-                account_id, name=name, status=status, mode=mode,
+                account_id,
+                name=name,
+                status=status,
+                mode=mode,
             )
         if status is not None and status != account["status"]:
             raise ValueError("修改策略时请单独保存账户状态")
-        spec = PaperAccountSpec.model_validate({
-            "name": name if name is not None else account["name"],
-            "strategy": candidate_strategy,
-            "universe": candidate_universe,
-            "initial_capital": account["initial_capital"],
-            "mode": mode if mode is not None else account["mode"],
-            # Once the snapshot changes it is no longer identical to its source backtest.
-            "source_backtest_id": "",
-        })
+        spec = PaperAccountSpec.model_validate(
+            {
+                "name": name if name is not None else account["name"],
+                "strategy": candidate_strategy,
+                "universe": candidate_universe,
+                "initial_capital": account["initial_capital"],
+                "mode": mode if mode is not None else account["mode"],
+                # Once the snapshot changes it is no longer identical to its source backtest.
+                "source_backtest_id": "",
+            }
+        )
         spec, symbols, meta = self._materialize_account_spec(spec)
-        return self.store.replace_strategy(
+        effective_after = self._strategy_change_signal_date()
+        updated = self.store.replace_strategy(
             account_id,
             spec,
             symbols=symbols,
             universe_meta=meta,
             warning=self._strategy_warning(spec),
+            effective_after=effective_after,
         )
+        try:
+            transition = self.propose(account_id)
+        except (KeyError, OSError, RuntimeError, ValueError) as exc:
+            message = f"策略已保存，等待行情就绪后按 {effective_after} 信号日生成强制调仓：{str(exc)[:240]}"
+            self.store.set_runtime_warning(account_id, message)
+            updated = self.store.account(account_id) or updated
+            updated["transition"] = {
+                "status": "waiting_data",
+                "signal_date": effective_after,
+                "message": message,
+            }
+            return updated
+        updated = self.store.account(account_id) or updated
+        updated["transition"] = transition
+        return updated
+
+    @staticmethod
+    def _strategy_change_signal_date(now: datetime | None = None) -> str:
+        current = now or datetime.now(SHANGHAI)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=SHANGHAI)
+        else:
+            current = current.astimezone(SHANGHAI)
+        signal_day = current.date()
+        if (current.hour, current.minute) >= (15, 0):
+            signal_day += timedelta(days=1)
+        return signal_day.isoformat()
 
     def archive_account(self, account_id: str) -> dict:
         return self.store.archive_account(account_id)
@@ -850,9 +989,7 @@ class PaperService:
             status_by_slug = {str(item.get("slug")): str(item.get("status")) for item in catalog}
         except Exception:
             status_by_slug = {}
-        unapproved = [
-            name for name in names if status_by_slug.get(name) not in {"approved", "production"}
-        ]
+        unapproved = [name for name in names if status_by_slug.get(name) not in {"approved", "production"}]
         if not unapproved:
             return ""
         shown = "、".join(unapproved[:5])
@@ -863,24 +1000,29 @@ class PaperService:
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
-        spec = PaperAccountSpec.model_validate({
-            "name": name,
-            "strategy": account["strategy"],
-            "universe": account["universe"],
-            "initial_capital": account["initial_capital"],
-            "mode": mode,
-            "source_backtest_id": account["source_backtest_id"],
-        })
+        spec = PaperAccountSpec.model_validate(
+            {
+                "name": name,
+                "strategy": account["strategy"],
+                "universe": account["universe"],
+                "initial_capital": account["initial_capital"],
+                "mode": mode,
+                "source_backtest_id": account["source_backtest_id"],
+            }
+        )
         symbols = account["universe_snapshot"].get("symbols", [])
         return self.store.create_account(
-            spec, symbols=symbols, universe_meta={"cloned_from": account_id},
+            spec,
+            symbols=symbols,
+            universe_meta={"cloned_from": account_id},
             warning=self._strategy_warning(spec),
         )
 
     @staticmethod
     def _prices_from_row(row: pd.Series) -> dict[str, float]:
         return {
-            str(symbol): float(value) for symbol, value in row.items()
+            str(symbol): float(value)
+            for symbol, value in row.items()
             if value is not None and math.isfinite(float(value)) and float(value) > 0
         }
 
@@ -896,10 +1038,13 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             raise ValueError("账户已暂停或归档，不能生成新提案")
+        transition_after = str(account.get("strategy_effective_after") or "")
+        force_transition = bool(transition_after)
         eligible_symbols = list(account["universe_snapshot"].get("symbols") or [])
         symbols = list(eligible_symbols)
         symbols.extend(
-            position.symbol for position in self.store.ledger(account_id).positions()
+            position.symbol
+            for position in self.store.ledger(account_id).positions()
             if position.shares > 0 and position.symbol not in symbols
         )
         if not eligible_symbols:
@@ -934,19 +1079,27 @@ class PaperService:
             raise ValueError("Lab OOF 回测策略不能生成实时模拟提案")
         else:
             parsed_strategy = FactorStrategySpec.model_validate(strategy_spec)
-        if not signal_is_due(parsed_strategy, close.index, len(close.index) - 1):
+        if not force_transition and not signal_is_due(
+            parsed_strategy,
+            close.index,
+            len(close.index) - 1,
+        ):
             return {
-                "status": "not_due", "account_id": account_id,
+                "status": "not_due",
+                "account_id": account_id,
                 "signal_date": latest_date.strftime("%Y-%m-%d"),
                 "message": "今天不是该策略的调仓日，未生成提案。",
             }
         strategy_panel = {
             key: frame.reindex(columns=eligible_symbols)
-            for key, frame in panel.items() if isinstance(frame, pd.DataFrame)
+            for key, frame in panel.items()
+            if isinstance(frame, pd.DataFrame)
         }
         strategy = build_strategy(
-            parsed_strategy, eligible_symbols,
-            pd.Timestamp(close.index[0]).strftime("%Y-%m-%d"), latest_date.strftime("%Y-%m-%d"),
+            parsed_strategy,
+            eligible_symbols,
+            pd.Timestamp(close.index[0]).strftime("%Y-%m-%d"),
+            latest_date.strftime("%Y-%m-%d"),
             universe=account["universe"],
         )
         weights_frame = strategy.target_weights(strategy_panel)
@@ -958,15 +1111,37 @@ class PaperService:
         prices = self._prices_from_row(close.iloc[-1])
         missing = sorted(symbol for symbol in target if symbol not in prices)
         if missing:
-            warnings.append({
-                "code": "missing_close", "level": "warning",
-                "message": f"{len(missing)} 只标的缺少信号日收盘价，将等待可用行情。",
-            })
+            warnings.append(
+                {
+                    "code": "missing_close",
+                    "level": "warning",
+                    "message": f"{len(missing)} 只标的缺少信号日收盘价，将等待可用行情。",
+                }
+            )
+        if force_transition:
+            warnings.append(
+                {
+                    "code": "strategy_changed",
+                    "level": "info",
+                    "message": (
+                        f"策略或候选已修改；按 {transition_after} 作为信号日，"
+                        "在其后的首个真实交易日开盘执行新旧持仓切换。"
+                    ),
+                }
+            )
+        signal_date = transition_after or latest_date.strftime("%Y-%m-%d")
         cycle, created = self.store.create_cycle(
-            account, latest_date.strftime("%Y-%m-%d"), target, prices, warnings,
+            account,
+            signal_date,
+            target,
+            prices,
+            warnings,
         )
-        if account["mode"] == "auto" and cycle.get("status") == "proposed":
+        if (force_transition or account["mode"] == "auto") and (cycle.get("status") == "proposed"):
             cycle = self.store.confirm(cycle["id"])
+        if force_transition and cycle.get("id"):
+            self.store.clear_strategy_transition(account_id, account["strategy_hash"])
+            self.store.clear_runtime_warning(account_id)
         cycle["created"] = created
         cycle["ledger_written"] = False
         return cycle
@@ -992,11 +1167,13 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             return {
-                "status": "paused", "account_id": account_id,
+                "status": "paused",
+                "account_id": account_id,
                 "message": "账户已暂停或归档，待开盘订单没有处理。",
             }
         cycles = [
-            cycle for cycle in self.store.cycles(account_id, limit=100)
+            cycle
+            for cycle in self.store.cycles(account_id, limit=100)
             if cycle["status"] in {"confirmed", "blocked"}
         ]
         if not cycles:
@@ -1018,7 +1195,8 @@ class PaperService:
         eligible_dates = dates[dates > after]
         if eligible_dates.empty:
             return {
-                "status": "waiting_open", "cycle": cycle,
+                "status": "waiting_open",
+                "cycle": cycle,
                 "message": "信号后的下一交易日开盘价尚未到达，未写入成交。",
             }
         execution = eligible_dates[0]
@@ -1046,9 +1224,13 @@ class PaperService:
                     pending_orders.append(order)
                     continue
                 self.store.update_order(
-                    order["id"], status="filled", side=str(trade["side"]),
-                    shares=float(trade["shares"]), price=float(trade["price"]),
-                    fee=float(trade["fee"]), reason="reconciled",
+                    order["id"],
+                    status="filled",
+                    side=str(trade["side"]),
+                    shares=float(trade["shares"]),
+                    price=float(trade["price"]),
+                    fee=float(trade["fee"]),
+                    reason="reconciled",
                 )
             orders = pending_orders
         executable: list[tuple[dict, str, float, float, float, float | None]] = []
@@ -1058,22 +1240,28 @@ class PaperService:
             raw_previous = day_previous.get(symbol) if previous is not None else None
             open_value = float(raw_open) if pd.notna(raw_open) else 0.0
             previous_value = (
-                float(raw_previous)
-                if raw_previous is not None and pd.notna(raw_previous)
-                else None
+                float(raw_previous) if raw_previous is not None and pd.notna(raw_previous) else None
             )
             current_shares = float(current.get(symbol, 0.0))
             target_value = total_assets * float(order["target_weight"])
             target_shares = (
                 math.floor(target_value / open_value / trade_config.lot_size) * trade_config.lot_size
-                if open_value > 0 else current_shares
+                if open_value > 0
+                else current_shares
             )
             diff = target_shares - current_shares
             side = "buy" if diff > 0 else "sell" if diff < 0 else "hold"
             desired_value = abs(target_value - current_shares * open_value)
-            executable.append((
-                order, side, abs(diff), desired_value, open_value, previous_value,
-            ))
+            executable.append(
+                (
+                    order,
+                    side,
+                    abs(diff),
+                    desired_value,
+                    open_value,
+                    previous_value,
+                )
+            )
         executable.sort(key=lambda item: 0 if item[1] == "sell" else 1)
         filled, blocked = [], []
         for order, side, desired_shares, desired_value, raw_open, previous_close in executable:
@@ -1084,7 +1272,10 @@ class PaperService:
             quote = quote_open(symbol, side, raw_open, previous_close, trade_config)
             if quote.blocked_reason:
                 self.store.update_order(
-                    order["id"], status="blocked", side=side, reason=quote.blocked_reason,
+                    order["id"],
+                    status="blocked",
+                    side=side,
+                    reason=quote.blocked_reason,
                 )
                 blocked.append({"symbol": symbol, "side": side, "reason": quote.blocked_reason})
                 continue
@@ -1095,7 +1286,10 @@ class PaperService:
                     shares = math.floor(shares / trade_config.lot_size) * trade_config.lot_size
                 if shares <= 0:
                     self.store.update_order(
-                        order["id"], status="blocked", side=side, reason="t_plus_one",
+                        order["id"],
+                        status="blocked",
+                        side=side,
+                        reason="t_plus_one",
                     )
                     blocked.append({"symbol": symbol, "side": side, "reason": "t_plus_one"})
                     continue
@@ -1105,21 +1299,32 @@ class PaperService:
                 shares = executable_buy_shares(cash, desired_value, raw_open, trade_config)
                 if shares <= 0:
                     self.store.update_order(
-                        order["id"], status="blocked", side=side, reason="insufficient_cash",
+                        order["id"],
+                        status="blocked",
+                        side=side,
+                        reason="insufficient_cash",
                     )
                     blocked.append({"symbol": symbol, "side": side, "reason": "insufficient_cash"})
                     continue
                 amount = shares * quote.execution_price
                 fee = buy_cost(amount, trade_config)
             trade = TradeRecord(
-                date=execution_date, symbol=symbol, side=side,
-                price=round(quote.execution_price, 4), shares=shares,
-                fee=round(fee, 2), note=f"paper cycle {cycle['id']}",
+                date=execution_date,
+                symbol=symbol,
+                side=side,
+                price=round(quote.execution_price, 4),
+                shares=shares,
+                fee=round(fee, 2),
+                note=f"paper cycle {cycle['id']}",
             )
             written = ledger.add_trade(trade, idempotency_key=order["idempotency_key"])
             self.store.update_order(
-                order["id"], status="filled", side=side, shares=shares,
-                price=trade.price, fee=trade.fee,
+                order["id"],
+                status="filled",
+                side=side,
+                shares=shares,
+                price=trade.price,
+                fee=trade.fee,
             )
             if side == "buy":
                 cash -= amount + fee
@@ -1136,7 +1341,10 @@ class PaperService:
             self.store.set_warning(account_id, message, pause=True)
             raise RuntimeError(message)
         return {
-            "status": status, "cycle": cycle, "filled": filled, "blocked": blocked,
+            "status": status,
+            "cycle": cycle,
+            "filled": filled,
+            "blocked": blocked,
             "report": final_report,
         }
 
@@ -1162,10 +1370,13 @@ class PaperService:
             series = cached["close"].dropna()
             price_series[symbol] = series
             price_map[symbol] = float(series.iloc[-1])
-            freshness.append({
-                "symbol": symbol, "status": "ready",
-                "as_of": pd.Timestamp(series.index[-1]).strftime("%Y-%m-%d"),
-            })
+            freshness.append(
+                {
+                    "symbol": symbol,
+                    "status": "ready",
+                    "as_of": pd.Timestamp(series.index[-1]).strftime("%Y-%m-%d"),
+                }
+            )
         report = ledger_report(ledger, prices=price_map)
         dates: list[str] = []
         twr: list[float] = []
@@ -1205,7 +1416,10 @@ class PaperService:
         }
 
     def run_auto_account(
-        self, account_id: str, *, expected_signal_date: str | None = None,
+        self,
+        account_id: str,
+        *,
+        expected_signal_date: str | None = None,
     ) -> dict:
         """Process one auto account and create/confirm its newest due proposal."""
         account = self.store.account(account_id)
@@ -1213,7 +1427,8 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active" or account["mode"] != "auto":
             return {
-                "status": "skipped", "account_id": account_id,
+                "status": "skipped",
+                "account_id": account_id,
                 "message": "账户未启用自动交易。",
             }
         processed = self.process(account_id)
@@ -1221,12 +1436,13 @@ class PaperService:
         signal_date = str(proposal.get("signal_date") or "")
         if expected_signal_date and signal_date < expected_signal_date:
             raise RuntimeError(
-                f"自动交易等待 {expected_signal_date} 收盘行情；当前最新信号日为"
-                f" {signal_date or '未知'}"
+                f"自动交易等待 {expected_signal_date} 收盘行情；当前最新信号日为 {signal_date or '未知'}"
             )
         return {
-            "status": "ok", "account_id": account_id,
-            "processed": processed, "proposal": proposal,
+            "status": "ok",
+            "account_id": account_id,
+            "processed": processed,
+            "proposal": proposal,
         }
 
     def run_auto_accounts(self, *, expected_signal_date: str | None = None) -> dict:
@@ -1237,14 +1453,17 @@ class PaperService:
                 continue
             try:
                 row = self.run_auto_account(
-                    account["id"], expected_signal_date=expected_signal_date,
+                    account["id"],
+                    expected_signal_date=expected_signal_date,
                 )
             except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                 message = str(exc)[:500]
                 self.store.set_warning(account["id"], message)
                 row = {
-                    "status": "failed", "account_id": account["id"],
-                    "name": account["name"], "error": message,
+                    "status": "failed",
+                    "account_id": account["id"],
+                    "name": account["name"],
+                    "error": message,
                 }
                 logger.warning("模拟账户自动处理失败 account=%s: %s", account["id"], exc)
             items.append(row)
