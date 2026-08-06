@@ -154,7 +154,10 @@ def _full_refresh(
             store.put(symbol, frame, replace=True)
             store.mark_checked(
                 symbol, start, end, source=source.name, replace_coverage=True)
-            return store.get(symbol).loc[start:end]
+            stored = store.get(symbol)
+            if stored is None:
+                raise RuntimeError(f"{source.name} 日线写入后无法读取")
+            return stored.loc[start:end]
         except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
@@ -488,7 +491,10 @@ def load_intraday(
                 # 分钟线不采用日线的整段前复权替换语义：免费接口回溯有限，
                 # 每日归档必须合并才能形成可长期复用的本地历史。
                 store.put(symbol, df, replace=False)
-                return store.get(symbol).loc[start_ts:end_ts]
+                stored = store.get(symbol)
+                if stored is None:
+                    raise RuntimeError(f"{source.name} 分钟线写入后无法读取")
+                return stored.loc[start_ts:end_ts]
             errors.append(f"{factory.__name__}: 返回空数据")
         except Exception as e:
             errors.append(f"{factory.__name__}: {e}")
@@ -537,22 +543,23 @@ def load_bar_panel(
     指定 field（如 "close"）时直接返回该字段的 DataFrame。
     """
     frequency = validate_frequency(frequency)
-    store: BarStore | IntradayBarStore = (
-        BarStore() if frequency == "1d" else IntradayBarStore(frequency)
-    )
+    daily_store = BarStore() if frequency == "1d" else None
+    intraday_store = IntradayBarStore(frequency) if frequency != "1d" else None
     frames: dict[str, pd.DataFrame] = {}
     failures: list[tuple[str, str]] = []
     total = len(symbols)
 
     def one(symbol: str) -> pd.DataFrame:
         if frequency == "1d":
+            assert daily_store is not None
             return load_history(
-                symbol, start, end, use_cache=use_cache, store=store,
+                symbol, start, end, use_cache=use_cache, store=daily_store,
                 refresh=refresh, priority=priority,
             )
+        assert intraday_store is not None
         return load_intraday(
             symbol, start, end, frequency=frequency, use_cache=use_cache,
-            store=store, priority=priority,
+            store=intraday_store, priority=priority,
         )
 
     workers = min(max(1, int(max_workers)), 8, max(1, total))

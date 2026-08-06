@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.18.1"
+VERSION = "0.18.2"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,36 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "证券名称单一存储",
+                "items": (
+                    (
+                        "运行时停止读写 stock_names.json 兼容缓存，名称查询、刷新和手工"
+                        "保存统一落到 security_master.sqlite。"
+                    ),
+                    (
+                        "旧 JSON 仅保留一次性迁移读取，既有用户名称不会丢失。"
+                    ),
+                    (
+                        "仓库忽略本地 uv 与隔离测试临时目录，开发状态不再被缓存污染。"
+                    ),
+                ),
+            },
+            {
+                "title": "数据注册类型修复",
+                "items": (
+                    (
+                        "日线与分钟线写入后显式校验可读结果，并分离面板的日线和分钟"
+                        "存储类型，修复完整 mypy 门禁发现的 3 项问题。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.18.1",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "统一数据源能力",
@@ -182,21 +212,6 @@ RELEASES = (
                     (
                         "账户 API 增加稳定管理能力字段，删除继续采用可恢复归档并保留"
                         "策略快照、订单与成交账本。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.5",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "健康探针异常边界",
-                "items": (
-                    (
-                        "后台健康探针保留完整本机日志，但公开诊断仅返回稳定恢复提示，"
-                        "关闭最后一条异常栈暴露告警。"
                     ),
                 ),
             },
