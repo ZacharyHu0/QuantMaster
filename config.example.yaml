@@ -28,6 +28,13 @@ data:
   free_stockdb_online_enabled: true       # 仅用于小批交互补缺
   free_stockdb_online_url: http://8.138.149.215:7899
   free_stockdb_online_timeout: 4
+  after_close_enabled: true
+  after_close_auto_run: true
+  after_close_include_bj: true
+  after_close_min_listing_sessions: 60
+  after_close_min_avg_amount: 30000000
+  after_close_candidate_limit: 30
+  after_close_notify: true
   tushare_token: ""          # 可选：https://tushare.pro 注册获取
   cache_days: 1              # 日线缓存有效期（天）
   intraday_cache_minutes: 5  # 当日分钟线缓存刷新间隔

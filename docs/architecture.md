@@ -83,13 +83,23 @@
   上层模块完全不感知数据来自哪家。
 - **数据源优先级与降级**：A 股默认使用用户安装的 free-stockdb SDK 和本地数据，
   随后回退 AKShare、Tushare 与本地缓存；主源可在设置中切换。QuantMaster 不捆绑
-  free-stockdb 程序、数据或同步源。数据源显式声明 daily、intraday、spot、
-  index_members、industry 与 themes 能力；调度器只调用满足请求能力的来源。新增数据源
+  free-stockdb 程序、数据或同步源。数据源显式声明 daily、daily_cross_section、
+  intraday、spot、index_members、industry、themes、board_hierarchy 与
+  native_indicators 能力；诊断同时披露声明和本机可用状态。调度器只调用满足请求能力的来源。新增数据源
   需要实现对应方法、声明 capability 并注册到 `registry._factories()`。能力矩阵和各市场
   实际优先级可在 `/api/v1/diagnostics` 或 `qm doctor --deep` 中查看。
 - **free-stockdb 托管**：`data/free_stockdb_runtime.py` 只管理用户自行安装的完整发行包，
   不下载程序、数据或同步源。目录、启停、盘后更新时间均可在设置中调整；更新期间其他
   请求按注册优先级降级，应用退出会终止仍在运行的更新器，运行状态进入深度诊断。
+- **盘后研究快照**：`after_close/` 以证券主数据为全 A 股入口，批量读取日频截面并执行
+  最新交易日、证券/OHLCV 覆盖、板块目录和覆盖骤降门禁。板块及候选由版本化的
+  QuantMaster 公式计算，正式结果以输入哈希写入不可变 SQLite 快照，同时将截面和板块
+  成员关系写入研究湖。历史重放只读取冻结快照；缺少点时板块生效日期时拒绝用今天的分类
+  强制重算过去。1/3/5/7 日标签只在未来交易日实际发生后生成，并显式保留全市场基线、
+  中证 800 点时成员缺失、换手、集中度和容量口径。
+  中证800成员通过 Tushare `index_weight` 拉取沪深300与中证500月度快照，按生效日写入
+  `raw/stock/1d/csi800_membership` 研究湖分区；盘后、Quant Lab 与回放共用内容哈希和
+  分区血缘，缺权限时只把该基线标为不可用。
 - **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
   隔离目录并增量归档。SQLite 分别记录实际数据边界、已检查覆盖边界、检查时间、
   来源和状态。完整历史覆盖长期视为不可变；接近当前日期时按 `cache_days` 检查，

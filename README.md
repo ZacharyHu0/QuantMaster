@@ -75,6 +75,10 @@ qm fetch --universe demo --frequency 5m --start 2026-07-01  # 分钟线归档
 qm regime --universe demo --start 2022-01-01         # 牛熊/趋势/板块/未来展望
 qm select --universe demo --horizon 3 --profile risk_adjusted --top 10 # Hybrid v2 今日决策
 qm decisions --universe demo --limit 20              # 回看当时实际生成的决策
+qm after-close scan                                  # 全 A 股盘后板块优先级与研究候选
+qm after-close show                                  # 查看最新正式快照及数据新鲜度
+qm after-close history --limit 20                    # 重放历史冻结快照
+qm after-close export --format csv --output scan.csv # 导出可核查候选证据
 qm factor-test "rank(-delta(close, 5))"              # 因子体检：IC/分层/换手
 qm backtest --factor mom_20d --top 5                 # 因子选股回测
 qm backtest --strategy decision --profile stable --holding-days 3 --top 5 # 固化 Champion 回测
@@ -102,6 +106,14 @@ qm doctor --deep                                    # 深查存储完整性、�
 不访问生产数据。确认后再执行 `sync`；设置中心的“研究生产湖”提供相同的
 dry-run、启动、取消和续跑能力。详细数据口径、ArtifactRef 和 Rust 构建见
 [docs/research_pipeline.md](docs/research_pipeline.md)。
+
+盘后扫描只在 free-stockdb 最新交易日、证券/OHLCV 覆盖和多层板块目录通过
+完整性门后发布新快照；失败会继续展示上一份正式结果及过期原因。默认排除 ST、
+上市不足 60 个交易日和近 20 日日均成交额低于 3,000 万元的证券，北交所默认纳入
+并单独披露。候选是可审计的研究证据，不会自动下单或转化为确定性买卖建议。
+若配置的 Tushare 账号具备 `index_weight` 权限，系统会拉取沪深300与中证500月度点时
+成分，按生效日写入研究湖 `csi800_membership` 分区；盘后验证、Quant Lab 和历史回放
+复用该缓存。缺少 Token 或权限时只降级中证800基线，不影响盘后正式快照发布。
 
 Python API 同样直接：
 

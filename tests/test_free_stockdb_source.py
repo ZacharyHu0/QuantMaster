@@ -84,6 +84,19 @@ def test_free_stockdb_board_data_feeds_industry_and_concepts(monkeypatch) -> Non
     }]
 
 
+def test_free_stockdb_cross_section_discloses_optional_field_coverage(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+
+    frame = source.daily_cross_section(
+        ["600519.SH"], "2026-08-05", "2026-08-05",
+    )
+
+    assert frame.loc[0, "symbol"] == "600519.SH"
+    assert pd.isna(frame.loc[0, "pe_ttm"])
+    assert "pe_ttm" in client.calls[0]["fields"]
+    assert source.board_hierarchy()[0]["level"] == "L1"
+
+
 def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr(

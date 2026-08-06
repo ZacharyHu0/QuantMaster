@@ -413,6 +413,26 @@ class InstrumentStore:
                         result[instrument.symbol] = instrument
         return result
 
+    def list(
+        self, *, market: str = "", asset_type: str = "", status: str = "",
+    ) -> list[Instrument]:
+        """按稳定代码顺序枚举证券，供全市场本地研究任务使用。"""
+        clauses: list[str] = []
+        params: list[str] = []
+        for column, raw in (
+            ("market", market), ("asset_type", asset_type), ("status", status),
+        ):
+            value = str(raw).strip()
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value.upper() if column == "market" else value.lower())
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM instruments{where} ORDER BY symbol", params,
+            ).fetchall()
+        return [Instrument(**dict(row)) for row in rows]
+
     def names(self, symbols: Iterable[str]) -> dict[str, str]:
         requested = [str(item).upper() for item in dict.fromkeys(symbols)]
         if not requested:

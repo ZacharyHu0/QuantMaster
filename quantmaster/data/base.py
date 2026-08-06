@@ -38,11 +38,14 @@ class Market(enum.StrEnum):
 
 class DataCapability(enum.StrEnum):
     DAILY = "daily"
+    DAILY_CROSS_SECTION = "daily_cross_section"
     INTRADAY = "intraday"
     SPOT = "spot"
     INDEX_MEMBERS = "index_members"
     INDUSTRY = "industry"
     THEMES = "themes"
+    BOARD_HIERARCHY = "board_hierarchy"
+    NATIVE_INDICATORS = "native_indicators"
 
 
 @dataclass
@@ -149,6 +152,22 @@ class DataSource(ABC):
 
     def index_members(self, index_symbol: str) -> list[str]:  # pragma: no cover
         """指数成分股列表。"""
+        raise NotImplementedError
+
+    def daily_cross_section(
+        self, symbols: list[str], start: str, end: str,
+    ) -> pd.DataFrame:  # pragma: no cover - 可选数据源能力
+        """点时日频截面；至少包含 symbol/date/OHLCV，缺失字段保留为空。"""
+        raise NotImplementedError
+
+    def board_hierarchy(self) -> list[dict]:  # pragma: no cover - 可选数据源能力
+        """返回带 category/level/members 的版本化板块目录。"""
+        raise NotImplementedError
+
+    def native_indicators(
+        self, names: list[str], symbols: list[str], start: str, end: str,
+    ) -> dict:  # pragma: no cover - 仅用于交叉校验或加速
+        """数据源原生指标；不得作为不可审计的唯一评分路径。"""
         raise NotImplementedError
 
     def supports(self, market: Market) -> bool:

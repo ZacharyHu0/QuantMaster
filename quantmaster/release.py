@@ -4,13 +4,37 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.1.4"
+VERSION = "1.2.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "free-stockdb 盘后研究引擎",
+                "items": (
+                    (
+                        "全 A 股盘后扫描新增数据完整性门、不可变快照、申万多层与概念板块"
+                        "优先级，以及逐项披露趋势、量价、风险和估值可用性的研究候选。"
+                    ),
+                    (
+                        "Web、CLI 与 API 共用统一任务和快照，支持取消、恢复、历史重放、"
+                        "CSV/JSON 导出；更新失败会沿用旧快照并披露过期原因。"
+                    ),
+                    (
+                        "正式截面与板块关系进入研究湖，1/3/5/7 日标签加入全市场超额、"
+                        "中证800点时超额、回撤、容量、换手和集中度；指数成分按生效日"
+                        "缓存并与 Quant Lab 复用，结果始终定位为研究观察，不自动下单。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.1.4",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -202,38 +226,6 @@ RELEASES = (
                     ),
                     (
                         "长时间更新可随应用退出而终止，运行状态进入诊断与设置热应用结果。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.19.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "市场指标与候选版诊断",
-                "items": (
-                    (
-                        "大盘卡片和决策板块新增日线 RSI(14)，CNN Fear & Greed 作为"
-                        "明确标注的美国/全球风险背景。"
-                    ),
-                    (
-                        "RSI<22 显示“加仓抄底观察”，同时 CNN<10 显示“罕见大底机会”；"
-                        "弱网时使用短缓存或显式降级。"
-                    ),
-                    (
-                        "/api/v1/diagnostics 与 qm doctor --deep 新增所选主源、各市场"
-                        "优先级和数据源能力矩阵，读取过程不会探测网络。"
-                    ),
-                    (
-                        "架构文档同步 capability 扩展契约，明确 free-stockdb 默认但可切换、"
-                        "且不随 QuantMaster 捆绑。"
-                    ),
-                    (
-                        "Windows 一键启动会自动复用或拉起用户放在 runtime/free-stockdb "
-                        "中的本地 stockdb 服务，文件未就绪或连接失败时返回明确警告并继续"
-                        "使用后备数据源。"
                     ),
                 ),
             },

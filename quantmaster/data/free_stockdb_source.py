@@ -81,10 +81,13 @@ class FreeStockDBSource(DataSource):
     markets = (Market.CN,)
     capabilities = frozenset({
         DataCapability.DAILY,
+        DataCapability.DAILY_CROSS_SECTION,
         DataCapability.INTRADAY,
         DataCapability.SPOT,
         DataCapability.INDUSTRY,
         DataCapability.THEMES,
+        DataCapability.BOARD_HIERARCHY,
+        DataCapability.NATIVE_INDICATORS,
     })
 
     def __init__(
@@ -162,6 +165,7 @@ class FreeStockDBSource(DataSource):
         frequency: str,
         *,
         fq: str | None,
+        fields: str | None = None,
         probe: bool = False,
     ):
         client = self._sdk_client()
@@ -175,24 +179,39 @@ class FreeStockDBSource(DataSource):
                 "end": end,
                 "frequency": frequency,
                 "fq": fq,
+                "fields": fields,
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
+        arguments = {
+            "code": code,
+            "start": start or None,
+            "end": end or None,
+            "frequency": frequency,
+            "fq": fq,
+            "as_df": False,
+        }
+        # Older stock_sdk builds do not expose the fields keyword.  Keep the
+        # established daily/minute contract compatible while asking newer
+        # builds for the richer after-close cross section explicitly.
+        if fields is not None:
+            arguments["fields"] = fields
         return provider_call(
             self.name,
             key,
-            lambda: client.get_data(
-                code=code,
-                start=start or None,
-                end=end or None,
-                frequency=frequency,
-                fq=fq,
-                as_df=False,
-            ),
+            lambda: client.get_data(**arguments),
             probe=probe,
         )
+
+    def sdk_version(self) -> str:
+        """Return a best-effort SDK version without turning it into a dependency."""
+        try:
+            module = self._load_sdk_module()
+        except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError):
+            return ""
+        return str(getattr(module, "__version__", "") or getattr(module, "VERSION", ""))
 
     def _request(self, params: dict[str, str], *, probe: bool = False):
         key = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -356,6 +375,73 @@ class FreeStockDBSource(DataSource):
             if not frame.empty:
                 result[symbol] = frame
         return result
+
+    def daily_cross_section(
+        self, symbols: list[str], start: str, end: str,
+    ) -> pd.DataFrame:
+        """批量读取盘后点时截面；可选字段缺失时保留 NaN。"""
+        ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        columns = [
+            "symbol", "date", "open", "high", "low", "close", "volume",
+            "amount", "float_mv", "total_mv", "pe_ttm", "pb", "is_st",
+        ]
+        if not ordered:
+            return pd.DataFrame(columns=columns)
+        codes = [symbol.partition(".")[0].zfill(6) for symbol in ordered]
+        begin = _compact_time(start, intraday=False)
+        finish = _compact_time(end, intraday=False)
+        fields = ",".join(columns[1:])
+        payload = self._sdk_data(codes, begin, finish, "1d", fq="qfq", fields=fields)
+        records: list[dict[str, Any]] = []
+        if payload is None:
+            for symbol, code in zip(ordered, codes, strict=True):
+                for item in self._query_http("日k", code, begin, finish):
+                    records.append({**item, "symbol": symbol})
+        elif isinstance(payload, dict):
+            for symbol, code in zip(ordered, codes, strict=True):
+                values = payload.get(code, payload.get(symbol))
+                for item in self._records(values):
+                    records.append({**item, "symbol": symbol})
+        elif len(ordered) == 1:
+            records = [{**item, "symbol": ordered[0]} for item in self._records(payload)]
+        frame = pd.DataFrame(records)
+        for column in columns:
+            if column not in frame:
+                frame[column] = pd.NA
+        if frame.empty:
+            return frame[columns]
+        digits = frame["date"].astype(str).str.replace(r"\D", "", regex=True).str[:8]
+        frame["date"] = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
+        for column in (
+            "open", "high", "low", "close", "volume", "amount",
+            "float_mv", "total_mv", "pe_ttm", "pb",
+        ):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        return frame[columns].dropna(subset=["date"]).sort_values(["symbol", "date"])
+
+    def board_hierarchy(self) -> list[dict[str, Any]]:
+        levels = {"申万一级": "L1", "申万二级": "L2", "申万三级": "L3", "概念": "CONCEPT"}
+        return [
+            {
+                **item,
+                "level": levels.get(str(item.get("category") or ""), "OTHER"),
+                "members": list(item.get("symbols") or []),
+            }
+            for item in self.boards()
+        ]
+
+    def native_indicators(
+        self, names: list[str], symbols: list[str], start: str, end: str,
+    ) -> dict:
+        """调用 SDK 指标模块，仅供显式校验/性能路径使用。"""
+        module = self._load_sdk_module()
+        indicator = getattr(module, "zb", None)
+        calculate = getattr(indicator, "jisuan", None)
+        if not callable(calculate):
+            raise RuntimeError("free-stockdb SDK 未暴露原生指标计算")
+        codes = [str(symbol).partition(".")[0].zfill(6) for symbol in symbols]
+        return calculate(names, codes, start=_compact_time(start, intraday=False),
+                         end=_compact_time(end, intraday=False), frequency="1d")
 
     def intraday(
         self, symbol: str, start: str, end: str, frequency: str = "5m",

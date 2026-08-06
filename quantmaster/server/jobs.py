@@ -25,9 +25,11 @@ from quantmaster.server.rotation import (
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 JobDomain = Literal[
     "research", "data", "lab", "backtests", "rotation", "repairs", "automation",
+    "after_close",
 ]
 _DOMAINS: tuple[JobDomain, ...] = (
-    "research", "data", "lab", "backtests", "repairs", "automation", "rotation",
+    "research", "data", "lab", "backtests", "repairs", "automation", "after_close",
+    "rotation",
 )
 _ACTIVE = frozenset({"queued", "running", "cancelling", "paused", "interrupted"})
 _RETRYABLE = frozenset({
@@ -71,6 +73,10 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "after_close":
+        from quantmaster.after_close.jobs import get_after_close_jobs
+
+        return get_after_close_jobs().get(job_id)
     if domain == "automation":
         automation_job = get_runtime().service.jobs.store.get(job_id)
         if not str(automation_job.get("type") or "").startswith("automation."):
@@ -97,6 +103,10 @@ def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
 
 
 def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
+    if domain == "after_close":
+        from quantmaster.after_close.jobs import get_after_close_jobs
+
+        return get_after_close_jobs().list(limit)
     if domain == "automation":
         return [
             value for value in get_runtime().service.jobs.store.list(max(limit * 4, limit))
@@ -119,6 +129,11 @@ def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
 
 
 def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    if domain == "after_close":
+        from quantmaster.after_close.jobs import get_after_close_jobs
+
+        _get(domain, job_id)
+        return get_after_close_jobs().runtime.store.events(job_id, after, limit)
     if domain == "automation":
         _get(domain, job_id)
         return get_runtime().service.jobs.store.events(job_id, after, limit)
@@ -139,6 +154,11 @@ def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict
 
 
 def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "after_close":
+        from quantmaster.after_close.jobs import get_after_close_jobs
+
+        _get(domain, job_id)
+        return get_after_close_jobs().runtime.store.cancel(job_id)
     if domain == "automation":
         _get(domain, job_id)
         return get_runtime().service.jobs.store.cancel(job_id)
@@ -158,6 +178,11 @@ def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
 
 
 def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
+    if domain == "after_close":
+        from quantmaster.after_close.jobs import get_after_close_jobs
+
+        _get(domain, job_id)
+        return get_after_close_jobs().runtime.retry(job_id)
     if domain == "automation":
         _get(domain, job_id)
         return get_runtime().service.jobs.retry(job_id)

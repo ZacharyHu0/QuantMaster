@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/static/lab.css">
 <link rel="stylesheet" href="/static/trading.css">
 <link rel="stylesheet" href="/static/rotation.css">
+<link rel="stylesheet" href="/static/after-close.css">
 <link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
@@ -40,6 +41,7 @@
     </span>
     <span class="nav-group" aria-label="决策">
       <button data-tab="candidates">候选</button>
+      <button data-tab="after-close">盘后扫描</button>
       <button data-tab="decision">决策</button>
     </span>
     <span class="nav-group" aria-label="研究">
@@ -346,6 +348,53 @@
       </div>
     </section>
   </div>
+</section>
+
+<!-- ================= 决策 ================= -->
+<section class="tab" id="tab-after-close">
+  <div class="after-close-masthead">
+    <div><span class="eyebrow">AFTER-CLOSE DISCOVERY</span><h2>盘后扫描</h2>
+      <p>先看板块优先级，再核查板块内研究候选。所有结果绑定交易日、输入哈希与评分版本，不构成买卖建议。</p></div>
+    <dl id="after-close-asof"><dt>正式快照</dt><dd>尚未读取</dd><dt>数据状态</dt><dd>等待检查</dd></dl>
+  </div>
+  <div class="after-close-toolbar">
+    <form id="after-close-scan-form">
+      <label>历史重放截止日<input id="after-close-as-of" type="date" aria-label="历史重放截止日"></label>
+      <button class="primary" type="submit">运行全市场扫描</button>
+      <button class="ghost" id="after-close-rerun" type="button">强制重跑</button>
+    </form>
+    <div class="after-close-actions">
+      <select id="after-close-history" aria-label="历史盘后快照"><option value="">最新正式快照</option></select>
+      <a class="ghost-link" id="after-close-json" href="#">导出 JSON</a>
+      <a class="ghost-link" id="after-close-csv" href="#">导出 CSV</a>
+    </div>
+  </div>
+  <div class="after-close-progress" id="after-close-progress" hidden aria-live="polite">
+    <div><span data-after-close-phase>准备中</span><strong data-after-close-percent>0%</strong></div>
+    <div class="load-track"><div class="load-fill"></div></div>
+    <button class="ghost" data-after-close-cancel type="button">安全取消</button>
+  </div>
+  <div class="after-close-stale" id="after-close-stale" hidden></div>
+  <div class="after-close-coverage" id="after-close-coverage" aria-live="polite"></div>
+  <div class="after-close-levels" id="after-close-levels" role="group" aria-label="板块层级">
+    <button type="button" class="active" data-level="L1">申万一级</button>
+    <button type="button" data-level="L2">申万二级</button>
+    <button type="button" data-level="L3">申万三级</button>
+    <button type="button" data-level="CONCEPT">概念</button>
+  </div>
+  <div class="after-close-workbench">
+    <section class="after-close-sector-pane" aria-labelledby="after-close-sector-title">
+      <div class="after-close-pane-head"><div><h3 id="after-close-sector-title">板块优先级</h3><span id="after-close-sector-summary">等待快照</span></div><button class="text-button" id="after-close-clear-sector" type="button" hidden>显示全部候选</button></div>
+      <div class="after-close-table-wrap"><table><thead><tr><th>#</th><th>板块</th><th>评分</th><th>20日</th><th>相对</th><th>宽度</th><th>覆盖</th></tr></thead><tbody id="after-close-sectors"></tbody></table></div>
+    </section>
+    <section class="after-close-candidate-pane" aria-labelledby="after-close-candidate-title">
+      <div class="after-close-pane-head"><div><h3 id="after-close-candidate-title">研究候选</h3><span id="after-close-candidate-summary">等待快照</span></div><button class="ghost" id="after-close-copy" type="button">复制为候选池</button></div>
+      <div class="after-close-table-wrap"><table><thead><tr><th>#</th><th>标的</th><th>评分</th><th>20日</th><th>量能</th><th>回撤</th><th>证据</th></tr></thead><tbody id="after-close-candidates"></tbody></table></div>
+    </section>
+  </div>
+  <section class="after-close-validation" id="after-close-validation" aria-labelledby="after-close-validation-title">
+    <div><h3 id="after-close-validation-title">事后验证</h3><p>只有未来交易日真实发生后才写入 1/3/5/7 日标签。</p></div><div data-after-close-labels>尚无可计算标签</div>
+  </section>
 </section>
 
 <!-- ================= 决策 ================= -->
@@ -1023,6 +1072,14 @@
             <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">启动原生更新器</button></div>
             <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="留空则自动使用本地目录下的 pybao"><small>显式路径优先；留空时自动发现 &lt;本地目录&gt;/pybao/stock_sdk.py。</small></label>
             <label class="field-wide">free-stockdb 服务地址<input name="data.free_stockdb_url" type="url" required placeholder="http://127.0.0.1:7899"><small>SDK 使用其中的主机和端口；也可改为自己的兼容服务。</small></label>
+            <div class="field-wide section-divider"><strong>盘后全市场研究</strong><small>原生更新成功后，通过完整性门才发布新的正式快照。</small></div>
+            <label class="toggle-field"><span><strong>启用盘后扫描</strong><small>构建板块优先级与板块内研究候选。</small></span><input name="data.after_close_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>更新后自动运行</strong><small>free-stockdb 更新成功并恢复服务后自动提交扫描。</small></span><input name="data.after_close_auto_run" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>纳入北交所</strong><small>关闭后全市场扫描只包含沪深普通股。</small></span><input name="data.after_close_include_bj" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>推送扫描结果</strong><small>仅推送正式快照变化或完整性失败，不生成交易指令。</small></span><input name="data.after_close_notify" type="checkbox" role="switch"></label>
+            <label>最少上市交易日<input name="data.after_close_min_listing_sessions" type="number" min="20" max="1000" required></label>
+            <label>20 日日均成交额下限<input name="data.after_close_min_avg_amount" type="number" min="0" step="1000000" required><small>默认 30,000,000 元。</small></label>
+            <label>研究候选数量<input name="data.after_close_candidate_limit" type="number" min="5" max="200" required></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button><button type="button" class="ghost check-button" data-check="tushare">检测</button></div><small id="tushare-secret-state"></small></label>
             <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
             <label>分钟缓存（分钟）<input name="data.intraday_cache_minutes" type="number" min="0" required></label>
@@ -1274,6 +1331,7 @@
 <script src="/static/lab.js"></script>
 <script src="/static/trading.js"></script>
 <script src="/static/rotation.js"></script>
+<script src="/static/after-close.js"></script>
 <script src="/static/help.js"></script>
 </body>
 </html>

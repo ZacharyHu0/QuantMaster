@@ -69,6 +69,7 @@ function sourceForPath(path) {
     ['/api/v1/research/mining', '因子挖掘'], ['/api/v1/paper', '模拟交易'],
     ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '实盘账本'],
     ['/api/v1/rotation', '板块联动'],
+    ['/api/v1/after-close', '盘后扫描'],
     ['/api/v1/jobs', '后台任务'],
     ['/api/v1/portfolio', '我的标的'], ['/api/v1/settings', '设置中心'],
     ['/api/v1/automation', '自动任务'], ['/api/v1/lab', 'Quant Lab'],
@@ -852,6 +853,7 @@ function loadActiveTab(tab) {
   if (tab === 'paper') loadPaper();
   if (tab === 'help' && typeof window.loadHelp === 'function') window.loadHelp();
   if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
+  if (tab === 'after-close' && typeof window.loadAfterClose === 'function') window.loadAfterClose();
   if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
   if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
   if (tab === 'decision' && !decisionLoaded && !decisionLoading) void loadDecisionHistory();

@@ -330,6 +330,18 @@ class FreeStockDBRuntime:
                     phase="completed", update_result="success" if code == 0 else "failed",
                     exit_code=code, trigger=trigger,
                 )
+                if (
+                    code == 0
+                    and get_config().data.after_close_enabled
+                    and get_config().data.after_close_auto_run
+                ):
+                    try:
+                        from quantmaster.after_close.jobs import get_after_close_jobs
+
+                        get_after_close_jobs().submit(force=False)
+                        logger.info("free-stockdb 更新完成，已提交盘后研究扫描")
+                    except (ImportError, RuntimeError, ValueError):
+                        logger.warning("free-stockdb 更新完成，但盘后研究扫描未能提交", exc_info=True)
             elif not self._stop.is_set():
                 self._set_status(
                     "error", "更新结束，但本地服务恢复失败", phase="completed",

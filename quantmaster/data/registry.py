@@ -319,12 +319,32 @@ def data_source_capabilities() -> dict[str, object]:
         priority[market.value] = [str(factory.name) for factory in ordered]
         for factory in ordered:
             name = str(factory.name)
+            declared = sorted(value.value for value in factory.capabilities)
+            capability_status = {value: "declared" for value in declared}
+            if name.startswith("free-stockdb"):
+                from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
+
+                sdk_available = resolve_free_stockdb_sdk_path() is not None
+                local_configured = bool(str(get_config().data.free_stockdb_url or "").strip())
+                capability_status.update({
+                    DataCapability.DAILY.value: "available" if local_configured else "unavailable",
+                    DataCapability.DAILY_CROSS_SECTION.value: (
+                        "available" if sdk_available else "degraded"
+                    ),
+                    DataCapability.BOARD_HIERARCHY.value: (
+                        "available" if sdk_available else "unavailable"
+                    ),
+                    DataCapability.NATIVE_INDICATORS.value: (
+                        "available" if sdk_available else "unavailable"
+                    ),
+                })
             providers.setdefault(
                 name,
                 {
                     "name": name,
                     "markets": sorted(value.value for value in factory.markets),
-                    "capabilities": sorted(value.value for value in factory.capabilities),
+                    "capabilities": declared,
+                    "capability_status": capability_status,
                 },
             )
     return {

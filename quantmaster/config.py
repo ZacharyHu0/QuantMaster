@@ -58,6 +58,13 @@ class DataConfig:
     tushare_calls_per_minute: int = 120   # 2000 积分档保守全局限速
     tushare_cache_days: int = 1           # Tushare 当期接口响应缓存天数
     fundamental_cache_days: int = 7       # 季度财务数据本地缓存天数
+    after_close_enabled: bool = True       # free-stockdb 盘后研究扫描
+    after_close_auto_run: bool = True      # 本地库更新就绪后自动运行
+    after_close_include_bj: bool = True
+    after_close_min_listing_sessions: int = 60
+    after_close_min_avg_amount: float = 30_000_000.0
+    after_close_candidate_limit: int = 30
+    after_close_notify: bool = True
     repair_enabled: bool = True            # 检测到可重建数据损坏时持久排队
     repair_daily_budget: int = 100         # 每个数据源每日最多自动修复次数
     repair_max_workers: int = 2            # 全局自动修复并发上限

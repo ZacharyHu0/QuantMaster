@@ -94,6 +94,13 @@ class DataSettings(StrictModel):
     tushare_calls_per_minute: int = Field(default=120, ge=1, le=10_000)
     tushare_cache_days: int = Field(default=1, ge=0, le=3650)
     fundamental_cache_days: int = Field(default=7, ge=0, le=3650)
+    after_close_enabled: bool = True
+    after_close_auto_run: bool = True
+    after_close_include_bj: bool = True
+    after_close_min_listing_sessions: int = Field(default=60, ge=20, le=1000)
+    after_close_min_avg_amount: float = Field(default=30_000_000.0, ge=0, le=1e13)
+    after_close_candidate_limit: int = Field(default=30, ge=5, le=200)
+    after_close_notify: bool = True
 
     @field_validator("root")
     @classmethod

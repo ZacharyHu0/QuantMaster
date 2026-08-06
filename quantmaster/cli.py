@@ -277,6 +277,90 @@ def cmd_decisions(args) -> None:
     _print_json({"snapshots": DecisionStore().history(args.universe, args.limit)})
 
 
+def cmd_after_close(args) -> int:
+    from pathlib import Path
+
+    from quantmaster.after_close.jobs import get_after_close_jobs
+    from quantmaster.after_close.service import get_after_close_service
+    from quantmaster.runtime.json import strict_json_dumps
+
+    service = get_after_close_service()
+    if args.after_close_cmd in {"scan", "rerun"}:
+        import time
+
+        jobs = get_after_close_jobs()
+        job, created = jobs.submit(
+            as_of=args.as_of or "", force=args.after_close_cmd == "rerun",
+        )
+        jobs.start()
+        print(
+            f"盘后扫描任务 {job['id']} {'已创建' if created else '已复用'}",
+            file=sys.stderr,
+        )
+        while True:
+            job = jobs.get(str(job["id"]))
+            if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
+                break
+            print(
+                f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'} "
+                f"{job.get('detail') or ''}", file=sys.stderr,
+            )
+            time.sleep(0.5)
+        if job["status"] not in {"completed", "completed_with_warnings"}:
+            _print_json(jobs.public(job))
+            return 1
+        snapshot = service.store.public_latest()
+        _print_json({"job": jobs.public(job), "snapshot": snapshot})
+        return 0
+    if args.after_close_cmd == "history":
+        _print_json({"items": service.store.history(args.limit)})
+        return 0
+    snapshot = (
+        service.store.get(args.snapshot_id) if getattr(args, "snapshot_id", "")
+        else service.store.latest()
+    )
+    if snapshot is None:
+        raise FileNotFoundError("尚无盘后研究快照")
+    payload = snapshot.to_dict()
+    payload["validation"] = {
+        **payload.get("validation", {}),
+        "labels": service.store.labels(snapshot.snapshot_id),
+    }
+    if args.after_close_cmd == "export":
+        target = Path(args.output).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if args.format == "csv":
+            import csv
+
+            fields = [
+                "rank", "symbol", "name", "score", "as_of_date", "sectors", "reasons",
+                "return_5d", "return_20d", "trend_20d", "avg_amount_20d",
+                "amount_change", "volatility_20d", "drawdown_20d", "float_mv",
+                "total_mv", "pe_ttm", "pb",
+            ]
+            with target.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for candidate in snapshot.candidates:
+                    writer.writerow({
+                        "rank": candidate.rank, "symbol": candidate.symbol,
+                        "name": candidate.name, "score": candidate.score,
+                        "as_of_date": candidate.as_of_date,
+                        "sectors": " / ".join(item["name"] for item in candidate.sectors),
+                        "reasons": "；".join(candidate.reasons),
+                        **{
+                            key: candidate.metrics.get(key)
+                            for key in fields if key in candidate.metrics
+                        },
+                    })
+        else:
+            target.write_text(strict_json_dumps(payload, indent=2), encoding="utf-8")
+        _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
+    else:
+        _print_json(payload)
+    return 0
+
+
 def cmd_factors(args) -> None:
     from quantmaster.ai.sentiment import list_news_factors
     from quantmaster.factors.fundamental import list_fundamental_factors
@@ -906,6 +990,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--universe", default=None, help="按候选过滤")
     p.add_argument("--limit", type=int, default=30)
     p.set_defaults(func=cmd_decisions)
+
+    p = sub.add_parser("after-close", help="free-stockdb 全 A 股盘后板块与研究候选")
+    acsub = p.add_subparsers(dest="after_close_cmd", required=True)
+    for command, help_text in (
+        ("scan", "创建或复用当日盘后扫描"),
+        ("rerun", "强制创建一次可复跑扫描"),
+    ):
+        item = acsub.add_parser(command, help=help_text)
+        item.add_argument("--as-of", default="", help="历史重放截止日 YYYY-MM-DD")
+    show = acsub.add_parser("show", help="查看最新或指定不可变快照")
+    show.add_argument("--snapshot-id", default="")
+    history = acsub.add_parser("history", help="查看盘后快照历史")
+    history.add_argument("--limit", type=int, default=30)
+    export = acsub.add_parser("export", help="导出快照 JSON/CSV")
+    export.add_argument("output")
+    export.add_argument("--snapshot-id", default="")
+    export.add_argument("--format", choices=["json", "csv"], default="json")
+    p.set_defaults(
+        func=cmd_after_close, as_of="", snapshot_id="", limit=30, output="", format="json",
+    )
 
     sub.add_parser("factors", help="列出内置因子").set_defaults(func=cmd_factors)
 

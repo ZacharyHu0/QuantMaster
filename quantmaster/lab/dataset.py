@@ -9,9 +9,11 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.index_membership import (
+    load_cached_csi800_members_as_of,
+    load_cached_csi800_records,
+)
 from quantmaster.lab.models import DatasetSnapshot, content_hash
-
-CSI800_INDEXES = ("000300.SH", "000905.SH")
 
 
 def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataFrame:
@@ -61,8 +63,7 @@ def load_csi800_membership(
         from quantmaster.data.tushare_source import TushareSource
 
         source = TushareSource()
-    records = [source.index_weights(code, start, end) for code in CSI800_INDEXES]
-    frame = pd.concat(records, ignore_index=True) if records else pd.DataFrame()
+    frame = load_cached_csi800_records(start, end, source=source)
     if frame.empty:
         raise RuntimeError("中证800历史成分为空；请检查 Tushare token 与 index_weight 权限")
     if calendar is None:
@@ -72,34 +73,7 @@ def load_csi800_membership(
 
 def load_csi800_members_as_of(as_of: str, *, source=None) -> dict[str, Any]:
     """读取目标日可知的中证800成分，分别沿用两个指数最近一期快照。"""
-    target = pd.Timestamp(as_of).normalize()
-    if pd.isna(target):
-        raise ValueError("查看日期需要使用 YYYY-MM-DD 格式")
-    if source is None:
-        from quantmaster.data.tushare_source import TushareSource
-
-        source = TushareSource()
-    start = (target - pd.DateOffset(months=4)).replace(day=1)
-    members: set[str] = set()
-    snapshot_dates: dict[str, str] = {}
-    for index_code in CSI800_INDEXES:
-        frame = source.index_weights(
-            index_code, start.strftime("%Y-%m-%d"), target.strftime("%Y-%m-%d"))
-        eligible = frame.loc[pd.to_datetime(frame.get("trade_date"), errors="coerce") <= target]
-        if eligible.empty:
-            raise RuntimeError(
-                f"{index_code} 在 {target.date()} 前没有可用成分；请检查 Tushare token 与 index_weight 权限")
-        latest = pd.to_datetime(eligible["trade_date"]).max().normalize()
-        current = eligible.loc[pd.to_datetime(eligible["trade_date"]).dt.normalize() == latest]
-        members.update(current["symbol"].dropna().astype(str))
-        snapshot_dates[index_code] = latest.strftime("%Y-%m-%d")
-    if not members:
-        raise RuntimeError("中证800动态候选没有可用成分")
-    return {
-        "as_of": target.strftime("%Y-%m-%d"),
-        "symbols": sorted(members),
-        "snapshot_dates": snapshot_dates,
-    }
+    return load_cached_csi800_members_as_of(as_of, source=source)
 
 
 def _bar_manifest(symbols: Iterable[str]) -> dict[str, Any]:

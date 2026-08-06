@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from quantmaster.after_close.jobs import (
+        get_after_close_jobs,
+        shutdown_after_close_jobs,
+    )
     from quantmaster.analysis.stock_jobs import (
         get_stock_analysis_jobs,
         shutdown_stock_analysis_jobs,
@@ -74,6 +78,7 @@ async def lifespan(_: FastAPI):
     rotation_worker = get_rotation_worker()
     repair_worker = get_data_repair_manager()
     stock_analysis_worker = get_stock_analysis_jobs()
+    after_close_worker = get_after_close_jobs()
 
     def drain_workers() -> None:
         # The data root can be hot-switched, which replaces this singleton.
@@ -87,9 +92,11 @@ async def lifespan(_: FastAPI):
         worker.stop()
         runtime.stop()
         stock_analysis_worker.pause()
+        after_close_worker.pause()
 
     def resume_workers() -> None:
         stock_analysis_worker.resume()
+        after_close_worker.resume()
         runtime.start()
         research_worker.start()
         data_refresh_manager.start()
@@ -110,11 +117,13 @@ async def lifespan(_: FastAPI):
                 and rotation_worker.idle
                 and get_paper_automation_worker().idle
                 and stock_analysis_worker.idle
+                and after_close_worker.idle
             ),
         )
     )
     research_worker.start()
     stock_analysis_worker.start()
+    after_close_worker.start()
     data_refresh_manager.start()
     repair_worker.start()
     backtest_worker.start()
@@ -153,6 +162,7 @@ async def lifespan(_: FastAPI):
         close_llm_http_clients()
         # 飞书 outbox 已在 drain_workers 中停止，不会在此处重新创建分析单例。
         shutdown_stock_analysis_jobs()
+        shutdown_after_close_jobs()
         logger.info("QuantMaster 已停止")
 
 
@@ -336,6 +346,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 from quantmaster.server.automation import router as automation_router  # noqa: E402
+from quantmaster.server.after_close import router as after_close_router  # noqa: E402
 from quantmaster.server.jobs import router as jobs_router  # noqa: E402
 from quantmaster.server.lab import router as lab_router  # noqa: E402
 from quantmaster.server.management import router as management_router  # noqa: E402
@@ -346,6 +357,7 @@ from quantmaster.server.stock_analysis import router as stock_analysis_router  #
 from quantmaster.server.trading import router as trading_router  # noqa: E402
 
 app.include_router(management_router)
+app.include_router(after_close_router)
 app.include_router(automation_router)
 app.include_router(lab_router)
 app.include_router(jobs_router)
