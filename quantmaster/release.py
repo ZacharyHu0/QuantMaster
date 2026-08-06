@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.1"
+VERSION = "0.14.2"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "数据源边界收敛",
+                "items": (
+                    (
+                        "将 free-stockdb 行业降级与诊断探针拆为独立边界，保持 v0.14 功能不变，"
+                        "恢复复杂度质量基线。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.1",
         "date": RELEASE_DATE,
         "sections": (
             {

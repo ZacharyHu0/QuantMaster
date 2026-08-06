@@ -183,6 +183,32 @@ def check_storage(data: DataSettings) -> dict[str, Any]:
                        path=str(root))
 
 
+def _check_free_stockdb(data: DataSettings | None, timeout: float) -> dict[str, Any]:
+    if data is None:
+        return {}
+    try:
+        from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+        details = FreeStockDBSource(
+            data.free_stockdb_url,
+            min(float(timeout), data.free_stockdb_timeout),
+            data.free_stockdb_sdk_path,
+        ).probe()
+        engine = str(details.get("engine") or "free-stockdb")
+        return {
+            "free-stockdb": {
+                "status": "success", "message": f"本地服务可用（{engine}）",
+            },
+        }
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return {
+            "free-stockdb": {
+                "status": "warning",
+                "message": f"本地服务未运行，将自动降级（{type(exc).__name__}）",
+            },
+        }
+
+
 def check_data_sources(
     timeout: float = 8.0,
     data: DataSettings | None = None,
@@ -230,24 +256,7 @@ def check_data_sources(
             package, result = future.result()
             sources[package] = result
 
-    if data is not None:
-        try:
-            from quantmaster.data.free_stockdb_source import FreeStockDBSource
-
-            details = FreeStockDBSource(
-                data.free_stockdb_url,
-                min(float(timeout), data.free_stockdb_timeout),
-                data.free_stockdb_sdk_path,
-            ).probe()
-            engine = str(details.get("engine") or "free-stockdb")
-            sources["free-stockdb"] = {
-                "status": "success", "message": f"本地服务可用（{engine}）",
-            }
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            sources["free-stockdb"] = {
-                "status": "warning",
-                "message": f"本地服务未运行，将自动降级（{type(exc).__name__}）",
-            }
+    sources.update(_check_free_stockdb(data, timeout))
 
     from quantmaster.data.instruments import instrument_diagnostics
     from quantmaster.data.resilience import PROVIDER_HEALTH

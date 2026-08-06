@@ -49,19 +49,22 @@ def _save_industry_blocks(blocks: dict[str, dict]) -> None:
     temp.replace(path)
 
 
-def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
-    """按设置优先使用 free-stockdb，失败后回退 Tushare/东方财富。"""
-    if get_config().data.primary_provider == "free-stockdb":
-        try:
-            from quantmaster.data.free_stockdb_source import FreeStockDBSource
+def _free_stockdb_industry_map() -> dict[str, str]:  # pragma: no cover - 本地外部服务
+    if get_config().data.primary_provider != "free-stockdb":
+        return {}
+    try:
+        from quantmaster.data.free_stockdb_source import FreeStockDBSource
 
-            local_mapping = FreeStockDBSource().industry_map()
-            if local_mapping:
-                return local_mapping
+        mapping = FreeStockDBSource().industry_map()
+        if not mapping:
             logger.warning("free-stockdb 申万一级行业映射为空，继续使用备用源")
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            logger.warning("free-stockdb 行业映射不可用，继续使用备用源: %s", exc)
+        return mapping
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("free-stockdb 行业映射不可用，继续使用备用源: %s", exc)
+        return {}
 
+
+def _fallback_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
     tushare_mapping: dict[str, str] = {}
     if get_config().data.tushare_token:
         try:
@@ -106,6 +109,11 @@ def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
             mapping.update(block.get("mapping", {}))
     # 对同一股票优先采用申万 2021 一级行业口径。
     return {**mapping, **tushare_mapping}
+
+
+def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
+    """按设置优先使用 free-stockdb，失败后回退 Tushare/东方财富。"""
+    return _free_stockdb_industry_map() or _fallback_industry_map()
 
 
 def save_industry_map(mapping: dict[str, str]) -> None:
