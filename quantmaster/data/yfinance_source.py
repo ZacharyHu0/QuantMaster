@@ -9,7 +9,7 @@ import hashlib
 
 import pandas as pd
 
-from quantmaster.data.base import DataSource, Market, normalize_daily
+from quantmaster.data.base import DataCapability, DataSource, Market, normalize_daily
 from quantmaster.data.resilience import provider_call
 
 
@@ -43,6 +43,7 @@ def to_yahoo_symbol(symbol: str) -> str:
 class YFinanceSource(DataSource):
     name = "yfinance"
     markets = (Market.US, Market.JP, Market.KR, Market.HK, Market.INDEX, Market.FUTURES)
+    capabilities = frozenset({DataCapability.DAILY})
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         yf = _require_yfinance()

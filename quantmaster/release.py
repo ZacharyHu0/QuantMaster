@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.18.0"
+VERSION = "0.18.1"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "统一数据源能力",
+                "items": (
+                    (
+                        "日线、分钟线、实时快照、指数成分、行业和题材改为显式能力；"
+                        "调度器会跳过不支持当前请求的来源。"
+                    ),
+                    (
+                        "free-stockdb 继续作为可切换的默认首选，并将基础接口、注册器和"
+                        "适配器纳入 mypy 检查。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.18.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "模拟盘单一契约",
@@ -178,24 +197,6 @@ RELEASES = (
                     (
                         "后台健康探针保留完整本机日志，但公开诊断仅返回稳定恢复提示，"
                         "关闭最后一条异常栈暴露告警。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.4",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "代码扫描残余收敛",
-                "items": (
-                    (
-                        "文件缓存安全字符集恢复基本面派生键与 Yahoo 期货代码使用的 #、=，"
-                        "继续拒绝路径分隔符和目录跳转。"
-                    ),
-                    (
-                        "行情缓存统一经过受限路径解析，运行诊断不再向 API 返回底层异常文本。"
                     ),
                 ),
             },

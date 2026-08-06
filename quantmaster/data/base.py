@@ -36,6 +36,15 @@ class Market(enum.StrEnum):
     INDEX = "idx"      # 指数
 
 
+class DataCapability(enum.StrEnum):
+    DAILY = "daily"
+    INTRADAY = "intraday"
+    SPOT = "spot"
+    INDEX_MEMBERS = "index_members"
+    INDUSTRY = "industry"
+    THEMES = "themes"
+
+
 @dataclass
 class Bar:
     symbol: str
@@ -116,6 +125,7 @@ class DataSource(ABC):
 
     name: str = "base"
     markets: tuple[Market, ...] = ()
+    capabilities: frozenset[DataCapability] = frozenset({DataCapability.DAILY})
 
     @abstractmethod
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -143,3 +153,21 @@ class DataSource(ABC):
 
     def supports(self, market: Market) -> bool:
         return market in self.markets
+
+    def supports_capability(self, capability: DataCapability | str) -> bool:
+        value = (
+            capability
+            if isinstance(capability, DataCapability)
+            else DataCapability(str(capability))
+        )
+        if value in self.capabilities:
+            return True
+        method_name = {
+            DataCapability.DAILY: "daily",
+            DataCapability.INTRADAY: "intraday",
+            DataCapability.SPOT: "spot",
+            DataCapability.INDEX_MEMBERS: "index_members",
+        }.get(value)
+        if method_name is None:
+            return False
+        return getattr(type(self), method_name) is not getattr(DataSource, method_name)

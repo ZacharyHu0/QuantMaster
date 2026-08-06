@@ -17,7 +17,13 @@ from enum import StrEnum
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.base import DataSource, Market, guess_market, validate_frequency
+from quantmaster.data.base import (
+    DataCapability,
+    DataSource,
+    Market,
+    guess_market,
+    validate_frequency,
+)
 from quantmaster.data.resilience import bypass_endpoint_cache, data_priority
 from quantmaster.data.storage import BarStore, IntradayBarStore
 
@@ -201,7 +207,7 @@ def _fetch_segment(
             merged = frame if cached is None or cached.empty else _align_increment(
                 cached, frame, direction)
             fresh_latest = pd.Timestamp(frame.index.max()).normalize()
-            if prefer_extension and fresh_latest <= cached_latest:
+            if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
                 errors.append(
                     f"{factory.__name__}: 未返回 {cached_latest.date()} 之后的新行情")
                 if best is None or fresh_latest > best[2]:
@@ -275,15 +281,27 @@ def _factories() -> dict[Market, list]:
     }
 
 
-def get_source(market: Market) -> DataSource:
-    """返回该市场第一个可用的数据源。"""
+def get_source(
+    market: Market,
+    capability: DataCapability | str = DataCapability.DAILY,
+) -> DataSource:
+    """返回该市场第一个声明所需能力且可以初始化的数据源。"""
+    required = (
+        capability
+        if isinstance(capability, DataCapability)
+        else DataCapability(str(capability))
+    )
     errors = []
     for factory in _factories().get(market, []):
         try:
-            return factory()
+            source = factory()
+            if source.supports_capability(required):
+                return source
         except Exception as e:  # pragma: no cover - 依赖安装情况
             errors.append(f"{factory.__name__}: {e}")
-    raise RuntimeError(f"市场 {market.value} 无可用数据源: {errors}")
+    raise RuntimeError(
+        f"市场 {market.value} 没有支持 {required.value} 的可用数据源: {errors}"
+    )
 
 
 def load_spot(symbols: list[str]) -> pd.DataFrame:
@@ -298,6 +316,8 @@ def load_spot(symbols: list[str]) -> pd.DataFrame:
             break
         try:
             source = factory()
+            if not source.supports_capability(DataCapability.SPOT):
+                continue
             snapshot = source.spot(missing)
             for _, value in snapshot.iterrows():
                 code = str(value.get("code") or "").zfill(6)
@@ -460,6 +480,8 @@ def load_intraday(
     for factory in _factories().get(market, []):
         try:
             source = factory()
+            if not source.supports_capability(DataCapability.INTRADAY):
+                continue
             with data_priority(priority):
                 df = source.intraday(symbol, fetch_start, fetch_end, frequency)
             if df is not None and not df.empty:

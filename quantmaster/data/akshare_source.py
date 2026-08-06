@@ -9,6 +9,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quantmaster.data.base import (
+    DataCapability,
     DataSource,
     Market,
     guess_market,
@@ -37,6 +38,12 @@ def _split(symbol: str) -> tuple[str, str]:
 class AkshareSource(DataSource):
     name = "akshare"
     markets = (Market.CN, Market.HK, Market.FUTURES, Market.INDEX)
+    capabilities = frozenset({
+        DataCapability.DAILY,
+        DataCapability.INTRADAY,
+        DataCapability.SPOT,
+        DataCapability.INDEX_MEMBERS,
+    })
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         ak = _require_akshare()

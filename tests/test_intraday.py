@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from quantmaster.data import registry
-from quantmaster.data.base import DataSource, Market, normalize_bars
+from quantmaster.data.base import DataCapability, DataSource, Market, normalize_bars
 from quantmaster.data.storage import IntradayBarStore
 
 
@@ -21,6 +21,27 @@ def test_normalize_chinese_intraday_columns():
     assert isinstance(bars.index, pd.DatetimeIndex)
     assert list(bars.columns) == ["open", "high", "low", "close", "volume", "amount"]
     assert bars.index[1].minute == 35
+
+
+def test_registry_selects_only_sources_with_the_required_capability(monkeypatch):
+    class DailyOnly(DataSource):
+        def daily(self, symbol, start, end):
+            return pd.DataFrame()
+
+    class MinuteSource(DailyOnly):
+        def intraday(self, symbol, start, end, frequency="5m"):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        registry,
+        "_factories",
+        lambda: {Market.CN: [DailyOnly, MinuteSource]},
+    )
+
+    assert isinstance(
+        registry.get_source(Market.CN, DataCapability.INTRADAY),
+        MinuteSource,
+    )
 
 
 def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):

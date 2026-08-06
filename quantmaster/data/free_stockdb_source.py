@@ -25,6 +25,7 @@ import pandas as pd
 from quantmaster.config import get_config
 from quantmaster.data.base import (
     OHLCV_COLUMNS,
+    DataCapability,
     DataSource,
     Market,
     normalize_bars,
@@ -64,6 +65,13 @@ class FreeStockDBSource(DataSource):
 
     name = "free-stockdb"
     markets = (Market.CN,)
+    capabilities = frozenset({
+        DataCapability.DAILY,
+        DataCapability.INTRADAY,
+        DataCapability.SPOT,
+        DataCapability.INDUSTRY,
+        DataCapability.THEMES,
+    })
 
     def __init__(
         self,
@@ -391,7 +399,7 @@ class FreeStockDBSource(DataSource):
                 continue
             category = value.get("category")
             if isinstance(category, int) or str(category).isdigit():
-                category = _BOARD_CATEGORIES.get(int(category), str(category))
+                category = _BOARD_CATEGORIES.get(int(str(category)), str(category))
             symbols = [
                 symbol
                 for raw in value.get("symbols", []) or []
@@ -422,7 +430,11 @@ class FreeStockDBSource(DataSource):
         boards = self._board_records(rows)
         if category is None:
             return boards
-        expected = _BOARD_CATEGORIES.get(category, str(category))
+        expected = (
+            _BOARD_CATEGORIES.get(int(str(category)), str(category))
+            if isinstance(category, int) or str(category).isdigit()
+            else str(category)
+        )
         return [item for item in boards if item["category"] == expected]
 
     def industry_map(self) -> dict[str, str]:

@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.base import DataSource, Market, normalize_daily
+from quantmaster.data.base import DataCapability, DataSource, Market, normalize_daily
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
     EndpointFrameCache,
@@ -115,6 +115,7 @@ def _current_session_cache_floor(
 class TushareSource(DataSource):
     name = "tushare"
     markets = (Market.CN, Market.INDEX)
+    capabilities = frozenset({DataCapability.DAILY, DataCapability.INDUSTRY})
 
     def __init__(self, cache: EndpointFrameCache | None = None):
         self.cache = cache or EndpointFrameCache("tushare")
