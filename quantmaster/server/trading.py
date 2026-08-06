@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -18,6 +19,7 @@ from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.management import _require_csrf
 
 router = APIRouter(prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
 
 def _service() -> BacktestService:
@@ -31,9 +33,12 @@ def _wake_auto_account(account: dict) -> dict:
 
 
 def _error(exc: Exception) -> HTTPException:
+    logger.warning("交易 API 请求失败（%s）", type(exc).__name__, exc_info=True)
     if isinstance(exc, KeyError):
-        return HTTPException(404, str(exc).strip("'"))
-    return HTTPException(400, str(exc))
+        return HTTPException(404, "交易资源不存在")
+    if isinstance(exc, ValueError):
+        return HTTPException(400, "交易请求参数或状态无效")
+    return HTTPException(500, "交易请求执行失败，请查看本机日志")
 
 
 @router.post("/backtests", status_code=202)
@@ -43,7 +48,8 @@ def create_backtest(spec: BacktestSpec, request: Request) -> dict:
     try:
         run = worker.service.enqueue(spec)
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        logger.warning("回测入队参数校验失败", exc_info=True)
+        raise HTTPException(422, "回测参数无效，请检查策略、标的池和日期范围") from exc
     worker.start()
     return run
 

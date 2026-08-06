@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "交易接口异常信息收口",
+                "items": (
+                    (
+                        "回测、交易与模拟盘接口不再把底层异常文本返回浏览器；服务端保留诊断"
+                        "日志，客户端仅收到稳定状态码和不含路径、凭据的安全提示。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.1.3",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -219,73 +234,6 @@ RELEASES = (
                         "Windows 一键启动会自动复用或拉起用户放在 runtime/free-stockdb "
                         "中的本地 stockdb 服务，文件未就绪或连接失败时返回明确警告并继续"
                         "使用后备数据源。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.18.2",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "证券名称单一存储",
-                "items": (
-                    (
-                        "运行时停止读写 stock_names.json 兼容缓存，名称查询、刷新和手工"
-                        "保存统一落到 security_master.sqlite。"
-                    ),
-                    (
-                        "旧 JSON 仅保留一次性迁移读取，既有用户名称不会丢失。"
-                    ),
-                    (
-                        "仓库忽略本地 uv 与隔离测试临时目录，开发状态不再被缓存污染。"
-                    ),
-                ),
-            },
-            {
-                "title": "数据注册类型修复",
-                "items": (
-                    (
-                        "日线与分钟线写入后显式校验可读结果，并分离面板的日线和分钟"
-                        "存储类型，修复完整 mypy 门禁发现的 3 项问题。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.18.1",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "统一数据源能力",
-                "items": (
-                    (
-                        "日线、分钟线、实时快照、指数成分、行业和题材改为显式能力；"
-                        "调度器会跳过不支持当前请求的来源。"
-                    ),
-                    (
-                        "free-stockdb 继续作为可切换的默认首选，并将基础接口、注册器和"
-                        "适配器纳入 mypy 检查。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.18.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "模拟盘单一契约",
-                "items": (
-                    (
-                        "删除旧单账本 PaperTrader、/paper/run、/paper/report 与 qm paper run，"
-                        "模拟交易统一使用可管理的独立账户、提案、确认和开盘撮合流程。"
-                    ),
-                    (
-                        "修复 qm paper propose 读取创建参数的问题，并更新当前 CLI 指南。"
                     ),
                 ),
             },

@@ -964,6 +964,24 @@ def test_factor_reference_splitter_preserves_expression_commas():
         split_factor_references("rank(close), ts_mean(volume, 20")
 
 
+def test_trading_api_errors_never_expose_exception_details() -> None:
+    from quantmaster.server import trading
+
+    internal = r"C:\private\ledger.sqlite Bearer secret-value"
+    cases = (
+        (KeyError(internal), 404, "交易资源不存在"),
+        (ValueError(internal), 400, "交易请求参数或状态无效"),
+        (RuntimeError(internal), 500, "交易请求执行失败，请查看本机日志"),
+    )
+
+    for exception, status, detail in cases:
+        public = trading._error(exception)
+        assert public.status_code == status
+        assert public.detail == detail
+        assert "private" not in str(public.detail)
+        assert "secret-value" not in str(public.detail)
+
+
 def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
     client = TestClient(app)
     worker = get_backtest_worker()
@@ -982,7 +1000,7 @@ def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
         headers={"X-CSRF-Token": token},
     )
     assert response.status_code == 422
-    assert "未知字段" in response.json()["detail"]
+    assert response.json()["detail"] == "回测参数无效，请检查策略、标的池和日期范围"
 
 
 def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
