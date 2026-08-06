@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.17.0"
+VERSION = "0.17.1"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "模拟盘自动化解耦",
+                "items": (
+                    (
+                        "每日模拟交易 worker、租约心跳与进程内单例迁入独立模块，"
+                        "账户存储和交易服务不再同时承担调度职责。"
+                    ),
+                    (
+                        "服务端、自动化入口和回归测试统一使用新模块，并将该边界"
+                        "纳入 mypy 检查。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.17.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "运行时发布元数据瘦身",
@@ -170,28 +189,6 @@ RELEASES = (
                     ),
                     (
                         "恢复宽异常质量门禁，不扩大技术债基线。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.14.0",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "free-stockdb 本地行情与板块数据",
-                "items": (
-                    (
-                        "默认复用用户安装的 free-stockdb 成熟 SDK 与本地数据，补充前复权日线、"
-                        "1/5/15/30/60 分钟线、行情快照、申万行业和概念板块。"
-                    ),
-                    (
-                        "主数据源、SDK 目录和服务地址均可设置；不捆绑 free-stockdb 程序、"
-                        "数据包或上游同步源，不可用时自动回退现有来源。"
-                    ),
-                    (
-                        "GitHub Release 仅展示当前版本变更，仓库 CHANGELOG 继续保留完整历史。"
                     ),
                 ),
             },

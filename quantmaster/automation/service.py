@@ -1180,7 +1180,7 @@ class AutomationService:
         return {"items": len(items)}
 
     def _task_paper_rebalance_proposal(self) -> dict:
-        from quantmaster.backtest.paper_accounts import get_paper_automation_worker
+        from quantmaster.backtest.paper_automation import get_paper_automation_worker
 
         worker = get_paper_automation_worker()
         worker.start()

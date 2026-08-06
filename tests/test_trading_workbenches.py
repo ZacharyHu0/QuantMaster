@@ -12,10 +12,10 @@ from fastapi.testclient import TestClient
 
 from quantmaster.backtest import BacktestConfig, run_backtest
 from quantmaster.backtest.paper_accounts import (
-    PaperAutomationWorker,
     PaperService,
     PaperStore,
 )
+from quantmaster.backtest.paper_automation import PaperAutomationWorker
 from quantmaster.backtest.spec import (
     BacktestSpec,
     DecisionStrategySpec,

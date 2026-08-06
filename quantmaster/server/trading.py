@@ -9,10 +9,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import ConfigDict, Field
 
-from quantmaster.backtest.paper_accounts import (
-    get_paper_automation_worker,
-    get_paper_service,
-)
+from quantmaster.backtest.paper_accounts import get_paper_service
+from quantmaster.backtest.paper_automation import get_paper_automation_worker
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec, StrategySpec
 from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
 from quantmaster.runtime.contracts import ContractModel

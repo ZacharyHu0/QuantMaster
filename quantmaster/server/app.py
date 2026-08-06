@@ -47,7 +47,7 @@ async def lifespan(_: FastAPI):
         shutdown_stock_analysis_jobs,
     )
     from quantmaster.automation.runtime import get_runtime
-    from quantmaster.backtest.paper_accounts import get_paper_automation_worker
+    from quantmaster.backtest.paper_automation import get_paper_automation_worker
     from quantmaster.backtest.workbench import get_backtest_worker
     from quantmaster.data.instruments import InstrumentStore
     from quantmaster.data.maintenance import data_refresh_manager
