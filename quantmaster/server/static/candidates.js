@@ -146,10 +146,17 @@
     if (state.currentName && catalogItem(state.currentName)) mobileSelect.value = state.currentName;
   }
 
-  async function refreshCatalog({mapping = null, select = null, loadDetail = false} = {}) {
-    if (state.catalogPromise) return state.catalogPromise;
+  async function refreshCatalog(options = {}) {
+    const {mapping = null, select = null, loadDetail = false} = options;
+    if (state.catalogPromise) {
+      const pending = state.catalogPromise;
+      await pending;
+      if (state.catalogPromise === pending) state.catalogPromise = null;
+      if (select || loadDetail) return refreshCatalog(options);
+      return;
+    }
     state.loading = true;
-    state.catalogPromise = (async () => {
+    const pending = (async () => {
       try {
         const data = await request('/api/v1/settings/universes');
         state.catalog = data.universes || [];
@@ -169,8 +176,11 @@
         state.loading = false;
       }
     })();
-    try { return await state.catalogPromise; }
-    finally { state.catalogPromise = null; }
+    state.catalogPromise = pending;
+    try { return await pending; }
+    finally {
+      if (state.catalogPromise === pending) state.catalogPromise = null;
+    }
   }
 
   function renderErrorState(message, dynamic = false) {

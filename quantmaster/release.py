@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.51"
+VERSION = "0.13.52"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "候选池保存后导航竞态修复",
+                "items": (
+                    (
+                        "候选池写入后的目录刷新会等待既有读取结束并重新获取最新目录，"
+                        "确保新建候选立即加载详情并正确清除未保存状态。"
+                    ),
+                    (
+                        "成功保存的候选不再被导航保护误判为未保存草稿，切换实盘、"
+                        "模拟盘等管理页面恢复稳定。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.51",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "Rust 原生内核安全升级",
