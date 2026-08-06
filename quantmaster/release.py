@@ -4,13 +4,31 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.0"
+VERSION = "0.14.1"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "free-stockdb 首个可发布补丁",
+                "items": (
+                    (
+                        "保留 v0.14 的 SDK 分钟行情与行业/概念板块接入，并将外部故障处理"
+                        "收敛为明确异常类型。"
+                    ),
+                    (
+                        "恢复宽异常质量门禁，不扩大技术债基线。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.0",
         "date": RELEASE_DATE,
         "sections": (
             {

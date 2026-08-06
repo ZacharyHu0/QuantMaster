@@ -243,7 +243,7 @@ def check_data_sources(
             sources["free-stockdb"] = {
                 "status": "success", "message": f"本地服务可用（{engine}）",
             }
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             sources["free-stockdb"] = {
                 "status": "warning",
                 "message": f"本地服务未运行，将自动降级（{type(exc).__name__}）",

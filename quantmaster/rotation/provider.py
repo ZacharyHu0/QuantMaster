@@ -291,7 +291,7 @@ class RotationProvider:
             themes = FreeStockDBSource().themes()
         except InterruptedError:
             raise
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             raise ThemeSourceUnavailable(
                 f"free-stockdb 概念目录不可用：{_compact_error(exc)}"
             ) from exc

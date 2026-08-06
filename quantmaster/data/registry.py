@@ -149,7 +149,7 @@ def _full_refresh(
             store.mark_checked(
                 symbol, start, end, source=source.name, replace_coverage=True)
             return store.get(symbol).loc[start:end]
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
     if cached is not None and not cached.empty:

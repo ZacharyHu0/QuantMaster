@@ -107,7 +107,7 @@ class FreeStockDBSource(DataSource):
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
-        except Exception:
+        except (ImportError, OSError, AttributeError, RuntimeError):
             sys.modules.pop(module_name, None)
             raise
         return module
@@ -123,7 +123,7 @@ class FreeStockDBSource(DataSource):
             host = parsed.hostname or "127.0.0.1"
             port = parsed.port or (443 if parsed.scheme == "https" else 7899)
             self._client = client_class(host=host, port=port, password="")
-        except Exception as exc:
+        except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
             # SDK 是用户安装的可选能力；加载失败时仍允许兼容 HTTP 服务或其他源。
             self._sdk_error = exc
             self._client = None

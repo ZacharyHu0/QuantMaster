@@ -59,7 +59,7 @@ def fetch_industry_map() -> dict[str, str]:  # pragma: no cover - 网络
             if local_mapping:
                 return local_mapping
             logger.warning("free-stockdb 申万一级行业映射为空，继续使用备用源")
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("free-stockdb 行业映射不可用，继续使用备用源: %s", exc)
 
     tushare_mapping: dict[str, str] = {}
