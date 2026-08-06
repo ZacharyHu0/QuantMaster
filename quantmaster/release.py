@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "首轮测试瘦身",
+                "items": (
+                    (
+                        "浏览器回归从 15 条收敛到 8 条核心产品流程，删除重复的错误恢复、"
+                        "动画细节和内部状态测试，减少 Chromium 重复启动。"
+                    ),
+                    (
+                        "移除发布工作流与 Quant Lab 静态字符串镜像测试，并将帮助页验收"
+                        "收敛为导航、搜索、计算器和响应式主路径。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.15.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "模拟账户策略管理闭环",

@@ -634,52 +634,6 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
         assert any(item["type"] == "retry_of" for item in events)
 
 
-def test_lab_ui_alignment_dialog_and_ml_setup_contract(tmp_path):
-    _config(tmp_path, enabled=False)
-    from quantmaster.server.app import app
-
-    with TestClient(app) as client:
-        page = client.get("/").text
-        styles = client.get("/static/lab.css").text
-        script = client.get("/static/lab.js").text
-
-    assert '<span class="nav-lab-label">Quant Lab</span>' in page
-    assert 'id="lab-ml-setup"' in page
-    assert 'id="lab-job-drawer"' in page
-    assert 'aria-labelledby="lab-job-drawer-title"' in page
-    assert 'data-settings-panel="lab"' in page
-    assert 'name="lab.horizons" data-list-checkbox' in page
-    assert "#nav .nav-lab-label" in styles
-    assert "margin:auto" in styles
-    assert "--dialog-x" in styles
-    assert "setupDraggableDialog" in script
-    assert "refreshJobDetail" in script
-    assert "data-retry-job" in script
-    assert "completed_with_warnings" in script
-    assert "180 / 240 / 360 / 480 秒" in script
-    assert ".lab-job-drawer.is-open" in styles
-    assert "clampDialogOffset" in script
-    assert 'python -m pip install -e ".[data,ml]"' in script
-    assert "qm lab doctor" in script
-    assert "qm lab worker" in script
-    assert "aria-disabled" in script
-    assert "data-deploy-profile" in script
-    assert "data-deploy-scope" in script
-    assert "产出版本" in script
-    assert "quantmaster:settings-applied" in script
-    assert 'value="python"' in page
-    assert 'name="lab.ai_python_mining_enabled"' in page
-    assert 'id="lab-split-preview"' in page
-    assert 'id="lab-python-gate"' in page
-    assert 'id="lab-open-python-settings"' in page
-    assert "discover_python" in script
-    assert "refreshMiningRuns" in script
-    assert "syncPythonMiningGate" in script
-    assert "需要先启用 AutoMiner" in script
-    assert "ROBUSTNESS GATE" in script
-    assert ".lab-robustness-grid" in styles
-
-
 def test_restricted_python_policy_and_subprocess_contract():
     panel = _panel(days=80, symbols=5)
     source = (
