@@ -1,70 +1,51 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-BACKFILL = ROOT / ".github" / "release-backfill.json"
 
 
-def test_release_workflow_guards_historical_backfills() -> None:
+def test_release_workflow_only_accepts_future_tag_pushes() -> None:
     source = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "release_tag:" in source
-    assert "target_sha:" in source
+    assert 'tags: ["v*"]' in source
+    assert "workflow_dispatch:" not in source
+    assert "release-backfill" not in source
+    assert not (ROOT / ".github" / "release-backfill.json").exists()
+    assert "github.ref_name" in source
     assert "git merge-base --is-ancestor" in source
-    assert "target_sha must be a full lowercase commit SHA" in source
-    assert "tag $release_tag does not match target version" in source
-    assert "immutable tag $release_tag" in source
-    assert "required immutable tag $release_tag is missing" in source
-    assert 'git push origin "refs/tags/${release_tag}"' not in source
-    assert "fromJSON(needs.prepare.outputs.targets)" in source
-    assert "matrix.target.target_sha" in source
-    assert "matrix.target.make_latest" in source
+    assert "matrix.target" not in source
 
 
-def test_release_workflow_builds_native_wheels_without_maturin_develop() -> None:
+def test_release_workflow_builds_locked_native_desktops() -> None:
     source = WORKFLOW.read_text(encoding="utf-8")
 
     assert "maturin develop" not in source
-    assert "maturin build" in source
-    assert "uv sync --locked" in source
     assert source.count("maturin build") == 1
-    assert "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b" in source
-    assert "dtolnay/rust-toolchain@1.94.0" in source
-    assert "fail_on_unmatched_files: true" in source
-    assert "retention-days: 90" in source
+    assert "uv sync --locked" in source
+    assert "setuptools==83.0.0" in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17" in source
 
 
-def test_historical_release_is_published_without_becoming_latest() -> None:
+def test_release_workflow_publishes_once_with_supply_chain_evidence() -> None:
     source = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "make_latest: ${{ matrix.target.make_latest }}" in source
-    assert "publishing its GitHub Release requires" not in source
+    assert source.count("softprops/action-gh-release@") == 1
+    assert "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65" in source
+    assert "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610" in source
+    assert 'syft-version: "v1.50.0"' in source
+    assert "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373" in source
+    assert "SHA256SUMS" in source
+    assert "make_latest: true" in source
 
 
-def test_ci_matrix_collects_every_platform_result() -> None:
+def test_ci_matrix_collects_every_platform_result_and_audits_rust() -> None:
     source = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "strategy:\n      fail-fast: false\n      matrix:" in source
-
-
-def test_release_backfill_manifest_is_unique_and_immutable() -> None:
-    payload = json.loads(BACKFILL.read_text(encoding="utf-8"))
-    releases = payload["releases"]
-    tags = [item["tag"] for item in releases]
-
-    assert payload["schema_version"] == 1
-    assert tags == [
-        "v0.10.1",
-        "v0.10.2",
-        "v0.11.0",
-        "v0.11.1",
-        "v0.12.0",
-        "v0.13.6",
-        "v0.13.8",
-    ]
-    assert len(tags) == len(set(tags))
-    assert all(len(item["target_sha"]) == 40 for item in releases)
+    assert source.count(
+        "dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17"
+    ) == 3
+    assert "cargo install cargo-audit --version 0.22.2 --locked" in source

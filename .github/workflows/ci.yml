@@ -43,11 +43,11 @@ jobs:
           path: reports/*.xml
 
   rust-quality:
-    timeout-minutes: 15
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
         with:
           components: rustfmt, clippy
       - run: |
@@ -55,6 +55,11 @@ jobs:
           cargo check --manifest-path rust/quantmaster-kernel/Cargo.toml --locked
           cargo clippy --manifest-path rust/quantmaster-kernel/Cargo.toml --locked -- -D warnings
           cargo test --manifest-path rust/quantmaster-kernel/Cargo.toml --locked
+      - name: Audit locked Rust dependencies
+        working-directory: rust/quantmaster-kernel
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit
 
   native-parity:
     timeout-minutes: 20
@@ -70,7 +75,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12.13"
           enable-cache: true
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
       - run: uv sync --locked --extra dev --extra rust
       - name: Bind PyO3 to the locked Python
         shell: bash
@@ -179,7 +184,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12.13"
           enable-cache: true
-      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
       - run: uv sync --locked --extra dev --extra quality --extra rust --extra release --extra data --extra tushare
       - name: Python quality ratchets
         run: |

@@ -111,6 +111,8 @@ class TestBasics:
         assert data["release_date"] == RELEASE_DATE
         assert data["releases"][0]["version"] == __version__
         assert data["releases"][0]["sections"]
+        assert len(data["releases"]) == 10
+        assert data["history_url"].endswith("/CHANGELOG.md")
 
     def test_index_serves_html(self):
         resp = client.get("/")

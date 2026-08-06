@@ -1,138 +1,43 @@
 name: Release Desktop Builds
 
-permissions:
-  contents: write
-
-# 打 tag（如 v0.3.0）自动构建 Mac / Windows / Linux 三平台单文件可执行程序
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Historical tag to create or rebuild (for example v0.10.1)"
-        required: false
-        type: string
-      target_sha:
-        description: "Full historical commit SHA; must be an ancestor of main"
-        required: false
-        type: string
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.32"
+  PYTHON_VERSION: "3.12.13"
 
 jobs:
-  prepare:
+  validate:
+    timeout-minutes: 5
     runs-on: ubuntu-latest
-    outputs:
-      targets: ${{ steps.targets.outputs.targets }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-      - name: Resolve, validate, and create release tags
-        id: targets
+      - name: Validate immutable current release tag
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
-          EVENT_SHA: ${{ github.sha }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          TARGET_SHA: ${{ inputs.target_sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          targets_file="$RUNNER_TEMP/release-targets.json"
-          normalized_file="$RUNNER_TEMP/release-targets.tsv"
-          : > "$normalized_file"
-
-          python - <<'PY' > "$targets_file"
-          import json
-          import os
-          from pathlib import Path
-
-          event = os.environ["EVENT_NAME"]
-          if event == "push" and os.environ["REF_TYPE"] == "tag":
-              targets = [{
-                  "tag": os.environ["REF_NAME"],
-                  "target_sha": os.environ["EVENT_SHA"],
-                  "make_latest": True,
-              }]
-          elif event == "workflow_dispatch":
-              tag = os.environ.get("RELEASE_TAG", "").strip()
-              target_sha = os.environ.get("TARGET_SHA", "").strip()
-              if not tag or not target_sha:
-                  raise SystemExit("release_tag and target_sha must be supplied together")
-              targets = [{"tag": tag, "target_sha": target_sha, "make_latest": False}]
-          else:
-              payload = json.loads(
-                  Path(".github/release-backfill.json").read_text(encoding="utf-8")
-              )
-              if payload.get("schema_version") != 1:
-                  raise SystemExit("unsupported release backfill schema")
-              releases = payload.get("releases")
-              if not isinstance(releases, list) or not releases:
-                  raise SystemExit("release backfill list must not be empty")
-              targets = [
-                  {
-                      "tag": item.get("tag"),
-                      "target_sha": item.get("target_sha"),
-                      "make_latest": False,
-                  }
-                  for item in releases
-                  if isinstance(item, dict)
-              ]
-              if len(targets) != len(releases):
-                  raise SystemExit("each release backfill entry must be an object")
-
-          if len({item["tag"] for item in targets}) != len(targets):
-              raise SystemExit("duplicate release backfill tag")
-          print(json.dumps(targets, separators=(",", ":")))
-          PY
-
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git fetch origin main --tags --force
-          while IFS=$'\t' read -r release_tag target_sha make_latest; do
-            if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "invalid release tag: $release_tag" >&2
-              exit 1
-            fi
-            if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "target_sha must be a full lowercase commit SHA" >&2
-              exit 1
-            fi
-
-            git cat-file -e "${target_sha}^{commit}"
-            git merge-base --is-ancestor "$target_sha" origin/main
-            app_version="$({ git show "${target_sha}:quantmaster/release.py" || true; } \
-              | sed -n 's/^VERSION = "\([^"]*\)"/\1/p' | head -n 1)"
-            if [[ "$release_tag" != "v${app_version}" ]]; then
-              echo "tag $release_tag does not match target version v${app_version}" >&2
-              exit 1
-            fi
-
-            target_commit="$(git rev-parse "${target_sha}^{commit}")"
-            if git show-ref --verify --quiet "refs/tags/${release_tag}"; then
-              tagged_commit="$(git rev-list -n 1 "$release_tag")"
-              if [[ "$tagged_commit" != "$target_commit" ]]; then
-                echo "immutable tag $release_tag already points to $tagged_commit" >&2
-                exit 1
-              fi
-            else
-              echo "required immutable tag $release_tag is missing; create it with the release operator" >&2
-              exit 1
-            fi
-            printf '%s\t%s\t%s\n' "$release_tag" "$target_commit" "$make_latest" \
-              >> "$normalized_file"
-          done < <(
-            python -c 'import json,sys; [print(x["tag"], x["target_sha"], str(x["make_latest"]).lower(), sep="\t") for x in json.load(open(sys.argv[1], encoding="utf-8"))]' "$targets_file"
-          )
-
-          targets="$(python -c 'import csv,json,sys; print(json.dumps([{"tag": r[0], "target_sha": r[1], "make_latest": r[2] == "true"} for r in csv.reader(open(sys.argv[1], encoding="utf-8"), delimiter="\t")], separators=(",", ":")))' "$normalized_file")"
-          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          target_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          git merge-base --is-ancestor "$target_commit" origin/main
+          app_version="$(python -c 'from quantmaster.release import VERSION; print(VERSION)')"
+          test "$RELEASE_TAG" = "v${app_version}"
 
   build:
-    needs: prepare
+    needs: validate
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(needs.prepare.outputs.targets) }}
         platform:
           - os: windows-latest
             artifact: QuantMaster.exe
@@ -147,30 +52,29 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ matrix.target.target_sha }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: "0.11.32"
-          python-version: "3.12.13"
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Install
+      - uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
+      - name: Install locked desktop environment
         shell: bash
         run: |
           set -euo pipefail
           uv sync --locked --extra data --extra tushare --extra rust --extra release
           uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
           uv pip install --no-index --find-links dist/native quantmaster-kernel
-      - name: Verify native research kernel
-        run: uv run python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
-      - name: Verify tag matches application version
+      - name: Verify native kernel and application version
         shell: bash
         env:
-          RELEASE_TAG: ${{ matrix.target.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          uv run python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
           test "$RELEASE_TAG" = "v$(uv run python -c 'from quantmaster import __version__; print(__version__)')"
-      - name: Build
+      - name: Build desktop executable
         working-directory: packaging
         run: uv run pyinstaller quantmaster.spec --noconfirm
       - name: Rename artifact
@@ -178,15 +82,50 @@ jobs:
         run: mv "packaging/dist/${{ matrix.platform.artifact }}" "${{ matrix.platform.asset }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.target.tag }}-${{ matrix.platform.asset }}
+          name: release-${{ matrix.platform.asset }}
           path: ${{ matrix.platform.asset }}
-          retention-days: 90
-      - name: Attach to release
-        uses: softprops/action-gh-release@v2
+          retention-days: 30
+
+  publish:
+    needs: [validate, build]
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          tag_name: ${{ matrix.target.tag }}
-          target_commitish: ${{ matrix.target.target_sha }}
-          files: ${{ matrix.platform.asset }}
+          ref: ${{ github.ref }}
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/release
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: dist/release
+          format: cyclonedx-json
+          output-file: dist/release/QuantMaster.cdx.json
+          syft-version: "v1.50.0"
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Generate SHA-256 checksums
+        working-directory: dist/release
+        run: >-
+          sha256sum QuantMaster-linux QuantMaster-macos QuantMaster-windows.exe
+          QuantMaster.cdx.json > SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: dist/release/*
+      - name: Publish immutable GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/release/*
           body_path: CHANGELOG.md
           fail_on_unmatched_files: true
-          make_latest: ${{ matrix.target.make_latest }}
+          make_latest: true

@@ -276,6 +276,9 @@ python tools/release_sync.py push
 在 `.git` 内；该授权只允许前向发布紧邻的 patch 版本，并会在新版本成功推送后自动清除。
 依赖与构建工具记录在跨平台 `uv.lock`，CI 和
 正式发布统一使用 `uv sync --locked`；可用 `QM_CONFIG_PATH` 为 doctor/CI 指定隔离配置。
+发布工作流只响应新的 `v{VERSION}` tag，不提供历史 tag 回填或重建入口。三平台桌面产物
+会在全部构建成功后由单一任务发布，并同时附带 `SHA256SUMS`、CycloneDX SBOM 和 GitHub
+构建来源证明；版本接口只内嵌最近 10 条说明，完整历史以 `CHANGELOG.md` 为准。
 
 从 v0.13.40 起，兼容与回归测试以 v0.13.39 当前数据/API 契约为基线，只保证后续版本
 向前演进；更早版本的数据库布局、旧路由和一次性迁移不再新增或保留发布门禁测试。

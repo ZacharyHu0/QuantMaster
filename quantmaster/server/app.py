@@ -32,7 +32,7 @@ from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.backtest.quality import assess_panel_quality, assess_signal_quality
 from quantmaster.config import get_config
 from quantmaster.logging_config import redact_sensitive_text
-from quantmaster.release import RELEASE_DATE, RELEASES
+from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.json import strict_json_dumps
@@ -519,6 +519,7 @@ def release_info() -> dict:
         "version": __version__,
         "release_date": RELEASE_DATE,
         "releases": RELEASES,
+        "history_url": RELEASE_HISTORY_URL,
     }
 
 

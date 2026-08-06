@@ -4,13 +4,41 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.49"
+VERSION = "0.13.50"
 RELEASE_DATE = "2026-08-06"
+RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "面向未来的可复现发布链",
+                "items": (
+                    (
+                        "桌面发布只接受已存在的当前版本 tag，历史回填清单与手动重建入口"
+                        "已删除，既有 tag 不再由工作流创建或移动。"
+                    ),
+                    (
+                        "三平台构建统一使用锁定环境和不可变 Action 提交；Rust 依赖新增"
+                        "cargo-audit，setuptools 构建后端固定为 83.0.0。"
+                    ),
+                    (
+                        "三个桌面产物由单一发布任务汇总，并附带 CycloneDX SBOM、SHA-256"
+                        "校验清单和 GitHub 构建来源证明，避免并发覆盖发布状态。"
+                    ),
+                    (
+                        "版本接口只返回最近 10 个面向未来的版本说明，完整历史统一链接到"
+                        "CHANGELOG，应用不再加载或维护旧版本发布契约。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.49",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "Python 3.12 与分层测试入口",
@@ -2504,4 +2532,4 @@ RELEASES = (
             },
         ),
     },
-)
+)[:10]
