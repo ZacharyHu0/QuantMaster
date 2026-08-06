@@ -20,6 +20,12 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert operations["data_providers"]["timeout_seconds"] == 45
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
+    assert operations["database_schemas"]["news"] == {
+        "status": "ok", "current": 1, "expected": 1,
+    }
+    assert operations["database_schemas"]["paper"] == {
+        "status": "ok", "current": 1, "expected": 1,
+    }
 
 
 def test_deep_doctor_reports_corrupt_sqlite_as_high_risk(isolated_config):

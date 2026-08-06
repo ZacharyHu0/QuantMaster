@@ -36,10 +36,11 @@ from quantmaster.config import get_config
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.jobs import WorkerIdentity
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 from quantmaster.trading_sessions import SessionExpectation, expected_session
 
 logger = logging.getLogger(__name__)
+PAPER_SCHEMA_VERSION = 1
 
 
 def utc_now() -> str:
@@ -60,8 +61,8 @@ class PaperStore:
         return connect_sqlite(self.path, row_factory=True)
 
     def _migrate(self) -> None:
-        with self._conn() as conn:
-            conn.executescript("""
+        def schema_v1(conn: sqlite3.Connection) -> None:
+            execute_sql_script(conn, """
                 CREATE TABLE IF NOT EXISTS paper_accounts (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
                     mode TEXT NOT NULL, initial_capital REAL NOT NULL,
@@ -132,6 +133,9 @@ class PaperStore:
                 "UPDATE paper_accounts SET strategy_warning=warning "
                 "WHERE strategy_warning='' AND runtime_warning='' AND warning<>''"
             )
+
+        with self._conn() as conn:
+            migrate_schema(conn, ((PAPER_SCHEMA_VERSION, schema_v1),))
 
     @staticmethod
     def _account_value(row: sqlite3.Row | None) -> dict | None:

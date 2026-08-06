@@ -99,6 +99,28 @@ def connect_sqlite(
 Migration = tuple[int, Callable[[sqlite3.Connection], None]]
 
 
+def execute_sql_script(connection: sqlite3.Connection, script: str) -> None:
+    """Execute a DDL script without ``executescript``'s implicit commit.
+
+    ``sqlite3.Connection.executescript`` commits any active transaction before
+    running its input.  Schema callbacks use this helper so the DDL, data
+    backfill and ``user_version`` update remain one atomic migration.
+    """
+    pending: list[str] = []
+    for line in script.splitlines(keepends=True):
+        pending.append(line)
+        statement = "".join(pending)
+        if not sqlite3.complete_statement(statement):
+            continue
+        sql = statement.strip()
+        if sql:
+            connection.execute(sql)
+        pending.clear()
+    remainder = "".join(pending).strip()
+    if remainder:
+        raise sqlite3.OperationalError("incomplete SQL migration statement")
+
+
 def migrate_schema(
     connection: sqlite3.Connection,
     migrations: Iterable[Migration],

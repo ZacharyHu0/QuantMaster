@@ -6,6 +6,60 @@ import sqlite3
 from typing import Any
 
 
+def _database_schema_metrics() -> dict[str, dict[str, Any]]:
+    from quantmaster.ai.news_storage import NEWS_SCHEMA_VERSION
+    from quantmaster.automation.store import AUTOMATION_SCHEMA_VERSION
+    from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION
+    from quantmaster.config import get_config
+    from quantmaster.lab.store import LAB_SCHEMA_VERSION
+    from quantmaster.portfolio.ledger import LEDGER_SCHEMA_VERSION
+    from quantmaster.research.catalog import RESEARCH_SCHEMA_VERSION
+    from quantmaster.runtime.sqlite import connect_sqlite
+
+    root = get_config().data_root
+    databases = {
+        "news": (root / "news.sqlite", NEWS_SCHEMA_VERSION, "meta"),
+        "paper": (root / "paper.sqlite", PAPER_SCHEMA_VERSION, "pragma"),
+        "automation": (
+            root / "automation.sqlite", AUTOMATION_SCHEMA_VERSION, "pragma",
+        ),
+        "lab": (root / "lab.sqlite", LAB_SCHEMA_VERSION, "pragma"),
+        "research": (
+            root / "research_lake" / "_meta" / "catalog.sqlite",
+            RESEARCH_SCHEMA_VERSION,
+            "pragma",
+        ),
+        "ledger": (root / "ledger_default.sqlite", LEDGER_SCHEMA_VERSION, "pragma"),
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for name, (path, expected, source) in databases.items():
+        if not path.exists():
+            result[name] = {"status": "cold", "current": 0, "expected": expected}
+            continue
+        try:
+            with connect_sqlite(path, row_factory=True) as connection:
+                if source == "meta":
+                    row = connection.execute(
+                        "SELECT value FROM news_store_meta WHERE key='schema_version'"
+                    ).fetchone()
+                    current = int(row[0]) if row else 0
+                else:
+                    current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            result[name] = {
+                "status": "unreadable",
+                "current": None,
+                "expected": expected,
+                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+            }
+            continue
+        status = "ok" if current == expected else (
+            "upgrade_required" if current < expected else "newer"
+        )
+        result[name] = {"status": status, "current": current, "expected": expected}
+    return result
+
+
 def collect_operational_metrics() -> dict[str, Any]:
     result: dict[str, Any] = {}
 
@@ -74,6 +128,7 @@ def collect_operational_metrics() -> dict[str, Any]:
             "issues": list(quality.get("issues") or []),
         }
     result["rotation_snapshots"] = qualities
+    result["database_schemas"] = _database_schema_metrics()
     return result
 
 

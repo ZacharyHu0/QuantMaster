@@ -12,13 +12,14 @@ from typing import Any
 from quantmaster.automation.models import AlertEvent, utc_now
 from quantmaster.automation.policy import resolved_policy
 from quantmaster.config import get_config
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 
 DEFAULT_TARGETS = (
     ("weixin_owner", "weixin", "微信管理员私聊", "direct"),
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
+AUTOMATION_SCHEMA_VERSION = 6
 
 DEFAULT_JOBS = {
     "intraday_monitor": (True, {
@@ -48,8 +49,8 @@ class AutomationStore:
         return connect_sqlite(self.path, timeout=5.0, row_factory=True)
 
     def _migrate(self) -> None:
-        with self._conn() as conn:
-            conn.executescript("""
+        def schema_v6(conn: sqlite3.Connection) -> None:
+            execute_sql_script(conn, """
                 CREATE TABLE IF NOT EXISTS notification_targets (
                     id TEXT PRIMARY KEY, channel TEXT NOT NULL, label TEXT NOT NULL,
                     target TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '',
@@ -134,7 +135,6 @@ class AutomationStore:
                 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_chat_created
                     ON conversation_messages(channel,account_id,chat_id,created_at DESC);
-                PRAGMA user_version=5;
             """)
             target_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(notification_targets)")}
@@ -163,6 +163,9 @@ class AutomationStore:
                 "WHERE status='running'",
                 (utc_now(),),
             )
+
+        with self._conn() as conn:
+            migrate_schema(conn, ((AUTOMATION_SCHEMA_VERSION, schema_v6),))
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:

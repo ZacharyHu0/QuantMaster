@@ -19,7 +19,9 @@ from quantmaster.research.contracts import (
     utc_now,
 )
 from quantmaster.runtime.jobs import lease_deadline
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+
+RESEARCH_SCHEMA_VERSION = 1
 
 
 class ResearchCatalog:
@@ -34,8 +36,9 @@ class ResearchCatalog:
         return connect_sqlite(self.path, row_factory=True)
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(
+        def schema_v1(connection: sqlite3.Connection) -> None:
+            execute_sql_script(
+                connection,
                 """
                 CREATE TABLE IF NOT EXISTS research_specs (
                     kind TEXT NOT NULL,
@@ -161,6 +164,9 @@ class ResearchCatalog:
                     "UPDATE research_jobs SET task_indexes_json=? WHERE id=?",
                     (canonical_json(list(range(int(row["total"])))), row["id"]),
                 )
+
+        with self._connect() as connection:
+            migrate_schema(connection, ((RESEARCH_SCHEMA_VERSION, schema_v1),))
 
     def recover_interrupted_jobs(self) -> int:
         """Recover only abandoned leases; live workers in other processes are untouched."""

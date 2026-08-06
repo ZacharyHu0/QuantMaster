@@ -23,7 +23,7 @@ from quantmaster.runtime.maintenance import (
     maintenance_barrier,
 )
 from quantmaster.runtime.process import ProcessLimitError, ProcessLimits, run_restricted_process
-from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 
 
 def test_connection_factory_context_releases_database_handle(tmp_path):
@@ -84,7 +84,10 @@ def test_schema_migration_rolls_back_version_and_content_together(tmp_path):
         ]) == 1
 
         def broken(conn: sqlite3.Connection) -> None:
-            conn.execute("INSERT INTO values_v1(value) VALUES ('must-rollback')")
+            execute_sql_script(conn, """
+                INSERT INTO values_v1(value) VALUES ('must-rollback');
+                INSERT INTO values_v1(value) VALUES ('must-also-rollback');
+            """)
             raise RuntimeError("injected migration failure")
 
         with pytest.raises(RuntimeError, match="injected"):

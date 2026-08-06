@@ -25,7 +25,9 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
+
+LEDGER_SCHEMA_VERSION = 1
 
 
 class LedgerIntegrityError(ValueError):
@@ -87,51 +89,60 @@ class Ledger:
     def __init__(self, path: Path | None = None, name: str = "default"):
         self.path = path or get_config().data_root / f"ledger_{name}.sqlite"
         with self._conn() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS trades ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, symbol TEXT,"
-                "side TEXT, price REAL, shares REAL, fee REAL, note TEXT,"
-                "import_batch TEXT, fingerprint TEXT, idempotency_key TEXT)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS cashflows ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT,"
-                "amount REAL, kind TEXT, note TEXT, idempotency_key TEXT)"   # kind: deposit/withdraw/dividend
-            )
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
-            if "import_batch" not in columns:
-                conn.execute("ALTER TABLE trades ADD COLUMN import_batch TEXT")
-            if "fingerprint" not in columns:
-                conn.execute("ALTER TABLE trades ADD COLUMN fingerprint TEXT")
-            if "idempotency_key" not in columns:
-                conn.execute("ALTER TABLE trades ADD COLUMN idempotency_key TEXT")
-            cash_columns = {row[1] for row in conn.execute("PRAGMA table_info(cashflows)")}
-            if "idempotency_key" not in cash_columns:
-                conn.execute("ALTER TABLE cashflows ADD COLUMN idempotency_key TEXT")
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS import_batches ("
-                "id TEXT PRIMARY KEY, file_hash TEXT NOT NULL, filename TEXT,"
-                "encoding TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, row_count INTEGER)"
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_fingerprint ON trades(fingerprint)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_import_file_hash ON import_batches(file_hash)")
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency "
-                "ON trades(idempotency_key) WHERE idempotency_key IS NOT NULL")
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_cashflows_idempotency "
-                "ON cashflows(idempotency_key) WHERE idempotency_key IS NOT NULL")
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS ledger_anomalies ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,"
-                "reference_id INTEGER NOT NULL,symbol TEXT NOT NULL,trade_date TEXT NOT NULL,"
-                "details_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-                "UNIQUE(kind,reference_id))"
-            )
-            self._migrate_historical_inventory_anomalies(conn)
+            migrate_schema(conn, ((LEDGER_SCHEMA_VERSION, self._schema_v1),))
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path)
+
+    @classmethod
+    def _schema_v1(cls, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS trades ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, symbol TEXT,"
+            "side TEXT, price REAL, shares REAL, fee REAL, note TEXT,"
+            "import_batch TEXT, fingerprint TEXT, idempotency_key TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS cashflows ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT,"
+            "amount REAL, kind TEXT, note TEXT, idempotency_key TEXT)"
+        )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(trades)")}
+        for name in ("import_batch", "fingerprint", "idempotency_key"):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE trades ADD COLUMN {name} TEXT")
+        cash_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(cashflows)")
+        }
+        if "idempotency_key" not in cash_columns:
+            connection.execute("ALTER TABLE cashflows ADD COLUMN idempotency_key TEXT")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS import_batches ("
+            "id TEXT PRIMARY KEY, file_hash TEXT NOT NULL, filename TEXT,"
+            "encoding TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, row_count INTEGER)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_fingerprint ON trades(fingerprint)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_import_file_hash ON import_batches(file_hash)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency "
+            "ON trades(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cashflows_idempotency "
+            "ON cashflows(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ledger_anomalies ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,"
+            "reference_id INTEGER NOT NULL,symbol TEXT NOT NULL,trade_date TEXT NOT NULL,"
+            "details_json TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE(kind,reference_id))"
+        )
+        cls._migrate_historical_inventory_anomalies(connection)
 
     @staticmethod
     def _migrate_historical_inventory_anomalies(connection: sqlite3.Connection) -> None:

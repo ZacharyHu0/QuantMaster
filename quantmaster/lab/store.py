@@ -20,11 +20,12 @@ from quantmaster.lab.models import (
     normalize_factor_name,
     utc_now,
 )
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
+LAB_SCHEMA_VERSION = 7
 
 
 def _collision_safe_factor_name(
@@ -72,9 +73,9 @@ class LabStore:
         return connect_sqlite(self.path, row_factory=True)
 
     def _migrate(self) -> None:
-        with self._conn() as conn:
+        def schema_v7(conn: sqlite3.Connection) -> None:
             previous_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-            conn.executescript("""
+            execute_sql_script(conn, """
                 CREATE TABLE IF NOT EXISTS factor_definitions (
                     id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
                     name_key TEXT NOT NULL, kind TEXT NOT NULL, category TEXT NOT NULL,
@@ -216,7 +217,9 @@ class LabStore:
                 "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
                 "ON deployments(status,universe,horizon,profile,role)"
             )
-            conn.execute("PRAGMA user_version=6")
+
+        with self._conn() as conn:
+            migrate_schema(conn, ((LAB_SCHEMA_VERSION, schema_v7),))
 
     @staticmethod
     def _repair_factor_names(conn: sqlite3.Connection) -> None:
@@ -862,7 +865,8 @@ class LabStore:
     ) -> dict:
         if self.study(study_id) is None:
             raise KeyError("优化 Study 不存在")
-        assignments, params = ["updated_at=?"], [utc_now()]
+        assignments: list[str] = ["updated_at=?"]
+        params: list[Any] = [utc_now()]
         for column, value in (
             ("status", status), ("job_id", job_id), ("experiment_id", experiment_id),
             ("storage_url", storage_url),
@@ -1121,7 +1125,7 @@ class LabStore:
                 "INSERT INTO lab_job_events(job_id,event_json,created_at) VALUES (?,?,?)",
                 (job_id, canonical_json(event), utc_now()),
             )
-        return int(cursor.lastrowid)
+        return int(cursor.lastrowid or 0)
 
     def update_job(
         self,
