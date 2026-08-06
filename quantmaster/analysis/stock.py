@@ -6,7 +6,7 @@ import json
 import logging
 import math
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib import resources
 from typing import Any
 
@@ -784,7 +784,7 @@ class StockAnalysisService:
                 "upstream": "https://clawhub.ai/clementgu/skills/stock-analysis-framework",
             },
             "query": str(query).strip(), "instrument": instrument,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "data_as_of": quote["as_of"], "quote": quote,
             "dimensions": dimensions,
             "overall": {

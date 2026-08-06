@@ -40,7 +40,7 @@
 ## 快速开始
 
 ```bash
-# 环境要求 Python 3.10+
+# 环境要求 Python 3.12+
 pip install -e ".[data,dev]"     # data = akshare + yfinance（推荐）
 # 已配置 2000 积分 Tushare token 时：pip install -e ".[data,tushare,dev]"
 # 启用 Ridge 与全部深度模型：pip install -e ".[data,ml,dev]"

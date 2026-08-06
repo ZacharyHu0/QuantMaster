@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from quantmaster.backtest.quality import (
@@ -290,6 +290,6 @@ def collect_health_report() -> dict[str, Any]:
     )
     return {
         "level": level,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "issues": issues,
     }

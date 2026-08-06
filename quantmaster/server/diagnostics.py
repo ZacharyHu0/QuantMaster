@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from quantmaster.server.problems import collect_health_report, make_problem
@@ -34,7 +34,7 @@ def _refresh() -> None:
     except Exception as exc:  # final diagnostic boundary: never break liveness/readiness
         report = {
             "level": "warning",
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": datetime.now(UTC).isoformat(),
             "issues": [make_problem(
                 "diagnostics_failed",
                 severity="warning",
@@ -77,7 +77,7 @@ def diagnostics(*, wait_for_first: bool = True) -> dict[str, Any]:
         return result
     return {
         "level": "warning",
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "refreshing": True,
         "issues": [make_problem(
             "diagnostics_pending",

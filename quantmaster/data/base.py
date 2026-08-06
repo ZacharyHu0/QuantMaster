@@ -24,7 +24,7 @@ OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
 
 
-class Market(str, enum.Enum):
+class Market(enum.StrEnum):
     CN = "cn"          # A 股
     HK = "hk"          # 港股
     US = "us"          # 美股

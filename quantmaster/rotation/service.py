@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -53,7 +53,7 @@ Cancelled = Callable[[], bool]
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:

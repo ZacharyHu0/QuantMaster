@@ -6,13 +6,13 @@ import enum
 import hashlib
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 from quantmaster.runtime.json import strict_json_dumps
 
 
-class _ValueEnum(str, enum.Enum):
+class _ValueEnum(enum.StrEnum):
     def __str__(self) -> str:
         return self.value
 
@@ -58,7 +58,7 @@ _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def canonical_json(value: Any) -> str:

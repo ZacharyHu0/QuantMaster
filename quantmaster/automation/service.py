@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -513,7 +513,7 @@ class AutomationService:
         if not created:
             return {"event": stored, "created": False, "enqueued": 0}
         count = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for target in self.store.targets():
             if target_ids is not None and target["id"] not in target_ids:
                 continue
@@ -895,7 +895,7 @@ class AutomationService:
             phase_label = "新闻拉取异常"
         else:
             phase_label = "新闻分析需要处理"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return AlertEvent(
             kind="task_failure", score=100, severity="critical", data_as_of=now.isoformat(),
             evidence=evidence,

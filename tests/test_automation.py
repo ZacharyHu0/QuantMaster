@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pandas as pd
@@ -275,7 +275,7 @@ def test_contextual_chat_compacts_long_history_into_topic_memory(tmp_path, monke
         "feishu_group", target="oc_group", account_id="cli_app",
         owner_actor=owner_actor, actor="test",
     )
-    started = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    started = datetime(2026, 7, 1, tzinfo=UTC)
     for index in range(65):
         topic = "贵州茅台 600519 估值存在分歧" if index % 9 == 0 else "行业日常讨论"
         store.remember_conversation_message(

@@ -3,7 +3,7 @@
 ## 安装
 
 ```bash
-# Python 3.10+；Mac / Windows / Linux 均可
+# Python 3.12+；Mac / Windows / Linux 均可
 git clone https://github.com/ZacharyHu0/QuantMaster.git
 cd QuantMaster
 pip install -e ".[data,dev]"        # data = akshare + yfinance

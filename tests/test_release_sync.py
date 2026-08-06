@@ -1,7 +1,7 @@
 """Release metadata and automatic GitHub synchronization guard."""
 
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -119,7 +119,7 @@ def test_ci_failure_recovery_only_allows_next_patch():
 
 
 def test_release_clock_uses_asia_shanghai_date_at_utc_boundary():
-    assert release_today(datetime(2026, 7, 30, 22, tzinfo=timezone.utc)) == date(
+    assert release_today(datetime(2026, 7, 30, 22, tzinfo=UTC)) == date(
         2026, 7, 31,
     )
 

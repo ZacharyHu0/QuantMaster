@@ -12,7 +12,7 @@ import logging
 import math
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
+from enum import StrEnum
 
 import pandas as pd
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_FACTORIES: dict[str, list] = {}
 
 
-class RefreshMode(str, Enum):
+class RefreshMode(StrEnum):
     AUTO = "auto"
     INCREMENTAL = "incremental"
     FULL = "full"

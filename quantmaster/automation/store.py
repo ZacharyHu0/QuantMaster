@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -603,7 +603,7 @@ class AutomationStore:
             )
 
     def hourly_delivery_count(self, target_id: str) -> int:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+        cutoff = (datetime.now(UTC) - timedelta(hours=1)).isoformat(timespec="seconds")
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM delivery_attempts WHERE target_id=? "
@@ -872,7 +872,7 @@ class AutomationStore:
         return dict(row) if row is not None else None
 
     def cleanup(self, retention_days: int) -> None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat(timespec="seconds")
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat(timespec="seconds")
         with self._conn() as conn:
             conn.execute("DELETE FROM task_runs WHERE started_at<?", (cutoff,))
             conn.execute("DELETE FROM audit_log WHERE created_at<?", (cutoff,))

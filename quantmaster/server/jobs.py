@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -39,7 +39,7 @@ _RETRYABLE = frozenset({
 
 def _iso_time(value: Any) -> str:
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(value), UTC).isoformat()
     return str(value or "")
 
 

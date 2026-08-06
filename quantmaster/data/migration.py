@@ -10,7 +10,7 @@ import threading
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from quantmaster.config import get_config
@@ -34,7 +34,7 @@ class MigrationTask:
     copied_bytes: int = 0
     total_bytes: int = 0
     error: str = ""
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     maintenance_lease: MaintenanceLease | None = field(default=None, repr=False)
@@ -180,7 +180,7 @@ class DataMigrationManager:
         with self._lock:
             task.status = status
             task.error = error
-            task.finished_at = datetime.now(timezone.utc).isoformat()
+            task.finished_at = datetime.now(UTC).isoformat()
             if status == "completed":
                 task.progress = 100
                 task.phase = "迁移完成"

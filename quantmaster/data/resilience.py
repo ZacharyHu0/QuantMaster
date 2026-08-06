@@ -554,7 +554,7 @@ def _permanent_failure(exc: BaseException) -> bool:
     return classify_provider_failure(exc) in _PERMANENT_FAILURES
 
 
-def _run_scheduled_provider(lane: str, key: str, func: Callable[[], T]) -> T:
+def _run_scheduled_provider[T](lane: str, key: str, func: Callable[[], T]) -> T:
     try:
         result = PROVIDER_SCHEDULER.call(lane, key, func)
     except ProviderTimeoutError as exc:
@@ -565,7 +565,7 @@ def _run_scheduled_provider(lane: str, key: str, func: Callable[[], T]) -> T:
     return result
 
 
-def provider_call(
+def provider_call[T](
     lane: str,
     key: str,
     func: Callable[[], T],
@@ -602,7 +602,7 @@ def provider_call(
     return _run_scheduled_provider(lane, key, scheduled)
 
 
-def akshare_call(
+def akshare_call[T](
     label: str,
     func: Callable[..., T],
     *args,

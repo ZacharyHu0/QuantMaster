@@ -10,7 +10,7 @@ import re
 import tempfile
 import threading
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -576,7 +576,7 @@ class ConfigManager:
             for item in self.list_snapshots():
                 if item.get("kind") == "automatic" and item.get("config_hash") == digest:
                     return item
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         snap_id = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
         item = {"id": snap_id, "kind": kind, "name": name,
                 "created_at": now.isoformat(), "config_hash": digest, "config": safe}

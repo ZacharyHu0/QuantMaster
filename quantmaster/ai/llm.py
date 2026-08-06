@@ -24,7 +24,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -216,8 +216,8 @@ def _retry_after(response: httpx.Response) -> float | None:
         try:
             target = parsedate_to_datetime(raw)
             if target.tzinfo is None:
-                target = target.replace(tzinfo=timezone.utc)
-            return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+                target = target.replace(tzinfo=UTC)
+            return max(0.0, (target - datetime.now(UTC)).total_seconds())
         except (TypeError, ValueError, OverflowError):
             return None
 
@@ -386,7 +386,7 @@ class LLMClient:
             _WEB_SEARCH_CAPABILITIES[self._capability_key()] = {
                 "supported": bool(supported),
                 "detail": str(detail)[:500],
-                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "checked_at": datetime.now(UTC).isoformat(),
                 "checked_monotonic": time.monotonic(),
                 "provider": self.config.provider,
             }

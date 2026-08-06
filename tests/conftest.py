@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sqlite3
@@ -12,6 +13,57 @@ import pandas as pd
 import pytest
 
 from quantmaster.config import Config, set_config
+
+_FULL_ONLY_FILES = frozenset({
+    "test_automation.py",
+    "test_backtest.py",
+    "test_composite.py",
+    "test_data_resilience.py",
+    "test_factors.py",
+    "test_fundamentals.py",
+    "test_lab.py",
+    "test_management_data.py",
+    "test_regime_decision.py",
+    "test_report.py",
+    "test_research_optimization.py",
+    "test_research_pipeline.py",
+    "test_rotation_analytics.py",
+    "test_rotation_api.py",
+    "test_rotation_provider.py",
+    "test_rotation_store_service.py",
+    "test_settings_checks.py",
+    "test_stock_analysis.py",
+    "test_trading_workbenches.py",
+    "test_ui_management.py",
+})
+
+
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        "--full",
+        action="store_true",
+        default=False,
+        help="run slower integration suites in addition to the default fast contract suite",
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    if config.getoption("--full"):
+        return
+    run_browser = os.environ.get("QM_RUN_UI") == "1"
+    selected = []
+    deselected = []
+    for item in items:
+        filename = item.path.name
+        if filename not in _FULL_ONLY_FILES or (
+            filename == "test_ui_management.py" and run_browser
+        ):
+            selected.append(item)
+        else:
+            deselected.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
 
 
 def _referenced_test_symbols() -> set[str]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -255,7 +255,7 @@ def feishu_check(request: Request) -> dict:
     return {
         "status": "error" if "error" in statuses else
                   "warning" if "warning" in statuses else "success",
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "stages": stages,
     }
 

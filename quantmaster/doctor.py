@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import ipaddress
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -309,7 +309,7 @@ def run_doctor(*, deep: bool = False) -> dict[str, Any]:
         "deep": deep,
         "version": VERSION,
         "release_date": RELEASE_DATE,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "data_root": str(root),
         "counts": counts,
         "metrics": metrics,

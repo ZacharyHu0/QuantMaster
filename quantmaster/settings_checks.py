@@ -8,7 +8,7 @@ import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,7 +29,7 @@ def _result(status: str, message: str, started: float, **details: Any) -> dict[s
         "status": status,
         "message": message,
         "latency_ms": round((time.perf_counter() - started) * 1000),
-        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
         "details": details,
     }
 

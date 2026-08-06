@@ -38,7 +38,9 @@ RELEASE_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 def release_today(now: datetime | None = None) -> date:
     """Return the repository release date in its declared business timezone."""
-    instant = now or datetime.now(timezone.utc)
+    # Keep this bootstrap tool runnable by the pre-existing Git hook before the
+    # project's Python 3.12 environment has been activated.
+    instant = now or datetime.now(timezone.utc)  # noqa: UP017
     return instant.astimezone(RELEASE_TIMEZONE).date()
 
 
@@ -213,7 +215,7 @@ def write_pending(commit: str, version: str, error: str = "") -> None:
             {
                 "commit": commit,
                 "version": version,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 "last_error": error[-2000:],
             },
             ensure_ascii=False,
@@ -461,7 +463,7 @@ def authorize_ci_recovery(run_id: int) -> int:
                 "commit": commit,
                 "version": version,
                 "run_id": run_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             },
             ensure_ascii=False,
             indent=2,

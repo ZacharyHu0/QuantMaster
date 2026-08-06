@@ -13,7 +13,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlparse
@@ -80,7 +80,7 @@ BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _clean_text(value: Any) -> str:
@@ -391,7 +391,7 @@ class NewsSourceStore:
     def save_response(self, source_id: str, url: str, content: bytes,
                       headers: httpx.Headers, status_code: int) -> str:
         digest = hashlib.sha256(content).hexdigest()
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d")
         directory = self.raw_root / source_id / stamp
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{digest}.gz"

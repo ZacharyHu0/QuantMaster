@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.13.48"
+VERSION = "0.13.49"
 RELEASE_DATE = "2026-08-06"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Python 3.12 与分层测试入口",
+                "items": (
+                    (
+                        "源码运行环境升级为 Python 3.12+，开发、CI 和桌面构建统一固定"
+                        "到 3.12.13，不再承担临近停止安全维护的 Python 3.10 兼容成本。"
+                    ),
+                    (
+                        "默认 Pytest 收敛为 250 个快速契约；重型研究、回测和数据韧性"
+                        "套件改由 --full 与覆盖率分片显式执行，本地检查不再加载全部 598 项。"
+                    ),
+                    (
+                        "三平台核心 CI 不再重复编译和检查 Rust；原生扩展改由独立三平台"
+                        "一致性任务验证，Rust fmt、check、clippy 与 test 只集中执行一次。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.13.48",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "权威数据库版本化迁移",
