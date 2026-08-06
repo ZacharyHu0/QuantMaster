@@ -717,7 +717,7 @@
 <section class="tab" id="tab-paper">
   <div class="trading-heading">
     <div><span class="trading-eyebrow">PAPER EXECUTION DESK</span><h2>模拟盘</h2>
-      <p>一个账户对应一份不可变策略快照。自动账户每日在收盘数据就绪后完成撮合、生成并确认新提案；手动账户仍保留逐步操作。</p></div>
+      <p>每个账户独立保存策略和候选快照；产生调仓历史前可直接编辑，之后复制为新账户再调整。自动账户每日在收盘数据就绪后运行，手动账户保留逐步操作。</p></div>
     <div class="trading-rule"><strong>收盘后</strong><span>生成并确认</span><i aria-hidden="true">→</i><strong>次日开盘</strong><span>自动模拟成交</span></div>
   </div>
   <div class="paper-layout">
@@ -741,7 +741,7 @@
     <div class="paper-workspace">
       <div class="trading-toolbar">
         <div><h3 id="paper-account-title">选择一个账户</h3><span id="paper-account-meta">策略快照和订单互相隔离</span></div>
-        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-edit" class="trading-secondary" type="button" aria-expanded="false">编辑</button><button id="paper-copy" class="trading-secondary" type="button" aria-expanded="false">复制并调整</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button><button id="paper-delete" class="trading-secondary danger" type="button">删除</button><button id="paper-restore" class="trading-secondary" type="button" hidden>恢复</button></div>
+        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-edit" class="trading-secondary" type="button" aria-expanded="false">编辑账户与策略</button><button id="paper-copy" class="trading-secondary" type="button" aria-expanded="false">复制策略</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button><button id="paper-delete" class="trading-secondary danger" type="button" title="可恢复删除，不会清除历史账本">删除</button><button id="paper-restore" class="trading-secondary" type="button" hidden>恢复</button></div>
       </div>
       <form id="paper-edit-form" class="paper-create-form paper-edit-form" hidden>
         <input name="action" type="hidden" value="edit">

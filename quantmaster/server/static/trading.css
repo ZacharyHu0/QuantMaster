@@ -449,6 +449,10 @@
 .paper-strategy-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .paper-strategy-head h3 { margin: 0; font-size: 13px; }
 .paper-strategy-head code { max-width: 60%; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
+.paper-strategy-management { display: flex; align-items: baseline; gap: 8px; margin: -2px 0 12px; color: var(--muted); font-size: 10px; }
+.paper-strategy-management strong { color: var(--trade-accent); font-size: 11px; }
+.paper-strategy-management[data-state="locked"] strong,
+.paper-strategy-management[data-state="archived"] strong { color: var(--muted); }
 .paper-strategy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--trade-line); }
 .paper-strategy-grid div { min-width: 0; padding: 10px 12px; border-right: 1px solid var(--trade-line); border-bottom: 1px solid var(--trade-line); }
 .paper-strategy-grid div:nth-child(4n) { border-right: 0; }

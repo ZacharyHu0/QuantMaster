@@ -783,11 +783,20 @@
   function renderStrategyPanel(account) {
     const snapshot = account.universe_snapshot || {};
     const members = snapshot.symbols || [];
+    const management = account.management || {};
+    const strategyEditable = management.strategy_editable ??
+      account.activity?.strategy_editable === true;
+    const managementState = account.status === 'archived'
+      ? ['只读归档', '策略和历史账本仍可查看；恢复账户或复制策略后继续。', 'archived']
+      : strategyEditable
+      ? ['可直接编辑', '当前没有调仓或成交历史，可以修改这份策略快照。', 'editable']
+      : ['历史已锁定', '为避免改写历史，请使用“复制策略”创建独立账户。', 'locked'];
     const source = account.source_backtest_id
       ? `回测 ${String(account.source_backtest_id).slice(0, 8)}`
       : snapshot.cloned_from ? `复制自 ${String(snapshot.cloned_from).slice(0, 8)}` : '直接创建';
     return `<section class="paper-strategy-panel" aria-labelledby="paper-strategy-title">
       <div class="paper-strategy-head"><h3 id="paper-strategy-title">独立策略快照</h3><code title="完整策略哈希">${escapeHtml(account.strategy_hash)}</code></div>
+      <div class="paper-strategy-management" data-state="${managementState[2]}"><strong>${managementState[0]}</strong><span>${managementState[1]}</span></div>
       <div class="paper-strategy-grid">
         ${strategyFacts(account).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}
         <div><span>策略来源</span><strong>${escapeHtml(source)}</strong></div>
@@ -860,7 +869,8 @@
     pause.hidden = account.status === 'archived';
     document.getElementById('paper-delete').hidden = account.status === 'archived';
     document.getElementById('paper-restore').hidden = account.status !== 'archived';
-    document.getElementById('paper-edit').disabled = account.status === 'archived';
+    const edit = document.getElementById('paper-edit');
+    edit.disabled = account.status === 'archived';
     paperOut.innerHTML = '<div class="trading-skeleton"></div>';
     try {
       const payload = await api(`/api/v1/paper/accounts/${accountId}/report`, {cache: 'no-store'});
@@ -871,6 +881,12 @@
       renderAccountList();
       document.getElementById('paper-account-title').textContent = account.name;
       document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'} · 快照 ${account.strategy_hash.slice(0, 10)}`;
+      const strategyEditable = account.management?.strategy_editable ??
+        account.activity?.strategy_editable === true;
+      edit.textContent = strategyEditable ? '编辑账户与策略' : '编辑账户';
+      edit.title = strategyEditable
+        ? '当前没有交易历史，可直接修改账户和策略'
+        : '策略已有历史，只能修改账户信息；调整策略请复制账户';
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
@@ -934,7 +950,7 @@
         toggle.setAttribute('aria-expanded', 'false');
         await loadPaperAccounts(false);
         await openPaperAccount(account.id);
-        paperStatus.innerHTML = `<div class="trading-success">账户已创建。策略和候选已固化为快照；修改策略请复制新账户。</div>`;
+        paperStatus.innerHTML = `<div class="trading-success">账户已创建。产生调仓或成交历史前，可直接编辑账户与策略。</div>`;
       } catch (error) {
         renderError(paperStatus, error, '账户创建失败');
       } finally { setButtonBusy(button, false); }
@@ -993,7 +1009,9 @@
     setEditorValue('profile', strategy.profile || 'risk_adjusted');
     setEditorValue('top_n', strategy.top_n || 5);
     setEditorValue('initial_capital', account.initial_capital);
-    paperEditorStrategyLocked = !copy && account.activity?.strategy_editable !== true;
+    paperEditorStrategyLocked = !copy && !(
+      account.management?.strategy_editable ?? account.activity?.strategy_editable === true
+    );
     document.getElementById('paper-editor-title').textContent = copy
       ? '复制并调整策略' : '编辑账户';
     document.getElementById('paper-editor-note').textContent = copy

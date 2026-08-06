@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.5"
+VERSION = "0.15.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "模拟账户策略管理闭环",
+                "items": (
+                    (
+                        "模拟账户详情明确展示策略可编辑、历史锁定或只读归档状态，"
+                        "产生历史前可直接编辑，产生历史后可复制策略继续探索。"
+                    ),
+                    (
+                        "账户 API 增加稳定管理能力字段，删除继续采用可恢复归档并保留"
+                        "策略快照、订单与成交账本。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.5",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "健康探针异常边界",

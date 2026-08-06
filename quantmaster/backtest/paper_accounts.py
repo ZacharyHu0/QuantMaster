@@ -764,7 +764,19 @@ class PaperService:
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
-        account["activity"] = self.store.account_activity(account_id)
+        return self._with_management(account)
+
+    def _with_management(self, account: dict) -> dict:
+        """Expose the stable account-management contract used by API clients."""
+        activity = self.store.account_activity(account["id"])
+        archived = account["status"] == "archived"
+        account["activity"] = activity
+        account["management"] = {
+            "strategy_editable": bool(activity["strategy_editable"]) and not archived,
+            "can_archive": not archived,
+            "can_restore": archived,
+            "delete_mode": "archive",
+        }
         return account
 
     def update_account(
@@ -1181,7 +1193,7 @@ class PaperService:
                 if automation.get("status") in {"failed", "running"}
                 else "idle"
             )
-        account["activity"] = self.store.account_activity(account_id)
+        account = self._with_management(account)
         return {
             "account": account,
             "report": report,

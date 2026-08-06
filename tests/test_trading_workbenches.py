@@ -361,7 +361,14 @@ def test_pristine_paper_strategy_can_change_but_history_requires_copy(tmp_path, 
     changed = service.update_account(account["id"], strategy=changed_strategy)
     assert changed["strategy"]["top_n"] == 2
     assert changed["strategy_hash"] != original_hash
-    assert service.account_details(account["id"])["activity"]["strategy_editable"] is True
+    details = service.account_details(account["id"])
+    assert details["activity"]["strategy_editable"] is True
+    assert details["management"] == {
+        "strategy_editable": True,
+        "can_archive": True,
+        "can_restore": False,
+        "delete_mode": "archive",
+    }
 
     service.store.create_cycle(
         changed, "2026-08-05", {"600000.SH": 0.35}, {"600000.SH": 10.0}, [],
@@ -386,6 +393,12 @@ def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
     assert service.store.accounts() == []
     assert service.store.accounts(include_archived=True)[0]["id"] == account["id"]
     assert not service.store.ledger(account["id"]).cashflows().empty
+    assert service.account_details(account["id"])["management"] == {
+        "strategy_editable": False,
+        "can_archive": False,
+        "can_restore": True,
+        "delete_mode": "archive",
+    }
 
     restored = service.update_account(account["id"], status="paused")
     assert restored["status"] == "paused"
