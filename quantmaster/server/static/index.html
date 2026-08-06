@@ -131,6 +131,17 @@
     <button class="primary" type="submit">同步最新行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
   </form>
+  <section class="panel market-sentiment-panel" id="market-fear-greed" aria-live="polite">
+    <div class="market-sentiment-value">
+      <span class="eyebrow">CNN FEAR &amp; GREED</span>
+      <div><strong data-fear-greed-score>—</strong><span data-fear-greed-label>读取中</span></div>
+    </div>
+    <div class="market-sentiment-copy">
+      <strong id="market-fear-greed-status">全球风险背景</strong>
+      <p id="market-fear-greed-note">CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。</p>
+    </div>
+    <a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a>
+  </section>
   <section class="market-section market-index-section" id="major-indexes" data-market-group="A股指数" data-market-order="0" aria-labelledby="major-indexes-title">
     <div class="market-section-head"><div class="market-section-heading">
       <h2 class="market-section-title" id="major-indexes-title">主要指数</h2><span class="market-section-count">正在读取</span></div>

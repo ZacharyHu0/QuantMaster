@@ -18,6 +18,15 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert operations["news_analysis"]["claims"]["active"] == 0
     assert operations["llm"]["waiting"] == 0
     assert operations["data_providers"]["timeout_seconds"] == 45
+    capabilities = operations["data_source_capabilities"]
+    assert capabilities["selected"] == "free-stockdb"
+    assert capabilities["priority"]["cn"][0] == "free-stockdb"
+    free_stockdb = next(
+        item for item in capabilities["providers"] if item["name"] == "free-stockdb"
+    )
+    assert {"daily", "intraday", "spot", "industry", "themes"} <= set(
+        free_stockdb["capabilities"]
+    )
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
     assert operations["database_schemas"]["news"] == {

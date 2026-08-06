@@ -44,7 +44,7 @@ def _number(value: Any, digits: int = 4) -> float | None:
 
 
 def indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
-    """计算逐日 MACD、资金量代理、波动和趋势分数。"""
+    """计算逐日 RSI、MACD、资金量代理、波动和趋势分数。"""
     if "close" not in bars:
         raise ValueError("行情缺少 close 列")
     close = pd.to_numeric(bars["close"], errors="coerce").sort_index()
@@ -56,6 +56,15 @@ def indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
     result["return_1d"] = close.pct_change(fill_method=None)
     result["momentum_5d"] = close.pct_change(5, fill_method=None)
     result["momentum_20d"] = close.pct_change(20, fill_method=None)
+    delta = close.diff()
+    average_gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    average_loss = (-delta.clip(upper=0)).ewm(
+        alpha=1 / 14, adjust=False, min_periods=14,
+    ).mean()
+    relative_strength = average_gain / average_loss.replace(0, np.nan)
+    result["rsi_14"] = 100 - 100 / (1 + relative_strength)
+    result.loc[(average_loss == 0) & (average_gain > 0), "rsi_14"] = 100.0
+    result.loc[(average_loss == 0) & (average_gain == 0), "rsi_14"] = 50.0
     result["ema_10"] = close.ewm(span=10, adjust=False).mean()
     result["ema_30"] = close.ewm(span=30, adjust=False).mean()
     ema12 = close.ewm(span=12, adjust=False).mean()
@@ -106,6 +115,7 @@ def _current(frame: pd.DataFrame) -> dict[str, Any]:
         "return_1d": _number(row["return_1d"]),
         "momentum_5d": _number(row["momentum_5d"]),
         "momentum_20d": _number(row["momentum_20d"]),
+        "rsi_14": _number(row["rsi_14"], 2),
         "macd": _number(row["macd"]),
         "macd_signal": _number(row["macd_signal"]),
         "macd_hist": _number(row["macd_hist"]),
@@ -177,7 +187,7 @@ def analyze_bars(
     """返回当前、过去逐日状态和未来 1-7 日概率展望。"""
     frame = indicator_frame(bars)
     past_columns = [
-        "close", "return_1d", "trend_score", "bull_score", "state",
+        "close", "return_1d", "trend_score", "bull_score", "state", "rsi_14",
         "macd", "macd_signal", "macd_hist", "volume_ratio_5_20", "amount_ratio_5_20",
     ]
     past = frame[[c for c in past_columns if c in frame]].copy()

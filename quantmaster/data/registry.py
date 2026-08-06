@@ -284,6 +284,30 @@ def _factories() -> dict[Market, list]:
     }
 
 
+def data_source_capabilities() -> dict[str, object]:
+    """Return configured priority and declared capabilities without probing providers."""
+    factories = _factories()
+    providers: dict[str, dict[str, object]] = {}
+    priority: dict[str, list[str]] = {}
+    for market, ordered in factories.items():
+        priority[market.value] = [str(factory.name) for factory in ordered]
+        for factory in ordered:
+            name = str(factory.name)
+            providers.setdefault(
+                name,
+                {
+                    "name": name,
+                    "markets": sorted(value.value for value in factory.markets),
+                    "capabilities": sorted(value.value for value in factory.capabilities),
+                },
+            )
+    return {
+        "selected": str(get_config().data.primary_provider),
+        "priority": priority,
+        "providers": list(providers.values()),
+    }
+
+
 def get_source(
     market: Market,
     capability: DataCapability | str = DataCapability.DAILY,

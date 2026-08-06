@@ -83,8 +83,10 @@
   上层模块完全不感知数据来自哪家。
 - **数据源优先级与降级**：A 股默认使用用户安装的 free-stockdb SDK 和本地数据，
   随后回退 AKShare、Tushare 与本地缓存；主源可在设置中切换。QuantMaster 不捆绑
-  free-stockdb 程序、数据或同步源。新增数据源只需实现 `DataSource.daily()`
-  并注册到 `registry._factories()`。
+  free-stockdb 程序、数据或同步源。数据源显式声明 daily、intraday、spot、
+  index_members、industry 与 themes 能力；调度器只调用满足请求能力的来源。新增数据源
+  需要实现对应方法、声明 capability 并注册到 `registry._factories()`。能力矩阵和各市场
+  实际优先级可在 `/api/v1/diagnostics` 或 `qm doctor --deep` 中查看。
 - **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
   隔离目录并增量归档。SQLite 分别记录实际数据边界、已检查覆盖边界、检查时间、
   来源和状态。完整历史覆盖长期视为不可变；接近当前日期时按 `cache_days` 检查，
@@ -139,8 +141,12 @@
 
 ## 市场状态与决策层（market/、decision/）
 
-- `market/regime.py`：逐日计算 MACD、资金量比、波动、牛熊分和五档趋势状态；
+- `market/regime.py`：逐日计算 RSI(14)、MACD、资金量比、波动、牛熊分和五档趋势状态；
   候选状态叠加上涨家数、站上 MA20 比例，并按行业映射生成板块强弱。
+- `market/fear_greed.py` 从 CNN 官方 graphdata 读取 Fear & Greed，以 30 分钟派生缓存
+  隔离弱网；失败时使用最近成功值或显式降级。该指数只作为美国/全球风险背景，
+  大盘和板块分别使用自身日线 RSI；RSI<22 标记“加仓抄底观察”，再叠加 CNN<10
+  标记“罕见大底机会”，两者均为经验提示而非自动交易指令。
 - “未来”输出 1/3/5/7 日概率、期望收益和置信度，明确标为规则型展望，
   不把未知未来包装成事实；同时报告历史样本数、方向准确率与 Brier 概率误差，
   方便长期检验展望是否真的有用。

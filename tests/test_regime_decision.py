@@ -42,11 +42,13 @@ def test_market_and_sector_views(panel):
     report = analyze_market(panel)
     assert 0 <= report["current"]["bull_score"] <= 100
     assert 0 <= report["current"]["advance_ratio"] <= 1
+    assert 0 <= report["current"]["rsi_14"] <= 100
     symbols = list(panel["close"].columns)
     mapping = {symbol: "行业A" if i < 4 else "行业B" for i, symbol in enumerate(symbols)}
     sectors = analyze_sectors(panel, mapping)
     assert set(sectors["sector"]) == {"行业A", "行业B"}
     assert sectors["bull_score"].between(0, 100).all()
+    assert sectors["rsi_14"].between(0, 100).all()
 
 
 def test_swing_scores_have_no_forward_dependency(panel):

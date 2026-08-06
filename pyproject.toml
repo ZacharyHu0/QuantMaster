@@ -122,6 +122,7 @@ files = [
     "quantmaster/data/free_stockdb_source.py",
     "quantmaster/data/storage.py",
     "quantmaster/data/repair.py",
+    "quantmaster/market/fear_greed.py",
     "quantmaster/server/security.py",
     "quantmaster/research/lake.py",
     "quantmaster/research/catalog.py",

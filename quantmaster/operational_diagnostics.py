@@ -81,9 +81,11 @@ def collect_operational_metrics() -> dict[str, Any]:
     }
     result["llm"] = llm_gate_status()
 
+    from quantmaster.data.registry import data_source_capabilities
     from quantmaster.data.resilience import PROVIDER_SCHEDULER
 
     result["data_providers"] = PROVIDER_SCHEDULER.status()
+    result["data_source_capabilities"] = data_source_capabilities()
 
     from quantmaster.backtest.paper_accounts import PaperStore
 

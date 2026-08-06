@@ -203,7 +203,7 @@ def _check_free_stockdb(data: DataSettings | None, timeout: float) -> dict[str, 
                 "status": "success", "message": f"本地服务可用（{engine}）",
             },
         }
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         return {
             "free-stockdb": {
                 "status": "warning",

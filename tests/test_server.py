@@ -133,6 +133,7 @@ class TestBasics:
         assert 'id="kline-frequency"' in resp.text
         assert 'class="panel market-detail-panel" id="kline-panel"' in resp.text
         assert 'id="major-indexes" data-market-group="A股指数"' in resp.text
+        assert 'id="market-fear-greed"' in resp.text
         assert "{'A股指数':majorIndexes}" in app_script
         assert "主要指数区块已保留" in app_script
         assert "function marketChangeSeries" in app_script
@@ -157,6 +158,8 @@ class TestBasics:
         assert 'class="backtest-trades-scroll"' in app_script
         assert "createLoadProgress" in app_script
         assert "createMarketStreamRenderer" in app_script
+        assert "/api/v1/market/fear-greed" in app_script
+        assert "data-opportunity-rsi" in app_script
         assert "createDecisionStreamRenderer" in app_script
         assert "function loadKlineSeries" in app_script
         assert "function renderKlineSeries" in app_script

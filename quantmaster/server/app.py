@@ -583,12 +583,20 @@ def _market_groups() -> dict[str, dict[str, str]]:
 
 
 def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None) -> dict | None:
+    from quantmaster.market import classify_opportunity, indicator_frame
+
     if frame is None or frame.empty or "close" not in frame:
         return None
     close = frame["close"].dropna()
     if close.empty:
         return None
     checked_at = (meta or {}).get("checked_at")
+    rsi = None
+    try:
+        rsi = indicator_frame(pd.DataFrame({"close": close}))["rsi_14"].iloc[-1]
+        rsi = round(float(rsi), 2) if pd.notna(rsi) else None
+    except ValueError:
+        rsi = None
     return {
         "symbol": symbol,
         "name": name,
@@ -603,6 +611,8 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         ),
         "cache_status": str((meta or {}).get("last_status") or "ready"),
         "source": str((meta or {}).get("last_source") or "local-cache"),
+        "rsi_14": rsi,
+        "opportunity": classify_opportunity(rsi),
         "freshness": (
             "stale" if str((meta or {}).get("last_status") or "ready")
             in {"stale", "refresh_failed"} else "ready"
@@ -890,6 +900,14 @@ def market_overview(
 ) -> dict:
     """个人股票与全球参考市场概览。"""
     return _market_overview_data(start, refresh=refresh)
+
+
+@app.get("/api/v1/market/fear-greed")
+def market_fear_greed(refresh: bool = False) -> dict:
+    """CNN Fear & Greed；作为全球背景参考，不伪装成 A 股本地指标。"""
+    from quantmaster.market import load_cnn_fear_greed
+
+    return load_cnn_fear_greed(force=refresh)
 
 
 @app.get("/api/v1/market/overview/stream")

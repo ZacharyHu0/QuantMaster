@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.18.2"
+VERSION = "0.19.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,38 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "市场指标与候选版诊断",
+                "items": (
+                    (
+                        "大盘卡片和决策板块新增日线 RSI(14)，CNN Fear & Greed 作为"
+                        "明确标注的美国/全球风险背景。"
+                    ),
+                    (
+                        "RSI<22 显示“加仓抄底观察”，同时 CNN<10 显示“罕见大底机会”；"
+                        "弱网时使用短缓存或显式降级。"
+                    ),
+                    (
+                        "/api/v1/diagnostics 与 qm doctor --deep 新增所选主源、各市场"
+                        "优先级和数据源能力矩阵，读取过程不会探测网络。"
+                    ),
+                    (
+                        "架构文档同步 capability 扩展契约，明确 free-stockdb 默认但可切换、"
+                        "且不随 QuantMaster 捆绑。"
+                    ),
+                    (
+                        "Windows 一键启动会自动复用或拉起用户放在 runtime/free-stockdb "
+                        "中的本地 stockdb 服务，文件未就绪或连接失败时返回明确警告并继续"
+                        "使用后备数据源。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.18.2",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "证券名称单一存储",
@@ -193,25 +225,6 @@ RELEASES = (
                     (
                         "移除发布工作流与 Quant Lab 静态字符串镜像测试，并将帮助页验收"
                         "收敛为导航、搜索、计算器和响应式主路径。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.15.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "模拟账户策略管理闭环",
-                "items": (
-                    (
-                        "模拟账户详情明确展示策略可编辑、历史锁定或只读归档状态，"
-                        "产生历史前可直接编辑，产生历史后可复制策略继续探索。"
-                    ),
-                    (
-                        "账户 API 增加稳定管理能力字段，删除继续采用可恢复归档并保留"
-                        "策略快照、订单与成交账本。"
                     ),
                 ),
             },

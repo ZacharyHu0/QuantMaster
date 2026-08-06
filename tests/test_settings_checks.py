@@ -170,3 +170,21 @@ def test_data_source_checks_use_real_endpoints_in_parallel_and_mask_proxy(monkey
     assert any("finance.yahoo.com/v8/finance/chart" in url for url in calls)
     assert result["details"]["proxies"]["HTTPS_PROXY"] == "http://proxy.example:8080"
     assert "secret-user" not in str(result) and "secret-pass" not in str(result)
+
+
+def test_free_stockdb_connection_failure_degrades_to_warning(monkeypatch):
+    from quantmaster.settings_checks import _check_free_stockdb
+
+    def fail_probe(_self):
+        raise httpx.ConnectError("local stockdb refused the connection")
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source.FreeStockDBSource.probe",
+        fail_probe,
+    )
+
+    result = _check_free_stockdb(DataSettings(), 2)
+
+    assert result["free-stockdb"]["status"] == "warning"
+    assert "自动降级" in result["free-stockdb"]["message"]
+    assert "ConnectError" in result["free-stockdb"]["message"]
