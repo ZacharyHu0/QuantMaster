@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.4"
+VERSION = "0.14.5"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "健康探针异常边界",
+                "items": (
+                    (
+                        "后台健康探针保留完整本机日志，但公开诊断仅返回稳定恢复提示，"
+                        "关闭最后一条异常栈暴露告警。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.4",
         "date": RELEASE_DATE,
         "sections": (
             {

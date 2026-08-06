@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,19 +16,22 @@ from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.runtime.problems import OperationProblem as OperationProblem
 from quantmaster.runtime.problems import Problem, make_problem
 
+logger = logging.getLogger(__name__)
+
 
 def _clean(value: object, limit: int = 300) -> str:
     text = redact_sensitive_text(str(value or "").strip())
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
-def _component_failure(name: str, exc: Exception) -> Problem:
+def _component_failure(name: str) -> Problem:
+    logger.warning("后台健康探针失败 component=%s", name, exc_info=True)
     return make_problem(
         "health_probe_failed",
         severity="warning",
         source="后台状态",
         title=f"{name}状态暂不可用",
-        message=_clean(exc) or "状态读取失败",
+        message="状态读取失败，请查看本机日志",
         action="稍后刷新后台状态；如持续出现，请查看服务端日志。",
         problem_id=f"health:{name}:probe",
     )
@@ -67,8 +71,8 @@ def collect_health_report() -> dict[str, Any]:
                 next_probe_at=float(item.get("next_probe_at") or 0),
                 can_continue=True,
             ))
-    except Exception as exc:
-        issues.append(_component_failure("行情数据源", exc))
+    except Exception:
+        issues.append(_component_failure("行情数据源"))
 
     try:
         from quantmaster.data.maintenance import data_refresh_manager
@@ -95,8 +99,8 @@ def collect_health_report() -> dict[str, Any]:
                 problem_id=f"refresh:{refresh.get('id', 'latest')}",
                 job_status=status,
             ))
-    except Exception as exc:
-        issues.append(_component_failure("数据刷新", exc))
+    except Exception:
+        issues.append(_component_failure("数据刷新"))
 
     try:
         from quantmaster.data.repair import get_data_repair_manager
@@ -127,8 +131,8 @@ def collect_health_report() -> dict[str, Any]:
                 action="系统会保留隔离原件并自动校验替换结果。",
                 problem_id="data-repair:pending",
             ))
-    except Exception as exc:
-        issues.append(_component_failure("数据修复", exc))
+    except Exception:
+        issues.append(_component_failure("数据修复"))
 
     try:
         from quantmaster.ai.news_sources import NewsSourceStore
@@ -145,8 +149,8 @@ def collect_health_report() -> dict[str, Any]:
                 action="在资讯来源设置中检测该来源，或稍后重新抓取。",
                 problem_id=f"news-source:{source.get('id', 'unknown')}",
             ))
-    except Exception as exc:
-        issues.append(_component_failure("资讯来源", exc))
+    except Exception:
+        issues.append(_component_failure("资讯来源"))
 
     try:
         from quantmaster.ai.llm import web_search_capability_status
@@ -162,8 +166,8 @@ def collect_health_report() -> dict[str, Any]:
                 action="系统会自动使用内置金融数据源；如需联网补证，可切换支持原生搜索的模型接口。",
                 problem_id="stock-analysis:web-search",
             ))
-    except (ImportError, RuntimeError, TypeError, ValueError) as exc:
-        issues.append(_component_failure("个股联网搜索", exc))
+    except (ImportError, RuntimeError, TypeError, ValueError):
+        issues.append(_component_failure("个股联网搜索"))
 
     try:
         from quantmaster.automation.runtime import get_runtime
@@ -194,8 +198,8 @@ def collect_health_report() -> dict[str, Any]:
                     action="在自动化页面查看任务运行记录并重试。",
                     problem_id=f"automation-run:{latest.get('id', 'latest')}",
                 ))
-    except Exception as exc:
-        issues.append(_component_failure("自动任务", exc))
+    except Exception:
+        issues.append(_component_failure("自动任务"))
 
     try:
         from quantmaster.config import get_config
@@ -250,8 +254,8 @@ def collect_health_report() -> dict[str, Any]:
                     action="打开 Quant Lab 查看已保存结果或按相同参数重新运行。",
                     problem_id=f"lab-job:{latest.get('id', 'latest')}",
                 ))
-    except Exception as exc:
-        issues.append(_component_failure("Quant Lab", exc))
+    except Exception:
+        issues.append(_component_failure("Quant Lab"))
 
     try:
         from quantmaster.backtest.workbench import get_backtest_worker
@@ -282,8 +286,8 @@ def collect_health_report() -> dict[str, Any]:
                 problem_id=f"backtest-run:{latest.get('id', 'latest')}",
                 items=stored.get("items") if isinstance(stored.get("items"), list) else None,
             ))
-    except Exception as exc:
-        issues.append(_component_failure("策略回测", exc))
+    except Exception:
+        issues.append(_component_failure("策略回测"))
 
     level = "error" if any(item["severity"] == "error" for item in issues) else (
         "warning" if any(item["severity"] == "warning" for item in issues) else "ok"

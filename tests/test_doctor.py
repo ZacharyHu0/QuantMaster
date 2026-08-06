@@ -75,3 +75,14 @@ def test_operational_metrics_degrade_without_hiding_failure(monkeypatch):
     assert operational_diagnostics.safe_operational_metrics() == {
         "status": "degraded", "error": "运行指标收集失败，请查看本机日志",
     }
+
+
+def test_component_probe_failure_does_not_expose_exception_text():
+    from quantmaster.server.problems import _component_failure
+
+    try:
+        raise RuntimeError("internal path and credential detail")
+    except RuntimeError:
+        problem = _component_failure("测试组件")
+    assert problem["message"] == "状态读取失败，请查看本机日志"
+    assert "internal" not in str(problem)
