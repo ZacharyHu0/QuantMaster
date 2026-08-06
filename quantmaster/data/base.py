@@ -23,7 +23,7 @@ import pandas as pd
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
-_SYMBOL_PATTERN = re.compile(r"[0-9A-Za-z._^-]{1,48}")
+_SYMBOL_PATTERN = re.compile(r"[0-9A-Za-z._^=-]{1,48}")
 
 
 class Market(enum.StrEnum):
@@ -107,7 +107,7 @@ def validate_symbol(symbol: str) -> str:
     """Validate the canonical market identifier accepted by file-backed stores."""
     value = symbol.strip()
     if _SYMBOL_PATTERN.fullmatch(value) is None:
-        raise ValueError("标的代码仅支持 1–48 位字母、数字及 ._^- 字符")
+        raise ValueError("标的代码仅支持 1–48 位字母、数字及 ._^=- 字符")
     return value
 
 

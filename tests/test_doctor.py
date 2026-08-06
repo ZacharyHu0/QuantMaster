@@ -73,5 +73,5 @@ def test_operational_metrics_degrade_without_hiding_failure(monkeypatch):
         lambda: (_ for _ in ()).throw(RuntimeError("metrics offline")),
     )
     assert operational_diagnostics.safe_operational_metrics() == {
-        "status": "degraded", "error": "RuntimeError: metrics offline",
+        "status": "degraded", "error": "运行指标收集失败，请查看本机日志",
     }

@@ -4,13 +4,31 @@
 每次仓库修改都必须递增版本，并同步更新根目录 CHANGELOG.md。
 """
 
-VERSION = "0.14.3"
+VERSION = "0.14.4"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "代码扫描残余收敛",
+                "items": (
+                    (
+                        "文件缓存安全字符集恢复基本面派生键与 Yahoo 期货代码使用的 #、=，"
+                        "继续拒绝路径分隔符和目录跳转。"
+                    ),
+                    (
+                        "行情缓存统一经过受限路径解析，运行诊断不再向 API 返回底层异常文本。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.14.3",
         "date": RELEASE_DATE,
         "sections": (
             {

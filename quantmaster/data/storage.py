@@ -24,6 +24,7 @@ from typing import Literal
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.paths import confined_path
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,11 @@ class _BarLock(AbstractContextManager["_BarLock"]):
         try:
             state = _FILE_LOCK_STATE.get(self.key)
             if state is None:
-                lock_path = self.root / ".locks" / f"{_safe_name(self.symbol)}.lock"
+                lock_path = confined_path(
+                    self.root / ".locks",
+                    f"{_safe_name(self.symbol)}.lock",
+                    label="行情缓存锁",
+                )
                 _FILE_LOCK_STATE[self.key] = (1, _acquire_file_lock(lock_path))
             else:
                 _FILE_LOCK_STATE[self.key] = (state[0] + 1, state[1])
@@ -133,7 +138,7 @@ def _safe_name(symbol: str) -> str:
         not safe
         or safe in {".", ".."}
         or safe != symbol
-        or re.fullmatch(r"[0-9A-Za-z._^-]{1,64}", safe) is None
+        or re.fullmatch(r"[0-9A-Za-z._^#=-]{1,64}", safe) is None
     ):
         raise ValueError("标的代码包含非法字符")
     return safe
@@ -224,7 +229,9 @@ class BarStore:
         return connect_sqlite(self.meta_db, policy="cache")
 
     def _path(self, symbol: str) -> Path:
-        return self.root / f"{_safe_name(symbol)}.parquet"
+        return confined_path(
+            self.root, f"{_safe_name(symbol)}.parquet", label="行情缓存",
+        )
 
     def path_for_repair(self, symbol: str) -> Path:
         """Resolve a repair target without exposing arbitrary path construction."""
@@ -584,9 +591,16 @@ class IntradayBarStore(BarStore):
         if self.frequency == "1d":
             raise ValueError("IntradayBarStore 仅用于分钟线")
         base = Path(root) if root else get_config().data_root / "bars" / "intraday"
-        directory = {
-            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "60m": "60m",
-        }.get(self.frequency)
-        if directory is None:  # validate_frequency 已拒绝未知值；保留显式安全边界。
+        if self.frequency == "1m":
+            directory = "1m"
+        elif self.frequency == "5m":
+            directory = "5m"
+        elif self.frequency == "15m":
+            directory = "15m"
+        elif self.frequency == "30m":
+            directory = "30m"
+        elif self.frequency == "60m":
+            directory = "60m"
+        else:  # validate_frequency 已拒绝未知值；保留显式安全边界。
             raise ValueError("IntradayBarStore 收到未知分钟频率")
         super().__init__(base / directory)

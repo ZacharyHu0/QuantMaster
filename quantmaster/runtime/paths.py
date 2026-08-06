@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path, PureWindowsPath
 
-_SAFE_COMPONENT = re.compile(r"[0-9A-Za-z._-]+")
+_SAFE_COMPONENT = re.compile(r"[0-9A-Za-z._^#=-]+")
 
 
 def confined_path(root: str | Path, relative: object, *, label: str = "文件") -> Path:

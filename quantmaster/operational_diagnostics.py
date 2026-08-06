@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _database_schema_metrics() -> dict[str, dict[str, Any]]:
@@ -45,12 +48,13 @@ def _database_schema_metrics() -> dict[str, dict[str, Any]]:
                     current = int(row[0]) if row else 0
                 else:
                     current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            logger.warning("诊断无法读取数据库 schema name=%s", name, exc_info=True)
             result[name] = {
                 "status": "unreadable",
                 "current": None,
                 "expected": expected,
-                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                "error": "数据库不可读，请查看本机日志",
             }
             continue
         status = "ok" if current == expected else (
@@ -112,8 +116,11 @@ def collect_operational_metrics() -> dict[str, Any]:
     for kind in ("temperature", "structure", "industries", "themes", "etf_flows"):
         try:
             snapshot = rotation.snapshot(kind)
-        except RotationIntegrityError as exc:
-            qualities[kind] = {"status": "corrupt", "issues": [str(exc)[:300]]}
+        except RotationIntegrityError:
+            logger.warning("诊断发现板块快照损坏 kind=%s", kind, exc_info=True)
+            qualities[kind] = {
+                "status": "corrupt", "issues": ["板块快照完整性校验失败"],
+            }
             continue
         if snapshot is None:
             qualities[kind] = {"status": "cold", "issues": ["尚无快照"]}
@@ -136,8 +143,9 @@ def safe_operational_metrics() -> dict[str, Any]:
     """Diagnostic boundary: one failed database must not hide base health."""
     try:
         return collect_operational_metrics()
-    except (ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+    except (ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        logger.warning("运行指标收集失败", exc_info=True)
         return {
             "status": "degraded",
-            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "error": "运行指标收集失败，请查看本机日志",
         }
