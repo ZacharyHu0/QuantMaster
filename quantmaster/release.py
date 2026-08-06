@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 RELEASE_DATE = "2026-08-07"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "盘后扫描任务重提修复",
+                "items": (
+                    (
+                        "盘后扫描仅合并仍在排队或执行中的同规格任务；失败、取消或已完成"
+                        "的历史任务不再永久拦截后续扫描，页面按钮可以创建真正的新任务。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.2.1",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -197,33 +212,6 @@ RELEASES = (
                 "title": "诊断契约同步",
                 "items": (
                     "同步模拟盘 schema v2 的深度诊断断言，恢复完整 CI。",
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.21.0",
-        "date": "2026-08-06",
-        "sections": (
-            {
-                "title": "恐贪与 RSI 趋势仪表盘",
-                "items": (
-                    (
-                        "CNN 恐贪指数新增当日指针仪表盘和近一年历史曲线，弱网时与当前值"
-                        "一起使用最近成功缓存。"
-                    ),
-                    (
-                        "主要指数与其他市场卡片新增醒目的 RSI(14) 数值和独立历史曲线，"
-                        "明确标出 RSI 22 抄底观察线。"
-                    ),
-                    (
-                        "决策页集中对比候选等权大盘与当前全部板块的 RSI 曲线，板块表格"
-                        "同步强化低 RSI 提示。"
-                    ),
-                    (
-                        "模拟盘账户栏重新整理新建与归档控件；策略、候选和调仓频率可直接"
-                        "修改并按 15:00 分界排入后续交易日，净值横轴固定使用日期标签。"
-                    ),
                 ),
             },
         ),

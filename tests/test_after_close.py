@@ -242,3 +242,44 @@ def test_after_close_cli_contract_supports_csv_export() -> None:
 
     assert args.after_close_cmd == "export"
     assert args.format == "csv"
+
+
+def test_after_close_submit_only_coalesces_active_jobs() -> None:
+    from quantmaster.after_close.jobs import TASK_TYPE, AfterCloseJobs
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.store = self
+            self.items = [{
+                "id": "old-failure", "type": TASK_TYPE, "status": "failed",
+                "spec": {"as_of": "", "force": False},
+            }]
+            self.submissions = []
+
+        def register(self, *_args) -> None:
+            return None
+
+        def list(self, _limit, *, job_type=""):
+            return [item for item in self.items if item["type"] == job_type]
+
+        def submit(self, job_type, spec, **options):
+            self.submissions.append((job_type, spec, options))
+            created = {
+                "id": f"new-{len(self.submissions)}", "type": job_type,
+                "status": "queued", "spec": spec,
+            }
+            self.items.insert(0, created)
+            return created, True
+
+    runtime = _Runtime()
+    jobs = AfterCloseJobs(runtime)  # type: ignore[arg-type]
+
+    replacement, created = jobs.submit()
+    assert created is True
+    assert replacement["id"] == "new-1"
+    assert runtime.submissions[0][2]["idempotency_key"] == ""
+
+    duplicate, duplicate_created = jobs.submit()
+    assert duplicate_created is False
+    assert duplicate["id"] == replacement["id"]
+    assert len(runtime.submissions) == 1

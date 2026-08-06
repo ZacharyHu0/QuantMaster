@@ -6,6 +6,7 @@ from typing import Any
 from quantmaster.after_close.service import get_after_close_service
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import (
+    ACTIVE_STATUSES,
     JobContext,
     JobOutcome,
     UnifiedJobRuntime,
@@ -20,6 +21,7 @@ class AfterCloseJobs:
         self.runtime = runtime or UnifiedJobRuntime(
             UnifiedJobStore(get_config().data_root / "jobs.sqlite"), max_workers=1,
         )
+        self._submit_lock = threading.Lock()
         self.runtime.register(TASK_TYPE, self._handle)
 
     def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
@@ -100,16 +102,22 @@ class AfterCloseJobs:
         ))
 
     def submit(self, *, as_of: str = "", force: bool = False) -> tuple[dict, bool]:
-        cfg = get_config().data
-        key = "" if force else ":".join((
-            as_of or "latest", str(cfg.after_close_include_bj),
-            str(cfg.after_close_min_listing_sessions), str(cfg.after_close_min_avg_amount),
-            str(cfg.after_close_candidate_limit),
-        ))
-        return self.runtime.submit(
-            TASK_TYPE, {"as_of": as_of, "force": bool(force)},
-            idempotency_key=key, deadline_seconds=3600, max_attempts=3,
-        )
+        spec = {"as_of": as_of, "force": bool(force)}
+        # 只合并仍在执行的同规格扫描。持久幂等键会永久绑定首个任务，导致
+        # 当天一次失败后，页面后续点击始终取回旧失败任务，甚至跨交易日也
+        # 无法创建新扫描。盘后快照自身已有输入哈希保证结果不可变，因此任务
+        # 层只需要防止并发重复提交，终态任务必须允许重新运行。
+        with self._submit_lock:
+            for existing in self.runtime.store.list(1000, job_type=TASK_TYPE):
+                if (
+                    existing.get("status") in ACTIVE_STATUSES
+                    and existing.get("spec") == spec
+                ):
+                    return existing, False
+            return self.runtime.submit(
+                TASK_TYPE, spec, idempotency_key="",
+                deadline_seconds=3600, max_attempts=3,
+            )
 
     def list(self, limit: int = 50) -> list[dict]:
         return self.runtime.store.list(limit, job_type=TASK_TYPE)
