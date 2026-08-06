@@ -86,6 +86,9 @@ def collect_operational_metrics() -> dict[str, Any]:
 
     result["data_providers"] = PROVIDER_SCHEDULER.status()
     result["data_source_capabilities"] = data_source_capabilities()
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    result["free_stockdb_runtime"] = free_stockdb_runtime.status()
 
     from quantmaster.backtest.paper_accounts import PaperStore
 

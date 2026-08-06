@@ -27,6 +27,9 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert {"daily", "intraday", "spot", "industry", "themes"} <= set(
         free_stockdb["capabilities"]
     )
+    assert operations["free_stockdb_runtime"]["state"] in {
+        "stopped", "missing", "running", "disabled", "degraded", "error", "updating",
+    }
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
     assert operations["database_schemas"]["news"] == {

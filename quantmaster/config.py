@@ -42,6 +42,10 @@ class DataConfig:
     free_stockdb_sdk_path: str = ""       # 用户安装的 pybao/stock_sdk.py 目录
     free_stockdb_url: str = "http://127.0.0.1:7899"
     free_stockdb_timeout: float = 3.0      # 本地服务不可用时快速降级
+    free_stockdb_root: str = "runtime/free-stockdb"
+    free_stockdb_managed: bool = True
+    free_stockdb_auto_update: bool = True
+    free_stockdb_update_time: str = "18:30"
     tushare_token: str = ""
     cache_days: int = 1                   # 日线缓存有效期（天）
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
@@ -182,6 +186,16 @@ def _apply_env(cfg: Config) -> None:
         "QM_FREE_STOCKDB_URL", cfg.data.free_stockdb_url).strip().rstrip("/")
     cfg.data.free_stockdb_timeout = float(
         env.get("QM_FREE_STOCKDB_TIMEOUT", cfg.data.free_stockdb_timeout))
+    cfg.data.free_stockdb_root = env.get(
+        "QM_FREE_STOCKDB_ROOT", cfg.data.free_stockdb_root).strip()
+    cfg.data.free_stockdb_managed = env.get(
+        "QM_FREE_STOCKDB_MANAGED", str(cfg.data.free_stockdb_managed)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.free_stockdb_auto_update = env.get(
+        "QM_FREE_STOCKDB_AUTO_UPDATE", str(cfg.data.free_stockdb_auto_update)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.free_stockdb_update_time = env.get(
+        "QM_FREE_STOCKDB_UPDATE_TIME", cfg.data.free_stockdb_update_time).strip()
     cfg.data.akshare_retries = int(
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(

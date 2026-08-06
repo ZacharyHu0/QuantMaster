@@ -60,6 +60,7 @@ def capture_runtime_baseline() -> None:
 
 def _runtime_status() -> dict[str, Any]:
     from quantmaster.automation.runtime import get_runtime
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.lab.worker import get_worker
 
     cfg = get_config()
@@ -75,8 +76,26 @@ def _runtime_status() -> dict[str, Any]:
             "restart_required": restart,
         },
         "automation": get_runtime().status(),
+        "free_stockdb": free_stockdb_runtime.status(),
         "lab": get_worker().status(),
     }
+
+
+def _apply_free_stockdb(changed: list[str], result: dict[str, Any]) -> dict[str, Any]:
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    if not any(field.startswith("data.free_stockdb_") for field in changed):
+        return {"status": "unchanged"}
+    try:
+        active = free_stockdb_runtime.restart()
+        return {
+            "status": "applied" if active else "degraded",
+            **free_stockdb_runtime.status(),
+        }
+    except (OSError, RuntimeError, ValueError):
+        logger.warning("free-stockdb 托管运行时热应用失败", exc_info=True)
+        result.setdefault("warnings", []).append("free-stockdb 设置已保存，但运行时热应用失败")
+        return {"status": "degraded", "message": "托管运行时应用失败，请重启服务"}
 
 
 def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +110,7 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
         "lab": {"status": "unchanged"},
         "server": {"status": "restart_required" if result.get("restart_required") else "applied"},
     }
+    apply_status["free_stockdb"] = _apply_free_stockdb(changed, result)
     try:
         runtime = get_runtime()
         if "data.root" in changed:

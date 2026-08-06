@@ -49,6 +49,7 @@ async def lifespan(_: FastAPI):
     from quantmaster.automation.runtime import get_runtime
     from quantmaster.backtest.paper_automation import get_paper_automation_worker
     from quantmaster.backtest.workbench import get_backtest_worker
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.data.instruments import InstrumentStore
     from quantmaster.data.maintenance import data_refresh_manager
     from quantmaster.data.repair import get_data_repair_manager
@@ -64,6 +65,7 @@ async def lifespan(_: FastAPI):
     # bundled offline snapshot; external catalog refreshes are explicit maintenance
     # operations so a stopped app cannot leave network/database threads behind.
     InstrumentStore()
+    free_stockdb_runtime.start()
     runtime = get_runtime()
     runtime.start()
     worker = get_worker()
@@ -139,6 +141,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         drain_workers()
+        free_stockdb_runtime.stop()
         unregister_maintenance()
         from quantmaster.ai.llm import close_llm_http_clients
 

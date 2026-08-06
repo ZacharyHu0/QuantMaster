@@ -131,6 +131,10 @@ data:
   primary_provider: free-stockdb # free-stockdb | akshare | tushare
   free_stockdb_sdk_path: ""  # 用户安装的 free-stockdb/pybao 目录
   free_stockdb_url: http://127.0.0.1:7899
+  free_stockdb_root: runtime/free-stockdb # 可选：用户自行解压的完整发行包目录
+  free_stockdb_managed: true       # 随 QuantMaster 启停本机 stockdb
+  free_stockdb_auto_update: true   # 使用发行包自带更新器盘后增量更新
+  free_stockdb_update_time: "18:30"
   tushare_token: ""            # 可选
   akshare_retries: 3           # 失败后指数退避重试，再降级 Tushare
   provider_timeout: 45         # 单次数据源任务含排队的硬截止秒数
@@ -176,8 +180,9 @@ TEST 在入围顺序冻结后才读取一次且不回流选参。非 PIT 特征�
 数据源默认顺序是 **free-stockdb → AKShare → Tushare → 本地缓存**，也可在设置中
 把 AKShare 或 Tushare 设为主源。QuantMaster 复用用户自行安装的
 [free-stockdb](https://github.com/hello245m/free-stockdb) `StockDBClient` 与本地数据，
-提供前复权日线、1/5/15/30/60 分钟线、申万行业和概念板块；只配置 SDK 目录与本地服务地址，
-不复制其程序、数据包或上游同步源。东方财富、新浪、中证、Yahoo 与 Tushare 分通道调度，
+提供前复权日线、1/5/15/30/60 分钟线、申万行业和概念板块。完整发行包可自行解压到
+`runtime/free-stockdb` 或在设置中选择其他目录，由 QuantMaster 可选托管启停和盘后更新；
+项目不会下载或复制其程序、数据包和上游同步源。东方财富、新浪、中证、Yahoo 与 Tushare 分通道调度，
 不同上游可并行，同一真实上游保持保守并发；
 代理、限流或连续失败会持久化熔断并汇总日志，避免重启后再次制造错误风暴。全球参考
 市场使用一次 Yahoo 批量请求。行业抓取仍按成功板块分别保存，单个板块失败不会清空其他结果。

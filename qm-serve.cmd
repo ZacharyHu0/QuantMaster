@@ -11,7 +11,6 @@ if not exist "%QM_PYTHON%" (
 )
 
 pushd "%QM_ROOT%" >nul
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%QM_ROOT%tools\start_free_stockdb.ps1"
 "%QM_PYTHON%" -m quantmaster.cli serve %*
 set "QM_EXIT_CODE=%ERRORLEVEL%"
 popd >nul

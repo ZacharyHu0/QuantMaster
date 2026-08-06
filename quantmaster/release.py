@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 RELEASE_DATE = "2026-08-06"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,28 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "free-stockdb 托管运行时",
+                "items": (
+                    (
+                        "可选托管用户自行安装的 free-stockdb 完整发行包，随 QuantMaster "
+                        "启停并按用户设置的盘后时间执行增量更新。"
+                    ),
+                    (
+                        "发行包目录、托管开关、自动更新和时间均可配置；不下载或捆绑程序、"
+                        "数据包及同步源，维护失败时继续使用后备数据源。"
+                    ),
+                    (
+                        "长时间更新可随应用退出而终止，运行状态进入诊断与设置热应用结果。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "0.19.0",
+        "date": "2026-08-06",
         "sections": (
             {
                 "title": "市场指标与候选版诊断",
@@ -206,25 +228,6 @@ RELEASES = (
                     (
                         "合并净值、行业中性、样本外验证、绩效和遗传因子挖掘的重复"
                         "等价用例，移除未再使用的 Hypothesis 依赖。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "0.16.0",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "首轮测试瘦身",
-                "items": (
-                    (
-                        "浏览器回归从 15 条收敛到 8 条核心产品流程，删除重复的错误恢复、"
-                        "动画细节和内部状态测试，减少 Chromium 重复启动。"
-                    ),
-                    (
-                        "移除发布工作流与 Quant Lab 静态字符串镜像测试，并将帮助页验收"
-                        "收敛为导航、搜索、计算器和响应式主路径。"
                     ),
                 ),
             },

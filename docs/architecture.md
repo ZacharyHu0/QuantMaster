@@ -87,6 +87,9 @@
   index_members、industry 与 themes 能力；调度器只调用满足请求能力的来源。新增数据源
   需要实现对应方法、声明 capability 并注册到 `registry._factories()`。能力矩阵和各市场
   实际优先级可在 `/api/v1/diagnostics` 或 `qm doctor --deep` 中查看。
+- **free-stockdb 托管**：`data/free_stockdb_runtime.py` 只管理用户自行安装的完整发行包，
+  不下载程序、数据或同步源。目录、启停、盘后更新时间均可在设置中调整；更新期间其他
+  请求按注册优先级降级，应用退出会终止仍在运行的更新器，运行状态进入深度诊断。
 - **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
   隔离目录并增量归档。SQLite 分别记录实际数据边界、已检查覆盖边界、检查时间、
   来源和状态。完整历史覆盖长期视为不可变；接近当前日期时按 `cache_days` 检查，
