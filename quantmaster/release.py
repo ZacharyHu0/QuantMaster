@@ -4,13 +4,28 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.14"
-RELEASE_DATE = "2026-08-07"
+VERSION = "1.3.15"
+RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "轮动窗口纵向溢出修正",
+                "items": (
+                    (
+                        "桌面端的轮动观察窗口不再创建滚动容器，彻底消除 1、3、5、20 日"
+                        "切换器的纵向滚动条；仅窄屏保留隐藏轨道的横向滑动。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.14",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -133,18 +148,6 @@ RELEASES = (
                 "title": "候选列表宽度与日期交互修正",
                 "items": (
                     "候选日期输入不再响应鼠标滚轮；成员表按可用宽度分配列宽，消除中等宽度下的无效横向滚动与留白。",
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.5",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "页面内选择器统一",
-                "items": (
-                    "时间窗口、行情周期与推送强度等互斥选择器统一为二级导航的底部蓝色当前位置标记，取消圆角底色。",
                 ),
             },
         ),
