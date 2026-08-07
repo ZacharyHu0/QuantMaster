@@ -4,13 +4,25 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.13"
+VERSION = "1.3.14"
 RELEASE_DATE = "2026-08-07"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "轮动窗口控件修正",
+                "items": (
+                    "轮动的 1、3、5、20 日观察窗口保留窄屏横向滑动，同时隐藏意外显示的滚动条并禁止纵向溢出。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.13",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -133,18 +145,6 @@ RELEASES = (
                 "title": "页面内选择器统一",
                 "items": (
                     "时间窗口、行情周期与推送强度等互斥选择器统一为二级导航的底部蓝色当前位置标记，取消圆角底色。",
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.4",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "观察页签选中态收口",
-                "items": (
-                    "观察二级页签取消圆角底色，改为文字强调与底部蓝色当前位置标记，悬停不再产生按钮式背景。",
                 ),
             },
         ),

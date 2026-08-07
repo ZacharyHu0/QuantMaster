@@ -78,9 +78,10 @@
 .rotation-commandbar strong { color:var(--ink-2); font-size:12px; }
 .rotation-commandbar span { max-width:68ch; color:var(--muted); font-size:10px; }
 .rotation-window-control {
-  display:inline-flex; align-items:stretch; max-width:100%; gap:2px; overflow-x:auto;
-  border-bottom:1px solid var(--axis); scrollbar-width:thin;
+  display:inline-flex; align-items:stretch; max-width:100%; gap:2px; overflow-x:auto; overflow-y:hidden;
+  border-bottom:1px solid var(--axis); scrollbar-width:none; -ms-overflow-style:none;
 }
+.rotation-window-control::-webkit-scrollbar { display:none; }
 .rotation-window-control button {
   position:relative; flex:0 0 auto; min-height:32px; padding:5px 10px 6px; border:0;
   border-radius:0; background:transparent; color:var(--muted); cursor:pointer; font:inherit;
