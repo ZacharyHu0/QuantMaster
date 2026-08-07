@@ -81,12 +81,28 @@
 .candidate-meta dd strong { color:var(--ink); font-size:15px; font-variant-numeric:tabular-nums; }
 
 .candidate-date-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
-.candidate-date-row label { display:grid; gap:5px; color:var(--muted); font-size:11px; }
-.candidate-date-row input { width:100%; min-height:36px; font-variant-numeric:tabular-nums; }
-/* 保留原生日历面板，移除各浏览器可能显示的上下微调器。 */
-.candidate-date-row input[type="date"]::-webkit-inner-spin-button,
-.candidate-date-row input[type="date"]::-webkit-clear-button { display:none; -webkit-appearance:none; }
-.candidate-date-row input[type="date"]::-moz-number-spin-box { display:none; }
+.candidate-date-picker { position:relative; display:grid; gap:5px; color:var(--muted); font-size:11px; }
+.candidate-date-trigger { display:flex; align-items:center; justify-content:space-between; gap:22px; min-width:178px; min-height:36px; padding:6px 9px; border:1px solid var(--axis); border-radius:7px; background:var(--page); color:var(--ink-2); cursor:pointer; font:inherit; font-size:12px; font-variant-numeric:tabular-nums; text-align:left; }
+.candidate-date-trigger:hover { border-color:var(--s1); color:var(--ink); }
+.candidate-date-trigger:focus-visible,.candidate-calendar-popover button:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
+.candidate-calendar-popover { position:absolute; z-index:12; top:calc(100% + 6px); left:0; width:252px; padding:10px; border:1px solid var(--axis); border-radius:8px; background:var(--surface); box-shadow:0 16px 36px rgb(0 0 0 / 34%); }
+.candidate-calendar-popover[hidden] { display:none; }
+.candidate-calendar-head { display:grid; grid-template-columns:32px 1fr 32px; align-items:center; min-height:32px; margin-bottom:7px; }
+.candidate-calendar-head strong { color:var(--ink-2); font-size:11px; font-weight:600; text-align:center; font-variant-numeric:tabular-nums; }
+.candidate-calendar-head button,.candidate-calendar-foot button { border:0; background:transparent; color:var(--muted); cursor:pointer; font:inherit; }
+.candidate-calendar-head button { width:32px; height:32px; font-size:18px; line-height:1; }
+.candidate-calendar-head button:hover,.candidate-calendar-foot button:hover { color:var(--ink); }
+.candidate-calendar-head button:disabled,.candidate-calendar-day:disabled { color:color-mix(in oklch,var(--muted) 45%,transparent); cursor:not-allowed; }
+.candidate-calendar-week,.candidate-calendar-grid { display:grid; grid-template-columns:repeat(7,1fr); }
+.candidate-calendar-week { margin-bottom:3px; color:var(--muted); font-size:9px; text-align:center; }
+.candidate-calendar-grid { gap:2px; }
+.candidate-calendar-day { position:relative; min-height:29px; border:0; border-radius:4px; background:transparent; color:var(--ink-2); cursor:pointer; font:inherit; font-size:10px; font-variant-numeric:tabular-nums; }
+.candidate-calendar-day:hover:not(:disabled) { color:var(--ink); background:var(--grid); }
+.candidate-calendar-day.outside { color:color-mix(in oklch,var(--muted) 58%,transparent); }
+.candidate-calendar-day[aria-pressed="true"] { color:var(--ink); font-weight:650; }
+.candidate-calendar-day[aria-pressed="true"]::after { content:""; position:absolute; inset-inline:7px; bottom:3px; height:2px; background:var(--s1); }
+.candidate-calendar-foot { display:flex; justify-content:flex-end; margin-top:7px; padding-top:7px; border-top:1px solid var(--border); }
+.candidate-calendar-foot button { padding:3px 1px; color:var(--s1); font-size:10px; }
 .candidate-snapshots { display:flex; flex-wrap:wrap; gap:6px 14px; color:var(--muted); font-size:11px; }
 
 .candidate-toolbar { display:flex; flex-direction:column; align-items:stretch; gap:10px; }

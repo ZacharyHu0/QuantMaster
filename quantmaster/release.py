@@ -4,13 +4,25 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.12"
+VERSION = "1.3.13"
 RELEASE_DATE = "2026-08-07"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "候选日期选择器重建",
+                "items": (
+                    "候选历史日期改为项目内月历弹层，彻底移除浏览器原生日期输入的上下微调和滚轮行为。",
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.12",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -133,21 +145,6 @@ RELEASES = (
                 "title": "观察页签选中态收口",
                 "items": (
                     "观察二级页签取消圆角底色，改为文字强调与底部蓝色当前位置标记，悬停不再产生按钮式背景。",
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.3",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "资讯暂停项可随时手动恢复",
-                "items": (
-                    (
-                        "资讯连续失败后统一显示为“已暂停”，手动恢复不再受自动恢复"
-                        "时间窗口限制；自动任务仍按原退避窗口运行。"
-                    ),
                 ),
             },
         ),

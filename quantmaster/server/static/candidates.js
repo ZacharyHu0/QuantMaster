@@ -366,6 +366,33 @@
     return '';
   }
 
+  const isoDate = value => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return today;
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+  };
+
+  const calendarMarkup = (selected, cursor = selected) => {
+    const selectedDate = isoDate(selected);
+    const current = new Date(`${isoDate(cursor)}T00:00:00`);
+    const year = current.getFullYear(), month = current.getMonth();
+    const first = new Date(year, month, 1), start = new Date(year, month, 1 - first.getDay());
+    const todayValue = today;
+    const cells = Array.from({length:42}, (_, index) => {
+      const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
+      const value = isoDate(day);
+      const outside = day.getMonth() !== month;
+      return `<button type="button" class="candidate-calendar-day${outside ? ' outside' : ''}" data-candidate-calendar-date="${value}" ${value > todayValue ? 'disabled' : ''} aria-pressed="${value === selectedDate}">${day.getDate()}</button>`;
+    }).join('');
+    return `<div class="candidate-calendar-head"><button type="button" data-candidate-calendar-step="-1" aria-label="上个月">‹</button><strong>${year} 年 ${month + 1} 月</strong><button type="button" data-candidate-calendar-step="1" aria-label="下个月" ${year === Number(todayValue.slice(0,4)) && month >= Number(todayValue.slice(5,7)) - 1 ? 'disabled' : ''}>›</button></div><div class="candidate-calendar-week" aria-hidden="true"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="candidate-calendar-grid">${cells}</div><div class="candidate-calendar-foot"><button type="button" data-candidate-calendar-today>今天</button></div>`;
+  };
+
+  function renderCalendarMonth(cursor) {
+    const root = document.getElementById('candidate-calendar-popover');
+    const selected = document.getElementById('candidate-as-of')?.value || today;
+    if (root) root.innerHTML = calendarMarkup(selected, cursor);
+  }
+
   function renderDetail() {
     if (!state.detail) return;
     const detail = state.detail;
@@ -375,7 +402,8 @@
     const origin = state.originTab ? `<button class="candidate-origin" type="button" data-candidate-action="return-origin">← 返回${html(tabLabel(state.originTab))}</button>` : '';
     const actions = state.newMode ? '' : `<button class="ghost" type="button" data-candidate-action="clone">复制为自定义候选</button>${editable ?
       '<button class="ghost" type="button" data-candidate-action="rename">重命名</button><button class="ghost candidate-danger" type="button" data-candidate-action="delete">删除</button>' : ''}`;
-    const dynamic = detail.kind === 'dynamic' ? `<div class="candidate-date-row"><label>查看日期<input id="candidate-as-of" type="date" max="${today}" value="${html(detail.as_of || today)}"></label>
+    const selectedDate = isoDate(detail.as_of || today);
+    const dynamic = detail.kind === 'dynamic' ? `<div class="candidate-date-row"><div class="candidate-date-picker"><span>查看日期</span><button type="button" class="candidate-date-trigger" data-candidate-date-toggle aria-haspopup="dialog" aria-expanded="false"><span data-candidate-date-label>${html(selectedDate)}</span><span aria-hidden="true">⌄</span></button><input id="candidate-as-of" type="hidden" value="${html(selectedDate)}"><div class="candidate-calendar-popover" id="candidate-calendar-popover" role="dialog" aria-label="选择查看日期" hidden>${calendarMarkup(selectedDate)}</div></div>
       <button class="ghost" type="button" data-candidate-action="load-date">查看该日成分</button></div>
       <div class="candidate-snapshots">${Object.entries(detail.snapshot_dates || {}).map(([code,value]) =>
         `<span>${html(code)} 快照 · ${html(value)}</span>`).join('')}</div>` : '';
@@ -831,13 +859,49 @@
     } else if (event.target.id === 'candidate-index-symbol') state.indexSymbol = event.target.value;
   });
 
-  // 原生日期输入在部分浏览器会把鼠标滚轮解释为加减日期；日期只应由点选或键盘明确修改。
-  workspace.addEventListener('wheel', event => {
-    if (!event.target.closest('#candidate-as-of')) return;
-    event.preventDefault();
-  }, {passive:false});
-
   workspace.addEventListener('click', async event => {
+    const dateToggle = event.target.closest('[data-candidate-date-toggle]');
+    if (dateToggle) {
+      const popover = document.getElementById('candidate-calendar-popover');
+      const open = Boolean(popover?.hidden);
+      if (popover) popover.hidden = !open;
+      dateToggle.setAttribute('aria-expanded', String(open));
+      return;
+    }
+    const calendarDate = event.target.closest('[data-candidate-calendar-date]');
+    if (calendarDate && !calendarDate.disabled) {
+      const value = calendarDate.dataset.candidateCalendarDate;
+      const input = document.getElementById('candidate-as-of');
+      if (input) input.value = value;
+      const label = workspace.querySelector('[data-candidate-date-label]');
+      if (label) label.textContent = value;
+      const popover = document.getElementById('candidate-calendar-popover');
+      if (popover) popover.hidden = true;
+      workspace.querySelector('[data-candidate-date-toggle]')?.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    const calendarStep = event.target.closest('[data-candidate-calendar-step]');
+    if (calendarStep && !calendarStep.disabled) {
+      const heading = workspace.querySelector('.candidate-calendar-head strong')?.textContent || '';
+      const matched = heading.match(/(\d{4}) 年 (\d{1,2}) 月/);
+      if (matched) renderCalendarMonth(new Date(Number(matched[1]), Number(matched[2]) - 1 + Number(calendarStep.dataset.candidateCalendarStep), 1));
+      return;
+    }
+    if (event.target.closest('[data-candidate-calendar-today]')) {
+      renderCalendarMonth(today);
+      const input = document.getElementById('candidate-as-of');
+      if (input) input.value = today;
+      const label = workspace.querySelector('[data-candidate-date-label]');
+      if (label) label.textContent = today;
+      return;
+    }
+    if (!event.target.closest('.candidate-date-picker')) {
+      const popover = document.getElementById('candidate-calendar-popover');
+      if (popover && !popover.hidden) {
+        popover.hidden = true;
+        workspace.querySelector('[data-candidate-date-toggle]')?.setAttribute('aria-expanded', 'false');
+      }
+    }
     const page = event.target.closest('[data-candidate-page]');
     if (page && !page.disabled) {
       state.page = Number(page.dataset.candidatePage);
