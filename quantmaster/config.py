@@ -31,7 +31,7 @@ class LLMConfig:
     max_tokens: int = 2048
     temperature: float = 0.3
     timeout: float = 60.0
-    max_concurrency: int = 1              # 所有 LLM 请求共享的全局并发上限
+    max_concurrency: int = 1              # 除资讯标注外的 LLM 请求共享上限
     queue_timeout: float = 30.0           # 并发闸门 FIFO 排队最长等待秒数
 
 
@@ -97,6 +97,7 @@ class NewsConfig:
     raw_cache_days: int = 7
     annotation_enabled: bool = True
     annotation_batch_size: int = 10
+    annotation_max_concurrency: int = 4
     annotation_items_per_run: int = 100
     annotation_timeout: float = 180.0
     annotation_model: str = ""
@@ -187,6 +188,9 @@ def _apply_env(cfg: Config) -> None:
         env.get("QM_LLM_MAX_CONCURRENCY", cfg.llm.max_concurrency))
     cfg.llm.queue_timeout = float(
         env.get("QM_LLM_QUEUE_TIMEOUT", cfg.llm.queue_timeout))
+    cfg.news.annotation_max_concurrency = int(env.get(
+        "QM_NEWS_ANNOTATION_MAX_CONCURRENCY", cfg.news.annotation_max_concurrency,
+    ))
     cfg.data.tushare_token = env.get("TUSHARE_TOKEN", cfg.data.tushare_token)
     cfg.data.root = env.get("QM_DATA_ROOT", cfg.data.root)
     cfg.data.primary_provider = env.get(

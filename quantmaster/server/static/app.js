@@ -820,6 +820,20 @@ async function streamJson(path, opts, onProgress) {
 
 /* ---------- 导航 ---------- */
 const ACTIVE_TAB_STORAGE_KEY = 'quantmaster.activeTab';
+const ACTIVE_WORKSPACE_PAGE_KEY = 'quantmaster.workspacePage.v1';
+const TAB_WORKSPACE = {
+  market:'observe', rotation:'observe', news:'observe',
+  'after-close':'select', candidates:'select', 'stock-analysis':'select', decision:'select',
+  lab:'research', backtest:'research', paper:'trade', ledger:'trade', automation:'automation',
+};
+const DEFAULT_WORKSPACE_PAGE = {
+  observe:'quotes', select:'after-close', research:'lab', trade:'paper', automation:'automation',
+};
+const ROUTE_PAGE = {
+  observe:{quotes:'market', temperature:'market', style:'market', rotation:'rotation', industry:'rotation', themes:'rotation', 'etf-flows':'rotation', news:'news'},
+  select:{'after-close':'after-close', candidates:'candidates', 'stock-analysis':'stock-analysis', decision:'decision'},
+  research:{lab:'lab', backtest:'backtest'}, trade:{paper:'paper', ledger:'ledger'}, automation:{automation:'automation'},
+};
 
 function storedActiveTab() {
   try { return sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || ''; }
@@ -834,6 +848,58 @@ function rememberActiveTab(tab) {
 function forgetActiveTab() {
   try { sessionStorage.removeItem(ACTIVE_TAB_STORAGE_KEY); }
   catch (_) { /* 禁用会话存储时无需清理 */ }
+}
+
+function storedWorkspacePage(workspace) {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(ACTIVE_WORKSPACE_PAGE_KEY) || '{}');
+    return typeof value?.[workspace] === 'string' ? value[workspace] : '';
+  } catch (_) { return ''; }
+}
+
+function rememberWorkspacePage(workspace, page) {
+  if (!workspace || !page) return;
+  try {
+    const value = JSON.parse(sessionStorage.getItem(ACTIVE_WORKSPACE_PAGE_KEY) || '{}');
+    value[workspace] = page;
+    sessionStorage.setItem(ACTIVE_WORKSPACE_PAGE_KEY, JSON.stringify(value));
+  } catch (_) { /* 会话存储不可用时使用默认页 */ }
+}
+
+function workspaceForTab(tab) { return TAB_WORKSPACE[tab] || ''; }
+
+function routeForControl(control) {
+  const workspace = workspaceForTab(control?.dataset.tab || '');
+  const page = control?.dataset.workspacePage || '';
+  if (!workspace || !page) return '';
+  return workspace === 'automation' ? '#automation' : `#${workspace}/${page}`;
+}
+
+function updateRoute(control) {
+  const route = routeForControl(control);
+  if (route && location.hash !== route) history.replaceState(null, '', route);
+}
+
+function pageControl(workspace, page) {
+  if (workspace === 'automation' && page === 'automation') {
+    return document.querySelector('header [data-workspace="automation"][data-tab="automation"]');
+  }
+  const expectedTab = ROUTE_PAGE[workspace]?.[page];
+  return Array.from(document.querySelectorAll(`header [data-workspace-pages="${workspace}"] [data-tab]`)).find(control =>
+    control.dataset.workspacePage === page && (!expectedTab || control.dataset.tab === expectedTab),
+  ) || null;
+}
+
+function setWorkspace(workspace) {
+  document.querySelectorAll('[data-workspace]').forEach(button => {
+    button.classList.toggle('active', button.dataset.workspace === workspace);
+    button.setAttribute('aria-current', button.dataset.workspace === workspace ? 'page' : 'false');
+  });
+  document.querySelectorAll('[data-workspace-pages]').forEach(group => {
+    group.hidden = group.dataset.workspacePages !== workspace;
+  });
+  const context = document.querySelector('.workspace-context');
+  if (context) context.hidden = !document.querySelector(`[data-workspace-pages="${workspace}"]`);
 }
 
 function tabControl(tab) {
@@ -859,16 +925,31 @@ function loadActiveTab(tab) {
   if (tab === 'decision' && !decisionLoaded && !decisionLoading) void loadDecisionHistory();
 }
 
-function activateTab(control, {persist = true, load = true} = {}) {
+function activateTab(control, {persist = true, load = true, route = true} = {}) {
   const tab = control?.dataset.tab;
   if (!tab || !document.getElementById('tab-' + tab)) return false;
   document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
+  document.querySelectorAll('header [role="tab"]').forEach(button => {
+    button.setAttribute('aria-selected', String(button === control));
+    button.tabIndex = button === control ? 0 : -1;
+  });
   document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
   if (persist) rememberActiveTab(tab);
+  const workspace = workspaceForTab(tab);
+  if (workspace) {
+    setWorkspace(workspace);
+    rememberWorkspacePage(workspace, control.dataset.workspacePage || DEFAULT_WORKSPACE_PAGE[workspace]);
+    if (route) updateRoute(control);
+  } else {
+    document.querySelectorAll('[data-workspace]').forEach(button => button.classList.remove('active'));
+    document.querySelectorAll('[data-workspace-pages]').forEach(group => { group.hidden = true; });
+    const context = document.querySelector('.workspace-context');
+    if (context) context.hidden = true;
+  }
   if (tab !== 'help' && location.hash.startsWith('#help')) {
     history.replaceState(null, '', location.pathname + location.search);
   }
-  if (control.closest('#nav')) control.scrollIntoView({block:'nearest', inline:'nearest'});
+  control.scrollIntoView({block:'nearest', inline:'nearest'});
   Object.values(charts).forEach(c => c.resize());
   if (load) loadActiveTab(tab);
   if (window.QuantCharts) window.QuantCharts.activateTab(tab);
@@ -876,19 +957,53 @@ function activateTab(control, {persist = true, load = true} = {}) {
 }
 
 document.querySelector('header').addEventListener('click', e => {
+  const workspaceControl = e.target.closest('[data-workspace]');
+  if (workspaceControl) {
+    const workspace = workspaceControl.dataset.workspace;
+    if (workspace === 'automation') {
+      activateTab(workspaceControl);
+      return;
+    }
+    const page = storedWorkspacePage(workspace) || DEFAULT_WORKSPACE_PAGE[workspace];
+    pageControl(workspace, page)?.click();
+    return;
+  }
   const control = e.target.closest('[data-tab]');
   if (!control) return;
   activateTab(control);
 });
 
-const restoredTab = location.hash.startsWith('#help') ? 'help' : storedActiveTab();
-const restoredControl = tabControl(restoredTab);
+function routeFromHash() {
+  const match = location.hash.match(/^#(observe|select|research|trade)\/([a-z-]+)$/);
+  if (match && ROUTE_PAGE[match[1]]?.[match[2]]) return {workspace:match[1], page:match[2]};
+  if (location.hash === '#automation') return {workspace:'automation', page:'automation'};
+  const legacy = location.hash.match(/^#(market|rotation)\/([a-z-]+)$/);
+  if (legacy) {
+    const map = legacy[1] === 'market'
+      ? {quotes:'quotes', temperature:'temperature', style:'style'}
+      : {overview:'rotation', industry:'industry', themes:'themes', 'etf-flows':'etf-flows', radar:'rotation'};
+    if (map[legacy[2]]) return {workspace:'observe', page:map[legacy[2]]};
+  }
+  return null;
+}
+
+const initialRoute = routeFromHash();
+const restoredTab = location.hash.startsWith('#help') ? 'help' : (initialRoute ? ROUTE_PAGE[initialRoute.workspace][initialRoute.page] : storedActiveTab());
+const restoredControl = initialRoute ? pageControl(initialRoute.workspace, initialRoute.page) : tabControl(restoredTab);
 if (restoredControl) {
   activateTab(restoredControl, {persist:false, load:false});
   window.addEventListener('load', () => loadActiveTab(restoredTab), {once:true});
 } else if (restoredTab) {
   forgetActiveTab();
 }
+
+window.addEventListener('hashchange', () => {
+  const route = routeFromHash();
+  // 市场与轮动的同级页还要切换本页视图，由 rotation.js 统一接管。
+  if (!route || route.workspace === 'observe') return;
+  const control = pageControl(route.workspace, route.page);
+  if (control) activateTab(control, {persist:true, load:true, route:false});
+});
 
 /* ---------- 我的标的 ---------- */
 let assetListsData = { favorites:[], following:[], holdings:[] };

@@ -12,6 +12,10 @@
     strong_dominant:'强势样本占优', weak_rebound:'低位样本修复', balanced:'强弱均衡',
     pending:'等待连续确认', unavailable:'样本不足',
   };
+  const STAGE_LABELS = {
+    repair_spread:'修复扩散', low_repair:'低位修复', extreme_weak:'极弱钝化',
+    unclear:'方向未明', retreat_watch:'退潮观察', clear_retreat:'明确退潮',
+  };
   const cache = new Map();
   let activeMarketPage = 'quotes';
   let activeRotationPage = 'overview';
@@ -24,13 +28,20 @@
   let activeWindow = 5;
   let themePage = 1;
   let etfPage = 1;
+  let themePageSize = 50;
+  let etfPageSize = 50;
+  let themePagination = {page:1,page_size:50,total:0,pages:1,has_previous:false,has_next:false};
+  let etfPagination = {page:1,page_size:50,total:0,pages:1,has_previous:false,has_next:false};
   let industrySort = 'change';
   let themeSort = 'change';
   let etfSort = 'flow';
   let themeQuery = '';
   let themeStage = '';
+  let themeGrade = '';
   let etfQuery = '';
   let etfCategory = '';
+  let requestVersion = 0;
+  let searchTimer = 0;
   try {
     const savedWindow = Number(localStorage.getItem(WINDOW_KEY));
     if (WINDOWS.includes(savedWindow)) activeWindow = savedWindow;
@@ -64,6 +75,17 @@
   const signal = (item, window = activeWindow) => item?.signals?.[String(window)] || {};
   const pp = value => signed(value,1,' pp');
   const windowControl = label => `<div class="rotation-window-control" aria-label="${esc(label)}">${WINDOWS.map(window => `<button type="button" data-rotation-window="${window}" aria-pressed="${String(window === activeWindow)}">${window} 日</button>`).join('')}</div>`;
+  const pageControl = (kind, pagination, pageSize) => {
+    const page = Number(pagination?.page || 1), pages = Math.max(1, Number(pagination?.pages || 1));
+    const numbers = Array.from({length:pages},(_, index) => index + 1).filter(value =>
+      value === 1 || value === pages || Math.abs(value - page) <= 2,
+    );
+    const rendered = numbers.flatMap((value,index) => {
+      const gap = index && value - numbers[index - 1] > 1 ? ['<span class="rotation-page-gap" aria-hidden="true">…</span>'] : [];
+      return [...gap, `<button type="button" data-rotation-page-to="${kind}:${value}" ${value === page ? 'aria-current="page"' : ''}>${value}</button>`];
+    }).join('');
+    return `<div class="rotation-pagination"><span>第 ${page}/${pages} 页 · ${Number(pagination?.total || 0)} 条</span><div class="rotation-pagination-actions"><button type="button" data-rotation-page-to="${kind}:1" ${page <= 1 ? 'disabled' : ''}>首页</button><button type="button" data-rotation-page-step="${kind}:-1" ${page <= 1 ? 'disabled' : ''}>上一页</button><span class="rotation-page-numbers">${rendered}</span><button type="button" data-rotation-page-step="${kind}:1" ${page >= pages ? 'disabled' : ''}>下一页</button><button type="button" data-rotation-page-to="${kind}:${pages}" ${page >= pages ? 'disabled' : ''}>末页</button><label class="rotation-page-size">每页<select data-rotation-${kind}-page-size>${[25,50,100].map(value => `<option value="${value}" ${value === pageSize ? 'selected' : ''}>${value}</option>`).join('')}</select></label></div></div>`;
+  };
 
   function chartZoom(pointCount, {yAxisIndex = 0, initialPoints = 0} = {}) {
     const start = initialPoints > 0 && pointCount > initialPoints
@@ -208,6 +230,7 @@
     }
     const current = data.current;
     const ratios = current.ratios || {};
+    const recent = (data.history || []).slice(-5);
     out.innerHTML = `
       <div class="rotation-kpis">
         <div class="rotation-kpi"><span>市场温度</span><strong class="${Number(current.temperature) >= 50 ? 'up' : ''}">${percent(current.temperature)}</strong><small>趋势向上样本占比</small></div>
@@ -215,6 +238,7 @@
         <div class="rotation-kpi"><span>强势加速</span><strong>${percent(ratios.strong_up)}</strong><small>${Number(current.counts?.strong_up || 0).toLocaleString()} 只</small></div>
         <div class="rotation-kpi"><span>有效样本</span><strong>${Number(current.eligible_count || 0).toLocaleString()}</strong><small>停牌与缺失不进分母</small></div>
       </div>
+      <section class="rotation-section rotation-path-section"><div class="rotation-section-head"><div><h3>近五日温度路径</h3><p>只呈现已完成交易日的扩散比例，避免把温度线误读成价格 K 线。</p></div></div><div class="rotation-path-strip">${recent.map(row => `<div><span>${esc(String(row.date || '').slice(5))}</span><strong class="${Number(row.temperature) >= 50 ? 'up' : ''}">${percent(row.temperature)}</strong><small>${esc(_regimeLabel(row.temperature))}</small></div>`).join('')}</div></section>
       <div class="rotation-layout two">
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>温度序列</h3><p>市场温度及 5 / 10 / 20 日均线 · 拖动底部与右侧控件缩放</p></div><output>${esc(data.as_of || '')}</output></div><div class="rotation-chart tall" id="rotation-temperature-chart"></div></section>
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>四档分布</h3><p>同一有效样本互斥归类，家数严格守恒</p></div></div>
@@ -225,6 +249,15 @@
         <div class="rotation-evidence-list">${(data.evidence?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div>
       </section>${issuesMarkup(meta)}`;
     temperatureChart(data.history || []);
+  }
+
+  function _regimeLabel(value) {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature)) return '—';
+    if (temperature < 10) return '冰点';
+    if (temperature < 25) return '收缩';
+    if (temperature < 50) return '扩散';
+    return '过热';
   }
 
   function structureChart(history) {
@@ -253,7 +286,7 @@
     const label = current.confirmed === 'pending' ? `${STYLE_LABELS[current.candidate] || current.candidate} · 待确认` : STYLE_LABELS[current.confirmed] || current.confirmed;
     out.innerHTML = `
       <div class="rotation-kpis">
-        <div class="rotation-kpi"><span>当前结构</span><strong>${esc(label)}</strong><small>三日连续才确认</small></div>
+        <div class="rotation-kpi"><span>当前结构</span><strong>${esc(label)}</strong><small>候选连续 ${current.candidate_sessions || 0} 日 · 确认连续 ${current.confirmed_sessions || 0} 日</small></div>
         <div class="rotation-kpi"><span>当日强弱差</span><strong class="${tone(current.spread_1d)}">${returnPct(current.spread_1d)}</strong><small>强势中位数 − 低位中位数</small></div>
         <div class="rotation-kpi"><span>三日均值</span><strong class="${tone(current.spread_3d)}">${returnPct(current.spread_3d)}</strong><small>过滤单日跳变</small></div>
         <div class="rotation-kpi"><span>判断死区</span><strong>±0.25 pp</strong><small>区间内记为均衡</small></div>
@@ -261,9 +294,10 @@
       <div class="rotation-layout two">
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>强弱样本收益</h3><p>柱为强弱差，折线为两组当日收益中位数</p></div></div><div class="rotation-chart tall" id="rotation-structure-chart"></div></section>
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>当前分布</h3><p>上涨比例与收益中位数同时核查</p></div></div>
-          <div class="rotation-state-list">${(data.distribution || []).map(row => `<div class="rotation-state-row"><strong>${esc(row.label)}</strong><span>${row.count} 只 · 上涨 ${row.positive_ratio == null ? '—' : percent(row.positive_ratio * 100)}</span><output class="${tone(row.median_return)}">${returnPct(row.median_return)}</output></div>`).join('')}</div>
+          <div class="rotation-state-list">${(data.distribution || []).map(row => `<div class="rotation-state-row"><strong>${esc(row.label)}</strong><span>${row.count} 只 · ${row.share == null ? '—' : percent(row.share * 100)} · 上涨 ${row.positive_ratio == null ? '—' : percent(row.positive_ratio * 100)}</span><output class="${tone(row.median_return)}">${returnPct(row.median_return)}</output></div>`).join('')}</div>
         </section>
       </div>
+      <section class="rotation-section rotation-style-path"><div class="rotation-section-head"><div><h3>最近 10 日确认路径</h3><p>候选状态连续三日一致才成为确认状态；待确认不被包装为结论。</p></div></div><div class="rotation-path-strip">${(data.history || []).slice(-10).map(row => `<div><span>${esc(String(row.date || '').slice(5))}</span><strong>${esc(STYLE_LABELS[row.confirmed] || STYLE_LABELS[row.candidate] || '待判定')}</strong><small>${row.confirmed === 'pending' ? '待确认' : '已确认'}</small></div>`).join('')}</div></section>
       <div class="rotation-layout equal">
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>强势样本前列</h3><p>仅用于解释结构，不构成候选清单</p></div></div>${cohortTable(data.leaders || [])}</section>
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>低位样本前列</h3><p>按趋势分数从低到高</p></div></div>${cohortTable(data.laggards || [])}</section>
@@ -333,6 +367,12 @@
     return `<div class="rotation-table-wrap"><table class="rotation-table rotation-ranking-table"><thead><tr><th>板块</th><th>阶段</th><th class="numeric">变化</th><th class="numeric">超额</th><th class="numeric">宽度</th><th class="numeric">量能</th></tr></thead><tbody>${rows.map(row => `<tr><td><button type="button" data-rotation-jump="${kind}" data-code="${esc(row.code)}">${esc(row.name)}</button></td><td><span class="rotation-stage" data-stage="${esc(row.stage)}">${esc(row.stage_label)}</span></td><td class="numeric ${tone(row.signal?.rotation_change_pp)}">${pp(row.signal?.rotation_change_pp)}</td><td class="numeric ${tone(row.signal?.excess_return)}">${returnPct(row.signal?.excess_return)}</td><td class="numeric">${row.signal?.advance_ratio == null ? '—' : percent(Number(row.signal.advance_ratio)*100)}</td><td class="numeric ${tone(row.signal?.amount_activity)}">${returnPct(row.signal?.amount_activity)}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
+  function movementSummary(summary = {}, window = activeWindow) {
+    const movement = summary.movements?.[String(window)] || {};
+    const longest = summary.persistence?.longest?.[0];
+    return `<div class="rotation-movement-strip"><div><span>${window} 日改善</span><strong class="up">${movement.improving_count ?? 0}</strong></div><div><span>${window} 日转弱</span><strong class="down">${movement.retreating_count ?? 0}</strong></div><div><span>最快变化</span><strong>${esc(movement.leader?.name || '—')}</strong><small>${pp(movement.leader?.rotation_change_pp)}</small></div><div><span>持续最长</span><strong>${esc(longest?.name || '—')}</strong><small>${longest?.sessions || 0} 日 · ${esc(longest?.stage_label || '')}</small></div></div>`;
+  }
+
   function renderOverview(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-overview-content');
     updateMeta('overview',meta);
@@ -393,6 +433,7 @@
     out.innerHTML = `
       <div class="rotation-commandbar"><div><strong>行业观察窗口</strong><span>坐标位置是当前值，箭头起点为 ${activeWindow} 个交易日前</span></div>${windowControl('行业周期观察窗口')}</div>
       <div class="rotation-kpis"><div class="rotation-kpi"><span>有效一级行业</span><strong>${l1.length}</strong><small>申万 2021 共 31 个</small></div><div class="rotation-kpi"><span>变化最快</span><strong>${esc(best?.name || '—')}</strong><small class="${tone(signal(best).rotation_change_pp)}">${pp(signal(best).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>变化末位</span><strong>${esc(worst?.name || '—')}</strong><small class="${tone(signal(worst).rotation_change_pp)}">${pp(signal(worst).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>覆盖门槛</span><strong>8 · 70%</strong><small>最少成分 · 行情覆盖</small></div></div>
+      <section class="rotation-section"><div class="rotation-section-head"><div><h3>阶段迁移</h3><p>改善与转弱按所选窗口的强势变化减低位变化计算；持续日数只统计连续可判定阶段。</p></div></div>${movementSummary(data.summary || {},activeWindow)}</section>
       <section class="rotation-section"><div class="rotation-section-head"><div><h3>周期坐标与 ${activeWindow} 日轨迹</h3><p>横轴强势加速、纵轴低位偏弱；坐标按当前值与轨迹自适应，拖动底部与右侧控件缩放</p></div><output>${l1.length} 个一级行业</output></div><div class="rotation-chart tall" id="rotation-industry-scatter"></div></section>
       <section class="rotation-section"><div class="rotation-section-head"><div><h3>行业信号矩阵</h3><p>阶段固定 3 日；表格按独立证据排序，不合成综合分</p></div><label class="rotation-compact-field">排序<select data-rotation-industry-sort><option value="change" ${industrySort === 'change' ? 'selected' : ''}>轮动变化</option><option value="excess" ${industrySort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${industrySort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="weak" ${industrySort === 'weak' ? 'selected' : ''}>低位占比</option></select></label></div>
         <div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>行业</th><th>阶段（3日）</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">强势 / 低位</th><th class="numeric">覆盖</th></tr></thead><tbody>${rows.map(item => { const current = signal(item); return `<tr><td><button type="button" data-rotation-detail="industry" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)} · ${esc(item.level)}</div></td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${percent(item.strong_ratio)} / ${percent(item.weak_ratio)}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div>
@@ -439,39 +480,27 @@
 
   function renderThemes(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-themes-content');
-    updateMeta('themes',meta); themeCatalog = data.items || [];
+    updateMeta('themes',meta); themeCatalog = data.items || []; themePagination = data.pagination || themePagination;
     if (!themeCatalog.length) { out.innerHTML = emptyMarkup(meta,data.message || '尚未建立细分题材成分目录。','themes'); return; }
     if (!themeCatalog[0]?.signals) { out.innerHTML = emptyMarkup(meta,'题材快照需要升级后才能展示多周期信号。','themes'); return; }
-    const stages = [...new Set(themeCatalog.map(item => item.stage))].sort();
-    out.innerHTML = `<div class="rotation-commandbar"><div><strong>题材信号矩阵</strong><span>${themeCatalog.length}/${data.total || themeCatalog.length} 个可计算题材 · 每页 50 条</span></div>${windowControl('题材观察窗口')}</div><div class="rotation-filterbar"><label>搜索<input data-rotation-theme-query type="search" value="${esc(themeQuery)}" placeholder="题材名称、代码或关联行业"></label><label>阶段<select data-rotation-theme-stage><option value="">全部阶段</option>${stages.map(value => `<option value="${esc(value)}" ${themeStage === value ? 'selected' : ''}>${esc(themeCatalog.find(item => item.stage === value)?.stage_label || value)}</option>`).join('')}</select></label><label>排序<select data-rotation-theme-sort><option value="change" ${themeSort === 'change' ? 'selected' : ''}>轮动变化</option><option value="excess" ${themeSort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${themeSort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="coverage" ${themeSort === 'coverage' ? 'selected' : ''}>样本覆盖</option></select></label></div><div id="rotation-theme-results"></div><section class="rotation-detail" id="rotation-theme-detail" hidden></section>${issuesMarkup(meta)}`;
+    const summary = data.summary || {};
+    out.innerHTML = `<div class="rotation-commandbar"><div><strong>题材信号矩阵</strong><span>${themePagination.total || 0} 个可计算题材 · 服务端完整分页 · 结构评分不构成交易评级</span></div>${windowControl('题材观察窗口')}</div>${movementSummary(summary,activeWindow)}<div class="rotation-filterbar"><label>搜索<input data-rotation-theme-query type="search" value="${esc(themeQuery)}" placeholder="题材名称、代码或关联行业"></label><label>阶段<select data-rotation-theme-stage><option value="">全部阶段</option>${Object.entries(STAGE_LABELS).map(([value,label]) => `<option value="${esc(value)}" ${themeStage === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label><label>结构评分<select data-rotation-theme-grade><option value="">全部等级</option>${['A','B','C','D'].map(value => `<option value="${value}" ${themeGrade === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>排序<select data-rotation-theme-sort><option value="change" ${themeSort === 'change' ? 'selected' : ''}>轮动变化</option><option value="score" ${themeSort === 'score' ? 'selected' : ''}>结构评分</option><option value="excess" ${themeSort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${themeSort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="coverage" ${themeSort === 'coverage' ? 'selected' : ''}>样本覆盖</option></select></label></div><div id="rotation-theme-results"></div><section class="rotation-detail" id="rotation-theme-detail" hidden></section>${issuesMarkup(meta)}`;
     drawThemeTable();
   }
 
   function drawThemeTable() {
     const target = document.getElementById('rotation-theme-results'); if (!target) return;
-    const needle = themeQuery.trim().toLowerCase();
-    const filtered = themeCatalog.filter(item => {
-      const industry = item.primary_industry?.name || '';
-      return (!needle || `${item.name} ${item.code} ${industry}`.toLowerCase().includes(needle)) && (!themeStage || item.stage === themeStage);
-    }).sort((left,right) => {
-      const a = signal(left), b = signal(right);
-      if (themeSort === 'excess') return Number(b.excess_return ?? -Infinity) - Number(a.excess_return ?? -Infinity);
-      if (themeSort === 'amount') return Number(b.amount_activity ?? -Infinity) - Number(a.amount_activity ?? -Infinity);
-      if (themeSort === 'coverage') return Number(right.coverage || 0) - Number(left.coverage || 0);
-      return Number(b.rotation_change_pp ?? -Infinity) - Number(a.rotation_change_pp ?? -Infinity);
-    });
-    const pages = Math.max(1,Math.ceil(filtered.length / 50)); themePage = Math.min(themePage,pages);
-    const visible = filtered.slice((themePage - 1)*50,themePage*50);
-    target.innerHTML = visible.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>题材</th><th>关联一级行业</th><th>阶段（3日）</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">覆盖</th></tr></thead><tbody>${visible.map(item => { const current = signal(item); return `<tr><td><button type="button" data-rotation-detail="theme" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)}</div></td><td>${item.primary_industry ? `${esc(item.primary_industry.name)}<div class="hint">${percent(Number(item.primary_industry.theme_share || 0)*100)} · ${item.primary_industry.overlap_count} 只</div>` : '<span class="hint">跨行业 / 证据不足</span>'}</td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div><div class="rotation-pagination"><span>第 ${themePage}/${pages} 页 · ${filtered.length} 条</span><div><button type="button" data-rotation-page-step="theme:-1" ${themePage <= 1 ? 'disabled' : ''}>上一页</button><button type="button" data-rotation-page-step="theme:1" ${themePage >= pages ? 'disabled' : ''}>下一页</button></div></div>` : '<div class="rotation-empty"><strong>没有匹配题材</strong><p>可缩短关键词或清除阶段筛选。</p></div>';
+    target.innerHTML = themeCatalog.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>题材</th><th>关联一级行业</th><th>阶段（3日）</th><th class="numeric">评分 / 等级</th><th class="numeric">持续</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">覆盖</th></tr></thead><tbody>${themeCatalog.map(item => { const current = signal(item); return `<tr><td><button type="button" data-rotation-detail="theme" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)}</div></td><td>${item.primary_industry ? `${esc(item.primary_industry.name)}<div class="hint">${percent(Number(item.primary_industry.theme_share || 0)*100)} · ${item.primary_industry.overlap_count} 只</div>` : '<span class="hint">跨行业 / 证据不足</span>'}</td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric">${number(item.rotation_score,1)} · ${esc(item.grade || '—')}</td><td class="numeric">${item.stage_sessions || 0} 日</td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div>${pageControl('theme',themePagination,themePageSize)}` : '<div class="rotation-empty"><strong>没有匹配题材</strong><p>可缩短关键词或清除阶段、评分筛选。</p></div>';
   }
 
   function renderEtf(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-etf-content');
-    updateMeta('etf_flows',meta); etfCatalog = data.items || [];
-    if (!etfCatalog.length) { out.innerHTML = emptyMarkup(meta,data.summary?.message || data.message || '等待 ETF 份额快照。','etf'); return; }
+    updateMeta('etf_flows',meta); etfCatalog = data.items || []; etfPagination = data.pagination || etfPagination;
+    if (!data.summary && !etfCatalog.length) { out.innerHTML = emptyMarkup(meta,data.message || '等待 ETF 份额快照。','etf'); return; }
     const currentWindow = data.summary?.windows?.[String(activeWindow)] || {};
-    const categories = [...new Set(etfCatalog.map(item => item.category))].sort();
-    out.innerHTML = `<div class="rotation-commandbar"><div><strong>ETF 资金窗口</strong><span>累计资金按最近完整交易日求和；跟踪基准缺失时不猜测</span></div>${windowControl('ETF资金观察窗口')}</div><div class="rotation-kpis"><div class="rotation-kpi"><span>${activeWindow} 日净流</span><strong class="${tone(currentWindow.net_flow)}">${money(currentWindow.net_flow)}</strong><small>${currentWindow.sessions || 0} 个交易日</small></div><div class="rotation-kpi"><span>净申购 ETF</span><strong>${currentWindow.inflow_count || 0}</strong><small>窗口累计为正</small></div><div class="rotation-kpi"><span>净赎回 ETF</span><strong>${currentWindow.outflow_count || 0}</strong><small>窗口累计为负</small></div><div class="rotation-kpi"><span>收盘价降级</span><strong>${data.summary?.close_fallback_count || 0}</strong><small>净值缺失时使用</small></div></div><section class="rotation-section"><div class="rotation-section-head"><div><h3>每日与累计资金</h3><p>柱为当日净流，折线为当前本地历史累计 · 支持横纵坐标缩放</p></div><output>${data.daily?.length || 0} 日</output></div><div class="rotation-chart tall" id="rotation-etf-chart"></div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>跟踪基准聚合</h3><p>同一基准下的 ETF 合并，避免同质产品重复放大观感</p></div><output>${data.benchmarks?.length || 0} 个基准</output></div><div class="rotation-benchmark-grid">${[...(data.benchmarks || [])].sort((a,b) => Math.abs(Number(b.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(a.flows?.[String(activeWindow)] || 0))).slice(0,20).map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('')}</div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 贡献明细</h3><p>完整目录默认 50 行分页，逐只披露价格来源</p></div></div><div class="rotation-filterbar"><label>搜索<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="ETF 名称、代码或基准"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="flow" ${etfSort === 'flow' ? 'selected' : ''}>窗口资金</option><option value="daily" ${etfSort === 'daily' ? 'selected' : ''}>当日资金</option><option value="name" ${etfSort === 'name' ? 'selected' : ''}>名称</option></select></label></div><div id="rotation-etf-results"></div></section>${issuesMarkup(meta)}`;
+    const categories = data.categories || [];
+    const streaks = data.summary?.streaks || {};
+    out.innerHTML = `<div class="rotation-commandbar"><div><strong>ETF 资金窗口</strong><span>累计资金按最近完整交易日求和；跟踪基准缺失时不猜测</span></div>${windowControl('ETF资金观察窗口')}</div><div class="rotation-kpis"><div class="rotation-kpi"><span>${activeWindow} 日净流</span><strong class="${tone(currentWindow.net_flow)}">${money(currentWindow.net_flow)}</strong><small>${currentWindow.sessions || 0} 个交易日</small></div><div class="rotation-kpi"><span>最大净申购</span><strong>${esc(currentWindow.largest_inflow?.name || '—')}</strong><small class="up">${money(currentWindow.largest_inflow?.flow)}</small></div><div class="rotation-kpi"><span>最大净赎回</span><strong>${esc(currentWindow.largest_outflow?.name || '—')}</strong><small class="down">${money(currentWindow.largest_outflow?.flow)}</small></div><div class="rotation-kpi"><span>连续申购 / 赎回</span><strong>${esc(streaks.longest_inflow?.name || '—')} / ${esc(streaks.longest_outflow?.name || '—')}</strong><small>${streaks.longest_inflow?.sessions || 0} / ${streaks.longest_outflow?.sessions || 0} 个观测日</small></div></div><section class="rotation-section"><div class="rotation-section-head"><div><h3>每日与累计资金</h3><p>柱为当日净流，折线为当前本地历史累计 · 支持横纵坐标缩放</p></div><output>${data.daily?.length || 0} 日</output></div><div class="rotation-chart tall" id="rotation-etf-chart"></div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>跟踪基准聚合</h3><p>同一基准下的 ETF 合并，避免同质产品重复放大观感</p></div><output>${data.benchmarks?.length || 0} 个基准</output></div><div class="rotation-benchmark-grid">${[...(data.benchmarks || [])].sort((a,b) => Math.abs(Number(b.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(a.flows?.[String(activeWindow)] || 0))).slice(0,20).map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('')}</div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 贡献明细</h3><p>完整目录默认 50 行分页，逐只披露价格来源与连续申赎</p></div></div><div class="rotation-filterbar"><label>搜索<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="ETF 名称、代码或基准"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="flow" ${etfSort === 'flow' ? 'selected' : ''}>窗口资金</option><option value="daily" ${etfSort === 'daily' ? 'selected' : ''}>当日资金</option><option value="streak" ${etfSort === 'streak' ? 'selected' : ''}>连续申赎</option><option value="name" ${etfSort === 'name' ? 'selected' : ''}>名称</option></select></label></div><div id="rotation-etf-results"></div></section>${issuesMarkup(meta)}`;
     drawEtfTable();
     const chart = mkChart('rotation-etf-chart');
     const daily = data.daily || [];
@@ -495,15 +524,7 @@
 
   function drawEtfTable() {
     const target = document.getElementById('rotation-etf-results'); if (!target) return;
-    const needle = etfQuery.trim().toLowerCase();
-    const filtered = etfCatalog.filter(item => (!needle || `${item.name} ${item.symbol} ${item.benchmark}`.toLowerCase().includes(needle)) && (!etfCategory || item.category === etfCategory)).sort((left,right) => {
-      if (etfSort === 'name') return String(left.name).localeCompare(String(right.name),'zh-CN');
-      if (etfSort === 'daily') return Number(right.flow || 0) - Number(left.flow || 0);
-      return Number(right.flows?.[String(activeWindow)] || 0) - Number(left.flows?.[String(activeWindow)] || 0);
-    });
-    const pages = Math.max(1,Math.ceil(filtered.length / 50)); etfPage = Math.min(etfPage,pages);
-    const visible = filtered.slice((etfPage - 1)*50,etfPage*50);
-    target.innerHTML = visible.length ? `<div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>ETF</th><th>跟踪基准</th><th>类别</th><th class="numeric">${activeWindow}日资金</th><th class="numeric">当日资金</th><th class="numeric">份额变化</th><th class="numeric">估算价格</th><th>价格来源</th></tr></thead><tbody>${visible.map(item => `<tr><td>${esc(item.name)}<div class="hint">${esc(item.symbol)}</div></td><td>${esc(item.benchmark || '未披露')}</td><td>${esc(item.category)}</td><td class="numeric ${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</td><td class="numeric ${tone(item.flow)}">${money(item.flow)}</td><td class="numeric ${tone(item.share_change)}">${number(item.share_change,0)}</td><td class="numeric">${number(item.price,4)}</td><td>${item.price_source === 'nav' ? '净值' : '<span class="rotation-stage">收盘价降级</span>'}</td></tr>`).join('')}</tbody></table></div><div class="rotation-pagination"><span>第 ${etfPage}/${pages} 页 · ${filtered.length} 条</span><div><button type="button" data-rotation-page-step="etf:-1" ${etfPage <= 1 ? 'disabled' : ''}>上一页</button><button type="button" data-rotation-page-step="etf:1" ${etfPage >= pages ? 'disabled' : ''}>下一页</button></div></div>` : '<div class="rotation-empty"><strong>没有匹配 ETF</strong><p>可缩短关键词或清除类别筛选。</p></div>';
+    target.innerHTML = etfCatalog.length ? `<div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>ETF</th><th>跟踪基准</th><th>类别</th><th class="numeric">${activeWindow}日资金</th><th class="numeric">当日资金</th><th class="numeric">连续</th><th class="numeric">份额变化</th><th class="numeric">估算价格</th><th>价格来源</th></tr></thead><tbody>${etfCatalog.map(item => `<tr><td>${esc(item.name)}<div class="hint">${esc(item.symbol)}</div></td><td>${esc(item.benchmark || '未披露')}</td><td>${esc(item.category)}</td><td class="numeric ${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</td><td class="numeric ${tone(item.flow)}">${money(item.flow)}</td><td class="numeric ${tone(item.flow_streak_sessions)}">${Number(item.flow_streak_sessions || 0) > 0 ? '+' : ''}${item.flow_streak_sessions || 0} 日</td><td class="numeric ${tone(item.share_change)}">${number(item.share_change,0)}</td><td class="numeric">${number(item.price,4)}</td><td>${item.price_source === 'nav' ? '净值' : '<span class="rotation-stage">收盘价降级</span>'}</td></tr>`).join('')}</tbody></table></div>${pageControl('etf',etfPagination,etfPageSize)}` : '<div class="rotation-empty"><strong>没有匹配 ETF</strong><p>可缩短关键词或清除类别筛选。</p></div>';
   }
 
   async function openGroupDetail(kind, code) {
@@ -512,7 +533,7 @@
     if (!target) return;
     target.hidden = false;
     target.innerHTML = '<div class="rotation-skeleton"><span></span><span></span></div>';
-    target.scrollIntoView({behavior:REDUCED_MOTION ? 'auto' : 'smooth',block:'nearest'});
+    target.scrollIntoView({behavior:'auto',block:'nearest'});
     try {
       const payload = await api(`/api/v1/rotation/${isTheme ? 'themes' : 'industries'}/${encodeURIComponent(code)}`);
       const item = payload.data || {};
@@ -528,13 +549,14 @@
   }
 
   async function loadCurrent(force = false) {
+    const thisRequest = ++requestVersion;
     const marketPage = activeMarketPage;
     const rotationPage = activeRotationPage;
     const marketActive = document.getElementById('tab-market')?.classList.contains('active');
     const rotationActive = document.getElementById('tab-rotation')?.classList.contains('active');
     const stillCurrent = () => (
-      (marketActive && activeMarketPage === marketPage && document.getElementById('tab-market')?.classList.contains('active'))
-      || (rotationActive && activeRotationPage === rotationPage && document.getElementById('tab-rotation')?.classList.contains('active'))
+      thisRequest === requestVersion && ((marketActive && activeMarketPage === marketPage && document.getElementById('tab-market')?.classList.contains('active'))
+      || (rotationActive && activeRotationPage === rotationPage && document.getElementById('tab-rotation')?.classList.contains('active')))
     );
     try {
       let payload;
@@ -551,10 +573,23 @@
         payload = await fetchView('industries','/api/v1/rotation/industries',force);
         if (stillCurrent()) renderIndustries(payload);
       } else if (rotationActive && rotationPage === 'themes') {
-        payload = await fetchView('themes','/api/v1/rotation/themes?limit=500',force);
+        const params = new URLSearchParams({page:String(themePage),page_size:String(themePageSize),window:String(activeWindow),sort:themeSort,order:themeSort === 'name' ? 'asc' : 'desc'});
+        if (themeQuery.trim()) params.set('query',themeQuery.trim());
+        if (themeStage) params.set('stage',themeStage);
+        if (themeGrade) params.set('grade',themeGrade);
+        payload = await fetchView(`themes:${params.toString()}`,`/api/v1/rotation/themes?${params}`,force);
+        themePage = Number(payload.data?.pagination?.page || themePage);
         if (stillCurrent()) renderThemes(payload);
       } else if (rotationActive && rotationPage === 'etf-flows') {
-        payload = await fetchView('etf','/api/v1/rotation/etf-flows',force);
+        const params = new URLSearchParams({page:String(etfPage),page_size:String(etfPageSize),window:String(activeWindow),sort:etfSort,order:etfSort === 'name' ? 'asc' : 'desc'});
+        if (etfQuery.trim()) params.set('query',etfQuery.trim());
+        if (etfCategory) params.set('category',etfCategory);
+        const [summary, items] = await Promise.all([
+          fetchView('etf-summary','/api/v1/rotation/etf-flows?include_items=false',force),
+          fetchView(`etf-items:${params.toString()}`,`/api/v1/rotation/etf-flows/items?${params}`,force),
+        ]);
+        etfPage = Number(items.data?.pagination?.page || etfPage);
+        payload = {meta:summary.meta,data:{...summary.data,...items.data}};
         if (stillCurrent()) renderEtf(payload);
       }
     } catch (error) {
@@ -575,7 +610,8 @@
       button.tabIndex = selected ? 0 : -1;
     });
     document.querySelectorAll('[data-market-view]').forEach(view => { view.hidden = view.dataset.marketView !== page; });
-    if (updateHash && location.hash !== `#market/${page}`) history.replaceState(null,'',`#market/${page}`);
+    const route = `#observe/${page}`;
+    if (updateHash && location.hash !== route) history.replaceState(null,'',route);
     if (page !== 'quotes') loadCurrent();
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
   }
@@ -590,7 +626,9 @@
       button.tabIndex = selected ? 0 : -1;
     });
     document.querySelectorAll('[data-rotation-view]').forEach(view => { view.hidden = view.dataset.rotationView !== page; });
-    if (updateHash && location.hash !== `#rotation/${page}`) history.replaceState(null,'',`#rotation/${page}`);
+    const routePage = {overview:'rotation',industry:'industry',themes:'themes','etf-flows':'etf-flows'}[page] || 'rotation';
+    const route = `#observe/${routePage}`;
+    if (updateHash && location.hash !== route) history.replaceState(null,'',route);
     loadCurrent();
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
   }
@@ -687,14 +725,27 @@
   }
 
   function applyHash() {
-    const match = location.hash.match(/^#(market|rotation)\/([a-z-]+)$/);
-    if (!match) return false;
-    const control = tabControl(match[1]);
-    if (control) activateTab(control,{persist:true,load:false});
-    if (match[1] === 'market') setMarketPage(match[2],false);
+    const canonical = location.hash.match(/^#observe\/([a-z-]+)$/);
+    const legacy = location.hash.match(/^#(market|rotation)\/([a-z-]+)$/);
+    const route = canonical ? canonical[1] : legacy ? legacy[2] : '';
+    const parent = canonical
+      ? ({quotes:'market',temperature:'market',style:'market',rotation:'rotation',industry:'rotation',themes:'rotation','etf-flows':'rotation'}[route] || '')
+      : legacy?.[1];
+    if (!parent) return false;
+    const workspacePage = parent === 'market'
+      ? route
+      : ({overview:'rotation',industry:'industry',themes:'themes','etf-flows':'etf-flows',radar:'rotation'}[route] || 'rotation');
+    const control = document.querySelector(`header [data-workspace-page="${workspacePage}"][data-tab="${parent}"]`);
+    if (control) activateTab(control,{persist:true,load:false,route:false});
+    if (parent === 'market') setMarketPage(route,false);
     else {
-      setRotationPage(match[2],false);
-      if (match[2] === 'radar') history.replaceState(null,'','#rotation/overview');
+      setRotationPage(route === 'radar' ? 'overview' : route,false);
+    }
+    if (legacy) {
+      const canonicalRoute = parent === 'market'
+        ? `#observe/${route}`
+        : `#observe/${route === 'radar' ? 'rotation' : route}`;
+      history.replaceState(null,'',canonicalRoute);
     }
     return true;
   }
@@ -724,8 +775,15 @@
     const pageStep = event.target.closest('[data-rotation-page-step]');
     if (pageStep) {
       const [kind,step] = pageStep.dataset.rotationPageStep.split(':');
-      if (kind === 'theme') { themePage = Math.max(1,themePage + Number(step)); drawThemeTable(); }
-      if (kind === 'etf') { etfPage = Math.max(1,etfPage + Number(step)); drawEtfTable(); }
+      if (kind === 'theme') { themePage = Math.max(1,themePage + Number(step)); loadCurrent(); }
+      if (kind === 'etf') { etfPage = Math.max(1,etfPage + Number(step)); loadCurrent(); }
+      return;
+    }
+    const pageTo = event.target.closest('[data-rotation-page-to]');
+    if (pageTo) {
+      const [kind,page] = pageTo.dataset.rotationPageTo.split(':');
+      if (kind === 'theme') { themePage = Math.max(1,Number(page) || 1); loadCurrent(); }
+      if (kind === 'etf') { etfPage = Math.max(1,Number(page) || 1); loadCurrent(); }
       return;
     }
     const jump = event.target.closest('[data-rotation-jump]');
@@ -739,7 +797,7 @@
   });
 
   document.addEventListener('keydown', event => {
-    const current = event.target.closest('.rotation-local-tabs [role="tab"]');
+    const current = event.target.closest('.workspace-context [role="tab"]');
     if (!current || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     const tabs = [...current.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
     const index = tabs.indexOf(current);
@@ -748,16 +806,17 @@
     const next = tabs[nextIndex];
     event.preventDefault();
     next.focus();
-    if (next.dataset.rotationPage) setRotationPage(next.dataset.rotationPage);
-    else if (next.dataset.marketPage) setMarketPage(next.dataset.marketPage);
+    next.click();
   });
 
   document.addEventListener('input', event => {
     if (event.target.matches('[data-rotation-theme-query]')) {
-      themeQuery = event.target.value; themePage = 1; drawThemeTable();
+      themeQuery = event.target.value; themePage = 1;
+      clearTimeout(searchTimer); searchTimer = setTimeout(() => loadCurrent(),220);
     }
     if (event.target.matches('[data-rotation-etf-query]')) {
-      etfQuery = event.target.value; etfPage = 1; drawEtfTable();
+      etfQuery = event.target.value; etfPage = 1;
+      clearTimeout(searchTimer); searchTimer = setTimeout(() => loadCurrent(),220);
     }
   });
 
@@ -765,29 +824,35 @@
     if (event.target.matches('[data-rotation-industry-sort]')) {
       industrySort = event.target.value; loadCurrent();
     } else if (event.target.matches('[data-rotation-theme-stage]')) {
-      themeStage = event.target.value; themePage = 1; drawThemeTable();
+      themeStage = event.target.value; themePage = 1; loadCurrent();
+    } else if (event.target.matches('[data-rotation-theme-grade]')) {
+      themeGrade = event.target.value; themePage = 1; loadCurrent();
     } else if (event.target.matches('[data-rotation-theme-sort]')) {
-      themeSort = event.target.value; themePage = 1; drawThemeTable();
+      themeSort = event.target.value; themePage = 1; loadCurrent();
+    } else if (event.target.matches('[data-rotation-theme-page-size]')) {
+      themePageSize = Number(event.target.value) || 50; themePage = 1; loadCurrent();
     } else if (event.target.matches('[data-rotation-etf-category]')) {
-      etfCategory = event.target.value; etfPage = 1; drawEtfTable();
+      etfCategory = event.target.value; etfPage = 1; loadCurrent();
     } else if (event.target.matches('[data-rotation-etf-sort]')) {
-      etfSort = event.target.value; etfPage = 1; drawEtfTable();
+      etfSort = event.target.value; etfPage = 1; loadCurrent();
+    } else if (event.target.matches('[data-rotation-etf-page-size]')) {
+      etfPageSize = Number(event.target.value) || 50; etfPage = 1; loadCurrent();
     }
   });
 
   document.querySelector('header')?.addEventListener('click', event => {
     const control = event.target.closest('[data-tab]');
-    if (control?.dataset.tab === 'market' && !location.hash.startsWith('#market/')) setMarketPage(activeMarketPage);
-    if (control?.dataset.tab === 'rotation' && !location.hash.startsWith('#rotation/')) setRotationPage(activeRotationPage);
+    if (control?.dataset.tab === 'market' && !control.dataset.marketPage) setMarketPage(activeMarketPage);
+    if (control?.dataset.tab === 'rotation' && !control.dataset.rotationPage) setRotationPage(activeRotationPage);
   });
   window.addEventListener('hashchange',applyHash);
 
   window.loadRotationFeature = tab => {
     if (tab === 'market') {
-      const page = location.hash.startsWith('#market/') ? location.hash.slice(8) : activeMarketPage;
+      const page = location.hash.startsWith('#observe/') ? location.hash.slice(9) : activeMarketPage;
       setMarketPage(page,false);
     } else if (tab === 'rotation') {
-      const page = location.hash.startsWith('#rotation/') ? location.hash.slice(10) : activeRotationPage;
+      const page = location.hash.startsWith('#observe/') ? location.hash.slice(9) : activeRotationPage;
       setRotationPage(page,false);
     }
   };

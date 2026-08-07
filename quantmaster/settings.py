@@ -158,6 +158,7 @@ class NewsSettings(StrictModel):
     raw_cache_days: int = Field(default=7, ge=0, le=3650)
     annotation_enabled: bool = True
     annotation_batch_size: int = Field(default=10, ge=1, le=50)
+    annotation_max_concurrency: int = Field(default=4, ge=1, le=16)
     annotation_items_per_run: int = Field(default=100, ge=1, le=1000)
     annotation_timeout: float = Field(default=180.0, ge=5.0, le=600.0)
     annotation_model: str = Field(default="", max_length=200)

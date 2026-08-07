@@ -319,12 +319,14 @@ def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
 
     queue = store.stats(30)["queue"]
     assert {key: queue[key] for key in (
-        "pending", "failed", "recovery", "dead_letter", "recoverable_dead_letter",
+        "pending", "failed", "recovery", "dead_letter",
+        "manual_recoverable_dead_letter", "recoverable_dead_letter",
     )} == {
         "pending": 1,
         "failed": 1,
         "recovery": 0,
         "dead_letter": 1,
+        "manual_recoverable_dead_letter": 1,
         "recoverable_dead_letter": 1,
     }
     assert queue["processing"] == 0
@@ -352,8 +354,10 @@ def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkey
     assert focused[-1] == {"symbol": "000020.SZ", "name": "标的20", "count": 1}
 
 
-def test_annotation_stream_yields_each_persisted_batch(tmp_path):
+def test_annotation_stream_yields_each_persisted_batch(tmp_path, isolated_config):
     from quantmaster.ai.crawler import AICrawler
+
+    isolated_config.news.annotation_max_concurrency = 1
 
     class FakeLLM:
         def chat_json(self, prompt, system="", **kwargs):
@@ -393,6 +397,42 @@ def test_annotation_stream_yields_each_persisted_batch(tmp_path):
     assert [event["type"] for event in remaining] == ["batch", "batch", "complete"]
     assert remaining[-1]["completed"] == 7
     assert len(store.query(status="complete", limit=20)["items"]) == 7
+
+
+def test_annotation_batches_use_news_specific_concurrency(tmp_path, isolated_config):
+    import threading
+
+    isolated_config.news.annotation_max_concurrency = 3
+    active = maximum = 0
+    lock = threading.Lock()
+
+    class ConcurrentLLM:
+        def chat_json(self, prompt, system="", **kwargs):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return [{
+                "symbols": [], "sectors": [], "event_type": "其他",
+                "sentiment": 0, "summary": "并发标注", "scope": "market",
+                "urgency": "normal", "confidence": 0.8,
+            }]
+
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([
+        NewsItem(source="test", title=f"并发 {index}", content=f"正文 {index}")
+        for index in range(6)
+    ])
+
+    result = AICrawler(client=ConcurrentLLM(), store=store).enrich_pending(
+        limit=6, batch_size=1,
+    )
+
+    assert result["completed"] == 6
+    assert maximum == 3
 
 
 def test_annotation_failure_uses_structured_code_and_provider_backoff(tmp_path):
@@ -564,6 +604,7 @@ def test_news_api_csrf_and_ui_contract():
     assert 'id="news-dead-action-count"' in page
     assert 'name="llm.max_concurrency"' in page
     assert 'name="news.annotation_timeout"' in page
+    assert 'name="news.annotation_max_concurrency"' in page
     assert 'name="news.annotation_model"' in page
     assert 'name="news.annotation_reasoning_effort"' in page
     assert 'data-settings-section="sources"' in page
@@ -575,6 +616,11 @@ def test_news_api_csrf_and_ui_contract():
     assert "runAnnotation(event.currentTarget, 'failed')" in chart_source
     assert "function failureTemplate(item)" in chart_source
     assert "data-news-retry" in chart_source
+    assert "queue?.manual_recoverable_dead_letter" in chart_source
+    assert "正在认领可手动恢复的暂停项" in chart_source
+    assert "恢复暂停项" in chart_source
+    assert "死信" not in chart_source
+    assert "recoveryWaiting" not in chart_source
 
 
 def test_periodic_news_job_is_registered():

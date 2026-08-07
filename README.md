@@ -51,8 +51,11 @@ pip install -e ".[data,dev]"     # data = akshare + yfinance（推荐）
 qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
 
-Windows 仓库用户也可以运行 `qm-serve.cmd --open`，脚本会固定使用项目 `.venv`，避免
-Conda base 或旧版全局命令抢占运行环境。
+Windows 仓库用户也可以运行 `qm-serve.cmd --open`。脚本会固定使用项目 `.venv`，并默认
+监视主站 Python 代码：代码变更后 Web worker 会安全热更新，FreeStockDB 在整个启动器
+退出前保持运行；HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
+运行 `qm-serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
+`QuantMaster.exe`；监督进程和热更新 worker 在 Windows 任务管理器中都显示为 QuantMaster。
 
 启动后点击页头的“帮助”，可在应用内阅读完整手册；也可以直接打开
 `http://127.0.0.1:8686/#help/start`。手册中的市场规则标有核验日期，实盘前仍应以

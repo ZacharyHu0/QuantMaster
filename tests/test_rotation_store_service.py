@@ -93,6 +93,7 @@ def test_rotation_overview_cache_invalidates_on_snapshot_id(tmp_path, monkeypatc
     )
     service.overview()
     first_count = len(calls)
+    assert service.snapshot("themes")["meta"]["quality"]["upgrade_pending"] is True
     service.overview()
     assert len(calls) == first_count
     store.save_snapshots({"themes": payload("themes", "two")})

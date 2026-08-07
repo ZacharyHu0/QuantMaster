@@ -148,7 +148,7 @@
   function statusLabel(status) {
     return {
       complete: '已标注', pending: '待标注', failed: '退避重试',
-      recovery: '恢复中', dead_letter: '死信',
+      recovery: '恢复中', dead_letter: '已暂停',
     }[status] || status || '待标注';
   }
 
@@ -160,17 +160,16 @@
     const recoveryCount = Number(item.analysis_recovery_count || 0);
     const window = retryWindow(item.next_retry_at);
     const recoveryExhausted = dead && recoveryCount >= 3;
-    const recoveryWaiting = dead && Number(item.next_retry_at || 0) > Date.now() / 1000;
-    const ready = !dead || (!recoveryExhausted && !recoveryWaiting);
+    const ready = !dead || !recoveryExhausted;
     const action = dead ?
-      recoveryExhausted ? '恢复次数已用尽' : recoveryWaiting ? '等待恢复窗口' : '恢复此死信' :
+      recoveryExhausted ? '恢复次数已用尽' : '恢复此项' :
       '立即重试此项';
     const code = String(item.last_failure_code || 'unknown').toLocaleUpperCase('en-US');
-    const scheduleLabel = dead ? '最早恢复' : '自动重试';
+    const scheduleLabel = dead ? '自动恢复窗口' : '自动重试';
     const reason = item.analysis_error || '未记录具体错误信息';
-    return `<section class="news-failure-panel${dead ? ' dead' : ''}" aria-label="${dead ? '死信诊断' : '分析失败诊断'}">
+    return `<section class="news-failure-panel${dead ? ' dead' : ''}" aria-label="${dead ? '暂停项诊断' : '分析失败诊断'}">
       <div class="news-failure-copy">
-        <div class="news-failure-head"><strong>${dead ? '已进入死信隔离' : '本次分析未完成'}</strong><span>${dead ? '已停止自动重试' : '仍在自动退避队列'}</span></div>
+        <div class="news-failure-head"><strong>${dead ? '自动重试已暂停' : '本次分析未完成'}</strong><span>${dead ? '可手动恢复' : '仍在自动退避队列'}</span></div>
         <p>${html(reason)}</p>
         <div class="news-failure-meta"><span>错误码 ${html(code)}</span><span>连续尝试 ${attempts} 次</span><span>${scheduleLabel} ${html(window.relative)}${window.absolute ? ` · ${html(window.absolute)}` : ''}</span>${dead ? `<span>已恢复 ${recoveryCount} / 3 次</span>` : ''}</div>
       </div>
@@ -330,7 +329,7 @@
     const actions = [
       {id: 'news-reanalyze', count: Number(queue?.pending || 0), label: '处理待标注'},
       {id: 'news-retry-failed', count: Number(queue?.failed || 0), label: '重试失败项'},
-      {id: 'news-recover-dead', count: Number(queue?.recoverable_dead_letter || 0), label: '恢复死信'},
+      {id: 'news-recover-dead', count: Number(queue?.manual_recoverable_dead_letter || 0), label: '恢复暂停项'},
     ];
     for (const action of actions) {
       const button = document.getElementById(action.id);
@@ -353,24 +352,27 @@
       failed: Number(value?.failed || 0),
       recovery: Number(value?.recovery || 0),
       dead_letter: Number(value?.dead_letter || 0),
+      manual_recoverable_dead_letter: Number(
+        value?.manual_recoverable_dead_letter ?? value?.recoverable_dead_letter ?? 0),
       recoverable_dead_letter: Number(value?.recoverable_dead_letter || 0),
     };
     const queue = state.queue;
     document.getElementById('news-pending-action-count').textContent = queue.pending.toLocaleString();
     document.getElementById('news-failed-action-count').textContent = queue.failed.toLocaleString();
-    document.getElementById('news-dead-action-count').textContent = queue.recoverable_dead_letter.toLocaleString();
+    document.getElementById('news-dead-action-count').textContent =
+      queue.manual_recoverable_dead_letter.toLocaleString();
     document.getElementById('news-dead-action-hint').textContent = queue.dead_letter
-      ? `可恢复 ${queue.recoverable_dead_letter} / 共 ${queue.dead_letter}` : '没有隔离条目';
+      ? `可手动恢复 ${queue.manual_recoverable_dead_letter} / 共 ${queue.dead_letter} 个暂停项` : '没有暂停项';
     const parts = [];
     if (queue.pending) parts.push(`待标注 ${queue.pending}`);
     if (queue.failed) parts.push(`退避重试 ${queue.failed}`);
-    if (queue.dead_letter) parts.push(`死信 ${queue.dead_letter}`);
+    if (queue.dead_letter) parts.push(`已暂停 ${queue.dead_letter}`);
     document.getElementById('news-queue-summary').textContent = parts.length
       ? parts.join(' · ') : '队列已清空，没有等待处理的资讯';
     const deadButton = document.getElementById('news-recover-dead');
-    deadButton.title = queue.dead_letter && !queue.recoverable_dead_letter
-      ? `共 ${queue.dead_letter} 条死信，尚未到恢复时间` :
-        queue.recoverable_dead_letter ? `${queue.recoverable_dead_letter} 条死信已到恢复时间` : '没有死信';
+    deadButton.title = queue.manual_recoverable_dead_letter
+      ? `${queue.manual_recoverable_dead_letter} 个暂停项可立即手动恢复；${queue.recoverable_dead_letter} 个已到自动恢复时间`
+      : queue.dead_letter ? `共 ${queue.dead_letter} 个暂停项，恢复次数均已用尽` : '没有暂停项';
     refreshAnnotationAvailability();
   }
 
@@ -716,10 +718,10 @@
       report: '失败项重试完成',
     },
     dead_letter: {
-      idle: '恢复死信', active: '恢复中', preparing: '准备死信恢复队列',
-      reading: '正在检查恢复窗口与模型健康状态…', empty: '没有可恢复死信',
-      emptyDetail: '当前没有已到恢复时间的死信。', complete: '本轮死信恢复已完成',
-      report: '死信恢复完成',
+      idle: '恢复暂停项', active: '恢复中', preparing: '准备暂停项恢复队列',
+      reading: '正在认领可手动恢复的暂停项…', empty: '没有可手动恢复的暂停项',
+      emptyDetail: '当前暂停项的恢复次数均已用尽。', complete: '本轮暂停项恢复已完成',
+      report: '暂停项恢复完成',
     },
   };
 
@@ -780,7 +782,7 @@
       const processed = Number(finalEvent.processed || 0);
       const completed = Number(finalEvent.completed || 0);
       const emptyDetail = finalEvent.reason || copy.emptyDetail;
-      const failureDestination = mode === 'dead_letter' ? '重新进入死信隔离' : '进入退避重试';
+      const failureDestination = mode === 'dead_letter' ? '重新暂停自动重试' : '进入退避重试';
       document.getElementById('news-annotation-count').textContent =
         `完成 ${completed} · 失败 ${failed} · ${processed} / ${processed}`;
       finishAnnotationProgress(
@@ -795,7 +797,7 @@
       );
       if (failed) {
         const recoveryAction = mode === 'dead_letter'
-          ? '已完成结果可以使用；失败死信会等待下一个恢复窗口。'
+          ? '已完成结果可以使用；失败项仍可手动恢复，自动任务会等待下一个窗口。'
           : '已完成结果可以使用；可点击“重试失败项”再次分析失败资讯。';
         window.QuantMasterRunInfo.add('warning', '资讯分析', '部分资讯标注失败', {
           detail:`完成 ${completed} 条，失败 ${failed} 条；失败项已${failureDestination}。`,

@@ -35,6 +35,19 @@ def test_managed_endpoint_uses_configured_loopback_port(monkeypatch) -> None:
     assert FreeStockDBRuntime._endpoint() == ("localhost", 7900)
 
 
+def test_reload_worker_attaches_without_taking_process_ownership(monkeypatch) -> None:
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(runtime, "_listening", lambda: True)
+
+    assert runtime.attach_to_supervisor() is True
+    status = runtime._status
+    assert status["state"] == "running"
+    assert status["managed"] is True
+    assert status["supervised"] is True
+    assert runtime._process is None
+    assert runtime._thread is None
+
+
 def test_managed_service_uses_server_mode_without_opening_vendor_page(
     tmp_path, monkeypatch,
 ) -> None:

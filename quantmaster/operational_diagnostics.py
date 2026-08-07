@@ -68,7 +68,7 @@ def collect_operational_metrics() -> dict[str, Any]:
     result: dict[str, Any] = {}
 
     from quantmaster.ai.crawler import NewsStore
-    from quantmaster.ai.llm import llm_gate_status
+    from quantmaster.ai.llm import llm_gate_status, news_llm_gate_status
 
     news = NewsStore()
     queue = news.stats(days=1).get("queue") or {}
@@ -79,7 +79,7 @@ def collect_operational_metrics() -> dict[str, Any]:
         "failed": int(queue.get("failed") or 0),
         "dead_letter": int(queue.get("dead_letter") or 0),
     }
-    result["llm"] = llm_gate_status()
+    result["llm"] = {**llm_gate_status(), "news": news_llm_gate_status()}
 
     from quantmaster.data.registry import data_source_capabilities
     from quantmaster.data.resilience import PROVIDER_SCHEDULER

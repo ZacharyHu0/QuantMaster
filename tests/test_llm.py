@@ -174,6 +174,53 @@ class TestLLMClient:
             assert list(executor.map(lambda client: client.chat("hi"), clients)) == ["ok", "ok"]
         assert maximum == 1
 
+    def test_news_concurrency_uses_an_independent_gate(
+        self, monkeypatch, isolated_config,
+    ):
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        isolated_config.news.annotation_max_concurrency = 2
+        active = {"global": 0, "news": 0}
+        maximum = {"global": 0, "news": 0, "combined": 0}
+        lock = threading.Lock()
+
+        def fake_post(url, **kwargs):
+            scope = kwargs["json"]["model"]
+            with lock:
+                active[scope] += 1
+                maximum[scope] = max(maximum[scope], active[scope])
+                maximum["combined"] = max(maximum["combined"], sum(active.values()))
+            time.sleep(0.05)
+            with lock:
+                active[scope] -= 1
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
+        global_config = LLMConfig(
+            provider="openai", api_key="sk", model="global", max_concurrency=1,
+        )
+        news_config = LLMConfig(
+            provider="openai", api_key="sk", model="news", max_concurrency=1,
+        )
+        clients = [
+            LLMClient(global_config), LLMClient(global_config),
+            LLMClient(news_config, concurrency_scope="news"),
+            LLMClient(news_config, concurrency_scope="news"),
+        ]
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            assert list(executor.map(lambda client: client.chat("hi"), clients)) == [
+                "ok", "ok", "ok", "ok",
+            ]
+        assert maximum == {"global": 1, "news": 2, "combined": 3}
+
 
 def test_request_gate_is_fifo_and_queue_wait_is_bounded():
     import threading

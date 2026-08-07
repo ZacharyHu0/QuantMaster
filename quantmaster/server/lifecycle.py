@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -96,13 +97,59 @@ def install_windows_console_handler(
     return unregister
 
 
-def run_uvicorn_foreground(app: Any, host: str, port: int, log_level: str = "warning") -> None:
+def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
+    """在独立监督进程中热重载主站，同时保持 free-stockdb 持续运行。"""
+    import uvicorn
+
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    package_dir = Path(__file__).resolve().parents[1]
+    worker_flag = "QM_SERVER_RELOAD_WORKER"
+    previous_flag = os.environ.get(worker_flag)
+
+    # Uvicorn 的 reload 监督进程不会加载 ASGI lifespan，正适合持有数据库
+    # sidecar；每次替换的 Web worker 只连接它，不取得进程所有权。
+    free_stockdb_runtime.start()
+    os.environ[worker_flag] = "1"
+    try:
+        uvicorn.run(
+            "quantmaster.server.app:app",
+            host=host,
+            port=port,
+            log_level=log_level,
+            log_config=None,
+            access_log=False,
+            reload=True,
+            reload_dirs=[str(package_dir)],
+            reload_includes=["*.py"],
+        )
+    finally:
+        # 只有整个启动器退出才停止数据库；Web worker 的多次热替换不会经过这里。
+        free_stockdb_runtime.stop()
+        if previous_flag is None:
+            os.environ.pop(worker_flag, None)
+        else:
+            os.environ[worker_flag] = previous_flag
+
+
+def run_uvicorn_foreground(
+    app: Any,
+    host: str,
+    port: int,
+    log_level: str = "warning",
+    *,
+    reload: bool = False,
+) -> None:
     """运行 Uvicorn，并把终端、启动器与服务生命周期绑定在一起。"""
     import uvicorn
 
     from quantmaster.runtime.network import validate_listen_host
 
     host = validate_listen_host(host)
+
+    if reload:
+        _run_uvicorn_reload(host, port, log_level)
+        return
 
     server = uvicorn.Server(uvicorn.Config(
         app, host=host, port=port, log_level=log_level,

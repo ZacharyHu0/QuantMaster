@@ -20,7 +20,7 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert temperature.status_code == 200
     assert temperature.json()["meta"]["quality"]["status"] == "cold"
     assert temperature.json()["meta"]["quality"]["coverage"] is None
-    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V2"
+    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V3"
 
     overview = client.get("/api/v1/rotation/overview").json()
     assert overview["meta"]["quality"]["coverage"] is None
@@ -179,3 +179,73 @@ def test_unified_jobs_support_rotation_cancel_and_retry(monkeypatch):
 def test_rotation_detail_returns_not_found_until_group_passes_quality_gate():
     response = _client().get("/api/v1/rotation/industries/801080.SI")
     assert response.status_code == 404
+
+
+def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
+    service = get_rotation_service()
+    items = [
+        {
+            "code": f"BK{index:04d}", "name": f"题材 {index:04d}", "stage": "repair_spread",
+            "grade": "A" if index % 2 else "B", "rotation_score": 50.0,
+            "coverage": 1.0, "primary_industry": {"name": "电子"},
+            "signals": {"5": {"rotation_change_pp": 3.0, "excess_return": 0.01, "amount_activity": 0.02}},
+        }
+        for index in range(698)
+    ]
+    service.store.save_snapshots({
+        "themes": {
+            "meta": {"snapshot_id": "themes-698", "quality": {"status": "complete", "issues": []}},
+            "data": {"items": items, "summary": {}},
+        },
+    })
+    client = _client()
+
+    legacy = client.get("/api/v1/rotation/themes", params={"limit": 7}).json()["data"]
+    assert legacy["limit"] == 7
+    assert len(legacy["items"]) == 7
+    assert "pagination" not in legacy
+
+    first = client.get(
+        "/api/v1/rotation/themes", params={"page": 1, "page_size": 25, "limit": 2},
+    ).json()["data"]
+    assert first["pagination"] == {
+        "page": 1, "page_size": 25, "total": 698, "pages": 28,
+        "has_previous": False, "has_next": True,
+    }
+    again = client.get("/api/v1/rotation/themes", params={"page": 1, "page_size": 25}).json()["data"]
+    assert [item["code"] for item in first["items"]] == [item["code"] for item in again["items"]]
+    all_codes = []
+    for page in range(1, 29):
+        data = client.get("/api/v1/rotation/themes", params={"page": page, "page_size": 25}).json()["data"]
+        all_codes.extend(item["code"] for item in data["items"])
+    assert len(all_codes) == len(set(all_codes)) == 698
+    assert set(all_codes) == {item["code"] for item in items}
+
+
+def test_rotation_etf_summary_and_paginated_items_stay_consistent():
+    service = get_rotation_service()
+    items = [
+        {
+            "symbol": f"51{index:04d}.SH", "name": f"宽基 ETF {index}", "category": "宽基",
+            "benchmark": "沪深300", "flow": float(index - 2), "flow_streak_sessions": index - 2,
+            "flows": {"5": float(index - 2)},
+        }
+        for index in range(5)
+    ]
+    service.store.save_snapshots({
+        "etf_flows": {
+            "meta": {"snapshot_id": "etf-page", "quality": {"status": "complete", "issues": []}},
+            "data": {
+                "items": items, "summary": {"windows": {"5": {"net_flow": 0.0}}},
+                "daily": [], "benchmarks": [],
+            },
+        },
+    })
+    client = _client()
+    summary = client.get("/api/v1/rotation/etf-flows", params={"include_items": "false"}).json()["data"]
+    assert "items" not in summary
+    assert summary["item_total"] == 5
+    paged = client.get("/api/v1/rotation/etf-flows/items", params={"page": 1, "page_size": 25}).json()["data"]
+    assert paged["pagination"]["total"] == summary["item_total"]
+    assert paged["categories"] == ["宽基"]
+    assert [item["symbol"] for item in paged["items"]] == [item["symbol"] for item in reversed(items)]

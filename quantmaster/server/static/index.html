@@ -25,36 +25,20 @@
 </head>
 <body>
 <script src="/static/brand-intro.js"></script>
-<header>
+<header class="app-header">
+  <div class="header-primary">
   <h1 class="brand-title">
     <button class="brand-replay" id="brand-replay" type="button" aria-label="重播 QuantMaster 品牌片头" title="重播品牌片头">
       <img class="brand-replay-mark" src="/static/brand/quantmaster-mark-inverse.svg" alt="">
       <span class="brand-word">Quant<span class="brand-word-master">Master</span></span>
     </button>
   </h1>
-  <nav id="nav" aria-label="主要功能">
-    <span class="nav-group" aria-label="观察">
-      <button data-tab="market" class="active">市场</button>
-      <button data-tab="rotation">轮动</button>
-      <button data-tab="news">资讯</button>
-      <button data-tab="stock-analysis">个股分析</button>
-    </span>
-    <span class="nav-group" aria-label="决策">
-      <button data-tab="candidates">候选</button>
-      <button data-tab="after-close">盘后扫描</button>
-      <button data-tab="decision">决策</button>
-    </span>
-    <span class="nav-group" aria-label="研究">
-      <button data-tab="lab"><span class="nav-lab-label">Quant Lab</span></button>
-      <button data-tab="backtest">回测</button>
-    </span>
-    <span class="nav-group" aria-label="执行">
-      <button data-tab="paper">模拟盘</button>
-      <button data-tab="ledger">实盘</button>
-    </span>
-    <span class="nav-group" aria-label="运维">
-      <button data-tab="automation">自动化</button>
-    </span>
+  <nav id="nav" class="workspace-nav" aria-label="工作台">
+    <button data-workspace="observe" class="active" type="button">观察</button>
+    <button data-workspace="select" type="button">选股</button>
+    <button data-workspace="research" type="button">研究</button>
+    <button data-workspace="trade" type="button">交易</button>
+    <button data-workspace="automation" data-workspace-page="automation" data-tab="automation" type="button">自动化</button>
   </nav>
   <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
     <span id="release-version">版本</span>
@@ -89,6 +73,37 @@
       </svg>
     </button>
   </div>
+  </div>
+  <nav class="workspace-context" aria-label="当前工作台页面">
+    <div class="workspace-context-group" data-workspace-pages="observe" aria-label="观察页面">
+      <section class="workspace-context-section" aria-label="市场观察">
+      <span class="workspace-context-label" aria-hidden="true">市场</span>
+      <div role="tablist" aria-label="市场观察">
+        <button id="market-quotes-tab" type="button" role="tab" data-tab="market" data-market-page="quotes" data-workspace-page="quotes" aria-selected="true" aria-controls="market-quotes-view" tabindex="0">行情</button>
+        <button id="market-temperature-tab" type="button" role="tab" data-tab="market" data-market-page="temperature" data-workspace-page="temperature" aria-selected="false" aria-controls="market-temperature-view" tabindex="-1">市场温度</button>
+        <button id="market-style-tab" type="button" role="tab" data-tab="market" data-market-page="style" data-workspace-page="style" aria-selected="false" aria-controls="market-style-view" tabindex="-1">市场风格</button>
+      </div>
+      </section>
+      <section class="workspace-context-section" aria-label="板块轮动">
+      <span class="workspace-context-label">轮动</span>
+      <div role="tablist" aria-label="板块轮动">
+        <button id="rotation-overview-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="overview" data-workspace-page="rotation" aria-selected="false" aria-controls="rotation-overview-view" tabindex="-1">轮动总览</button>
+        <button id="rotation-industry-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="industry" data-workspace-page="industry" aria-selected="false" aria-controls="rotation-industry-view" tabindex="-1">行业周期</button>
+        <button id="rotation-themes-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="themes" data-workspace-page="themes" aria-selected="false" aria-controls="rotation-themes-view" tabindex="-1">细分题材</button>
+        <button id="rotation-etf-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="etf-flows" data-workspace-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">宽基资金</button>
+      </div>
+      </section>
+      <section class="workspace-context-section" aria-label="市场信息">
+      <span class="workspace-context-label">信息</span>
+      <div role="tablist" aria-label="市场信息"><button type="button" role="tab" data-tab="news" data-workspace-page="news" aria-selected="false" tabindex="-1">资讯</button></div>
+      </section>
+    </div>
+    <div class="workspace-context-group" data-workspace-pages="select" aria-label="选股页面" hidden><div role="tablist" aria-label="选股流程">
+      <button type="button" role="tab" data-tab="after-close" data-workspace-page="after-close" aria-selected="false" tabindex="-1">盘后扫描</button><button type="button" role="tab" data-tab="candidates" data-workspace-page="candidates" aria-selected="false" tabindex="-1">候选</button><button type="button" role="tab" data-tab="stock-analysis" data-workspace-page="stock-analysis" aria-selected="false" tabindex="-1">个股分析</button><button type="button" role="tab" data-tab="decision" data-workspace-page="decision" aria-selected="false" tabindex="-1">决策</button>
+    </div></div>
+    <div class="workspace-context-group" data-workspace-pages="research" aria-label="研究页面" hidden><div role="tablist" aria-label="研究工具"><button type="button" role="tab" data-tab="lab" data-workspace-page="lab" aria-selected="false" tabindex="-1">Quant Lab</button><button type="button" role="tab" data-tab="backtest" data-workspace-page="backtest" aria-selected="false" tabindex="-1">回测</button></div></div>
+    <div class="workspace-context-group" data-workspace-pages="trade" aria-label="交易页面" hidden><div role="tablist" aria-label="交易工作台"><button type="button" role="tab" data-tab="paper" data-workspace-page="paper" aria-selected="false" tabindex="-1">模拟盘</button><button type="button" role="tab" data-tab="ledger" data-workspace-page="ledger" aria-selected="false" tabindex="-1">实盘</button></div></div>
+  </nav>
   <aside class="release-popover" id="release-popover" role="dialog" aria-modal="false" aria-labelledby="release-popover-title" hidden>
     <div class="release-popover-head">
       <h2 id="release-popover-title">更新日志</h2>
@@ -106,22 +121,11 @@
 
 <!-- ================= 市场 ================= -->
 <section class="tab active" id="tab-market">
-  <div class="rotation-local-nav" data-rotation-nav="market">
-    <div class="rotation-local-tabs" role="tablist" aria-label="市场视图">
-      <button id="market-quotes-tab" type="button" role="tab" data-market-page="quotes" aria-selected="true" aria-controls="market-quotes-view" tabindex="0">行情</button>
-      <button id="market-temperature-tab" type="button" role="tab" data-market-page="temperature" aria-selected="false" aria-controls="market-temperature-view" tabindex="-1">市场温度</button>
-      <button id="market-style-tab" type="button" role="tab" data-market-page="style" aria-selected="false" aria-controls="market-style-view" tabindex="-1">市场风格</button>
-    </div>
-    <div class="rotation-local-meta" data-rotation-meta="market">
-      <div class="rotation-meta-line"><span>行情与联动快照独立更新</span></div>
-      <button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
-    </div>
-  </div>
   <section class="rotation-view" id="market-temperature-view" data-market-view="temperature" role="tabpanel" aria-labelledby="market-temperature-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">MARKET BREADTH</span><h2>市场温度</h2>
         <p>用全市场个股趋势分层计算扩散比例，同时展示证据缺口与样本覆盖；折线不是 K 线。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
     </div>
     <div id="market-temperature-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -129,7 +133,7 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">COHORT STRUCTURE</span><h2>市场风格</h2>
         <p>比较强势与低位样本的收益分布，以 0.25 个百分点死区过滤噪声，连续三日才确认状态。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="structure"><dt>快照</dt><dd>等待刷新</dd><dt>确认</dt><dd>连续 3 日</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="structure"><dt>快照</dt><dd>等待刷新</dd><dt>确认</dt><dd>连续 3 日</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
     </div>
     <div id="market-style-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -201,24 +205,11 @@
 
 <!-- ================= 轮动 ================= -->
 <section class="tab" id="tab-rotation">
-  <div class="rotation-local-nav" data-rotation-nav="rotation">
-    <div class="rotation-local-tabs" role="tablist" aria-label="板块联动视图">
-      <button id="rotation-overview-tab" type="button" role="tab" data-rotation-page="overview" aria-selected="true" aria-controls="rotation-overview-view" tabindex="0">轮动总览</button>
-      <button id="rotation-industry-tab" type="button" role="tab" data-rotation-page="industry" aria-selected="false" aria-controls="rotation-industry-view" tabindex="-1">行业周期</button>
-      <button id="rotation-themes-tab" type="button" role="tab" data-rotation-page="themes" aria-selected="false" aria-controls="rotation-themes-view" tabindex="-1">细分题材</button>
-      <button id="rotation-etf-tab" type="button" role="tab" data-rotation-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">宽基资金</button>
-    </div>
-    <div class="rotation-local-meta" data-rotation-meta="rotation">
-      <div class="rotation-meta-line"><span>申万 2021 一级 · 东方财富概念 · ETF 份额</span></div>
-      <button class="rotation-refresh" type="button" data-rotation-refresh="all">刷新联动</button>
-    </div>
-  </div>
-
   <section class="rotation-view" id="rotation-overview-view" data-rotation-view="overview" role="tabpanel" aria-labelledby="rotation-overview-tab">
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">ROTATION WORKBENCH</span><h2>轮动总览</h2>
         <p>用全量行业与题材识别多周期改善、转弱和成分共振；ETF 资金只作为整体风险偏好背景。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="overview"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="overview"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="all">刷新联动</button>
     </div>
     <div id="rotation-overview-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -227,7 +218,7 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">SW2021 CYCLE MAP</span><h2>行业周期</h2>
         <p>周期坐标仅在这里展示；阶段固定采用 3 日判定，1 / 3 / 5 / 20 日窗口用于轨迹、变化和相对强弱。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="industries"><dt>快照</dt><dd>等待刷新</dd><dt>口径</dt><dd>申万 2021</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="industries"><dt>快照</dt><dd>等待刷新</dd><dt>口径</dt><dd>申万 2021</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="industries">刷新行业</button>
     </div>
     <div id="rotation-industry-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -236,7 +227,7 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">CONCEPT LIFECYCLE</span><h2>细分题材</h2>
         <p>完整目录按多周期变化、相对收益、上涨宽度与真实申万成分交集核查；默认每页展示 50 条。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="themes"><dt>快照</dt><dd>等待刷新</dd><dt>来源</dt><dd>东方财富概念</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="themes"><dt>快照</dt><dd>等待刷新</dd><dt>来源</dt><dd>东方财富概念</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="themes">刷新题材</button>
     </div>
     <div id="rotation-themes-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -245,7 +236,7 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">ETF SHARE FLOW</span><h2>宽基资金</h2>
         <p>资金估算采用“份额变化 × 当日净值”，同时按观察窗口与原始跟踪基准聚合；净值缺失才使用收盘价。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待 09:05</dd><dt>公式</dt><dd>Δ份额 × 净值</dd></dl>
+      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待 09:05</dd><dt>公式</dt><dd>Δ份额 × 净值</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button>
     </div>
     <div id="rotation-etf-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -853,7 +844,7 @@
   <div class="news-status-strip" aria-label="资讯处理状态">
     <div><span>近 30 日入库</span><strong id="news-stat-total">—</strong></div>
     <div><span>标注覆盖率</span><strong id="news-stat-coverage">—</strong></div>
-    <div><span>待处理 / 失败 / 死信</span><strong id="news-stat-pending">—</strong></div>
+    <div><span>待处理 / 失败 / 已暂停</span><strong id="news-stat-pending">—</strong></div>
     <div><span>高重要度事件</span><strong id="news-stat-important">—</strong></div>
   </div>
 
@@ -862,7 +853,7 @@
     <label><span>来源组</span><select name="group"><option value="">全部来源组</option><option value="fast">快讯 · 10 分钟</option><option value="official">官方 · 15 分钟</option><option value="periodic">定期 · 60 分钟</option></select></label>
     <label><span>来源</span><select name="source" id="news-source-filter"><option value="">全部来源</option></select></label>
     <label><span>情绪</span><select name="sentiment"><option value="">全部情绪</option><option value="positive">偏正面</option><option value="neutral">中性</option><option value="negative">偏负面</option></select></label>
-    <label><span>标注</span><select name="status"><option value="">全部状态</option><option value="complete">已完成</option><option value="pending">待处理</option><option value="failed">退避重试</option><option value="dead_letter">死信</option></select></label>
+    <label><span>标注</span><select name="status"><option value="">全部状态</option><option value="complete">已完成</option><option value="pending">待处理</option><option value="failed">退避重试</option><option value="dead_letter">已暂停</option></select></label>
     <label><span>排序</span><select name="sort"><option value="recent">最新入库</option><option value="importance">重要度</option></select></label>
     <button class="ghost" type="submit">筛选</button>
     <button class="news-reset" id="news-reset" type="button">重置</button>
@@ -872,7 +863,7 @@
     <section class="news-feed-panel" aria-labelledby="news-feed-title">
       <div class="news-panel-head">
         <div><h3 id="news-feed-title">事件流</h3><p id="news-result-caption">正在读取本地资讯库…</p></div>
-        <div class="news-queue-legend" aria-label="分析状态说明"><span><i class="failed"></i>退避：等待自动重试</span><span><i class="dead"></i>死信：已暂停重试</span></div>
+        <div class="news-queue-legend" aria-label="分析状态说明"><span><i class="failed"></i>退避：等待自动重试</span><span><i class="dead"></i>已暂停：停止自动重试</span></div>
       </div>
       <div class="news-queue-bar" aria-label="资讯分析队列">
         <div class="news-queue-summary" aria-live="polite"><span>分析队列</span><strong id="news-queue-summary">正在读取队列状态…</strong></div>
@@ -887,7 +878,7 @@
           </button>
           <button class="news-queue-action dead" id="news-recover-dead" type="button" disabled>
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.25v7.5m0 0 3-3m-3 3-3-3M4 13.25v2.5h12v-2.5"/></svg>
-            <span><strong data-action-label>恢复死信</strong><small id="news-dead-action-hint">到期项全部分批恢复</small></span><b id="news-dead-action-count">—</b>
+            <span><strong data-action-label>恢复暂停项</strong><small id="news-dead-action-hint">未耗尽项全部分批恢复</small></span><b id="news-dead-action-count">—</b>
           </button>
         </div>
       </div>
@@ -1048,7 +1039,7 @@
             <label>最大输出 Token<input name="llm.max_tokens" type="number" min="1" max="1000000" required></label>
             <label>Temperature<input name="llm.temperature" type="number" min="0" max="2" step="0.1" required></label>
             <label>超时（秒）<input name="llm.timeout" type="number" min="1" max="600" step="1" required></label>
-            <label>全局并发上限<input name="llm.max_concurrency" type="number" min="1" max="16" step="1" required><small>所有自动任务与手动分析共享；重型模型建议设为 1。</small></label>
+            <label>通用并发上限<input name="llm.max_concurrency" type="number" min="1" max="16" step="1" required><small>除资讯标注外的自动任务与手动分析共享；重型模型建议设为 1。</small></label>
             <label>排队超时（秒）<input name="llm.queue_timeout" type="number" min="1" max="300" step="1" required><small>FIFO 等待超过此时间会返回可重试错误，不会无限占用线程。</small></label>
           </div>
           <div class="check-result" data-check-result="llm-models">等待检测</div>
@@ -1143,6 +1134,7 @@
             <label>最低标注置信度<input name="news.factor_min_confidence" type="number" min="0" max="1" step="0.05" required></label>
             <label class="toggle-field"><span><strong>自动标注新资讯</strong><small>模型不可用时保留在待处理队列。</small></span><input name="news.annotation_enabled" type="checkbox" role="switch"></label>
             <label>单批标注条数<input name="news.annotation_batch_size" type="number" min="1" max="50" step="1" required><small>每次 LLM 请求包含的资讯数量。</small></label>
+            <label>资讯并发数<input name="news.annotation_max_concurrency" type="number" min="1" max="16" step="1" required><small>仅用于资讯标注批次，独立于通用模型并发；建议 2–4。</small></label>
             <label>每轮处理上限<input name="news.annotation_items_per_run" type="number" min="1" max="1000" step="1" required><small>限制一次后台运行消费的待标注数量。</small></label>
             <label>资讯分析超时（秒）<input name="news.annotation_timeout" type="number" min="5" max="600" step="1" required><small>仅用于资讯标注；重型模型建议 120–180 秒。</small></label>
             <label>资讯模型 ID<input name="news.annotation_model" list="settings-model-list" autocomplete="off" placeholder="留空则使用通用模型"><small>可选择较轻量模型；留空时跟随模型服务设置。</small></label>

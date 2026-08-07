@@ -217,15 +217,17 @@
 
 - **llm.py**：通过生命周期管理的共享 httpx 连接池调 REST，`provider` 三选一：`anthropic` /
   `openai` / `openai-compatible`（DeepSeek、通义、Kimi、GLM、Ollama 等
-  一切 OpenAI 协议网关，改 `base_url` 即可）。所有调用进入 FIFO 并发队列，排队超时
-  产生可重试结构化错误；连接池在配置端点切换后延迟关闭旧连接，在应用退出时统一释放。
+  一切 OpenAI 协议网关，改 `base_url` 即可）。通用调用与资讯标注分别进入独立 FIFO
+  并发队列，资讯可在设置中心提高并行批次数而不挤占交互分析；排队超时产生可重试结构化
+  错误。连接池在配置端点切换后延迟关闭旧连接，在应用退出时统一释放。
 - **news_claims.py**：可重建的 `news_analysis_claims` 只保存 owner、随机 token、任务类型、
   租约和心跳。每批在 `BEGIN IMMEDIATE` 内原子认领，完成/失败必须通过 token fencing；
   过期 worker 无权覆盖接管者结果。
 - **news_sources.py**：持久化来源、运行记录和 HTTP 条件缓存。声明式采集只支持
   RSS、JSON 点号路径和 HTML CSS 选择器；每次请求及重定向都校验公网地址，响应限制
   5MB，鉴权凭据不会随跨域跳转或详情链接发送。
-- **crawler.py**：先规范化、指纹去重并写入 SQLite，再把新资讯放入 LLM 批量标注队列。
+- **crawler.py**：先规范化、指纹去重并写入 SQLite，再把新资讯放入可独立配置并发数的
+  LLM 批量标注队列。
   模型不可用不影响归档；失败按 1/5/30 分钟退避，重复资讯不重复消耗模型额度。“全部重试”
   固定启动时最大资讯 ID，再逐批认领；人工失败/死信恢复绕过自动健康与退避门禁。
 - **sentiment.py**：`news_sentiment` 按首次获取时点而非来源声称的发布时间对齐，聚合

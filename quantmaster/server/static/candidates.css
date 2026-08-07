@@ -82,7 +82,11 @@
 
 .candidate-date-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
 .candidate-date-row label { display:grid; gap:5px; color:var(--muted); font-size:11px; }
-.candidate-date-row input { width:100%; }
+.candidate-date-row input { width:100%; min-height:36px; font-variant-numeric:tabular-nums; }
+/* 保留原生日历面板，移除各浏览器可能显示的上下微调器。 */
+.candidate-date-row input[type="date"]::-webkit-inner-spin-button,
+.candidate-date-row input[type="date"]::-webkit-clear-button { display:none; -webkit-appearance:none; }
+.candidate-date-row input[type="date"]::-moz-number-spin-box { display:none; }
 .candidate-snapshots { display:flex; flex-wrap:wrap; gap:6px 14px; color:var(--muted); font-size:11px; }
 
 .candidate-toolbar { display:flex; flex-direction:column; align-items:stretch; gap:10px; }
@@ -94,7 +98,7 @@
 .candidate-feedback.error { color:var(--bad); }
 .candidate-feedback.success { color:var(--s3); }
 
-.candidate-table-wrap { overflow-x:auto; border-top:1px solid var(--border); }
+.candidate-table-wrap { max-width:100%; overflow-x:clip; border-top:1px solid var(--border); }
 .candidate-table { min-width:0; }
 .candidate-table thead { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
 .candidate-table,.candidate-table tbody { display:block; }
@@ -219,16 +223,17 @@
   .candidate-search-add { flex:1 1 360px; max-width:520px; }
   .candidate-toolbar-actions { justify-content:flex-end; }
   .candidate-toolbar-actions button { flex:0 0 auto; }
-  .candidate-table { display:table; min-width:620px; }
+  .candidate-table { display:table; width:100%; min-width:0; table-layout:fixed; }
   .candidate-table thead { position:static; width:auto; height:auto; overflow:visible; clip:auto; }
   .candidate-table tbody { display:table-row-group; }
   .candidate-table tr { display:table-row; padding:0; border:0; }
   .candidate-table th { padding:7px 10px; }
   .candidate-table td { display:table-cell; padding:8px 10px; border-bottom:1px solid var(--grid); }
-  .candidate-member-name { width:44%; }
-  .candidate-member-symbol { width:32%; font-size:12px; }
-  .candidate-member-meta { width:18%; font-size:11px; }
-  .candidate-member-action { width:82px; text-align:right; }
+  .candidate-table th:nth-child(1),.candidate-member-name { width:38%; }
+  .candidate-table th:nth-child(2),.candidate-member-symbol { width:18%; font-size:12px; }
+  .candidate-table th:nth-child(3),.candidate-member-meta { width:29%; font-size:11px; }
+  .candidate-table th:nth-child(4),.candidate-member-action { width:104px; text-align:right; }
+  .candidate-member-symbol,.candidate-member-meta { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .candidate-member-action button { min-height:32px; }
   .candidate-save-dock span { flex:1 1 auto; }
 }

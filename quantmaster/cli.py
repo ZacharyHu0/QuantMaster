@@ -63,7 +63,7 @@ def cmd_serve(args) -> None:
         browser_timer.daemon = True
         browser_timer.start()
     try:
-        serve()
+        serve(reload=bool(getattr(args, "reload", False)))
     finally:
         if browser_timer is not None:
             browser_timer.cancel()
@@ -833,10 +833,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="启动 Web 界面")
     p.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
+    p.add_argument(
+        "--reload", action="store_true",
+        help="监视主站代码并安全热更新（FreeStockDB 保持运行）",
+    )
+    p.add_argument(
+        "--no-reload", dest="reload", action="store_false",
+        help="关闭主站代码热更新",
+    )
+    p.set_defaults(reload=False)
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
-    p.set_defaults(func=cmd_serve, open_browser=True)
+    p.set_defaults(func=cmd_serve, open_browser=True, reload=False)
 
     p = sub.add_parser("doctor", help="检查运行边界、存储完整性和工程约束")
     p.add_argument("--deep", action="store_true", help="逐库、逐文件并执行架构/API 深度检查")

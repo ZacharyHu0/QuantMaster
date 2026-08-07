@@ -43,7 +43,7 @@ NEWS_TASK_LABELS = {
     "official_news_scan": "官方资讯扫描",
     "periodic_news_scan": "定期资讯扫描",
     "news_digest": "重要资讯摘要",
-    "news_dead_letter_recovery": "新闻死信恢复",
+    "news_dead_letter_recovery": "资讯暂停项恢复",
 }
 CONVERSATION_RAW_CHARACTER_LIMIT = 14_000
 CONVERSATION_RAW_MESSAGE_LIMIT = 60
@@ -877,7 +877,7 @@ class AutomationService:
             processed = _safe_nonnegative_int(annotation.get("processed"))
             completed = _safe_nonnegative_int(annotation.get("completed"))
             evidence.append(
-                f"分析重试已耗尽：{analysis_dead_letter} 条进入死信，"
+                f"分析重试已耗尽：{analysis_dead_letter} 条已暂停自动重试，"
                 f"本轮成功 {completed}/{processed} 条"
             )
             for detail in terminal_details[:2]:

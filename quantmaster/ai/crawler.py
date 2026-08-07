@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -31,7 +32,12 @@ from urllib.parse import urljoin
 import httpx
 
 from quantmaster.ai.llm import LLMClient, LLMError
-from quantmaster.ai.news_claims import ClaimMode, NewsClaimStore, normalize_news_ids
+from quantmaster.ai.news_claims import (
+    ClaimBatch,
+    ClaimMode,
+    NewsClaimStore,
+    normalize_news_ids,
+)
 from quantmaster.ai.news_sources import (
     FetchedArticle,
     NewsSourceStore,
@@ -889,6 +895,8 @@ class NewsStore:
                 "SUM(analysis_status='failed') AS failed,"
                 "SUM(analysis_status='recovery') AS recovery,"
                 "SUM(analysis_status='dead_letter') AS dead_letter,"
+                "SUM(analysis_status='dead_letter' AND analysis_recovery_count<3) "
+                "AS manual_recoverable_dead_letter,"
                 "SUM(analysis_status='dead_letter' AND analysis_recovery_count<3 "
                 "AND next_retry_at<=?) AS recoverable_dead_letter FROM news",
                 (now,),
@@ -939,7 +947,7 @@ class NewsStore:
             key: int((queue_counts[key] if queue_counts else 0) or 0)
             for key in (
                 "pending", "failed", "recovery", "dead_letter",
-                "recoverable_dead_letter",
+                "manual_recoverable_dead_letter", "recoverable_dead_letter",
             )
         }
         claims = self.claims.stats(now=now)
@@ -1020,6 +1028,7 @@ class AICrawler:
     def __init__(self, client: LLMClient | None = None, store: NewsStore | None = None,
                  source_store: NewsSourceStore | None = None):
         self._client = client
+        self._client_lock = threading.Lock()
         self.store = store or NewsStore()
         self.source_store = source_store or self.store.sources
         self.identity = WorkerIdentity.create("news-analysis")
@@ -1027,7 +1036,9 @@ class AICrawler:
     @property
     def client(self) -> LLMClient:
         if self._client is None:
-            self._client = LLMClient()
+            with self._client_lock:
+                if self._client is None:
+                    self._client = LLMClient(concurrency_scope="news")
         return self._client
 
     @staticmethod
@@ -1177,6 +1188,95 @@ class AICrawler:
             value["content"] = content[:2000]
         return value
 
+    def _process_annotation_batch(
+        self,
+        batch: ClaimBatch,
+        items: list[NewsItem],
+        batch_number: int,
+        cfg: Any,
+    ) -> dict[str, Any]:
+        """Process one claimed provider batch without mutating shared progress counters."""
+        written_ids: list[int] = []
+        retry_scheduled = dead_letter = 0
+        failure_detail: dict[str, Any] | None = None
+        error = ""
+        try:
+            with _claim_heartbeat(
+                self.store.claims, batch.token, self.identity.value,
+            ) as lease_alive:
+                parsed = self.client.chat_json(
+                    self._annotation_prompt(items), system=EXTRACT_SYSTEM,
+                    timeout=cfg.annotation_timeout,
+                    reasoning_effort=cfg.annotation_reasoning_effort,
+                    model=cfg.annotation_model or None,
+                )
+                if not isinstance(parsed, list) or len(parsed) != len(items):
+                    raise ValueError("LLM 标注结果数量与输入不一致")
+                if any(not isinstance(result, dict) for result in parsed):
+                    raise ValueError("LLM 标注结果包含非对象元素")
+                if not lease_alive.is_set():
+                    raise LLMError(
+                        "资讯分析租约已转交其他 worker",
+                        code="claim_lost", retryable=True,
+                    )
+                from quantmaster.automation.news import importance_score
+
+                prepared: list[tuple[int, NewsItem]] = []
+                for item, result in zip(items, parsed, strict=True):
+                    if item.db_id is None:
+                        raise ValueError("待标注资讯缺少持久化 ID")
+                    self._apply_result(item, result, self.store._industry_map)
+                    item.importance_score, item.scope, _ = importance_score(
+                        item, set(), set(),
+                    )
+                    prepared.append((item.db_id, item))
+                written_ids = self.store.update_analyses(
+                    prepared,
+                    claim_token=batch.token,
+                    claim_owner=self.identity.value,
+                )
+        except Exception as exc:
+            logger.warning("资讯分析批次失败", exc_info=True)
+            error = _safe_analysis_error(exc)
+            failure_code = _analysis_failure_code(exc)
+            retryable = exc.retryable if isinstance(exc, LLMError) else True
+            outcome = self.store.analysis_failure(
+                [item.db_id for item in items if item.db_id is not None],
+                error,
+                failure_code,
+                retryable=retryable,
+                retry_after=exc.retry_after if isinstance(exc, LLMError) else None,
+                claim_token=batch.token,
+                claim_owner=self.identity.value,
+            )
+            retry_scheduled = int(outcome["retry_scheduled"])
+            dead_letter = int(outcome["dead_letter"])
+            failure_detail = {
+                "batch": batch_number,
+                "code": failure_code,
+                "message": error,
+                "retryable": bool(retryable),
+                "failed": int(outcome["failed"]),
+                "retry_scheduled": retry_scheduled,
+                "dead_letter": dead_letter,
+                "next_retry_at": float(outcome["next_retry_at"]),
+            }
+        finally:
+            try:
+                self.store.claims.release(batch.token, self.identity.value)
+            except Exception:
+                logger.warning("资讯分析租约释放失败", exc_info=True)
+        return {
+            "batch": batch_number,
+            "item_count": len(items),
+            "updated_ids": [item.db_id for item in items if item.db_id is not None],
+            "completed_ids": written_ids,
+            "retry_scheduled": retry_scheduled,
+            "dead_letter": dead_letter,
+            "failure_detail": failure_detail,
+            "error": error,
+        }
+
     def enrich_pending_events(
         self, limit: int | None = None, ids: list[int] | None = None,
         batch_size: int | None = None,
@@ -1213,122 +1313,98 @@ class AICrawler:
         failure_details: list[dict[str, Any]] = []
         remaining_ids = list(normalized_ids) if normalized_ids is not None else None
         batch_number = 0
-        while processed < selected_limit:
+        concurrency = max(
+            1,
+            min(int(cfg.annotation_max_concurrency), 16, batch_count or 1),
+        )
+        futures: dict[Future[dict[str, Any]], tuple[int, ClaimBatch]] = {}
+        executor = ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="qm-news-annotation",
+        )
+
+        def submit_next() -> bool:
+            nonlocal batch_number, claimed, recovered_leases, remaining_ids
+            if claimed >= total:
+                return False
             batch = self.store.claims.claim(
                 owner=self.identity.value,
                 task_type=f"news:{mode}",
                 mode=mode,
-                limit=min(size, selected_limit - processed),
+                limit=min(size, total - claimed),
                 ids=remaining_ids,
                 max_id=max_id,
                 manual=manual,
             )
             recovered_leases += batch.recovered_leases
             if not batch.ids:
-                break
+                return False
             batch_number += 1
             claimed += len(batch.ids)
             if remaining_ids is not None:
                 claimed_set = set(batch.ids)
-                remaining_ids = [value for value in remaining_ids if value not in claimed_set]
+                remaining_ids = [
+                    value for value in remaining_ids if value not in claimed_set
+                ]
             chunk = self.store.rows_by_ids(list(batch.ids))
             items = [NewsItem(
                 source=row["source_id"], title=row["title"], content=row["content"],
                 url=row["url"], published_at=row["published_at"],
                 is_official=row["is_official"], db_id=row["id"],
             ) for row in chunk]
-            chunk_completed = 0
-            chunk_retry_scheduled = chunk_dead_letter = 0
-            error = ""
-            try:
-                with _claim_heartbeat(
-                    self.store.claims, batch.token, self.identity.value,
-                ) as lease_alive:
-                    parsed = self.client.chat_json(
-                        self._annotation_prompt(items), system=EXTRACT_SYSTEM,
-                        timeout=cfg.annotation_timeout,
-                        reasoning_effort=cfg.annotation_reasoning_effort,
-                        model=cfg.annotation_model or None,
-                    )
-                    if not isinstance(parsed, list) or len(parsed) != len(items):
-                        raise ValueError("LLM 标注结果数量与输入不一致")
-                    if any(not isinstance(result, dict) for result in parsed):
-                        raise ValueError("LLM 标注结果包含非对象元素")
-                    if not lease_alive.is_set():
-                        raise LLMError(
-                            "资讯分析租约已转交其他 worker",
-                            code="claim_lost", retryable=True,
-                        )
-                    from quantmaster.automation.news import importance_score
+            future = executor.submit(
+                self._process_annotation_batch, batch, items, batch_number, cfg,
+            )
+            futures[future] = (batch_number, batch)
+            return True
 
-                    prepared: list[tuple[int, NewsItem]] = []
-                    for item, result in zip(items, parsed, strict=True):
-                        if item.db_id is None:
-                            raise ValueError("待标注资讯缺少持久化 ID")
-                        self._apply_result(item, result, self.store._industry_map)
-                        item.importance_score, item.scope, _ = importance_score(
-                            item, set(), set(),
-                        )
-                        prepared.append((item.db_id, item))
-                    written_ids = self.store.update_analyses(
-                        prepared,
-                        claim_token=batch.token,
-                        claim_owner=self.identity.value,
-                    )
-                    completed += len(written_ids)
-                    chunk_completed += len(written_ids)
-                    completed_ids.extend(written_ids)
-            except Exception as exc:
-                logger.warning("资讯分析批次失败", exc_info=True)
-                error = _safe_analysis_error(exc)
-                failure_code = _analysis_failure_code(exc)
-                retryable = exc.retryable if isinstance(exc, LLMError) else True
-                outcome = self.store.analysis_failure(
-                    [item.db_id for item in items if item.db_id is not None],
-                    error,
-                    failure_code,
-                    retryable=retryable,
-                    retry_after=exc.retry_after if isinstance(exc, LLMError) else None,
-                    claim_token=batch.token,
-                    claim_owner=self.identity.value,
-                )
-                chunk_retry_scheduled = int(outcome["retry_scheduled"])
-                chunk_dead_letter = int(outcome["dead_letter"])
-                retry_scheduled += chunk_retry_scheduled
-                dead_letter += chunk_dead_letter
-                failure_details.append({
-                    "batch": batch_number,
-                    "code": failure_code,
-                    "message": error,
-                    "retryable": bool(retryable),
-                    "failed": int(outcome["failed"]),
-                    "retry_scheduled": chunk_retry_scheduled,
-                    "dead_letter": chunk_dead_letter,
-                    "next_retry_at": float(outcome["next_retry_at"]),
-                })
-            finally:
-                self.store.claims.release(batch.token, self.identity.value)
-            chunk_failed = len(items) - chunk_completed
-            failed += chunk_failed
-            processed += len(items)
-            updated_ids = [item.db_id for item in items if item.db_id is not None]
-            updated_items = [
-                self._stream_item(value)
-                for value in self.store.rows_by_ids(updated_ids)
-            ]
-            yield {
-                "type": "batch", "batch": batch_number,
-                "batch_count": batch_count, "processed": processed, "total": total,
-                "completed": completed, "failed": failed,
-                "batch_completed": chunk_completed, "batch_failed": chunk_failed,
-                "retry_scheduled": retry_scheduled, "dead_letter": dead_letter,
-                "batch_retry_scheduled": chunk_retry_scheduled,
-                "batch_dead_letter": chunk_dead_letter,
-                "completed_ids": completed_ids[-chunk_completed:] if chunk_completed else [],
-                "updated_items": updated_items, "error": error, "claimed": claimed,
-                "in_progress": queue["in_progress"],
-                "recovered_leases": recovered_leases,
-            }
+        try:
+            while len(futures) < concurrency and submit_next():
+                pass
+            while futures:
+                done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                for future in sorted(done, key=lambda value: futures[value][0]):
+                    futures.pop(future)
+                    outcome = future.result()
+                    chunk_completed = len(outcome["completed_ids"])
+                    chunk_failed = int(outcome["item_count"]) - chunk_completed
+                    chunk_retry_scheduled = int(outcome["retry_scheduled"])
+                    chunk_dead_letter = int(outcome["dead_letter"])
+                    processed += int(outcome["item_count"])
+                    completed += chunk_completed
+                    failed += chunk_failed
+                    retry_scheduled += chunk_retry_scheduled
+                    dead_letter += chunk_dead_letter
+                    completed_ids.extend(outcome["completed_ids"])
+                    if outcome["failure_detail"] is not None:
+                        failure_details.append(outcome["failure_detail"])
+                    updated_items = [
+                        self._stream_item(value)
+                        for value in self.store.rows_by_ids(outcome["updated_ids"])
+                    ]
+                    yield {
+                        "type": "batch", "batch": outcome["batch"],
+                        "batch_count": batch_count, "processed": processed,
+                        "total": total, "completed": completed, "failed": failed,
+                        "batch_completed": chunk_completed,
+                        "batch_failed": chunk_failed,
+                        "retry_scheduled": retry_scheduled,
+                        "dead_letter": dead_letter,
+                        "batch_retry_scheduled": chunk_retry_scheduled,
+                        "batch_dead_letter": chunk_dead_letter,
+                        "completed_ids": outcome["completed_ids"],
+                        "updated_items": updated_items,
+                        "error": outcome["error"], "claimed": claimed,
+                        "in_progress": queue["in_progress"],
+                        "recovered_leases": recovered_leases,
+                    }
+                    while len(futures) < concurrency and submit_next():
+                        pass
+        finally:
+            for future, (_, batch) in futures.items():
+                if future.cancel():
+                    self.store.claims.release(batch.token, self.identity.value)
+            executor.shutdown(wait=True, cancel_futures=True)
         result = {
             "processed": processed, "completed": completed,
             "failed": failed, "retry_scheduled": retry_scheduled,

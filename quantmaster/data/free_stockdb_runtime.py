@@ -411,6 +411,24 @@ class FreeStockDBRuntime:
             self._thread.start()
         return ready
 
+    def attach_to_supervisor(self) -> bool:
+        """让热重载 worker 观察 sidecar，但不取得启停所有权。"""
+        if self._listening():
+            self._set_status(
+                "running",
+                "本地服务由热更新启动器托管",
+                managed=True,
+                supervised=True,
+            )
+            return True
+        self._set_status(
+            "degraded",
+            "热更新启动器尚未提供本地数据库服务",
+            managed=True,
+            supervised=True,
+        )
+        return False
+
     def stop(self) -> None:
         self._stop.set()
         with self._lock:

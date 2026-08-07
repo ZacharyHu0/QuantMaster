@@ -189,6 +189,7 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
     manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
     update = _update(manager)
     update.news.annotation_batch_size = 7
+    update.news.annotation_max_concurrency = 6
     update.news.annotation_items_per_run = 35
     update.news.annotation_timeout = 150
     update.news.annotation_model = "lightweight-model"
@@ -199,10 +200,12 @@ def test_news_and_lab_changes_report_hot_apply_fields(tmp_path):
 
     assert result["restart_required"] == []
     assert {
-        "news.annotation_batch_size", "news.annotation_items_per_run",
+        "news.annotation_batch_size", "news.annotation_max_concurrency",
+        "news.annotation_items_per_run",
         "news.annotation_timeout", "news.annotation_model",
         "lab.enabled", "lab.horizons",
     }.issubset(result["changed_fields"])
+    assert manager.public()["news"]["annotation_max_concurrency"] == 6
     assert manager.public()["config_revision"] == result["config_revision"]
     assert manager.load().lab.horizons == [3, 7]
 

@@ -558,7 +558,7 @@ def test_news_dead_letter_alert_includes_structured_root_cause(tmp_path, monkeyp
     assert failure["payload"]["terminal"] is True
     assert failure["payload"]["dead_letter"] == 2
     assert failure["payload"]["error_codes"] == ["read_timeout"]
-    assert any("2 条进入死信" in value for value in failure["evidence"])
+    assert any("2 条已暂停自动重试" in value for value in failure["evidence"])
     assert any("read_timeout：模型在 180 秒内未返回结果" in value
                for value in failure["evidence"])
     card = format_feishu_card(failure)

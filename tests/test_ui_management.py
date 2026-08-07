@@ -98,10 +98,14 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert settings.bounding_box()["x"] > page.locator("#nav").bounding_box()["x"]
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
-        assert page.locator("#nav button:not([hidden])").all_inner_texts() == [
-            "市场", "轮动", "资讯", "个股分析", "候选", "决策", "Quant Lab", "回测",
-            "模拟盘", "实盘", "自动化",
+        assert page.locator("#nav .workspace-nav button").all_inner_texts() == [
+            "观察", "选股", "研究", "交易", "自动化",
         ]
+        assert page.locator('[data-workspace-pages="observe"] button').all_inner_texts() == [
+            "行情", "市场温度", "市场风格", "轮动总览", "行业周期", "细分题材", "宽基资金", "资讯",
+        ]
+        page.get_by_role("button", name="自动化", exact=True).click()
+        assert page.locator(".workspace-context").is_hidden()
         settings.click()
         config_path = page.locator("#settings-config-path")
         config_path.wait_for(state="visible")

@@ -17,6 +17,37 @@ from quantmaster.rotation.service import get_rotation_service, get_rotation_work
 router = APIRouter(prefix="/api/v1", tags=["rotation"])
 
 
+def _pagination(
+    values: list[dict[str, Any]], page: int, page_size: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    total = len(values)
+    pages = max(1, (total + page_size - 1) // page_size)
+    current = min(max(1, page), pages)
+    start = (current - 1) * page_size
+    return values[start:start + page_size], {
+        "page": current,
+        "page_size": page_size,
+        "total": total,
+        "pages": pages,
+        "has_previous": current > 1,
+        "has_next": current < pages,
+    }
+
+
+def _number(value: Any, fallback: float = float("-inf")) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _page_size(value: int | None, default: int = 50) -> int:
+    selected = default if value is None else value
+    if selected not in {25, 50, 100}:
+        raise HTTPException(422, "page_size 仅允许 25、50 或 100")
+    return selected
+
+
 def _iso_time(value: Any) -> str:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), UTC).isoformat()
@@ -144,6 +175,13 @@ def rotation_industry_detail(code: str) -> dict[str, Any]:
 def rotation_themes(
     query: str = Query("", max_length=80),
     limit: int | None = Query(None, ge=1, le=500),
+    page: int | None = Query(None, ge=1),
+    page_size: int | None = Query(None, ge=1, le=100),
+    stage: str = Query("", max_length=80),
+    grade: Literal["", "A", "B", "C", "D"] = "",
+    sort: Literal["change", "score", "excess", "amount", "coverage", "name"] = "change",
+    order: Literal["asc", "desc"] = "desc",
+    window: Literal[1, 3, 5, 20] = 5,
 ) -> dict[str, Any]:
     service = get_rotation_service()
     snapshot = service.snapshot("themes")
@@ -151,13 +189,38 @@ def rotation_themes(
     needle = query.strip().casefold()
     items = [
         item for item in values
-        if not needle
-        or needle in str(item.get("name") or "").casefold()
-        or needle in str(item.get("code") or "").casefold()
+        if (
+            not needle
+            or needle in str(item.get("name") or "").casefold()
+            or needle in str(item.get("code") or "").casefold()
+            or needle in str((item.get("primary_industry") or {}).get("name") or "").casefold()
+        )
+        and (not stage or str(item.get("stage") or "") == stage)
+        and (not grade or str(item.get("grade") or "") == grade)
     ]
-    selected_limit = limit or int(service.store.preferences()["theme_limit"])
     data = {key: value for key, value in snapshot.get("data", {}).items() if key != "details"}
-    data.update({"items": items[:selected_limit], "total": len(items), "limit": selected_limit})
+    if page is None and page_size is None:
+        selected_limit = limit or int(service.store.preferences()["theme_limit"])
+        data.update({"items": items[:selected_limit], "total": len(items), "limit": selected_limit})
+        return {"meta": snapshot["meta"], "data": data}
+
+    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        signal = (item.get("signals") or {}).get(str(window), {})
+        if sort == "name":
+            return (str(item.get("name") or "").casefold(), str(item.get("code") or ""))
+        fields = {
+            "score": item.get("rotation_score"),
+            "excess": signal.get("excess_return"),
+            "amount": signal.get("amount_activity"),
+            "coverage": item.get("coverage"),
+            "change": signal.get("rotation_change_pp"),
+        }
+        return (_number(fields[sort]), str(item.get("name") or ""), str(item.get("code") or ""))
+
+    reverse = order == "desc"
+    items.sort(key=sort_key, reverse=reverse)
+    visible, pagination = _pagination(items, page or 1, _page_size(page_size))
+    data.update({"items": visible, "pagination": pagination})
     return {"meta": snapshot["meta"], "data": data}
 
 
@@ -169,9 +232,61 @@ def rotation_theme_detail(code: str) -> dict[str, Any]:
     return result
 
 
+@router.get("/rotation/etf-flows/items")
+def rotation_etf_flow_items(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    query: str = Query("", max_length=80),
+    category: str = Query("", max_length=80),
+    sort: Literal["flow", "daily", "streak", "name"] = "flow",
+    order: Literal["asc", "desc"] = "desc",
+    window: Literal[1, 3, 5, 20] = 5,
+) -> dict[str, Any]:
+    snapshot = get_rotation_service().snapshot("etf_flows")
+    values = list(snapshot.get("data", {}).get("items") or [])
+    needle = query.strip().casefold()
+    items = [
+        item for item in values
+        if (
+            not needle
+            or needle in str(item.get("name") or "").casefold()
+            or needle in str(item.get("symbol") or "").casefold()
+            or needle in str(item.get("benchmark") or "").casefold()
+        )
+        and (not category or str(item.get("category") or "") == category)
+    ]
+
+    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        if sort == "name":
+            return (str(item.get("name") or "").casefold(), str(item.get("symbol") or ""))
+        value = (
+            item.get("flows", {}).get(str(window)) if sort == "flow"
+            else item.get("flow") if sort == "daily"
+            else item.get("flow_streak_sessions")
+        )
+        return (_number(value), str(item.get("name") or ""), str(item.get("symbol") or ""))
+
+    items.sort(key=sort_key, reverse=order == "desc")
+    visible, pagination = _pagination(items, page, _page_size(page_size))
+    return {
+        "meta": snapshot["meta"],
+        "data": {
+            "items": visible,
+            "pagination": pagination,
+            "categories": sorted({str(item.get("category") or "未分类") for item in values}),
+        },
+    }
+
+
 @router.get("/rotation/etf-flows")
-def rotation_etf_flows() -> dict[str, Any]:
-    return get_rotation_service().snapshot("etf_flows")
+def rotation_etf_flows(include_items: bool = True) -> dict[str, Any]:
+    snapshot = get_rotation_service().snapshot("etf_flows")
+    if include_items:
+        return snapshot
+    data = dict(snapshot.get("data") or {})
+    items = list(data.pop("items", []) or [])
+    data["item_total"] = len(items)
+    return {"meta": snapshot["meta"], "data": data}
 
 
 @router.get("/rotation/taxonomy/industries")

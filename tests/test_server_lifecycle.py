@@ -70,3 +70,31 @@ def test_run_uvicorn_foreground_releases_handlers(monkeypatch):
         ("run",),
         ("unregister",),
     ]
+
+
+def test_reload_supervisor_owns_free_stockdb_across_worker_reloads(monkeypatch):
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    calls = []
+
+    class FakeUvicorn:
+        @staticmethod
+        def run(app, **kwargs):
+            calls.append(("run", app, kwargs))
+            assert lifecycle.os.environ["QM_SERVER_RELOAD_WORKER"] == "1"
+
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", FakeUvicorn())
+    monkeypatch.setattr(free_stockdb_runtime, "start", lambda: calls.append(("stockdb-start",)))
+    monkeypatch.setattr(free_stockdb_runtime, "stop", lambda: calls.append(("stockdb-stop",)))
+    monkeypatch.delenv("QM_SERVER_RELOAD_WORKER", raising=False)
+
+    lifecycle.run_uvicorn_foreground(
+        "ignored-app", "127.0.0.1", 8686, reload=True,
+    )
+
+    assert calls[0] == ("stockdb-start",)
+    assert calls[1][0:2] == ("run", "quantmaster.server.app:app")
+    assert calls[1][2]["reload"] is True
+    assert calls[1][2]["reload_includes"] == ["*.py"]
+    assert calls[2] == ("stockdb-stop",)
+    assert "QM_SERVER_RELOAD_WORKER" not in lifecycle.os.environ

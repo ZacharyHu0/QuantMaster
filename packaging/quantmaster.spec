@@ -29,6 +29,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas,
     name="QuantMaster",
+    icon="quantmaster.ico",
     console=True,           # 保留控制台便于查看日志；不想要黑窗口可改 False
     upx=False,
 )

@@ -5,15 +5,13 @@
   --chart-warning: #c99642;
   --chart-compare: #8e84c8;
   --chart-neutral: #aaa89f;
-  --chart-duration-in: 640ms;
-  --chart-duration-state: 240ms;
+  --chart-duration-in: 0ms;
+  --chart-duration-state: 0ms;
 }
 
 .qm-chart-frame { position: relative; isolation: isolate; }
 
-.qm-chart-fade { animation: qm-chart-fade 180ms var(--ease-out-quart) both; }
-.qm-enter { animation: qm-enter 360ms var(--ease-out-expo) both; animation-delay: min(calc(var(--qm-order, 0) * 34ms), 320ms); }
-.qm-row-enter { animation: qm-row-enter 280ms var(--ease-out-quart) both; animation-delay: min(calc(var(--qm-row-order, 0) * 28ms), 252ms); }
+.qm-chart-fade { animation: qm-chart-fade 150ms var(--ease-out-quart) both; }
 
 table { font-variant-numeric: tabular-nums; }
 :where(.table-scroll, .rotation-table-wrap, .trading-table-wrap, .backtest-trades-scroll, .paper-orders) { overflow-x: auto; }
@@ -32,21 +30,13 @@ table { font-variant-numeric: tabular-nums; }
 :where(table) td.numeric,
 :where(table) td.qm-numeric { text-align: right; }
 tbody tr { min-height: 36px; }
-tbody tr:hover { background-color: color-mix(in oklch, var(--chart-primary) 5%, transparent); }
+@media (hover:hover) and (pointer:fine) {
+  tbody tr:hover { background-color: color-mix(in oklch, var(--chart-primary) 5%, transparent); }
+}
 
-@keyframes qm-enter {
-  from { opacity: 0; transform: translate3d(0, 9px, 0); }
-  to { opacity: 1; transform: translate3d(0, 0, 0); }
-}
-@keyframes qm-row-enter {
-  from { opacity: 0; transform: translate3d(0, 6px, 0); }
-  to { opacity: 1; transform: translate3d(0, 0, 0); }
-}
 @keyframes qm-chart-fade { from { opacity: .35; } to { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .qm-enter,
-  .qm-row-enter,
   .qm-chart-fade { animation: none !important; }
   .sentiment-axis b,
   .rotation-meter i { transition: none !important; }

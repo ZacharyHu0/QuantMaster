@@ -26,7 +26,7 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -147,11 +147,17 @@ class _LLMRequestGate:
 
 
 _LLM_REQUEST_GATE = _LLMRequestGate()
+_NEWS_LLM_REQUEST_GATE = _LLMRequestGate()
 
 
 def llm_gate_status() -> dict[str, int]:
     """Expose non-secret queue pressure for diagnostics."""
     return _LLM_REQUEST_GATE.status()
+
+
+def news_llm_gate_status() -> dict[str, int]:
+    """Expose the independently limited news-annotation queue pressure."""
+    return _NEWS_LLM_REQUEST_GATE.status()
 
 
 def _web_search_capability_key(config: LLMConfig) -> tuple[str, str, str]:
@@ -268,9 +274,15 @@ def _api_error(provider: str, response: httpx.Response) -> LLMError:
 
 
 class LLMClient:
-    def __init__(self, config: LLMConfig | None = None):
+    def __init__(
+        self,
+        config: LLMConfig | None = None,
+        *,
+        concurrency_scope: Literal["global", "news"] = "global",
+    ):
         self._uses_runtime_config = config is None
         self.config = config or get_config().llm
+        self._concurrency_scope = concurrency_scope
         if not self.config.api_key and self.config.provider != "openai-compatible":
             raise LLMError(
                 "未配置 LLM API key。请设置环境变量 ANTHROPIC_API_KEY / OPENAI_API_KEY / "
@@ -278,8 +290,17 @@ class LLMClient:
             )
 
     def _max_concurrency(self) -> int:
+        if self._concurrency_scope == "news":
+            return max(
+                1, min(16, int(get_config().news.annotation_max_concurrency)),
+            )
         config = get_config().llm if self._uses_runtime_config else self.config
         return max(1, int(config.max_concurrency))
+
+    def _request_gate(self) -> _LLMRequestGate:
+        if self._concurrency_scope == "news":
+            return _NEWS_LLM_REQUEST_GATE
+        return _LLM_REQUEST_GATE
 
     def _queue_timeout(self) -> float:
         config = get_config().llm if self._uses_runtime_config else self.config
@@ -287,7 +308,7 @@ class LLMClient:
 
     def _post(self, url: str, **kwargs: Any) -> httpx.Response:
         try:
-            with _LLM_REQUEST_GATE.slot(self._max_concurrency(), self._queue_timeout()):
+            with self._request_gate().slot(self._max_concurrency(), self._queue_timeout()):
                 key = (self.config.provider, self.config.base_url.rstrip("/"))
                 with _HTTP_CLIENT_POOL.client(key) as client:
                     return client.post(url, **kwargs)

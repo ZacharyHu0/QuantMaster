@@ -230,15 +230,26 @@ class TestBasics:
         assert "%%QM_RISK_FREE%%" not in resp.text
         nav_markup = resp.text.split('<nav id="nav"', 1)[1].split("</nav>", 1)[0]
         assert 'data-tab="settings"' not in nav_markup
-        assert [
-            nav_markup.index(f'data-tab="{tab}"')
-            for tab in ("market", "news", "stock-analysis", "candidates", "decision", "lab", "backtest",
-                        "paper", "ledger", "automation")
-        ] == sorted([
-            nav_markup.index(f'data-tab="{tab}"')
-            for tab in ("market", "news", "stock-analysis", "candidates", "decision", "lab", "backtest",
-                        "paper", "ledger", "automation")
+        assert [nav_markup.index(f'data-workspace="{workspace}"') for workspace in (
+            "observe", "select", "research", "trade", "automation",
+        )] == sorted([
+            nav_markup.index(f'data-workspace="{workspace}"') for workspace in (
+                "observe", "select", "research", "trade", "automation",
+            )
         ])
+        assert (
+            'data-workspace="automation" data-workspace-page="automation" data-tab="automation"'
+            in nav_markup
+        )
+        assert 'data-workspace-pages="automation"' not in resp.text
+        workspace_pages = (
+            "quotes", "temperature", "style", "rotation", "industry", "themes", "etf-flows", "news",
+            "after-close", "candidates", "stock-analysis", "decision", "lab", "backtest", "paper",
+            "ledger",
+        )
+        assert [resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages] == sorted(
+            resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages
+        )
         assert 'class="header-settings" data-tab="settings"' in resp.text
         assert resp.text.index('class="header-help"') < resp.text.index('class="header-settings"')
         help_markup = resp.text.split('class="header-help"', 1)[1].split("</button>", 1)[0]

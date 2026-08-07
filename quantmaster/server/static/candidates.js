@@ -831,6 +831,12 @@
     } else if (event.target.id === 'candidate-index-symbol') state.indexSymbol = event.target.value;
   });
 
+  // 原生日期输入在部分浏览器会把鼠标滚轮解释为加减日期；日期只应由点选或键盘明确修改。
+  workspace.addEventListener('wheel', event => {
+    if (!event.target.closest('#candidate-as-of')) return;
+    event.preventDefault();
+  }, {passive:false});
+
   workspace.addEventListener('click', async event => {
     const page = event.target.closest('[data-candidate-page]');
     if (page && !page.disabled) {

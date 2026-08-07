@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -69,7 +70,11 @@ async def lifespan(_: FastAPI):
     # bundled offline snapshot; external catalog refreshes are explicit maintenance
     # operations so a stopped app cannot leave network/database threads behind.
     InstrumentStore()
-    free_stockdb_runtime.start()
+    reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
+    if reload_worker:
+        free_stockdb_runtime.attach_to_supervisor()
+    else:
+        free_stockdb_runtime.start()
     runtime = get_runtime()
     runtime.start()
     worker = get_worker()
@@ -155,7 +160,8 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         drain_workers()
-        free_stockdb_runtime.stop()
+        if not reload_worker:
+            free_stockdb_runtime.stop()
         unregister_maintenance()
         from quantmaster.ai.llm import close_llm_http_clients
 
@@ -1808,8 +1814,14 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     return payload
 
 
-def serve() -> None:  # pragma: no cover - 入口
+def serve(*, reload: bool = False) -> None:  # pragma: no cover - 入口
     from quantmaster.server.lifecycle import run_uvicorn_foreground
 
     cfg = get_config().server
-    run_uvicorn_foreground(app, host=cfg.host, port=cfg.port, log_level="warning")
+    run_uvicorn_foreground(
+        app,
+        host=cfg.host,
+        port=cfg.port,
+        log_level="warning",
+        reload=reload,
+    )

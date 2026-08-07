@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quantmaster.rotation.analytics import (
     _stage,
@@ -58,6 +59,9 @@ def test_market_structure_exposes_distribution_and_three_day_confirmation():
     }
     assert result["current"]["dead_zone"] == 0.0025
     assert result["definition"]["confirmation_sessions"] == 3
+    assert sum(row["share"] for row in result["distribution"]) == pytest.approx(1.0)
+    assert result["current"]["candidate_sessions"] >= 0
+    assert result["current"]["confirmed_sessions"] >= 0
 
 
 def test_group_rotation_respects_coverage_and_member_reconciliation():
@@ -92,6 +96,13 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
             assert 0 <= signal["advance_ratio"] <= 1
             assert signal["amount_activity"] is not None
         assert len(result["details"][item["code"]]["history"]) >= 20
+        history = result["details"][item["code"]]["history"]
+        assert all("stage" in row and "stage_label" in row for row in history)
+        assert item["stage_sessions"] >= 1
+    for movement in result["summary"]["movements"].values():
+        assert sum(movement[f"{key}_count"] for key in (
+            "improving", "retreating", "unchanged", "unavailable",
+        )) == len(result["items"])
     assert result["definition"]["windows"] == [1, 3, 5, 20]
 
 
@@ -154,6 +165,10 @@ def test_etf_flow_uses_nav_then_marks_close_fallback():
     assert result["summary"]["nav_count"] == 1
     assert result["summary"]["close_fallback_count"] == 1
     assert result["summary"]["windows"]["1"]["net_flow"] == 30.0
+    assert result["summary"]["windows"]["1"]["largest_inflow"]["flow"] == 41.0
+    assert result["summary"]["windows"]["1"]["largest_outflow"]["flow"] == -11.0
+    assert by_symbol["510300.SH"]["flow_streak_sessions"] == 1
+    assert by_symbol["159915.SZ"]["flow_streak_sessions"] == -1
     assert result["definition"]["windows"] == [1, 3, 5, 20]
     assert result["daily"][-1]["cumulative_ma5"] is None
 

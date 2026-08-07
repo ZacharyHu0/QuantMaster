@@ -12,7 +12,7 @@ llm:
   max_tokens: 2048
   temperature: 0.3
   timeout: 60               # 普通模型请求读取超时
-  max_concurrency: 1        # 所有 LLM 调用共享的进程内并发上限
+  max_concurrency: 1        # 除资讯标注外的 LLM 调用共享上限
   queue_timeout: 30         # FIFO 排队最长等待秒数（1–300）
 
 data:
@@ -49,6 +49,7 @@ news:
   raw_cache_days: 7          # 原始 HTTP 响应短期保留；结构化资讯长期保留
   annotation_enabled: true   # 新资讯去重入库后进入 LLM 标注队列
   annotation_batch_size: 10  # 单次 LLM 批量条数
+  annotation_max_concurrency: 4 # 资讯标注独立并发数，不占通用 LLM 队列
   annotation_items_per_run: 100 # 每轮最多处理的待标注资讯
   annotation_model: ""         # 资讯专用模型；留空时使用 llm.model
   annotation_reasoning_effort: low # 资讯任务通常不需要高推理强度

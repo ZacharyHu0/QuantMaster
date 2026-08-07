@@ -882,6 +882,7 @@ class RotationService:
                     ),
                     *(quality.get("issues") or []),
                 ]))
+                quality["upgrade_pending"] = True
                 meta["quality"] = quality
             if kind == "themes" and str(quality.get("status") or "") == "cold":
                 active = next((

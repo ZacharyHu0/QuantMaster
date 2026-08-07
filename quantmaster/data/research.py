@@ -59,16 +59,16 @@ class PitDataStore:
 def _flatten_symbol(value: dict[str, pd.DataFrame], calendar: pd.DatetimeIndex) -> pd.DataFrame:
     """Make one source response persistable without losing the raw/PIT distinction."""
     frame = pd.DataFrame(index=calendar)
-    for field in REQUIRED_SIGNAL_FIELDS:
-        if field in value["signal"]:
-            frame[field] = value["signal"][field]
+    for signal_field in REQUIRED_SIGNAL_FIELDS:
+        if signal_field in value["signal"]:
+            frame[signal_field] = value["signal"][signal_field]
     if "amount" in value["signal"]:
         frame["amount"] = value["signal"]["amount"]
-    for field, column in (
+    for raw_field, column in (
         ("raw_open", "open"), ("raw_high", "high"),
         ("raw_low", "low"), ("raw_close", "close"),
     ):
-        frame[field] = value["raw"][column]
+        frame[raw_field] = value["raw"][column]
     frame["adj_factor"] = value["adj_factor"]["adj_factor"]
     frame["up_limit"] = value["limits"]["up_limit"]
     frame["down_limit"] = value["limits"]["down_limit"]

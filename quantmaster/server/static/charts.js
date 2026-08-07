@@ -68,13 +68,13 @@ function chartKind(option) {
 
 function motionProfile(kind, count) {
   if (REDUCED_MOTION) return {enabled: false, duration: 0, update: 0, stagger: 0};
-  if (count > 1000) return {enabled: false, duration: 180, update: 180, stagger: 0, containerOnly: true};
+  if (count > 1000) return {enabled: false, duration: 0, update: 0, stagger: 0, containerOnly: true};
   var dense = (kind === 'line' || kind === 'kline') ? count > 240 : count > 60;
   return {
-    enabled: true,
-    duration: dense ? 420 : 640,
-    update: dense ? 240 : 320,
-    stagger: dense ? 0 : Math.min(12, count ? Math.floor(320 / count) : 0),
+    enabled: false,
+    duration: 0,
+    update: 0,
+    stagger: dense ? 0 : 0,
   };
 }
 
@@ -156,6 +156,30 @@ function prepareSeries(series, index, profile) {
   return result;
 }
 
+function prepareDataZoom(dataZoom, hasYAxis) {
+  if (!Array.isArray(dataZoom) || !dataZoom.length) return dataZoom;
+  var result = dataZoom.map(function (zoom) {
+    var next = Object.assign({}, zoom);
+    // 滚轮由统一的轴向处理器接管，避免 ECharts 默认行为同时改变两个方向。
+    if (next.type === 'inside') {
+      next.zoomOnMouseWheel = false;
+      next.moveOnMouseWheel = false;
+      next.moveOnMouseMove = false;
+    }
+    return next;
+  });
+  var hasX = result.some(function (zoom) { return zoom.xAxisIndex !== undefined; });
+  var hasY = result.some(function (zoom) { return zoom.yAxisIndex !== undefined; });
+  if (hasX && hasYAxis && !hasY) {
+    result.push({
+      id: 'qm-zoom-y-wheel', type: 'inside', yAxisIndex: 0,
+      start: 0, end: 100, filterMode: 'none',
+      zoomOnMouseWheel: false, moveOnMouseWheel: false, moveOnMouseMove: false,
+    });
+  }
+  return result;
+}
+
 function enhanceOption(option) {
   if (!option || typeof option !== 'object') return option;
   var kind = chartKind(option);
@@ -173,6 +197,7 @@ function enhanceOption(option) {
   });
   result.xAxis = normalizeAxis(option.xAxis);
   result.yAxis = normalizeAxis(option.yAxis);
+  result.dataZoom = prepareDataZoom(option.dataZoom, Boolean(result.yAxis));
   if (Array.isArray(option.series)) {
     result.series = option.series.map(function (series, index) { return prepareSeries(series, index, profile); });
   }
@@ -226,6 +251,61 @@ function valAxis(formatter) {
 
 var chartObservers = new Map();
 
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function wheelDataWindow(chart, event) {
+  if (REDUCED_MOTION || !chart || chart.isDisposed()) return;
+  var option = chart.getOption ? chart.getOption() : null;
+  var zooms = option && option.dataZoom;
+  if (!Array.isArray(zooms) || !zooms.length) return;
+  var horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+  var useHorizontal = event.shiftKey || Math.abs(horizontalDelta) > Math.abs(event.deltaY);
+  var axis = useHorizontal ? 'x' : 'y';
+  var delta = useHorizontal ? horizontalDelta : event.deltaY;
+  if (!delta) return;
+  var zoom = zooms.find(function (item) {
+    return item.type === 'inside' && item[axis + 'AxisIndex'] !== undefined;
+  });
+  if (!zoom) return;
+
+  var dom = chart.getDom();
+  var rect = dom.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  var position = axis === 'x'
+    ? clamp((event.clientX - rect.left) / rect.width, 0, 1)
+    : clamp(1 - (event.clientY - rect.top) / rect.height, 0, 1);
+  var start = Number(zoom.start);
+  var end = Number(zoom.end);
+  start = Number.isFinite(start) ? start : 0;
+  end = Number.isFinite(end) ? end : 100;
+  var span = Math.max(1, end - start);
+  var nextStart;
+  var nextEnd;
+  if (event.ctrlKey) {
+    var factor = Math.pow(1.16, clamp(delta / 100, -2, 2));
+    var nextSpan = clamp(span * factor, 4, 100);
+    var anchor = start + span * position;
+    nextStart = anchor - nextSpan * position;
+    nextStart = clamp(nextStart, 0, 100 - nextSpan);
+    nextEnd = nextStart + nextSpan;
+  } else {
+    // 普通滚轮沿轴平移：右移查看更晚数据，向下查看更低数值。
+    var direction = axis === 'x' ? 1 : -1;
+    var distance = span * clamp(delta / 100, -2, 2) * 0.16 * direction;
+    nextStart = clamp(start + distance, 0, 100 - span);
+    nextEnd = nextStart + span;
+    // 全量视图或抵达边界时不拦截页面，避免滚动陷阱。
+    if (Math.abs(nextStart - start) < 0.001) return;
+  }
+  event.preventDefault();
+  chart.dispatchAction({
+    type: 'dataZoom', dataZoomId: zoom.id,
+    start: nextStart, end: nextEnd,
+  });
+}
+
 function installChartLifecycle(id, chart) {
   var nativeSetOption = chart.setOption.bind(chart);
   chart.__qmNativeSetOption = nativeSetOption;
@@ -244,6 +324,9 @@ function installChartLifecycle(id, chart) {
     }
     return result;
   };
+  chart.getDom().addEventListener('wheel', function (event) {
+    wheelDataWindow(chart, event);
+  }, {capture: true, passive: false});
   if (window.ResizeObserver) {
     var observer = new ResizeObserver(function () {
       if (!chart.isDisposed() && chart.getDom().offsetParent !== null) chart.resize();
@@ -329,40 +412,25 @@ function replayChart(id) {
 
 function stageTab(tab) {
   var root = document.getElementById('tab-' + tab);
-  if (!root || REDUCED_MOTION) return;
-  var nodes = Array.from(root.querySelectorAll(':scope > .cards, :scope > .panel, :scope > .row, :scope > section, .rotation-section, .trading-chart-block'));
-  nodes.slice(0, 12).forEach(function (node, index) {
-    node.classList.remove('qm-enter');
-    node.style.setProperty('--qm-order', String(index));
-  });
+  if (!root) return;
   root.querySelectorAll('tbody').forEach(function (body) {
-    Array.from(body.rows).slice(0, 10).forEach(function (row, index) {
-      row.classList.remove('qm-row-enter');
-      row.style.setProperty('--qm-row-order', String(index));
+    Array.from(body.rows).forEach(function (row) {
       Array.from(row.cells).forEach(function (cell) {
         var value = cell.textContent.trim().replace(/[,，]/g, '');
         if (/^[+−-]?(?:\d+(?:\.\d+)?|\.\d+)(?:%|亿|万|元|股|pp)?$/.test(value)) cell.classList.add('qm-numeric');
       });
     });
   });
-  requestAnimationFrame(function () {
-    nodes.slice(0, 12).forEach(function (node) { node.classList.add('qm-enter'); });
-    root.querySelectorAll('tbody').forEach(function (body) {
-      Array.from(body.rows).slice(0, 10).forEach(function (row) { row.classList.add('qm-row-enter'); });
-    });
-  });
 }
 
 function stageAddedRows(node) {
-  if (REDUCED_MOTION || !(node instanceof Element)) return;
+  if (!(node instanceof Element)) return;
   var rows = node.matches('tbody tr') ? [node] : Array.from(node.querySelectorAll('tbody tr'));
-  rows.slice(0, 10).forEach(function (row, index) {
-    row.style.setProperty('--qm-row-order', String(index));
+  rows.forEach(function (row) {
     Array.from(row.cells).forEach(function (cell) {
       var value = cell.textContent.trim().replace(/[,，]/g, '');
       if (/^[+−-]?(?:\d+(?:\.\d+)?|\.\d+)(?:%|亿|万|元|股|pp)?$/.test(value)) cell.classList.add('qm-numeric');
     });
-    requestAnimationFrame(function () { row.classList.add('qm-row-enter'); });
   });
 }
 
@@ -375,7 +443,6 @@ function activateChartTab(tab) {
       var chart = charts[id];
       if (!chart || chart.isDisposed() || !root.contains(chart.getDom())) return;
       chart.resize();
-      replayChart(id);
     });
   });
 }

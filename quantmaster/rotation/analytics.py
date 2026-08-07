@@ -14,7 +14,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-ALGORITHM_VERSION = "QM_ROTATION_V2"
+ALGORITHM_VERSION = "QM_ROTATION_V3"
 ROTATION_WINDOWS = (1, 3, 5, 20)
 MIN_HISTORY = 30
 EPS = 1e-12
@@ -274,6 +274,18 @@ def _candidate(spread: Any) -> str:
     return "balanced"
 
 
+def _trailing_sessions(values: list[str], value: str, *, unavailable: str = "unavailable") -> int:
+    """Count the current uninterrupted state; unavailable observations break it."""
+    if not value or value == unavailable:
+        return 0
+    count = 0
+    for candidate in reversed(values):
+        if candidate != value:
+            break
+        count += 1
+    return count
+
+
 def compute_market_structure(
     close: pd.DataFrame,
     *,
@@ -306,6 +318,7 @@ def compute_market_structure(
     current_date, row = valid.index[-1], valid.iloc[-1]
     current_score = trend.score.loc[current_date].dropna()
     current_returns = trend.returns.loc[current_date]
+    eligible_count = int(trend.eligible.loc[current_date].sum())
     distributions = []
     for state, label in STATE_LABELS.items():
         members = masks[state].loc[current_date]
@@ -314,6 +327,7 @@ def compute_market_structure(
             "state": state,
             "label": label,
             "count": int(members.sum()),
+            "share": _number(float(members.sum()) / eligible_count, 4) if eligible_count else None,
             "median_return": _number(values.median(), 4),
             "positive_ratio": _number((values > 0).mean(), 4) if len(values) else None,
         })
@@ -334,6 +348,13 @@ def compute_market_structure(
         "current": {
             "candidate": str(row["candidate"]),
             "confirmed": str(row["confirmed"]),
+            "candidate_sessions": _trailing_sessions(
+                [str(value) for value in valid["candidate"].tolist()], str(row["candidate"]),
+            ),
+            "confirmed_sessions": _trailing_sessions(
+                [str(value) for value in valid["confirmed"].tolist()], str(row["confirmed"]),
+                unavailable="pending",
+            ),
             "spread_1d": _number(row["spread"], 4),
             "spread_3d": _number(valid["spread"].tail(3).mean(), 4),
             "dead_zone": 0.0025,
@@ -368,6 +389,47 @@ def _stage(strong_ratio: float, weak_ratio: float, delta_strong: float, delta_we
     if delta_strong <= -3.0 or delta_weak >= 3.0:
         return "retreat_watch"
     return "unclear"
+
+
+def _movement_row(item: dict[str, Any], window: int) -> dict[str, Any]:
+    signal = dict((item.get("signals") or {}).get(str(window)) or {})
+    return {
+        "code": str(item.get("code") or ""),
+        "name": str(item.get("name") or ""),
+        "stage": str(item.get("stage") or ""),
+        "stage_label": str(item.get("stage_label") or ""),
+        "rotation_change_pp": signal.get("rotation_change_pp"),
+        "excess_return": signal.get("excess_return"),
+    }
+
+
+def _movement_summary(items: list[dict[str, Any]], window: int) -> dict[str, Any]:
+    """Return auditable direction counts and endpoints for one observation window."""
+    available = [
+        item for item in items
+        if (item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp") is not None
+    ]
+    ranked = sorted(
+        available,
+        key=lambda item: (
+            float((item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp") or 0.0),
+            float((item.get("signals") or {}).get(str(window), {}).get("excess_return") or 0.0),
+            str(item.get("name") or ""),
+        ),
+        reverse=True,
+    )
+    changes = [
+        float((item.get("signals") or {}).get(str(window), {}).get("rotation_change_pp") or 0.0)
+        for item in available
+    ]
+    return {
+        "improving_count": sum(value > 0 for value in changes),
+        "retreating_count": sum(value < 0 for value in changes),
+        "unchanged_count": sum(value == 0 for value in changes),
+        "unavailable_count": len(items) - len(available),
+        "leader": _movement_row(ranked[0], window) if ranked else None,
+        "laggard": _movement_row(ranked[-1], window) if ranked else None,
+    }
 
 
 def _representatives(
@@ -640,17 +702,44 @@ def analyze_group_rotation(
             else "C" if rotation_score >= 40 else "D"
         )
         history_rows = []
-        window = trend.close.index[trend.close.index <= current_date][-max(20, min(int(history), 520)):]
-        for date_value in window:
+        history_length = max(20, min(int(history), 520))
+        history_start = max(0, current_position - history_length + 1)
+        for position in range(history_start, current_position + 1):
+            date_value = trend.close.index[position]
             valid = int(trend.eligible.loc[date_value, symbols].sum())
             if not valid:
                 continue
+            strong_ratio = 100 * masks["strong_up"].loc[date_value, symbols].sum() / valid
+            weak_ratio = 100 * masks["weak"].loc[date_value, symbols].sum() / valid
+            stage_key: str | None = None
+            if position >= 3:
+                previous_date = trend.close.index[position - 3]
+                previous_valid = int(trend.eligible.loc[previous_date, symbols].sum())
+                previous_coverage = previous_valid / member_count if member_count else 0.0
+                if previous_valid >= minimum_members and previous_coverage >= minimum_coverage:
+                    previous_strong = (
+                        100 * masks["strong_up"].loc[previous_date, symbols].sum() / previous_valid
+                    )
+                    previous_weak = (
+                        100 * masks["weak"].loc[previous_date, symbols].sum() / previous_valid
+                    )
+                    stage_key = _stage(
+                        float(strong_ratio), float(weak_ratio),
+                        float(strong_ratio - previous_strong), float(weak_ratio - previous_weak),
+                    )
+            if position == current_position:
+                stage_key = stage
             history_rows.append({
                 "date": _date(date_value),
-                "strong_ratio": _number(100 * masks["strong_up"].loc[date_value, symbols].sum() / valid, 2),
-                "weak_ratio": _number(100 * masks["weak"].loc[date_value, symbols].sum() / valid, 2),
+                "strong_ratio": _number(strong_ratio, 2),
+                "weak_ratio": _number(weak_ratio, 2),
                 "eligible": valid,
+                "stage": stage_key,
+                "stage_label": STAGE_LABELS.get(stage_key or "", "待判定"),
             })
+        stage_sessions = _trailing_sessions(
+            [str(row["stage"] or "") for row in history_rows], stage, unavailable="",
+        )
         item = {
             "code": str(code),
             "name": str(raw.get("name") or code),
@@ -667,6 +756,7 @@ def analyze_group_rotation(
             "advance_ratio": _number(advance_ratio, 4),
             "stage": stage,
             "stage_label": STAGE_LABELS[stage],
+            "stage_sessions": stage_sessions,
             "rotation_score": _number(rotation_score, 2),
             "grade": grade,
             "representatives": _representatives(symbols, trend, current_date, names, amount_clean),
@@ -688,6 +778,27 @@ def analyze_group_rotation(
             "stages": {
                 stage: sum(1 for item in items if item["stage"] == stage)
                 for stage in STAGE_LABELS
+            },
+            "movements": {
+                str(window): _movement_summary(items, window) for window in ROTATION_WINDOWS
+            },
+            "persistence": {
+                "median_sessions": _number(
+                    pd.Series([item.get("stage_sessions") for item in items]).median(), 1,
+                ) if items else None,
+                "longest": [
+                    {
+                        "code": str(item.get("code") or ""),
+                        "name": str(item.get("name") or ""),
+                        "stage": str(item.get("stage") or ""),
+                        "stage_label": str(item.get("stage_label") or ""),
+                        "sessions": int(item.get("stage_sessions") or 0),
+                    }
+                    for item in sorted(
+                        items,
+                        key=lambda item: (-int(item.get("stage_sessions") or 0), str(item.get("name") or "")),
+                    )[:5]
+                ],
             },
         },
         "definition": {
@@ -746,6 +857,31 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
     latest = dated[dated["trade_date"] == as_of].copy()
     latest = latest.sort_values("flow", ascending=False)
     available_dates = sorted(pd.Timestamp(item) for item in dated["trade_date"].dropna().unique())
+    latest_metadata = latest.drop_duplicates("symbol").set_index("symbol")
+
+    def flow_streak(symbol: str) -> int:
+        observations = dated[dated["symbol"].astype(str) == symbol]
+        by_date = {
+            pd.Timestamp(row["trade_date"]): float(row["flow"])
+            for _, row in observations.iterrows()
+            if pd.notna(row["flow"])
+        }
+        direction = 0
+        sessions = 0
+        for date_value in reversed(available_dates):
+            flow = by_date.get(date_value)
+            if flow is None or flow == 0:
+                break
+            next_direction = 1 if flow > 0 else -1
+            if direction and next_direction != direction:
+                break
+            direction = next_direction
+            sessions += 1
+        return direction * sessions
+
+    flow_streaks = {
+        str(symbol): flow_streak(str(symbol)) for symbol in latest_metadata.index.astype(str)
+    }
     window_frames: dict[int, pd.DataFrame] = {}
     window_summaries: dict[str, dict[str, Any]] = {}
     for window in ROTATION_WINDOWS:
@@ -766,6 +902,26 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
         window: values.set_index("symbol")["flow"].to_dict()
         for window, values in window_frames.items()
     }
+
+    def flow_descriptor(row: pd.Series | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        symbol = str(row["symbol"])
+        metadata = latest_metadata.loc[symbol] if symbol in latest_metadata.index else None
+        return {
+            "symbol": symbol,
+            "name": str(metadata.get("name") if metadata is not None else symbol),
+            "benchmark": str(metadata.get("benchmark") if metadata is not None else "未披露"),
+            "flow": _number(row["flow"], 2),
+        }
+
+    for window, values in window_frames.items():
+        positive = values[values["flow"] > 0].sort_values(["flow", "symbol"], ascending=[False, True])
+        negative = values[values["flow"] < 0].sort_values(["flow", "symbol"], ascending=[True, True])
+        window_summaries[str(window)].update({
+            "largest_inflow": flow_descriptor(positive.iloc[0]) if not positive.empty else None,
+            "largest_outflow": flow_descriptor(negative.iloc[0]) if not negative.empty else None,
+        })
     items = []
     for _, row in latest.iterrows():
         items.append({
@@ -779,6 +935,7 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
                 for window, values in symbol_flows.items()
             },
             "share_change": _number(row["share_change"], 2),
+            "flow_streak_sessions": flow_streaks.get(str(row["symbol"]), 0),
             "price": _number(row["price"], 4),
             "price_source": str(row["price_source"]),
         })
@@ -788,7 +945,6 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
     daily["cumulative_ma20"] = daily["cumulative"].rolling(20, min_periods=20).mean()
     benchmark_groups: list[dict[str, Any]] = []
     benchmark_values = dated.copy()
-    latest_metadata = latest.drop_duplicates("symbol").set_index("symbol")
     latest_benchmarks = latest_metadata["benchmark"].fillna("").astype(str).to_dict()
     benchmark_values["benchmark_label"] = (
         benchmark_values["symbol"].astype(str).map(latest_benchmarks).fillna("")
@@ -816,6 +972,14 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
     benchmark_groups.sort(key=lambda item: (
         -abs(float(item["flows"].get("5") or 0.0)), item["benchmark"],
     ))
+    inflow_streaks = sorted(
+        (item for item in items if int(item.get("flow_streak_sessions") or 0) > 0),
+        key=lambda item: (-int(item["flow_streak_sessions"]), item["name"], item["symbol"]),
+    )
+    outflow_streaks = sorted(
+        (item for item in items if int(item.get("flow_streak_sessions") or 0) < 0),
+        key=lambda item: (int(item["flow_streak_sessions"]), item["name"], item["symbol"]),
+    )
     return {
         "as_of": _date(as_of),
         "items": items,
@@ -837,7 +1001,17 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
             "outflow_count": int((latest["flow"] < 0).sum()),
             "nav_count": int((latest["price_source"] == "nav").sum()),
             "close_fallback_count": int((latest["price_source"] == "close").sum()),
-            "windows": window_summaries,
+                "windows": window_summaries,
+                "streaks": {
+                    "longest_inflow": {
+                    "symbol": inflow_streaks[0]["symbol"], "name": inflow_streaks[0]["name"],
+                    "sessions": int(inflow_streaks[0]["flow_streak_sessions"]),
+                } if inflow_streaks else None,
+                "longest_outflow": {
+                    "symbol": outflow_streaks[0]["symbol"], "name": outflow_streaks[0]["name"],
+                    "sessions": abs(int(outflow_streaks[0]["flow_streak_sessions"])),
+                } if outflow_streaks else None,
+            },
         },
         "definition": {
             "formula": "份额变化 × 当日净值；净值缺失时使用收盘价并标记",
