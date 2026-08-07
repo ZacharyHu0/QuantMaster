@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 SCORE_VERSION = "QM_AFTER_CLOSE_V1"
 
 
@@ -74,6 +74,8 @@ class AfterCloseSnapshot:
     candidates: tuple[ResearchCandidate, ...]
     excluded_counts: dict[str, int]
     validation: dict[str, Any] = field(default_factory=dict)
+    ingest_id: str = ""
+    artifact_id: str = ""
     score_version: str = SCORE_VERSION
     schema_version: str = SCHEMA_VERSION
     generated_at: str = field(default_factory=utc_now)

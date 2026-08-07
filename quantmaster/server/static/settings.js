@@ -87,6 +87,8 @@
     document.querySelectorAll('[data-settings-panel]').forEach(panel => {
       panel.classList.toggle('active', panel.dataset.settingsPanel === name);
     });
+    const mobileSelect = document.getElementById('settings-section-select');
+    if (mobileSelect && mobileSelect.value !== name) mobileSelect.value = name;
     form.hidden = ['sources', 'backup'].includes(name);
     if (name === 'backup') loadSnapshots();
     if (['automation', 'lab'].includes(name)) loadAutomationOverview();
@@ -117,6 +119,9 @@
   document.getElementById('settings-nav').addEventListener('click', event => {
     const button = event.target.closest('[data-settings-section]');
     if (button) switchSection(button.dataset.settingsSection);
+  });
+  document.getElementById('settings-section-select').addEventListener('change', event => {
+    switchSection(event.target.value);
   });
 
   document.querySelector('header').addEventListener('click', event => {
@@ -150,6 +155,7 @@
     state.fillingForm = false;
     setSaveState('', config.managed_by_gui ? '自动保存已开启' : '填写后将自动启用 GUI 配置管理');
     renderRuntime(config.runtime || state.lastRuntime);
+    renderSavedChecks(config.checks || {});
     scheduleAutomaticModelCheck();
   }
 
@@ -167,11 +173,21 @@
     if (stockdb && stockdbStatus) {
       const elapsed = Number.isFinite(stockdb.elapsed_seconds) ? ` · 已用 ${stockdb.elapsed_seconds} 秒` : '';
       const engine = stockdb.sdk_engine ? ` · ${stockdb.sdk_engine}` : '';
-      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
-      const failed = ['error', 'degraded'].includes(stockdb.state) || stockdb.update_result === 'failed';
-      stockdbStatus.className = `field-wide check-result ${failed ? 'error' : stockdb.state === 'running' && stockdb.update_result !== 'native_required' ? 'success' : ''}`;
+      const sessions = stockdb.target_session
+        ? ` · 目标 ${stockdb.target_session} / 实际 ${stockdb.actual_session || '待验收'}`
+        : stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : '';
+      const attempts = stockdb.attempt
+        ? ` · 第 ${stockdb.attempt}/${stockdb.max_attempts || 1} 次` : '';
+      const retry = stockdb.next_retry_at
+        ? ` · 下次 ${new Date(stockdb.next_retry_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}` : '';
+      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${sessions}${attempts}${retry}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
+      const failed = ['error', 'degraded'].includes(stockdb.state)
+        || ['failed', 'manual_required'].includes(stockdb.update_result);
+      const healthy = stockdb.state === 'running'
+        && !['failed', 'manual_required', 'retry_wait'].includes(stockdb.update_result);
+      stockdbStatus.className = `field-wide check-result ${failed ? 'error' : healthy ? 'success' : ''}`;
       const active = ['queued', 'updating', 'restarting'].includes(stockdb.state)
-        || ['queued', 'stopping', 'syncing', 'restarting'].includes(stockdb.phase);
+        || ['queued', 'stopping', 'syncing', 'restarting', 'validating'].includes(stockdb.phase);
       const updateButton = document.getElementById('free-stockdb-update-now');
       if (updateButton) updateButton.disabled = active;
       if (active) scheduleFreeStockDbPoll();
@@ -228,11 +244,47 @@
     state.autoSaveTimer = setTimeout(flushAutosave, delay);
   }
 
+  function markCheckStale(kind) {
+    const result = document.querySelector(`[data-check-result="${kind}"]`);
+    if (!result || result.classList.contains('stale')) return;
+    if (result.classList.contains('checking')) {
+      result.dataset.stalePending = 'true';
+      return;
+    }
+    if (!result.dataset.checked) return;
+    result.classList.add('stale');
+    const badge = result.querySelector('.check-stale');
+    if (badge) badge.hidden = false;
+  }
+
+  function markDependentChecksStale(input) {
+    const name = input.name || '';
+    if (name.startsWith('llm.') || input.id === 'llm-secret') {
+      markCheckStale('llm-models');
+      markCheckStale('llm-web-search');
+    }
+    if (name === 'llm.timeout') markCheckStale('data-sources');
+    if (name === 'data.root') {
+      markCheckStale('storage');
+      markCheckStale('data-sources');
+      markCheckStale('lab');
+    }
+    if (['data.free_stockdb_url', 'data.free_stockdb_timeout',
+      'data.free_stockdb_sdk_path'].includes(name)) markCheckStale('data-sources');
+    if (input.id === 'tushare-secret') {
+      markCheckStale('tushare');
+      markCheckStale('lab');
+    }
+    if (['lab.universe', 'lab.device'].includes(name)) markCheckStale('lab');
+    if (name.startsWith('server.')) markCheckStale('server');
+  }
+
   form.addEventListener('input', event => {
     const input = event.target;
     if (input.id === 'plaintext-confirm' || input.id === 'feishu-app-secret' ||
         input.id === 'weixin-verify-code') return;
     if (!input.name && !['llm-secret', 'tushare-secret'].includes(input.id)) return;
+    markDependentChecksStale(input);
     if (input.id === 'llm-secret' || input.id === 'tushare-secret') {
       const name = input.id.replace('-secret', '');
       state.secretActions[name] = input.value ? 'replace' : 'keep';
@@ -256,6 +308,7 @@
       return;
     }
     if (input.id === 'feishu-app-secret' || input.id === 'weixin-verify-code') return;
+    markDependentChecksStale(input);
     if (input.dataset.confirmCloud !== undefined && input.checked) {
       const confirmed = window.confirm('允许匿名云端样本会扩大数据出站范围。每次实际发送仍需确认，是否继续？');
       if (!confirmed) {
@@ -281,6 +334,8 @@
   function scheduleAutomaticModelCheck() {
     clearTimeout(state.modelCheckTimer);
     state.modelCheckTimer = setTimeout(() => {
+      const result = document.querySelector('[data-check-result="llm-models"]');
+      if (result?.dataset.checked) return;
       const provider = form.elements['llm.provider'].value;
       const base = form.elements['llm.base_url'].value.trim();
       const sameTarget = provider === state.config?.llm?.provider &&
@@ -303,6 +358,7 @@
       state.secretActions[name] = 'clear';
       document.getElementById(`${name}-secret`).value = '';
       document.getElementById(`${name}-secret-state`).textContent = '正在显式清除…';
+      markDependentChecksStale(document.getElementById(`${name}-secret`));
       scheduleAutosave(0, '正在清除凭据…');
     });
   });
@@ -340,28 +396,114 @@
     return payload;
   }
 
+  function diagnosticGroups(kind, data) {
+    const details = data.details || {};
+    if (kind === 'data-sources') {
+      const sources = Object.entries(details.sources || {}).map(([name, item]) => ({
+        label: name, value: item.message || '无返回信息', status: item.status,
+      }));
+      const circuits = Object.entries(details.circuits || {})
+        .filter(([, item]) => item.state !== 'closed')
+        .map(([name, item]) => ({label: name, value: item.state, status: 'warning'}));
+      const master = details.security_master;
+      const coverage = master?.coverage?.map(item =>
+        `${item.market}/${item.asset_type} ${item.count}`).join('、');
+      const masterRows = master ? [{
+        label: '证券主数据',
+        value: `${master.record_count || 0} 条${coverage ? ` · ${coverage}` : ''}`,
+        status: master.status,
+      }] : [];
+      const proxies = Object.entries(details.proxies || {}).map(([name, value]) => ({
+        label: name, value,
+      }));
+      return [
+        {title: '依赖与端点', rows: sources},
+        {title: '熔断状态', rows: circuits.length ? circuits : [{label: '全部通道', value: 'closed'}]},
+        {title: '证券主数据', rows: masterRows},
+        {title: '代理', rows: proxies.length ? proxies : [{label: '环境代理', value: '未配置'}]},
+      ].filter(group => group.rows.length);
+    }
+    if (kind === 'lab') {
+      return [{title: '环境检查', rows: Object.entries(details.checks || {}).map(([name, item]) => ({
+        label: name, value: item.message || '无返回信息', status: item.status,
+      }))}];
+    }
+    const rows = [];
+    if (Array.isArray(details.models)) rows.push({label: '模型数量', value: details.models.length});
+    if (details.endpoint) rows.push({label: '检测端点', value: details.endpoint});
+    if (details.path) rows.push({label: '目录', value: details.path});
+    if (details.free_bytes != null) rows.push({
+      label: '剩余空间', value: `${(details.free_bytes / (1024 ** 3)).toFixed(1)} GB`,
+    });
+    if (details.host) rows.push({label: '监听地址', value: `${details.host}:${details.port}`});
+    if (details.category) rows.push({label: '分类', value: details.category});
+    if (details.supported != null) rows.push({
+      label: '联网搜索', value: details.supported ? '支持' : '未确认支持',
+      status: details.supported ? 'success' : 'warning',
+    });
+    if (Array.isArray(details.sources) && details.sources.length) {
+      rows.push(...details.sources.slice(0, 5).map(item => ({
+        label: item.title || '来源', value: item.url || '',
+      })));
+    }
+    return rows.length ? [{title: '检测详情', rows}] : [];
+  }
+
+  function diagnosticIssueCount(kind, data) {
+    if (kind === 'data-sources') {
+      const sourceIssues = Object.values(data.details?.sources || {})
+        .filter(item => item.status !== 'success').length;
+      const circuitIssues = Object.values(data.details?.circuits || {})
+        .filter(item => item.state !== 'closed').length;
+      return sourceIssues + circuitIssues;
+    }
+    if (kind === 'lab') {
+      return Object.values(data.details?.checks || {})
+        .filter(item => item.status !== 'success').length;
+    }
+    return data.status === 'success' ? 0 : 1;
+  }
+
+  function renderSavedChecks(checks) {
+    Object.entries(checks).forEach(([kind, data]) => renderCheck(kind, data));
+  }
+
+  function formatCheckTimestamp(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('zh-CN', {hour12: false});
+  }
+
   function renderCheck(kind, data) {
     const el = document.querySelector(`[data-check-result="${kind}"]`);
     if (!el) return;
-    el.className = `check-result ${data.status || ''}`;
-    const time = data.checked_at ? new Date(data.checked_at).toLocaleTimeString('zh-CN', {hour12: false}) : '';
-    const labChecks = kind === 'lab' ? Object.values(data.details?.checks || {})
-      .map(item => item.message).filter(Boolean) : [];
-    const sourceChecks = kind === 'data-sources' ? Object.entries(data.details?.sources || {})
-      .map(([name, item]) => `${name}: ${item.message}`) : [];
-    const openCircuits = kind === 'data-sources' ? Object.entries(data.details?.circuits || {})
-      .filter(([, item]) => item.state !== 'closed')
-      .map(([name, item]) => `${name} ${item.state}`) : [];
-    const proxies = kind === 'data-sources' ? Object.entries(data.details?.proxies || {})
-      .map(([name, value]) => `${name}=${value}`) : [];
-    const master = kind === 'data-sources' ? data.details?.security_master : null;
-    const coverage = master?.coverage?.map(item => `${item.market}/${item.asset_type} ${item.count}`).join('、');
-    const details = [...labChecks, ...sourceChecks,
-      ...(master ? [`证券主数据：${master.record_count || 0} 条${coverage ? `（${coverage}）` : ''}`] : []),
-      ...(openCircuits.length ? [`熔断：${openCircuits.join('、')}`] : []),
-      ...(proxies.length ? [`代理：${proxies.join('、')}`] : [])];
-    el.textContent = `${data.message}${details.length ? ` · ${details.join('；')}` : ''}` +
-      `${data.latency_ms != null ? ` · ${data.latency_ms}ms` : ''}${time ? ` · ${time}` : ''}`;
+    const status = data.status || 'warning';
+    const time = formatCheckTimestamp(data.checked_at);
+    const stale = Boolean(data.stale || el.dataset.stalePending === 'true');
+    const issueCount = diagnosticIssueCount(kind, data);
+    const meta = [
+      data.latency_ms != null ? `${data.latency_ms}ms` : '',
+      time,
+      issueCount ? `${issueCount} 项需关注` : '未发现异常',
+    ].filter(Boolean);
+    const groups = diagnosticGroups(kind, data);
+    const detailHtml = groups.length ? `<details class="check-details"${status === 'success' ? '' : ' open'}>
+      <summary>查看检测详情</summary>
+      <div class="check-detail-groups">${groups.map(group => `<section>
+        <h5>${html(group.title)}</h5>
+        ${group.rows.map(row => `<div class="check-detail-row ${html(row.status || '')}">
+          <strong>${html(row.label)}</strong><span>${html(row.value)}</span>
+        </div>`).join('')}
+      </section>`).join('')}</div>
+    </details>` : '';
+    el.className = `check-result ${status}${stale ? ' stale' : ''}`;
+    el.dataset.checked = 'true';
+    delete el.dataset.stalePending;
+    el.innerHTML = `<div class="check-summary">
+      <div><strong>${html(data.message || '检测完成')}</strong><span class="check-stale"${stale ? '' : ' hidden'}>配置已修改，需要重新检测</span></div>
+      <small>${meta.map(html).join(' · ')}</small>
+    </div>${detailHtml}`;
     if (kind === 'llm-models' && Array.isArray(data.details?.models)) {
       const list = document.getElementById('settings-model-list');
       list.innerHTML = data.details.models.map(model => `<option value="${html(model)}"></option>`).join('');
@@ -376,7 +518,12 @@
     button.addEventListener('click', async () => {
       const kind = button.dataset.check;
       const result = document.querySelector(`[data-check-result="${kind}"]`);
-      if (result) { result.className = 'check-result'; result.textContent = '检测中…'; }
+      if (result) {
+        result.className = 'check-result checking';
+        result.removeAttribute('data-checked');
+        delete result.dataset.stalePending;
+        result.innerHTML = '<div class="check-summary"><strong>检测中…</strong><small>正在等待服务返回</small></div>';
+      }
       button.disabled = true;
       try {
         const data = await request(`/api/v1/settings/check/${kind}`, {

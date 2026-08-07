@@ -121,7 +121,18 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
             max_uses=1,
         )
     except LLMError as exc:
-        message = "搜索请求超时或网络不可达" if exc.retryable else "搜索能力检测失败"
+        if exc.code in {
+            "read_timeout", "connect_timeout", "request_timeout", "queue_timeout", "network_error",
+        }:
+            message = "搜索请求超时或网络不可达"
+        elif exc.code == "invalid_response":
+            message = "网关返回了无法解析的搜索响应"
+        elif exc.code == "response_failed":
+            message = "搜索服务返回了失败事件"
+        elif exc.code == "response_incomplete":
+            message = "搜索响应未完整结束"
+        else:
+            message = "搜索能力检测失败"
         return _result(
             "warning", message, started, supported=None, sources=[], error_code=exc.code,
         )
@@ -238,17 +249,43 @@ def check_data_sources(
         try:
             from quantmaster.data.resilience import provider_call
 
+            def request_endpoint() -> httpx.Response:
+                response = httpx.get(url, timeout=timeout, follow_redirects=True)
+                if response.status_code >= 400:
+                    response.raise_for_status()
+                return response
+
             response = provider_call(
                 lane, "settings-connectivity-probe",
-                lambda: httpx.get(url, timeout=timeout, follow_redirects=True),
+                request_endpoint,
                 probe=True,
             )
-            status = "success" if response.status_code < 500 else "warning"
-            return package, {"status": status, "message": f"真实行情端点 HTTP {response.status_code}"}
+            return package, {
+                "status": "success",
+                "message": f"真实行情端点可达（HTTP {response.status_code}）",
+            }
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code == 429:
+                message, category, status = "真实行情端点限流（HTTP 429）", "rate-limit", "warning"
+            elif code == 401:
+                message, category, status = "真实行情端点认证失败（HTTP 401）", "authentication", "error"
+            elif code == 403:
+                message, category, status = "真实行情端点拒绝访问（HTTP 403）", "permission", "error"
+            elif code >= 500:
+                message, category, status = (
+                    f"真实行情上游异常（HTTP {code}）", "upstream-5xx", "warning"
+                )
+            else:
+                message, category, status = (
+                    f"真实行情端点拒绝请求（HTTP {code}）", "http-error", "warning"
+                )
+            return package, {"status": status, "message": message, "category": category}
         except Exception as exc:
             return package, {
                 "status": "warning",
-                "message": f"依赖已安装，但行情端点不可达（{type(exc).__name__}）",
+                "message": f"依赖已安装，但行情网络不可达（{type(exc).__name__}）",
+                "category": "network",
             }
 
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:

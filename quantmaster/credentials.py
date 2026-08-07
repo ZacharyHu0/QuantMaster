@@ -19,6 +19,14 @@ class CredentialStore:
     @staticmethod
     def llm_target(provider: str, base_url: str) -> str:
         endpoint = (base_url or "official").strip().lower().rstrip("/")
+        for suffix in ("/chat/completions", "/responses", "/messages", "/models"):
+            if endpoint.endswith(suffix):
+                endpoint = endpoint[:-len(suffix)].rstrip("/")
+                break
+        # `/v1` 是同一服务的 API 版本前缀，不应因为补全它就切换凭据槽。
+        # provider 仍是目标的一部分，因此不同协议不会意外共用密钥。
+        if endpoint.endswith("/v1"):
+            endpoint = endpoint[:-len("/v1")].rstrip("/")
         digest = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:20]
         return f"llm:{provider.strip().lower()}:{digest}"
 

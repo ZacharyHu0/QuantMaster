@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.rotation.contracts import RotationJobSpec
@@ -20,7 +21,7 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert temperature.status_code == 200
     assert temperature.json()["meta"]["quality"]["status"] == "cold"
     assert temperature.json()["meta"]["quality"]["coverage"] is None
-    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V3"
+    assert temperature.json()["meta"]["algorithm_version"] == "QM_ROTATION_V6"
 
     overview = client.get("/api/v1/rotation/overview").json()
     assert overview["meta"]["quality"]["coverage"] is None
@@ -38,7 +39,10 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
 
     page = client.get("/")
     assert page.status_code == 200
-    assert 'href="/static/rotation.css"' in page.text
+    assert 'href="/static/rotation.css?rev=' in page.text
+    assert "%%QM_ROTATION_CSS_REV%%" not in page.text
+    rotation_css = client.get("/static/rotation.css")
+    assert rotation_css.headers["cache-control"] == "no-cache, max-age=0, must-revalidate"
     assert 'data-tab="rotation"' in page.text
     assert 'id="market-temperature-view"' in page.text
     assert 'id="market-style-view"' in page.text
@@ -181,6 +185,79 @@ def test_rotation_detail_returns_not_found_until_group_passes_quality_gate():
     assert response.status_code == 404
 
 
+def test_group_apis_materialize_selected_window_scores_and_grade_filters():
+    service = get_rotation_service()
+
+    def group_item(code: str, name: str, *, level: str) -> dict:
+        scores = {
+            str(window): {
+                "window": window,
+                "score": 72.0 if window == 1 else 38.0,
+                "grade": "A" if window == 1 else "D",
+                "available_weight": 100,
+                "minimum_weight": 60,
+                "items": [{
+                    "id": "trend", "label": "趋势向上", "score": 50.0,
+                    "weight": 40, "note": "测试证据", "available": True,
+                }],
+            }
+            for window in (1, 3, 5, 20)
+        }
+        return {
+            "code": code, "name": name, "level": level, "stage": "unclear",
+            "scores": scores, "score": scores["5"], "rotation_score": 38.0,
+            "grade": "D", "signals": {str(window): {} for window in (1, 3, 5, 20)},
+        }
+
+    industry = group_item("801080.SI", "电子", level="L1")
+    theme = group_item("BK1001", "机器人", level="concept")
+    meta = {
+        "snapshot_id": "window-scores", "as_of": "2026-08-07",
+        "quality": {"status": "complete", "issues": []},
+    }
+    service.store.save_snapshots({
+        "industries": {
+            "meta": meta,
+            "data": {"items": [industry], "details": {industry["code"]: industry}},
+        },
+        "themes": {
+            "meta": meta,
+            "data": {"items": [theme], "details": {theme["code"]: theme}},
+        },
+    })
+    client = _client()
+
+    one_day = client.get("/api/v1/rotation/industries", params={"window": 1}).json()["data"]
+    five_day = client.get("/api/v1/rotation/industries", params={"window": 5}).json()["data"]
+    assert one_day["window"] == 1
+    assert one_day["items"][0]["rotation_score"] == 72.0
+    assert one_day["items"][0]["score"]["grade"] == "A"
+    assert one_day["items"][0]["score_available_weight"] == 100
+    assert "scores" not in one_day["items"][0]
+    assert five_day["items"][0]["rotation_score"] == 38.0
+    assert five_day["items"][0]["grade"] == "D"
+
+    detail = client.get(
+        "/api/v1/rotation/industries/801080.SI", params={"window": 1},
+    ).json()["data"]
+    assert detail["score"]["window"] == 1
+    assert detail["score"]["items"][0]["id"] == "trend"
+
+    themes_one = client.get(
+        "/api/v1/rotation/themes",
+        params={"window": 1, "grade": "A", "page": 1, "page_size": 25},
+    ).json()["data"]
+    themes_five = client.get(
+        "/api/v1/rotation/themes",
+        params={"window": 5, "grade": "A", "page": 1, "page_size": 25},
+    ).json()["data"]
+    assert themes_one["pagination"]["total"] == 1
+    assert themes_one["items"][0]["rotation_score"] == 72.0
+    assert themes_five["pagination"]["total"] == 0
+    assert client.get("/api/v1/rotation/industries", params={"window": 2}).status_code == 422
+    assert client.get("/api/v1/rotation/themes/BK1001", params={"window": 20}).status_code == 200
+
+
 def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
     service = get_rotation_service()
     items = [
@@ -188,7 +265,14 @@ def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
             "code": f"BK{index:04d}", "name": f"题材 {index:04d}", "stage": "repair_spread",
             "grade": "A" if index % 2 else "B", "rotation_score": 50.0,
             "coverage": 1.0, "primary_industry": {"name": "电子"},
-            "signals": {"5": {"rotation_change_pp": 3.0, "excess_return": 0.01, "amount_activity": 0.02}},
+            "signals": {
+                str(window): {
+                    "rotation_change_pp": float(index if window in {1, 5} else -index),
+                    "excess_return": 0.01,
+                    "amount_activity": 0.02,
+                }
+                for window in (1, 3, 5, 20)
+            },
         }
         for index in range(698)
     ]
@@ -214,6 +298,18 @@ def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
     }
     again = client.get("/api/v1/rotation/themes", params={"page": 1, "page_size": 25}).json()["data"]
     assert [item["code"] for item in first["items"]] == [item["code"] for item in again["items"]]
+    for window, expected_code in ((1, "BK0697"), (3, "BK0000"), (5, "BK0697"), (20, "BK0000")):
+        response = client.get(
+            "/api/v1/rotation/themes",
+            params={
+                "page": 1, "page_size": 25, "window": window,
+                "sort": "change", "order": "desc",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["pagination"]["total"] == 698
+        assert data["items"][0]["code"] == expected_code
     all_codes = []
     for page in range(1, 29):
         data = client.get("/api/v1/rotation/themes", params={"page": page, "page_size": 25}).json()["data"]
@@ -222,13 +318,95 @@ def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
     assert set(all_codes) == {item["code"] for item in items}
 
 
+def test_rotation_theme_focus_queue_is_auditable_and_ignores_catalog_filters():
+    service = get_rotation_service()
+
+    def theme(
+        code: str,
+        name: str,
+        *,
+        score: float,
+        grade: str,
+        change: float,
+        excess: float,
+        breadth: float,
+        amount: float,
+    ) -> dict:
+        return {
+            "code": code,
+            "name": name,
+            "stage": "repair_spread" if change > 0 else "retreat_watch",
+            "stage_label": "修复扩散" if change > 0 else "退潮观察",
+            "rotation_score": score,
+            "grade": grade,
+            "coverage": 0.9,
+            "signals": {
+                str(window): {
+                    "rotation_change_pp": change,
+                    "excess_return": excess,
+                    "advance_ratio": breadth,
+                    "amount_activity": amount,
+                }
+                for window in (1, 3, 5, 20)
+            },
+        }
+
+    items = [
+        theme("BK1", "机器人", score=82, grade="A", change=8, excess=.02, breadth=.7, amount=.1),
+        theme("BK2", "光模块", score=76, grade="B", change=6, excess=.01, breadth=.6, amount=.08),
+        theme("BK3", "高分题材", score=95, grade="C", change=5, excess=.03, breadth=.8, amount=.2),
+        theme("BK4", "宽度题材", score=66, grade="C", change=3, excess=.01, breadth=.55, amount=-.1),
+        theme("BK5", "弱证据题材", score=64, grade="B", change=-2, excess=-.01, breadth=.4, amount=-.1),
+    ]
+    service.store.save_snapshots({
+        "themes": {
+            "meta": {"snapshot_id": "focus-themes", "quality": {"status": "complete", "issues": []}},
+            "data": {"items": items, "summary": {"group_count": len(items)}},
+        },
+    })
+
+    data = _client().get(
+        "/api/v1/rotation/themes",
+        params={"page": 1, "page_size": 25, "query": "没有匹配"},
+    ).json()["data"]
+
+    assert data["pagination"]["total"] == 0
+    assert data["items"] == []
+    assert [item["code"] for item in data["focus_items"]] == ["BK1", "BK2", "BK3", "BK4"]
+    assert data["focus_items"][0]["focus"] == {
+        "evidence_count": 5,
+        "evidence_total": 5,
+        "reasons": [
+            {"id": "rotation", "label": "轮动改善"},
+            {"id": "excess", "label": "相对收益为正"},
+            {"id": "breadth", "label": "上涨宽度过半"},
+            {"id": "amount", "label": "量能活跃"},
+            {"id": "grade", "label": "周期结构 A/B"},
+        ],
+    }
+    assert data["focus_definition"] == {
+        "criteria": [
+            {"id": "rotation", "label": "轮动改善"},
+            {"id": "excess", "label": "相对收益为正"},
+            {"id": "breadth", "label": "上涨宽度过半"},
+            {"id": "amount", "label": "量能活跃"},
+            {"id": "grade", "label": "周期结构 A/B"},
+        ],
+        "limit": 4,
+        "window": 5,
+    }
+
+
 def test_rotation_etf_summary_and_paginated_items_stay_consistent():
     service = get_rotation_service()
     items = [
         {
             "symbol": f"51{index:04d}.SH", "name": f"宽基 ETF {index}", "category": "宽基",
             "benchmark": "沪深300", "flow": float(index - 2), "flow_streak_sessions": index - 2,
-            "flows": {"5": float(index - 2)},
+            "flows": {
+                str(window): float((index - 2) * (1 if window in {1, 5} else -1))
+                for window in (1, 3, 5, 20)
+            },
         }
         for index in range(5)
     ]
@@ -249,3 +427,29 @@ def test_rotation_etf_summary_and_paginated_items_stay_consistent():
     assert paged["pagination"]["total"] == summary["item_total"]
     assert paged["categories"] == ["宽基"]
     assert [item["symbol"] for item in paged["items"]] == [item["symbol"] for item in reversed(items)]
+    for window, expected_symbol in (
+        (1, "510004.SH"), (3, "510000.SH"),
+        (5, "510004.SH"), (20, "510000.SH"),
+    ):
+        response = client.get(
+            "/api/v1/rotation/etf-flows/items",
+            params={
+                "page": 1, "page_size": 25, "window": window,
+                "sort": "flow", "order": "desc",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["pagination"]["total"] == summary["item_total"]
+        assert data["items"][0]["symbol"] == expected_symbol
+
+
+@pytest.mark.parametrize(
+    "path",
+    ("/api/v1/rotation/themes", "/api/v1/rotation/etf-flows/items"),
+)
+@pytest.mark.parametrize("window", (2, "invalid"))
+def test_rotation_paginated_windows_reject_unsupported_values(path, window):
+    response = _client().get(path, params={"page": 1, "page_size": 25, "window": window})
+
+    assert response.status_code == 422

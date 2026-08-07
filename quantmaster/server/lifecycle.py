@@ -5,11 +5,17 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+RELOAD_QUIET_SECONDS = 30.0
+RELOAD_MAX_BATCH_SECONDS = 300.0
+RELOAD_MIN_INTERVAL_SECONDS = 300.0
+RELOAD_TRIGGER_PATH_ENV = "QM_SERVER_RELOAD_TRIGGER_PATH"
 
 
 def _process_is_alive(pid: int) -> bool:
@@ -97,6 +103,156 @@ def install_windows_console_handler(
     return unregister
 
 
+def _meaningful_reload_paths(paths: set[Path], package_dir: Path) -> list[Path]:
+    """Ignore release bookkeeping when it is the only backend source change."""
+    release_path = (package_dir / "release.py").resolve()
+    return sorted(
+        (path for path in paths if path.resolve() != release_path),
+        key=lambda path: str(path).casefold(),
+    )
+
+
+def _reload_timing_ms() -> tuple[int, int, int]:
+    """Return bounded quiet, batching and minimum reload interval windows."""
+    try:
+        quiet = float(os.environ.get("QM_RELOAD_QUIET_SECONDS", RELOAD_QUIET_SECONDS))
+    except ValueError:
+        quiet = RELOAD_QUIET_SECONDS
+    try:
+        maximum = float(
+            os.environ.get("QM_RELOAD_MAX_BATCH_SECONDS", RELOAD_MAX_BATCH_SECONDS),
+        )
+    except ValueError:
+        maximum = RELOAD_MAX_BATCH_SECONDS
+    try:
+        interval = float(
+            os.environ.get("QM_RELOAD_MIN_INTERVAL_SECONDS", RELOAD_MIN_INTERVAL_SECONDS),
+        )
+    except ValueError:
+        interval = RELOAD_MIN_INTERVAL_SECONDS
+    quiet = min(300.0, max(2.0, quiet))
+    maximum = min(1800.0, max(quiet, maximum))
+    interval = min(1800.0, max(quiet, interval))
+    return round(quiet * 1000), round(maximum * 1000), round(interval * 1000)
+
+
+class _ReloadChangeGate:
+    """Accumulate backend changes and enforce a real minimum reload interval."""
+
+    def __init__(
+        self,
+        package_dir: Path,
+        minimum_interval: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.package_dir = package_dir
+        self.minimum_interval = minimum_interval
+        self.clock = clock
+        self.pending: set[Path] = set()
+        self.last_reload_at: float | None = None
+
+    def offer(self, paths: set[Path]) -> list[Path] | None:
+        self.pending.update(_meaningful_reload_paths(paths, self.package_dir))
+        if not self.pending:
+            return None
+        now = self.clock()
+        if (
+            self.last_reload_at is not None
+            and now - self.last_reload_at < self.minimum_interval
+        ):
+            return None
+        ready = sorted(self.pending, key=lambda path: str(path).casefold())
+        self.pending.clear()
+        self.last_reload_at = now
+        return ready
+
+    def clear(self) -> None:
+        """Drop accumulated automatic changes after a manual full worker reload."""
+        self.pending.clear()
+
+
+def manual_reload_trigger_path() -> Path | None:
+    """Return the supervisor-owned trigger path when reload mode is active."""
+    if os.environ.get("QM_SERVER_RELOAD_WORKER") != "1":
+        return None
+    configured = os.environ.get(RELOAD_TRIGGER_PATH_ENV, "").strip()
+    return Path(configured).resolve() if configured else None
+
+
+def request_manual_reload(path: Path) -> None:
+    """Notify the reload supervisor after the HTTP response has been sent."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(time.time_ns()), encoding="ascii")
+
+
+def _run_quiet_uvicorn_reload(
+    uvicorn: Any,
+    *,
+    package_dir: Path,
+    trigger_path: Path,
+    host: str,
+    port: int,
+    log_level: str,
+) -> None:
+    """Run a reload supervisor that waits for a real editing quiet period."""
+    from uvicorn.supervisors.basereload import BaseReload
+    from uvicorn.supervisors.watchfilesreload import FileFilter
+    from watchfiles import watch
+
+    quiet_ms, maximum_ms, interval_ms = _reload_timing_ms()
+
+    class QuietReload(BaseReload):
+        def __init__(self, config, target, sockets):
+            super().__init__(config, target, sockets)
+            self.reloader_name = "QuantMaster watcher"
+            self.watch_filter = FileFilter(config)
+            self.change_gate = _ReloadChangeGate(
+                package_dir,
+                minimum_interval=interval_ms / 1000,
+            )
+            self.watcher = watch(
+                package_dir,
+                trigger_path.parent,
+                watch_filter=None,
+                stop_event=self.should_exit,
+                debounce=maximum_ms,
+                step=quiet_ms,
+                yield_on_timeout=True,
+                ignore_permission_denied=True,
+            )
+
+        def should_restart(self) -> list[Path] | None:
+            changes = next(self.watcher)
+            changed_paths = {Path(changed_path).resolve() for _change, changed_path in changes}
+            if trigger_path.resolve() in changed_paths:
+                self.change_gate.clear()
+                return [trigger_path]
+            candidates = {
+                changed_path
+                for changed_path in changed_paths
+                if self.watch_filter(Path(changed_path))
+            }
+            return self.change_gate.offer(candidates)
+
+    config = uvicorn.Config(
+        "quantmaster.server.app:app",
+        host=host,
+        port=port,
+        log_level=log_level,
+        log_config=None,
+        access_log=False,
+        reload=True,
+        reload_dirs=[str(package_dir)],
+        reload_includes=["*.py"],
+    )
+    server = uvicorn.Server(config=config)
+    socket = config.bind_socket()
+    try:
+        QuietReload(config, target=server.run, sockets=[socket]).run()
+    except KeyboardInterrupt:  # pragma: no cover - interactive terminal path
+        pass
+
+
 def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     """在独立监督进程中热重载主站，同时保持 free-stockdb 持续运行。"""
     import uvicorn
@@ -105,31 +261,77 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
 
     package_dir = Path(__file__).resolve().parents[1]
     worker_flag = "QM_SERVER_RELOAD_WORKER"
+    verbose_flag = "QM_SERVER_RELOAD_VERBOSE"
+    control_flag = "QM_FREE_STOCKDB_CONTROL_PATH"
+    trigger_flag = RELOAD_TRIGGER_PATH_ENV
     previous_flag = os.environ.get(worker_flag)
+    previous_verbose = os.environ.get(verbose_flag)
+    previous_control = os.environ.get(control_flag)
+    previous_trigger = os.environ.get(trigger_flag)
 
     # Uvicorn 的 reload 监督进程不会加载 ASGI lifespan，正适合持有数据库
     # sidecar；每次替换的 Web worker 只连接它，不取得进程所有权。
     free_stockdb_runtime.start()
+    control_path = free_stockdb_runtime._control_path()
+    os.environ[control_flag] = str(control_path)
+    trigger_path = control_path.with_name(".quantmaster-reload-trigger")
+    os.environ[trigger_flag] = str(trigger_path)
+    cleanup_lock = threading.Lock()
+    cleanup_complete = threading.Event()
+
+    def cleanup_sidecar() -> None:
+        with cleanup_lock:
+            if cleanup_complete.is_set():
+                return
+            try:
+                free_stockdb_runtime.stop()
+            finally:
+                cleanup_complete.set()
+
+    parent_stop = threading.Event()
+    parent_watcher = threading.Thread(
+        target=watch_parent_exit,
+        args=(os.getppid(), cleanup_sidecar, parent_stop),
+        name="qm-reload-parent-watch",
+        daemon=True,
+    )
+    parent_watcher.start()
+    unregister_handler = install_windows_console_handler(cleanup_sidecar, cleanup_complete)
     os.environ[worker_flag] = "1"
+    from quantmaster.logging_config import is_verbose_logging
+
+    os.environ[verbose_flag] = "1" if is_verbose_logging() else "0"
     try:
-        uvicorn.run(
-            "quantmaster.server.app:app",
+        _run_quiet_uvicorn_reload(
+            uvicorn,
+            package_dir=package_dir,
+            trigger_path=trigger_path,
             host=host,
             port=port,
             log_level=log_level,
-            log_config=None,
-            access_log=False,
-            reload=True,
-            reload_dirs=[str(package_dir)],
-            reload_includes=["*.py"],
         )
     finally:
         # 只有整个启动器退出才停止数据库；Web worker 的多次热替换不会经过这里。
-        free_stockdb_runtime.stop()
+        parent_stop.set()
+        cleanup_sidecar()
+        unregister_handler()
+        parent_watcher.join(timeout=1)
         if previous_flag is None:
             os.environ.pop(worker_flag, None)
         else:
             os.environ[worker_flag] = previous_flag
+        if previous_verbose is None:
+            os.environ.pop(verbose_flag, None)
+        else:
+            os.environ[verbose_flag] = previous_verbose
+        if previous_control is None:
+            os.environ.pop(control_flag, None)
+        else:
+            os.environ[control_flag] = previous_control
+        if previous_trigger is None:
+            os.environ.pop(trigger_flag, None)
+        else:
+            os.environ[trigger_flag] = previous_trigger
 
 
 def run_uvicorn_foreground(

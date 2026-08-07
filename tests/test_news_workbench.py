@@ -92,6 +92,9 @@ class _RouteNewsStore:
     def stats(self, days=30):
         return {"days": days}
 
+    def event_focus(self, days=7):
+        return {"days": days, "top_symbols": []}
+
     def query(self, **kwargs):
         self.calls.append(("query", kwargs))
         return {"items": [], "filters": kwargs}
@@ -315,7 +318,10 @@ def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
     for _ in range(3):
         store.analysis_failure([dead_id], "offline", "network")
     with store._conn() as connection:
-        connection.execute("UPDATE news SET next_retry_at=0 WHERE id=?", (dead_id,))
+        connection.execute(
+            "UPDATE news SET analysis_recovery_count=3,next_retry_at=0 WHERE id=?",
+            (dead_id,),
+        )
 
     queue = store.stats(30)["queue"]
     assert {key: queue[key] for key in (
@@ -327,7 +333,7 @@ def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
         "recovery": 0,
         "dead_letter": 1,
         "manual_recoverable_dead_letter": 1,
-        "recoverable_dead_letter": 1,
+        "recoverable_dead_letter": 0,
     }
     assert queue["processing"] == 0
     assert queue["claims"] == {"total": 0, "active": 0, "expired": 0}
@@ -352,6 +358,163 @@ def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkey
     assert len(focused) == 20
     assert focused[0] == {"symbol": "000001.SZ", "name": "标的01", "count": 1}
     assert focused[-1] == {"symbol": "000020.SZ", "name": "标的20", "count": 1}
+
+
+def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkeypatch):
+    now = 2_000_000_000.0
+    monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
+    monkeypatch.setattr(
+        "quantmaster.data.load_stock_names",
+        lambda values: {symbol: f"名称-{symbol}" for symbol in values},
+    )
+    store = NewsStore(tmp_path / "news.sqlite")
+    store._industry_map = {}
+    items = [
+        NewsItem(
+            source="unit", title="窗口内", content="窗口内正文", symbols=["600001.SH"],
+            confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="mirror", title="窗口内转载", content="窗口内正文",
+            symbols=["600001.SH"], confidence=.9, importance_score=100,
+            analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="精确边界", content="精确边界正文", symbols=["000001.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="三日窗口", content="三日窗口正文", symbols=["000002.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="窗口外", content="窗口外正文", symbols=["000003.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="低置信度", content="低置信度正文", symbols=["000004.SZ"],
+            confidence=0, importance_score=100, analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="零质量", content="零质量正文", symbols=["000005.SZ"],
+            confidence=1, importance_score=0, analysis_status="complete",
+        ),
+        NewsItem(
+            source="unit", title="未完成", content="未完成正文", symbols=["000006.SZ"],
+            confidence=1, importance_score=100, analysis_status="pending",
+        ),
+    ]
+    assert store.save(items) == len(items)
+    seen_at = {
+        "窗口内": now - 60,
+        "窗口内转载": now - 30,
+        "精确边界": now - 86400,
+        "三日窗口": now - 2 * 86400,
+        "窗口外": now - 3 * 86400 - 1,
+    }
+    with store._conn() as connection:
+        for title, timestamp in seen_at.items():
+            connection.execute(
+                "UPDATE news SET first_seen_at=? WHERE title=?", (timestamp, title),
+            )
+
+    one_day = store.event_focus(1)
+    three_days = store.event_focus(3)
+    thirty_days = store.event_focus(30)
+
+    assert one_day == {
+        "days": 1,
+        "top_symbols": [
+            {"symbol": "000001.SZ", "name": "名称-000001.SZ", "count": 1},
+            {"symbol": "600001.SH", "name": "名称-600001.SH", "count": 1},
+        ],
+    }
+    assert [item["symbol"] for item in three_days["top_symbols"]] == [
+        "000001.SZ", "000002.SZ", "600001.SH",
+    ]
+    assert [item["symbol"] for item in thirty_days["top_symbols"]] == [
+        "000001.SZ", "000002.SZ", "000003.SZ", "600001.SH",
+    ]
+    with pytest.raises(ValueError, match="仅支持"):
+        store.event_focus(2)
+
+
+def test_market_sentiment_respects_requested_cutoff_and_quality_deduplication(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    items = [
+        NewsItem(
+            source="test",
+            title=f"盘中利好 {index}",
+            content=f"独立内容 {index}",
+            sentiment=1,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+        )
+        for index in range(21)
+    ]
+    items.extend([
+        NewsItem(
+            source="mirror",
+            title="盘中利好转载",
+            content="独立内容 0",
+            sentiment=-1,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+        ),
+        NewsItem(
+            source="test",
+            title="盘后利空",
+            content="盘后独立内容",
+            sentiment=-1,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+        ),
+    ])
+    store.save(items)
+    cutoff = 1_800_000_000.0
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE news SET first_seen_at=? WHERE title LIKE '盘中%'",
+            (cutoff - 60,),
+        )
+        connection.execute(
+            "UPDATE news SET first_seen_at=? WHERE title='盘后利空'",
+            (cutoff + 60,),
+        )
+
+    at_close = store.market_sentiment(as_of=cutoff, days=30)
+    after_close = store.market_sentiment(as_of=cutoff + 120, days=30)
+
+    assert at_close["event_count"] == 21
+    assert at_close["score"] == 100.0
+    assert at_close["lookback_days"] == 30
+    assert after_close["event_count"] == 22
+    assert after_close["score"] < at_close["score"]
+
+
+def test_news_event_focus_is_sorted_and_limited_to_24(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.data.load_stock_names", lambda values: dict.fromkeys(values, "测试标的"),
+    )
+    store = NewsStore(tmp_path / "news.sqlite")
+    store._industry_map = {}
+    symbols = [f"{index:06d}.SZ" for index in range(1, 27)]
+    store.save([
+        NewsItem(
+            source="unit", title=f"事件 {symbol}", content=f"正文 {symbol}",
+            symbols=[symbol], confidence=1, importance_score=100,
+            analysis_status="complete",
+        )
+        for symbol in reversed(symbols)
+    ])
+
+    focused = store.event_focus(7)["top_symbols"]
+
+    assert len(focused) == 24
+    assert [item["symbol"] for item in focused] == symbols[:24]
 
 
 def test_annotation_stream_yields_each_persisted_batch(tmp_path, isolated_config):
@@ -458,6 +621,42 @@ def test_annotation_failure_uses_structured_code_and_provider_backoff(tmp_path):
     assert detail["analysis_status"] == "failed"
     assert detail["last_failure_code"] == "read_timeout"
     assert detail["next_retry_at"] >= started + 239
+
+
+def test_news_detail_explains_existing_generic_analysis_error(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([NewsItem(source="test", title="网关响应异常", content="等待诊断")])
+    item_id = store.max_id()
+    store.analysis_failure(
+        [item_id], "资讯分析失败，请查看本机日志", "invalid_response",
+    )
+
+    detail = store.detail(item_id)
+
+    assert detail["analysis_error"] == (
+        "模型接口返回的内容无法解析。常见原因是 API 地址指向网页、网关返回错误页，"
+        "或接口协议不兼容；请检查 API 地址和模型服务。"
+    )
+
+
+def test_news_failure_keeps_safe_upstream_response_summary(tmp_path):
+    message = (
+        "OpenAI 协议 API 返回了无法解析的响应（HTTP 200 · text/html，"
+        "页面标题：Sub2API - AI API Gateway）"
+    )
+
+    class HTMLGateway:
+        def chat_json(self, prompt, system=None, **kwargs):
+            raise LLMError(message, code="invalid_response", retryable=True)
+
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([NewsItem(source="test", title="错误页", content="等待诊断")])
+    item_id = store.max_id()
+
+    result = AICrawler(client=HTMLGateway(), store=store).enrich_pending(limit=1)
+
+    assert result["failure_details"][0]["message"] == message
+    assert store.detail(item_id)["analysis_error"] == message
 
 
 def test_non_retryable_annotation_error_enters_dead_letter_immediately(tmp_path):
@@ -602,6 +801,11 @@ def test_news_api_csrf_and_ui_contract():
     assert 'id="news-pending-action-count"' in page
     assert 'id="news-failed-action-count"' in page
     assert 'id="news-dead-action-count"' in page
+    assert 'id="news-focus-window"' in page
+    assert page.count('data-news-focus-days=') == 4
+    assert 'class="rotation-window-control news-focus-window"' in page
+    assert 'data-news-focus-days="7" aria-pressed="true"' in page
+    assert 'id="news-focus-feedback"' in page
     assert 'name="llm.max_concurrency"' in page
     assert 'name="news.annotation_timeout"' in page
     assert 'name="news.annotation_max_concurrency"' in page
@@ -610,16 +814,30 @@ def test_news_api_csrf_and_ui_contract():
     assert 'data-settings-section="sources"' in page
     assert "/static/news.js" in page
     assert "/static/news.css" in page
+    assert "/static/news.js?rev=" in page
+    assert "/static/news.css?rev=" in page
+    assert "%%QM_NEWS_" not in page
     chart_source = client.get("/static/news.js").text
+    news_styles = client.get("/static/news.css").text
     assert "mkChart('news-factor-chart')" in chart_source
     assert "CHART_COLORS.primary" in chart_source
     assert "runAnnotation(event.currentTarget, 'failed')" in chart_source
     assert "function failureTemplate(item)" in chart_source
+    assert "/api/v1/news/event-focus?days=${requestedDays}" in chart_source
+    assert "requestId !== state.eventFocusRequest" in chart_source
+    assert "button.dataset.newsFocusDays" in chart_source
+    assert "loadEventFocus(state.eventFocusRetryDays)" in chart_source
+    assert "过去 ${days} 日暂无达到质量门槛的标的提及" in chart_source
+    assert "--news-scroll-edge: 12px" in news_styles
+    assert news_styles.count("padding-inline-end: var(--news-scroll-edge)") == 2
     assert "data-news-retry" in chart_source
+    assert "原因：${html(reason)}" in chart_source
     assert "queue?.manual_recoverable_dead_letter" in chart_source
     assert "正在认领可手动恢复的暂停项" in chart_source
     assert "恢复暂停项" in chart_source
     assert "死信" not in chart_source
+    assert "恢复次数已用尽" not in chart_source
+    assert "/ 3 次" not in chart_source
     assert "recoveryWaiting" not in chart_source
 
 
@@ -771,6 +989,11 @@ def test_manual_dead_letter_recovery_ignores_health_and_backoff(tmp_path, monkey
     item_id = store.max_id()
     for _ in range(3):
         store.analysis_failure([item_id], "offline", "network")
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE news SET analysis_recovery_count=3,next_retry_at=? WHERE id=?",
+            (time.time() + 7 * 86400, item_id),
+        )
     monkeypatch.setattr(store, "llm_recently_healthy", lambda: False)
 
     class HealthyClient:
@@ -940,6 +1163,10 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     assert "secret-value" not in public_error
 
     assert news_module.news_stats(request, days=9999) == {"days": 3650}
+    assert news_module.news_event_focus(request, days=7) == {
+        "days": 7, "top_symbols": [],
+    }
+    assert TestClient(app).get("/api/v1/news/event-focus?days=2").status_code == 422
     queried = news_module.news_query(
         request,
         limit=20,

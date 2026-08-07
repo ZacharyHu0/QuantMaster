@@ -67,6 +67,13 @@ def classify_provider_failure(exc: BaseException) -> str:
     text = str(exc).lower()
     if isinstance(exc, EmptyProviderResponse):
         return "empty_response"
+    if (
+        getattr(exc, "winerror", None) == 10013
+        or "winerror 10013" in text
+        or "socket access" in text
+        or "套接字访问权限" in text
+    ):
+        return "transient_network"
     if isinstance(exc, AttributeError) or any(value in text for value in (
         "has no attribute", "接口不存在", "endpoint not found", "not implemented",
     )):

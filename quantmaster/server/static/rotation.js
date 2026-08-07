@@ -24,6 +24,8 @@
   const WINDOW_KEY = 'quantmaster.rotation.window.v2';
   const WINDOWS = [1,3,5,20];
   let themeCatalog = [];
+  let themeFocus = [];
+  let themeFocusDefinition = {};
   let etfCatalog = [];
   let activeWindow = 5;
   let themePage = 1;
@@ -32,6 +34,9 @@
   let etfPageSize = 50;
   let themePagination = {page:1,page_size:50,total:0,pages:1,has_previous:false,has_next:false};
   let etfPagination = {page:1,page_size:50,total:0,pages:1,has_previous:false,has_next:false};
+  let activeIndustryLevel = 'L1';
+  let industryPayload = null;
+  let industryChartFrame = 0;
   let industrySort = 'change';
   let themeSort = 'change';
   let etfSort = 'flow';
@@ -73,7 +78,9 @@
     return Number.isFinite(parsed) ? `${parsed > 0 ? '+' : ''}${parsed.toFixed(digits)}${suffix}` : '—';
   };
   const signal = (item, window = activeWindow) => item?.signals?.[String(window)] || {};
+  const groupScore = item => item?.score || {};
   const pp = value => signed(value,1,' pp');
+  const scoreEvidenceMarkup = score => `<div class="rotation-evidence-list">${(score?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div>`;
   const windowControl = label => `<div class="rotation-window-control" aria-label="${esc(label)}">${WINDOWS.map(window => `<button type="button" data-rotation-window="${window}" aria-pressed="${String(window === activeWindow)}">${window} 日</button>`).join('')}</div>`;
   const pageControl = (kind, pagination, pageSize) => {
     const page = Number(pagination?.page || 1), pages = Math.max(1, Number(pagination?.pages || 1));
@@ -87,7 +94,7 @@
     return `<div class="rotation-pagination"><span>第 ${page}/${pages} 页 · ${Number(pagination?.total || 0)} 条</span><div class="rotation-pagination-actions"><button type="button" data-rotation-page-to="${kind}:1" ${page <= 1 ? 'disabled' : ''}>首页</button><button type="button" data-rotation-page-step="${kind}:-1" ${page <= 1 ? 'disabled' : ''}>上一页</button><span class="rotation-page-numbers">${rendered}</span><button type="button" data-rotation-page-step="${kind}:1" ${page >= pages ? 'disabled' : ''}>下一页</button><button type="button" data-rotation-page-to="${kind}:${pages}" ${page >= pages ? 'disabled' : ''}>末页</button><label class="rotation-page-size">每页<select data-rotation-${kind}-page-size>${[25,50,100].map(value => `<option value="${value}" ${value === pageSize ? 'selected' : ''}>${value}</option>`).join('')}</select></label></div></div>`;
   };
 
-  function chartZoom(pointCount, {yAxisIndex = 0, initialPoints = 0} = {}) {
+  function chartZoom(pointCount, {yAxisIndex = 0, initialPoints = 0, initialYEnd = 100} = {}) {
     const start = initialPoints > 0 && pointCount > initialPoints
       ? Math.max(0, 100 * (pointCount - initialPoints) / pointCount)
       : 0;
@@ -100,9 +107,9 @@
     return [
       {id:'zoom-x-inside',type:'inside',xAxisIndex:0,...common},
       {id:'zoom-x-slider',type:'slider',xAxisIndex:0,height:12,bottom:7,...common,...slider},
-      {id:'zoom-y-inside',type:'inside',yAxisIndex,start:0,end:100,filterMode:'none'},
+      {id:'zoom-y-inside',type:'inside',yAxisIndex,start:0,end:initialYEnd,filterMode:'none'},
       {id:'zoom-y-slider',type:'slider',orient:'vertical',yAxisIndex,width:12,right:3,top:42,bottom:56,
-        start:0,end:100,filterMode:'none',...slider},
+        start:0,end:initialYEnd,filterMode:'none',...slider},
     ];
   }
 
@@ -206,16 +213,54 @@
       markLine:index === 0 ? {
         silent:true, symbol:'none', label:{color:MUTED,fontSize:9,formatter:'{b}'},
         lineStyle:{color:AXIS,type:'dashed',width:1},
-        data:[{name:'冰点 10',yAxis:10},{name:'收缩 25',yAxis:25},{name:'过热 50',yAxis:50}],
+        data:[{name:'冰点 10',yAxis:10},{name:'强势扩散 25',yAxis:25},{name:'过热 >50',yAxis:50}],
       } : undefined,
     }));
     chart.setOption(baseOpt({
       legend:{top:0,textStyle:{color:INK2,fontSize:10}},
-      grid:{left:46,right:48,top:38,bottom:58}, xAxis:timeAxis(),
+      grid:{left:46,right:80,top:38,bottom:58}, xAxis:{...timeAxis(),splitNumber:12},
       yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
       tooltip:{trigger:'axis',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:11},valueFormatter:value => `${number(value,1)}%`},
-      dataZoom:chartZoom(history.length),
+      dataZoom:chartZoom(history.length,{initialPoints:252,initialYEnd:60}),
       series,
+    }));
+  }
+
+  function recentTemperatureChart(history) {
+    const chart = mkChart('rotation-temperature-recent-chart');
+    if (!chart) return;
+    const recent = (history || []).slice(-15);
+    const values = recent.map(row => Number(row.temperature)).filter(Number.isFinite);
+    const minimum = values.length ? Math.min(...values) : 0;
+    const maximum = values.length ? Math.max(...values) : 100;
+    const padding = Math.max(3, (maximum - minimum) * .15);
+    const lower = Math.max(0, Math.floor((minimum - padding) / 5) * 5);
+    const upper = Math.min(100, Math.ceil((maximum + padding) / 5) * 5);
+    chart.setOption(baseOpt({
+      grid:{left:30,right:8,top:18,bottom:24},
+      tooltip:{trigger:'axis',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:10},valueFormatter:value => `${number(value,1)}%`},
+      xAxis:{type:'category',boundaryGap:false,data:recent.map(row => row.date),axisLine:{lineStyle:{color:AXIS}},axisTick:{show:false},axisLabel:{color:MUTED,fontSize:9,interval:index => index === 0 || index === recent.length - 1 || index % 3 === 0,formatter:value => String(value || '').slice(5)}},
+      yAxis:{type:'value',min:lower,max:upper > lower ? upper : Math.min(100,lower + 5),splitNumber:3,axisLine:{show:false},axisTick:{show:false},axisLabel:{color:MUTED,fontSize:9,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
+      series:[{name:'市场温度',type:'line',showSymbol:true,symbol:'circle',symbolSize:5,data:recent.map(row => row.temperature),lineStyle:{color:CHART_COLORS.primary,width:1.7},itemStyle:{color:CHART_COLORS.primary},label:{show:true,position:'top',distance:4,color:INK2,fontSize:9,formatter:params => `${number(params.value,1)}%`},labelLayout:{hideOverlap:true}}],
+    }));
+  }
+
+  function evidenceRadarChart(items) {
+    const chart = mkChart('rotation-evidence-radar');
+    if (!chart) return;
+    const dimensions = [
+      ['trend','趋势分布'], ['breadth','涨跌宽度'], ['volume','量能确认'],
+      ['etf_capital','ETF 资金'], ['sentiment','情绪代理'],
+    ];
+    const indexed = new Map((items || []).map(item => [item.id,item]));
+    const evidence = dimensions.map(([id,label]) => ({id,label,item:indexed.get(id)}));
+    const complete = evidence.every(({item}) => item?.available && Number.isFinite(Number(item.score)));
+    const values = evidence.map(({item}) => Number(item?.score));
+    chart.setOption(baseOpt({
+      tooltip:complete ? {trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:10},formatter:params => `${params.name}<br>${evidence.map(({label},index) => `${label} ${number(params.value[index],1)}`).join('<br>')}`} : {show:false},
+      radar:{center:['50%','52%'],radius:'68%',startAngle:90,splitNumber:4,indicator:evidence.map(({label}) => ({name:label,max:100})),axisName:{color:INK2,fontSize:10},axisNameGap:7,axisLine:{lineStyle:{color:AXIS}},splitLine:{lineStyle:{color:GRID}},splitArea:{show:false}},
+      series:complete ? [{name:'五维证据',type:'radar',symbol:'circle',symbolSize:4,lineStyle:{color:CHART_COLORS.primary,width:1.6},itemStyle:{color:CHART_COLORS.primary},areaStyle:{color:'rgba(57,135,229,.14)'},data:[{name:'五维证据',value:values}]}] : [],
+      graphic:complete ? [] : [{type:'text',left:'center',top:'middle',style:{text:'等待完整五维证据',fill:MUTED,font:'10px sans-serif'}}],
     }));
   }
 
@@ -230,35 +275,38 @@
     }
     const current = data.current;
     const ratios = current.ratios || {};
-    const recent = (data.history || []).slice(-5);
+    const recent = (data.history || []).slice(-15);
     out.innerHTML = `
       <div class="rotation-kpis">
-        <div class="rotation-kpi"><span>市场温度</span><strong class="${Number(current.temperature) >= 50 ? 'up' : ''}">${percent(current.temperature)}</strong><small>趋势向上样本占比</small></div>
-        <div class="rotation-kpi"><span>温度区间</span><strong>${esc(current.regime_label || '—')}</strong><small>${esc(current.regime || '')}</small></div>
+        <div class="rotation-kpi"><span>市场温度</span><strong class="${Number(current.temperature) > 50 ? 'up' : ''}">${percent(current.temperature)}</strong><small>趋势向上样本占比</small></div>
+        <div class="rotation-kpi"><span>温度区间</span><strong class="rotation-regime" data-regime="${esc(current.regime || 'unavailable')}">${esc(current.regime_label || '—')}</strong><small>${esc(current.regime || '')}</small></div>
         <div class="rotation-kpi"><span>强势加速</span><strong>${percent(ratios.strong_up)}</strong><small>${Number(current.counts?.strong_up || 0).toLocaleString()} 只</small></div>
         <div class="rotation-kpi"><span>有效样本</span><strong>${Number(current.eligible_count || 0).toLocaleString()}</strong><small>停牌与缺失不进分母</small></div>
       </div>
-      <section class="rotation-section rotation-path-section"><div class="rotation-section-head"><div><h3>近五日温度路径</h3><p>只呈现已完成交易日的扩散比例，避免把温度线误读成价格 K 线。</p></div></div><div class="rotation-path-strip">${recent.map(row => `<div><span>${esc(String(row.date || '').slice(5))}</span><strong class="${Number(row.temperature) >= 50 ? 'up' : ''}">${percent(row.temperature)}</strong><small>${esc(_regimeLabel(row.temperature))}</small></div>`).join('')}</div></section>
-      <div class="rotation-layout two">
+      <div class="rotation-layout two rotation-temperature-layout">
         <section class="rotation-section"><div class="rotation-section-head"><div><h3>温度序列</h3><p>市场温度及 5 / 10 / 20 日均线 · 拖动底部与右侧控件缩放</p></div><output>${esc(data.as_of || '')}</output></div><div class="rotation-chart tall" id="rotation-temperature-chart"></div></section>
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>四档分布</h3><p>同一有效样本互斥归类，家数严格守恒</p></div></div>
-          <div class="rotation-state-list">${Object.keys(STATE_LABELS).map(state => `<div class="rotation-state-row"><strong>${STATE_LABELS[state]}</strong><div class="rotation-meter"><i style="--ratio:${Math.max(0,Math.min(1,Number(ratios[state] || 0)/100))}"></i></div><output>${percent(ratios[state])} · ${Number(current.counts?.[state] || 0).toLocaleString()}</output></div>`).join('')}</div>
-        </section>
+        <div class="rotation-temperature-aside">
+          <section class="rotation-section"><div class="rotation-section-head"><div><h3>四档分布</h3><p>每只股票只归入一档，四档合计等于参与计算的股票总数</p></div></div>
+            <div class="rotation-state-list">${Object.keys(STATE_LABELS).map(state => `<div class="rotation-state-row"><strong>${STATE_LABELS[state]}</strong><div class="rotation-meter"><i style="--ratio:${Math.max(0,Math.min(1,Number(ratios[state] || 0)/100))}"></i></div><output>${percent(ratios[state])} · ${Number(current.counts?.[state] || 0).toLocaleString()}</output></div>`).join('')}</div>
+          </section>
+          <section class="rotation-section"><div class="rotation-section-head"><div><h3>近 15 日温度路径</h3><p>最近 15 个已完成交易日</p></div></div><div class="rotation-chart rotation-temperature-recent-chart" id="rotation-temperature-recent-chart"></div></section>
+        </div>
       </div>
       <section class="rotation-section"><div class="rotation-section-head"><div><h3>证据分解</h3><p>缺失维度从有效权重中剔除，不按零分处理</p></div><output>有效权重 ${data.evidence?.available_weight || 0}/100 · 综合 ${number(data.evidence?.score,1)}</output></div>
-        <div class="rotation-evidence-list">${(data.evidence?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div>
+        <div class="rotation-evidence-layout"><div class="rotation-chart rotation-evidence-radar" id="rotation-evidence-radar" aria-label="市场温度五维证据雷达图"></div><div class="rotation-evidence-list">${(data.evidence?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div></div>
       </section>${issuesMarkup(meta)}`;
     temperatureChart(data.history || []);
+    recentTemperatureChart(recent);
+    evidenceRadarChart(data.evidence?.items || []);
   }
 
-  function _regimeLabel(value) {
-    const temperature = Number(value);
-    if (!Number.isFinite(temperature)) return '—';
-    if (temperature < 10) return '冰点';
-    if (temperature < 25) return '收缩';
-    if (temperature < 50) return '扩散';
-    return '过热';
-  }
+  const structureSpreadColor = value => {
+    const parsed = Number(Array.isArray(value) ? value[value.length - 1] : value);
+    if (!Number.isFinite(parsed)) return CHART_COLORS.neutral;
+    if (parsed > .0025) return CHART_COLORS.up;
+    if (parsed < -.0025) return CHART_COLORS.down;
+    return CHART_COLORS.primary;
+  };
 
   function structureChart(history) {
     const chart = mkChart('rotation-structure-chart');
@@ -268,10 +316,129 @@
       grid:{left:52,right:18,top:38,bottom:34}, xAxis:timeAxis(),
       yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value => `${(value * 100).toFixed(1)}%`},splitLine:{lineStyle:{color:GRID}}},
       series:[
-        {name:'强势样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.strong_return]),lineStyle:{color:CHART_COLORS.up,width:1.5}},
-        {name:'低位样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.weak_return]),lineStyle:{color:CHART_COLORS.down,width:1.5}},
-        {name:'强弱差',type:'bar',barMaxWidth:6,data:history.map(row => [row.date,row.spread]),itemStyle:{color:CHART_COLORS.primary}},
+        {name:'强势样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.strong_return]),lineStyle:{color:CHART_COLORS.up,width:1.7,type:'solid'}},
+        {name:'低位样本',type:'line',showSymbol:false,data:history.map(row => [row.date,row.weak_return]),lineStyle:{color:CHART_COLORS.down,width:1.7,type:'dashed'}},
+        {
+          name:'强弱差',type:'bar',barMaxWidth:6,
+          data:history.map(row => [row.date,row.spread]),
+          itemStyle:{color:params => structureSpreadColor(params.value)},
+          markArea:{
+            silent:true,label:{show:false},
+            itemStyle:{color:'rgba(79,143,216,.07)'},
+            data:[[{yAxis:-.0025},{yAxis:.0025}]],
+          },
+        },
       ],
+    }));
+  }
+
+  function structurePathChart(history) {
+    const chart = mkChart('rotation-style-path-chart');
+    if (!chart) return;
+    const recent = (history || []).slice(-10);
+    const levels = {weak_rebound:-1,balanced:0,strong_dominant:1};
+    const levelLabels = {'-1':'低位修复','0':'均衡','1':'强势占优'};
+    const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};
+    const pathColor = state => state === 'strong_dominant'
+      ? CHART_COLORS.up
+      : state === 'weak_rebound'
+        ? CHART_COLORS.down
+        : state === 'balanced' ? CHART_COLORS.primary : MUTED;
+    const points = recent.map(row => {
+      const confirmed = row.confirmed !== 'pending' && row.confirmed !== 'unavailable';
+      const state = confirmed ? row.confirmed : row.candidate;
+      const value = Number(levels[state]);
+      const color = pathColor(state);
+      return {
+        value:Number.isFinite(value) ? value : null,
+        pathRow:row,
+        symbol:'circle',
+        symbolSize:confirmed ? 7 : 6,
+        itemStyle:{
+          color:confirmed ? color : CHART_COLORS.surface,
+          borderColor:color,
+          borderWidth:confirmed ? 0 : 2,
+        },
+      };
+    });
+    const hasPath = points.some(point => point.value !== null);
+    chart.setOption(baseOpt({
+      grid:{left:62,right:8,top:8,bottom:24},
+      tooltip:{
+        trigger:'axis',
+        axisPointer:{type:'line'},
+        backgroundColor:CHART_COLORS.surface,
+        borderColor:AXIS,
+        textStyle:{color:CHART_COLORS.ink,fontSize:10},
+        formatter:params => {
+          const row = (params || []).find(item => item.data?.pathRow)?.data?.pathRow;
+          if (!row) return '';
+          const candidate = STYLE_LABELS[row.candidate] || '待判定';
+          const confirmed = row.confirmed === 'pending'
+            ? '待确认'
+            : STYLE_LABELS[row.confirmed] || '样本不足';
+          return `${esc(row.date || '')}<br>候选 ${esc(candidate)}<br>确认 ${esc(confirmed)}`;
+        },
+      },
+      xAxis:{
+        type:'category',
+        boundaryGap:false,
+        data:recent.map(row => row.date),
+        axisLine:{lineStyle:{color:AXIS}},
+        axisTick:{show:false},
+        axisLabel:{
+          color:MUTED,
+          fontSize:9,
+          interval:recent.length > 6 ? 2 : 0,
+          formatter:value => String(value || '').slice(5),
+        },
+      },
+      yAxis:{
+        type:'value',
+        min:-1,
+        max:1,
+        interval:1,
+        axisLine:{show:false},
+        axisTick:{show:false},
+        axisLabel:{
+          color:MUTED,
+          fontSize:9,
+          formatter:value => {
+            const key = levelStyles[String(value)];
+            return key ? `{${key}|${levelLabels[String(value)]}}` : '';
+          },
+          rich:{
+            strong:{color:CHART_COLORS.up,fontSize:9},
+            balanced:{color:CHART_COLORS.primary,fontSize:9},
+            weak:{color:CHART_COLORS.down,fontSize:9},
+          },
+        },
+        splitLine:{lineStyle:{color:GRID}},
+      },
+      graphic:hasPath ? [] : [{
+        type:'text',
+        left:'center',
+        top:'middle',
+        style:{text:'暂无确认路径',fill:MUTED,font:'10px sans-serif'},
+      }],
+      series:[{
+        name:'确认路径',
+        type:'line',
+        step:'end',
+        connectNulls:false,
+        data:points,
+        lineStyle:{color:MUTED,width:1.4},
+        markArea:{
+          silent:true,
+          label:{show:false},
+          data:[
+            [{yAxis:-1,itemStyle:{color:'rgba(36,160,107,.055)'}},{yAxis:-.5}],
+            [{yAxis:-.5,itemStyle:{color:'rgba(79,143,216,.055)'}},{yAxis:.5}],
+            [{yAxis:.5,itemStyle:{color:'rgba(230,103,103,.055)'}},{yAxis:1}],
+          ],
+        },
+        emphasis:{focus:'series'},
+      }],
     }));
   }
 
@@ -283,26 +450,39 @@
       return;
     }
     const current = data.current;
-    const label = current.confirmed === 'pending' ? `${STYLE_LABELS[current.candidate] || current.candidate} · 待确认` : STYLE_LABELS[current.confirmed] || current.confirmed;
+    const rawStyle = current.confirmed === 'pending' ? current.candidate : current.confirmed;
+    const style = ['strong_dominant','weak_rebound','balanced'].includes(rawStyle)
+      ? rawStyle
+      : 'unavailable';
+    const styleLabel = STYLE_LABELS[style] || '样本不足';
+    const confirmation = current.confirmed === 'pending'
+      ? 'pending'
+      : style === 'unavailable' ? 'unavailable' : 'confirmed';
+    const confirmationLabel = confirmation === 'pending'
+      ? '待确认'
+      : confirmation === 'confirmed' ? '已确认' : '样本不足';
     out.innerHTML = `
       <div class="rotation-kpis">
-        <div class="rotation-kpi"><span>当前结构</span><strong>${esc(label)}</strong><small>候选连续 ${current.candidate_sessions || 0} 日 · 确认连续 ${current.confirmed_sessions || 0} 日</small></div>
+        <div class="rotation-kpi rotation-style-current-kpi" data-style="${esc(style)}" data-confirmation="${confirmation}"><span>当前结构</span><strong class="rotation-style-current-value">${esc(styleLabel)}</strong><small><b class="rotation-style-confirmation">${confirmationLabel}</b> · 候选连续 ${current.candidate_sessions || 0} 日 · 确认连续 ${current.confirmed_sessions || 0} 日</small></div>
         <div class="rotation-kpi"><span>当日强弱差</span><strong class="${tone(current.spread_1d)}">${returnPct(current.spread_1d)}</strong><small>强势中位数 − 低位中位数</small></div>
         <div class="rotation-kpi"><span>三日均值</span><strong class="${tone(current.spread_3d)}">${returnPct(current.spread_3d)}</strong><small>过滤单日跳变</small></div>
-        <div class="rotation-kpi"><span>判断死区</span><strong>±0.25 pp</strong><small>区间内记为均衡</small></div>
+        <div class="rotation-kpi"><span>判断死区</span><strong class="rotation-style-threshold">±0.25 pp</strong><small>区间内记为均衡</small></div>
       </div>
-      <div class="rotation-layout two">
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>强弱样本收益</h3><p>柱为强弱差，折线为两组当日收益中位数</p></div></div><div class="rotation-chart tall" id="rotation-structure-chart"></div></section>
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>当前分布</h3><p>上涨比例与收益中位数同时核查</p></div></div>
-          <div class="rotation-state-list">${(data.distribution || []).map(row => `<div class="rotation-state-row"><strong>${esc(row.label)}</strong><span>${row.count} 只 · ${row.share == null ? '—' : percent(row.share * 100)} · 上涨 ${row.positive_ratio == null ? '—' : percent(row.positive_ratio * 100)}</span><output class="${tone(row.median_return)}">${returnPct(row.median_return)}</output></div>`).join('')}</div>
-        </section>
+      <div class="rotation-layout two rotation-style-layout">
+        <section class="rotation-section"><div class="rotation-section-head"><div><h3>强弱样本收益</h3><p>红绿柱为强弱差，蓝色带为 ±0.25 pp 死区；折线为两组收益中位数</p></div></div><div class="rotation-chart tall" id="rotation-structure-chart"></div></section>
+        <div class="rotation-structure-aside">
+          <section class="rotation-section"><div class="rotation-section-head"><div><h3>当前分布</h3><p>上涨比例与收益中位数同时核查</p></div></div>
+            <div class="rotation-state-list rotation-style-distribution">${(data.distribution || []).map(row => `<div class="rotation-state-row" data-state="${esc(row.state || 'unavailable')}"><strong>${esc(row.label)}</strong><span>${row.count} 只 · ${row.share == null ? '—' : percent(row.share * 100)} · 上涨 ${row.positive_ratio == null ? '—' : percent(row.positive_ratio * 100)}</span><output class="${tone(row.median_return)}">${returnPct(row.median_return)}</output></div>`).join('')}</div>
+          </section>
+          <section class="rotation-section"><div class="rotation-section-head"><div><h3>最近 10 日确认路径</h3><p>阶梯线为候选方向；实心点已确认，空心点待确认</p></div></div><div class="rotation-chart rotation-style-path-chart" id="rotation-style-path-chart" aria-label="最近 10 日市场风格确认路径折线图"></div></section>
+        </div>
       </div>
-      <section class="rotation-section rotation-style-path"><div class="rotation-section-head"><div><h3>最近 10 日确认路径</h3><p>候选状态连续三日一致才成为确认状态；待确认不被包装为结论。</p></div></div><div class="rotation-path-strip">${(data.history || []).slice(-10).map(row => `<div><span>${esc(String(row.date || '').slice(5))}</span><strong>${esc(STYLE_LABELS[row.confirmed] || STYLE_LABELS[row.candidate] || '待判定')}</strong><small>${row.confirmed === 'pending' ? '待确认' : '已确认'}</small></div>`).join('')}</div></section>
       <div class="rotation-layout equal">
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>强势样本前列</h3><p>仅用于解释结构，不构成候选清单</p></div></div>${cohortTable(data.leaders || [])}</section>
-        <section class="rotation-section"><div class="rotation-section-head"><div><h3>低位样本前列</h3><p>按趋势分数从低到高</p></div></div>${cohortTable(data.laggards || [])}</section>
+        <section class="rotation-section"><div class="rotation-section-head"><div><h3 class="rotation-style-heading" data-tone="strong">强势样本前列</h3><p>仅用于解释结构，不构成候选清单</p></div></div>${cohortTable(data.leaders || [])}</section>
+        <section class="rotation-section"><div class="rotation-section-head"><div><h3 class="rotation-style-heading" data-tone="weak">低位样本前列</h3><p>按趋势分数从低到高</p></div></div>${cohortTable(data.laggards || [])}</section>
       </div>${issuesMarkup(meta)}`;
     structureChart(data.history || []);
+    structurePathChart(data.history || []);
   }
 
   function cohortTable(items) {
@@ -310,41 +490,93 @@
     return `<div class="rotation-table-wrap"><table class="rotation-table" style="min-width:420px"><thead><tr><th>名称</th><th>代码</th><th class="numeric">趋势</th><th class="numeric">日收益</th></tr></thead><tbody>${items.map(item => `<tr><td>${esc(item.name)}</td><td>${esc(item.symbol)}</td><td class="numeric">${number(item.trend_score,3)}</td><td class="numeric ${tone(item.return_1d)}">${returnPct(item.return_1d)}</td></tr>`).join('')}</tbody></table></div>`;
   }
 
+  function industryPlotPoints(items) {
+    return items.map(item => {
+      if (item?.positive_ratio === null || item?.positive_ratio === undefined
+          || item?.weak_ratio === null || item?.weak_ratio === undefined) return null;
+      const current = [Number(item.positive_ratio),Number(item.weak_ratio)];
+      if (!current.every(Number.isFinite)) return null;
+      const currentSignal = signal(item);
+      const positiveChange = Number(currentSignal.positive_change_pp);
+      const weakChange = Number(currentSignal.weak_change_pp);
+      const previous = [
+        current[0] - (Number.isFinite(positiveChange) ? positiveChange : 0),
+        current[1] - (Number.isFinite(weakChange) ? weakChange : 0),
+      ];
+      return {item,current,previous,currentSignal};
+    }).filter(Boolean);
+  }
+
   function scatterOption(items) {
-    const values = [];
-    items.forEach(item => {
-      const current = [Number(item.strong_ratio),Number(item.weak_ratio)];
-      const currentSignal = signal(item);
-      const previous = [current[0] - Number(currentSignal.strong_change_pp || 0),current[1] - Number(currentSignal.weak_change_pp || 0)];
-      values.push(...current,...previous);
-    });
-    const axisMax = (offset) => {
-      const maximum = Math.max(0,...values.filter((_,index) => index % 2 === offset).filter(Number.isFinite));
-      return Math.min(100, Math.max(5, Math.ceil(maximum * 1.12 / 5) * 5));
+    const points = industryPlotPoints(items);
+    const values = points.flatMap(point => [...point.current,...point.previous]);
+    const axisRange = (offset) => {
+      const axisValues = values.filter((_,index) => index % 2 === offset).filter(Number.isFinite);
+      const lowest = Math.max(0,Math.min(100,...axisValues));
+      const highest = Math.max(0,Math.min(100,Math.max(...axisValues)));
+      const span = Math.max(0,highest - lowest);
+      const padding = Math.max(3,span * .16);
+      let minimum = Math.max(0,Math.floor((lowest - padding) / 5) * 5);
+      let maximum = Math.min(100,Math.ceil((highest + padding) / 5) * 5);
+      if (maximum - minimum < 10) {
+        const center = (lowest + highest) / 2;
+        minimum = Math.max(0,Math.floor((center - 5) / 5) * 5);
+        maximum = Math.min(100,Math.ceil((center + 5) / 5) * 5);
+      }
+      if (maximum <= minimum) maximum = Math.min(100,minimum + 10);
+      if (maximum <= minimum) minimum = Math.max(0,maximum - 10);
+      return {min:minimum,max:maximum};
     };
-    const labels = new Set([...items].sort((left,right) => Math.abs(Number(signal(right).rotation_change_pp || 0)) - Math.abs(Number(signal(left).rotation_change_pp || 0))).slice(0,8).map(item => item.code));
-    const trails = items.map(item => {
-      const currentSignal = signal(item);
-      return {coords:[
-        [Number(item.strong_ratio) - Number(currentSignal.strong_change_pp || 0),Number(item.weak_ratio) - Number(currentSignal.weak_change_pp || 0)],
-        [Number(item.strong_ratio),Number(item.weak_ratio)],
-      ],lineStyle:{color:Number(currentSignal.rotation_change_pp) >= 0 ? CHART_COLORS.up : CHART_COLORS.down}};
-    });
+    const xRange = axisRange(0), yRange = axisRange(1);
+    const labels = new Set([...points].sort((left,right) => Math.abs(Number(right.currentSignal.rotation_change_pp || 0)) - Math.abs(Number(left.currentSignal.rotation_change_pp || 0))).slice(0,8).map(point => point.item.code));
+    const trails = points.map(point => ({
+      coords:[point.previous,point.current],
+      lineStyle:{
+        color:Number(point.currentSignal.rotation_change_pp) >= 0 ? CHART_COLORS.up : CHART_COLORS.down,
+        width:1.2,
+        opacity:.62,
+      },
+    }));
     return baseOpt({
       grid:{left:50,right:48,top:24,bottom:60},
       tooltip:{trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:11},formatter:params => {
         const item = params.data?.item;
         if (!item) return '';
         const currentSignal = signal(item);
-        return `${esc(item.name)}<br>${activeWindow}日变化 ${pp(currentSignal.rotation_change_pp)}<br>超额 ${returnPct(currentSignal.excess_return)}<br>上涨宽度 ${percent(Number(currentSignal.advance_ratio || 0)*100)}<br>${esc(item.stage_label)}（固定3日）`;
+        return `${esc(item.name)}<br>${activeWindow}日评分 ${number(item.rotation_score,1)} · ${esc(item.grade || '待补')}<br>${activeWindow}日变化 ${pp(currentSignal.rotation_change_pp)}<br>超额 ${returnPct(currentSignal.excess_return)}<br>上涨宽度 ${percent(Number(currentSignal.advance_ratio || 0)*100)}<br>${esc(item.stage_label)}（固定3日）`;
       }},
-      xAxis:{type:'value',name:'强势加速占比',nameLocation:'middle',nameGap:28,min:0,max:axisMax(0),axisLabel:{color:MUTED,formatter:'{value}%'},nameTextStyle:{color:MUTED,fontSize:10},splitLine:{lineStyle:{color:GRID}}},
-      yAxis:{type:'value',name:'低位偏弱占比',nameTextStyle:{color:MUTED,fontSize:10},min:0,max:axisMax(1),axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
+      xAxis:{type:'value',name:'趋势向上占比',nameLocation:'middle',nameGap:28,min:xRange.min,max:xRange.max,splitNumber:5,axisLabel:{color:MUTED,formatter:'{value}%'},nameTextStyle:{color:MUTED,fontSize:10},splitLine:{lineStyle:{color:GRID}}},
+      yAxis:{type:'value',name:'低位偏弱占比',nameTextStyle:{color:MUTED,fontSize:10},min:yRange.min,max:yRange.max,splitNumber:5,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},
       series:[
-        {type:'lines',coordinateSystem:'cartesian2d',silent:true,symbol:['none','arrow'],symbolSize:5,lineStyle:{width:1,opacity:.34},data:trails},
-        {name:'行业',type:'scatter',data:items.map(item => ({value:[item.strong_ratio,item.weak_ratio,Math.max(7,Math.sqrt(item.eligible_count || 1)*2.2)],item,itemStyle:{color:Number(signal(item).rotation_change_pp) > 0 ? CHART_COLORS.up : Number(signal(item).rotation_change_pp) < 0 ? CHART_COLORS.down : CHART_COLORS.primary}})),symbolSize:value => value[2],label:{show:true,position:'top',color:INK2,fontSize:9,formatter:params => labels.has(params.data.item.code) ? params.data.item.name : ''}},
+        {name:'轨迹',type:'lines',coordinateSystem:'cartesian2d',silent:true,symbol:['circle','arrow'],symbolSize:[3,7],lineStyle:{width:1.2,opacity:.62},data:trails,z:2},
+        {name:'行业',type:'scatter',data:points.map(point => ({value:[...point.current,Math.min(22,Math.max(8,Math.sqrt(point.item.eligible_count || 1)*2.1))],item:point.item,itemStyle:{color:Number(point.currentSignal.rotation_change_pp) > 0 ? CHART_COLORS.up : Number(point.currentSignal.rotation_change_pp) < 0 ? CHART_COLORS.down : CHART_COLORS.primary,borderColor:CHART_COLORS.surface,borderWidth:1.5,opacity:.96}})),symbolSize:value => value[2],label:{show:true,position:'top',color:INK2,fontSize:9,formatter:params => labels.has(params.data.item.code) ? params.data.item.name : ''},z:3},
       ],
-      dataZoom:chartZoom(items.length),
+      dataZoom:chartZoom(points.length),
+    });
+  }
+
+  function scheduleIndustryChart(items, levelLabel) {
+    cancelAnimationFrame(industryChartFrame);
+    const target = document.getElementById('rotation-industry-scatter');
+    if (!target) return;
+    const points = industryPlotPoints(items);
+    if (!points.length) {
+      disposeChart('rotation-industry-scatter');
+      target.innerHTML = `<div class="rotation-chart-state"><strong>暂无可绘制坐标</strong><span>${esc(levelLabel)}尚未形成有效的趋势向上与低位偏弱坐标。</span></div>`;
+      return;
+    }
+    industryChartFrame = requestAnimationFrame(() => {
+      if (!target.isConnected || target.offsetParent === null) return;
+      try {
+        const chart = mkChart('rotation-industry-scatter');
+        if (!chart) throw new Error('图表引擎尚未就绪');
+        chart.setOption(scatterOption(items),{notMerge:true});
+        chart.resize();
+      } catch (error) {
+        disposeChart('rotation-industry-scatter');
+        target.innerHTML = `<div class="rotation-chart-state" data-tone="error"><strong>周期坐标暂不可用</strong><span>${esc(error?.message || '请稍后重试')}</span></div>`;
+        reportLocalError('板块联动','行业周期坐标未能绘制',error);
+      }
     });
   }
 
@@ -392,7 +624,7 @@
       ${dimensionStrip(data.dimensions)}
       <div class="rotation-kpis">
         <div class="rotation-kpi"><span>市场温度</span><strong>${temp ? percent(temp.temperature) : '—'}</strong><small>${activeWindow} 日 ${pp(tempChange)} · ${esc(temp?.regime_label || '等待')}</small></div>
-        <div class="rotation-kpi"><span>改善行业</span><strong>${industryRank.improving_count ?? 0}/${industryRank.available ?? 0}</strong><small>强势变化 − 弱势变化 &gt; 0</small></div>
+        <div class="rotation-kpi"><span>改善行业</span><strong>${industryRank.improving_count ?? 0}/${industryRank.available ?? 0}</strong><small>趋势向上变化 − 低位变化 &gt; 0</small></div>
         <div class="rotation-kpi"><span>改善题材</span><strong>${themeRank.improving_count ?? 0}/${themeRank.available ?? 0}</strong><small>完整可用目录，不限 Top 16</small></div>
         <div class="rotation-kpi"><span>${activeWindow} 日 ETF 净流</span><strong class="${tone(etfWindow.net_flow)}">${money(etfWindow.net_flow)}</strong><small>${etfWindow.sessions ?? 0} 个交易日 · ${etfWindow.inflow_count ?? 0} 增 / ${etfWindow.outflow_count ?? 0} 减</small></div>
       </div>
@@ -414,6 +646,7 @@
   function sortedIndustryItems(items) {
     return [...items].sort((left,right) => {
       const a = signal(left), b = signal(right);
+      if (industrySort === 'score') return Number(right.rotation_score ?? -Infinity) - Number(left.rotation_score ?? -Infinity);
       if (industrySort === 'excess') return Number(b.excess_return ?? -Infinity) - Number(a.excess_return ?? -Infinity);
       if (industrySort === 'amount') return Number(b.amount_activity ?? -Infinity) - Number(a.amount_activity ?? -Infinity);
       if (industrySort === 'weak') return Number(b.weak_ratio ?? -Infinity) - Number(a.weak_ratio ?? -Infinity);
@@ -421,26 +654,61 @@
     });
   }
 
+  function summarizeIndustryItems(items, window = activeWindow) {
+    const available = items.map(item => ({item,current:signal(item,window)})).filter(({current}) => (
+      current.rotation_change_pp !== null && current.rotation_change_pp !== undefined
+      && Number.isFinite(Number(current.rotation_change_pp))
+    ));
+    const ranked = [...available].sort((left,right) => Number(right.current.rotation_change_pp) - Number(left.current.rotation_change_pp));
+    const longest = [...items].sort((left,right) => Number(right.stage_sessions || 0) - Number(left.stage_sessions || 0))[0];
+    return {
+      movements:{[String(window)]:{
+        improving_count:available.filter(({current}) => Number(current.rotation_change_pp) > 0).length,
+        retreating_count:available.filter(({current}) => Number(current.rotation_change_pp) < 0).length,
+        unchanged_count:available.filter(({current}) => Number(current.rotation_change_pp) === 0).length,
+        unavailable_count:items.length - available.length,
+        leader:ranked[0] ? {...ranked[0].item,rotation_change_pp:ranked[0].current.rotation_change_pp} : null,
+        laggard:ranked.at(-1) ? {...ranked.at(-1).item,rotation_change_pp:ranked.at(-1).current.rotation_change_pp} : null,
+      }},
+      persistence:{longest:longest ? [{...longest,sessions:Number(longest.stage_sessions || 0)}] : []},
+    };
+  }
+
+  function industryLevelTabs() {
+    return `<div class="rotation-industry-level-tabs" role="tablist" aria-label="行业层级">${[
+      ['L1','一级行业'],['L2','二级行业'],
+    ].map(([level,label]) => `<button id="rotation-industry-${level.toLowerCase()}-tab" type="button" role="tab" data-rotation-industry-level="${level}" aria-selected="${String(level === activeIndustryLevel)}" aria-controls="rotation-industry-level-content" tabindex="${level === activeIndustryLevel ? 0 : -1}">${label}</button>`).join('')}</div>`;
+  }
+
   function renderIndustries(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-industry-content');
+    industryPayload = payload;
     updateMeta('industries',meta);
     const items = data.items || [];
     if (!items.length) { out.innerHTML = emptyMarkup(meta,data.message || '行业成分尚未达到计算门槛。','industries'); return; }
-    if (!items[0]?.signals) { out.innerHTML = emptyMarkup(meta,'行业快照需要升级后才能展示多周期信号。','industries'); return; }
-    const l1 = items.filter(item => item.level === 'L1');
-    const rows = sortedIndustryItems(items);
-    const best = sortedIndustryItems(l1)[0], worst = sortedIndustryItems(l1).at(-1);
+    if (!items.some(item => item?.signals)) { out.innerHTML = emptyMarkup(meta,'行业快照需要升级后才能展示多周期信号。','industries'); return; }
+    if (!items.some(item => item?.positive_ratio != null && item?.weak_ratio != null)) { out.innerHTML = emptyMarkup(meta,'行业快照正在升级趋势向上口径。','industries'); return; }
+    const levelItems = items.filter(item => item.level === activeIndustryLevel);
+    const rows = sortedIndustryItems(levelItems);
+    const summary = summarizeIndustryItems(levelItems,activeWindow);
+    const movement = summary.movements[String(activeWindow)] || {};
+    const best = movement.leader, worst = movement.laggard;
+    const isL2 = activeIndustryLevel === 'L2';
+    const levelLabel = isL2 ? '二级行业' : '一级行业';
+    const levelDescription = isL2 ? '已关注申万二级行业' : '申万 2021 一级行业';
+    const managerMarkup = isL2 ? `<section class="rotation-l2-manager" id="rotation-l2-manager" aria-labelledby="rotation-l2-manager-title" hidden><div class="rotation-l2-manager-head"><div><h3 id="rotation-l2-manager-title">管理二级行业关注区</h3><p>最多选择 30 个；这里只改变二级行业工作台，不改写一级行业汇总。</p></div><button type="button" class="rotation-link" data-rotation-l2-toggle aria-expanded="true" aria-controls="rotation-l2-manager">收起</button></div><div id="rotation-l2-options"><div class="rotation-skeleton"><span></span></div></div></section>` : '';
+    const matrixMarkup = rows.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>行业</th><th>阶段（3日）</th><th class="numeric">评分 / 等级</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">趋势向上 / 低位</th><th class="numeric">覆盖</th></tr></thead><tbody>${rows.map(item => { const current = signal(item); const coordinates = item.positive_ratio == null || item.weak_ratio == null ? '—' : `${percent(item.positive_ratio)} / ${percent(item.weak_ratio)}`; return `<tr><td><button type="button" data-rotation-detail="industry" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)}</div></td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric">${number(item.rotation_score,1)} · ${esc(item.grade || '—')}</td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${coordinates}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div>` : `<div class="rotation-empty compact"><strong>${isL2 ? '尚未关注可计算的二级行业' : '当前没有可计算的一级行业'}</strong><p>${isL2 ? '打开管理关注区，选择需要持续观察的申万二级行业。' : '请刷新行业快照并核对数据覆盖。'}</p>${isL2 ? '<button class="rotation-refresh" type="button" data-rotation-l2-toggle aria-expanded="false" aria-controls="rotation-l2-manager">管理二级行业</button>' : ''}</div>`;
     out.innerHTML = `
-      <div class="rotation-commandbar"><div><strong>行业观察窗口</strong><span>坐标位置是当前值，箭头起点为 ${activeWindow} 个交易日前</span></div>${windowControl('行业周期观察窗口')}</div>
-      <div class="rotation-kpis"><div class="rotation-kpi"><span>有效一级行业</span><strong>${l1.length}</strong><small>申万 2021 共 31 个</small></div><div class="rotation-kpi"><span>变化最快</span><strong>${esc(best?.name || '—')}</strong><small class="${tone(signal(best).rotation_change_pp)}">${pp(signal(best).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>变化末位</span><strong>${esc(worst?.name || '—')}</strong><small class="${tone(signal(worst).rotation_change_pp)}">${pp(signal(worst).rotation_change_pp)}</small></div><div class="rotation-kpi"><span>覆盖门槛</span><strong>8 · 70%</strong><small>最少成分 · 行情覆盖</small></div></div>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>阶段迁移</h3><p>改善与转弱按所选窗口的强势变化减低位变化计算；持续日数只统计连续可判定阶段。</p></div></div>${movementSummary(data.summary || {},activeWindow)}</section>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>周期坐标与 ${activeWindow} 日轨迹</h3><p>横轴强势加速、纵轴低位偏弱；坐标按当前值与轨迹自适应，拖动底部与右侧控件缩放</p></div><output>${l1.length} 个一级行业</output></div><div class="rotation-chart tall" id="rotation-industry-scatter"></div></section>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>行业信号矩阵</h3><p>阶段固定 3 日；表格按独立证据排序，不合成综合分</p></div><label class="rotation-compact-field">排序<select data-rotation-industry-sort><option value="change" ${industrySort === 'change' ? 'selected' : ''}>轮动变化</option><option value="excess" ${industrySort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${industrySort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="weak" ${industrySort === 'weak' ? 'selected' : ''}>低位占比</option></select></label></div>
-        <div class="rotation-table-wrap"><table class="rotation-table rotation-signal-table"><thead><tr><th>行业</th><th>阶段（3日）</th><th class="numeric">${activeWindow}日变化</th><th class="numeric">成员收益</th><th class="numeric">超额</th><th class="numeric">上涨宽度</th><th class="numeric">量能</th><th class="numeric">强势 / 低位</th><th class="numeric">覆盖</th></tr></thead><tbody>${rows.map(item => { const current = signal(item); return `<tr><td><button type="button" data-rotation-detail="industry" data-code="${esc(item.code)}">${esc(item.name)}</button><div class="hint">${esc(item.code)} · ${esc(item.level)}</div></td><td><span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></td><td class="numeric ${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</td><td class="numeric ${tone(current.member_return)}">${returnPct(current.member_return)}</td><td class="numeric ${tone(current.excess_return)}">${returnPct(current.excess_return)}</td><td class="numeric">${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</td><td class="numeric ${tone(current.amount_activity)}">${returnPct(current.amount_activity)}</td><td class="numeric">${percent(item.strong_ratio)} / ${percent(item.weak_ratio)}</td><td class="numeric">${item.eligible_count}/${item.member_count}</td></tr>`; }).join('')}</tbody></table></div>
-      </section><section class="rotation-detail" id="rotation-industry-detail" hidden></section><details class="rotation-l2"><summary><span>二级行业关注区 <small class="rotation-l2-copy">最多 30 个，不改变一级行业汇总</small></span></summary><div id="rotation-l2-options"><div class="rotation-skeleton"><span></span></div></div></details>${issuesMarkup(meta)}`;
-    const chart = mkChart('rotation-industry-scatter');
-    if (chart) chart.setOption(scatterOption(l1));
-    loadL2Options();
+      <div class="rotation-industry-toolbar">${industryLevelTabs()}<span class="rotation-industry-basis">阶段固定 3 日；评分、轨迹和变化采用当前观察窗口</span>${windowControl('行业周期观察窗口')}${isL2 ? '<button type="button" class="rotation-l2-manage-toggle" data-rotation-l2-toggle aria-expanded="false" aria-controls="rotation-l2-manager">管理关注区</button>' : ''}</div>
+      ${managerMarkup}
+      <div class="rotation-industry-workbench" id="rotation-industry-level-content" role="tabpanel" aria-labelledby="rotation-industry-${activeIndustryLevel.toLowerCase()}-tab">
+        <section class="rotation-section rotation-industry-chart-panel"><div class="rotation-section-head"><div><h3>周期坐标与 ${activeWindow} 日轨迹</h3><p>横轴趋势向上、纵轴低位偏弱；圆点为窗口起点，箭头指向当前坐标</p></div><output>${levelItems.length} 个${levelLabel}</output></div><div class="rotation-chart rotation-industry-chart" id="rotation-industry-scatter" role="img" aria-label="${esc(levelLabel)}周期坐标与 ${activeWindow} 日轨迹"></div></section>
+        <aside class="rotation-industry-summary" aria-label="${esc(levelLabel)}摘要"><div class="rotation-industry-summary-head"><div><strong>${esc(levelLabel)}摘要</strong><span>${esc(levelDescription)}</span></div><output>${levelItems.length} 个可计算</output></div><div class="rotation-industry-kpis"><div><span>有效行业</span><strong>${levelItems.length}</strong></div><div><span>覆盖门槛</span><strong>8 · 70%</strong></div><div><span>变化最快</span><strong>${esc(best?.name || '—')}</strong><small class="${tone(best?.rotation_change_pp)}">${pp(best?.rotation_change_pp)}</small></div><div><span>变化末位</span><strong>${esc(worst?.name || '—')}</strong><small class="${tone(worst?.rotation_change_pp)}">${pp(worst?.rotation_change_pp)}</small></div></div><div class="rotation-industry-movement"><div class="rotation-industry-summary-label"><strong>阶段迁移</strong><span>净变化与连续阶段</span></div>${movementSummary(summary,activeWindow)}</div></aside>
+      </div>
+      <section class="rotation-section rotation-industry-matrix"><div class="rotation-section-head"><div><h3>${esc(levelLabel)}信号矩阵</h3><p>评分为 75% 绝对结构与 25% 同层级相对证据；不构成交易评级</p></div><label class="rotation-compact-field">排序<select data-rotation-industry-sort><option value="change" ${industrySort === 'change' ? 'selected' : ''}>轮动变化</option><option value="score" ${industrySort === 'score' ? 'selected' : ''}>周期评分</option><option value="excess" ${industrySort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${industrySort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="weak" ${industrySort === 'weak' ? 'selected' : ''}>低位占比</option></select></label></div>${matrixMarkup}</section>
+      <section class="rotation-detail" id="rotation-industry-detail" hidden></section>${issuesMarkup(meta)}`;
+    scheduleIndustryChart(levelItems,levelLabel);
+    if (isL2) loadL2Options();
   }
 
   async function loadL2Options() {
@@ -470,7 +738,9 @@
         try {
           const body = {l2_codes:checks.filter(input => input.checked).map(input => input.value),theme_limit:preferences.data?.theme_limit || 16};
           const saved = await api('/api/v1/rotation/preferences',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-          cache.set('preferences',saved); cache.delete('industries'); cache.delete('overview');
+          cache.set('preferences',saved);
+          Array.from(cache.keys()).filter(key => key.startsWith('industries:')).forEach(key => cache.delete(key));
+          cache.delete('overview');
           button.textContent = '已保存'; await loadCurrent(true);
         } catch (error) { button.textContent = '保存失败'; reportLocalError('板块联动','二级行业关注未能保存',error); }
         finally { setTimeout(() => { button.disabled = false; if (button.textContent !== '保存关注区') button.textContent = '保存关注区'; },1200); }
@@ -478,13 +748,67 @@
     } catch (error) { target.innerHTML = errorMarkup(error); }
   }
 
+  function themeFocusMeta(item) {
+    if (item?.focus) return item.focus;
+    const current = signal(item);
+    const reasons = [
+      ['rotation','轮动改善',Number(current.rotation_change_pp) > 0],
+      ['excess','相对收益为正',Number(current.excess_return) > 0],
+      ['breadth','上涨宽度过半',Number(current.advance_ratio) >= .5],
+      ['amount','量能活跃',Number(current.amount_activity) > 0],
+      ['grade','周期结构 A/B',['A','B'].includes(item?.grade)],
+    ].filter(([, , available]) => available).map(([id,label]) => ({id,label}));
+    return {evidence_count:reasons.length,evidence_total:5,reasons};
+  }
+
+  function themeFocusCard(item, index) {
+    const current = signal(item), focus = themeFocusMeta(item), lead = index === 0;
+    const evidenceCount = Number(focus.evidence_count || 0);
+    const evidenceTotal = Number(focus.evidence_total || 5);
+    const reasons = (focus.reasons || []).map(reason => esc(reason.label)).join('、')
+      || '当前窗口证据偏弱，仅按相对表现进入观察';
+    const priority = evidenceCount >= 4 ? '优先核查' : evidenceCount >= 3 ? '持续跟踪' : '相对观察';
+    const industry = item.primary_industry
+      ? `${esc(item.primary_industry.name)} · 重合 ${item.primary_industry.overlap_count || 0} 只`
+      : '跨行业 / 映射证据不足';
+    const representatives = (item.representatives || []).slice(0,3);
+    const identity = `<div class="rotation-theme-focus-identity"><span>系统筛选</span><h4 id="rotation-theme-focus-${index}">${esc(item.name)}</h4><p>${esc(item.code)} · ${industry}</p></div>`;
+    const header = `<header class="rotation-theme-focus-card-head"><span class="rotation-theme-focus-rank" aria-hidden="true">${String(index + 1).padStart(2,'0')}</span>${identity}<span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label || '待判定')}</span></header>`;
+    const score = `<div class="rotation-theme-focus-score"><strong>${number(item.rotation_score,1)}</strong><span>/ 100</span><small>${activeWindow} 日周期评分 · ${esc(item.grade || '待补')}</small></div>`;
+    const evidence = `<div class="rotation-theme-focus-evidence"><span>${priority}</span><strong>${evidenceCount}/${evidenceTotal} 项证据</strong></div>`;
+    const footer = `<footer class="rotation-theme-focus-card-foot"><span>${item.stage_sessions || 0} 日阶段持续 · ${item.eligible_count || 0}/${item.member_count || 0} 有效成分</span><button type="button" data-rotation-detail="theme" data-code="${esc(item.code)}">查看完整证据</button></footer>`;
+    if (!lead) {
+      const representative = representatives[0];
+      const compactFooter = `<footer class="rotation-theme-focus-card-foot"><span>${representative ? `代表 ${esc(representative.name)} ${returnPct(representative.return_1d)}` : '暂无合格代表样本'} · ${item.eligible_count || 0}/${item.member_count || 0} 有效</span><button type="button" data-rotation-detail="theme" data-code="${esc(item.code)}">查看完整证据</button></footer>`;
+      return `<article class="rotation-theme-focus-card is-compact" aria-labelledby="rotation-theme-focus-${index}">${header}<div class="rotation-theme-focus-compact-row">${score}<dl><div><dt>轮动</dt><dd class="${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</dd></div><div><dt>超额</dt><dd class="${tone(current.excess_return)}">${returnPct(current.excess_return)}</dd></div><div><dt>宽度</dt><dd>${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)}</dd></div></dl>${evidence}</div><p class="rotation-theme-focus-reason"><span>入选依据</span>${reasons}</p>${compactFooter}</article>`;
+    }
+    const metrics = [
+      ['轮动变化',pp(current.rotation_change_pp),tone(current.rotation_change_pp)],
+      ['成员收益',returnPct(current.member_return),tone(current.member_return)],
+      ['相对收益',returnPct(current.excess_return),tone(current.excess_return)],
+      ['上涨宽度',current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100),''],
+      ['量能活跃',returnPct(current.amount_activity),tone(current.amount_activity)],
+      ['样本覆盖',percent(Number(item.coverage || 0)*100),''],
+    ];
+    const representativeRows = representatives.map(value => `<div class="rotation-theme-focus-representative"><strong>${esc(value.name)}</strong><span>${esc(value.symbol)}</span><output class="${tone(value.return_1d)}">趋势 ${number(value.trend_score,3)} · ${returnPct(value.return_1d)}</output></div>`).join('')
+      || '<p class="hint">暂无满足流动性与历史门槛的代表样本</p>';
+    const windowTrace = `<div class="rotation-theme-focus-window-trace"><div class="rotation-theme-focus-subhead"><span>多窗口轮动变化</span><small>趋势向上占比变化 − 低位偏弱占比变化</small></div><dl>${WINDOWS.map(window => { const value = signal(item,window).rotation_change_pp; return `<div><dt>${window} 日</dt><dd class="${tone(value)}">${pp(value)}</dd></div>`; }).join('')}</dl></div>`;
+    return `<article class="rotation-theme-focus-card is-lead" aria-labelledby="rotation-theme-focus-${index}">${header}<div class="rotation-theme-focus-lead-reading">${score}${evidence}</div><p class="rotation-theme-focus-reason"><span>自动关注依据</span>${reasons}</p><dl class="rotation-theme-focus-metrics">${metrics.map(([label,value,valueTone]) => `<div><dt>${label}</dt><dd class="${valueTone}">${value}</dd></div>`).join('')}</dl>${windowTrace}<div class="rotation-theme-focus-representatives"><div class="rotation-theme-focus-subhead"><span>代表样本</span><small>趋势分 / 当日涨跌</small></div>${representativeRows}</div>${footer}</article>`;
+  }
+
   function renderThemes(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-themes-content');
     updateMeta('themes',meta); themeCatalog = data.items || []; themePagination = data.pagination || themePagination;
-    if (!themeCatalog.length) { out.innerHTML = emptyMarkup(meta,data.message || '尚未建立细分题材成分目录。','themes'); return; }
-    if (!themeCatalog[0]?.signals) { out.innerHTML = emptyMarkup(meta,'题材快照需要升级后才能展示多周期信号。','themes'); return; }
+    themeFocus = (data.focus_items || themeCatalog.slice(0,4)).slice(0,4);
+    themeFocusDefinition = data.focus_definition || {};
     const summary = data.summary || {};
-    out.innerHTML = `<div class="rotation-commandbar"><div><strong>题材信号矩阵</strong><span>${themePagination.total || 0} 个可计算题材 · 服务端完整分页 · 结构评分不构成交易评级</span></div>${windowControl('题材观察窗口')}</div>${movementSummary(summary,activeWindow)}<div class="rotation-filterbar"><label>搜索<input data-rotation-theme-query type="search" value="${esc(themeQuery)}" placeholder="题材名称、代码或关联行业"></label><label>阶段<select data-rotation-theme-stage><option value="">全部阶段</option>${Object.entries(STAGE_LABELS).map(([value,label]) => `<option value="${esc(value)}" ${themeStage === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label><label>结构评分<select data-rotation-theme-grade><option value="">全部等级</option>${['A','B','C','D'].map(value => `<option value="${value}" ${themeGrade === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>排序<select data-rotation-theme-sort><option value="change" ${themeSort === 'change' ? 'selected' : ''}>轮动变化</option><option value="score" ${themeSort === 'score' ? 'selected' : ''}>结构评分</option><option value="excess" ${themeSort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${themeSort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="coverage" ${themeSort === 'coverage' ? 'selected' : ''}>样本覆盖</option></select></label></div><div id="rotation-theme-results"></div><section class="rotation-detail" id="rotation-theme-detail" hidden></section>${issuesMarkup(meta)}`;
+    const total = Number(summary.group_count || themePagination.total || themeCatalog.length);
+    if (!total && !themeFocus.length) { out.innerHTML = emptyMarkup(meta,data.message || '尚未建立细分题材成分目录。','themes'); return; }
+    const sample = themeFocus[0] || themeCatalog[0];
+    if (!sample?.signals) { out.innerHTML = emptyMarkup(meta,'题材快照需要升级后才能展示多周期信号。','themes'); return; }
+    const criteria = (themeFocusDefinition.criteria || []).map(item => item.label).filter(Boolean).join('、')
+      || '轮动改善、正超额、上涨宽度、量能与周期结构';
+    out.innerHTML = `<div class="rotation-commandbar"><div><strong>自动关注口径</strong><span>${activeWindow} 日窗口按 ${esc(criteria)} 排序；只表达核查优先级，不构成交易评级</span></div>${windowControl('题材观察窗口')}</div><section class="rotation-theme-focus" aria-labelledby="rotation-theme-focus-heading"><div class="rotation-theme-focus-head"><div><span>FOCUS QUEUE</span><h3 id="rotation-theme-focus-heading">重点关注题材</h3><p>先看证据更完整的题材，再进入全量目录交叉核查。</p></div><output>${themeFocus.length} / ${total} 个</output></div><div class="rotation-theme-focus-board">${themeFocus.map(themeFocusCard).join('')}</div><div class="rotation-theme-market-context"><span>全量题材背景</span>${movementSummary(summary,activeWindow)}</div></section><section class="rotation-detail" id="rotation-theme-detail" hidden></section><section class="rotation-theme-catalog" aria-labelledby="rotation-theme-catalog-heading"><div class="rotation-theme-catalog-head"><div><span>FULL CATALOG</span><h3 id="rotation-theme-catalog-heading">搜索与完整列表</h3><p>按名称、代码或关联行业定位；筛选只作用于下方目录。</p></div><output>${themePagination.total || 0} / ${total} 条</output></div><div class="rotation-filterbar rotation-theme-filterbar"><label>搜索题材<input data-rotation-theme-query type="search" value="${esc(themeQuery)}" placeholder="输入题材名称、代码或关联行业"></label><label>阶段<select data-rotation-theme-stage><option value="">全部阶段</option>${Object.entries(STAGE_LABELS).map(([value,label]) => `<option value="${esc(value)}" ${themeStage === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label><label>周期评分<select data-rotation-theme-grade><option value="">全部等级</option>${['A','B','C','D'].map(value => `<option value="${value}" ${themeGrade === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label>排序<select data-rotation-theme-sort><option value="change" ${themeSort === 'change' ? 'selected' : ''}>轮动变化</option><option value="score" ${themeSort === 'score' ? 'selected' : ''}>周期评分</option><option value="excess" ${themeSort === 'excess' ? 'selected' : ''}>相对收益</option><option value="amount" ${themeSort === 'amount' ? 'selected' : ''}>量能活跃</option><option value="coverage" ${themeSort === 'coverage' ? 'selected' : ''}>样本覆盖</option></select></label></div><div id="rotation-theme-results"></div></section>${issuesMarkup(meta)}`;
     drawThemeTable();
   }
 
@@ -496,11 +820,15 @@
   function renderEtf(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-etf-content');
     updateMeta('etf_flows',meta); etfCatalog = data.items || []; etfPagination = data.pagination || etfPagination;
-    if (!data.summary && !etfCatalog.length) { out.innerHTML = emptyMarkup(meta,data.message || '等待 ETF 份额快照。','etf'); return; }
+    const research = data.research || {}, researchItems = research.items || [], researchMeta = research.meta || {};
+    if (!data.summary && !etfCatalog.length && !researchItems.length) { out.innerHTML = emptyMarkup(meta,data.message || '等待 ETF 研究与份额快照。','etf'); return; }
     const currentWindow = data.summary?.windows?.[String(activeWindow)] || {};
-    const categories = data.categories || [];
+    const categories = [...new Set([...(research.categories || []),...(data.categories || [])])];
     const streaks = data.summary?.streaks || {};
+    const researchRows = researchItems.map(item => { const m=item.metrics||{}, minute=item.minute_evidence||{}; return `<tr><td>${esc(item.name)}<div class="hint">${esc(item.symbol)}</div></td><td>${esc(item.category)}</td><td class="numeric">${item.category_rank == null ? '—' : `${item.category_rank} · ${number(item.score,1)}`}</td><td class="numeric ${tone(m.return_20d)}">${returnPct(m.return_20d)}</td><td class="numeric">${money(m.avg_amount_20d)}</td><td>${item.share_lag_sessions === 0 ? '当日直连' : item.share_lag_sessions === 1 ? '<span class="rotation-stage">滞后 1 日</span>' : '份额缺失'}</td><td>${minute.complete_session ? `完整 · ${number(minute.vwap_deviation,4)}` : `${minute.rows||0} 条 · 不参与评分`}</td></tr>`; }).join('');
+    const researchSection = `<section class="rotation-section"><div class="rotation-section-head"><div><h3>全场分类研究</h3><p>各类资产只在同类别内排名；stockdb 与直连接口共享 Tushare 上游，不视为独立交叉验证</p></div><output>${research.pagination?.total || researchItems.length} 只 · ${esc(researchMeta.as_of || '待扫描')}</output></div>${researchRows ? `<div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>ETF</th><th>类别</th><th class="numeric">类别排名 · 分数</th><th class="numeric">20 日收益</th><th class="numeric">日均成交额</th><th>份额时点</th><th>分钟证据 / VWAP偏离</th></tr></thead><tbody>${researchRows}</tbody></table></div>` : '<div class="rotation-empty"><strong>尚无全场 ETF 快照</strong><p>运行 ETF 扫描后显示全部可交易 ETF；原有资金流仍在下方保留。</p></div>'}</section>`;
     out.innerHTML = `<div class="rotation-commandbar"><div><strong>ETF 资金窗口</strong><span>累计资金按最近完整交易日求和；跟踪基准缺失时不猜测</span></div>${windowControl('ETF资金观察窗口')}</div><div class="rotation-kpis"><div class="rotation-kpi"><span>${activeWindow} 日净流</span><strong class="${tone(currentWindow.net_flow)}">${money(currentWindow.net_flow)}</strong><small>${currentWindow.sessions || 0} 个交易日</small></div><div class="rotation-kpi"><span>最大净申购</span><strong>${esc(currentWindow.largest_inflow?.name || '—')}</strong><small class="up">${money(currentWindow.largest_inflow?.flow)}</small></div><div class="rotation-kpi"><span>最大净赎回</span><strong>${esc(currentWindow.largest_outflow?.name || '—')}</strong><small class="down">${money(currentWindow.largest_outflow?.flow)}</small></div><div class="rotation-kpi"><span>连续申购 / 赎回</span><strong>${esc(streaks.longest_inflow?.name || '—')} / ${esc(streaks.longest_outflow?.name || '—')}</strong><small>${streaks.longest_inflow?.sessions || 0} / ${streaks.longest_outflow?.sessions || 0} 个观测日</small></div></div><section class="rotation-section"><div class="rotation-section-head"><div><h3>每日与累计资金</h3><p>柱为当日净流，折线为当前本地历史累计 · 支持横纵坐标缩放</p></div><output>${data.daily?.length || 0} 日</output></div><div class="rotation-chart tall" id="rotation-etf-chart"></div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>跟踪基准聚合</h3><p>同一基准下的 ETF 合并，避免同质产品重复放大观感</p></div><output>${data.benchmarks?.length || 0} 个基准</output></div><div class="rotation-benchmark-grid">${[...(data.benchmarks || [])].sort((a,b) => Math.abs(Number(b.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(a.flows?.[String(activeWindow)] || 0))).slice(0,20).map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('')}</div></section><section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 贡献明细</h3><p>完整目录默认 50 行分页，逐只披露价格来源与连续申赎</p></div></div><div class="rotation-filterbar"><label>搜索<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="ETF 名称、代码或基准"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory === value ? 'selected' : ''}>${esc(value)}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="flow" ${etfSort === 'flow' ? 'selected' : ''}>窗口资金</option><option value="daily" ${etfSort === 'daily' ? 'selected' : ''}>当日资金</option><option value="streak" ${etfSort === 'streak' ? 'selected' : ''}>连续申赎</option><option value="name" ${etfSort === 'name' ? 'selected' : ''}>名称</option></select></label></div><div id="rotation-etf-results"></div></section>${issuesMarkup(meta)}`;
+    out.innerHTML = researchSection + out.innerHTML;
     drawEtfTable();
     const chart = mkChart('rotation-etf-chart');
     const daily = data.daily || [];
@@ -535,15 +863,16 @@
     target.innerHTML = '<div class="rotation-skeleton"><span></span><span></span></div>';
     target.scrollIntoView({behavior:'auto',block:'nearest'});
     try {
-      const payload = await api(`/api/v1/rotation/${isTheme ? 'themes' : 'industries'}/${encodeURIComponent(code)}`);
+      const payload = await api(`/api/v1/rotation/${isTheme ? 'themes' : 'industries'}/${encodeURIComponent(code)}?window=${activeWindow}`);
       const item = payload.data || {};
+      const score = groupScore(item);
       const industryContext = isTheme ? (item.primary_industry
         ? ` · 主行业 ${esc(item.primary_industry.name)} ${percent(Number(item.primary_industry.theme_share || 0)*100)}`
         : ' · 跨行业或映射证据不足') : '';
-      target.innerHTML = `<div class="rotation-detail-head"><div><h3>${esc(item.name)} <span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></h3><p>${esc(item.code)} · ${item.eligible_count}/${item.member_count} 有效成分 · 覆盖 ${percent(Number(item.coverage || 0)*100)}${industryContext}</p></div><button type="button" class="rotation-link" data-close-rotation-detail>关闭详情</button></div><div class="rotation-detail-signals">${WINDOWS.map(window => { const current = signal(item,window); return `<div><span>${window} 日变化</span><strong class="${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</strong><small>超额 ${returnPct(current.excess_return)} · 宽度 ${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)} · 量能 ${returnPct(current.amount_activity)}</small></div>`; }).join('')}</div><div class="rotation-representatives">${(item.representatives || []).map(value => `<div class="rotation-representative"><strong>${esc(value.name)}</strong><span>${esc(value.symbol)}</span><span class="${tone(value.return_1d)}">趋势 ${number(value.trend_score,3)} · ${returnPct(value.return_1d)}</span></div>`).join('') || '<span class="hint">暂无满足流动性与历史门槛的代表样本</span>'}</div><div class="rotation-chart compact" id="rotation-detail-chart"></div>`;
+      target.innerHTML = `<div class="rotation-detail-head"><div><h3>${esc(item.name)} <span class="rotation-stage" data-stage="${esc(item.stage)}">${esc(item.stage_label)}</span></h3><p>${esc(item.code)} · ${item.eligible_count}/${item.member_count} 有效成分 · 覆盖 ${percent(Number(item.coverage || 0)*100)}${industryContext}</p><p>${activeWindow} 日周期评分 ${number(score.score,1)} · ${esc(score.grade || '待补')} · 有效权重 ${score.available_weight ?? 0}/100</p></div><button type="button" class="rotation-link" data-close-rotation-detail>关闭详情</button></div><div class="rotation-detail-signals">${WINDOWS.map(window => { const current = signal(item,window); return `<div><span>${window} 日变化</span><strong class="${tone(current.rotation_change_pp)}">${pp(current.rotation_change_pp)}</strong><small>超额 ${returnPct(current.excess_return)} · 宽度 ${current.advance_ratio == null ? '—' : percent(Number(current.advance_ratio)*100)} · 量能 ${returnPct(current.amount_activity)}</small></div>`; }).join('')}</div><section class="rotation-section"><div class="rotation-section-head"><div><h3>评分证据</h3><p>缺失维度退出有效权重；同层级百分位只承担 25%</p></div></div>${scoreEvidenceMarkup(score)}</section><div class="rotation-representatives">${(item.representatives || []).map(value => `<div class="rotation-representative"><strong>${esc(value.name)}</strong><span>${esc(value.symbol)}</span><span class="${tone(value.return_1d)}">趋势 ${number(value.trend_score,3)} · ${returnPct(value.return_1d)}</span></div>`).join('') || '<span class="hint">暂无满足流动性与历史门槛的代表样本</span>'}</div><div class="rotation-chart compact" id="rotation-detail-chart"></div>`;
       const chart = mkChart('rotation-detail-chart');
       if (chart) chart.setOption(baseOpt({
-        legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:48,right:18,top:36,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},series:[{name:'强势加速',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.strong_ratio]),lineStyle:{color:CHART_COLORS.up,width:1.5}},{name:'低位偏弱',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.weak_ratio]),lineStyle:{color:CHART_COLORS.down,width:1.5}}],
+        legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:48,right:18,top:36,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',min:0,max:100,axisLabel:{color:MUTED,formatter:'{value}%'},splitLine:{lineStyle:{color:GRID}}},series:[{name:'趋势向上',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.positive_ratio]),lineStyle:{color:CHART_COLORS.up,width:1.5}},{name:'低位偏弱',type:'line',showSymbol:false,data:(item.history || []).map(row => [row.date,row.weak_ratio]),lineStyle:{color:CHART_COLORS.down,width:1.5}}],
       }));
     } catch (error) { target.innerHTML = errorMarkup(error); }
   }
@@ -570,7 +899,7 @@
         payload = await fetchView('overview','/api/v1/rotation/overview',force);
         if (stillCurrent()) renderOverview(payload);
       } else if (rotationActive && rotationPage === 'industry') {
-        payload = await fetchView('industries','/api/v1/rotation/industries',force);
+        payload = await fetchView(`industries:${activeWindow}`,`/api/v1/rotation/industries?window=${activeWindow}`,force);
         if (stillCurrent()) renderIndustries(payload);
       } else if (rotationActive && rotationPage === 'themes') {
         const params = new URLSearchParams({page:String(themePage),page_size:String(themePageSize),window:String(activeWindow),sort:themeSort,order:themeSort === 'name' ? 'asc' : 'desc'});
@@ -584,12 +913,16 @@
         const params = new URLSearchParams({page:String(etfPage),page_size:String(etfPageSize),window:String(activeWindow),sort:etfSort,order:etfSort === 'name' ? 'asc' : 'desc'});
         if (etfQuery.trim()) params.set('query',etfQuery.trim());
         if (etfCategory) params.set('category',etfCategory);
-        const [summary, items] = await Promise.all([
+        const researchParams = new URLSearchParams({page:String(etfPage),page_size:String(etfPageSize),sort:'rank',order:'asc'});
+        if (etfQuery.trim()) researchParams.set('query',etfQuery.trim());
+        if (etfCategory) researchParams.set('category',etfCategory);
+        const [summary, items, research] = await Promise.all([
           fetchView('etf-summary','/api/v1/rotation/etf-flows?include_items=false',force),
           fetchView(`etf-items:${params.toString()}`,`/api/v1/rotation/etf-flows/items?${params}`,force),
+          fetchView(`etf-research:${researchParams.toString()}`,`/api/v1/rotation/etfs?${researchParams}`,force),
         ]);
         etfPage = Number(items.data?.pagination?.page || etfPage);
-        payload = {meta:summary.meta,data:{...summary.data,...items.data}};
+        payload = {meta:summary.meta,data:{...summary.data,...items.data,research:{...research.data,meta:research.meta}}};
         if (stillCurrent()) renderEtf(payload);
       }
     } catch (error) {
@@ -757,11 +1090,54 @@
     openGroupDetail(kind,code);
   }
 
+  async function scanEtfResearch(button) {
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = '正在提交…';
+    try {
+      let job = await api('/api/v1/rotation/etfs/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      while (['queued','running','cancelling','interrupted'].includes(job.status)) {
+        button.textContent = `${Math.round(Number(job.progress || 0))}% ${job.phase || '读取本地库'}`;
+        await new Promise(resolve => setTimeout(resolve,800));
+        job = await api(`/api/v1/rotation/etfs/jobs/${encodeURIComponent(job.id)}`);
+      }
+      if (!['completed','completed_with_warnings'].includes(job.status)) throw new Error(job.error || job.message || 'ETF 扫描失败');
+      Array.from(cache.keys()).filter(key => key.startsWith('etf-research:')).forEach(key => cache.delete(key));
+      button.textContent = '扫描完成';
+      await loadCurrent(true);
+    } catch (error) {
+      button.textContent = '扫描失败';
+      reportLocalError('ETF 研究','全场 ETF 扫描未完成',error);
+    } finally {
+      setTimeout(() => { button.disabled = false; button.textContent = original; },1200);
+    }
+  }
+
   document.addEventListener('click', event => {
     const market = event.target.closest('[data-market-page]');
     if (market) { setMarketPage(market.dataset.marketPage); return; }
     const rotation = event.target.closest('[data-rotation-page]');
     if (rotation) { setRotationPage(rotation.dataset.rotationPage); return; }
+    const industryLevel = event.target.closest('[data-rotation-industry-level]');
+    if (industryLevel) {
+      const selected = industryLevel.dataset.rotationIndustryLevel;
+      if (['L1','L2'].includes(selected) && selected !== activeIndustryLevel) {
+        activeIndustryLevel = selected;
+        if (industryPayload) renderIndustries(industryPayload);
+        else loadCurrent();
+      }
+      return;
+    }
+    const l2Toggle = event.target.closest('[data-rotation-l2-toggle]');
+    if (l2Toggle) {
+      const manager = document.getElementById('rotation-l2-manager');
+      if (!manager) return;
+      const opening = manager.hidden;
+      manager.hidden = !opening;
+      document.querySelectorAll('[data-rotation-l2-toggle]').forEach(button => button.setAttribute('aria-expanded',String(opening)));
+      if (opening && l2Toggle.closest('.rotation-empty')) requestAnimationFrame(() => manager.scrollIntoView({behavior:'auto',block:'nearest'}));
+      return;
+    }
     const windowButton = event.target.closest('[data-rotation-window]');
     if (windowButton) {
       const selected = Number(windowButton.dataset.rotationWindow);
@@ -790,6 +1166,8 @@
     if (jump) { jumpToGroup(jump.dataset.rotationJump,jump.dataset.code); return; }
     const refreshButton = event.target.closest('[data-rotation-refresh]');
     if (refreshButton) { refresh(refreshButton.dataset.rotationRefresh,refreshButton); return; }
+    const etfScan = event.target.closest('[data-etf-research-scan]');
+    if (etfScan) { scanEtfResearch(etfScan); return; }
     const detail = event.target.closest('[data-rotation-detail]');
     if (detail) { openGroupDetail(detail.dataset.rotationDetail,detail.dataset.code); return; }
     const close = event.target.closest('[data-close-rotation-detail]');
@@ -797,6 +1175,17 @@
   });
 
   document.addEventListener('keydown', event => {
+    const industryTab = event.target.closest('.rotation-industry-level-tabs [role="tab"]');
+    if (industryTab && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
+      const tabs = [...industryTab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
+      const index = tabs.indexOf(industryTab);
+      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      event.preventDefault();
+      tabs[nextIndex].focus();
+      tabs[nextIndex].click();
+      return;
+    }
     const current = event.target.closest('.workspace-context [role="tab"]');
     if (!current || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     const tabs = [...current.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];

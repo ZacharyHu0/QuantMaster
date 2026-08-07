@@ -94,6 +94,7 @@ def test_free_stockdb_cross_section_discloses_optional_field_coverage(monkeypatc
     assert frame.loc[0, "symbol"] == "600519.SH"
     assert pd.isna(frame.loc[0, "pe_ttm"])
     assert "pe_ttm" in client.calls[0]["fields"]
+    assert client.calls[0]["fq"] is None
     assert source.board_hierarchy()[0]["level"] == "L1"
 
 
@@ -119,7 +120,8 @@ def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> 
         ["600519.SH", "000001.SZ"], "2026-08-06", "2026-08-06",
     )
 
-    assert frame.shape == (2, 13)
+    assert frame.shape == (2, 21)
+    assert frame["pre_close"].isna().all()
     assert frame["symbol"].tolist() == ["000001.SZ", "600519.SH"]
     assert frame["amount"].tolist() == [1_000_000, 1_000_000]
     assert frame["is_st"].tolist() == [False, False]

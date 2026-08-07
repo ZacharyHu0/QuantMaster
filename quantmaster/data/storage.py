@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 _LOCKS_GUARD = threading.Lock()
 _SYMBOL_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _FILE_LOCK_STATE: dict[tuple[str, str], tuple[int, BufferedRandom]] = {}
+_INTEGRITY_LOG_GUARD = threading.Lock()
+_INTEGRITY_LOGGED_AT: dict[tuple[str, str, str], float] = {}
 
 _META_COLUMNS = (
     "symbol", "start", "end", "updated_at", "coverage_start", "coverage_end",
@@ -309,6 +311,18 @@ class BarStore:
         """返回跨 BarStore 实例共享的单标的锁，覆盖读取、拉取和原子替换。"""
         return _BarLock(self.root, symbol)
 
+    def _normalize_frame_index(self, value: pd.DataFrame) -> pd.DataFrame:
+        """Return daily bars with a timezone-naive trading-date index.
+
+        Older yfinance cache files retain the exchange timezone in parquet.  Daily
+        registry boundaries are date strings, so keeping that timezone would make
+        otherwise valid cached dates incomparable with the requested range.
+        """
+        if isinstance(value.index, pd.DatetimeIndex) and value.index.tz is not None:
+            value = value.copy()
+            value.index = value.index.tz_localize(None)
+        return value
+
     def read(
         self,
         symbol: str,
@@ -348,7 +362,7 @@ class BarStore:
                         symbol, reason, metadata or {}, enqueue_repair,
                     )
                     return BarReadResult(None, "corrupt", reason, actual_hash)
-            value = pd.read_parquet(path, columns=columns)
+            value = self._normalize_frame_index(pd.read_parquet(path, columns=columns))
             if orphan_reason:
                 # A readable legacy/orphan file is useful as an explicit degraded
                 # offline result while its catalog entry is rebuilt.  It must never
@@ -401,7 +415,20 @@ class BarStore:
         enqueue: bool,
     ) -> None:
         self._mark_corrupt(symbol)
-        logger.error("BarStore integrity failure symbol=%s reason=%s", symbol, reason)
+        log_key = (str(self.root.resolve()), symbol, reason)
+        now = time.time()
+        with _INTEGRITY_LOG_GUARD:
+            previous = _INTEGRITY_LOGGED_AT.get(log_key, 0.0)
+            should_log = now - previous >= 600
+            if should_log:
+                _INTEGRITY_LOGGED_AT[log_key] = now
+        if should_log:
+            logger.error("BarStore integrity failure symbol=%s reason=%s", symbol, reason)
+        else:
+            logger.debug(
+                "BarStore repeated integrity failure suppressed symbol=%s reason=%s",
+                symbol, reason,
+            )
         if not enqueue or self.root.name != "bars":
             return
         try:
@@ -519,6 +546,7 @@ class BarStore:
         """
         if df is None or df.empty:
             return
+        df = self._normalize_frame_index(df)
         from quantmaster.runtime.maintenance import maintenance_barrier
 
         maintenance_barrier.require_writable()
@@ -686,3 +714,7 @@ class IntradayBarStore(BarStore):
         else:  # validate_frequency 已拒绝未知值；保留显式安全边界。
             raise ValueError("IntradayBarStore 收到未知分钟频率")
         super().__init__(base / directory)
+
+    def _normalize_frame_index(self, value: pd.DataFrame) -> pd.DataFrame:
+        """Intraday timestamps retain their provider timezone when one is present."""
+        return value

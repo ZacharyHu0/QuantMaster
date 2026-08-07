@@ -200,6 +200,7 @@ class InstrumentStore:
         if not count:
             self._import_bundled_snapshot()
         self._migrate_legacy_names()
+        self._migrate_exchange_etfs()
 
     def _import_bundled_snapshot(self) -> None:
         records: list[dict[str, Any]] = []
@@ -250,6 +251,16 @@ class InstrumentStore:
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key,value) VALUES('legacy_names_migrated', ?)",
                 (str(int(time.time())),),
+            )
+
+    def _migrate_exchange_etfs(self) -> None:
+        """Repair old Tushare fund_basic imports that labeled listed ETFs as funds."""
+        with self._connection() as connection:
+            connection.execute(
+                """UPDATE instruments SET asset_type='etf'
+                   WHERE market='CN' AND exchange IN ('SH','SZ') AND asset_type='fund'
+                     AND UPPER(name) LIKE '%ETF%' AND UPPER(name) NOT LIKE '%LOF%'
+                     AND name NOT LIKE '%联接%'"""
             )
 
     @staticmethod

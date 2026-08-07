@@ -107,6 +107,66 @@ class TestLLMClient:
         assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
         assert captured["payload"]["reasoning_effort"] == "high"
 
+    def test_invalid_html_response_reports_safe_upstream_summary(self, monkeypatch):
+        def fake_post(url, **kwargs):
+            return httpx.Response(
+                200,
+                text=(
+                    "<!doctype html><html><head><title>Sub2API - AI API Gateway</title>"
+                    "</head><body>sk-secret-must-not-leak</body></html>"
+                ),
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
+        client = LLMClient(LLMConfig(
+            provider="openai-compatible", base_url="https://gateway.test/v1",
+        ))
+
+        with pytest.raises(LLMError) as caught:
+            client.chat("hi")
+
+        message = str(caught.value)
+        assert caught.value.code == "invalid_response"
+        assert "HTTP 200" in message
+        assert "text/html" in message
+        assert "Sub2API - AI API Gateway" in message
+        assert "secret-must-not-leak" not in message
+
+    def test_root_gateway_falls_back_to_v1_after_html(self, monkeypatch):
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            if url.endswith("/v1/chat/completions"):
+                return httpx.Response(
+                    200, json={"choices": [{"message": {"content": "ok"}}]},
+                    request=httpx.Request("POST", url),
+                )
+            return httpx.Response(
+                200, text="<title>Gateway Console</title>",
+                headers={"Content-Type": "text/html"},
+                request=httpx.Request("POST", url),
+            )
+
+        monkeypatch.setattr(
+            httpx.Client, "post",
+            lambda _client, *args, **kwargs: fake_post(*args, **kwargs),
+        )
+        client = LLMClient(LLMConfig(
+            provider="openai-compatible", base_url="https://gateway.test",
+        ))
+
+        assert client.chat("hi") == "ok"
+        assert calls == [
+            "https://gateway.test/chat/completions",
+            "https://gateway.test/v1/chat/completions",
+        ]
+
     def test_per_request_model_override(self, monkeypatch):
         captured = {}
 

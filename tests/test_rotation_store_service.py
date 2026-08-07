@@ -130,17 +130,98 @@ def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
     ).read_text(encoding="utf-8")
+    stylesheet = (
+        Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.css"
+    ).read_text(encoding="utf-8")
 
-    assert "Math.ceil(maximum * 1.12 / 5) * 5" in script
-    assert "Math.max(40" not in script
-    assert "Math.max(60" not in script
+    assert "const padding = Math.max(3,span * .16)" in script
+    assert "min:xRange.min,max:xRange.max" in script
+    assert "min:yRange.min,max:yRange.max" in script
     assert script.count('id="rotation-industry-scatter"') == 1
     assert "rotation-radar-scatter" not in script
     assert "周期坐标与 ${activeWindow} 日轨迹" in script
-    assert "dataZoom:chartZoom(history.length)" in script
-    assert "dataZoom:chartZoom(items.length)" in script
+    assert "name:'趋势向上占比'" in script
+    assert "item.positive_ratio" in script
+    assert "currentSignal.positive_change_pp" in script
+    assert "评分为 75% 绝对结构与 25% 同层级相对证据" in script
+    assert "scoreEvidenceMarkup(score)" in script
+    assert "?window=${activeWindow}" in script
+    assert "dataZoom:chartZoom(history.length,{initialPoints:252,initialYEnd:60})" in script
+    assert "grid:{left:46,right:80,top:38,bottom:58}" in script
+    assert "xAxis:{...timeAxis(),splitNumber:12}" in script
+    assert "start:0,end:initialYEnd" in script
+    assert script.count('id="rotation-temperature-recent-chart"') == 1
+    assert script.count("slice(-15)") >= 2
+    assert "近 15 日温度路径" in script
+    assert "index % 3 === 0" in script
+    assert "const padding = Math.max(3, (maximum - minimum) * .15)" in script
+    assert "min:lower,max:upper > lower ? upper : Math.min(100,lower + 5)" in script
+    assert "recentTemperatureChart(recent)" in script
+    assert script.count('id="rotation-evidence-radar"') == 1
+    assert "const complete = evidence.every" in script
+    assert "series:complete ?" in script
+    assert "等待完整五维证据" in script
+    assert "dataZoom:chartZoom(points.length)" in script
     assert "dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1],initialPoints:260})" in script
     assert "orient:'vertical',yAxisIndex" in script
+    assert script.count('class="rotation-layout two rotation-temperature-layout"') == 1
+    assert 'class="rotation-regime" data-regime="${esc(current.regime || \'unavailable\')}"' in script
+    assert "每只股票只归入一档，四档合计等于参与计算的股票总数" in script
+    assert "同一有效样本互斥归类，家数严格守恒" not in script
+    assert ".rotation-layout.two.rotation-temperature-layout" in stylesheet
+    assert "grid-template-columns:minmax(0,2.3fr) minmax(240px,.5fr)" in stylesheet
+    assert ".rotation-temperature-recent-chart { height:136px; }" in stylesheet
+    assert ".rotation-evidence-radar { height:240px; }" in stylesheet
+    assert "grid-template-columns:minmax(220px,.7fr) minmax(0,1.3fr)" in stylesheet
+    assert ".rotation-state-row { grid-template-columns:52px minmax(0,1fr) 92px; gap:8px; }" in stylesheet
+    assert '.rotation-regime[data-regime="ice"] { color:var(--s1); }' in stylesheet
+    assert '.rotation-regime[data-regime="contraction"] { color:var(--down); }' in stylesheet
+    assert '.rotation-regime[data-regime="expansion"] { color:var(--up); }' in stylesheet
+    assert '.rotation-regime[data-regime="overheat"] { color:var(--s4); }' in stylesheet
+    assert ".rotation-table.rotation-ranking-table" in stylesheet
+    assert "width:100%; min-width:0; table-layout:fixed;" in stylesheet
+    assert ".rotation-ranking-table th:nth-child(1)" in stylesheet
+    assert ".rotation-ranking-table th:nth-child(2)" in stylesheet
+    assert ".rotation-ranking-table th:nth-child(n+3)" in stylesheet
+
+
+def test_market_style_confirmation_path_uses_compact_chart_layout():
+    script = (
+        Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
+    ).read_text(encoding="utf-8")
+    stylesheet = (
+        Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.css"
+    ).read_text(encoding="utf-8")
+
+    assert script.count('id="rotation-style-path-chart"') == 1
+    assert "structurePathChart(data.history || [])" in script
+    assert "step:'end'" in script
+    assert "const structureSpreadColor = value =>" in script
+    assert "if (parsed > .0025) return CHART_COLORS.up;" in script
+    assert "if (parsed < -.0025) return CHART_COLORS.down;" in script
+    assert "lineStyle:{color:CHART_COLORS.down,width:1.7,type:'dashed'}" in script
+    assert "data:[[{yAxis:-.0025},{yAxis:.0025}]]" in script
+    assert "const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};" in script
+    assert "rgba(36,160,107,.055)" in script
+    assert "rgba(79,143,216,.055)" in script
+    assert "rgba(230,103,103,.055)" in script
+    assert 'data-style="${esc(style)}" data-confirmation="${confirmation}"' in script
+    assert 'data-state="${esc(row.state || \'unavailable\')}"' in script
+    assert 'class="rotation-structure-aside"' in script
+    assert "rotation-path-strip" not in script
+    assert ".rotation-layout.two.rotation-style-layout" in stylesheet
+    assert "grid-template-columns:minmax(0,1.7fr) minmax(300px,.7fr)" in stylesheet
+    assert ".rotation-style-path-chart { height:136px; }" in stylesheet
+    assert ".rotation-style-current-kpi[data-style=\"strong_dominant\"]" in stylesheet
+    assert ".rotation-style-current-kpi[data-style=\"weak_rebound\"]" in stylesheet
+    assert ".rotation-style-current-kpi[data-style=\"balanced\"]" in stylesheet
+    assert "background:color-mix(in oklch,var(--style-tone) 7%,var(--page));" in stylesheet
+    assert ".rotation-style-current-kpi[data-confirmation=\"pending\"]" in stylesheet
+    assert ".rotation-style-distribution .rotation-state-row[data-state=\"strong_up\"]" in stylesheet
+    assert ".rotation-style-distribution .rotation-state-row[data-state=\"range\"]" in stylesheet
+    assert ".rotation-style-distribution .rotation-state-row[data-state=\"weak\"]" in stylesheet
+    assert ".rotation-style-heading[data-tone=\"strong\"]" in stylesheet
+    assert ".rotation-style-heading[data-tone=\"weak\"]" in stylesheet
 
 
 def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_path):
@@ -228,6 +309,29 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         return real_compute_trend(values)
 
     monkeypatch.setattr(service_module, "compute_trend_matrices", counted_trend)
+    monkeypatch.setattr(
+        service_module,
+        "compute_etf_capital_evidence",
+        lambda *_args, **_kwargs: {
+            "available": True,
+            "score": 18.45,
+            "as_of": str(close.index[-1].date()),
+            "note": "近 5 日净申购率 -3.98%",
+            "fund_count": 20,
+            "reference_windows": 252,
+        },
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_news_sentiment_evidence",
+        lambda as_of: {
+            "available": True,
+            "score": 53.95,
+            "as_of": as_of,
+            "note": "中性 +7.90",
+            "event_count": 120,
+        },
+    )
 
     def load_values(*, progress, cancelled):
         assert not cancelled()
@@ -275,6 +379,14 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     themes = service.snapshot("themes")
     etf_flows = service.snapshot("etf_flows")
     assert temperature["meta"]["batch_id"] == industries["meta"]["batch_id"]
+    assert temperature["data"]["evidence"]["available_weight"] == 100
+    evidence = {
+        item["id"]: item for item in temperature["data"]["evidence"]["items"]
+    }
+    assert evidence["etf_capital"]["score"] == 18.45
+    assert evidence["sentiment"]["score"] == 53.95
+    assert "tushare:fund_share" in temperature["meta"]["sources"]
+    assert "local:news" in temperature["meta"]["sources"]
     assert len(industries["data"]["items"]) == 4
     assert len(themes["data"]["items"]) == 1
     assert set(industries["data"]["items"][0]["signals"]) == {"1", "3", "5", "20"}

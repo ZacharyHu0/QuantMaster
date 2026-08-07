@@ -75,8 +75,13 @@ class NewsClaimStore:
         if mode == "failed":
             return "n.analysis_status='failed'", []
         if mode == "dead_letter":
-            sql = "n.analysis_status='dead_letter' AND n.analysis_recovery_count<3"
-            return (sql if manual else f"{sql} AND n.next_retry_at<=?", [] if manual else [time.time()])
+            sql = "n.analysis_status='dead_letter'"
+            if manual:
+                return sql, []
+            return (
+                f"{sql} AND n.analysis_recovery_count<3 AND n.next_retry_at<=?",
+                [time.time()],
+            )
         return (
             "n.analysis_status IN ('pending','failed','recovery') "
             "AND n.analysis_attempts<3 AND n.next_retry_at<=?",

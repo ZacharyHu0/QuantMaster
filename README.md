@@ -52,10 +52,16 @@ qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
 
 Windows 仓库用户也可以运行 `qm-serve.cmd --open`。脚本会固定使用项目 `.venv`，并默认
-监视主站 Python 代码：代码变更后 Web worker 会安全热更新，FreeStockDB 在整个启动器
-退出前保持运行；HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
+监视主站 Python 代码：连续写入会等待 30 秒静默，且任意两次重载至少间隔 5 分钟，
+冷却期间的全部修改会积压并合并为下一次安全热更新，
+单独修改发布元数据不会重启 Web worker，FreeStockDB 在整个启动器退出前保持运行；
+HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
 运行 `qm-serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
 `QuantMaster.exe`；监督进程和热更新 worker 在 Windows 任务管理器中都显示为 QuantMaster。
+可用 `QM_RELOAD_QUIET_SECONDS`、`QM_RELOAD_MAX_BATCH_SECONDS` 和
+`QM_RELOAD_MIN_INTERVAL_SECONDS` 调整静默、连续写入批次和重载限频窗口。
+需要立刻应用后端修改时，可打开页头版本号弹窗并点击“立即热更新”；手动更新绕过上述
+静默与限频窗口，只安全替换 Web worker，不会启停 FreeStockDB。
 
 启动后点击页头的“帮助”，可在应用内阅读完整手册；也可以直接打开
 `http://127.0.0.1:8686/#help/start`。手册中的市场规则标有核验日期，实盘前仍应以
@@ -114,9 +120,18 @@ dry-run、启动、取消和续跑能力。详细数据口径、ArtifactRef 和 
 完整性门后发布新快照；失败会继续展示上一份正式结果及过期原因。默认排除 ST、
 上市不足 60 个交易日和近 20 日日均成交额低于 3,000 万元的证券，北交所默认纳入
 并单独披露。候选是可审计的研究证据，不会自动下单或转化为确定性买卖建议。
+一次通过验收的本地更新会冻结未复权行情、复权因子、证券/退市目录和当日板块目录，
+生成可内容寻址的 `ingest_id`；盘后、ETF 研究、诊断与研究湖共用该摄取，不重复全库读取。
 若配置的 Tushare 账号具备 `index_weight` 权限，系统会拉取沪深300与中证500月度点时
 成分，按生效日写入研究湖 `csi800_membership` 分区；盘后验证、Quant Lab 和历史回放
 复用该缓存。缺少 Token 或权限时只降级中证800基线，不影响盘后正式快照发布。
+
+长期运行时，启用 `free_stockdb_auto_update` 会在设定时间自动安全停止受托管的
+stockdb、运行可见的原生更新器并恢复服务。更新器退出后还会按全市场实际交易日、
+证券覆盖和 OHLCV 完整率验收；未就绪时最多重试 3 次，每次间隔 15 分钟，单次更新器
+最长运行 30 分钟。只有验收通过才登记成功并自动提交盘后扫描。热重载 worker 通过
+本地 SQLite 控制邮箱把更新交给持有 stockdb 的监督进程；异常关闭遗留的进程仅在
+PID、创建时间、可执行文件路径和失效 owner 均核验一致时才会被下次启动回收。
 
 Python API 同样直接：
 
@@ -151,7 +166,7 @@ data:
   free_stockdb_url: http://127.0.0.1:7899
   free_stockdb_root: runtime/free-stockdb # 可选：用户自行解压的完整发行包目录
   free_stockdb_managed: true       # 随 QuantMaster 启停本机 stockdb
-  free_stockdb_auto_update: true   # 使用发行包自带更新器盘后增量更新
+  free_stockdb_auto_update: true   # 自动停库、更新、真实交易日验收并恢复服务
   free_stockdb_update_time: "18:30"
   tushare_token: ""            # 可选
   akshare_retries: 3           # 失败后指数退避重试，再降级 Tushare
@@ -197,8 +212,10 @@ TEST 在入围顺序冻结后才读取一次且不回流选参。非 PIT 特征�
 
 数据源默认顺序是 **free-stockdb → AKShare → Tushare → 本地缓存**，也可在设置中
 把 AKShare 或 Tushare 设为主源。QuantMaster 复用用户自行安装的
-[free-stockdb](https://github.com/hello245m/free-stockdb) `StockDBClient` 与本地数据，
-提供前复权日线、1/5/15/30/60 分钟线、申万行业和概念板块。完整发行包可自行解压到
+[free-stockdb](https://github.com/hello245m/free-stockdb) `StockDBClient` 与本地数据。
+free-stockdb 本身是 Tushare 数据的第三方本地打包/分发路径，因此跨路径差异用于检查
+打包时效、单位和字段语义，不被表述为独立上游交叉验证。QuantMaster 冻结未复权日线
+与复权因子，提供 1/5/15/30/60 分钟线、申万行业、概念板块和全场 ETF 分类研究。完整发行包可自行解压到
 `runtime/free-stockdb` 或在设置中选择其他目录，由 QuantMaster 可选托管启停和盘后更新；
 项目不会下载或复制其程序、数据包和上游同步源。东方财富、新浪、中证、Yahoo 与 Tushare 分通道调度，
 不同上游可并行，同一真实上游保持保守并发；

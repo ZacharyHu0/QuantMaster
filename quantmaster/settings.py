@@ -24,6 +24,10 @@ from quantmaster.credentials import CredentialError, CredentialStore
 
 CONFIG_VERSION = 1
 AUTO_SNAPSHOT_LIMIT = 20
+SETTINGS_CHECK_KINDS = frozenset({
+    "llm-models", "llm-web-search", "tushare", "storage",
+    "data-sources", "server", "lab",
+})
 
 
 def normalize_api_base(provider: str, value: str) -> str:
@@ -86,6 +90,12 @@ class DataSettings(StrictModel):
         default="http://8.138.149.215:7899", max_length=2048,
     )
     free_stockdb_online_timeout: float = Field(default=4.0, ge=0.5, le=30.0)
+    free_stockdb_ingest_retain: int = Field(default=30, ge=5, le=365)
+    free_stockdb_etf_research_enabled: bool = True
+    free_stockdb_etf_minutes_enabled: bool = True
+    free_stockdb_experimental_tick_enabled: bool = False
+    free_stockdb_experimental_fundamentals_enabled: bool = False
+    free_stockdb_experimental_daily_quota: int = Field(default=20, ge=1, le=200)
     cache_days: int = Field(default=1, ge=0, le=3650)
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
@@ -321,6 +331,53 @@ def document_from_config(cfg: Config) -> SettingsDocument:
     })
 
 
+def _setting_check_fingerprint(
+    kind: str,
+    document: SettingsDocument,
+    secrets: dict[str, str],
+) -> str:
+    """Hash only the settings that can affect one check; never persist credentials."""
+    secret_hashes = {
+        name: hashlib.sha256(f"quantmaster:{name}\0{value}".encode()).hexdigest()
+        if value else ""
+        for name, value in secrets.items()
+    }
+    if kind in {"llm-models", "llm-web-search"}:
+        subject: dict[str, Any] = {
+            "llm": document.llm.model_dump(),
+            "credential": secret_hashes.get("llm", ""),
+        }
+    elif kind == "tushare":
+        subject = {"credential": secret_hashes.get("tushare", "")}
+    elif kind == "storage":
+        subject = {"root": document.data.root}
+    elif kind == "data-sources":
+        subject = {
+            "timeout": document.llm.timeout,
+            "data": {
+                "root": document.data.root,
+                "free_stockdb_url": document.data.free_stockdb_url,
+                "free_stockdb_timeout": document.data.free_stockdb_timeout,
+                "free_stockdb_sdk_path": document.data.free_stockdb_sdk_path,
+            },
+        }
+    elif kind == "server":
+        subject = document.server.model_dump()
+    elif kind == "lab":
+        subject = {
+            "lab": {
+                "universe": document.lab.universe,
+                "device": document.lab.device,
+            },
+            "data_root": document.data.root,
+            "credential": secret_hashes.get("tushare", ""),
+        }
+    else:
+        raise ValueError(f"未知设置检测项目: {kind}")
+    encoded = json.dumps(subject, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _resolve_config_path(path: str | Path | None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
@@ -390,6 +447,7 @@ class ConfigManager:
         credential_store: CredentialStore | None = None,
     ):
         self.path = _resolve_config_path(path)
+        self.check_state_path = self.path.with_suffix(".checks.json")
         self.backup_dir = (Path(backup_dir).expanduser().resolve() if backup_dir else
                            (Path.home() / ".quantmaster" / "backups").resolve())
         self.credentials = credential_store or CredentialStore()
@@ -416,7 +474,8 @@ class ConfigManager:
     def public(self) -> dict[str, Any]:
         raw = _read_yaml(self.path)
         cfg = self.load()
-        doc = document_from_config(cfg).model_dump()
+        document = document_from_config(cfg)
+        doc = document.model_dump()
         meta = raw.get("_secrets") or {}
         doc.update({
             "managed_by_gui": bool(raw.get("managed_by_gui")),
@@ -426,8 +485,75 @@ class ConfigManager:
                 "llm": self._secret_public("llm", cfg.llm.api_key, meta),
                 "tushare": self._secret_public("tushare", cfg.data.tushare_token, meta),
             },
+            "checks": self.check_results(
+                document,
+                {"llm": cfg.llm.api_key, "tushare": cfg.data.tushare_token},
+            ),
         })
         return doc
+
+    def _read_check_state(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.check_state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return {"version": 1, "checks": {}}
+        checks = value.get("checks") if isinstance(value, dict) else None
+        return {
+            "version": 1,
+            "checks": checks if isinstance(checks, dict) else {},
+        }
+
+    def check_results(
+        self,
+        document: SettingsDocument,
+        secrets: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        """Return persisted safe results with staleness computed from current settings."""
+        with self._lock:
+            stored = self._read_check_state()["checks"]
+        public: dict[str, dict[str, Any]] = {}
+        for kind, item in stored.items():
+            if kind not in SETTINGS_CHECK_KINDS or not isinstance(item, dict):
+                continue
+            result = item.get("result")
+            if not isinstance(result, dict):
+                continue
+            value = copy.deepcopy(result)
+            value["stale"] = item.get("fingerprint") != _setting_check_fingerprint(
+                kind, document, secrets,
+            )
+            public[kind] = value
+        return public
+
+    def record_check_result(
+        self,
+        kind: str,
+        document: SettingsDocument,
+        secrets: dict[str, str],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one safe diagnostic result and return its public fresh form."""
+        if kind not in SETTINGS_CHECK_KINDS:
+            raise ValueError(f"未知设置检测项目: {kind}")
+        safe = {
+            key: copy.deepcopy(result[key])
+            for key in ("status", "message", "latency_ms", "checked_at", "details")
+            if key in result
+        }
+        # Enforce JSON-only state and discard any accidental non-contract objects.
+        safe = json.loads(json.dumps(safe, ensure_ascii=False))
+        with self._lock:
+            state = self._read_check_state()
+            state["checks"][kind] = {
+                "fingerprint": _setting_check_fingerprint(kind, document, secrets),
+                "result": safe,
+            }
+            self.check_state_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(
+                self.check_state_path,
+                json.dumps(state, ensure_ascii=False, indent=2),
+            )
+        return {**safe, "stale": False}
 
     @staticmethod
     def _secret_public(name: str, runtime_value: str, metadata: dict) -> dict[str, Any]:

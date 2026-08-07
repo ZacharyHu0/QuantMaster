@@ -5,8 +5,16 @@ import pandas as pd
 import pytest
 
 from quantmaster.rotation.analytics import (
+    STATE_CODES,
+    _amount_activity_score,
+    _classify_trend_states,
+    _group_grade,
+    _midrank_percentile,
+    _regime,
+    _score_group_windows,
     _stage,
     analyze_group_rotation,
+    compute_etf_capital_evidence,
     compute_market_structure,
     compute_market_temperature,
     compute_trend_matrices,
@@ -31,9 +39,52 @@ def _close(days: int = 100, symbols: int = 24) -> pd.DataFrame:
 
 def test_trend_history_does_not_change_when_future_rows_are_appended():
     close = _close(90, 12)
-    earlier = compute_trend_matrices(close.iloc[:70]).score
-    later = compute_trend_matrices(close).score.loc[earlier.index]
-    pd.testing.assert_frame_equal(earlier, later)
+    earlier = compute_trend_matrices(close.iloc[:70])
+    later = compute_trend_matrices(close)
+    pd.testing.assert_frame_equal(earlier.score, later.score.loc[earlier.score.index])
+    pd.testing.assert_frame_equal(earlier.state, later.state.loc[earlier.state.index])
+
+
+def test_trend_state_hysteresis_is_symmetric_and_resets_after_invalid_rows():
+    dates = pd.bdate_range("2026-01-05", periods=7)
+    score = pd.DataFrame({
+        "positive": [0.37, 0.38, 0.54, 0.55, -0.29, -0.30, -0.38],
+        "negative": [-0.37, -0.38, -0.20, 0.29, 0.30, 0.38, 0.55],
+        "reset": [0.38, 0.20, 0.20, 0.20, 0.20, 0.20, 0.20],
+    }, index=dates)
+    eligible = pd.DataFrame(True, index=dates, columns=score.columns)
+    eligible.loc[dates[1], "reset"] = False
+
+    states = _classify_trend_states(score, eligible)
+
+    assert states["positive"].tolist() == [
+        STATE_CODES["range"], STATE_CODES["up"], STATE_CODES["up"],
+        STATE_CODES["strong_up"], STATE_CODES["up"], STATE_CODES["range"],
+        STATE_CODES["weak"],
+    ]
+    assert states["negative"].tolist() == [
+        STATE_CODES["range"], STATE_CODES["weak"], STATE_CODES["weak"],
+        STATE_CODES["weak"], STATE_CODES["range"], STATE_CODES["up"],
+        STATE_CODES["strong_up"],
+    ]
+    assert states.loc[dates[0], "reset"] == STATE_CODES["up"]
+    assert states.loc[dates[1], "reset"] == STATE_CODES["unavailable"]
+    assert states.loc[dates[2], "reset"] == STATE_CODES["range"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (9.99, ("ice", "冰点/黄金坑")),
+        (10.0, ("contraction", "拉锯区")),
+        (24.99, ("contraction", "拉锯区")),
+        (25.0, ("expansion", "强势扩散区")),
+        (50.0, ("expansion", "强势扩散区")),
+        (50.01, ("overheat", "过热区")),
+    ],
+)
+def test_market_temperature_regime_boundaries_match_reference(value, expected):
+    assert _regime(value) == expected
 
 
 def test_market_temperature_reconciles_all_state_counts():
@@ -47,6 +98,52 @@ def test_market_temperature_reconciles_all_state_counts():
     assert result["quality"]["status"] == "complete"
     assert result["evidence"]["available_weight"] == 75
     assert result["history"][-1]["ma20"] is not None
+    assert all(
+        row["strong_up"] + row["up"] + row["range"] + row["weak"]
+        == row["eligible"]
+        for row in result["history"]
+    )
+    assert result["definition"]["state_model"] == "hysteresis"
+    assert result["definition"]["thresholds"] == {
+        "strong_up": 0.55, "up": 0.38, "weak": -0.38,
+    }
+    assert result["definition"]["hysteresis"] == {
+        "up_exit": -0.30, "weak_exit": 0.30,
+    }
+    assert result["definition"]["regimes"]["overheat"] == ">50"
+
+
+def test_market_temperature_accepts_same_day_supplemental_evidence():
+    close = _close()
+    as_of = str(close.index[-1].date())
+    result = compute_market_temperature(
+        close,
+        close * 1_000_000,
+        supplemental_evidence={
+            "etf_capital": {
+                "available": True,
+                "score": 18.45,
+                "as_of": as_of,
+                "note": "近 5 日净申购率 -3.98%",
+                "reference_windows": 252,
+            },
+            "sentiment": {
+                "available": True,
+                "score": 53.95,
+                "as_of": as_of,
+                "note": "中性 +7.90",
+                "event_count": 120,
+            },
+        },
+    )
+
+    items = {item["id"]: item for item in result["evidence"]["items"]}
+    assert result["evidence"]["available_weight"] == 100
+    assert items["etf_capital"]["score"] == 18.45
+    assert items["etf_capital"]["reference_windows"] == 252
+    assert items["sentiment"]["score"] == 53.95
+    assert items["sentiment"]["event_count"] == 120
+    assert not result["quality"]["issues"]
 
 
 def test_market_structure_exposes_distribution_and_three_day_confirmation():
@@ -85,11 +182,14 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
     for item in result["items"]:
         assert item["eligible_count"] <= item["member_count"]
         assert item["grade"] in {"A", "B", "C", "D"}
+        assert item["positive_ratio"] >= item["strong_ratio"]
         assert item["stage"] in result["summary"]["stages"]
         assert set(item["signals"]) == {"1", "3", "5", "20"}
+        assert set(item["scores"]) == {"1", "3", "5", "20"}
+        assert item["rotation_score"] == item["scores"]["5"]["score"]
         for signal in item["signals"].values():
             assert signal["rotation_change_pp"] == round(
-                signal["strong_change_pp"] - signal["weak_change_pp"], 2,
+                signal["positive_change_pp"] - signal["weak_change_pp"], 2,
             )
             assert signal["member_return"] is not None
             assert signal["excess_return"] is not None
@@ -98,12 +198,74 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
         assert len(result["details"][item["code"]]["history"]) >= 20
         history = result["details"][item["code"]]["history"]
         assert all("stage" in row and "stage_label" in row for row in history)
+        assert all(row["positive_ratio"] >= row["strong_ratio"] for row in history)
         assert item["stage_sessions"] >= 1
     for movement in result["summary"]["movements"].values():
         assert sum(movement[f"{key}_count"] for key in (
             "improving", "retreating", "unchanged", "unavailable",
         )) == len(result["items"])
     assert result["definition"]["windows"] == [1, 3, 5, 20]
+    assert result["definition"]["coordinates"]["x"] == "positive_ratio"
+    assert result["definition"]["score"]["weights"] == {
+        "trend": 40, "breadth": 20, "volume": 15,
+        "relative_return": 15, "rotation": 10,
+    }
+
+
+def _score_item(index: int, *, positive: float = 0.0) -> dict:
+    return {
+        "code": f"G{index:02d}", "name": f"组 {index}", "level": "L1",
+        "positive_ratio": positive,
+        "signals": {
+            str(window): {
+                "advance_ratio": 0.0,
+                "amount_activity": -0.30,
+                "excess_return": float(index if window != 20 else -index) / 10_000,
+                "rotation_change_pp": float(index if window != 20 else -index),
+            }
+            for window in (1, 3, 5, 20)
+        },
+    }
+
+
+def test_group_score_calibration_uses_midrank_volume_bounds_and_grades():
+    assert _midrank_percentile(1, [0, 1, 1, 2, 3, 4, 5, 6]) == 25.0
+    assert _midrank_percentile(1, [0, 1, 2]) is None
+    assert _amount_activity_score(-0.30) == 0.0
+    assert _amount_activity_score(0.0) == 50.0
+    assert _amount_activity_score(0.30) == 100.0
+    assert _amount_activity_score(0.80) == 100.0
+    assert [_group_grade(value) for value in (70, 55, 40, 39.99, None)] == [
+        "A", "B", "C", "D", "",
+    ]
+
+
+def test_relative_leader_stays_low_when_absolute_group_state_is_weak():
+    items = [_score_item(index) for index in range(8)]
+
+    _score_group_windows(items, "industry")
+
+    leader = items[-1]
+    assert leader["scores"]["5"]["available_weight"] == 100
+    assert leader["scores"]["5"]["score"] < 40
+    assert leader["scores"]["5"]["grade"] == "D"
+    assert leader["scores"]["1"]["score"] != leader["scores"]["20"]["score"]
+
+
+def test_group_score_withholds_result_below_minimum_available_weight():
+    item = _score_item(0, positive=25.0)
+    for signal in item["signals"].values():
+        signal.update({
+            "advance_ratio": None, "amount_activity": None,
+            "excess_return": None, "rotation_change_pp": None,
+        })
+
+    _score_group_windows([item], "industry")
+
+    score = item["scores"]["5"]
+    assert score["available_weight"] == 40
+    assert score["score"] is None
+    assert score["grade"] == ""
 
 
 def test_theme_industry_mapping_uses_member_overlap_and_auditable_thresholds():
@@ -206,3 +368,74 @@ def test_etf_flow_keeps_three_year_display_window():
 
     assert len(result["daily"]) == 780
     assert result["daily"][0]["date"] == str(dates[20].date())
+
+
+def _etf_evidence_frame(days: int = 80, funds: int = 20) -> pd.DataFrame:
+    dates = pd.bdate_range("2026-01-02", periods=days)
+    rates = np.linspace(-0.01, 0.01, days - 1)
+    rows = []
+    for fund in range(funds):
+        shares = 1_000.0 + fund
+        rows.append({
+            "trade_date": dates[0], "symbol": f"ETF{fund:03d}",
+            "shares": shares, "nav": 1.0,
+        })
+        for trade_date, rate in zip(dates[1:], rates, strict=True):
+            shares *= 1 + float(rate)
+            rows.append({
+                "trade_date": trade_date, "symbol": f"ETF{fund:03d}",
+                "shares": shares, "nav": 1.0,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_etf_capital_evidence_is_historical_percentile_without_future_rows():
+    frame = _etf_evidence_frame()
+    target = pd.bdate_range("2026-01-02", periods=71)[-1]
+
+    full = compute_etf_capital_evidence(frame, as_of=target)
+    truncated = compute_etf_capital_evidence(
+        frame[frame["trade_date"] <= target],
+        as_of=target,
+    )
+
+    assert full == truncated
+    assert full["available"] is True
+    assert 90 < full["score"] <= 100
+    assert full["fund_count"] == 20
+    assert full["reference_windows"] >= 60
+    assert full["net_subscription_rate"] > 0
+
+
+def test_etf_capital_evidence_zero_flow_is_midpoint_and_requires_current_snapshot():
+    frame = _etf_evidence_frame()
+    frame["shares"] = 1_000.0
+    target = pd.Timestamp(frame["trade_date"].max())
+    evidence = compute_etf_capital_evidence(frame, as_of=target)
+
+    assert evidence["available"] is True
+    assert evidence["score"] == 50.0
+    stale = compute_etf_capital_evidence(frame, as_of=target + pd.offsets.BDay())
+    assert stale["available"] is False
+    assert "仅到" in stale["note"]
+
+
+def test_etf_capital_evidence_rejects_thin_consecutive_coverage():
+    frame = _etf_evidence_frame()
+    dates = sorted(pd.Timestamp(value) for value in frame["trade_date"].unique())
+    missing_symbol = "ETF000"
+    frame = frame[
+        ~(
+            (frame["symbol"] == missing_symbol)
+            & (frame["trade_date"] == dates[-2])
+        )
+    ]
+    evidence = compute_etf_capital_evidence(
+        frame,
+        as_of=dates[-1],
+        min_funds=20,
+    )
+
+    assert evidence["available"] is False
+    assert evidence["fund_count"] == 19
+    assert "连续份额快照" in evidence["note"]

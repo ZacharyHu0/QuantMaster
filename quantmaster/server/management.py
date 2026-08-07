@@ -7,7 +7,17 @@ from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from pydantic import Field
 
 from quantmaster.config import get_config
@@ -33,6 +43,17 @@ settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
 logger = logging.getLogger(__name__)
+
+
+class StockDBTickRequest(ContractModel):
+    symbol: str = Field(min_length=6, max_length=12)
+    count: int = Field(default=1, ge=1, le=20)
+
+
+class StockDBFundamentalsRequest(ContractModel):
+    symbol: str = Field(min_length=6, max_length=12)
+    dataset: Literal["cash_flow", "income", "balance", "valuation"]
+    stat_date: str = Field(pattern=r"^\d{4}(?:q[1-4]|-\d{2}-\d{2})$")
 
 
 def _local(request: Request) -> bool:
@@ -87,11 +108,7 @@ def _apply_free_stockdb(changed: list[str], result: dict[str, Any]) -> dict[str,
     if not any(field.startswith("data.free_stockdb_") for field in changed):
         return {"status": "unchanged"}
     try:
-        active = free_stockdb_runtime.restart()
-        return {
-            "status": "applied" if active else "degraded",
-            **free_stockdb_runtime.status(),
-        }
+        return free_stockdb_runtime.request_apply_config(changed)
     except (OSError, RuntimeError, ValueError):
         logger.warning("free-stockdb 托管运行时热应用失败", exc_info=True)
         result.setdefault("warnings", []).append("free-stockdb 设置已保存，但运行时热应用失败")
@@ -183,12 +200,141 @@ def settings_runtime(request: Request) -> dict:
     return _runtime_status()
 
 
+@router.post("/system/reload", status_code=202)
+def reload_web_worker(request: Request, background_tasks: BackgroundTasks) -> dict:
+    """Manually replace the Web worker without applying automatic reload throttling."""
+    _require_csrf(request)
+    from quantmaster.server.lifecycle import manual_reload_trigger_path, request_manual_reload
+
+    trigger_path = manual_reload_trigger_path()
+    if trigger_path is None:
+        raise HTTPException(409, "当前未启用热更新监督进程，请使用 qm-serve.cmd 启动")
+    background_tasks.add_task(request_manual_reload, trigger_path)
+    return {
+        "accepted": True,
+        "message": "已请求立即热更新；FreeStockDB 将保持运行。",
+    }
+
+
 @router.get("/settings/free-stockdb")
 def free_stockdb_status(request: Request) -> dict:
     _require_local(request)
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
 
     return free_stockdb_runtime.status()
+
+
+@router.get("/data-sources/free-stockdb/audit")
+def free_stockdb_audit(request: Request) -> dict[str, Any]:
+    _require_local(request)
+    from collections import Counter
+
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+    from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    source = FreeStockDBSource()
+    issues: list[str] = []
+    probe: dict[str, Any] = {}
+    boards: list[dict[str, Any]] = []
+    catalog: list[dict[str, Any]] = []
+    delisted: list[dict[str, Any]] = []
+    try:
+        probe = source.probe()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        issues.append(f"连接探测失败：{str(exc)[:300]}")
+    if probe:
+        for label, reader, target in (
+            ("板块目录", source.board_hierarchy, boards),
+            ("证券目录", source.security_catalog, catalog),
+            ("退市目录", source.delisted_catalog, delisted),
+        ):
+            try:
+                target.extend(reader())
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                issues.append(f"{label}不可用：{str(exc)[:200]}")
+    root = Path(get_config().data.free_stockdb_root).expanduser().resolve()
+    mounts = [
+        {"name": item.name, "path": str(item), "automatic_union": False}
+        for item in sorted(root.glob("data*")) if item.is_dir()
+    ] if root.is_dir() else []
+    levels = Counter(str(item.get("level") or "OTHER") for item in boards)
+    ingests = StockDBIngestStore().history(1)
+    runtime = free_stockdb_runtime.status()
+    capabilities = {
+        "daily_bars": "verified" if probe else "unavailable",
+        "daily_cross_section": "verified" if probe else "unavailable",
+        "intraday_bars": "unverified" if probe else "unavailable",
+        "eod_snapshot": "verified" if probe else "unavailable",
+        "realtime_tick": (
+            "experimental" if get_config().data.free_stockdb_experimental_tick_enabled
+            else "disabled"
+        ),
+        "security_catalog": "verified" if catalog else "degraded",
+        "board_hierarchy": "verified" if boards else "degraded",
+        "etf_shares": "semantic_lag_disclosed" if probe else "unavailable",
+        "native_indicators": "unverified" if probe else "unavailable",
+    }
+    return {
+        "status": "ok" if not issues else ("degraded" if probe else "unavailable"),
+        "upstream": "tushare", "distribution": "free-stockdb",
+        "independent_cross_validation": False,
+        "runtime": runtime, "probe": probe,
+        "artifact": source.artifact_identity(
+            data_session=str(runtime.get("validated_session") or ""),
+        ).to_dict(),
+        "capabilities": capabilities,
+        "catalog": {"securities": len(catalog), "delisted_records": len(delisted)},
+        "boards": {"total": len(boards), "levels": dict(sorted(levels.items()))},
+        "mounts": mounts, "mount_policy": "diagnostic_only_no_automatic_union",
+        "latest_ingest": ingests[0].to_dict() if ingests else None,
+        "experimental_online": StockDBExperimentalOnline().status(),
+        "issues": issues,
+    }
+
+
+@router.get("/data-sources/free-stockdb/ingests")
+def free_stockdb_ingests(
+    request: Request, limit: int = 50,
+) -> dict[str, Any]:
+    _require_local(request)
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+    limit = max(1, min(int(limit), 365))
+    return {"items": [item.to_dict() for item in StockDBIngestStore().history(limit)]}
+
+
+@router.post("/data-sources/free-stockdb/experimental/tick")
+def free_stockdb_experimental_tick(
+    body: StockDBTickRequest, request: Request,
+) -> dict[str, Any]:
+    _require_csrf(request)
+    from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
+
+    try:
+        return StockDBExperimentalOnline().tick(body.symbol, count=body.count)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@router.post("/data-sources/free-stockdb/experimental/fundamentals")
+def free_stockdb_experimental_fundamentals(
+    body: StockDBFundamentalsRequest, request: Request,
+) -> dict[str, Any]:
+    _require_csrf(request)
+    from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
+
+    try:
+        return StockDBExperimentalOnline().fundamentals(
+            body.symbol, dataset=body.dataset, stat_date=body.stat_date,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 @router.get("/settings/free-stockdb/vendor-notice")
@@ -259,7 +405,7 @@ def check_setting(kind: Literal[
     )
 
     document, mutations = _check_document(body or {})
-    current = get_config()
+    current = settings_manager.load()
     if mutations.llm.action == "replace":
         llm_secret = mutations.llm.value or ""
     elif mutations.llm.action == "clear":
@@ -278,18 +424,25 @@ def check_setting(kind: Literal[
     else:
         tushare_secret = current.data.tushare_token
     if kind == "llm-models":
-        return list_llm_models(document.llm, llm_secret)
-    if kind == "llm-web-search":
-        return check_llm_web_search(document.llm, llm_secret)
-    if kind == "tushare":
-        return check_tushare(tushare_secret)
-    if kind == "storage":
-        return check_storage(document.data)
-    if kind == "data-sources":
-        return check_data_sources(document.llm.timeout, document.data)
-    if kind == "lab":
-        return check_lab(document.lab, document.data, tushare_secret)
-    return check_server(document.server)
+        result = list_llm_models(document.llm, llm_secret)
+    elif kind == "llm-web-search":
+        result = check_llm_web_search(document.llm, llm_secret)
+    elif kind == "tushare":
+        result = check_tushare(tushare_secret)
+    elif kind == "storage":
+        result = check_storage(document.data)
+    elif kind == "data-sources":
+        result = check_data_sources(document.llm.timeout, document.data)
+    elif kind == "lab":
+        result = check_lab(document.lab, document.data, tushare_secret)
+    else:
+        result = check_server(document.server)
+    return settings_manager.record_check_result(
+        kind,
+        document,
+        {"llm": llm_secret, "tushare": tushare_secret},
+        result,
+    )
 
 
 class SnapshotCreate(ContractModel):

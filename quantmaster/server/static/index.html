@@ -7,19 +7,19 @@
 <link rel="icon" href="/static/brand/quantmaster-favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/brand-intro.css">
 <link rel="stylesheet" href="/static/candidates.css">
-<link rel="stylesheet" href="/static/settings.css">
-<link rel="stylesheet" href="/static/automation.css">
-<link rel="stylesheet" href="/static/news.css">
+<link rel="stylesheet" href="/static/settings.css?rev=%%QM_SETTINGS_CSS_REV%%">
+<link rel="stylesheet" href="/static/automation.css?rev=%%QM_AUTOMATION_CSS_REV%%">
+<link rel="stylesheet" href="/static/news.css?rev=%%QM_NEWS_CSS_REV%%">
 <link rel="stylesheet" href="/static/stock-analysis.css">
-<link rel="stylesheet" href="/static/lab.css">
+<link rel="stylesheet" href="/static/lab.css?rev=%%QM_LAB_CSS_REV%%">
 <link rel="stylesheet" href="/static/trading.css">
-<link rel="stylesheet" href="/static/rotation.css">
-<link rel="stylesheet" href="/static/after-close.css">
+<link rel="stylesheet" href="/static/rotation.css?rev=%%QM_ROTATION_CSS_REV%%">
+<link rel="stylesheet" href="/static/after-close.css?rev=%%QM_AFTER_CLOSE_CSS_REV%%">
 <link rel="stylesheet" href="/static/help.css">
 <!-- ECharts 本地化（Apache-2.0）：不依赖 CDN，离线/大陆网络环境可用 -->
 <script src="/static/echarts.min.js"></script>
 <script src="/static/charts.js"></script>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?rev=%%QM_APP_CSS_REV%%">
 
 <link rel="stylesheet" href="/static/charts.css">
 </head>
@@ -40,11 +40,17 @@
     <button data-workspace="trade" type="button">交易</button>
     <button data-workspace="automation" data-workspace-page="automation" data-tab="automation" type="button">自动化</button>
   </nav>
-  <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
-    <span id="release-version">版本</span>
-    <time class="release-date" id="release-date" hidden><span class="release-year"></span><span class="release-day"></span></time>
-    <span class="release-unread" id="free-stockdb-release-unread" aria-label="free-stockdb 有新动态" hidden></span>
-  </button>
+  <div class="header-version-stack">
+    <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
+      <span id="release-version">版本</span>
+      <time class="release-date" id="release-date" hidden><span class="release-year"></span><span class="release-day"></span></time>
+    </button>
+    <button class="stockdb-update-trigger" id="stockdb-update-trigger" type="button" aria-label="查看 stockdb 更新状态" aria-haspopup="dialog" aria-expanded="false" aria-controls="stockdb-update-popover">
+      <span class="stockdb-update-label">stockdb</span>
+      <time id="stockdb-data-date">读取中</time>
+      <span class="release-unread" id="free-stockdb-release-unread" aria-label="free-stockdb 有新动态" hidden></span>
+    </button>
+  </div>
   <div class="header-actions">
     <button class="header-help" data-tab="help" type="button" aria-label="手册" title="打开量化研究与交易手册">
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -90,7 +96,7 @@
         <button id="rotation-overview-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="overview" data-workspace-page="rotation" aria-selected="false" aria-controls="rotation-overview-view" tabindex="-1">轮动总览</button>
         <button id="rotation-industry-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="industry" data-workspace-page="industry" aria-selected="false" aria-controls="rotation-industry-view" tabindex="-1">行业周期</button>
         <button id="rotation-themes-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="themes" data-workspace-page="themes" aria-selected="false" aria-controls="rotation-themes-view" tabindex="-1">细分题材</button>
-        <button id="rotation-etf-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="etf-flows" data-workspace-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">宽基资金</button>
+        <button id="rotation-etf-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="etf-flows" data-workspace-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">ETF 研究</button>
       </div>
       </section>
       <section class="workspace-context-section" aria-label="市场信息">
@@ -109,12 +115,27 @@
       <h2 id="release-popover-title">更新日志</h2>
       <span>QuantMaster</span>
     </div>
-    <section class="vendor-release" id="free-stockdb-release" hidden>
-      <div class="vendor-release-heading"><strong>free-stockdb</strong><span id="free-stockdb-release-state">官方动态</span></div>
-      <p id="free-stockdb-release-summary"></p>
+    <div class="release-reload-action">
+      <div><strong>主站代码</strong><span id="release-reload-status" role="status" aria-live="polite">绕过自动限频，立即安全替换 Web worker</span></div>
+      <button id="release-reload-button" type="button">立即热更新</button>
+    </div>
+    <div id="release-list"><div class="msg">正在读取更新日志…</div></div>
+  </aside>
+  <aside class="release-popover stockdb-update-popover" id="stockdb-update-popover" role="dialog" aria-modal="false" aria-labelledby="stockdb-update-popover-title" hidden>
+    <div class="release-popover-head">
+      <h2 id="stockdb-update-popover-title">stockdb 数据状态</h2>
+      <span>free-stockdb</span>
+    </div>
+    <dl class="stockdb-status-summary">
+      <div><dt>已验证交易日</dt><dd id="stockdb-popover-session">正在读取…</dd></div>
+      <div><dt>最近验收时间</dt><dd id="stockdb-popover-updated-at">正在读取…</dd></div>
+      <div><dt>运行状态</dt><dd id="stockdb-popover-state">正在读取…</dd></div>
+    </dl>
+    <section class="vendor-release" id="free-stockdb-release">
+      <div class="vendor-release-heading"><strong>官方动态</strong><span id="free-stockdb-release-state">free-stockdb</span></div>
+      <p id="free-stockdb-release-summary">正在读取官方动态…</p>
       <a id="free-stockdb-release-link" href="https://a.123128.xyz/" target="_blank" rel="noopener noreferrer">查看官网详情</a>
     </section>
-    <div id="release-list"><div class="msg">正在读取更新日志…</div></div>
   </aside>
 </header>
 <main>
@@ -139,17 +160,18 @@
   </section>
   <div id="market-quotes-view" data-market-view="quotes" role="tabpanel" aria-labelledby="market-quotes-tab">
   <form class="controls" id="mkt-refresh">
-    <button class="primary" type="submit">同步最新行情</button>
+    <button class="primary" type="submit">同步观察行情</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
+    <span class="hint">仅刷新本页、自选及参考标的缓存，不更新全市场 free-stockdb。</span>
   </form>
   <section class="panel market-sentiment-panel" id="market-fear-greed" aria-live="polite">
     <div class="market-sentiment-head">
-      <div class="market-sentiment-value">
-        <span class="eyebrow">CNN FEAR &amp; GREED</span>
-        <div><strong data-fear-greed-score>—</strong><span data-fear-greed-label>读取中</span></div>
-      </div>
+      <span class="eyebrow market-sentiment-title">CNN FEAR &amp; GREED</span>
       <div class="market-sentiment-copy">
-        <strong id="market-fear-greed-status">全球风险背景</strong>
+        <div class="market-sentiment-status">
+          <strong id="market-fear-greed-status">全球风险背景</strong>
+          <time id="market-fear-greed-time">等待更新</time>
+        </div>
         <p id="market-fear-greed-note">CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。</p>
       </div>
       <a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a>
@@ -157,8 +179,8 @@
     <div class="market-sentiment-visuals">
       <div class="fear-greed-gauge" id="fear-greed-gauge-market" data-fear-greed-gauge role="img" aria-label="CNN 当日恐贪指数仪表盘"></div>
       <div class="fear-greed-history-wrap">
-        <div class="indicator-chart-head"><strong>恐贪历史曲线</strong><span>0–100 · 10 为罕见恐惧参考线</span></div>
-        <div class="fear-greed-history" id="fear-greed-history-market" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线"></div>
+        <div class="indicator-chart-head"><strong>恐贪历史曲线</strong><span>黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧</span></div>
+        <div class="fear-greed-history" id="fear-greed-history-market" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线；黄色虚线表示 10 分罕见恐惧参考阈值"></div>
       </div>
     </div>
   </section>
@@ -215,7 +237,7 @@
   </section>
 
   <section class="rotation-view" id="rotation-industry-view" data-rotation-view="industry" role="tabpanel" aria-labelledby="rotation-industry-tab" hidden>
-    <div class="rotation-masthead">
+    <div class="rotation-masthead rotation-industry-masthead">
       <div><span class="rotation-eyebrow">SW2021 CYCLE MAP</span><h2>行业周期</h2>
         <p>周期坐标仅在这里展示；阶段固定采用 3 日判定，1 / 3 / 5 / 20 日窗口用于轨迹、变化和相对强弱。</p></div>
       <dl class="rotation-asof" data-rotation-asof="industries"><dt>快照</dt><dd>等待刷新</dd><dt>口径</dt><dd>申万 2021</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="industries">刷新行业</button>
@@ -226,7 +248,7 @@
   <section class="rotation-view" id="rotation-themes-view" data-rotation-view="themes" role="tabpanel" aria-labelledby="rotation-themes-tab" hidden>
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">CONCEPT LIFECYCLE</span><h2>细分题材</h2>
-        <p>完整目录按多周期变化、相对收益、上涨宽度与真实申万成分交集核查；默认每页展示 50 条。</p></div>
+        <p>自动聚焦当前窗口证据更完整的题材；向下搜索并浏览完整目录，逐项核查多周期变化与真实申万成分交集。</p></div>
       <dl class="rotation-asof" data-rotation-asof="themes"><dt>快照</dt><dd>等待刷新</dd><dt>来源</dt><dd>东方财富概念</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="themes">刷新题材</button>
     </div>
     <div id="rotation-themes-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
@@ -234,9 +256,9 @@
 
   <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etf-flows" role="tabpanel" aria-labelledby="rotation-etf-tab" hidden>
     <div class="rotation-masthead">
-      <div><span class="rotation-eyebrow">ETF SHARE FLOW</span><h2>宽基资金</h2>
-        <p>资金估算采用“份额变化 × 当日净值”，同时按观察窗口与原始跟踪基准聚合；净值缺失才使用收盘价。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待 09:05</dd><dt>公式</dt><dd>Δ份额 × 净值</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button>
+      <div><span class="rotation-eyebrow">ETF RESEARCH</span><h2>全场 ETF 研究</h2>
+        <p>覆盖沪深场内 ETF 与 QDII，按资产类别比较趋势、流动性和份额证据；分钟数据只作补充，不构成交易评级。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待盘后扫描</dd><dt>血缘</dt><dd>Tushare · stockdb 本地分发</dd></dl><div><button class="rotation-refresh" type="button" data-etf-research-scan>运行 ETF 扫描</button><button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button></div>
     </div>
     <div id="rotation-etf-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -345,14 +367,15 @@
 <section class="tab" id="tab-after-close">
   <div class="after-close-masthead">
     <div><span class="eyebrow">AFTER-CLOSE DISCOVERY</span><h2>盘后扫描</h2>
-      <p>先看板块优先级，再核查板块内研究候选。所有结果绑定交易日、输入哈希与评分版本，不构成买卖建议。</p></div>
+      <p>仅使用本机 free-stockdb 的全市场日线与板块目录生成可审计快照；Tushare 和其他页面的行情缓存不参与本扫描。结果不构成买卖建议。</p></div>
     <dl id="after-close-asof"><dt>正式快照</dt><dd>尚未读取</dd><dt>数据状态</dt><dd>等待检查</dd></dl>
   </div>
   <div class="after-close-toolbar">
     <form id="after-close-scan-form">
       <label>历史重放截止日<input id="after-close-as-of" type="date" aria-label="历史重放截止日"></label>
       <button class="primary" type="submit">运行全市场扫描</button>
-      <button class="ghost" id="after-close-rerun" type="button">强制重跑</button>
+      <button class="ghost" id="after-close-update-data" type="button" title="更新盘后扫描使用的全市场行情库">更新扫描数据</button>
+      <button class="text-button after-close-recompute" id="after-close-rerun" type="button" title="忽略该日期已有快照，使用当前扫描数据重新计算" hidden>按当前数据重新计算</button>
     </form>
     <div class="after-close-actions">
       <select id="after-close-history" aria-label="历史盘后快照"><option value="">最新正式快照</option></select>
@@ -360,12 +383,23 @@
       <a class="ghost-link" id="after-close-csv" href="#">导出 CSV</a>
     </div>
   </div>
+  <div class="after-close-source-status" id="after-close-source-status" role="status" aria-live="polite" hidden>
+    <span data-after-close-source-message></span>
+    <button class="text-button" data-after-close-open-stockdb type="button">查看详细状态</button>
+  </div>
   <div class="after-close-progress" id="after-close-progress" hidden aria-live="polite">
     <div><span data-after-close-phase>准备中</span><strong data-after-close-percent>0%</strong></div>
     <div class="load-track"><div class="load-fill"></div></div>
     <button class="ghost" data-after-close-cancel type="button">安全取消</button>
   </div>
-  <div class="after-close-stale" id="after-close-stale" hidden></div>
+  <aside class="after-close-stale" id="after-close-stale" role="status" aria-live="polite" hidden>
+    <div class="after-close-stale-copy">
+      <strong data-after-close-stale-title>最新扫描未发布</strong>
+      <p data-after-close-stale-detail></p>
+      <small data-after-close-stale-help></small>
+    </div>
+    <button class="ghost" data-after-close-open-stockdb type="button">打开本地行情库设置</button>
+  </aside>
   <div class="after-close-coverage" id="after-close-coverage" aria-live="polite"></div>
   <div class="after-close-levels" id="after-close-levels" role="group" aria-label="板块层级">
     <button type="button" class="active" data-level="L1">申万一级</button>
@@ -894,7 +928,17 @@
     <aside class="news-analysis" aria-label="资讯量化摘要">
       <section><div class="news-panel-head"><div><h3>大盘情绪</h3><p>质量加权 · <span id="news-halflife-days">3</span> 日半衰期</p></div><span class="state-pill">MARKET</span></div><div class="market-sentiment-readout"><div class="sentiment-number" id="news-factor-value">—</div><div class="market-sentiment-context"><strong id="news-market-label">待计算</strong><span id="news-market-meta">等待已标注事件</span></div></div><div class="sentiment-axis"><span id="news-axis-low">-20 偏空</span><i><b id="news-factor-marker"></b></i><span id="news-axis-high">偏多 +20</span></div><div id="news-factor-chart" class="news-factor-chart" role="img" aria-label="近 30 日大盘情绪走势"></div></section>
       <section><div class="news-panel-head"><div><h3>板块情绪分</h3><p>申万一级 · 绝对影响排序</p></div><span class="state-pill" id="news-sector-scale">自适应 ±20</span></div><div id="news-sector-scores" class="news-sector-list"><span class="news-muted">暂无板块标注</span></div></section>
-      <section><div class="news-panel-head"><div><h3>事件聚焦</h3><p>名称与代码 · 标注提及次数</p></div></div><div id="news-top-symbols" class="news-symbol-list"><span class="news-muted">暂无个股映射</span></div></section>
+      <section class="news-event-focus-panel">
+        <div class="news-panel-head"><div><h3>事件聚焦</h3><p>名称与代码 · 标注提及次数</p></div></div>
+        <div class="rotation-window-control news-focus-window" id="news-focus-window" role="group" aria-label="事件聚焦统计窗口">
+          <button type="button" data-news-focus-days="1" aria-pressed="false">1 日</button>
+          <button type="button" data-news-focus-days="3" aria-pressed="false">3 日</button>
+          <button type="button" data-news-focus-days="7" aria-pressed="true">7 日</button>
+          <button type="button" data-news-focus-days="30" aria-pressed="false">30 日</button>
+        </div>
+        <div class="news-focus-feedback" id="news-focus-feedback" role="status" aria-live="polite" hidden><span></span><button type="button">重试</button></div>
+        <div id="news-top-symbols" class="news-symbol-list" aria-live="polite"><span class="news-muted">正在读取近 7 日标的提及…</span></div>
+      </section>
       <section><div class="news-panel-head"><div><h3>来源运行状态</h3><p>最近一次采集结果</p></div><button class="text-action" id="news-open-sources" type="button">管理来源</button></div><div id="news-source-health" class="news-source-health"><span class="news-muted">正在读取…</span></div></section>
     </aside>
   </div>
@@ -962,37 +1006,79 @@
 
 <!-- ================= 自动化 ================= -->
 <section class="tab" id="tab-automation">
-  <div class="automation-heading">
-    <div><span class="eyebrow">BOT OPERATIONS</span><h2>消息与定时任务</h2>
-      <p>飞书企业自建应用 Bot 是主通道，支持群聊/私聊命令与结构化消息卡片；微信 ClawBot 作为轻量文本提醒补充。每个会话独立设置推送强度。</p></div>
-    <div class="automation-status" id="automation-runtime">正在读取运行状态</div>
-  </div>
-  <div class="automation-grid">
-    <div class="automation-stack">
-      <section class="panel">
-        <div class="automation-panel-head"><div><h3>定时任务</h3><p>交易时段、收盘流程与资讯扫描均由本机调度器执行。</p></div><button class="ghost" id="automation-refresh" type="button">刷新</button></div>
-        <div class="job-list" id="automation-jobs"><div class="automation-empty">正在读取任务…</div></div>
+  <header class="automation-heading">
+    <div class="automation-heading-copy">
+      <span class="eyebrow">AUTOMATION CONTROL</span>
+      <h2>自动化运营</h2>
+      <p>先确认调度、通道与推送目标是否正常，再进入任务处理和策略配置。</p>
+    </div>
+    <div class="automation-heading-tools">
+      <div class="automation-status loading" id="automation-runtime" role="status">正在读取运行状态</div>
+      <div class="automation-refresh-line">
+        <time id="automation-updated-at">尚未刷新</time>
+        <button class="ghost" id="automation-refresh" type="button">刷新状态</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="automation-page-feedback" id="automation-page-feedback" role="status" aria-live="polite" hidden></div>
+
+  <nav class="automation-view-tabs" role="tablist" aria-label="自动化运营视图">
+    <button id="automation-view-overview" type="button" role="tab" aria-selected="true" aria-controls="automation-panel-overview" tabindex="0" data-automation-view="overview">运行总览</button>
+    <button id="automation-view-jobs" type="button" role="tab" aria-selected="false" aria-controls="automation-panel-jobs" tabindex="-1" data-automation-view="jobs">任务调度</button>
+    <button id="automation-view-messaging" type="button" role="tab" aria-selected="false" aria-controls="automation-panel-messaging" tabindex="-1" data-automation-view="messaging">消息推送</button>
+    <button id="automation-view-records" type="button" role="tab" aria-selected="false" aria-controls="automation-panel-records" tabindex="-1" data-automation-view="records">运行记录</button>
+  </nav>
+
+  <section class="automation-view" id="automation-panel-overview" role="tabpanel" aria-labelledby="automation-view-overview" data-automation-panel="overview">
+    <div id="automation-overview" aria-live="polite" aria-busy="true">
+      <div class="automation-loading-shell" aria-label="正在读取自动化总览"><i></i><i></i><i></i></div>
+    </div>
+  </section>
+
+  <section class="automation-view" id="automation-panel-jobs" role="tabpanel" aria-labelledby="automation-view-jobs" data-automation-panel="jobs" hidden>
+    <header class="automation-section-head">
+      <div><h3>任务调度</h3><p>异常与暂停项优先排列；展开任务可查看计划、最近结果并执行操作。</p></div>
+    </header>
+    <div class="automation-list-surface job-list" id="automation-jobs" aria-live="polite"><div class="automation-empty">正在读取任务…</div></div>
+  </section>
+
+  <section class="automation-view" id="automation-panel-messaging" role="tabpanel" aria-labelledby="automation-view-messaging" data-automation-panel="messaging" hidden>
+    <div class="automation-message-layout">
+      <section class="automation-section">
+        <header class="automation-section-head">
+          <div><h3>Bot 通道</h3><p>飞书企业自建应用 Bot 是主通道；腾讯微信 ClawBot 仅作为可选文本提醒。</p></div>
+        </header>
+        <div class="automation-list-surface" id="automation-channels"><div class="automation-empty">正在读取接入状态…</div></div>
       </section>
-      <section class="panel">
-        <div class="automation-panel-head"><div><h3>推送目标与强度</h3><p>每个私聊或群聊独立设置；高级阈值会覆盖所选预设。</p></div></div>
+      <section class="automation-section automation-target-section">
+        <header class="automation-section-head">
+          <div><h3>推送目标</h3><p>先查看会话状态与订阅摘要，需要调整时再展开完整策略。</p></div>
+        </header>
         <div class="target-list" id="automation-targets"><div class="automation-empty">正在读取推送目标…</div></div>
       </section>
     </div>
-    <aside class="automation-stack">
-      <section class="panel">
-        <div class="automation-panel-head"><div><h3>Bot 接入</h3><p>优先配置飞书。凭据只保存到系统凭据库，页面不会回显 Token 或 Secret。</p></div></div>
-        <div id="automation-channels"><div class="automation-empty">正在读取接入状态…</div></div>
-      </section>
-      <section class="panel">
-        <div class="automation-panel-head"><div><h3>最近事件</h3><p>事件先入库、经目标策略过滤后再进入可靠发件箱。</p></div></div>
-        <div id="automation-events"><div class="automation-empty">暂无事件</div></div>
-      </section>
-    </aside>
-  </div>
-  <details class="panel automation-log" id="automation-audit-panel">
-    <summary class="automation-panel-head"><div><h3>操作审计</h3><p>绑定、强度调整、任务变更与二次确认均留痕。</p></div><span class="automation-audit-toggle">展开查看</span></summary>
-    <div class="table-scroll" id="automation-audit"><div class="automation-empty">展开后读取操作记录</div></div>
-  </details>
+  </section>
+
+  <section class="automation-view" id="automation-panel-records" role="tabpanel" aria-labelledby="automation-view-records" data-automation-panel="records" hidden>
+    <header class="automation-section-head automation-records-head">
+      <div><h3>运行记录</h3><p>任务执行、事件入库与配置操作分开查看，首次打开时按需读取。</p></div>
+    </header>
+    <div class="segmented automation-record-tabs" role="tablist" aria-label="自动化记录类型">
+      <button id="automation-record-view-runs" type="button" role="tab" aria-selected="true" aria-controls="automation-record-panel-runs" tabindex="0" data-record-view="runs">任务运行</button>
+      <button id="automation-record-view-events" type="button" role="tab" aria-selected="false" aria-controls="automation-record-panel-events" tabindex="-1" data-record-view="events">事件流</button>
+      <button id="automation-record-view-audit" type="button" role="tab" aria-selected="false" aria-controls="automation-audit-panel" tabindex="-1" data-record-view="audit">操作审计</button>
+    </div>
+    <section class="automation-record-panel" id="automation-record-panel-runs" role="tabpanel" aria-labelledby="automation-record-view-runs" data-record-panel="runs">
+      <div id="automation-runs"><div class="automation-empty">打开后读取任务运行记录</div></div>
+    </section>
+    <section class="automation-record-panel" id="automation-record-panel-events" role="tabpanel" aria-labelledby="automation-record-view-events" data-record-panel="events" hidden>
+      <div id="automation-events"><div class="automation-empty">打开后读取事件流</div></div>
+    </section>
+    <section class="automation-record-panel" id="automation-audit-panel" role="tabpanel" aria-labelledby="automation-record-view-audit" data-record-panel="audit" hidden>
+      <div id="automation-audit"><div class="automation-empty">打开后读取操作审计</div></div>
+    </section>
+  </section>
 </section>
 
 <!-- ================= 帮助 ================= -->
@@ -1015,21 +1101,69 @@
     <span class="settings-path" id="settings-config-path">正在读取配置…</span>
   </div>
   <div class="settings-shell">
+    <label class="settings-nav-mobile" for="settings-section-select">
+      <span>设置分区</span>
+      <select id="settings-section-select" aria-label="设置分区">
+        <optgroup label="AI 与连接">
+          <option value="llm">模型服务</option>
+          <option value="online-data">在线数据源</option>
+        </optgroup>
+        <optgroup label="数据">
+          <option value="local-data">本地行情库</option>
+          <option value="research-data">研究数据</option>
+        </optgroup>
+        <optgroup label="研究与执行">
+          <option value="lab">Quant Lab</option>
+          <option value="trade">交易规则</option>
+          <option value="automation">自动化</option>
+        </optgroup>
+        <optgroup label="资讯">
+          <option value="news">资讯处理</option>
+          <option value="sources">资讯来源</option>
+        </optgroup>
+        <optgroup label="系统">
+          <option value="server">本机服务</option>
+          <option value="backup">快照回滚</option>
+        </optgroup>
+      </select>
+    </label>
     <nav class="settings-nav" id="settings-nav" aria-label="设置分组">
-      <button type="button" class="active" data-settings-section="llm"><span>01</span>模型服务</button>
-      <button type="button" data-settings-section="data"><span>02</span>数据与缓存</button>
-      <button type="button" data-settings-section="trade"><span>03</span>交易规则</button>
-      <button type="button" data-settings-section="news"><span>04</span>资讯处理</button>
-      <button type="button" data-settings-section="sources"><span>05</span>资讯来源</button>
-      <button type="button" data-settings-section="automation"><span>06</span>自动化</button>
-      <button type="button" data-settings-section="lab"><span>07</span>Quant Lab</button>
-      <button type="button" data-settings-section="backup"><span>08</span>快照回滚</button>
-      <button type="button" data-settings-section="server"><span>09</span>本机服务</button>
+      <div class="settings-nav-group"><span>AI 与连接</span>
+        <button type="button" class="active" data-settings-section="llm">模型服务</button>
+        <button type="button" data-settings-section="online-data">在线数据源</button>
+      </div>
+      <div class="settings-nav-group"><span>数据</span>
+        <button type="button" data-settings-section="local-data">本地行情库</button>
+        <button type="button" data-settings-section="research-data">研究数据</button>
+      </div>
+      <div class="settings-nav-group"><span>研究与执行</span>
+        <button type="button" data-settings-section="lab">Quant Lab</button>
+        <button type="button" data-settings-section="trade">交易规则</button>
+        <button type="button" data-settings-section="automation">自动化</button>
+      </div>
+      <div class="settings-nav-group"><span>资讯</span>
+        <button type="button" data-settings-section="news">资讯处理</button>
+        <button type="button" data-settings-section="sources">资讯来源</button>
+      </div>
+      <div class="settings-nav-group"><span>系统</span>
+        <button type="button" data-settings-section="server">本机服务</button>
+        <button type="button" data-settings-section="backup">快照回滚</button>
+      </div>
     </nav>
     <div class="settings-content">
       <form id="settings-form" novalidate>
         <section class="settings-group active" data-settings-panel="llm">
-          <div class="group-heading"><div><h3>模型服务</h3><p>模型列表检测不发送推理；搜索检测会发送一次最小联网请求，并清除旧的“不支持”缓存。</p></div><div class="button-pair"><button class="ghost check-button" type="button" data-check="llm-models">刷新模型</button><button class="ghost check-button" type="button" data-check="llm-web-search">检测联网搜索</button></div></div>
+          <div class="group-heading"><div><h3>模型服务</h3><p>配置推理服务、模型能力与共享并发边界。</p></div></div>
+          <div class="settings-diagnostic-grid">
+            <section class="settings-diagnostic" data-diagnostic="llm-models">
+              <div class="diagnostic-heading"><div><h4>模型目录</h4><p>刷新 API 返回的模型列表，不发送推理请求。</p></div><button class="ghost check-button" type="button" data-check="llm-models">刷新模型</button></div>
+              <div class="check-result" data-check-result="llm-models" aria-live="polite"><div class="check-summary">等待检测</div></div>
+            </section>
+            <section class="settings-diagnostic" data-diagnostic="llm-web-search">
+              <div class="diagnostic-heading"><div><h4>联网搜索</h4><p>发送一次最小请求，并清除旧的“不支持”缓存。</p></div><button class="ghost check-button" type="button" data-check="llm-web-search">检测联网搜索</button></div>
+              <div class="check-result" data-check-result="llm-web-search" aria-live="polite"><div class="check-summary">联网搜索尚未检测</div></div>
+            </section>
+          </div>
           <div class="field-grid">
             <label>提供商<select name="llm.provider" required><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
             <label>模型 ID<input name="llm.model" list="settings-model-list" autocomplete="off" required><datalist id="settings-model-list"></datalist><small id="model-hint">可手动输入任意模型 ID</small></label>
@@ -1042,46 +1176,26 @@
             <label>通用并发上限<input name="llm.max_concurrency" type="number" min="1" max="16" step="1" required><small>除资讯标注外的自动任务与手动分析共享；重型模型建议设为 1。</small></label>
             <label>排队超时（秒）<input name="llm.queue_timeout" type="number" min="1" max="300" step="1" required><small>FIFO 等待超过此时间会返回可重试错误，不会无限占用线程。</small></label>
           </div>
-          <div class="check-result" data-check-result="llm-models">等待检测</div>
-          <div class="check-result" data-check-result="llm-web-search">联网搜索尚未检测</div>
         </section>
 
-        <section class="settings-group" data-settings-panel="data">
-          <div class="group-heading"><div><h3>数据与缓存</h3><p>数据目录变更必须经过校验与迁移任务，原目录始终保留。</p></div><div class="button-pair"><button class="ghost check-button" type="button" data-check="storage">检测目录</button><button class="ghost check-button" type="button" data-check="data-sources">检测数据源</button></div></div>
-          <div class="field-grid">
+        <section class="settings-group" data-settings-panel="local-data">
+          <div class="group-heading"><div><h3>本地行情库</h3><p>管理数据目录、free-stockdb 运行时、本地缓存同步与安全迁移。</p></div></div>
+          <section class="settings-diagnostic" data-diagnostic="storage">
+            <div class="diagnostic-heading"><div><h4>数据目录</h4><p>确认当前目录可写并读取剩余空间。</p></div><button class="ghost check-button" type="button" data-check="storage">检测目录</button></div>
+            <div class="check-result" data-check-result="storage" aria-live="polite"><div class="check-summary">目录尚未检测</div></div>
+          </section>
+          <div class="field-grid settings-subsection">
             <label class="field-wide">当前数据根目录<input name="data.root" readonly><small>要更换目录，请使用下方迁移工具。</small></label>
-            <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
             <label>free-stockdb 超时（秒）<input name="data.free_stockdb_timeout" type="number" min="0.5" max="30" step="0.5" required><small>仅用于本机 HTTP 兼容接口。</small></label>
+            <label>每日更新时间<input name="data.free_stockdb_update_time" type="time" required><small>默认盘后 18:30；未达到目标交易日时最多自动尝试 3 次。</small></label>
             <label class="field-wide">free-stockdb 本地目录<input name="data.free_stockdb_root" required placeholder="runtime/free-stockdb"><small>完整发行包目录，需包含 stockdb.exe、数据更新.exe、stockdb.conf 和 data。</small></label>
             <label class="toggle-field"><span><strong>托管本地服务</strong><small>随 QuantMaster 自动启停 stockdb。</small></span><input name="data.free_stockdb_managed" type="checkbox" role="switch"></label>
-            <label class="toggle-field"><span><strong>更新提醒</strong><small>到达更新时间后在 QuantMaster 内提示；当前更新器需手动确认原生窗口。</small></span><input name="data.free_stockdb_auto_update" type="checkbox" role="switch"></label>
-            <label>每日更新时间<input name="data.free_stockdb_update_time" type="time" required><small>默认盘后 18:30；当天未更新时显示提醒。</small></label>
-            <label class="toggle-field"><span><strong>启用在线补缺</strong><small>仅在本地缺数时低并发访问 free-stockdb-online。</small></span><input name="data.free_stockdb_online_enabled" type="checkbox" role="switch"></label>
-            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required><small>公开体验节点，不用于全市场高频批量任务。</small></label>
-            <label>在线补缺超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
-            <div class="field-wide check-result" id="free-stockdb-sidecar-status">free-stockdb sidecar 状态尚未读取</div>
-            <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">启动原生更新器</button></div>
+            <label class="toggle-field"><span><strong>自动更新本地库</strong><small>到点后安全停库并运行可见的原生更新器；按真实交易日验收后恢复服务。</small></span><input name="data.free_stockdb_auto_update" type="checkbox" role="switch"></label>
             <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="留空则自动使用本地目录下的 pybao"><small>显式路径优先；留空时自动发现 &lt;本地目录&gt;/pybao/stock_sdk.py。</small></label>
             <label class="field-wide">free-stockdb 服务地址<input name="data.free_stockdb_url" type="url" required placeholder="http://127.0.0.1:7899"><small>SDK 使用其中的主机和端口；也可改为自己的兼容服务。</small></label>
-            <div class="field-wide section-divider"><strong>盘后全市场研究</strong><small>原生更新成功后，通过完整性门才发布新的正式快照。</small></div>
-            <label class="toggle-field"><span><strong>启用盘后扫描</strong><small>构建板块优先级与板块内研究候选。</small></span><input name="data.after_close_enabled" type="checkbox" role="switch"></label>
-            <label class="toggle-field"><span><strong>更新后自动运行</strong><small>free-stockdb 更新成功并恢复服务后自动提交扫描。</small></span><input name="data.after_close_auto_run" type="checkbox" role="switch"></label>
-            <label class="toggle-field"><span><strong>纳入北交所</strong><small>关闭后全市场扫描只包含沪深普通股。</small></span><input name="data.after_close_include_bj" type="checkbox" role="switch"></label>
-            <label class="toggle-field"><span><strong>推送扫描结果</strong><small>仅推送正式快照变化或完整性失败，不生成交易指令。</small></span><input name="data.after_close_notify" type="checkbox" role="switch"></label>
-            <label>最少上市交易日<input name="data.after_close_min_listing_sessions" type="number" min="20" max="1000" required></label>
-            <label>20 日日均成交额下限<input name="data.after_close_min_avg_amount" type="number" min="0" step="1000000" required><small>默认 30,000,000 元。</small></label>
-            <label>研究候选数量<input name="data.after_close_candidate_limit" type="number" min="5" max="200" required></label>
-            <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button><button type="button" class="ghost check-button" data-check="tushare">检测</button></div><small id="tushare-secret-state"></small></label>
-            <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
-            <label>分钟缓存（分钟）<input name="data.intraday_cache_minutes" type="number" min="0" required></label>
-            <label>AKShare 重试<input name="data.akshare_retries" type="number" min="1" max="20" required></label>
-            <label>退避初始秒数<input name="data.akshare_retry_backoff" type="number" min="0" max="60" step="0.1" required></label>
-            <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源</small></label>
-            <label>Tushare 每分钟调用<input name="data.tushare_calls_per_minute" type="number" min="1" required></label>
-            <label>Tushare 缓存（天）<input name="data.tushare_cache_days" type="number" min="0" required></label>
-            <label>基本面缓存（天）<input name="data.fundamental_cache_days" type="number" min="0" required></label>
+            <div class="field-wide check-result" id="free-stockdb-sidecar-status" aria-live="polite">free-stockdb sidecar 状态尚未读取</div>
+            <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">立即更新并验证</button></div>
           </div>
-          <div class="check-stack"><div class="check-result" data-check-result="storage">目录尚未检测</div><div class="check-result" data-check-result="data-sources">数据源尚未检测</div><div class="check-result" data-check-result="tushare">Tushare 尚未检测</div></div>
           <div class="maintenance-box">
             <div><h4>手动增量同步行情</h4><p>已有标的只请求最后 5 个交易日的重叠区间，用于校准复权并补齐新行情；只有未缓存标的才会按起始日期初始化。</p></div>
             <div class="maintenance-controls">
@@ -1097,6 +1211,54 @@
               <div class="maintenance-actions"><button class="ghost" id="data-refresh-cancel" type="button">完成当前标的后取消</button><button class="ghost" id="data-refresh-resume" type="button" hidden>继续任务</button></div>
               <small data-refresh-failures></small>
             </div>
+          </div>
+          <div class="migration-box">
+            <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
+            <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
+            <div class="migration-progress" id="migration-progress" hidden><div><span data-migration-phase>准备中</span><strong data-migration-percent>0%</strong></div><div class="load-track"><div class="load-fill"></div></div><button class="ghost" id="migration-cancel" type="button">取消</button></div>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="online-data">
+          <div class="group-heading"><div><h3>在线数据源</h3><p>配置来源优先级、在线补缺、Tushare 凭据与联网缓存边界。</p></div></div>
+          <div class="settings-diagnostic-grid">
+            <section class="settings-diagnostic" data-diagnostic="data-sources">
+              <div class="diagnostic-heading"><div><h4>综合数据源</h4><p>检查依赖、真实行情端点、熔断和证券主数据。</p></div><button class="ghost check-button" type="button" data-check="data-sources">检测数据源</button></div>
+              <div class="check-result" data-check-result="data-sources" aria-live="polite"><div class="check-summary">数据源尚未检测</div></div>
+            </section>
+            <section class="settings-diagnostic" data-diagnostic="tushare">
+              <div class="diagnostic-heading"><div><h4>Tushare 凭据</h4><p>验证 Token 与当前账号可用能力。</p></div><button class="ghost check-button" type="button" data-check="tushare">检测 Tushare</button></div>
+              <div class="check-result" data-check-result="tushare" aria-live="polite"><div class="check-summary">Tushare 尚未检测</div></div>
+            </section>
+          </div>
+          <div class="field-grid settings-subsection">
+            <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
+            <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源。</small></label>
+            <label class="toggle-field"><span><strong>启用在线补缺</strong><small>仅在本地缺数时低并发访问 free-stockdb-online。</small></span><input name="data.free_stockdb_online_enabled" type="checkbox" role="switch"></label>
+            <label>在线补缺超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
+            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required><small>公开体验节点，不用于全市场高频批量任务。</small></label>
+            <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button></div><small id="tushare-secret-state"></small></label>
+            <label>AKShare 重试<input name="data.akshare_retries" type="number" min="1" max="20" required></label>
+            <label>退避初始秒数<input name="data.akshare_retry_backoff" type="number" min="0" max="60" step="0.1" required></label>
+            <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>
+            <label>分钟缓存（分钟）<input name="data.intraday_cache_minutes" type="number" min="0" required></label>
+            <label>Tushare 每分钟调用<input name="data.tushare_calls_per_minute" type="number" min="1" required></label>
+            <label>Tushare 缓存（天）<input name="data.tushare_cache_days" type="number" min="0" required></label>
+            <label>基本面缓存（天）<input name="data.fundamental_cache_days" type="number" min="0" required></label>
+          </div>
+        </section>
+
+        <section class="settings-group" data-settings-panel="research-data">
+          <div class="group-heading"><div><h3>研究数据</h3><p>定义盘后全市场扫描规则，并生产可追溯的跨资产研究分区。</p></div></div>
+          <div class="field-grid">
+            <div class="field-wide section-divider"><strong>盘后全市场研究</strong><small>原生更新成功后，通过完整性门才发布新的正式快照。</small></div>
+            <label class="toggle-field"><span><strong>启用盘后扫描</strong><small>构建板块优先级与板块内研究候选。</small></span><input name="data.after_close_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>更新后自动运行</strong><small>free-stockdb 更新成功并恢复服务后自动提交扫描。</small></span><input name="data.after_close_auto_run" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>纳入北交所</strong><small>关闭后全市场扫描只包含沪深普通股。</small></span><input name="data.after_close_include_bj" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>推送扫描结果</strong><small>仅推送正式快照变化或完整性失败，不生成交易指令。</small></span><input name="data.after_close_notify" type="checkbox" role="switch"></label>
+            <label>最少上市交易日<input name="data.after_close_min_listing_sessions" type="number" min="20" max="1000" required></label>
+            <label>20 日日均成交额下限<input name="data.after_close_min_avg_amount" type="number" min="0" step="1000000" required><small>默认 30,000,000 元。</small></label>
+            <label>研究候选数量<input name="data.after_close_candidate_limit" type="number" min="5" max="200" required></label>
           </div>
           <div class="research-data-box">
             <div class="research-data-heading"><div><h4>跨资产研究生产湖</h4><p>按日生成可追溯的股票、ETF 与期货分区；先预览依赖、权限和磁盘影响，再启动可恢复任务。</p></div><button class="ghost" id="research-data-reload" type="button">刷新目录</button></div>
@@ -1118,11 +1280,6 @@
               <div class="maintenance-actions"><button class="ghost" id="research-cancel" type="button">完成当前分区后取消</button><button class="ghost" id="research-resume" type="button" hidden>继续任务</button></div>
               <small data-research-detail></small>
             </div>
-          </div>
-          <div class="migration-box">
-            <div><h4>数据目录迁移</h4><p>复制 SQLite 一致快照并逐文件校验大小与 SHA-256，全部通过后才切换。</p></div>
-            <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
-            <div class="migration-progress" id="migration-progress" hidden><div><span data-migration-phase>准备中</span><strong data-migration-percent>0%</strong></div><div class="load-track"><div class="load-fill"></div></div><button class="ghost" id="migration-cancel" type="button">取消</button></div>
           </div>
         </section>
 
@@ -1193,7 +1350,11 @@
         </section>
 
         <section class="settings-group" data-settings-panel="lab">
-          <div class="group-heading"><div><h3>Quant Lab</h3><p>定义研究默认范围、后台节奏与计算边界；单次实验仍可在 Lab 工作台覆盖。</p></div><div class="button-pair"><span class="state-pill" id="lab-runtime-state">正在读取状态</span><button class="ghost check-button" type="button" data-check="lab">检测研究环境</button></div></div>
+          <div class="group-heading"><div><h3>Quant Lab</h3><p>定义研究默认范围、后台节奏与计算边界；单次实验仍可在 Lab 工作台覆盖。</p></div><span class="state-pill" id="lab-runtime-state">正在读取状态</span></div>
+          <section class="settings-diagnostic" data-diagnostic="lab">
+            <div class="diagnostic-heading"><div><h4>研究环境</h4><p>核查候选范围、计算设备、权限和依赖。</p></div><button class="ghost check-button" type="button" data-check="lab">检测研究环境</button></div>
+            <div class="check-result" data-check-result="lab" aria-live="polite"><div class="check-summary">研究环境尚未检测</div></div>
+          </section>
           <div class="field-grid">
             <label class="toggle-field field-wide"><span><strong>启用内置研究 Worker</strong><small>关闭后停止调度和领取新任务，当前任务完成后退出。</small></span><input name="lab.enabled" type="checkbox" role="switch"></label>
             <label>默认研究候选<div class="candidate-field"><select name="lab.universe" data-candidate-select="all" required><option value="csi800">csi800</option><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">管理</button></div><small>csi800 需要 Tushare index_weight 权限。</small></label>
@@ -1213,13 +1374,15 @@
               <label class="toggle-field field-wide"><span><strong>启用受限 Python AutoMiner</strong><small>启用后允许手动运行，并在每周首个研究日自动运行一次；候选仍须人工批准。</small></span><input name="lab.ai_python_mining_enabled" type="checkbox" role="switch"></label>
             </div>
           </details>
-          <div class="check-result" data-check-result="lab">研究环境尚未检测</div>
         </section>
 
         <section class="settings-group" data-settings-panel="server">
-          <div class="group-heading"><div><h3>本机服务</h3><p>只有 host 或 port 修改需要重启 QuantMaster；提示会持续保留到进程重启。</p></div><button class="ghost check-button" type="button" data-check="server">检测地址</button></div>
+          <div class="group-heading"><div><h3>本机服务</h3><p>只有 host 或 port 修改需要重启 QuantMaster；提示会持续保留到进程重启。</p></div></div>
+          <section class="settings-diagnostic" data-diagnostic="server">
+            <div class="diagnostic-heading"><div><h4>监听地址</h4><p>验证 Host 与 Port 合法，并检查端口是否可用。</p></div><button class="ghost check-button" type="button" data-check="server">检测地址</button></div>
+            <div class="check-result" data-check-result="server" aria-live="polite"><div class="check-summary">等待检测</div></div>
+          </section>
           <div class="field-grid"><label>Host<input name="server.host" required></label><label>Port<input name="server.port" type="number" min="1" max="65535" required></label></div>
-          <div class="check-result" data-check-result="server">等待检测</div>
         </section>
 
         <div class="save-dock" role="status" aria-live="polite"><div id="settings-save-state"><span class="save-dot"></span><span>自动保存已开启</span></div><span class="autosave-note" id="settings-runtime-note">停顿片刻或离开字段后自动生效</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
@@ -1314,16 +1477,16 @@
 
 
 <script src="/static/app.js"></script>
-<script src="/static/automation.js"></script>
-<script src="/static/settings.js"></script>
+<script src="/static/automation.js?rev=%%QM_AUTOMATION_JS_REV%%"></script>
+<script src="/static/settings.js?rev=%%QM_SETTINGS_JS_REV%%"></script>
 <script src="/static/candidates.js"></script>
-<script src="/static/news.js"></script>
+<script src="/static/news.js?rev=%%QM_NEWS_JS_REV%%"></script>
 <script src="/static/stock-analysis.js"></script>
 <script src="/static/ledger-import.js"></script>
 <script src="/static/lab.js"></script>
 <script src="/static/trading.js"></script>
 <script src="/static/rotation.js"></script>
-<script src="/static/after-close.js"></script>
+<script src="/static/after-close.js?rev=%%QM_VERSION%%"></script>
 <script src="/static/help.js"></script>
 </body>
 </html>

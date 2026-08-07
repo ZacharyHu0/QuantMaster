@@ -14,6 +14,7 @@ import pandas as pd
 from quantmaster.research.adapters import (
     DATASET_BY_ID,
     DEFAULT_DATASETS,
+    CompositeResearchAdapter,
     TushareResearchAdapter,
 )
 from quantmaster.research.contracts import (
@@ -60,11 +61,11 @@ class ResearchEngine:
         self,
         lake: ResearchLake | None = None,
         registry: ProviderRegistry | None = None,
-        adapter: TushareResearchAdapter | None = None,
+        adapter: TushareResearchAdapter | CompositeResearchAdapter | None = None,
     ):
         self.lake = lake or ResearchLake()
         self.registry = registry or built_in_registry()
-        self.adapter = adapter or TushareResearchAdapter(self.lake.catalog)
+        self.adapter = adapter or CompositeResearchAdapter(self.lake.catalog)
         for item in self.registry.select():
             self.lake.catalog.register_spec(item)
 

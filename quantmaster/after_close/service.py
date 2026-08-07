@@ -20,6 +20,7 @@ from quantmaster.after_close.models import (
 )
 from quantmaster.after_close.store import AfterCloseStore
 from quantmaster.config import get_config
+from quantmaster.data.free_stockdb_ingest import StockDBIngestService
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.research.contracts import content_hash
@@ -29,7 +30,11 @@ logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
 REQUIRED_FIELDS = ("open", "high", "low", "close", "volume")
-OPTIONAL_FIELDS = ("amount", "float_mv", "total_mv", "pe_ttm", "pb", "is_st")
+OPTIONAL_FIELDS = (
+    "amount", "float_mv", "total_mv", "pe_ttm", "pb", "is_st",
+    "pre_close", "pct_chg", "amplitude", "turnover", "vol_ratio",
+    "total_share", "float_share", "name",
+)
 
 
 def _finite(value: Any) -> float | None:
@@ -71,10 +76,12 @@ class AfterCloseService:
         source: FreeStockDBSource | None = None,
         instruments: InstrumentStore | None = None,
         store: AfterCloseStore | None = None,
+        ingest: StockDBIngestService | None = None,
     ):
         self.source = source or FreeStockDBSource()
         self.instruments = instruments or InstrumentStore()
         self.store = store or AfterCloseStore()
+        self.ingest = ingest or StockDBIngestService(self.source)
 
     def _universe(self, include_bj: bool) -> list[Instrument]:
         active = {"listed", "active", "l"}
@@ -98,6 +105,38 @@ class AfterCloseService:
             }
             for column in (*REQUIRED_FIELDS, *OPTIONAL_FIELDS)
         }
+
+    @staticmethod
+    def _consistency_checks(latest: pd.DataFrame) -> dict[str, Any]:
+        def numeric(column: str) -> pd.Series:
+            if column not in latest:
+                return pd.Series(np.nan, index=latest.index, dtype="float64")
+            return pd.to_numeric(latest[column], errors="coerce")
+
+        def compare(
+            name: str, left: pd.Series, right: pd.Series, tolerance: float,
+        ) -> tuple[str, dict[str, Any]]:
+            valid = left.notna() & right.notna() & np.isfinite(left) & np.isfinite(right)
+            relative = (left - right).abs() / right.abs().clip(lower=1e-9)
+            mismatch = valid & relative.gt(tolerance)
+            rows = int(valid.sum())
+            return name, {
+                "comparable_rows": rows, "mismatch_rows": int(mismatch.sum()),
+                "mismatch_ratio": round(float(mismatch.sum() / rows), 6) if rows else None,
+                "tolerance": tolerance,
+            }
+
+        close, volume = numeric("close"), numeric("volume")
+        total_share, float_share = numeric("total_share"), numeric("float_share")
+        return dict([
+            compare("total_mv", numeric("total_mv"), close * total_share, 0.02),
+            compare("float_mv", numeric("float_mv"), close * float_share, 0.02),
+            compare("turnover", numeric("turnover"), volume / float_share * 100, 0.10),
+            compare(
+                "pct_chg", numeric("pct_chg"),
+                (close / numeric("pre_close") - 1) * 100, 0.02,
+            ),
+        ])
 
     def _gate(
         self, frame: pd.DataFrame, boards: list[dict[str, Any]], expected_count: int,
@@ -134,6 +173,14 @@ class AfterCloseService:
             reasons.append(
                 f"证券覆盖较上一成功快照骤降 {previous_observed} → {observed}"
             )
+        consistency = self._consistency_checks(latest)
+        severe = [
+            name for name, item in consistency.items()
+            if int(item.get("comparable_rows") or 0) >= 100
+            and float(item.get("mismatch_ratio") or 0) > 0.20
+        ]
+        if severe:
+            reasons.append("截面一致性校验异常：" + "、".join(severe))
         coverage = {
             "status": "complete" if not reasons else "rejected",
             "expected_symbols": expected_count,
@@ -141,6 +188,7 @@ class AfterCloseService:
             "symbol_ratio": round(symbol_ratio, 6),
             "required_ohlcv_ratio": round(required_ratio, 6),
             "field_coverage": self._field_coverage(frame, latest),
+            "consistency": consistency,
             "board_counts": dict(sorted(levels.items())),
             "expected_session": expectation.as_dict(),
             "issues": reasons,
@@ -192,6 +240,13 @@ class AfterCloseService:
             "pe_ttm": _finite(latest.get("pe_ttm")),
             "pb": _finite(latest.get("pb")),
             "is_st": _bool(latest.get("is_st")),
+            "pre_close": _finite(latest.get("pre_close")),
+            "pct_chg": _finite(latest.get("pct_chg")),
+            "amplitude": _finite(latest.get("amplitude")),
+            "turnover": _finite(latest.get("turnover")),
+            "vol_ratio": _finite(latest.get("vol_ratio")),
+            "total_share": _finite(latest.get("total_share")),
+            "float_share": _finite(latest.get("float_share")),
         }
 
     @staticmethod
@@ -391,22 +446,13 @@ class AfterCloseService:
         target = date.fromisoformat(as_of) if as_of else date.today()
         start = target - timedelta(days=max(180, cfg.after_close_min_listing_sessions * 3))
         progress(5, "读取本地数据库", f"准备 {len(symbols)} 只 A 股")
-        frames: list[pd.DataFrame] = []
-        for offset in range(0, len(symbols), 300):
-            if cancelled():
-                raise InterruptedError("盘后扫描已取消")
-            batch = symbols[offset:offset + 300]
-            frames.append(self.source.daily_cross_section(
-                batch, start.isoformat(), target.isoformat(),
-            ))
-            progress(
-                5 + int(50 * min(len(symbols), offset + len(batch)) / len(symbols)),
-                "读取本地数据库", f"已读取 {min(len(symbols), offset + len(batch))}/{len(symbols)}",
-            )
-        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        boards = self.source.board_hierarchy()
         try:
-            actual_as_of, coverage = self._gate(frame, boards, len(symbols))
+            ingest_snapshot, frame, boards, _ = self.ingest.load_or_create(
+                instruments=instruments, start=start.isoformat(), end=target.isoformat(),
+                validator=self._gate, progress=progress, cancelled=cancelled,
+            )
+            actual_as_of = ingest_snapshot.as_of_date
+            coverage = dict(ingest_snapshot.coverage)
         except DataGateRejected as exc:
             self.store.record_failure(exc.reasons, as_of_date=exc.as_of, coverage=exc.coverage)
             raise
@@ -472,6 +518,8 @@ class AfterCloseService:
                 for item in sorted(boards, key=lambda value: str(value.get("code") or ""))
             ],
             "filters": filters, "score_version": SCORE_VERSION,
+            "ingest_id": ingest_snapshot.ingest_id,
+            "artifact_id": ingest_snapshot.artifact_id,
             "csi800": csi800,
         }
         input_hash = content_hash(logical_input)
@@ -510,14 +558,20 @@ class AfterCloseService:
             filters=filters, coverage=coverage,
             provenance={
                 "source": self.source.name,
+                "upstream": "tushare",
+                "distribution": "free-stockdb",
                 "engine": (
                     "stock_sdk" if self.source.native_batch_available() else "http-compatible"
                 ),
                 "sdk_path": self.source.sdk_path, "sdk_version": self.source.sdk_version(),
+                "ingest_id": ingest_snapshot.ingest_id,
+                "artifact_id": ingest_snapshot.artifact_id,
+                "master_snapshot_id": ingest_snapshot.master_snapshot_id,
                 "score_version": SCORE_VERSION,
                 "calculation": "QuantMaster auditable formulas",
             },
             sectors=tuple(sectors), candidates=tuple(candidates), excluded_counts=excluded,
+            ingest_id=ingest_snapshot.ingest_id, artifact_id=ingest_snapshot.artifact_id,
             validation={
                 "market_regime": "positive" if np.isfinite(market20) and market20 > 0 else "defensive",
                 "candidate_turnover": _finite(turnover),
@@ -553,7 +607,11 @@ class AfterCloseService:
             lake.write_partition(
                 ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
                 "after_close_cross_section", snapshot.as_of_date, latest,
-                input_hashes={"after_close": snapshot.input_hash}, run_id=snapshot.snapshot_id,
+                input_hashes={
+                    "after_close": snapshot.input_hash,
+                    "stockdb_ingest": snapshot.ingest_id,
+                    "stockdb_artifact": snapshot.artifact_id,
+                }, run_id=snapshot.snapshot_id,
             )
             rows = [
                 {"trade_date": snapshot.as_of_date,
@@ -569,7 +627,11 @@ class AfterCloseService:
                 lake.write_partition(
                     ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
                     "after_close_board_membership", snapshot.as_of_date, pd.DataFrame(rows),
-                    input_hashes={"after_close": snapshot.input_hash}, run_id=snapshot.snapshot_id,
+                    input_hashes={
+                        "after_close": snapshot.input_hash,
+                        "stockdb_ingest": snapshot.ingest_id,
+                        "stockdb_artifact": snapshot.artifact_id,
+                    }, run_id=snapshot.snapshot_id,
                 )
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             logger.warning("盘后快照写入研究湖失败，SQLite 正式快照仍有效: %s", exc)
@@ -686,7 +748,11 @@ def get_after_close_service() -> AfterCloseService:
         return _instance
 
 
-def reset_after_close_service_for_tests() -> None:
+def reset_after_close_service() -> None:
     global _instance
     with _lock:
         _instance = None
+
+
+def reset_after_close_service_for_tests() -> None:
+    reset_after_close_service()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -284,3 +285,238 @@ class TushareResearchAdapter:
         if "symbol" in value:
             value["exchange"] = value["symbol"].str.rsplit(".", n=1).str[-1]
         return value
+
+
+class StockDBResearchAdapter:
+    """Local date-partition adapter; the upstream data remains Tushare."""
+
+    LOCAL_DATASETS = frozenset({
+        "stock_bars", "stock_adj_factor", "stock_daily_basic", "etf_bars",
+    })
+
+    def __init__(
+        self, catalog: ResearchCatalog, source=None, instruments=None, ingest_store=None,
+    ):
+        self.catalog = catalog
+        if source is None:
+            from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+            source = FreeStockDBSource()
+        if instruments is None:
+            from quantmaster.data.instruments import InstrumentStore
+
+            instruments = InstrumentStore()
+        self.source = source
+        self.instruments = instruments
+        if ingest_store is None:
+            from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+            ingest_store = StockDBIngestStore()
+        self.ingest_store = ingest_store
+        self._date_cache: dict[tuple[str, str], pd.DataFrame] = {}
+
+    def capabilities(self) -> list[dict[str, Any]]:
+        available = bool(getattr(self.source, "sdk_path", ""))
+        ready_names = {
+            name
+            for snapshot in self.ingest_store.history(30)
+            if snapshot.status == "complete"
+            for name in snapshot.content_hashes
+        }
+        content_name = {
+            "stock_bars": "stock_daily", "stock_adj_factor": "stock_adjustment_factors",
+            "stock_daily_basic": "stock_daily", "etf_bars": "etf_daily",
+        }
+        return [{
+            "dataset_id": definition.id, "endpoint": f"stockdb:{definition.endpoint}",
+            "state": (
+                CapabilityState.DATA_READY.value
+                if content_name.get(definition.id) in ready_names
+                else CapabilityState.INSTALLED.value
+                if available and definition.id in self.LOCAL_DATASETS
+                else CapabilityState.UNAVAILABLE.value
+            ),
+            "min_points": 0, "premium": False,
+            "detail": (
+                "Tushare 上游经 free-stockdb 本地分发；首次读取后升级为 data_ready"
+                if definition.id in self.LOCAL_DATASETS else "该数据集仍由 Tushare 直连接口提供"
+            ),
+            "upstream": "tushare", "distribution": "free-stockdb",
+            "independent_cross_validation": False, "checked_at": "",
+        } for definition in DATASETS]
+
+    def _asset_frame(self, asset: AssetClass, trade_date: str) -> pd.DataFrame:
+        key = (asset.value, trade_date)
+        if key in self._date_cache:
+            return self._date_cache[key].copy()
+        content_name = "etf_daily" if asset == AssetClass.ETF else "stock_daily"
+        target_date = pd.Timestamp(trade_date).normalize()
+        for snapshot in self.ingest_store.history(30):
+            if content_name not in snapshot.content_hashes:
+                continue
+            if not (snapshot.start_date <= trade_date <= snapshot.end_date):
+                continue
+            cached = self.ingest_store.load_frame(snapshot, content_name)
+            if cached.empty or "date" not in cached:
+                continue
+            cached = cached[pd.to_datetime(cached["date"], errors="coerce").dt.normalize().eq(
+                target_date
+            )].copy()
+            if not cached.empty:
+                cached["ingest_id"] = snapshot.ingest_id
+                self._date_cache[key] = cached
+                return cached.copy()
+        active = {"listed", "active", "l"}
+        if asset == AssetClass.STOCK:
+            instruments = [item for item in self.instruments.list(market="CN", asset_type="stock")
+                           if item.status.casefold() in active]
+        else:
+            from quantmaster.rotation.etf_research import is_exchange_etf
+
+            instruments = [item for item in self.instruments.list(market="CN") if is_exchange_etf(item)]
+        symbols = [item.symbol for item in instruments]
+        frames = []
+        for offset in range(0, len(symbols), 300):
+            frames.append(self.source.daily_cross_section(
+                symbols[offset:offset + 300], trade_date, trade_date,
+            ))
+        frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        self._date_cache[key] = frame.copy()
+        return frame
+
+    def fetch_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
+        definition = DATASET_BY_ID[dataset_id]
+        if dataset_id not in self.LOCAL_DATASETS:
+            return pd.DataFrame(columns=definition.columns)
+        if dataset_id == "stock_adj_factor":
+            target_date = pd.Timestamp(trade_date).normalize()
+            for snapshot in self.ingest_store.history(30):
+                if "stock_adjustment_factors" not in snapshot.content_hashes:
+                    continue
+                raw = self.ingest_store.load_frame(snapshot, "stock_adjustment_factors")
+                if raw.empty:
+                    continue
+                raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+                # Factors are sparse corporate-action observations.  Point-in-time
+                # research needs the effective value as of the requested session.
+                raw = raw[raw["date"].dt.normalize().le(target_date)]
+                if raw.empty:
+                    continue
+                value = raw.sort_values("date").groupby("symbol", as_index=False).tail(1)
+                value = value.rename(columns={"date": "factor_observed_date"})
+                value["trade_date"] = target_date
+                value["upstream"] = "tushare"
+                value["distribution"] = "free-stockdb"
+                value["ingest_id"] = snapshot.ingest_id
+                value["field_provenance"] = json.dumps({
+                    "adj_factor": "tushare:via-free-stockdb",
+                }, ensure_ascii=False, sort_keys=True)
+                return value[[
+                    "symbol", "trade_date", "adj_factor", "factor_observed_date",
+                    "upstream", "distribution", "ingest_id", "field_provenance",
+                ]]
+            return pd.DataFrame(columns=definition.columns)
+        asset = AssetClass.ETF if dataset_id == "etf_bars" else AssetClass.STOCK
+        raw = self._asset_frame(asset, trade_date)
+        if raw.empty:
+            return pd.DataFrame(columns=definition.columns)
+        value = raw.rename(columns={"date": "trade_date"}).copy()
+        value["trade_date"] = pd.Timestamp(trade_date).normalize()
+        value["upstream"] = "tushare"
+        value["distribution"] = "free-stockdb"
+        if dataset_id in {"stock_bars", "etf_bars"}:
+            keep = [*definition.columns, "pre_close", "pct_chg", "amplitude",
+                    "turnover", "vol_ratio", "total_share", "float_share"]
+            value["research_price"] = pd.to_numeric(value["close"], errors="coerce")
+            value["adjustment"] = "none"
+        else:
+            value = value.rename(columns={"turnover": "turnover_rate"})
+            keep = [*definition.columns, "float_mv", "total_share", "float_share", "vol_ratio"]
+        value["field_provenance"] = json.dumps({
+            column: "tushare:via-free-stockdb" for column in keep if column in value
+        }, ensure_ascii=False, sort_keys=True)
+        keep = [column for column in (*keep, "research_price", "adjustment", "upstream",
+                                      "distribution", "ingest_id", "field_provenance")
+                if column in value]
+        return value[keep].drop_duplicates(["trade_date", "symbol"], keep="last")
+
+
+class CompositeResearchAdapter:
+    """Prefer verified local distribution, then disclose direct-Tushare fallback rows."""
+
+    def __init__(
+        self, catalog: ResearchCatalog, local: StockDBResearchAdapter | None = None,
+        direct: TushareResearchAdapter | None = None,
+    ):
+        self.catalog = catalog
+        self.local = local or StockDBResearchAdapter(catalog)
+        self.direct = direct or TushareResearchAdapter(catalog)
+
+    def capabilities(self) -> list[dict[str, Any]]:
+        local = {item["dataset_id"]: item for item in self.local.capabilities()}
+        direct = {item["dataset_id"]: item for item in self.direct.capabilities()}
+        result = []
+        for definition in DATASETS:
+            result.append({
+                **direct[definition.id],
+                "routes": [local[definition.id], direct[definition.id]],
+                "preferred_route": (
+                    "tushare:via-free-stockdb" if definition.id in self.local.LOCAL_DATASETS
+                    else "tushare:direct"
+                ),
+                "independent_cross_validation": False,
+            })
+        return result
+
+    def official_calendar(
+        self, asset_class: AssetClass, start: str, end: str,
+    ) -> tuple[pd.DatetimeIndex, str]:
+        return self.direct.official_calendar(asset_class, start, end)
+
+    def fetch_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
+        if dataset_id not in self.local.LOCAL_DATASETS:
+            value = self.direct.fetch_date(dataset_id, trade_date)
+            if not value.empty:
+                value["upstream"] = "tushare"
+                value["distribution"] = "direct"
+            return value
+        try:
+            local = self.local.fetch_date(dataset_id, trade_date)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            local = pd.DataFrame()
+        if local.empty:
+            direct = self.direct.fetch_date(dataset_id, trade_date)
+            if not direct.empty:
+                direct["upstream"] = "tushare"
+                direct["distribution"] = "direct-fallback"
+                direct["field_provenance"] = json.dumps({
+                    column: "tushare:direct" for column in direct.columns
+                }, ensure_ascii=False, sort_keys=True)
+            return direct
+        # A local partial partition is publishable only after explicit direct
+        # completion. Rows retain their distribution route, so mixing is visible.
+        expected_asset = "etf" if dataset_id == "etf_bars" else "stock"
+        try:
+            from quantmaster.rotation.etf_research import is_exchange_etf
+
+            universe = self.local.instruments.list(market="CN")
+            expected = {
+                item.symbol for item in universe
+                if (is_exchange_etf(item) if expected_asset == "etf" else item.asset_type == "stock")
+                and item.status.casefold() in {"listed", "active", "l"}
+            }
+        except (AttributeError, OSError, RuntimeError):
+            expected = set(local["symbol"].astype(str))
+        observed = set(local["symbol"].astype(str))
+        if not expected or len(observed) / len(expected) >= 0.98:
+            return local
+        direct = self.direct.fetch_date(dataset_id, trade_date)
+        missing = direct[~direct["symbol"].astype(str).isin(observed)].copy() if not direct.empty else direct
+        if missing.empty:
+            return local
+        missing["upstream"] = "tushare"
+        missing["distribution"] = "direct-fallback"
+        missing["field_provenance"] = json.dumps({
+            column: "tushare:direct" for column in missing.columns
+        }, ensure_ascii=False, sort_keys=True)
+        return pd.concat((local, missing), ignore_index=True, sort=False)

@@ -185,16 +185,19 @@ function enhanceOption(option) {
   var kind = chartKind(option);
   var count = chartPointCount(option);
   var profile = motionProfile(kind, count);
+  var explicitMotion = option.__qmMotion === true && !REDUCED_MOTION;
+  var motionEnabled = explicitMotion || profile.enabled;
   var result = Object.assign({}, option, {
     color: PALETTE,
     backgroundColor: 'transparent',
-    animation: profile.enabled,
-    animationDuration: profile.enabled ? profile.duration : 0,
-    animationDurationUpdate: profile.enabled ? profile.update : 0,
-    animationEasing: 'cubicOut',
-    animationEasingUpdate: 'cubicOut',
+    animation: motionEnabled,
+    animationDuration: motionEnabled ? (explicitMotion ? option.animationDuration : profile.duration) : 0,
+    animationDurationUpdate: motionEnabled ? (explicitMotion ? option.animationDurationUpdate : profile.update) : 0,
+    animationEasing: explicitMotion ? (option.animationEasing || 'cubicOut') : 'cubicOut',
+    animationEasingUpdate: explicitMotion ? (option.animationEasingUpdate || 'cubicOut') : 'cubicOut',
     stateAnimation: {duration: REDUCED_MOTION ? 0 : 180, easing: 'cubicOut'},
   });
+  delete result.__qmMotion;
   result.xAxis = normalizeAxis(option.xAxis);
   result.yAxis = normalizeAxis(option.yAxis);
   result.dataZoom = prepareDataZoom(option.dataZoom, Boolean(result.yAxis));

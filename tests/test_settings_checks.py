@@ -6,7 +6,9 @@ import threading
 from typing import ClassVar
 
 import httpx
+import pytest
 
+from quantmaster.ai.llm import LLMError
 from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
 from quantmaster.settings_checks import (
     check_data_sources,
@@ -132,6 +134,46 @@ def test_web_search_check_requires_official_provider_key():
     assert result["details"]["supported"] is False
 
 
+@pytest.mark.parametrize(("code", "expected_message"), [
+    ("read_timeout", "搜索请求超时或网络不可达"),
+    ("network_error", "搜索请求超时或网络不可达"),
+    ("invalid_response", "网关返回了无法解析的搜索响应"),
+    ("response_failed", "搜索服务返回了失败事件"),
+    ("response_incomplete", "搜索响应未完整结束"),
+    ("auth_error", "搜索能力检测失败"),
+])
+def test_web_search_check_classifies_errors_without_leaking_details(
+    monkeypatch, code, expected_message,
+):
+    class SearchClient:
+        def __init__(self, config):
+            self.config = config
+
+        def web_search(self, query, **kwargs):
+            raise LLMError(
+                "raw upstream error sk-secret-do-not-show",
+                code=code,
+                retryable=True,
+            )
+
+    monkeypatch.setattr("quantmaster.ai.llm.LLMClient", SearchClient)
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.reset_web_search_capability",
+        lambda config: None,
+    )
+
+    result = check_llm_web_search(
+        LLMSettings(provider="openai", model="gpt-search"),
+        "secret",
+    )
+
+    assert result["status"] == "warning"
+    assert result["message"] == expected_message
+    assert result["details"]["supported"] is None
+    assert result["details"]["error_code"] == code
+    assert "sk-secret-do-not-show" not in str(result)
+
+
 def test_lab_check_reports_demo_and_missing_custom_pool(tmp_path):
     data = DataSettings(root=str(tmp_path))
     demo = check_lab(LabSettings(universe="demo", device="cpu"), data, "")
@@ -170,6 +212,56 @@ def test_data_source_checks_use_real_endpoints_in_parallel_and_mask_proxy(monkey
     assert any("finance.yahoo.com/v8/finance/chart" in url for url in calls)
     assert result["details"]["proxies"]["HTTPS_PROXY"] == "http://proxy.example:8080"
     assert "secret-user" not in str(result) and "secret-pass" not in str(result)
+
+
+@pytest.mark.parametrize(("http_status", "status", "message"), [
+    (200, "success", "可达"),
+    (304, "success", "可达"),
+    (429, "warning", "限流"),
+    (401, "error", "认证失败"),
+    (403, "error", "拒绝访问"),
+    (503, "warning", "上游异常"),
+])
+def test_data_source_check_classifies_http_status(
+    monkeypatch, http_status, status, message,
+):
+    def fake_get(url, **_kwargs):
+        return httpx.Response(http_status, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fake_get)
+    monkeypatch.setattr(
+        "quantmaster.data.resilience.provider_call",
+        lambda _lane, _key, func, **_kwargs: func(),
+    )
+
+    result = check_data_sources(2)
+
+    assert {item["status"] for item in result["details"]["sources"].values()} == {status}
+    assert all(message in item["message"] for item in result["details"]["sources"].values())
+
+
+def test_data_source_check_reports_connectivity_failure(monkeypatch):
+    def fail_get(_url, **_kwargs):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fail_get)
+    monkeypatch.setattr(
+        "quantmaster.data.resilience.provider_call",
+        lambda _lane, _key, func, **_kwargs: func(),
+    )
+
+    result = check_data_sources(2)
+
+    assert all(
+        item == {
+            "status": "warning",
+            "message": "依赖已安装，但行情网络不可达（ConnectTimeout）",
+            "category": "network",
+        }
+        for item in result["details"]["sources"].values()
+    )
 
 
 def test_free_stockdb_connection_failure_degrades_to_warning(monkeypatch):

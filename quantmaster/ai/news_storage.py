@@ -274,7 +274,8 @@ WITH base AS (
                AS quality_weight
       FROM news n
       LEFT JOIN news_sources s ON s.id=n.source_id
-     WHERE n.first_seen_at>=? AND n.analysis_status='complete' AND n.confidence>=?
+     WHERE n.first_seen_at>=? AND n.first_seen_at<=?
+       AND n.analysis_status='complete' AND n.confidence>=?
 ), ranked AS (
     SELECT *,ROW_NUMBER() OVER (
         PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id)
@@ -322,6 +323,7 @@ def aggregate_news_stats(
     connection: sqlite3.Connection,
     *,
     cutoff: float,
+    until: float,
     minimum_confidence: float,
     now: float,
     halflife_days: float,
@@ -329,6 +331,45 @@ def aggregate_news_stats(
     connection.create_function("qm_news_decay", 3, _decay_weight, deterministic=True)
     rows = connection.execute(
         _NEWS_STATS_SQL,
-        (cutoff, minimum_confidence, now, halflife_days),
+        (cutoff, until, minimum_confidence, now, halflife_days),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+_NEWS_EVENT_FOCUS_SQL = """
+WITH base AS (
+    SELECT n.id,n.content_hash,
+           COALESCE(s.factor_weight,1) * n.confidence * n.importance_score / 100.0
+               AS quality_weight
+      FROM news n
+      LEFT JOIN news_sources s ON s.id=n.source_id
+     WHERE n.first_seen_at>=? AND n.analysis_status='complete' AND n.confidence>=?
+), ranked AS (
+    SELECT *,ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id)
+        ORDER BY quality_weight DESC,id
+    ) AS duplicate_rank
+      FROM base
+), selected AS MATERIALIZED (
+    SELECT id FROM ranked WHERE duplicate_rank=1 AND quality_weight>0
+)
+SELECT d.symbol AS symbol,COUNT(*) AS event_count
+  FROM selected s JOIN news_analysis_symbols d ON d.news_id=s.id
+ GROUP BY d.symbol
+ ORDER BY event_count DESC,d.symbol
+ LIMIT 24
+"""
+
+
+def aggregate_news_event_focus(
+    connection: sqlite3.Connection,
+    *,
+    cutoff: float,
+    minimum_confidence: float,
+) -> list[dict[str, Any]]:
+    """Return the bounded, quality-filtered symbol focus without other analytics."""
+    rows = connection.execute(
+        _NEWS_EVENT_FOCUS_SQL,
+        (cutoff, minimum_confidence),
     ).fetchall()
     return [dict(row) for row in rows]

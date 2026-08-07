@@ -1,5 +1,8 @@
 (() => {
-  const state = {loaded:false, loading:null, snapshot:null, labels:[], level:'L1', sector:'', jobId:'', poll:null};
+  const state = {
+    loaded:false, loading:null, snapshot:null, labels:[], level:'L1', sector:'',
+    jobId:'', poll:null, stockdbPoll:null, stockdbActive:false,
+  };
   const root = document.getElementById('tab-after-close');
   if (!root) return;
 
@@ -78,6 +81,26 @@
     ).join('') : '尚无足够未来交易日，未生成标签';
   }
 
+  function staleCopy(snapshot) {
+    const reason = String(snapshot.staleness?.reason || '').trim();
+    const outdated = reason.match(
+      /本地库最新交易日\s*(\d{4}-\d{2}-\d{2})，预期至少为\s*(\d{4}-\d{2}-\d{2})/,
+    );
+    if (outdated) {
+      const [, actual, expected] = outdated;
+      return {
+        title:`扫描库尚未更新至 ${expected}`,
+        detail:`盘后扫描专用的 free-stockdb 目前只到 ${actual}，因此没有发布新结果。页面继续显示 ${snapshot.as_of_date} 的正式快照。`,
+        help:`其他页面的 Tushare 或行情缓存即使已到 ${expected}，也不会用于本扫描。请更新 free-stockdb，等待状态显示“数据已验证至 ${expected}”，再重新运行扫描。`,
+      };
+    }
+    return {
+      title:'最新扫描未通过完整性检查',
+      detail:`${reason || '本次扫描未能生成新的正式快照。'} 页面继续显示 ${snapshot.as_of_date} 的正式快照。`,
+      help:'请检查本地行情库状态，解决上述问题后重新运行扫描。',
+    };
+  }
+
   function render() {
     const snapshot = state.snapshot;
     if (!snapshot) {
@@ -92,8 +115,13 @@
       <dt>评分版本</dt><dd>${esc(snapshot.score_version)}</dd>
       <dt>输入哈希</dt><dd title="${esc(snapshot.input_hash)}">${esc(snapshot.input_hash.slice(0, 12))}</dd>`;
     const staleBox = document.getElementById('after-close-stale');
+    if (stale) {
+      const copy = staleCopy(snapshot);
+      staleBox.querySelector('[data-after-close-stale-title]').textContent = copy.title;
+      staleBox.querySelector('[data-after-close-stale-detail]').textContent = copy.detail;
+      staleBox.querySelector('[data-after-close-stale-help]').textContent = copy.help;
+    }
     staleBox.hidden = !stale;
-    staleBox.textContent = stale ? `最近一次扫描未发布：${snapshot.staleness.reason}` : '';
     const json = document.getElementById('after-close-json');
     const csv = document.getElementById('after-close-csv');
     json.href = `/api/v1/after-close/export/${encodeURIComponent(snapshot.snapshot_id)}?format=json`;
@@ -134,6 +162,70 @@
     box.querySelector('[data-after-close-cancel]').disabled = !job.can_cancel;
   }
 
+  function stockdbIsActive(status) {
+    return ['queued','updating','restarting'].includes(status?.state)
+      || ['queued','stopping','syncing','restarting','validating'].includes(status?.phase);
+  }
+
+  function renderStockdbUpdate(status) {
+    const box = document.getElementById('after-close-source-status');
+    const updateButton = document.getElementById('after-close-update-data');
+    const scanButton = document.querySelector('#after-close-scan-form button.primary');
+    const rerunButton = document.getElementById('after-close-rerun');
+    const active = stockdbIsActive(status);
+    const failed = ['error','degraded'].includes(status?.state)
+      || ['failed','manual_required'].includes(status?.update_result);
+    const succeeded = status?.update_result === 'success';
+    const target = status?.target_session ? ` · 目标 ${status.target_session}` : '';
+    const actual = status?.actual_session ? ` / 实际 ${status.actual_session}` : '';
+    const validated = status?.validated_session || status?.actual_session || '';
+    let message = status?.message || '正在读取扫描数据状态';
+    if (succeeded) {
+      message = validated
+        ? `扫描数据已更新至 ${validated}，现在可以运行扫描生成最新快照。`
+        : '扫描数据更新完成，现在可以运行扫描生成最新快照。';
+    } else if (failed) {
+      message = `扫描数据更新未完成：${message}`;
+    } else if (active) {
+      message = `${message}${target}${actual}`;
+    }
+    state.stockdbActive = active;
+    box.dataset.tone = failed ? 'error' : succeeded ? 'success' : 'progress';
+    box.querySelector('[data-after-close-source-message]').textContent = message;
+    box.hidden = false;
+    updateButton.textContent = active ? '正在更新扫描数据…' : '更新扫描数据';
+    updateButton.disabled = active;
+    scanButton.disabled = active || Boolean(state.jobId);
+    rerunButton.disabled = active || Boolean(state.jobId);
+    return active;
+  }
+
+  async function pollStockdbUpdate() {
+    clearTimeout(state.stockdbPoll);
+    state.stockdbPoll = null;
+    try {
+      const status = await api('/api/v1/settings/free-stockdb');
+      if (renderStockdbUpdate(status)) {
+        state.stockdbPoll = setTimeout(() => void pollStockdbUpdate(), 800);
+      }
+    } catch (error) {
+      renderStockdbUpdate({state:'degraded', update_result:'failed', message:error.message});
+    }
+  }
+
+  async function updateScanData() {
+    const button = document.getElementById('after-close-update-data');
+    button.disabled = true;
+    button.textContent = '正在提交更新…';
+    try {
+      const status = await post('/api/v1/settings/free-stockdb/update', {});
+      renderStockdbUpdate(status);
+      state.stockdbPoll = setTimeout(() => void pollStockdbUpdate(), 250);
+    } catch (error) {
+      renderStockdbUpdate({state:'degraded', update_result:'failed', message:error.message});
+    }
+  }
+
   async function pollJob() {
     if (!state.jobId) return;
     const job = await api(`/api/v1/jobs/after_close/${encodeURIComponent(state.jobId)}`);
@@ -158,13 +250,35 @@
         as_of:document.getElementById('after-close-as-of').value || '', force:Boolean(force),
       });
       state.jobId = job.id; progress(job); void pollJob();
-    } finally { busy(form, false); }
+    } finally {
+      busy(form, false);
+      form.querySelector('button.primary').disabled = state.stockdbActive;
+    }
+  }
+
+  function syncReplayAction() {
+    document.getElementById('after-close-rerun').hidden =
+      !document.getElementById('after-close-as-of').value;
   }
 
   document.getElementById('after-close-scan-form').addEventListener('submit', event => {
     event.preventDefault(); void submit(false);
   });
+  document.getElementById('after-close-update-data').addEventListener('click', () => {
+    void updateScanData();
+  });
   document.getElementById('after-close-rerun').addEventListener('click', () => void submit(true));
+  document.getElementById('after-close-as-of').addEventListener('input', syncReplayAction);
+  document.querySelectorAll('[data-after-close-open-stockdb]').forEach(button => {
+    button.addEventListener('click', async () => {
+      await window.QuantMasterManagement?.open('local-data');
+      const target = document.getElementById('free-stockdb-sidecar-status');
+      target?.scrollIntoView({
+        behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block:'center',
+      });
+    });
+  });
   document.querySelector('[data-after-close-cancel]').addEventListener('click', async () => {
     if (state.jobId) await post(`/api/v1/jobs/after_close/${encodeURIComponent(state.jobId)}/cancel`, {});
   });

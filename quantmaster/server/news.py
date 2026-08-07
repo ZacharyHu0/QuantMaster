@@ -206,6 +206,14 @@ def news_stats(request: Request, days: int = 30) -> dict:
     return NewsStore().stats(days=max(1, min(days, 3650)))
 
 
+@router.get("/event-focus")
+def news_event_focus(request: Request, days: int = 7) -> dict:
+    _require_local(request)
+    if days not in {1, 3, 7, 30}:
+        raise HTTPException(422, "事件聚焦窗口仅支持 1、3、7、30 日")
+    return NewsStore().event_focus(days)
+
+
 @router.get("")
 def news_query(
     request: Request, limit: int = 50, cursor: int | None = None, q: str = "",

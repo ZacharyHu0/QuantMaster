@@ -23,8 +23,11 @@ from quantmaster.data.instruments import InstrumentStore
 from quantmaster.data.storage import BarStore
 from quantmaster.rotation.analytics import (
     ALGORITHM_VERSION,
+    GROUP_SCORE_WEIGHTS,
+    MIN_GROUP_SCORE_WEIGHT,
     ROTATION_WINDOWS,
     analyze_group_rotation,
+    compute_etf_capital_evidence,
     compute_market_structure,
     compute_market_temperature,
     compute_trend_matrices,
@@ -54,6 +57,67 @@ Cancelled = Callable[[], bool]
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _market_close_epoch(as_of: str) -> float:
+    value = datetime.fromisoformat(str(as_of)).replace(
+        hour=15,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    )
+    return value.timestamp()
+
+
+def _news_sentiment_evidence(as_of: str, *, minimum_events: int = 20) -> dict[str, Any]:
+    fallback = {
+        "available": False,
+        "score": None,
+        "as_of": str(as_of or ""),
+        "note": "等待可核查资讯情绪",
+        "event_count": 0,
+        "signed_score": None,
+        "lookback_days": 30,
+    }
+    if not as_of:
+        return fallback
+    try:
+        from quantmaster.ai.crawler import NewsStore
+
+        snapshot = NewsStore().market_sentiment(
+            as_of=_market_close_epoch(as_of),
+            days=30,
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        logger.warning("市场温度读取本地资讯情绪失败", exc_info=True)
+        return {**fallback, "note": "本地资讯情绪暂不可用"}
+    event_count = int(snapshot.get("event_count") or 0)
+    signed_score = float(snapshot.get("score") or 0)
+    halflife_days = float(snapshot.get("halflife_days") or 0)
+    if event_count < int(minimum_events):
+        return {
+            **fallback,
+            "note": f"近 30 日合格资讯仅 {event_count} 条，至少需要 {minimum_events} 条",
+            "event_count": event_count,
+            "signed_score": round(signed_score, 2),
+            "halflife_days": halflife_days,
+        }
+    score = max(0.0, min(100.0, 50.0 + signed_score / 2.0))
+    label = str(snapshot.get("label") or "中性")
+    return {
+        "available": True,
+        "score": round(score, 2),
+        "as_of": str(as_of),
+        "note": (
+            f"{label} {signed_score:+.2f} · 近 30 日 {event_count} 条"
+            f" · 半衰期 {halflife_days:g} 日"
+        ),
+        "event_count": event_count,
+        "signed_score": round(signed_score, 2),
+        "halflife_days": halflife_days,
+        "lookback_days": int(snapshot.get("lookback_days") or 30),
+    }
 
 
 def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:
@@ -331,6 +395,7 @@ def _signal_row(item: dict[str, Any], window: int) -> dict[str, Any]:
         "eligible_count": int(item.get("eligible_count") or 0),
         "member_count": int(item.get("member_count") or 0),
         "strong_ratio": item.get("strong_ratio"),
+        "positive_ratio": item.get("positive_ratio"),
         "weak_ratio": item.get("weak_ratio"),
         "primary_industry": item.get("primary_industry"),
         "signal": signal,
@@ -560,6 +625,14 @@ class RotationService:
                     warning = f"{label}同步失败：{str(exc)[:160]}"
                     provider_issues[key].append(warning)
                     provider_warnings.append(warning)
+        etf_observations = pd.DataFrame()
+        if scope in {"all", "close", "market", "etf"}:
+            try:
+                etf_observations = self.store.etf_observations()
+            except RotationIntegrityError:
+                if scope in {"all", "etf"}:
+                    raise
+                logger.warning("市场温度读取 ETF 观察文件失败", exc_info=True)
         close = pd.DataFrame()
         amount = pd.DataFrame()
         names: dict[str, str] = {}
@@ -588,8 +661,20 @@ class RotationService:
 
         if scope in {"all", "close", "market"}:
             progress(compute_base, "计算市场温度", "汇总四档趋势分布与证据权重")
+            etf_evidence = compute_etf_capital_evidence(
+                etf_observations,
+                as_of=as_of,
+            )
+            sentiment_evidence = _news_sentiment_evidence(as_of)
             temperature = compute_market_temperature(
-                close, amount, expected_count=expected_count, trend=trend,
+                close,
+                amount,
+                expected_count=expected_count,
+                trend=trend,
+                supplemental_evidence={
+                    "etf_capital": etf_evidence,
+                    "sentiment": sentiment_evidence,
+                },
             )
             temperature_quality = temperature.pop("quality")
             temperature_quality["issues"] = list(dict.fromkeys([
@@ -598,12 +683,21 @@ class RotationService:
             temperature_quality = _mark_stale(
                 temperature_quality, as_of, expected_as_of,
             )
+            temperature_sources = list(sources)
+            if etf_evidence.get("available"):
+                temperature_sources.extend(["tushare:fund_share", "local:rotation_cache"])
+                if "nav" in etf_observations and etf_observations["nav"].notna().any():
+                    temperature_sources.append("tushare:fund_nav")
+                if "close" in etf_observations and etf_observations["close"].notna().any():
+                    temperature_sources.append("tushare:fund_daily")
+            if sentiment_evidence.get("available"):
+                temperature_sources.append("local:news")
             computed["temperature"] = self._envelope(
                 temperature,
                 snapshot_id=snapshot_id,
                 generated_at=generated_at,
                 quality=temperature_quality,
-                sources=sources,
+                sources=list(dict.fromkeys(temperature_sources)),
                 expected_as_of=expected_as_of,
             )
             progress(compute_base + 7, "计算市场风格", "比较强势与低位样本收益分布")
@@ -719,7 +813,12 @@ class RotationService:
                     "definition": {
                         "minimum_members": 8,
                         "minimum_coverage": 0.70,
-                        "theme_score": "55% 生命周期 + 45% 宽度",
+                        "positive_states": ["strong_up", "up"],
+                        "score": {
+                            "weights": dict(GROUP_SCORE_WEIGHTS),
+                            "minimum_available_weight": MIN_GROUP_SCORE_WEIGHT,
+                            "disclaimer": "结构状态评分，不构成交易评级",
+                        },
                     },
                 }
                 theme_quality = _status_quality(
@@ -742,7 +841,7 @@ class RotationService:
 
         if scope in {"all", "etf"}:
             progress(compute_base + 21, "估算宽基资金", "按份额变化与净值计算申赎资金")
-            etf_data = estimate_etf_flows(self.store.etf_observations())
+            etf_data = estimate_etf_flows(etf_observations)
             etf_ready = etf_data["summary"].get("status") == "ready"
             close_fallback_count = int(
                 etf_data["summary"].get("close_fallback_count") or 0

@@ -665,6 +665,83 @@ def test_feishu_channel_lifecycle_and_normalized_message(tmp_path, monkeypatch):
     assert store.bot_account("feishu")["status"] == "configured"
 
 
+def test_feishu_sdk_tasks_are_drained_before_private_loop_closes(monkeypatch):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from lark_oapi.ws import client as ws_client_module
+
+    from quantmaster.automation.channels.feishu import _drain_lark_ws_tasks
+
+    ws_loop = asyncio.new_event_loop()
+    cache_loop = asyncio.new_event_loop()
+    ready = threading.Event()
+    thread_finished = threading.Event()
+    events = []
+    remaining = []
+
+    async def _select():
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            events.append("select-stopped")
+
+    async def background(name):
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            events.append(f"{name}-stopped")
+
+    def run_ws_loop():
+        asyncio.set_event_loop(ws_loop)
+        root = ws_loop.create_task(_select())
+        background_tasks = [
+            ws_loop.create_task(background(name), name=f"sdk-{name}")
+            for name in ("ping", "receive")
+        ]
+        ready.set()
+        try:
+            ws_loop.run_until_complete(root)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            remaining.extend(asyncio.all_tasks(ws_loop))
+            ws_loop.close()
+            thread_finished.set()
+        assert all(task.done() for task in background_tasks)
+
+    async def disconnect():
+        events.append("disconnected")
+
+    worker = threading.Thread(target=run_ws_loop, daemon=True)
+    worker.start()
+    assert ready.wait(1)
+    monkeypatch.setattr(ws_client_module, "loop", ws_loop)
+    cache_task = cache_loop.create_task(background("cache"), name="sdk-cache")
+    ws = SimpleNamespace(
+        _auto_reconnect=True,
+        _disconnect=disconnect,
+        _cache=SimpleNamespace(_cron=cache_task),
+    )
+
+    channel = SimpleNamespace(_ws_client=ws)
+    assert asyncio.run(_drain_lark_ws_tasks(channel, timeout=1)) is True
+    assert thread_finished.wait(1)
+    worker.join(timeout=1)
+    cache_remaining = asyncio.all_tasks(cache_loop)
+    cache_loop.close()
+
+    assert ws._auto_reconnect is False
+    assert channel._ws_client is None
+    assert remaining == []
+    assert cache_remaining == set()
+    assert cache_task.cancelled()
+    assert set(events) == {
+        "ping-stopped", "receive-stopped", "disconnected", "select-stopped",
+    }
+
+
 def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monkeypatch):
     store = AutomationStore(tmp_path / "automation.sqlite")
     credentials = MemoryCredentials()
@@ -809,6 +886,16 @@ def test_automation_api_and_ui_contract():
 
     page = client.get("/").text
     assert 'data-tab="automation"' in page
+    assert "自动化运营" in page
+    assert 'role="tablist" aria-label="自动化运营视图"' in page
+    assert 'id="automation-view-overview"' in page
+    assert 'id="automation-view-jobs"' in page
+    assert 'id="automation-view-messaging"' in page
+    assert 'id="automation-view-records"' in page
+    assert 'role="tabpanel" aria-labelledby="automation-view-overview"' in page
+    assert "/static/automation.css?rev=" in page
+    assert "/static/automation.js?rev=" in page
+    assert "%%QM_AUTOMATION" not in page
     assert "腾讯微信 ClawBot" in page
     assert "飞书企业自建应用 Bot" in page
     automation_script = client.get("/static/automation.js").text
@@ -825,7 +912,12 @@ def test_automation_api_and_ui_contract():
     assert "未订阅任何内容；自动化与 Bot 监听仍会继续运行" in script
     assert "targetFeedback" in script
     assert "automation-audit-panel" in page
-    assert '<details class="panel automation-log"' in page
+    assert 'data-record-panel="audit"' in page
+    assert "/api/v1/automation/jobs" in script
+    assert "/api/v1/automation/events?limit=50" in script
+    assert "/api/v1/automation/audit?limit=50" in script
+    assert "alert(" not in script
     assert "news-source-feedback" in page
     assert "长连接正常，但尚未收到消息事件" in script
-    assert "测试（先绑定）" in script
+    assert "发送测试消息" in script
+    assert "测试消息未发送" in script

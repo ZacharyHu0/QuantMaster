@@ -41,8 +41,20 @@ from quantmaster.runtime.problems import OperationProblem, make_problem
 logger = logging.getLogger(__name__)
 
 
+def _configure_reload_worker_logging() -> bool:
+    """Restore CLI logging in workers spawned directly by Uvicorn's reloader."""
+    if os.environ.get("QM_SERVER_RELOAD_WORKER") != "1":
+        return False
+    from quantmaster.logging_config import configure_logging
+
+    configure_logging(verbose=os.environ.get("QM_SERVER_RELOAD_VERBOSE") == "1")
+    return True
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
+    _configure_reload_worker_logging()
     from quantmaster.after_close.jobs import (
         get_after_close_jobs,
         shutdown_after_close_jobs,
@@ -61,6 +73,10 @@ async def lifespan(_: FastAPI):
     from quantmaster.lab.worker import get_worker
     from quantmaster.logging_config import current_log_path
     from quantmaster.research.jobs import get_research_job_manager
+    from quantmaster.rotation.etf_jobs import (
+        get_etf_research_jobs,
+        shutdown_etf_research_jobs,
+    )
     from quantmaster.rotation.service import get_rotation_worker
     from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
     from quantmaster.server.management import capture_runtime_baseline
@@ -70,7 +86,6 @@ async def lifespan(_: FastAPI):
     # bundled offline snapshot; external catalog refreshes are explicit maintenance
     # operations so a stopped app cannot leave network/database threads behind.
     InstrumentStore()
-    reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
     if reload_worker:
         free_stockdb_runtime.attach_to_supervisor()
     else:
@@ -84,6 +99,7 @@ async def lifespan(_: FastAPI):
     repair_worker = get_data_repair_manager()
     stock_analysis_worker = get_stock_analysis_jobs()
     after_close_worker = get_after_close_jobs()
+    etf_research_worker = get_etf_research_jobs()
 
     def drain_workers() -> None:
         # The data root can be hot-switched, which replaces this singleton.
@@ -98,10 +114,12 @@ async def lifespan(_: FastAPI):
         runtime.stop()
         stock_analysis_worker.pause()
         after_close_worker.pause()
+        etf_research_worker.pause()
 
     def resume_workers() -> None:
         stock_analysis_worker.resume()
         after_close_worker.resume()
+        etf_research_worker.resume()
         runtime.start()
         research_worker.start()
         data_refresh_manager.start()
@@ -123,12 +141,15 @@ async def lifespan(_: FastAPI):
                 and get_paper_automation_worker().idle
                 and stock_analysis_worker.idle
                 and after_close_worker.idle
+                and etf_research_worker.idle
             ),
         )
     )
     research_worker.start()
     stock_analysis_worker.start()
     after_close_worker.start()
+    etf_research_worker.start()
+    free_stockdb_runtime.start_event_bridge()
     data_refresh_manager.start()
     repair_worker.start()
     backtest_worker.start()
@@ -159,6 +180,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        free_stockdb_runtime.stop_event_bridge()
         drain_workers()
         if not reload_worker:
             free_stockdb_runtime.stop()
@@ -169,6 +191,7 @@ async def lifespan(_: FastAPI):
         # 飞书 outbox 已在 drain_workers 中停止，不会在此处重新创建分析单例。
         shutdown_stock_analysis_jobs()
         shutdown_after_close_jobs()
+        shutdown_etf_research_jobs()
         logger.info("QuantMaster 已停止")
 
 
@@ -336,6 +359,8 @@ async def request_context_and_migration_lock(request: Request, call_next):
             },
         )
     response.headers["X-Request-ID"] = request_id
+    if path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
     apply_security_headers(response)
     if response.status_code >= 400:
         logger.warning(
@@ -494,9 +519,29 @@ def index(request: Request) -> HTMLResponse:
     from quantmaster.server.security import ensure_csrf_cookie
 
     template = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    settings_css_revision = str((STATIC_DIR / "settings.css").stat().st_mtime_ns)
+    settings_js_revision = str((STATIC_DIR / "settings.js").stat().st_mtime_ns)
+    automation_css_revision = str((STATIC_DIR / "automation.css").stat().st_mtime_ns)
+    automation_js_revision = str((STATIC_DIR / "automation.js").stat().st_mtime_ns)
+    news_css_revision = str((STATIC_DIR / "news.css").stat().st_mtime_ns)
+    news_js_revision = str((STATIC_DIR / "news.js").stat().st_mtime_ns)
+    rotation_css_revision = str((STATIC_DIR / "rotation.css").stat().st_mtime_ns)
+    lab_css_revision = str((STATIC_DIR / "lab.css").stat().st_mtime_ns)
+    after_close_css_revision = str((STATIC_DIR / "after-close.css").stat().st_mtime_ns)
+    app_css_revision = str((STATIC_DIR / "app.css").stat().st_mtime_ns)
     page = (
         template.replace("%%QM_VERSION%%", __version__)
         .replace("%%QM_RELEASE_DATE%%", RELEASE_DATE)
+        .replace("%%QM_SETTINGS_CSS_REV%%", settings_css_revision)
+        .replace("%%QM_SETTINGS_JS_REV%%", settings_js_revision)
+        .replace("%%QM_AUTOMATION_CSS_REV%%", automation_css_revision)
+        .replace("%%QM_AUTOMATION_JS_REV%%", automation_js_revision)
+        .replace("%%QM_NEWS_CSS_REV%%", news_css_revision)
+        .replace("%%QM_NEWS_JS_REV%%", news_js_revision)
+        .replace("%%QM_ROTATION_CSS_REV%%", rotation_css_revision)
+        .replace("%%QM_LAB_CSS_REV%%", lab_css_revision)
+        .replace("%%QM_AFTER_CLOSE_CSS_REV%%", after_close_css_revision)
+        .replace("%%QM_APP_CSS_REV%%", app_css_revision)
         .replace("%%QM_TRADING_DAYS%%", str(TRADING_DAYS))
         .replace("%%QM_RISK_FREE%%", str(RISK_FREE))
     )
@@ -1036,7 +1081,7 @@ def market_history(
         df = load_bars(symbol, start, end, frequency=frequency)
     except Exception:
         logger.warning("行情历史读取失败 symbol=%s frequency=%s", symbol, frequency, exc_info=True)
-        raise HTTPException(404, f"获取 {symbol} 失败，请查看本机日志") from None
+        raise HTTPException(503, f"{symbol} 行情暂不可用，请查看本机日志") from None
     return {
         "symbol": symbol,
         "frequency": frequency,

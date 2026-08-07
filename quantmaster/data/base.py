@@ -37,10 +37,17 @@ class Market(enum.StrEnum):
 
 
 class DataCapability(enum.StrEnum):
+    DAILY_BARS = "daily_bars"
     DAILY = "daily"
     DAILY_CROSS_SECTION = "daily_cross_section"
+    INTRADAY_BARS = "intraday_bars"
     INTRADAY = "intraday"
+    EOD_SNAPSHOT = "eod_snapshot"
+    REALTIME_TICK = "realtime_tick"
     SPOT = "spot"
+    SECURITY_CATALOG = "security_catalog"
+    ADJUSTMENT_FACTORS = "adjustment_factors"
+    ETF_SHARES = "etf_shares"
     INDEX_MEMBERS = "index_members"
     INDUSTRY = "industry"
     THEMES = "themes"
@@ -102,7 +109,10 @@ def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_daily(df: pd.DataFrame) -> pd.DataFrame:
     """向后兼容的日线标准化入口。"""
-    return normalize_bars(df)
+    result = normalize_bars(df)
+    if isinstance(result.index, pd.DatetimeIndex) and result.index.tz is not None:
+        result.index = result.index.tz_localize(None)
+    return result
 
 
 def validate_frequency(frequency: str) -> str:
@@ -150,6 +160,20 @@ class DataSource(ABC):
         """实时快照：columns = [symbol, name, price, change_pct]。"""
         raise NotImplementedError
 
+    def eod_snapshot(self, symbols: list[str]) -> pd.DataFrame:  # pragma: no cover
+        """最近一个已完成交易日的收盘快照；不能伪装成实时行情。"""
+        raise NotImplementedError
+
+    def security_catalog(self) -> list[dict]:  # pragma: no cover
+        """数据源自身的证券目录，仅作覆盖证据而非统一主数据。"""
+        raise NotImplementedError
+
+    def adjustment_factors(
+        self, symbols: list[str], start: str, end: str,
+    ) -> pd.DataFrame:  # pragma: no cover
+        """原始复权因子，供不可变研究价格派生。"""
+        raise NotImplementedError
+
     def index_members(self, index_symbol: str) -> list[str]:  # pragma: no cover
         """指数成分股列表。"""
         raise NotImplementedError
@@ -182,9 +206,14 @@ class DataSource(ABC):
         if value in self.capabilities:
             return True
         method_name = {
+            DataCapability.DAILY_BARS: "daily",
             DataCapability.DAILY: "daily",
+            DataCapability.INTRADAY_BARS: "intraday",
             DataCapability.INTRADAY: "intraday",
+            DataCapability.EOD_SNAPSHOT: "eod_snapshot",
             DataCapability.SPOT: "spot",
+            DataCapability.SECURITY_CATALOG: "security_catalog",
+            DataCapability.ADJUSTMENT_FACTORS: "adjustment_factors",
             DataCapability.INDEX_MEMBERS: "index_members",
         }.get(value)
         if method_name is None:

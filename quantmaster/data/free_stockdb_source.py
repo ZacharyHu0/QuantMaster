@@ -13,6 +13,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import tokenize
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from quantmaster.data.base import (
     validate_frequency,
 )
 from quantmaster.data.resilience import provider_call
+from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
 
 _BOARD_CATEGORIES = {
     0: "概念",
@@ -80,10 +82,15 @@ class FreeStockDBSource(DataSource):
     name = "free-stockdb"
     markets = (Market.CN,)
     capabilities = frozenset({
+        DataCapability.DAILY_BARS,
         DataCapability.DAILY,
         DataCapability.DAILY_CROSS_SECTION,
+        DataCapability.INTRADAY_BARS,
         DataCapability.INTRADAY,
-        DataCapability.SPOT,
+        DataCapability.EOD_SNAPSHOT,
+        DataCapability.SECURITY_CATALOG,
+        DataCapability.ADJUSTMENT_FACTORS,
+        DataCapability.ETF_SHARES,
         DataCapability.INDUSTRY,
         DataCapability.THEMES,
         DataCapability.BOARD_HIERARCHY,
@@ -107,6 +114,7 @@ class FreeStockDBSource(DataSource):
         self._sdk_checked = False
         self._client: Any | None = None
         self._sdk_error: BaseException | None = None
+        self._loaded_artifact_id = ""
 
     def _load_sdk_module(self):
         if not self.sdk_path:
@@ -119,7 +127,9 @@ class FreeStockDBSource(DataSource):
         if directory not in sys.path:
             # stock_sdk 会继续加载同目录的 stockdb 原生模块；保留该显式用户路径。
             sys.path.insert(0, directory)
-        digest = hashlib.sha256(str(sdk_file).encode("utf-8")).hexdigest()[:12]
+        # The vendor updates files in place.  A path-only module key would keep
+        # old code alive until QuantMaster itself restarts.
+        digest = hashlib.sha256(sdk_file.read_bytes()).hexdigest()[:16]
         module_name = f"_quantmaster_free_stockdb_{digest}"
         cached = sys.modules.get(module_name)
         if cached is not None:
@@ -130,11 +140,23 @@ class FreeStockDBSource(DataSource):
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         try:
-            spec.loader.exec_module(module)
+            # SourceFileLoader may reuse a same-size/same-second .pyc after an
+            # in-place vendor update. Compile the selected content directly so
+            # the content-hash module name and executed code cannot diverge.
+            with tokenize.open(sdk_file) as stream:
+                code = compile(stream.read(), str(sdk_file), "exec")
+            exec(code, module.__dict__)
         except (ImportError, OSError, AttributeError, RuntimeError):
             sys.modules.pop(module_name, None)
             raise
         return module
+
+    def reset_runtime(self) -> None:
+        """Discard clients after a data/runtime update; the next call re-probes."""
+        self._sdk_checked = False
+        self._client = None
+        self._sdk_error = None
+        self._loaded_artifact_id = ""
 
     def _sdk_client(self):
         if self._sdk_checked:
@@ -206,12 +228,26 @@ class FreeStockDBSource(DataSource):
         )
 
     def sdk_version(self) -> str:
-        """Return a best-effort SDK version without turning it into a dependency."""
+        """Return a deterministic vendor version or the SDK content fingerprint."""
         try:
             module = self._load_sdk_module()
         except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError):
             return ""
-        return str(getattr(module, "__version__", "") or getattr(module, "VERSION", ""))
+        namespace = getattr(module, "__dict__", {})
+        value = namespace.get("__version__") or namespace.get("VERSION")
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()
+        sdk = self.artifact_identity().sdk
+        digest = str(sdk.get("sha256") or "")
+        return f"sha256:{digest[:16]}" if digest else ""
+
+    def artifact_identity(
+        self, *, data_session: str = "", catalog_hash: str = "", board_hash: str = "",
+    ) -> StockDBArtifactIdentity:
+        return StockDBArtifactIdentity.discover(
+            self.sdk_path or None, get_config().data.free_stockdb_root,
+            data_session=data_session, catalog_hash=catalog_hash, board_hash=board_hash,
+        )
 
     def _request(self, params: dict[str, str], *, probe: bool = False):
         key = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -405,6 +441,8 @@ class FreeStockDBSource(DataSource):
         columns = [
             "symbol", "date", "open", "high", "low", "close", "volume",
             "amount", "float_mv", "total_mv", "pe_ttm", "pb", "is_st",
+            "pre_close", "pct_chg", "amplitude", "turnover", "vol_ratio",
+            "total_share", "float_share", "name",
         ]
         if not ordered:
             return pd.DataFrame(columns=columns)
@@ -412,7 +450,16 @@ class FreeStockDBSource(DataSource):
         begin = _compact_time(start, intraday=False)
         finish = _compact_time(end, intraday=False)
         fields = ",".join(columns[1:])
-        payload = self._sdk_data(codes, begin, finish, "1d", fq="qfq", fields=fields)
+        try:
+            # Cross-sectional ingestion archives point-in-time raw prices.  Research
+            # prices are derived later from the separately frozen factor payload.
+            payload = self._sdk_data(codes, begin, finish, "1d", fq=None, fields=fields)
+        except (KeyError, TypeError):
+            # Old SDK builds and strict wrappers only understand the original
+            # cross-section projection.  Missing rich fields remain null.
+            legacy = ",".join(columns[1:13])
+            payload = self._sdk_data(codes, begin, finish, "1d", fq=None, fields=legacy)
+            fields = legacy
         records: list[dict[str, Any]] = []
         if payload is None:
             for symbol, code in zip(ordered, codes, strict=True):
@@ -438,9 +485,13 @@ class FreeStockDBSource(DataSource):
         frame["date"] = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
         for column in (
             "open", "high", "low", "close", "volume", "amount",
-            "float_mv", "total_mv", "pe_ttm", "pb",
+            "float_mv", "total_mv", "pe_ttm", "pb", "pre_close", "pct_chg",
+            "amplitude", "turnover", "vol_ratio", "total_share", "float_share",
         ):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        # ETF valuation sentinels mean not-applicable, never a literal zero.
+        etf_mask = frame["symbol"].astype(str).str.partition(".")[0].str.startswith(("1", "5"))
+        frame.loc[etf_mask & frame["pb"].eq(0), "pb"] = pd.NA
         return frame[columns].dropna(subset=["date"]).sort_values(["symbol", "date"])
 
     def board_hierarchy(self) -> list[dict[str, Any]]:
@@ -460,9 +511,9 @@ class FreeStockDBSource(DataSource):
         """调用 SDK 指标模块，仅供显式校验/性能路径使用。"""
         module = self._load_sdk_module()
         indicator = getattr(module, "zb", None)
-        calculate = getattr(indicator, "jisuan", None)
+        calculate = getattr(indicator, "get", None)
         if not callable(calculate):
-            raise RuntimeError("free-stockdb SDK 未暴露原生指标计算")
+            raise RuntimeError("free-stockdb SDK 未暴露公开 zb.get 指标接口")
         codes = [str(symbol).partition(".")[0].zfill(6) for symbol in symbols]
         return calculate(names, codes, start=_compact_time(start, intraday=False),
                          end=_compact_time(end, intraday=False), frequency="1d")
@@ -489,7 +540,66 @@ class FreeStockDBSource(DataSource):
         }
         if "amount" in frame:
             aggregation["amount"] = "sum"
-        return frame.resample(frequency).agg(aggregation).dropna(subset=["close"])
+        return self._aggregate_cn_minutes(frame, frequency, aggregation)
+
+    def intraday_many(
+        self, symbols: list[str], start: str, end: str, frequency: str = "1m",
+    ) -> pd.DataFrame:
+        """Batch minute bars for coverage/evidence jobs; never implies realtime."""
+        frequency = validate_frequency(frequency)
+        if frequency == "1d":
+            frames = self.daily_cross_section(symbols, start, end)
+            return frames
+        ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        if not ordered:
+            return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
+        codes = [symbol.partition(".")[0].zfill(6) for symbol in ordered]
+        payload = self._sdk_data(
+            codes, _compact_time(start, intraday=True), _compact_time(end, intraday=True),
+            frequency, fq=None,
+        )
+        if not isinstance(payload, dict):
+            return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
+        frames: list[pd.DataFrame] = []
+        for symbol, code in zip(ordered, codes, strict=True):
+            values = payload.get(code, payload.get(symbol))
+            frame = self._frame(self._records(values), intraday=True)
+            if frame.empty:
+                continue
+            frame = frame.reset_index()
+            frame.insert(0, "symbol", symbol)
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+            columns=["symbol", "date", *OHLCV_COLUMNS, "amount"],
+        )
+
+    @staticmethod
+    def _aggregate_cn_minutes(
+        frame: pd.DataFrame, frequency: str, aggregation: dict[str, str],
+    ) -> pd.DataFrame:
+        """Aggregate within each A-share session so buckets never cross lunch."""
+        minutes = int(frequency[:-1])
+        values = frame.sort_index().copy()
+        minute_of_day = values.index.hour * 60 + values.index.minute
+        morning = (minute_of_day >= 570) & (minute_of_day <= 690)
+        afternoon = (minute_of_day >= 780) & (minute_of_day <= 900)
+        values = values.loc[morning | afternoon]
+        if values.empty:
+            return values
+        minute_of_day = values.index.hour * 60 + values.index.minute
+        session = pd.Series("pm", index=values.index)
+        session.loc[minute_of_day <= 690] = "am"
+        origin = pd.Series(780, index=values.index)
+        origin.loc[session.eq("am")] = 570
+        bucket = ((minute_of_day - origin) // minutes).astype(int)
+        grouped = values.groupby([
+            values.index.normalize(), session.to_numpy(), bucket,
+        ], sort=True)
+        result = grouped.agg(aggregation).dropna(subset=["close"])
+        result.index = pd.DatetimeIndex([
+            group.index[0] for _, group in grouped
+        ], name="date")
+        return result.sort_index()
 
     @staticmethod
     def _flatten_batch(payload) -> list[dict]:
@@ -502,7 +612,7 @@ class FreeStockDBSource(DataSource):
                 records.append(item)
         return records
 
-    def spot(self, symbols: list[str]) -> pd.DataFrame:
+    def eod_snapshot(self, symbols: list[str]) -> pd.DataFrame:
         requested = {symbol.partition(".")[0].zfill(6) for symbol in symbols}
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
         records: list[dict] = []
@@ -533,11 +643,108 @@ class FreeStockDBSource(DataSource):
                 change = (float(item["close"]) / float(item["pre_close"]) - 1) * 100
             rows.append({
                 "code": code,
+                "symbol": _canonical_cn_symbol(code),
                 "name": str(item.get("name") or ""),
                 "price": float(item["close"]),
                 "change_pct": float(change or 0),
+                "as_of_date": str(item.get("date") or trading_date)[:8],
+                "realtime": False,
             })
-        return pd.DataFrame(rows, columns=["code", "name", "price", "change_pct"])
+        return pd.DataFrame(rows, columns=[
+            "code", "symbol", "name", "price", "change_pct", "as_of_date", "realtime",
+        ])
+
+    def spot(self, symbols: list[str]) -> pd.DataFrame:
+        """Deprecated compatibility method; this source does not advertise SPOT."""
+        return self.eod_snapshot(symbols)
+
+    def adjustment_factors(
+        self, symbols: list[str], start: str, end: str,
+    ) -> pd.DataFrame:
+        requested = {
+            str(item).upper().partition(".")[0].zfill(6): str(item).upper()
+            for item in symbols
+        }
+        begin = _compact_time(start, intraday=False)
+        finish = _compact_time(end, intraday=False)
+        client = self._sdk_client()
+        if client is not None:
+            raw = provider_call(
+                self.name, "sdk:adjustment-factors",
+                lambda: client.rd.get("复权*").get("cum"),
+            )
+            by_symbol: dict[str, list[dict[str, Any]]] = {}
+            for item in raw:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                parts = str(item[0]).split(":")
+                if len(parts) < 3 or parts[-2] not in requested:
+                    continue
+                try:
+                    row = {
+                        "symbol": requested[parts[-2]], "date": parts[-1][:8],
+                        "adj_factor": float(item[1]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+                if row["date"] <= finish:
+                    by_symbol.setdefault(row["symbol"], []).append(row)
+            rows: list[dict[str, Any]] = []
+            for values in by_symbol.values():
+                values.sort(key=lambda row: row["date"])
+                previous = [row for row in values if row["date"] < begin]
+                if previous:
+                    rows.append(previous[-1])
+                rows.extend(row for row in values if row["date"] >= begin)
+            frame = pd.DataFrame(rows, columns=["symbol", "date", "adj_factor"])
+            if not frame.empty:
+                frame["date"] = pd.to_datetime(frame["date"], format="%Y%m%d", errors="coerce")
+                return frame.dropna(subset=["date", "adj_factor"]).sort_values(["symbol", "date"])
+
+        rows: list[dict[str, Any]] = []
+        for symbol in dict.fromkeys(str(item).upper() for item in symbols):
+            code = symbol.partition(".")[0].zfill(6)
+            for item in self._query_http("复权", code, begin, finish):
+                value = item.get("cum", item.get("factor"))
+                rows.append({"symbol": symbol, "date": item.get("date"), "adj_factor": value})
+        frame = pd.DataFrame(rows, columns=["symbol", "date", "adj_factor"])
+        if not frame.empty:
+            frame["date"] = pd.to_datetime(frame["date"].astype(str).str[:8], errors="coerce")
+            frame["adj_factor"] = pd.to_numeric(frame["adj_factor"], errors="coerce")
+            frame = frame.dropna(subset=["date", "adj_factor"])
+        return frame
+
+    @staticmethod
+    def _raw_table_records(rows: Any) -> list[dict[str, Any]]:
+        if not isinstance(rows, (list, tuple)):
+            try:
+                rows = list(rows)
+            except TypeError:
+                return []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            key, value = "", row
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                key, value = str(row[0]), row[1]
+            if isinstance(value, dict):
+                result.append({"key": key, **value})
+            else:
+                result.append({"key": key, "value": value})
+        return result
+
+    def security_catalog(self) -> list[dict[str, Any]]:
+        client = self._sdk_client()
+        if client is None:
+            raise RuntimeError("free-stockdb 证券目录需要 stock_sdk")
+        rows = provider_call(self.name, "sdk:security-catalog", lambda: client.rd.get("股票代码").do())
+        return self._raw_table_records(rows)
+
+    def delisted_catalog(self) -> list[dict[str, Any]]:
+        client = self._sdk_client()
+        if client is None:
+            raise RuntimeError("free-stockdb 退市目录需要 stock_sdk")
+        rows = provider_call(self.name, "sdk:delisted-catalog", lambda: client.rd.get("退市*").do())
+        return self._raw_table_records(rows)
 
     @staticmethod
     def _board_records(rows) -> list[dict[str, Any]]:
@@ -618,6 +825,8 @@ class FreeStockDBSource(DataSource):
             return {
                 "status": "ok", "engine": "stock_sdk",
                 "sdk_path": self.sdk_path, "service_url": self.base_url.rstrip("/"),
+                "sdk_version": self.sdk_version(),
+                "artifact": self.artifact_identity().to_dict(),
             }
         payload = self._request({"cmd": "ping"}, probe=True)
         result = payload if isinstance(payload, dict) else {"status": "ok"}

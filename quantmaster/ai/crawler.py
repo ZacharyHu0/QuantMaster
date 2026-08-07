@@ -44,6 +44,7 @@ from quantmaster.ai.news_sources import (
     fetch_declarative_source,
 )
 from quantmaster.ai.news_storage import (
+    aggregate_news_event_focus,
     aggregate_news_stats,
     migrate_news_schema,
     news_content_hash,
@@ -271,19 +272,53 @@ def _adaptive_sentiment_scale(values: list[float], default: int = 20) -> int:
     return next((bucket for bucket in (10, 20, 40, 60, 80, 100) if bucket >= padded), 100)
 
 
+_GENERIC_ANALYSIS_ERROR = "资讯分析失败，请查看本机日志"
+
+
+def _analysis_error_message(code: str) -> str:
+    normalized = str(code or "unknown").strip().casefold()
+    if normalized in {"rate_limit", "http_429"}:
+        return "模型服务拒绝了请求：调用过于频繁或额度不足。请稍后重试并检查服务额度。"
+    if normalized == "queue_timeout":
+        return "分析请求等待并发槽位超时。请稍后重试，或降低资讯处理并发。"
+    if normalized in {"timeout", "read_timeout", "request_timeout"}:
+        return "模型在设定时间内没有返回结果。请检查服务状态，或提高资讯分析超时时间。"
+    if normalized in {"network", "network_error", "connect_timeout"}:
+        return "无法连接模型服务。请检查网络、API 地址以及模型网关是否在线。"
+    if normalized in {"authentication", "http_401", "http_403"}:
+        return "模型服务拒绝鉴权。请检查 API 密钥以及该密钥的模型访问权限。"
+    if normalized == "http_400":
+        return "模型服务拒绝了请求（HTTP 400）。请检查模型名称和接口协议是否兼容。"
+    if normalized == "http_404":
+        return "没有找到模型接口或模型（HTTP 404）。请检查 API 地址和模型名称。"
+    if normalized in {"http_408", "http_425"}:
+        return "模型服务暂时无法处理请求。请稍后重试。"
+    if normalized in {"http_500", "http_502", "http_503", "http_504"}:
+        return "模型服务或上游网关暂时异常。请检查网关状态后重试。"
+    if normalized.startswith("http_"):
+        status = normalized.removeprefix("http_") or "未知"
+        return f"模型服务返回 HTTP {status}。请检查接口配置和服务状态。"
+    if normalized == "invalid_response":
+        return (
+            "模型接口返回的内容无法解析。常见原因是 API 地址指向网页、网关返回错误页，"
+            "或接口协议不兼容；请检查 API 地址和模型服务。"
+        )
+    if normalized == "invalid_json":
+        return "模型返回的分析内容不是合法 JSON。请检查模型兼容性或更换资讯分析模型。"
+    if normalized == "empty_response":
+        return "模型返回了空内容。请检查模型服务状态后重试。"
+    if normalized == "claim_lost":
+        return "该资讯已由另一项分析任务接管，无需重复处理。"
+    if normalized == "invalid_batch_shape":
+        return "模型返回的结果数量与本批资讯不一致。请重试或减小分析批次。"
+    return f"资讯分析遇到未识别错误（{normalized.upper()}）。请查看本机日志获取技术细节。"
+
+
 def _safe_analysis_error(exc: Exception) -> str:
     code = _analysis_failure_code(exc)
-    if code in {"rate_limit", "http_429", "queue_timeout"}:
-        return "资讯分析服务繁忙，已安排重试"
-    if code in {"timeout", "read_timeout", "network"}:
-        return "资讯分析网络超时，已安排重试"
-    if code in {"authentication", "http_401", "http_403"}:
-        return "资讯分析凭据不可用，请检查本机设置"
-    if code == "claim_lost":
-        return "资讯分析租约已转交其他任务"
-    if code == "invalid_batch_shape":
-        return "资讯分析结果格式不兼容"
-    return "资讯分析失败，请查看本机日志"
+    if code == "invalid_response" and isinstance(exc, LLMError):
+        return str(exc).strip()[:1000]
+    return _analysis_error_message(code)
 
 
 def _analysis_failure_code(exc: Exception) -> str:
@@ -367,6 +402,14 @@ class NewsStore:
         value["first_seen_at"] = (
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)) if epoch else ""
         )
+        if (
+            value.get("analysis_status") in {"failed", "dead_letter"}
+            and str(value.get("analysis_error") or "").strip()
+            in {"", _GENERIC_ANALYSIS_ERROR}
+        ):
+            value["analysis_error"] = _analysis_error_message(
+                str(value.get("last_failure_code") or "unknown"),
+            )
         return value
 
     def save(self, items: list[NewsItem]) -> int:
@@ -872,6 +915,43 @@ class NewsStore:
             result.append(value)
         return result
 
+    def market_sentiment(self, *, as_of: float, days: int = 30) -> dict[str, Any]:
+        """Return a quality-weighted market proxy bounded at the requested time."""
+        reference = float(as_of)
+        if not math.isfinite(reference) or reference <= 0:
+            raise ValueError("情绪代理时点必须是有效时间戳")
+        window_days = max(1, min(int(days), 3650))
+        cutoff = reference - window_days * 86400
+        news_config = get_config().news
+        minimum = float(news_config.factor_min_confidence)
+        halflife_days = max(0.01, float(news_config.factor_halflife_days))
+        with self._conn() as conn:
+            aggregate_rows = aggregate_news_stats(
+                conn,
+                cutoff=cutoff,
+                until=reference,
+                minimum_confidence=minimum,
+                now=reference,
+                halflife_days=halflife_days,
+            )
+        market_row = next(
+            (row for row in aggregate_rows if str(row.get("item_type") or "") == "market"),
+            {},
+        )
+        snapshot = _sentiment_snapshot_from_totals(
+            float(market_row.get("weighted_score") or 0),
+            float(market_row.get("total_weight") or 0),
+            int(market_row.get("event_count") or 0),
+        )
+        snapshot.update({
+            "as_of_epoch": reference,
+            "lookback_days": window_days,
+            "halflife_days": halflife_days,
+            "minimum_confidence": minimum,
+            "total_weight": round(float(market_row.get("total_weight") or 0), 4),
+        })
+        return snapshot
+
     def stats(self, days: int = 30) -> dict:
         now = time.time()
         cutoff = now - max(1, min(days, 3650)) * 86400
@@ -888,15 +968,14 @@ class NewsStore:
                 "SUM(importance_score>=80) AS important,"
                 "SUM(sentiment>0.15 AND analysis_status='complete') AS positive,"
                 "SUM(sentiment<-0.15 AND analysis_status='complete') AS negative "
-                "FROM news WHERE first_seen_at>=?", (cutoff,),
+                "FROM news WHERE first_seen_at>=? AND first_seen_at<=?", (cutoff, now),
             ).fetchone()
             queue_counts = conn.execute(
                 "SELECT SUM(analysis_status='pending') AS pending,"
                 "SUM(analysis_status='failed') AS failed,"
                 "SUM(analysis_status='recovery') AS recovery,"
                 "SUM(analysis_status='dead_letter') AS dead_letter,"
-                "SUM(analysis_status='dead_letter' AND analysis_recovery_count<3) "
-                "AS manual_recoverable_dead_letter,"
+                "SUM(analysis_status='dead_letter') AS manual_recoverable_dead_letter,"
                 "SUM(analysis_status='dead_letter' AND analysis_recovery_count<3 "
                 "AND next_retry_at<=?) AS recoverable_dead_letter FROM news",
                 (now,),
@@ -904,6 +983,7 @@ class NewsStore:
             aggregate_rows = aggregate_news_stats(
                 conn,
                 cutoff=cutoff,
+                until=now,
                 minimum_confidence=minimum,
                 now=now,
                 halflife_days=halflife_days,
@@ -991,6 +1071,35 @@ class NewsStore:
             for symbol, count in top_symbols
         ]
         return data
+
+    def event_focus(self, days: int = 7) -> dict:
+        """Return short-cycle symbol mentions using the same quality gates as stats."""
+        window_days = int(days)
+        if window_days not in {1, 3, 7, 30}:
+            raise ValueError("事件聚焦窗口仅支持 1、3、7、30 日")
+        cutoff = time.time() - window_days * 86400
+        minimum = get_config().news.factor_min_confidence
+        with self._conn() as conn:
+            rows = aggregate_news_event_focus(
+                conn,
+                cutoff=cutoff,
+                minimum_confidence=minimum,
+            )
+        from quantmaster.data import load_stock_names
+
+        symbols = [str(row["symbol"]) for row in rows]
+        symbol_names = load_stock_names(symbols)
+        return {
+            "days": window_days,
+            "top_symbols": [
+                {
+                    "symbol": symbol,
+                    "name": symbol_names.get(symbol, ""),
+                    "count": int(row["event_count"] or 0),
+                }
+                for row, symbol in zip(rows, symbols, strict=True)
+            ],
+        }
 
 
 @contextmanager

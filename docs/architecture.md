@@ -83,14 +83,19 @@
   上层模块完全不感知数据来自哪家。
 - **数据源优先级与降级**：A 股默认使用用户安装的 free-stockdb SDK 和本地数据，
   随后回退 AKShare、Tushare 与本地缓存；主源可在设置中切换。QuantMaster 不捆绑
-  free-stockdb 程序、数据或同步源。数据源显式声明 daily、daily_cross_section、
-  intraday、spot、index_members、industry、themes、board_hierarchy 与
-  native_indicators 能力；诊断同时披露声明和本机可用状态。调度器只调用满足请求能力的来源。新增数据源
+  free-stockdb 程序、数据或同步源。free-stockdb 是 Tushare 数据的第三方本地分发，
+  不作为独立上游交叉验证。数据源显式区分日线、日频截面、分钟线、收盘快照、实时 Tick、
+  证券目录、复权因子、板块层级、ETF 份额与原生指标；诊断同时披露安装、连接、数据就绪、
+  验证、资产类别、频率、覆盖和截至日期。调度器只调用满足请求能力的来源。新增数据源
   需要实现对应方法、声明 capability 并注册到 `registry._factories()`。能力矩阵和各市场
   实际优先级可在 `/api/v1/diagnostics` 或 `qm doctor --deep` 中查看。
 - **free-stockdb 托管**：`data/free_stockdb_runtime.py` 只管理用户自行安装的完整发行包，
-  不下载程序、数据或同步源。目录、启停、盘后更新时间均可在设置中调整；更新期间其他
-  请求按注册优先级降级，应用退出会终止仍在运行的更新器，运行状态进入深度诊断。
+  不下载程序、数据或同步源。目录、启停、盘后更新时间均可在设置中调整；热重载监督
+  进程通过 SQLite 邮箱独占进程控制，Web worker 只提交命令和消费幂等结果事件。自动
+  更新采用真实交易日和全市场覆盖验收，失败期间先恢复服务再有限重试。控制台关闭会
+  主动停止 sidecar；异常退出后的孤儿进程只有在 PID、创建时间、路径和 owner 身份都
+  核验一致时才回收，外部进程绝不终止。更新期间其他请求按注册优先级降级，运行状态
+  进入深度诊断。
 - **盘后研究快照**：`after_close/` 以证券主数据为全 A 股入口，批量读取日频截面并执行
   最新交易日、证券/OHLCV 覆盖、板块目录和覆盖骤降门禁。板块及候选由版本化的
   QuantMaster 公式计算，正式结果以输入哈希写入不可变 SQLite 快照，同时将截面和板块
@@ -100,6 +105,13 @@
   中证800成员通过 Tushare `index_weight` 拉取沪深300与中证500月度快照，按生效日写入
   `raw/stock/1d/csi800_membership` 研究湖分区；盘后、Quant Lab 与回放共用内容哈希和
   分区血缘，缺权限时只把该基线标为不可用。
+- **free-stockdb 摄取**：`data/free_stockdb_ingest.py` 以 SDK/原生程序哈希、数据代次、
+  证券主数据及证券/退市/板块目录哈希确定缓存身份，原子发布未复权日线、复权因子、ETF
+  日线/分钟证据和冻结目录。最近成功清单按发布时间保留，内容块只在不再被清单引用时回收；
+  研究价由冻结因子按版本化公式派生，原始价从不被覆盖。
+- **ETF 研究**：`rotation/etf_research.py` 保留全部沪深可交易 ETF 并排除 LOF，按宽基、
+  行业主题、策略、QDII、债券、商品、货币和其他类别分别排名。分钟证据不参与日频排名；
+  stockdb 份额保留观察日期和滞后语义，当日 Tushare 份额可用时优先采用。
 - **缓存**：日线每标的一个 Parquet；分钟线按 `1m/5m/15m/30m/60m`
   隔离目录并增量归档。SQLite 分别记录实际数据边界、已检查覆盖边界、检查时间、
   来源和状态。完整历史覆盖长期视为不可变；接近当前日期时按 `cache_days` 检查，
@@ -127,7 +139,8 @@
   Tushare `dc_index + dc_member`（当前需 6000 积分）。两套目录按整套口径切换，不混合
   板块代码；权限型接口使用独立健康通道，失败不会熔断 Tushare 核心行情，双源都失败
   时保留上次可用目录。
-- **分钟线口径**：free-stockdb SDK 提供 1/5/15/30/60 分钟聚合，其他来源作为后备；
+- **分钟线口径**：free-stockdb SDK 提供 1 分钟；HTTP 回退的 5/15/30/60 分钟由
+  QuantMaster 按 A 股上午/下午交易时段聚合，绝不跨午休合并。其他来源作为后备；
   本地归档统一使用不复权价格，避免复权基准变化造成假跳空。
 
 ## 研究生产层（research/）
@@ -137,8 +150,9 @@
 - `lake.py` 在 `data_root/research_lake` 中按 kind / asset / frequency / dataset /
   trade_date 组织 Zstd Parquet；SQLite 目录保存模式哈希、内容 SHA-256、输入
   血缘、规格版本和 run id。写入经过临时文件、fsync 和原子替换。
-- `adapters.py` 用交易日截面接口生产 A 股、ETF 和期货基线，区分未配置、
-  缺少权限与短暂失败。高级分钟接口只报能力，不会阻塞可用的日线基线。
+- `adapters.py` 优先读取已验证的 stockdb `ingest_id` 生产 A 股原始行情、复权因子、
+  每日指标与 ETF 行情分区，再按缺失行显式回退 Tushare 直连；两条路径都标记同一 Tushare
+  上游及各自 distribution。未配置、未安装、数据未就绪、缺少权限与短暂失败分别报告。
 - `engine.py` 先用官方日历和 lookback/lookahead 生成 dry-run DAG，再按 provider 合并
   公共扫描。增量运行会重算数据集的修订窗口，分区租约避免并发重复写入。
 - `providers.py` 内置六个跨资产截面因子、四个前瞻标签、QM_STYLE_V1 五风格

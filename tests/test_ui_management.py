@@ -93,12 +93,21 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         release.click()
         page.locator("#release-popover").wait_for(state="visible")
         assert "更新日志" in page.locator("#release-popover").inner_text()
+        assert page.get_by_role("button", name="立即热更新").is_visible()
+        assert "绕过自动限频" in page.locator("#release-reload-status").inner_text()
+        assert page.locator("#release-popover #free-stockdb-release").count() == 0
+        stockdb = page.locator("#stockdb-update-trigger")
+        stockdb.click()
+        page.locator("#stockdb-update-popover").wait_for(state="visible")
+        assert page.locator("#release-popover").is_hidden()
+        assert "stockdb 数据状态" in page.locator("#stockdb-update-popover").inner_text()
+        assert page.locator("#stockdb-update-popover #free-stockdb-release").count() == 1
 
         settings = page.get_by_role("button", name="设置", exact=True)
         assert settings.bounding_box()["x"] > page.locator("#nav").bounding_box()["x"]
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
-        assert page.locator("#nav .workspace-nav button").all_inner_texts() == [
+        assert page.locator("#nav.workspace-nav button").all_inner_texts() == [
             "观察", "选股", "研究", "交易", "自动化",
         ]
         assert page.locator('[data-workspace-pages="observe"] button').all_inner_texts() == [
@@ -110,12 +119,47 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         config_path = page.locator("#settings-config-path")
         config_path.wait_for(state="visible")
         playwright_sync.expect(config_path).not_to_have_text("正在读取配置…")
+        assert page.locator("#settings-nav .settings-nav-group").count() == 5
+        assert page.locator("#settings-nav [data-settings-section]").count() == 11
+        assert page.locator("#settings-nav [data-settings-section]").all_inner_texts() == [
+            "模型服务", "在线数据源", "本地行情库", "研究数据", "Quant Lab",
+            "交易规则", "自动化", "资讯处理", "资讯来源", "本机服务", "快照回滚",
+        ]
+
+        browser_settings = page.evaluate(
+            "structuredClone(window.QuantMasterManagement.state.config)"
+        )
+
+        def fulfill_settings_save(route):
+            if route.request.method != "PUT":
+                route.continue_()
+                return
+            body = route.request.post_data_json
+            for key in (
+                "config_version", "llm", "data", "trade", "news", "server", "automation", "lab",
+            ):
+                if key in body:
+                    browser_settings[key] = body[key]
+            browser_settings["managed_by_gui"] = True
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "status": "ok", "warnings": [], "changed_fields": [],
+                    "restart_required": [], "apply_status": {},
+                    "runtime": browser_settings["runtime"], "settings": browser_settings,
+                }),
+            )
+
+        page.route("**/api/v1/settings", fulfill_settings_save)
 
         page.locator('[name="llm.provider"]').select_option("openai-compatible")
         page.locator('[name="llm.base_url"]').fill("http://127.0.0.1:9/v1")
         page.locator('[name="llm.model"]').fill("manual-local-model")
         page.locator('[name="llm.reasoning_effort"]').select_option("high")
         page.locator('[name="llm.max_concurrency"]').fill("2")
+        page.locator('[name="llm.max_concurrency"]').blur()
+        _wait_for_class(page.locator("#settings-save-state"), "saved")
         page.locator('[data-check="llm-models"]').click()
         model_check = page.locator('[data-check-result="llm-models"]')
         playwright_sync.expect(model_check).to_have_class(
@@ -127,7 +171,50 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
         assert page.locator('[name="llm.reasoning_effort"]').input_value() == "high"
         assert page.locator('[name="llm.max_concurrency"]').input_value() == "2"
+        assert model_check.locator("xpath=ancestor::section[1]").get_attribute(
+            "data-diagnostic"
+        ) == "llm-models"
+        page.locator('[name="llm.timeout"]').fill("179")
+        playwright_sync.expect(model_check).to_have_class(re.compile(r"(?:^|\s)stale(?:\s|$)"))
+        playwright_sync.expect(model_check.locator(".check-stale")).to_be_visible()
+        page.locator('[name="llm.timeout"]').blur()
         _wait_for_class(page.locator("#settings-save-state"), "saved")
+
+        page.route(
+            "**/api/v1/settings/check/data-sources",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "status": "warning",
+                    "message": "数据源检测完成",
+                    "latency_ms": 24,
+                    "checked_at": "2026-08-08T01:14:56Z",
+                    "details": {
+                        "sources": {
+                            "akshare": {"status": "success", "message": "端点可达"},
+                            "yfinance": {"status": "warning", "message": "端点限流"},
+                        },
+                        "circuits": {"yahoo": {"state": "open"}},
+                        "security_master": {
+                            "status": "success", "record_count": 33984,
+                            "coverage": [{"market": "CN", "asset_type": "stock", "count": 5871}],
+                        },
+                        "proxies": {},
+                    },
+                }),
+            ),
+        )
+        page.locator('[data-settings-section="online-data"]').click()
+        data_diagnostic = page.locator('[data-diagnostic="data-sources"]')
+        assert data_diagnostic.locator('[data-check="data-sources"]').count() == 1
+        assert data_diagnostic.locator('[data-check-result="data-sources"]').count() == 1
+        data_diagnostic.locator('[data-check="data-sources"]').click()
+        source_result = data_diagnostic.locator('[data-check-result="data-sources"]')
+        playwright_sync.expect(source_result.locator(".check-details")).to_have_attribute("open", "")
+        assert source_result.locator(".check-detail-groups h5").all_inner_texts() == [
+            "依赖与端点", "熔断状态", "证券主数据", "代理",
+        ]
 
         page.locator('[data-settings-section="automation"]').click()
         assert page.locator('[name="automation.enabled"]').is_visible()
@@ -139,7 +226,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('#snapshot-form button').click()
         page.get_by_text("UI baseline", exact=True).first.wait_for()
 
-        page.get_by_role("button", name="候选", exact=True).click()
+        page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
         page.locator(".candidate-detail").wait_for()
         page.locator("#candidate-new").click()
         preset_buttons = page.locator("[data-candidate-index-preset]")
@@ -178,7 +265,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "坏日期,000001,卖出,11,100,5\n",
             encoding="utf-8-sig",
         )
-        page.get_by_role("button", name="实盘", exact=True).click()
+        page.locator('header [data-tab="ledger"]').evaluate("element => element.click()")
         page.locator('#broker-csv').set_input_files(csv)
         preview_button = page.locator('#csv-preview-form button')
         preview_button.wait_for(state="visible")
@@ -193,16 +280,19 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.locator('#csv-download-errors').is_visible()
 
         page.set_viewport_size({"width": 390, "height": 844})
-        page.get_by_role("button", name="候选", exact=True).click()
+        page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
         assert page.locator("#candidate-mobile-select").is_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="设置", exact=True).click()
-        page.locator('[data-settings-section="data"]').click()
-        assert page.locator('[data-settings-panel="data"]').is_visible()
+        mobile_settings = page.locator("#settings-section-select")
+        assert mobile_settings.is_visible()
+        assert page.locator("#settings-nav").is_hidden()
+        mobile_settings.select_option("local-data")
+        assert page.locator('[data-settings-panel="local-data"]').is_visible()
         columns = page.locator(".settings-shell").evaluate(
             "el => getComputedStyle(el).gridTemplateColumns"
         )
-        assert columns != "188px"
+        assert columns != "196px"
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         browser.close()
 
@@ -477,11 +567,18 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         "change_pct": 0.99, "nav": [[1784505600000, 1.0], [1784592000000, 1.02]],
         "as_of": "2026-07-21", "cache_status": "ready",
         "memberships": ["favorites", "holdings"],
+        "rsi_14": 58.0, "rsi_history": [
+            ["2026-05-01", 40.0], ["2026-06-15", 52.0], ["2026-07-21", 58.0],
+        ],
     }
     index = {
         "symbol": "000300.SH", "name": "沪深300", "last": 4600.0,
         "change_pct": -0.2, "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
         "as_of": "2026-07-21", "cache_status": "ready",
+        "rsi_14": 60.0, "rsi_history": [
+            ["2026-03-01", 20.0], ["2026-04-20", 30.0], ["2026-05-01", 35.0],
+            ["2026-06-15", 50.0], ["2026-07-21", 60.0],
+        ],
     }
     stream = "\n".join([
         json.dumps({
@@ -496,6 +593,10 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
             }, "request_id": "market-test",
         }, ensure_ascii=False),
     ]) + "\n"
+    kline = [
+        [f"2026-06-{day:02d}", price, price + 0.2, price - 0.3, price + 0.5, 1000 + day]
+        for day, price in enumerate([100.0] + [10.0 + index * 0.1 for index in range(27)],1)
+    ]
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
@@ -503,6 +604,12 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
             "**/api/v1/market/overview/stream*",
             lambda route: route.fulfill(
                 status=200, content_type="application/x-ndjson", body=stream),
+        )
+        page.route(
+            "**/api/v1/market/history/**",
+            lambda route: route.fulfill(json={
+                "symbol": "000300.SH", "frequency": "1d", "kline": kline,
+            }),
         )
         page.goto(url)
         personal_section = page.locator('[data-market-group="我的股票"]')
@@ -537,7 +644,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
                 endpointPoints: option.series[1].data.length,
                 tooltipText: option.tooltip[0].formatter([{
                   seriesId:'market-spark-trend', dataIndex:1,
-                  value:[1784592000000,-0.2],
+                  value:-0.2,
                 }]),
               };
             }""",
@@ -563,6 +670,60 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert page.evaluate("marketSparkMonth(1784505600000, true)") == "2026.07"
         assert page.evaluate("marketSparkMonth('1784505600000', true)") == "2026.07"
         assert page.evaluate("marketSparkMonth(1784505600000, false)") == "07月"
+        assert page.evaluate(
+            "history => rsiSparkPoints(history).map(point => point.date)",
+            index["rsi_history"],
+        ) == ["2026-05-01", "2026-06-15", "2026-07-21"]
+        rsi_spark = index_section.locator(".mkt-rsi-spark")
+        rsi_bounds = rsi_spark.bounding_box()
+        page.mouse.move(
+            rsi_bounds["x"] + rsi_bounds["width"] / 2,
+            rsi_bounds["y"] + 18,
+        )
+        tooltip = index_section.locator(".mkt-rsi-tooltip")
+        tooltip.wait_for(state="visible")
+        assert tooltip.locator("[data-rsi-hover-date]").inner_text() == "2026-06-15"
+        assert tooltip.locator("[data-rsi-hover-value]").inner_text() == "RSI 50.0"
+        hover_dot = index_section.locator(".mkt-rsi-hover-dot")
+        assert hover_dot.get_attribute("visibility") == "visible"
+        hover_dot_bounds = hover_dot.bounding_box()
+        assert abs(hover_dot_bounds["width"] - hover_dot_bounds["height"]) <= 0.5
+        assert max(hover_dot_bounds["width"],hover_dot_bounds["height"]) <= 4.0
+        page.mouse.move(rsi_bounds["x"] - 4,rsi_bounds["y"] + 18)
+        tooltip.wait_for(state="hidden")
+        index_section.locator(".mkt-item").click()
+        page.locator("#kline canvas").wait_for()
+        zoom_snapshot = """() => {
+          const chart = charts.kline;
+          const option = chart.getOption();
+          const zoom = id => {
+            const item = option.dataZoom.find(candidate => candidate.id === id);
+            return {start:Number(item.start),end:Number(item.end),filterMode:item.filterMode};
+          };
+          return {
+            x:zoom('market-kline-x-wheel'),
+            y:zoom('qm-zoom-y-wheel'),
+            yExtent:chart.getModel().getComponent('yAxis',0).axis.scale.getExtent(),
+          };
+        }"""
+        before_wheel = page.evaluate(zoom_snapshot)
+        assert before_wheel["x"]["filterMode"] == "none"
+        page.locator("#kline").evaluate(
+            """element => {
+              const bounds = element.getBoundingClientRect();
+              element.dispatchEvent(new WheelEvent('wheel',{
+                deltaX:-120,deltaY:0,ctrlKey:true,bubbles:true,cancelable:true,
+                clientX:bounds.left + bounds.width / 2,
+                clientY:bounds.top + bounds.height / 2,
+              }));
+            }"""
+        )
+        page.wait_for_timeout(50)
+        after_wheel = page.evaluate(zoom_snapshot)
+        assert after_wheel["x"]["start"] > before_wheel["x"]["start"]
+        assert after_wheel["x"]["end"] < before_wheel["x"]["end"]
+        assert after_wheel["y"] == before_wheel["y"]
+        assert after_wheel["yExtent"] == before_wheel["yExtent"]
         assert index_section.bounding_box()["y"] < personal_section.bounding_box()["y"]
 
         page.set_viewport_size({"width": 390, "height": 844})
@@ -640,13 +801,22 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         "last_error": "", "owner_actor": "feishu:cli_app:ou_owner", "has_context": False,
         "updated_at": "2026-07-27T10:00:00+00:00",
     }
+    job = {
+        "name": "news_digest", "enabled": False,
+        "schedule": {"type": "daily", "times": ["11:35", "21:00"]},
+        "args": {}, "next_run": None, "updated_at": "2026-07-27T10:00:00+00:00",
+    }
     overview = {
         "enabled": True, "timezone": "Asia/Shanghai", "runtime": "running",
-        "bot_accounts": [], "jobs": [], "recent_events": [], "targets": [target],
+        "bot_accounts": [{
+            "channel": "feishu", "account_id": "cli_app", "status": "listening",
+            "last_error": "",
+        }],
+        "jobs": [job], "recent_runs": [], "recent_events": [], "targets": [target],
         "inbound": {
             "feishu": {
-                "total": 0, "last_received_at": "",
-                "direct": {"total": 0, "last_received_at": ""},
+                "total": 1, "last_received_at": "2026-07-27T10:02:00+00:00",
+                "direct": {"total": 1, "last_received_at": "2026-07-27T10:02:00+00:00"},
                 "group": {"total": 0, "last_received_at": ""},
             },
             "weixin": {"total": 0, "last_received_at": ""},
@@ -659,7 +829,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         "built_in": True, "auth_type": "none", "auth_header": "",
         "auth_configured": False, "parser": {}, "last_error": "", "last_run": "",
     }
-    audit_requests = {"count": 0}
+    requests = {"audit": 0, "events": 0, "jobs": 0, "run": 0}
 
     def policy_handler(route):
         body = route.request.post_data_json
@@ -670,11 +840,42 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         route.fulfill(status=200, json=target)
 
     def audit_handler(route):
-        audit_requests["count"] += 1
+        requests["audit"] += 1
         route.fulfill(status=200, json={"items": [{
             "created_at": "2026-07-27T10:00:00+00:00", "actor": "web",
             "action": "update_policy", "object_type": "target",
             "object_id": "feishu_owner", "result": "ok",
+        }]})
+
+    def event_handler(route):
+        requests["events"] += 1
+        route.fulfill(status=200, json={"items": [{
+            "id": "event-1", "kind": "important_news", "score": 82,
+            "direction": "up", "occurred_at": "2026-07-27T10:03:00+00:00",
+            "payload": {"title": "测试市场事件"},
+        }]})
+
+    def jobs_handler(route):
+        if route.request.url.endswith("/run"):
+            requests["run"] += 1
+            route.fulfill(status=200, json={
+                "status": "accepted", "run_id": "job-2", "job_id": "job-2",
+                "task": "news_digest", "created": True,
+            })
+            return
+        if route.request.method == "PATCH":
+            job["enabled"] = route.request.post_data_json["action"] == "resume"
+            route.fulfill(status=200, json=job)
+            return
+        requests["jobs"] += 1
+        route.fulfill(status=200, json={"jobs": [job], "runs": [{
+            "domain": "automation", "id": "job-1", "type": "automation.news_digest",
+            "status": "completed", "progress": 1, "phase": "completed",
+            "detail": "摘要生成完成", "attempt": 1, "cancel_requested": False,
+            "created_at": "2026-07-27T09:59:00+00:00",
+            "updated_at": "2026-07-27T10:01:00+00:00",
+            "estimated_remaining_seconds": 0, "can_cancel": False,
+            "can_retry": False, "links": {},
         }]})
 
     def source_handler(route):
@@ -686,16 +887,46 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 390, "height": 844})
+        dialogs = []
+
+        def dismiss_dialog(dialog):
+            dialogs.append(dialog.message)
+            dialog.dismiss()
+
+        page.on("dialog", dismiss_dialog)
         page.route("**/api/v1/automation/overview", lambda route: route.fulfill(json=overview))
         page.route("**/api/v1/automation/audit*", audit_handler)
+        page.route("**/api/v1/automation/events*", event_handler)
+        page.route("**/api/v1/automation/jobs", jobs_handler)
+        page.route("**/api/v1/automation/jobs/**", jobs_handler)
         page.route("**/api/v1/automation/targets/*/policy", policy_handler)
         page.route("**/api/v1/news/sources*", source_handler)
         page.goto(url)
 
         page.get_by_role("button", name="自动化", exact=True).click()
+        page.locator("#automation-overview").get_by_text(
+            "重要消息摘要已暂停", exact=True,
+        ).wait_for()
+        overview_tab = page.get_by_role("tab", name="运行总览", exact=True)
+        overview_tab.focus()
+        overview_tab.press("ArrowRight")
+        assert page.get_by_role("tab", name="任务调度", exact=True).get_attribute(
+            "aria-selected"
+        ) == "true"
+
+        page.locator('[data-job-row="news_digest"] [data-job-expand]').click()
+        page.get_by_role("button", name="立即运行任务", exact=True).click()
+        _wait_for_class(page.locator(
+            '[data-job-row="news_digest"] .automation-row-feedback',
+        ), "success")
+        assert requests["run"] == 1
+
+        page.get_by_role("tab", name="消息推送", exact=True).click()
         page.locator('[data-target-card="feishu_owner"]').wait_for()
-        assert not page.locator("#automation-audit-panel").evaluate("element => element.open")
-        assert audit_requests["count"] == 0
+        page.locator('[data-target-card="feishu_owner"] [data-target-expand]').click()
+        assert requests["audit"] == 0
+        assert requests["events"] == 0
+        assert requests["jobs"] == 0
 
         for kind in ("important_news", "market_turn", "market_close", "task_report", "task_failure"):
             page.locator(f'[data-target="feishu_owner"][data-event-type="{kind}"]').uncheck()
@@ -707,10 +938,67 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
             '[data-target-card="feishu_owner"] .target-content-note'
         ).inner_text()
 
-        page.locator("#automation-audit-panel summary").click()
+        page.get_by_role("tab", name="运行记录", exact=True).click()
+        page.locator("#automation-runs").get_by_text("job-1", exact=True).wait_for()
+        assert requests["jobs"] == 1
+        assert requests["events"] == 0
+        assert requests["audit"] == 0
+
+        runs_tab = page.get_by_role("tab", name="任务运行", exact=True)
+        runs_tab.focus()
+        runs_tab.press("ArrowRight")
+        page.get_by_text("测试市场事件", exact=True).wait_for()
+        assert requests["events"] == 1
+        assert requests["audit"] == 0
+
+        page.get_by_role("tab", name="操作审计", exact=True).click()
         page.get_by_text("update_policy", exact=True).wait_for()
-        assert audit_requests["count"] == 1
+        assert requests["audit"] == 1
+
+        page.get_by_role("button", name="刷新状态", exact=True).click()
+        page.wait_for_function(
+            "() => document.querySelector('#automation-page-feedback')"
+            "?.textContent.includes('已刷新')"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#automation-audit')"
+            "?.textContent.includes('update_policy')"
+        )
+        assert requests["audit"] == 2
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert dialogs == []
+
+        page.emulate_media(reduced_motion="reduce")
+        page.get_by_role("tab", name="任务调度", exact=True).click()
+        assert page.locator("#automation-panel-jobs").evaluate(
+            "element => getComputedStyle(element).animationName"
+        ) == "none"
+
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.get_by_role("tab", name="消息推送", exact=True).click()
+        channel_status = page.locator(
+            '#automation-channel-feishu .status-label'
+        )
+        assert channel_status.evaluate(
+            "element => getComputedStyle(element).whiteSpace"
+        ) == "nowrap"
+        assert channel_status.evaluate(
+            "element => element.getBoundingClientRect().height"
+        ) < 24
+        target_toggle = page.locator(
+            '[data-target-card="feishu_owner"] [data-target-expand]'
+        )
+        if target_toggle.get_attribute("aria-expanded") != "true":
+            target_toggle.click()
+        subscription_checkbox = page.locator(
+            '[data-target-card="feishu_owner"] .target-content-options input'
+        ).first
+        assert subscription_checkbox.evaluate(
+            "element => element.getBoundingClientRect().width"
+        ) < 18
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= window.innerWidth"
+        )
 
         page.get_by_role("button", name="设置", exact=True).click()
         page.locator('[data-settings-section="sources"]').click()
@@ -718,6 +1006,595 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         page.locator('#news-source-editor button[type="submit"]').click()
         _wait_for_class(page.locator("#news-source-feedback"), "success")
         assert "已保存" in page.locator("#news-source-feedback").inner_text()
+        browser.close()
+
+
+def test_market_style_confirmation_path_chart_layout(live_server):
+    url, _ = live_server
+    states = [
+        ("weak_rebound", "pending"),
+        ("weak_rebound", "pending"),
+        ("weak_rebound", "weak_rebound"),
+        ("balanced", "pending"),
+        ("balanced", "pending"),
+        ("balanced", "balanced"),
+        ("strong_dominant", "pending"),
+        ("strong_dominant", "pending"),
+        ("strong_dominant", "strong_dominant"),
+        ("strong_dominant", "strong_dominant"),
+        ("balanced", "pending"),
+        ("balanced", "pending"),
+    ]
+    history = []
+    spread_by_state = {
+        "weak_rebound": -0.004,
+        "balanced": 0.001,
+        "strong_dominant": 0.005,
+    }
+    for day, (candidate, confirmed) in enumerate(states, 1):
+        spread = spread_by_state[candidate]
+        history.append({
+            "date": f"2026-07-{day:02d}",
+            "strong_return": 0.003 + spread / 2,
+            "weak_return": 0.003 - spread / 2,
+            "spread": spread,
+            "candidate": candidate,
+            "confirmed": confirmed,
+        })
+    payload = {
+        "meta": {
+            "as_of": "2026-07-12",
+            "algorithm_version": "QM_ROTATION_V6",
+            "sources": ["local:bars"],
+            "quality": {"status": "complete", "issues": []},
+        },
+        "data": {
+            "current": {
+                "candidate": "balanced",
+                "confirmed": "pending",
+                "candidate_sessions": 2,
+                "confirmed_sessions": 0,
+                "spread_1d": 0.001,
+                "spread_3d": 0.0023,
+            },
+            "history": history,
+            "distribution": [
+                {
+                    "state": state,
+                    "label": label,
+                    "count": count,
+                    "share": count / 100,
+                    "positive_ratio": positive,
+                    "median_return": median,
+                }
+                for state, label, count, positive, median in [
+                    ("strong_up", "强势加速", 18, 0.72, 0.009),
+                    ("up", "趋势延续", 34, 0.61, 0.004),
+                    ("range", "中位整理", 31, 0.48, -0.001),
+                    ("weak", "低位偏弱", 17, 0.35, -0.007),
+                ]
+            ],
+            "leaders": [],
+            "laggards": [],
+        },
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 1280, "height": 900},
+            reduced_motion="reduce",
+        )
+        page_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.route(
+            "**/api/v1/market/structure",
+            lambda route: route.fulfill(json=payload),
+        )
+        page.goto(f"{url}/#market/style")
+
+        path_chart = page.locator("#rotation-style-path-chart")
+        path_chart.locator("canvas").wait_for(state="visible")
+        main_chart = page.locator("#rotation-structure-chart")
+        color_state = page.evaluate(
+            """() => {
+              const resolve = variable => {
+                const probe = document.createElement('i');
+                probe.style.color = `var(${variable})`;
+                document.body.append(probe);
+                const color = getComputedStyle(probe).color;
+                probe.remove();
+                return color;
+              };
+              const current = document.querySelector('.rotation-style-current-kpi');
+              const rows = [...document.querySelectorAll(
+                '.rotation-style-distribution .rotation-state-row'
+              )];
+              return {
+                style: current.dataset.style,
+                confirmation: current.dataset.confirmation,
+                currentColor: getComputedStyle(
+                  current.querySelector('.rotation-style-current-value')
+                ).color,
+                pendingColor: getComputedStyle(
+                  current.querySelector('.rotation-style-confirmation')
+                ).color,
+                currentBackground: getComputedStyle(current).backgroundColor,
+                pageBackground: getComputedStyle(document.body).backgroundColor,
+                rowColors: Object.fromEntries(rows.map(row => [
+                  row.dataset.state, getComputedStyle(row.querySelector('strong')).color,
+                ])),
+                tokens: {
+                  up: resolve('--up'),
+                  down: resolve('--down'),
+                  balanced: resolve('--s1'),
+                  pending: resolve('--s4'),
+                },
+              };
+            }"""
+        )
+        assert color_state["style"] == "balanced"
+        assert color_state["confirmation"] == "pending"
+        assert color_state["currentColor"] == color_state["tokens"]["balanced"]
+        assert color_state["pendingColor"] == color_state["tokens"]["pending"]
+        assert color_state["currentBackground"] != color_state["pageBackground"]
+        assert color_state["rowColors"]["strong_up"] == color_state["tokens"]["up"]
+        assert color_state["rowColors"]["range"] == color_state["tokens"]["balanced"]
+        assert color_state["rowColors"]["weak"] == color_state["tokens"]["down"]
+        assert len(set(color_state["rowColors"].values())) == 4
+        chart_colors = page.evaluate(
+            """() => {
+              const structure = charts['rotation-structure-chart'].__qmLastOption;
+              const path = charts['rotation-style-path-chart'].__qmLastOption;
+              const strong = structure.series.find(series => series.name === '强势样本');
+              const weak = structure.series.find(series => series.name === '低位样本');
+              const spread = structure.series.find(series => series.name === '强弱差');
+              return {
+                spreadColors: [-.004,.001,.005].map(value =>
+                  spread.itemStyle.color({value:['2026-07-12',value]})
+                ),
+                expectedSpreadColors: [
+                  CHART_COLORS.down,CHART_COLORS.primary,CHART_COLORS.up,
+                ],
+                strongLine: {
+                  color: strong.lineStyle.color, type: strong.lineStyle.type,
+                },
+                weakLine: {
+                  color: weak.lineStyle.color, type: weak.lineStyle.type,
+                },
+                deadZone: spread.markArea.data[0].map(point => point.yAxis),
+                pathBandCount: path.series[0].markArea.data.length,
+                pathAxisColors: {
+                  weak: path.yAxis.axisLabel.rich.weak.color,
+                  balanced: path.yAxis.axisLabel.rich.balanced.color,
+                  strong: path.yAxis.axisLabel.rich.strong.color,
+                },
+              };
+            }"""
+        )
+        assert chart_colors["spreadColors"] == chart_colors["expectedSpreadColors"]
+        assert chart_colors["strongLine"] == {
+            "color": "#e66767",
+            "type": "solid",
+        }
+        assert chart_colors["weakLine"] == {
+            "color": "#24a06b",
+            "type": "dashed",
+        }
+        assert chart_colors["deadZone"] == [-0.0025, 0.0025]
+        assert chart_colors["pathBandCount"] == 3
+        assert chart_colors["pathAxisColors"] == {
+            "weak": "#24a06b",
+            "balanced": "#4f8fd8",
+            "strong": "#e66767",
+        }
+        distribution = page.locator(".rotation-structure-aside .rotation-section").nth(0)
+        path_section = page.locator(".rotation-structure-aside .rotation-section").nth(1)
+        main_box = main_chart.bounding_box()
+        distribution_box = distribution.bounding_box()
+        path_box = path_section.bounding_box()
+        assert path_box["x"] > main_box["x"] + main_box["width"]
+        assert path_box["y"] > distribution_box["y"]
+        assert main_box["height"] == pytest.approx(360, abs=1)
+        assert path_chart.bounding_box()["height"] == pytest.approx(136, abs=1)
+        assert page.locator(".rotation-path-strip").count() == 0
+        chart_state = page.evaluate(
+            """() => {
+              const option = charts['rotation-style-path-chart'].__qmLastOption;
+              return {
+                pointCount: option.series[0].data.length,
+                step: option.series[0].step,
+                minimum: option.yAxis.min,
+                maximum: option.yAxis.max,
+              };
+            }"""
+        )
+        assert chart_state == {
+            "pointCount": 10,
+            "step": "end",
+            "minimum": -1,
+            "maximum": 1,
+        }
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(100)
+        mobile_main = main_chart.bounding_box()
+        mobile_distribution = distribution.bounding_box()
+        mobile_path = path_section.bounding_box()
+        assert mobile_distribution["y"] > mobile_main["y"]
+        assert mobile_path["y"] > mobile_distribution["y"]
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page_errors == []
+        browser.close()
+
+
+def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
+    url, _ = live_server
+
+    def industry_item(code, name, level, positive, weak, change, sessions):
+        signals = {
+            str(window): {
+                "positive_change_pp": change / 2,
+                "weak_change_pp": -change / 2,
+                "rotation_change_pp": change,
+                "member_return": 0.012,
+                "excess_return": 0.004,
+                "advance_ratio": 0.62,
+                "amount_activity": 0.08,
+            }
+            for window in (1, 3, 5, 20)
+        }
+        return {
+            "code": code,
+            "name": name,
+            "level": level,
+            "member_count": 20,
+            "eligible_count": 18,
+            "coverage": 0.9,
+            "positive_ratio": positive,
+            "weak_ratio": weak,
+            "signals": signals,
+            "stage": "repair_spread" if change >= 0 else "retreat_watch",
+            "stage_label": "修复扩散" if change >= 0 else "退潮观察",
+            "stage_sessions": sessions,
+            "rotation_score": 68.4,
+            "grade": "B",
+        }
+
+    items = [
+        industry_item("L1-A", "一级成长", "L1", 58.0, 18.0, 7.0, 6),
+        industry_item("L1-B", "一级价值", "L1", 32.0, 44.0, -4.0, 3),
+        industry_item("L2-A", "二级软件", "L2", 61.0, 16.0, 9.0, 8),
+        industry_item("L2-B", "二级设备", "L2", 38.0, 36.0, -2.0, 4),
+        industry_item("L2-C", "未成图二级", "L2", None, None, 1.0, 2),
+    ]
+    selected_codes = {"L2-A", "L2-B"}
+    meta = {
+        "as_of": "2026-08-08",
+        "algorithm_version": "QM_ROTATION_V6",
+        "sources": ["SW2021"],
+        "quality": {"status": "complete", "issues": []},
+    }
+
+    def industries_handler(route):
+        visible = [
+            item for item in items
+            if item["level"] == "L1" or item["code"] in selected_codes
+        ]
+        route.fulfill(json={
+            "meta": meta,
+            "data": {"items": visible, "summary": {}, "window": 5},
+        })
+
+    def preferences_handler(route):
+        if route.request.method == "PUT":
+            body = route.request.post_data_json
+            selected_codes.clear()
+            selected_codes.update(body["l2_codes"])
+        route.fulfill(json={
+            "data": {"l2_codes": sorted(selected_codes), "theme_limit": 16},
+        })
+
+    taxonomy = {
+        "meta": meta,
+        "data": {
+            "l2": [
+                {"code": item["code"], "name": item["name"], "member_count": 20}
+                for item in items if item["level"] == "L2"
+            ],
+        },
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 1280, "height": 900},
+            reduced_motion="reduce",
+        )
+        page_errors = []
+        console_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.on(
+            "console",
+            lambda message: console_errors.append(message.text)
+            if message.type == "error" else None,
+        )
+        page.route("**/api/v1/rotation/industries**", industries_handler)
+        page.route(
+            "**/api/v1/rotation/taxonomy/industries",
+            lambda route: route.fulfill(json=taxonomy),
+        )
+        page.route("**/api/v1/rotation/preferences", preferences_handler)
+        page.goto(f"{url}/#observe/industry")
+
+        l1_tab = page.locator('[data-rotation-industry-level="L1"]')
+        l2_tab = page.locator('[data-rotation-industry-level="L2"]')
+        playwright_sync.expect(l1_tab).to_have_attribute("aria-selected", "true")
+        canvas = page.locator("#rotation-industry-scatter canvas").first
+        canvas.wait_for(state="visible")
+        chart_box = page.locator("#rotation-industry-scatter").bounding_box()
+        assert chart_box["width"] > 700
+        assert chart_box["height"] == pytest.approx(320, abs=1)
+        page.wait_for_function(
+            """() => charts['rotation-industry-scatter']?.getOption()
+              .series.every(series => series.data.length === 2)"""
+        )
+        axis_bounds = page.evaluate(
+            """() => {
+              const option = charts['rotation-industry-scatter'].getOption();
+              return {
+                xMin: option.xAxis[0].min,
+                xMax: option.xAxis[0].max,
+                yMin: option.yAxis[0].min,
+                yMax: option.yAxis[0].max,
+              };
+            }"""
+        )
+        assert 0 < axis_bounds["xMin"] < axis_bounds["xMax"] < 100
+        assert 0 < axis_bounds["yMin"] < axis_bounds["yMax"] < 100
+        chart_panel_box = page.locator(
+            ".rotation-industry-chart-panel"
+        ).bounding_box()
+        summary_box = page.locator(".rotation-industry-summary").bounding_box()
+        assert summary_box["x"] > chart_panel_box["x"] + chart_panel_box["width"]
+        assert summary_box["height"] < chart_panel_box["height"]
+        matrix = page.locator(".rotation-industry-matrix")
+        playwright_sync.expect(matrix).to_contain_text("一级成长")
+        playwright_sync.expect(matrix).not_to_contain_text("二级软件")
+        assert matrix.bounding_box()["y"] < 900
+
+        l1_tab.focus()
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
+        playwright_sync.expect(matrix).to_contain_text("二级软件")
+        playwright_sync.expect(matrix).not_to_contain_text("一级成长")
+        page.wait_for_function(
+            """() => charts['rotation-industry-scatter']?.getOption()
+              .series.every(series => series.data.length === 2)"""
+        )
+
+        page.evaluate(
+            """() => {
+              window.__industryOriginalEchartsInit = window.echarts.init;
+              window.echarts.init = () => { throw new Error('synthetic init failure'); };
+            }"""
+        )
+        l1_tab.click()
+        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text(
+            "周期坐标暂不可用"
+        )
+        page.evaluate(
+            """() => {
+              window.echarts.init = window.__industryOriginalEchartsInit;
+              delete window.__industryOriginalEchartsInit;
+            }"""
+        )
+        l2_tab.click()
+        page.locator("#rotation-industry-scatter canvas").first.wait_for(
+            state="visible"
+        )
+
+        page.get_by_role("button", name="3 日", exact=True).click()
+        playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
+        page.locator("[data-rotation-industry-sort]").select_option("score")
+        playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
+
+        page.get_by_role("button", name="管理关注区", exact=True).click()
+        manager_panel = page.locator("#rotation-l2-manager")
+        playwright_sync.expect(manager_panel).to_be_visible()
+        playwright_sync.expect(page.locator(".rotation-l2-grid")).to_be_visible()
+        assert page.locator(".rotation-l2-grid").bounding_box()["height"] <= 280
+        page.locator('.rotation-l2-option input[value="L2-A"]').set_checked(False)
+        page.locator('.rotation-l2-option input[value="L2-B"]').set_checked(False)
+        page.locator('.rotation-l2-option input[value="L2-C"]').set_checked(True)
+        page.locator("#rotation-l2-save").click()
+        playwright_sync.expect(matrix).to_contain_text("未成图二级")
+        playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
+        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text(
+            "暂无可绘制坐标"
+        )
+
+        page.get_by_role("button", name="管理关注区", exact=True).click()
+        page.locator('.rotation-l2-option input[value="L2-C"]').set_checked(False)
+        page.locator("#rotation-l2-save").click()
+        playwright_sync.expect(matrix).to_contain_text("尚未关注可计算的二级行业")
+        playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(100)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page_errors == []
+        assert console_errors == []
+        browser.close()
+
+
+def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
+    url, _ = live_server
+
+    def theme_item(index: int) -> dict:
+        change = float(9 - index)
+        signals = {
+            str(window): {
+                "rotation_change_pp": change,
+                "member_return": .012 - index * .001,
+                "excess_return": .006 - index * .0005,
+                "advance_ratio": .72 - index * .03,
+                "amount_activity": .09 - index * .01,
+            }
+            for window in (1, 3, 5, 20)
+        }
+        reasons = [
+            {"id": "rotation", "label": "轮动改善"},
+            {"id": "excess", "label": "相对收益为正"},
+            {"id": "breadth", "label": "上涨宽度过半"},
+            {"id": "amount", "label": "量能活跃"},
+            {"id": "grade", "label": "周期结构 A/B"},
+        ][:max(1, 5 - index // 2)]
+        return {
+            "code": f"BK{index + 1:04d}",
+            "name": ["机器人", "光模块", "创新药", "商业航天", "存储芯片", "液冷服务器"][index],
+            "stage": "repair_spread" if index < 4 else "unclear",
+            "stage_label": "修复扩散" if index < 4 else "方向未明",
+            "stage_sessions": 6 - index,
+            "rotation_score": 82.4 - index * 4.1,
+            "grade": "A" if index < 2 else "B",
+            "member_count": 36 + index,
+            "eligible_count": 32 + index,
+            "coverage": .88,
+            "signals": signals,
+            "primary_industry": {
+                "name": "电子" if index != 2 else "医药生物",
+                "overlap_count": 12 + index,
+                "theme_share": .48,
+            },
+            "representatives": [
+                {
+                    "name": f"代表样本 {index + 1}",
+                    "symbol": f"600{index:03d}",
+                    "trend_score": .72 - index * .03,
+                    "return_1d": .018 - index * .002,
+                },
+                {
+                    "name": f"次代表 {index + 1}",
+                    "symbol": f"300{index:03d}",
+                    "trend_score": .64 - index * .02,
+                    "return_1d": .009 - index * .001,
+                },
+            ],
+            "focus": {
+                "evidence_count": len(reasons),
+                "evidence_total": 5,
+                "reasons": reasons,
+            },
+        }
+
+    items = [theme_item(index) for index in range(6)]
+    meta = {
+        "as_of": "2026-08-08",
+        "algorithm_version": "QM_ROTATION_V6",
+        "sources": ["local:bars"],
+        "quality": {"status": "complete", "issues": []},
+    }
+
+    def themes_handler(route):
+        filtered = "query=" in route.request.url
+        visible = [] if filtered else items
+        route.fulfill(json={
+            "meta": meta,
+            "data": {
+                "items": visible,
+                "focus_items": items[:4],
+                "focus_definition": {
+                    "criteria": [
+                        {"id": "rotation", "label": "轮动改善"},
+                        {"id": "excess", "label": "相对收益为正"},
+                        {"id": "breadth", "label": "上涨宽度过半"},
+                        {"id": "amount", "label": "量能活跃"},
+                        {"id": "grade", "label": "周期结构 A/B"},
+                    ],
+                    "limit": 4,
+                    "window": 5,
+                },
+                "pagination": {
+                    "page": 1,
+                    "page_size": 50,
+                    "total": len(visible),
+                    "pages": 1,
+                    "has_previous": False,
+                    "has_next": False,
+                },
+                "summary": {
+                    "group_count": len(items),
+                    "movements": {
+                        "5": {
+                            "improving_count": 5,
+                            "retreating_count": 1,
+                            "leader": {
+                                "name": "机器人",
+                                "rotation_change_pp": 9.0,
+                            },
+                        },
+                    },
+                    "persistence": {
+                        "longest": [
+                            {"name": "机器人", "sessions": 6, "stage_label": "修复扩散"},
+                        ],
+                    },
+                },
+            },
+        })
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": 1280, "height": 1000},
+            reduced_motion="reduce",
+        )
+        page_errors = []
+        console_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.on(
+            "console",
+            lambda message: console_errors.append(message.text)
+            if message.type == "error" else None,
+        )
+        page.route("**/api/v1/rotation/themes?*", themes_handler)
+        page.goto(f"{url}/#observe/themes")
+
+        page.get_by_role("heading", name="重点关注题材", exact=True).wait_for()
+        cards = page.locator(".rotation-theme-focus-card")
+        playwright_sync.expect(cards).to_have_count(4)
+        playwright_sync.expect(cards.nth(0)).to_contain_text("机器人")
+        playwright_sync.expect(cards.nth(0)).to_contain_text("5/5 项证据")
+        playwright_sync.expect(cards.nth(0)).to_contain_text("代表样本 1")
+
+        lead_box = cards.nth(0).bounding_box()
+        compact_box = cards.nth(1).bounding_box()
+        search_box = page.locator("[data-rotation-theme-query]").bounding_box()
+        table_box = page.locator("#rotation-theme-results table").bounding_box()
+        assert lead_box["width"] > compact_box["width"]
+        assert lead_box["height"] > compact_box["height"] * 2
+        assert search_box["y"] > lead_box["y"] + lead_box["height"]
+        assert table_box["y"] > search_box["y"]
+        playwright_sync.expect(page.locator("#rotation-theme-results")).to_contain_text("液冷服务器")
+
+        page.locator("[data-rotation-theme-query]").fill("没有匹配")
+        page.get_by_text("没有匹配题材", exact=True).wait_for()
+        playwright_sync.expect(cards).to_have_count(4)
+        playwright_sync.expect(cards.nth(0)).to_contain_text("机器人")
+
+        page.locator("[data-rotation-theme-query]").fill("")
+        page.locator("#rotation-theme-results table").wait_for()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.wait_for_timeout(100)
+        mobile_lead = cards.nth(0).bounding_box()
+        mobile_second = cards.nth(1).bounding_box()
+        assert mobile_second["y"] > mobile_lead["y"] + mobile_lead["height"]
+        assert mobile_second["x"] == pytest.approx(mobile_lead["x"], abs=1)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page_errors == []
+        assert console_errors == []
         browser.close()
 
 

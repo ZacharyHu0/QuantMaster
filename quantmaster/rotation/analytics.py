@@ -14,10 +14,26 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-ALGORITHM_VERSION = "QM_ROTATION_V3"
+ALGORITHM_VERSION = "QM_ROTATION_V6"
 ROTATION_WINDOWS = (1, 3, 5, 20)
 MIN_HISTORY = 30
 EPS = 1e-12
+
+GROUP_SCORE_WEIGHTS = {
+    "trend": 40,
+    "breadth": 20,
+    "volume": 15,
+    "relative_return": 15,
+    "rotation": 10,
+}
+MIN_GROUP_SCORE_WEIGHT = 60
+MIN_PERCENTILE_PEERS = 8
+
+UP_ENTER_THRESHOLD = 0.38
+UP_EXIT_THRESHOLD = -0.30
+WEAK_ENTER_THRESHOLD = -0.38
+WEAK_EXIT_THRESHOLD = 0.30
+STRONG_UP_THRESHOLD = 0.55
 
 STATE_LABELS = {
     "strong_up": "强势加速",
@@ -27,11 +43,19 @@ STATE_LABELS = {
 }
 
 REGIMES: tuple[tuple[float, str, str], ...] = (
-    (10.0, "ice", "冰点"),
-    (25.0, "contraction", "收缩"),
-    (50.0, "expansion", "扩散"),
-    (101.0, "overheat", "过热"),
+    (10.0, "ice", "冰点/黄金坑"),
+    (25.0, "contraction", "拉锯区"),
+    (50.0, "expansion", "强势扩散区"),
+    (101.0, "overheat", "过热区"),
 )
+
+STATE_CODES = {
+    "unavailable": 0,
+    "strong_up": 1,
+    "up": 2,
+    "range": 3,
+    "weak": 4,
+}
 
 STAGE_LABELS = {
     "repair_spread": "修复扩散",
@@ -49,6 +73,7 @@ class TrendMatrices:
     returns: pd.DataFrame
     score: pd.DataFrame
     eligible: pd.DataFrame
+    state: pd.DataFrame
 
 
 def _number(value: Any, digits: int = 4) -> float | None:
@@ -66,10 +91,12 @@ def _date(value: Any) -> str:
 def _regime(value: float | None) -> tuple[str, str]:
     if value is None:
         return "unavailable", "暂不可用"
+    if value > 50.0:
+        return "overheat", "过热区"
     for upper, code, label in REGIMES:
-        if value < upper:
+        if value < upper or (upper == 50.0 and value == upper):
             return code, label
-    return "overheat", "过热"
+    return "overheat", "过热区"
 
 
 def _clean_matrix(value: pd.DataFrame, *, columns: list[str] | None = None) -> pd.DataFrame:
@@ -80,6 +107,46 @@ def _clean_matrix(value: pd.DataFrame, *, columns: list[str] | None = None) -> p
     if columns is not None:
         frame = frame.reindex(columns=columns)
     return frame.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+
+def _classify_trend_states(score: pd.DataFrame, eligible: pd.DataFrame) -> pd.DataFrame:
+    """Classify mutually exclusive trend states with causal symmetric hysteresis."""
+    values = score.to_numpy(dtype=float)
+    valid_values = eligible.to_numpy(dtype=bool) & np.isfinite(values)
+    codes = np.full(values.shape, STATE_CODES["unavailable"], dtype=np.int8)
+    previous = np.full(values.shape[1], STATE_CODES["range"], dtype=np.int8)
+
+    for position in range(values.shape[0]):
+        current_values = values[position]
+        valid = valid_values[position]
+        previous_up = (
+            (previous == STATE_CODES["strong_up"])
+            | (previous == STATE_CODES["up"])
+        )
+        previous_weak = previous == STATE_CODES["weak"]
+
+        up = valid & (
+            (previous_up & (current_values > UP_EXIT_THRESHOLD))
+            | (~previous_up & (current_values >= UP_ENTER_THRESHOLD))
+        )
+        weak = valid & (
+            (previous_weak & (current_values < WEAK_EXIT_THRESHOLD))
+            | (~previous_weak & (current_values <= WEAK_ENTER_THRESHOLD))
+        )
+        strong_up = up & (current_values >= STRONG_UP_THRESHOLD)
+
+        current = np.full(values.shape[1], STATE_CODES["range"], dtype=np.int8)
+        current[weak] = STATE_CODES["weak"]
+        current[up] = STATE_CODES["up"]
+        current[strong_up] = STATE_CODES["strong_up"]
+        current[~valid] = STATE_CODES["unavailable"]
+        codes[position] = current
+
+        # An unavailable observation leaves no stale state to revive later.
+        previous = current.copy()
+        previous[~valid] = STATE_CODES["range"]
+
+    return pd.DataFrame(codes, index=score.index, columns=score.columns)
 
 
 def compute_trend_matrices(close: pd.DataFrame) -> TrendMatrices:
@@ -114,16 +181,15 @@ def compute_trend_matrices(close: pd.DataFrame) -> TrendMatrices:
     ).sum()
     eligible = prices.notna() & (valid_history >= MIN_HISTORY)
     score = score.where(eligible)
-    return TrendMatrices(prices, returns, score, eligible & score.notna())
+    eligible = eligible & score.notna()
+    state = _classify_trend_states(score, eligible)
+    return TrendMatrices(prices, returns, score, eligible, state)
 
 
 def _state_masks(trend: TrendMatrices) -> dict[str, pd.DataFrame]:
-    score, eligible = trend.score, trend.eligible
     return {
-        "strong_up": eligible & (score >= 0.55),
-        "up": eligible & (score >= 0.20) & (score < 0.55),
-        "range": eligible & (score > -0.20) & (score < 0.20),
-        "weak": eligible & (score <= -0.20),
+        name: trend.eligible & trend.state.eq(STATE_CODES[name])
+        for name in STATE_LABELS
     }
 
 
@@ -168,6 +234,7 @@ def compute_market_temperature(
     expected_count: int | None = None,
     history: int = 760,
     trend: TrendMatrices | None = None,
+    supplemental_evidence: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return market temperature, moving averages and evidence decomposition."""
     trend = trend if trend is not None else compute_trend_matrices(close)
@@ -214,6 +281,40 @@ def compute_market_temperature(
             raw_volume_score = (float(ratio.loc[current_date]) - 0.70) / 0.60 * 100
             volume_evidence = _number(min(100.0, max(0.0, raw_volume_score)), 2)
             volume_note = f"全样本成交额 5/20 日比值 {_number(ratio.loc[current_date], 3)}"
+    external = supplemental_evidence or {}
+    current_date_text = _date(current_date)
+
+    def external_item(
+        identifier: str,
+        label: str,
+        weight: int,
+        fallback_note: str,
+    ) -> dict[str, Any]:
+        payload = dict(external.get(identifier) or {})
+        score = _number(payload.get("score"), 2)
+        evidence_as_of = str(payload.get("as_of") or "")
+        note = str(payload.get("note") or fallback_note)
+        if payload.get("available") is False or score is None or not 0 <= score <= 100:
+            score = None
+        if evidence_as_of and evidence_as_of != current_date_text:
+            score = None
+            note = f"证据日期 {evidence_as_of} 与行情日 {current_date_text} 不一致"
+        item: dict[str, Any] = {
+            "id": identifier,
+            "label": label,
+            "score": score,
+            "weight": weight,
+            "note": note,
+        }
+        for field_name in (
+            "as_of", "window_sessions", "reference_windows", "fund_count",
+            "net_subscription_rate", "net_subscription_rate_pct", "event_count",
+            "signed_score", "halflife_days", "lookback_days",
+        ):
+            if field_name in payload:
+                item[field_name] = payload[field_name]
+        return item
+
     evidence_items = [
         {"id": "trend", "label": "趋势分布", "score": trend_evidence, "weight": 40, "note": "温度本身"},
         {
@@ -221,8 +322,8 @@ def compute_market_temperature(
             "weight": 20, "note": "当日上涨家数占比",
         },
         {"id": "volume", "label": "量能确认", "score": volume_evidence, "weight": 15, "note": volume_note},
-        {"id": "etf_capital", "label": "ETF 资金", "score": None, "weight": 15, "note": "等待 ETF 份额快照"},
-        {"id": "sentiment", "label": "情绪代理", "score": None, "weight": 10, "note": "未配置可核查情绪序列"},
+        external_item("etf_capital", "ETF 资金", 15, "等待 ETF 份额快照"),
+        external_item("sentiment", "情绪代理", 10, "等待可核查资讯情绪"),
     ]
     available_weight = sum(item["weight"] for item in evidence_items if item["score"] is not None)
     evidence_score = (
@@ -257,9 +358,27 @@ def compute_market_temperature(
         "quality": quality,
         "definition": {
             "positive_states": ["strong_up", "up"],
-            "thresholds": {"strong_up": 0.55, "up": 0.20, "weak": -0.20},
-            "regimes": {"ice": "<10", "contraction": "10–25", "expansion": "25–50", "overheat": "≥50"},
+            "state_model": "hysteresis",
+            "thresholds": {
+                "strong_up": STRONG_UP_THRESHOLD,
+                "up": UP_ENTER_THRESHOLD,
+                "weak": WEAK_ENTER_THRESHOLD,
+            },
+            "hysteresis": {
+                "up_exit": UP_EXIT_THRESHOLD,
+                "weak_exit": WEAK_EXIT_THRESHOLD,
+            },
+            "regimes": {
+                "ice": "<10",
+                "contraction": "10–<25",
+                "expansion": "25–50",
+                "overheat": ">50",
+            },
             "minimum_history": MIN_HISTORY,
+            "evidence": {
+                "etf_capital": "近 5 日宽基 ETF 净申购率在最近 252 个有效窗口中的中位百分位",
+                "sentiment": "近 30 日质量加权资讯情绪由 [-100,100] 线性映射到 [0,100]",
+            },
         },
     }
 
@@ -377,16 +496,22 @@ def compute_market_structure(
     }
 
 
-def _stage(strong_ratio: float, weak_ratio: float, delta_strong: float, delta_weak: float) -> str:
+def _stage(
+    positive_ratio: float,
+    weak_ratio: float,
+    delta_positive: float,
+    delta_weak: float,
+) -> str:
+    del positive_ratio
     if weak_ratio >= 70.0 and delta_weak > -3.0:
         return "extreme_weak"
     if weak_ratio >= 50.0 and delta_weak <= -3.0:
         return "low_repair"
-    if delta_strong >= 3.0 and delta_weak <= -3.0:
+    if delta_positive >= 3.0 and delta_weak <= -3.0:
         return "repair_spread"
-    if delta_strong <= -3.0 and delta_weak >= 3.0:
+    if delta_positive <= -3.0 and delta_weak >= 3.0:
         return "clear_retreat"
-    if delta_strong <= -3.0 or delta_weak >= 3.0:
+    if delta_positive <= -3.0 or delta_weak >= 3.0:
         return "retreat_watch"
     return "unclear"
 
@@ -504,6 +629,151 @@ def _amount_activity(
     return _number(ratios.median(), 4)
 
 
+def _midrank_percentile(value: Any, reference: list[Any]) -> float | None:
+    """Return a tie-aware cross-sectional percentile without forcing thin cohorts."""
+    current = _number(value, 8)
+    values = [
+        number for candidate in reference
+        if (number := _number(candidate, 8)) is not None
+    ]
+    if current is None or len(values) < MIN_PERCENTILE_PEERS:
+        return None
+    less = sum(candidate < current for candidate in values)
+    equal = sum(candidate == current for candidate in values)
+    return _number(100.0 * (less + 0.5 * equal) / len(values), 2)
+
+
+def _amount_activity_score(value: Any) -> float | None:
+    """Map -30%..+30% activity around the prior-20-session baseline to 0..100."""
+    activity = _number(value, 8)
+    if activity is None:
+        return None
+    return _number(min(100.0, max(0.0, (activity + 0.30) / 0.60 * 100.0)), 2)
+
+
+def _group_grade(score: float | None) -> str:
+    if score is None:
+        return ""
+    return "A" if score >= 70 else "B" if score >= 55 else "C" if score >= 40 else "D"
+
+
+def _score_group_windows(items: list[dict[str, Any]], kind: str) -> None:
+    """Attach auditable per-window scores after all peer observations are known."""
+    peer_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        peer = "theme" if kind == "theme" else str(item.get("level") or "L1")
+        peer_groups.setdefault(peer, []).append(item)
+
+    for window in ROTATION_WINDOWS:
+        key = str(window)
+        for peers in peer_groups.values():
+            excess_reference = [
+                (item.get("signals") or {}).get(key, {}).get("excess_return")
+                for item in peers
+            ]
+            rotation_reference = [
+                (item.get("signals") or {}).get(key, {}).get("rotation_change_pp")
+                for item in peers
+            ]
+            for item in peers:
+                signal = dict((item.get("signals") or {}).get(key) or {})
+                positive_ratio = _number(item.get("positive_ratio"), 2)
+                advance_ratio = _number(signal.get("advance_ratio"), 8)
+                breadth_score = _number(
+                    100.0 * advance_ratio if advance_ratio is not None else None, 2,
+                )
+                volume_score = _amount_activity_score(signal.get("amount_activity"))
+                excess_score = _midrank_percentile(
+                    signal.get("excess_return"), excess_reference,
+                )
+                rotation_score = _midrank_percentile(
+                    signal.get("rotation_change_pp"), rotation_reference,
+                )
+                evidence = [
+                    {
+                        "id": "trend",
+                        "label": "趋势向上",
+                        "score": positive_ratio,
+                        "weight": GROUP_SCORE_WEIGHTS["trend"],
+                        "note": (
+                            f"强势加速 + 趋势延续占比 {positive_ratio:.2f}%"
+                            if positive_ratio is not None else "当前趋势分布不可用"
+                        ),
+                    },
+                    {
+                        "id": "breadth",
+                        "label": "上涨宽度",
+                        "score": breadth_score,
+                        "weight": GROUP_SCORE_WEIGHTS["breadth"],
+                        "note": (
+                            f"近 {window} 日上涨成员占比 {breadth_score:.2f}%"
+                            if breadth_score is not None else f"近 {window} 日收益覆盖不足"
+                        ),
+                    },
+                    {
+                        "id": "volume",
+                        "label": "量能确认",
+                        "score": volume_score,
+                        "weight": GROUP_SCORE_WEIGHTS["volume"],
+                        "note": (
+                            f"近 {window} 日量能较此前 20 日 {float(signal['amount_activity']):+.2%}"
+                            if signal.get("amount_activity") is not None else "成交额覆盖不足"
+                        ),
+                    },
+                    {
+                        "id": "relative_return",
+                        "label": "相对收益",
+                        "score": excess_score,
+                        "weight": GROUP_SCORE_WEIGHTS["relative_return"],
+                        "note": (
+                            f"近 {window} 日超额 {float(signal['excess_return']):+.2%} · "
+                            f"同层级第 {excess_score:.2f} 百分位"
+                            if excess_score is not None else "同层级超额收益样本不足"
+                        ),
+                    },
+                    {
+                        "id": "rotation",
+                        "label": "轮动变化",
+                        "score": rotation_score,
+                        "weight": GROUP_SCORE_WEIGHTS["rotation"],
+                        "note": (
+                            f"趋势净改善 {float(signal['rotation_change_pp']):+.2f} pp · "
+                            f"同层级第 {rotation_score:.2f} 百分位"
+                            if rotation_score is not None else "同层级轮动变化样本不足"
+                        ),
+                    },
+                ]
+                for evidence_item in evidence:
+                    evidence_item["available"] = evidence_item["score"] is not None
+                available_weight = sum(
+                    int(evidence_item["weight"])
+                    for evidence_item in evidence if evidence_item["available"]
+                )
+                score = None
+                if available_weight >= MIN_GROUP_SCORE_WEIGHT:
+                    score = _number(
+                        sum(
+                            float(evidence_item["score"]) * int(evidence_item["weight"])
+                            for evidence_item in evidence if evidence_item["available"]
+                        ) / available_weight,
+                        2,
+                    )
+                item.setdefault("scores", {})[key] = {
+                    "window": window,
+                    "score": score,
+                    "grade": _group_grade(score),
+                    "available_weight": available_weight,
+                    "minimum_weight": MIN_GROUP_SCORE_WEIGHT,
+                    "items": evidence,
+                }
+
+    for item in items:
+        default_score = dict((item.get("scores") or {}).get("5") or {})
+        item["score"] = default_score
+        item["rotation_score"] = default_score.get("score")
+        item["grade"] = str(default_score.get("grade") or "")
+
+
 def map_theme_industries(
     themes: dict[str, dict[str, Any]],
     industries: dict[str, dict[str, Any]],
@@ -572,6 +842,7 @@ def analyze_group_rotation(
     names = names or {}
     trend = trend if trend is not None else compute_trend_matrices(close)
     masks = _state_masks(trend)
+    positive_mask = masks["strong_up"] | masks["up"]
     valid_dates = trend.eligible.sum(axis=1)
     valid_dates = valid_dates[valid_dates > 0]
     if valid_dates.empty:
@@ -593,7 +864,7 @@ def analyze_group_rotation(
     if amount is not None and not amount.empty:
         amount_clean = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
     items: list[dict[str, Any]] = []
-    details: dict[str, Any] = {}
+    histories: dict[str, list[dict[str, Any]]] = {}
     for code, raw in groups.items():
         symbols = sorted(set(raw.get("members") or []).intersection(trend.close.columns))
         member_count = len(set(raw.get("members") or []))
@@ -605,6 +876,7 @@ def analyze_group_rotation(
         if eligible_count < minimum_members or coverage < minimum_coverage:
             continue
         strong_now = 100.0 * float(masks["strong_up"].loc[current_date, symbols].sum()) / eligible_count
+        positive_now = 100.0 * float(positive_mask.loc[current_date, symbols].sum()) / eligible_count
         weak_now = 100.0 * float(masks["weak"].loc[current_date, symbols].sum()) / eligible_count
         signals: dict[str, dict[str, Any]] = {}
         for window in ROTATION_WINDOWS:
@@ -612,6 +884,7 @@ def analyze_group_rotation(
             if previous_date is None:
                 signals[str(window)] = {
                     "strong_change_pp": None,
+                    "positive_change_pp": None,
                     "weak_change_pp": None,
                     "rotation_change_pp": None,
                     "member_return": None,
@@ -627,14 +900,20 @@ def analyze_group_rotation(
                     100.0 * float(masks["strong_up"].loc[previous_date, symbols].sum())
                     / eligible_before
                 )
+                positive_before = (
+                    100.0 * float(positive_mask.loc[previous_date, symbols].sum())
+                    / eligible_before
+                )
                 weak_before = (
                     100.0 * float(masks["weak"].loc[previous_date, symbols].sum())
                     / eligible_before
                 )
                 strong_change = strong_now - strong_before
+                positive_change = positive_now - positive_before
                 weak_change = weak_now - weak_before
             else:
                 strong_change = None
+                positive_change = None
                 weak_change = None
             period_returns = (
                 trend.close.loc[current_date, symbols]
@@ -650,13 +929,15 @@ def analyze_group_rotation(
                 advance_ratio = None
             market_return = universe_returns.get(window)
             strong_change_value = _number(strong_change, 2)
+            positive_change_value = _number(positive_change, 2)
             weak_change_value = _number(weak_change, 2)
             signals[str(window)] = {
                 "strong_change_pp": strong_change_value,
+                "positive_change_pp": positive_change_value,
                 "weak_change_pp": weak_change_value,
                 "rotation_change_pp": _number(
-                    strong_change_value - weak_change_value
-                    if strong_change_value is not None and weak_change_value is not None
+                    positive_change_value - weak_change_value
+                    if positive_change_value is not None and weak_change_value is not None
                     else None,
                     2,
                 ),
@@ -676,30 +957,18 @@ def analyze_group_rotation(
                 ),
             }
         three_day = signals["3"]
-        delta_strong = three_day["strong_change_pp"]
+        delta_positive = three_day["positive_change_pp"]
         delta_weak = three_day["weak_change_pp"]
         stage = _stage(
-            strong_now,
+            positive_now,
             weak_now,
-            float(delta_strong or 0.0),
+            float(delta_positive or 0.0),
             float(delta_weak or 0.0),
         )
         day_returns = trend.returns.loc[current_date, symbols]
         valid_returns = int(day_returns.notna().sum())
         advance_ratio = (
             float((day_returns > 0).sum() / valid_returns) if valid_returns else 0.0
-        )
-        breadth_score = 100.0 * (
-            0.40 * advance_ratio + 0.35 * strong_now / 100.0 + 0.25 * (1.0 - weak_now / 100.0)
-        )
-        lifecycle_scores = {
-            "repair_spread": 82.0, "low_repair": 66.0, "extreme_weak": 24.0,
-            "unclear": 48.0, "retreat_watch": 34.0, "clear_retreat": 18.0,
-        }
-        rotation_score = 0.55 * lifecycle_scores[stage] + 0.45 * breadth_score
-        grade = (
-            "A" if rotation_score >= 70 else "B" if rotation_score >= 55
-            else "C" if rotation_score >= 40 else "D"
         )
         history_rows = []
         history_length = max(20, min(int(history), 520))
@@ -710,6 +979,7 @@ def analyze_group_rotation(
             if not valid:
                 continue
             strong_ratio = 100 * masks["strong_up"].loc[date_value, symbols].sum() / valid
+            positive_ratio = 100 * positive_mask.loc[date_value, symbols].sum() / valid
             weak_ratio = 100 * masks["weak"].loc[date_value, symbols].sum() / valid
             stage_key: str | None = None
             if position >= 3:
@@ -717,21 +987,23 @@ def analyze_group_rotation(
                 previous_valid = int(trend.eligible.loc[previous_date, symbols].sum())
                 previous_coverage = previous_valid / member_count if member_count else 0.0
                 if previous_valid >= minimum_members and previous_coverage >= minimum_coverage:
-                    previous_strong = (
-                        100 * masks["strong_up"].loc[previous_date, symbols].sum() / previous_valid
+                    previous_positive = (
+                        100 * positive_mask.loc[previous_date, symbols].sum() / previous_valid
                     )
                     previous_weak = (
                         100 * masks["weak"].loc[previous_date, symbols].sum() / previous_valid
                     )
                     stage_key = _stage(
-                        float(strong_ratio), float(weak_ratio),
-                        float(strong_ratio - previous_strong), float(weak_ratio - previous_weak),
+                        float(positive_ratio), float(weak_ratio),
+                        float(positive_ratio - previous_positive),
+                        float(weak_ratio - previous_weak),
                     )
             if position == current_position:
                 stage_key = stage
             history_rows.append({
                 "date": _date(date_value),
                 "strong_ratio": _number(strong_ratio, 2),
+                "positive_ratio": _number(positive_ratio, 2),
                 "weak_ratio": _number(weak_ratio, 2),
                 "eligible": valid,
                 "stage": stage_key,
@@ -749,25 +1021,30 @@ def analyze_group_rotation(
             "eligible_count": eligible_count,
             "coverage": round(coverage, 4),
             "strong_ratio": _number(strong_now, 2),
+            "positive_ratio": _number(positive_now, 2),
             "weak_ratio": _number(weak_now, 2),
-            "delta_strong_3d": _number(delta_strong, 2),
+            "delta_positive_3d": _number(delta_positive, 2),
             "delta_weak_3d": _number(delta_weak, 2),
             "signals": signals,
             "advance_ratio": _number(advance_ratio, 4),
             "stage": stage,
             "stage_label": STAGE_LABELS[stage],
             "stage_sessions": stage_sessions,
-            "rotation_score": _number(rotation_score, 2),
-            "grade": grade,
             "representatives": _representatives(symbols, trend, current_date, names, amount_clean),
         }
         items.append(item)
-        details[str(code)] = {**item, "history": history_rows}
+        histories[str(code)] = history_rows
+    _score_group_windows(items, kind)
     items.sort(key=lambda item: (
-        -float(item["rotation_score"] or 0),
+        -float(item["rotation_score"])
+        if item.get("rotation_score") is not None else math.inf,
         -int(item["eligible_count"]),
         item["name"],
     ))
+    details = {
+        str(item["code"]): {**item, "history": histories.get(str(item["code"]), [])}
+        for item in items
+    }
     return {
         "as_of": _date(current_date),
         "kind": kind,
@@ -804,13 +1081,153 @@ def analyze_group_rotation(
         "definition": {
             "minimum_members": minimum_members,
             "minimum_coverage": minimum_coverage,
-            "coordinates": {"x": "strong_ratio", "y": "weak_ratio", "size": "member_count"},
+            "coordinates": {"x": "positive_ratio", "y": "weak_ratio", "size": "member_count"},
             "windows": list(ROTATION_WINDOWS),
-            "rotation_change": "strong_change_pp - weak_change_pp",
+            "positive_states": ["strong_up", "up"],
+            "rotation_change": "positive_change_pp - weak_change_pp",
             "relative_return": "member return median - full-market return median",
             "amount_activity": "member median(recent N-day mean / prior 20-day mean - 1)",
-            "theme_score": "55% 生命周期 + 45% 宽度" if kind == "theme" else None,
+            "score": {
+                "weights": dict(GROUP_SCORE_WEIGHTS),
+                "minimum_available_weight": MIN_GROUP_SCORE_WEIGHT,
+                "volume_mapping": "-30% -> 0, 0% -> 50, +30% -> 100; clipped",
+                "relative_components": "同类同层级中位百分位；至少 8 个可用同伴",
+                "grades": {"A": ">=70", "B": "55-<70", "C": "40-<55", "D": "<40"},
+                "disclaimer": "结构状态评分，不构成交易评级",
+            },
         },
+    }
+
+
+def compute_etf_capital_evidence(
+    frame: pd.DataFrame,
+    *,
+    as_of: Any,
+    window: int = 5,
+    lookback: int = 252,
+    min_history: int = 60,
+    min_funds: int = 20,
+) -> dict[str, Any]:
+    """Score broad-ETF subscriptions without scale or look-ahead leakage."""
+    target = pd.to_datetime(as_of, errors="coerce")
+    target_text = _date(target) if pd.notna(target) else ""
+
+    def unavailable(note: str, *, observed_as_of: str = "") -> dict[str, Any]:
+        return {
+            "available": False,
+            "score": None,
+            "as_of": observed_as_of,
+            "note": note,
+            "window_sessions": int(window),
+            "reference_windows": 0,
+            "fund_count": 0,
+            "net_subscription_rate": None,
+            "net_subscription_rate_pct": None,
+        }
+
+    required = {"trade_date", "symbol", "shares"}
+    if pd.isna(target) or frame is None or frame.empty or not required.issubset(frame.columns):
+        return unavailable("等待 ETF 份额与价格快照")
+    target = pd.Timestamp(target).tz_localize(None).normalize()
+    value = frame.copy()
+    value["trade_date"] = pd.to_datetime(value["trade_date"], errors="coerce")
+    if getattr(value["trade_date"].dt, "tz", None) is not None:
+        value["trade_date"] = value["trade_date"].dt.tz_localize(None)
+    value["trade_date"] = value["trade_date"].dt.normalize()
+    value["symbol"] = value["symbol"].astype(str)
+    value["shares"] = pd.to_numeric(value["shares"], errors="coerce")
+    nav = (
+        pd.to_numeric(value.get("nav"), errors="coerce")
+        if "nav" in value else pd.Series(np.nan, index=value.index)
+    )
+    close = (
+        pd.to_numeric(value.get("close"), errors="coerce")
+        if "close" in value else pd.Series(np.nan, index=value.index)
+    )
+    value["price"] = nav.fillna(close)
+    value = value.dropna(subset=["trade_date", "symbol", "shares", "price"])
+    value = value[(value["shares"] > 0) & (value["price"] > 0)]
+    value = value.drop_duplicates(["trade_date", "symbol"], keep="last")
+    value = value[value["trade_date"] <= target].sort_values(["symbol", "trade_date"])
+    if value.empty:
+        return unavailable("目标行情日前没有可用 ETF 份额快照")
+
+    observed_dates = pd.DatetimeIndex(sorted(value["trade_date"].unique()))
+    latest_observed = pd.Timestamp(observed_dates[-1])
+    latest_text = _date(latest_observed)
+    if target not in observed_dates:
+        return unavailable(
+            f"ETF 份额仅到 {latest_text}，目标行情日为 {target_text}",
+            observed_as_of=latest_text,
+        )
+
+    previous_dates = {
+        pd.Timestamp(observed_dates[index]): pd.Timestamp(observed_dates[index - 1])
+        for index in range(1, len(observed_dates))
+    }
+    grouped = value.groupby("symbol", sort=False)
+    value["previous_trade_date"] = grouped["trade_date"].shift()
+    value["previous_shares"] = grouped["shares"].shift()
+    value["expected_previous_date"] = value["trade_date"].map(previous_dates)
+    consecutive = value["previous_trade_date"].eq(value["expected_previous_date"])
+    eligible = value[consecutive & value["previous_shares"].gt(0)].copy()
+    eligible["flow"] = (eligible["shares"] - eligible["previous_shares"]) * eligible["price"]
+    eligible["prior_value"] = eligible["previous_shares"] * eligible["price"]
+    eligible = eligible.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["flow", "prior_value"],
+    )
+    daily = eligible.groupby("trade_date").agg(
+        net_flow=("flow", "sum"),
+        prior_value=("prior_value", "sum"),
+        fund_count=("symbol", "nunique"),
+    ).reindex(observed_dates)
+    daily["rate"] = (
+        daily["net_flow"] / daily["prior_value"].where(daily["prior_value"] > 0)
+    ).where(daily["fund_count"] >= int(min_funds))
+    rolling_rate = daily["rate"].rolling(int(window), min_periods=int(window)).sum()
+    current_rate = rolling_rate.get(target)
+    fund_count = int(daily.at[target, "fund_count"] or 0) if pd.notna(
+        daily.at[target, "fund_count"]
+    ) else 0
+    if pd.isna(current_rate):
+        return {
+            **unavailable(
+                f"目标行情日需至少 {min_funds} 只 ETF 的连续份额快照",
+                observed_as_of=target_text,
+            ),
+            "fund_count": fund_count,
+        }
+
+    reference = rolling_rate.loc[:target].dropna().tail(max(1, int(lookback)))
+    if len(reference) < int(min_history):
+        return {
+            **unavailable(
+                f"ETF 资金历史仅有 {len(reference)} 个有效窗口，至少需要 {min_history} 个",
+                observed_as_of=target_text,
+            ),
+            "reference_windows": len(reference),
+            "fund_count": fund_count,
+            "net_subscription_rate": _number(current_rate, 6),
+            "net_subscription_rate_pct": _number(float(current_rate) * 100, 2),
+        }
+    less = int((reference < float(current_rate)).sum())
+    equal = int((reference == float(current_rate)).sum())
+    score = 100.0 * (less + 0.5 * equal) / len(reference)
+    rate_pct = _number(float(current_rate) * 100, 2)
+    score_value = _number(score, 2)
+    return {
+        "available": True,
+        "score": score_value,
+        "as_of": target_text,
+        "note": (
+            f"近 {window} 日净申购率 {rate_pct:+.2f}% · "
+            f"近 {len(reference)} 个窗口第 {score_value:.2f} 百分位 · {fund_count} 只"
+        ),
+        "window_sessions": int(window),
+        "reference_windows": len(reference),
+        "fund_count": fund_count,
+        "net_subscription_rate": _number(current_rate, 6),
+        "net_subscription_rate_pct": rate_pct,
     }
 
 

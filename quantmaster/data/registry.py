@@ -311,7 +311,7 @@ def _request_factories(
 
 
 def data_source_capabilities() -> dict[str, object]:
-    """Return configured priority and declared capabilities without probing providers."""
+    """Return configured priority and honest, non-probed capability evidence."""
     factories = _factories()
     providers: dict[str, dict[str, object]] = {}
     priority: dict[str, list[str]] = {}
@@ -320,24 +320,42 @@ def data_source_capabilities() -> dict[str, object]:
         for factory in ordered:
             name = str(factory.name)
             declared = sorted(value.value for value in factory.capabilities)
-            capability_status = {value: "declared" for value in declared}
+            if name == "free-stockdb" and DataCapability.SPOT.value not in declared:
+                # Response-shape compatibility for older diagnostics clients;
+                # runtime routing uses factory.capabilities and will not select it.
+                declared.append(DataCapability.SPOT.value)
+                declared.sort()
+            capability_status = {
+                value: {
+                    "state": "declared", "installed": None, "connected": None,
+                    "data_ready": None, "verified": False,
+                }
+                for value in declared
+            }
             if name.startswith("free-stockdb"):
                 from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
 
                 sdk_available = resolve_free_stockdb_sdk_path() is not None
                 local_configured = bool(str(get_config().data.free_stockdb_url or "").strip())
-                capability_status.update({
-                    DataCapability.DAILY.value: "available" if local_configured else "unavailable",
-                    DataCapability.DAILY_CROSS_SECTION.value: (
-                        "available" if sdk_available else "degraded"
-                    ),
-                    DataCapability.BOARD_HIERARCHY.value: (
-                        "available" if sdk_available else "unavailable"
-                    ),
-                    DataCapability.NATIVE_INDICATORS.value: (
-                        "available" if sdk_available else "unavailable"
-                    ),
-                })
+                for capability in factory.capabilities:
+                    needs_sdk = capability in {
+                        DataCapability.DAILY_CROSS_SECTION,
+                        DataCapability.BOARD_HIERARCHY,
+                        DataCapability.SECURITY_CATALOG,
+                        DataCapability.NATIVE_INDICATORS,
+                    }
+                    installed = sdk_available if needs_sdk else local_configured
+                    capability_status[capability.value] = {
+                        "state": "unverified" if installed else "unavailable",
+                        "installed": installed, "connected": None,
+                        "data_ready": None, "verified": False,
+                    }
+                if name == "free-stockdb":
+                    capability_status[DataCapability.SPOT.value] = {
+                        "state": "deprecated_unavailable", "installed": sdk_available,
+                        "connected": None, "data_ready": None, "verified": False,
+                        "replacement": DataCapability.EOD_SNAPSHOT.value,
+                    }
             providers.setdefault(
                 name,
                 {

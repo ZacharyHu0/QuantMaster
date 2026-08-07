@@ -273,6 +273,162 @@ def _api_error(provider: str, response: httpx.Response) -> LLMError:
     )
 
 
+def _invalid_response_message(provider: str, response: httpx.Response) -> str:
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+    media_type = content_type or "未知类型"
+    summary = ""
+    if content_type in {"text/html", "application/xhtml+xml"}:
+        title = re.search(r"<title[^>]*>(.*?)</title>", response.text, re.I | re.S)
+        if title:
+            safe_title = re.sub(r"<[^>]+>", "", title.group(1))
+            safe_title = re.sub(r"\s+", " ", safe_title).strip()[:160]
+            if safe_title:
+                summary = f"，页面标题：{safe_title}"
+        if not summary:
+            summary = "，响应内容是一张 HTML 页面"
+    elif content_type.startswith("text/"):
+        preview = re.sub(r"\s+", " ", response.text).strip()[:200]
+        preview = re.sub(
+            r"(?i)\b(?:bearer\s+)?sk-[a-z0-9._-]{6,}", "[密钥已隐藏]", preview,
+        )
+        if preview:
+            summary = f"，响应摘要：{preview}"
+    return (
+        f"{provider} API 返回了无法解析的响应（HTTP {response.status_code} · "
+        f"{media_type}{summary}）"
+    )
+
+
+def _responses_terminal_payload(
+    event: dict[str, Any],
+    output_items: dict[int, dict[str, Any]] | None = None,
+    annotations: dict[tuple[int, int], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Normalize one Responses terminal event without exposing upstream bodies."""
+    event_type = str(event.get("type") or "").casefold()
+    payload = event.get("response") if event_type.startswith("response.") else event
+    if not isinstance(payload, dict):
+        raise LLMError(
+            "OpenAI Responses 返回了无效的终止事件",
+            code="invalid_response",
+            retryable=True,
+        )
+    status = str(payload.get("status") or "").casefold()
+    if event_type == "response.failed" or status in {"failed", "cancelled"}:
+        raise LLMError(
+            "OpenAI Responses 搜索返回了失败事件",
+            code="response_failed",
+            retryable=True,
+        )
+    if event_type == "response.incomplete" or status == "incomplete":
+        raise LLMError(
+            "OpenAI Responses 搜索响应未完整结束",
+            code="response_incomplete",
+            retryable=True,
+        )
+
+    normalized = dict(payload)
+    indexed = {
+        index: item
+        for index, item in enumerate(payload.get("output") or [])
+        if isinstance(item, dict)
+    }
+    indexed.update(output_items or {})
+    for (output_index, content_index), values in (annotations or {}).items():
+        item = indexed.get(output_index)
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, list) or not 0 <= content_index < len(content):
+            continue
+        part = content[content_index]
+        if not isinstance(part, dict):
+            continue
+        current = part.get("annotations")
+        if not isinstance(current, list):
+            current = []
+            part["annotations"] = current
+        for value in values:
+            if value not in current:
+                current.append(value)
+    normalized["output"] = [indexed[index] for index in sorted(indexed)]
+    return normalized
+
+
+def _parse_openai_responses(response: httpx.Response) -> dict[str, Any]:
+    """Accept both JSON Responses and gateways that always return buffered SSE."""
+    media_type = response.headers.get("content-type", "").split(";", 1)[0].casefold()
+    body = response.text
+    is_sse = media_type == "text/event-stream" or body.lstrip().startswith(("event:", "data:"))
+    if not is_sse:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise LLMError(
+                _invalid_response_message("OpenAI Responses", response),
+                code="invalid_response",
+                retryable=True,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LLMError(
+                "OpenAI Responses 返回了无效的 JSON 对象",
+                code="invalid_response",
+                retryable=True,
+            )
+        return _responses_terminal_payload(payload)
+
+    output_items: dict[int, dict[str, Any]] = {}
+    annotations: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    terminal: dict[str, Any] | None = None
+    normalized_body = body.replace("\r\n", "\n").replace("\r", "\n")
+    for block in normalized_body.split("\n\n"):
+        data_lines = [
+            line[5:].lstrip(" ")
+            for line in block.splitlines()
+            if line.startswith("data:")
+        ]
+        if not data_lines:
+            continue
+        raw = "\n".join(data_lines)
+        if raw.strip() == "[DONE]":
+            continue
+        try:
+            event = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise LLMError(
+                "OpenAI Responses SSE 包含无法解析的事件",
+                code="invalid_response",
+                retryable=True,
+            ) from exc
+        if not isinstance(event, dict):
+            raise LLMError(
+                "OpenAI Responses SSE 包含无效事件",
+                code="invalid_response",
+                retryable=True,
+            )
+        event_type = str(event.get("type") or "")
+        if event_type == "response.output_item.done" and isinstance(event.get("item"), dict):
+            try:
+                output_index = int(event.get("output_index", len(output_items)))
+            except (TypeError, ValueError):
+                output_index = len(output_items)
+            output_items[output_index] = event["item"]
+        elif (event_type == "response.output_text.annotation.added"
+              and isinstance(event.get("annotation"), dict)):
+            try:
+                key = (int(event.get("output_index", 0)), int(event.get("content_index", 0)))
+            except (TypeError, ValueError):
+                key = (0, 0)
+            annotations.setdefault(key, []).append(event["annotation"])
+        if event_type in {"response.completed", "response.failed", "response.incomplete"}:
+            terminal = event
+    if terminal is None:
+        raise LLMError(
+            "OpenAI Responses SSE 未包含终止事件",
+            code="invalid_response",
+            retryable=True,
+        )
+    return _responses_terminal_payload(terminal, output_items, annotations)
+
+
 class LLMClient:
     def __init__(
         self,
@@ -355,7 +511,7 @@ class LLMClient:
             data = response.json()
         except ValueError as exc:
             raise LLMError(
-                "Anthropic API 返回了无法解析的响应",
+                _invalid_response_message("Anthropic", response),
                 code="invalid_response",
                 retryable=True,
             ) from exc
@@ -367,26 +523,40 @@ class LLMClient:
     ) -> str:
         if system:
             messages = [{"role": "system", "content": system}, *messages]
-        url = OPENAI_URL
+        urls = [OPENAI_URL]
         if self.config.base_url:
-            url = self.config.base_url.rstrip("/") + "/chat/completions"
+            base = self.config.base_url.rstrip("/")
+            urls = [base + "/chat/completions"]
+            if not base.casefold().endswith("/v1"):
+                urls.append(base + "/v1/chat/completions")
         headers = ({"Authorization": f"Bearer {self.config.api_key}"}
                    if self.config.api_key else {})
-        try:
-            response = self._post(
-                url,
-                headers=headers,
-                json={
-                    "model": model,
-                    "max_tokens": self.config.max_tokens,
-                    "temperature": self.config.temperature,
-                    "reasoning_effort": reasoning_effort,
-                    "messages": messages,
-                },
-                timeout=_request_timeout(read_timeout),
+        response: httpx.Response | None = None
+        for index, url in enumerate(urls):
+            try:
+                response = self._post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "max_tokens": self.config.max_tokens,
+                        "temperature": self.config.temperature,
+                        "reasoning_effort": reasoning_effort,
+                        "messages": messages,
+                    },
+                    timeout=_request_timeout(read_timeout),
+                )
+            except httpx.HTTPError as exc:
+                raise _transport_error(exc, read_timeout) from exc
+            media_type = response.headers.get("content-type", "").casefold()
+            should_try_v1 = (
+                index == 0 and len(urls) > 1
+                and (response.status_code in {404, 405} or "text/html" in media_type)
             )
-        except httpx.HTTPError as exc:
-            raise _transport_error(exc, read_timeout) from exc
+            if not should_try_v1:
+                break
+        if response is None:  # pragma: no cover - urls 始终至少包含官方端点
+            raise LLMError("未生成模型请求地址", code="invalid_response")
         if response.status_code != 200:
             raise _api_error("OpenAI 协议", response)
         try:
@@ -394,7 +564,7 @@ class LLMClient:
             return data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(
-                "OpenAI 协议 API 返回了无法解析的响应",
+                _invalid_response_message("OpenAI 协议", response),
                 code="invalid_response",
                 retryable=True,
             ) from exc
@@ -511,20 +681,26 @@ class LLMClient:
             "tool_choice": "auto",
             "max_tool_calls": max(1, min(3, int(max_uses))),
             "include": ["web_search_call.action.sources"],
+            "stream": False,
         }
         minimal_payload = {
             "model": self.config.model,
             "input": query,
-            "reasoning": {"effort": self.config.reasoning_effort},
             "tools": [{"type": "web_search"}],
+            "stream": False,
         }
+        attempts = (
+            (minimal_payload, rich_payload)
+            if self.config.provider == "openai-compatible"
+            else (rich_payload, minimal_payload)
+        )
         response: Any = None
-        for index, payload in enumerate((rich_payload, minimal_payload)):
+        for index, request_payload in enumerate(attempts):
             try:
                 response = self._post(
                     url,
                     headers=headers,
-                    json=payload,
+                    json=request_payload,
                     timeout=_request_timeout(timeout),
                 )
             except httpx.HTTPError as exc:
@@ -536,13 +712,7 @@ class LLMClient:
             raise _api_error("OpenAI Responses", response)
         if response is None or response.status_code != 200:
             raise LLMError("OpenAI Responses 搜索探测未返回结果", code="invalid_response")
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise LLMError(
-                "OpenAI Responses 返回了无法解析的搜索响应",
-                code="invalid_response", retryable=True,
-            ) from exc
+        payload = _parse_openai_responses(response)
         return self._openai_search_results(payload)
 
     def _web_search_anthropic(

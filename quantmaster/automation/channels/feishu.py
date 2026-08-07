@@ -18,6 +18,130 @@ from quantmaster.logging_config import normalize_third_party_logger
 logger = logging.getLogger(__name__)
 
 
+def _task_name(task: asyncio.Task) -> str:
+    try:
+        coroutine = task.get_coro()
+        return str(
+            getattr(coroutine, "__qualname__", "")
+            or getattr(coroutine, "__name__", "")
+        )
+    except (AttributeError, RuntimeError):
+        return ""
+
+
+async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
+    """Drain lark-oapi 1.x private WS tasks before its loop is stopped.
+
+    The SDK's public ``stop_background`` closes the socket and immediately
+    stops its module-level loop.  Its ping, receive and ExpiringCache tasks are
+    otherwise destroyed while pending.  Keep this compatibility boundary here
+    instead of patching site-packages or hiding the resulting warnings.
+    """
+    ws = getattr(channel, "_ws_client", None)
+    if ws is None:
+        return False
+    ws_loop = None
+    try:
+        from lark_oapi.ws import client as ws_client_module
+
+        ws_loop = getattr(ws_client_module, "loop", None)
+    except ImportError:
+        return False
+    if ws_loop is None or ws_loop.is_closed():
+        return False
+
+    # A normal local shutdown must never enter the SDK's reconnect loop.
+    if hasattr(ws, "_auto_reconnect"):
+        ws._auto_reconnect = False
+
+    async def cancel_task(task: asyncio.Task) -> None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    # ExpiringCache is constructed inside the SDK executor thread.  With no
+    # event loop there, lark-oapi creates a separate orphan loop and schedules
+    # _start_clear_cron on it; that task is therefore invisible to ws_loop.
+    cache = getattr(ws, "_cache", None)
+    cache_task = getattr(cache, "_cron", None)
+    if isinstance(cache_task, asyncio.Task) and not cache_task.done():
+        cache_loop = cache_task.get_loop()
+        try:
+            running_loop = asyncio.get_running_loop()
+            if cache_loop is running_loop:
+                await cancel_task(cache_task)
+            elif cache_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    cancel_task(cache_task), cache_loop,
+                )
+                await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+            elif not cache_loop.is_closed():
+                def drain_orphan_loop() -> None:
+                    asyncio.set_event_loop(cache_loop)
+                    cache_task.cancel()
+                    cache_loop.run_until_complete(
+                        asyncio.gather(cache_task, return_exceptions=True),
+                    )
+
+                await asyncio.wait_for(
+                    asyncio.to_thread(drain_orphan_loop), timeout=timeout,
+                )
+        except (TimeoutError, asyncio.CancelledError, RuntimeError, OSError):
+            logger.warning("飞书 SDK 缓存协程未能在退出前完整回收", exc_info=True)
+
+    async def drain() -> list[asyncio.Task]:
+        current = asyncio.current_task()
+        roots: list[asyncio.Task] = []
+        background: list[asyncio.Task] = []
+        for task in asyncio.all_tasks(ws_loop):
+            if task is current or task.done():
+                continue
+            # WSClient.start() blocks on this sentinel via run_until_complete.
+            # Cancel it only after every real background task has been awaited.
+            if _task_name(task).endswith("._select") or _task_name(task) == "_select":
+                roots.append(task)
+            else:
+                background.append(task)
+        for task in background:
+            task.cancel()
+        if background:
+            await asyncio.gather(*background, return_exceptions=True)
+        disconnect = getattr(ws, "_disconnect", None)
+        if callable(disconnect):
+            await disconnect()
+        return roots
+
+    try:
+        if ws_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(drain(), ws_loop)
+            roots = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+            for task in roots:
+                ws_loop.call_soon_threadsafe(task.cancel)
+            # Let run_until_complete consume the sentinel cancellation before
+            # FeishuChannel.stop() considers stopping/closing the loop.
+            deadline = asyncio.get_running_loop().time() + timeout
+            while ws_loop.is_running() and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
+            if ws_loop.is_running():
+                logger.warning("飞书 SDK WebSocket 哨兵循环未能按时退出")
+                return False
+        else:
+            roots = ws_loop.run_until_complete(drain())
+            for task in roots:
+                task.cancel()
+            if roots:
+                ws_loop.run_until_complete(asyncio.gather(*roots, return_exceptions=True))
+        # We already disconnected and fully drained this transport.  Prevent
+        # FeishuChannel.stop() from running its private fallback a second time;
+        # that fallback calls run_until_complete from our active asyncio loop
+        # and creates an un-awaited _disconnect coroutine before raising.
+        if getattr(channel, "_ws_client", None) is ws:
+            channel._ws_client = None
+        return True
+    except (TimeoutError, asyncio.CancelledError, RuntimeError, OSError):
+        logger.warning("飞书 SDK 后台协程未能在退出前完整回收", exc_info=True)
+        return False
+
+
 class FeishuBotClient:
     """飞书企业自建应用 Bot：长连接收消息，OpenAPI 发送消息。"""
 
@@ -258,6 +382,7 @@ class FeishuBotClient:
                 await asyncio.to_thread(stop_event.wait)
             finally:
                 try:
+                    await _drain_lark_ws_tasks(channel)
                     await channel.stop_background()
                 except (OSError, RuntimeError, TypeError, ValueError):
                     if not stop_event.is_set():

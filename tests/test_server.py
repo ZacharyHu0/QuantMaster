@@ -31,6 +31,17 @@ class TestBasics:
         assert len(resp.headers["X-Request-ID"]) == 12
         assert client.get("/api/v1/health").status_code == 404
 
+    def test_market_history_read_failure_is_service_unavailable(self, monkeypatch):
+        def fail_load(*_args, **_kwargs):
+            raise TypeError("Cannot compare tz-naive and tz-aware timestamps")
+
+        monkeypatch.setattr("quantmaster.data.load_bars", fail_load)
+
+        response = client.get("/api/v1/market/history/DX-Y.NYB.US")
+
+        assert response.status_code == 503
+        assert "行情暂不可用" in response.json()["detail"]
+
     def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
         monkeypatch.setattr(
             "quantmaster.server.problems.collect_health_report",
@@ -86,7 +97,8 @@ class TestBasics:
         assert "style-src 'self'" in csp
         assert "'nonce-" not in csp
         assert "%%QM_CSP_NONCE%%" not in page.text
-        assert '<link rel="stylesheet" href="/static/app.css">' in page.text
+        assert '/static/app.css?rev=' in page.text
+        assert "%%QM_APP_CSS_REV%%" not in page.text
         assert '<script src="/static/app.js"></script>' in page.text
         assert "<script nonce=" not in page.text
         assert anonymous.get("/static/app.css").status_code == 200
@@ -123,6 +135,23 @@ class TestBasics:
         assert len(data["releases"]) == 10
         assert data["history_url"].endswith("/CHANGELOG.md")
 
+    def test_manual_reload_endpoint_requires_supervisor_and_writes_trigger(
+        self, monkeypatch, tmp_path,
+    ):
+        trigger = tmp_path / "reload.trigger"
+        monkeypatch.delenv("QM_SERVER_RELOAD_WORKER", raising=False)
+        monkeypatch.setenv("QM_SERVER_RELOAD_TRIGGER_PATH", str(trigger))
+        unavailable = client.post("/api/v1/system/reload")
+        assert unavailable.status_code == 409
+        assert not trigger.exists()
+
+        monkeypatch.setenv("QM_SERVER_RELOAD_WORKER", "1")
+        accepted = client.post("/api/v1/system/reload")
+        assert accepted.status_code == 202
+        assert accepted.json()["accepted"] is True
+        assert "FreeStockDB" in accepted.json()["message"]
+        assert trigger.read_text(encoding="ascii").isdigit()
+
     def test_index_serves_html(self):
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
@@ -140,6 +169,8 @@ class TestBasics:
         assert "function marketSparkParsedDate" in app_script
         assert "function marketSparkMonth" in app_script
         assert "function marketSparkOption" in app_script
+        assert "categories[dataIndex]" in app_script
+        assert "Number.isFinite(parsedValue)" in app_script
         assert "type:'category',data:categories,show:true" in app_script
         assert "id:'market-spark-latest'" in app_script
         assert "区间涨跌" in app_script
@@ -148,6 +179,14 @@ class TestBasics:
         assert "market-section-title" in resp.text
         assert "mkt-memberships" in app_script
         assert "名称与代码 · 标注提及次数" in resp.text
+        assert "/static/settings.css?rev=" in resp.text
+        assert "/static/settings.js?rev=" in resp.text
+        assert "%%QM_SETTINGS_CSS_REV%%" not in resp.text
+        assert "%%QM_SETTINGS_JS_REV%%" not in resp.text
+        assert "/static/news.css?rev=" in resp.text
+        assert "/static/news.js?rev=" in resp.text
+        for stylesheet in ("app", "lab", "after-close"):
+            assert f"/static/{stylesheet}.css?rev=" in resp.text
         assert "queueMarketReload" in app_script
         assert "data:[{yAxis:0}]" in app_script
         assert "type:'dashed'" in app_script
@@ -155,14 +194,74 @@ class TestBasics:
         assert "--scrollbar-track: #151514" in app_styles
         assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in app_styles
         assert "scrollbar-gutter:stable" in app_styles
+        assert ".segmented {" in app_styles
+        assert "overflow-x:auto; overflow-y:hidden" in app_styles
         assert 'class="backtest-trades-scroll"' in app_script
         assert "createLoadProgress" in app_script
         assert "createMarketStreamRenderer" in app_script
         assert "/api/v1/market/fear-greed" in app_script
+        assert 'id="market-fear-greed-time"' in resp.text
+        assert "function fearGreedAsOf" in app_script
+        assert ".formatToParts(parsed)" in app_script
+        assert "`${year}${Number(parts.month)}月${Number(parts.day)}日" in app_script
+        assert "function fearGreedGaugeLabels" in app_script
+        assert "[0,25,45,55,75,100].map" in app_script
+        assert "font:'600 13px" in app_script
+        assert 'class="eyebrow market-sentiment-title"' in resp.text
+        assert 'class="market-sentiment-value"' not in resp.text
+        assert "CNN 当日恐贪指数 ${scoreText}，${label}" in app_script
+        assert ".market-sentiment-panel { display:grid; gap:var(--space-sm)" in app_styles
+        assert ".fear-greed-gauge { width:100%; height:156px" in app_styles
+        assert ".fear-greed-history { width:100%; height:142px" in app_styles
+        assert "title:{show:true,offsetCenter:[0,'94%'],color:CHART_COLORS.ink2" in app_script
+        assert "fontSize:14,fontWeight:600,lineHeight:16" in app_script
+        assert "detail:{offsetCenter:[0,'42%']" in app_script
+        assert "fontSize:30,fontWeight:720,lineHeight:32" in app_script
+        assert "splitNumber:20" in app_script
+        assert "valueAnimation:!REDUCED_MOTION" in app_script
+        assert "animationDuration:REDUCED_MOTION ? 0 : 640" in app_script
+        assert "duration:640,easing:'cubicInOut'" in app_script
+        assert "formatter:'≤10 · 罕见恐惧'" in app_script
+        assert "position:'insideStartTop',distance:6" in app_script
+        assert "黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
+        assert "黄色虚线表示 10 分罕见恐惧参考阈值" in resp.text
+        assert "__qmMotion:true" in app_script
+        assert "id:'fear-greed-dial'" in app_script
+        assert "!chart.__qmFearGreedEntered" in app_script
+        assert "function replayFearGreedGaugeAnimation" in app_script
+        assert "control.dataset.marketPage === 'quotes'" in app_script
+        assert "control.getAttribute('aria-selected') !== 'true'" in app_script
+        assert "replayFearGreedGaugeAnimation(view)" in app_script
+        assert "chart.__qmFearGreedAnimationRevision !== animationRevision" in app_script
+        assert "marketFearGreed,width,height,0" in app_script
+        assert "target.animationDurationUpdate = 640" in app_script
+        assert "target.animationEasingUpdate = 'cubicInOut'" in app_script
+        assert "function fearGreedGaugeNeedle" in app_script
+        assert "function fearGreedGaugeRotation" in app_script
+        assert "210 - Math.max(0,Math.min(100,value)) * 2.4" in app_script
+        assert "rotation:fearGreedGaugeRotation(0)" in app_script
+        assert "id:'fear-greed-needle',type:'group'" in app_script
+        assert "pointer:{show:false}" in app_script
+        assert "keyframes:[" in app_script
+        assert "undefined,true" in app_script
+        assert "var explicitMotion = option.__qmMotion === true" in client.get("/static/charts.js").text
         assert "data-opportunity-rsi" in app_script
+        assert 'class="mkt-rsi-label"><span>RSI(14)</span><small>日线</small>' in app_script
+        assert "function rsiSparkPoints" in app_script
+        assert "function rsiSparkMarkup" in app_script
+        assert "function bindRsiSparkInteraction" in app_script
+        assert "getUTCMonth() - 3" in app_script
+        assert "mkt-rsi-date-label" in app_script
+        assert "mkt-rsi-tooltip" in app_script
+        assert "root.onpointermove" in app_script
+        assert "dotRadius * width / bounds.width" in app_script
+        assert "dotRadius * chartHeight / bounds.height" in app_script
         assert "createDecisionStreamRenderer" in app_script
         assert "function loadKlineSeries" in app_script
         assert "function renderKlineSeries" in app_script
+        assert "id:'market-kline-x-wheel'" in app_script
+        assert "id:'market-kline-x-slider'" in app_script
+        assert "xAxisIndex:[0,1],filterMode:'none'" in app_script
         assert "function openDecisionKline" in app_script
         assert "data-decision-kline-trigger" in app_script
         assert "data-decision-asset-toggle" in app_script
@@ -203,6 +302,19 @@ class TestBasics:
         assert 'id="data-refresh-preview"' in resp.text
         assert 'id="data-refresh-start-button"' in resp.text
         assert 'id="data-refresh-resume"' in resp.text
+        assert "同步观察行情" in resp.text
+        assert "不更新全市场 free-stockdb" in resp.text
+        assert "自动更新本地库" in resp.text
+        assert "立即更新并验证" in resp.text
+        assert resp.text.count('class="settings-nav-group"') == 5
+        assert resp.text.count("data-settings-section=") == 11
+        for panel in ("local-data", "online-data", "research-data"):
+            assert f'data-settings-panel="{panel}"' in resp.text
+        for diagnostic in (
+            "llm-models", "llm-web-search", "storage", "data-sources", "tushare", "lab", "server",
+        ):
+            assert f'data-diagnostic="{diagnostic}"' in resp.text
+        assert 'id="settings-section-select"' in resp.text
         assert 'id="runtime-drawer-frame"' in resp.text
         assert "window.QuantMasterRunInfo" in app_script
         assert "window.QuantMasterProblemDialog" in app_script
@@ -219,8 +331,27 @@ class TestBasics:
         assert "unhandledrejection" in app_script
         assert 'id="release-trigger"' in resp.text
         assert 'id="release-popover"' in resp.text
+        assert 'id="release-reload-button"' in resp.text
+        assert 'id="release-reload-status"' in resp.text
+        assert 'id="stockdb-update-trigger"' in resp.text
+        assert 'id="stockdb-update-popover"' in resp.text
+        assert 'id="stockdb-data-date"' in resp.text
+        assert 'id="stockdb-updated-at"' not in resp.text
+        assert 'id="stockdb-popover-updated-at"' in resp.text
         assert 'id="free-stockdb-release"' in resp.text
+        release_popover = resp.text.split(
+            '<aside class="release-popover" id="release-popover"', 1,
+        )[1].split("</aside>", 1)[0]
+        stockdb_popover = resp.text.split(
+            '<aside class="release-popover stockdb-update-popover" '
+            'id="stockdb-update-popover"', 1,
+        )[1].split("</aside>", 1)[0]
+        assert 'id="free-stockdb-release"' not in release_popover
+        assert 'id="free-stockdb-release"' in stockdb_popover
+        assert 'id="stockdb-popover-session"' in stockdb_popover
         assert '/api/v1/settings/free-stockdb/vendor-notice' in app_script
+        assert "/api/v1/system/reload" in app_script
+        assert "api('/api/v1/settings/free-stockdb')" in app_script
         assert 'qm-free-stockdb-release-seen' in app_script
         assert f'v{__version__}' not in resp.text  # 版本由 data 属性无闪烁注入，脚本负责呈现
         assert f'data-version="{__version__}"' in resp.text
@@ -294,7 +425,8 @@ class TestBasics:
         assert "--chart-primary" in chart_styles.text
         assert "scheduleFreeStockDbPoll" in settings_script.text
         assert "freeStockDbPollFailures < 5" in settings_script.text
-        assert "update_result === 'failed'" in settings_script.text
+        assert "['failed', 'manual_required'].includes(stockdb.update_result)" in settings_script.text
+        assert "stockdb.target_session" in settings_script.text
         help_content = client.get("/static/help-content.html")
         assert help_content.status_code == 200
         assert 'data-help-topic="start"' in help_content.text

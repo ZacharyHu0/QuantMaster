@@ -42,6 +42,11 @@ class ArtifactKind(_ValueEnum):
 
 class CapabilityState(_ValueEnum):
     AVAILABLE = "available"
+    INSTALLED = "installed"
+    DATA_READY = "data_ready"
+    DEGRADED = "degraded"
+    UNAVAILABLE = "unavailable"
+    UNSUPPORTED_BY_SYMBOL = "unsupported_by_symbol"
     MISSING_PERMISSION = "missing_permission"
     UNCONFIGURED = "unconfigured"
     TEMPORARY_FAILURE = "temporary_failure"

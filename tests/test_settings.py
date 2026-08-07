@@ -9,7 +9,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from quantmaster.config import load_config, set_config
-from quantmaster.credentials import CredentialError
+from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.server.app import app
 from quantmaster.settings import ConfigManager, SettingsUpdate, document_from_config
 
@@ -101,6 +101,93 @@ def test_secret_replace_redaction_and_snapshots(tmp_path):
     assert manager.public()["secrets"]["llm"]["configured"] is True
     assert all("highly-secret-value" not in item.read_text(encoding="utf-8")
                for item in (tmp_path / "backups").glob("*.json"))
+    set_config(None)
+
+
+@pytest.mark.parametrize("kind", [
+    "llm-models", "llm-web-search", "tushare", "storage",
+    "data-sources", "server", "lab",
+])
+def test_setting_check_results_persist_and_track_relevant_changes(tmp_path, kind):
+    credentials = FakeCredentials()
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", credentials)
+    document = document_from_config(manager.load())
+    secrets = {
+        "llm": "llm-secret-value",
+        "tushare": "tushare-secret-value",
+    }
+    result = {
+        "status": "warning",
+        "message": f"{kind} 已检测",
+        "latency_ms": 42,
+        "checked_at": "2026-08-08T08:09:10+00:00",
+        "details": {"category": "test"},
+    }
+
+    recorded = manager.record_check_result(kind, document, secrets, result)
+    reloaded = ConfigManager(manager.path, manager.backup_dir, credentials)
+    restored = reloaded.check_results(document, secrets)[kind]
+
+    assert recorded["stale"] is False
+    assert restored == {**result, "stale": False}
+    state_text = reloaded.check_state_path.read_text(encoding="utf-8")
+    assert "llm-secret-value" not in state_text
+    assert "tushare-secret-value" not in state_text
+
+    changed = document.model_copy(deep=True)
+    changed_secrets = dict(secrets)
+    if kind == "llm-models":
+        changed.llm.model = "another-model"
+    elif kind == "llm-web-search":
+        changed.llm.reasoning_effort = "high"
+    elif kind == "tushare":
+        changed_secrets["tushare"] = "replacement-token"
+    elif kind == "storage":
+        changed.data.root = str(tmp_path / "another-data-root")
+    elif kind == "data-sources":
+        changed.data.free_stockdb_url = "http://127.0.0.1:7999"
+    elif kind == "server":
+        changed.server.port += 1
+    else:
+        changed.lab.device = "cpu"
+
+    assert reloaded.check_results(changed, changed_secrets)[kind]["stale"] is True
+
+
+def test_corrupt_setting_check_state_is_ignored(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    manager.check_state_path.write_text("{not-json", encoding="utf-8")
+
+    assert manager.public()["checks"] == {}
+
+
+def test_adding_v1_keeps_compatible_gateway_secret(tmp_path):
+    path = tmp_path / "config.yaml"
+    credentials = FakeCredentials()
+    manager = ConfigManager(path, tmp_path / "backups", credentials)
+    first = _update(manager)
+    first.llm.provider = "openai-compatible"
+    first.llm.base_url = "https://gateway.test"
+    first.secrets.llm.action = "replace"
+    first.secrets.llm.value = "gateway-secret"
+    manager.save(first)
+
+    second = _update(manager)
+    second.llm.base_url = "https://gateway.test/v1"
+    result = manager.save(second)
+
+    assert not any("凭据已保持为空" in warning for warning in result["warnings"])
+    assert manager.load().llm.api_key == "gateway-secret"
+    targets = {
+        CredentialStore.llm_target("openai-compatible", endpoint)
+        for endpoint in (
+            "https://gateway.test",
+            "https://gateway.test/v1",
+            "https://gateway.test/v1/models",
+            "https://gateway.test/v1/chat/completions",
+        )
+    }
+    assert len(targets) == 1
     set_config(None)
 
 
@@ -294,8 +381,13 @@ def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypa
     assert remote.get("/api/v1/settings/free-stockdb/vendor-notice").status_code == 403
 
 
-def test_settings_web_search_probe_route_requires_csrf_and_uses_safe_check(monkeypatch):
+def test_settings_web_search_probe_route_persists_safe_state(
+    monkeypatch, tmp_path,
+):
+    from quantmaster.server import management
+
     captured = []
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
 
     def fake_check(settings, api_key):
         captured.append((settings.model, bool(api_key)))
@@ -308,6 +400,7 @@ def test_settings_web_search_probe_route_requires_csrf_and_uses_safe_check(monke
         }
 
     monkeypatch.setattr("quantmaster.settings_checks.check_llm_web_search", fake_check)
+    monkeypatch.setattr(management, "settings_manager", manager)
     client = TestClient(app)
     settings = client.get("/api/v1/settings").json()
     payload = {"settings": {
@@ -324,7 +417,19 @@ def test_settings_web_search_probe_route_requires_csrf_and_uses_safe_check(monke
 
     assert response.status_code == 200
     assert response.json()["details"]["supported"] is True
+    assert response.json()["stale"] is False
     assert captured and captured[0][0] == settings["llm"]["model"]
+    restored = client.get("/api/v1/settings").json()["checks"]["llm-web-search"]
+    assert restored["checked_at"] == "2026-07-31T00:00:00+00:00"
+    assert restored["stale"] is False
+    assert "secret" not in manager.check_state_path.read_text(encoding="utf-8").lower()
+
+    update = _update(manager)
+    update.llm.model = "changed-after-check"
+    manager.save(update)
+    stale = client.get("/api/v1/settings").json()["checks"]["llm-web-search"]
+    assert stale["stale"] is True
+    set_config(None)
 
 
 def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monkeypatch):

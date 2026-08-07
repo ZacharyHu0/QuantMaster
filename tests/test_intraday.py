@@ -6,8 +6,14 @@ import pandas as pd
 import pytest
 
 from quantmaster.data import registry
-from quantmaster.data.base import DataCapability, DataSource, Market, normalize_bars
-from quantmaster.data.storage import IntradayBarStore
+from quantmaster.data.base import (
+    DataCapability,
+    DataSource,
+    Market,
+    normalize_bars,
+    normalize_daily,
+)
+from quantmaster.data.storage import BarStore, IntradayBarStore
 
 
 def test_normalize_chinese_intraday_columns():
@@ -21,6 +27,37 @@ def test_normalize_chinese_intraday_columns():
     assert isinstance(bars.index, pd.DatetimeIndex)
     assert list(bars.columns) == ["open", "high", "low", "close", "volume", "amount"]
     assert bars.index[1].minute == 35
+
+
+def test_daily_bars_and_cache_drop_provider_timezone(tmp_path):
+    index = pd.date_range("2026-08-05", periods=2, tz="America/New_York")
+    raw = pd.DataFrame({
+        "Open": [10.0, 10.1], "High": [10.2, 10.3], "Low": [9.9, 10.0],
+        "Close": [10.1, 10.2], "Volume": [1000.0, 1200.0],
+    }, index=index)
+
+    normalized = normalize_daily(raw)
+    assert normalized.index.tz is None
+    assert normalized.index[0] == pd.Timestamp("2026-08-05")
+
+    store = BarStore(root=tmp_path / "bars")
+    store.put("DX-Y.NYB.US", raw, replace=True)
+    cached = store.get("DX-Y.NYB.US")
+    assert cached is not None
+    assert cached.index.tz is None
+    assert cached.loc["2026-08-05":"2026-08-06"].shape[0] == 2
+
+
+def test_intraday_cache_preserves_timezone(tmp_path):
+    index = pd.date_range("2026-08-05 09:30", periods=2, freq="5min", tz="Asia/Shanghai")
+    frame = pd.DataFrame({"close": [10.0, 10.1]}, index=index)
+    store = IntradayBarStore("5m", root=tmp_path / "intraday")
+
+    store.put("600000.SH", frame, replace=True)
+
+    cached = store.get("600000.SH")
+    assert cached is not None
+    assert str(cached.index.tz) == "Asia/Shanghai"
 
 
 def test_registry_selects_only_sources_with_the_required_capability(monkeypatch):

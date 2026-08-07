@@ -17,6 +17,10 @@
     annotationStartedAt: 0,
     annotationBusy: false,
     queue: null,
+    eventFocusDays: 7,
+    eventFocusLoadedDays: null,
+    eventFocusRequest: 0,
+    eventFocusRetryDays: 7,
   };
 
   const feed = document.getElementById('news-out');
@@ -159,21 +163,17 @@
     const attempts = Number(item.analysis_attempts || 0);
     const recoveryCount = Number(item.analysis_recovery_count || 0);
     const window = retryWindow(item.next_retry_at);
-    const recoveryExhausted = dead && recoveryCount >= 3;
-    const ready = !dead || !recoveryExhausted;
-    const action = dead ?
-      recoveryExhausted ? '恢复次数已用尽' : '恢复此项' :
-      '立即重试此项';
+    const action = dead ? '恢复此项' : '立即重试此项';
     const code = String(item.last_failure_code || 'unknown').toLocaleUpperCase('en-US');
     const scheduleLabel = dead ? '自动恢复窗口' : '自动重试';
     const reason = item.analysis_error || '未记录具体错误信息';
     return `<section class="news-failure-panel${dead ? ' dead' : ''}" aria-label="${dead ? '暂停项诊断' : '分析失败诊断'}">
       <div class="news-failure-copy">
         <div class="news-failure-head"><strong>${dead ? '自动重试已暂停' : '本次分析未完成'}</strong><span>${dead ? '可手动恢复' : '仍在自动退避队列'}</span></div>
-        <p>${html(reason)}</p>
-        <div class="news-failure-meta"><span>错误码 ${html(code)}</span><span>连续尝试 ${attempts} 次</span><span>${scheduleLabel} ${html(window.relative)}${window.absolute ? ` · ${html(window.absolute)}` : ''}</span>${dead ? `<span>已恢复 ${recoveryCount} / 3 次</span>` : ''}</div>
+        <p>原因：${html(reason)}</p>
+        <div class="news-failure-meta"><span>错误码 ${html(code)}</span><span>连续尝试 ${attempts} 次</span><span>${scheduleLabel} ${html(window.relative)}${window.absolute ? ` · ${html(window.absolute)}` : ''}</span>${dead ? `<span>已手动恢复 ${recoveryCount} 次</span>` : ''}</div>
       </div>
-      <button class="news-item-retry" type="button" data-news-retry="${dead ? 'dead_letter' : 'failed'}" data-news-id="${Number(item.id)}" data-retry-ready="${String(ready)}" ${ready ? '' : 'disabled'} aria-label="${html(action)}：${html(item.title || '')}">
+      <button class="news-item-retry" type="button" data-news-retry="${dead ? 'dead_letter' : 'failed'}" data-news-id="${Number(item.id)}" data-retry-ready="true" aria-label="${html(action)}：${html(item.title || '')}">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.6 7.25A6 6 0 1 0 15.3 13M15.6 3.8v3.45h-3.45"/></svg><span data-action-label>${html(action)}</span>
       </button>
     </section>`;
@@ -372,7 +372,7 @@
     const deadButton = document.getElementById('news-recover-dead');
     deadButton.title = queue.manual_recoverable_dead_letter
       ? `${queue.manual_recoverable_dead_letter} 个暂停项可立即手动恢复；${queue.recoverable_dead_letter} 个已到自动恢复时间`
-      : queue.dead_letter ? `共 ${queue.dead_letter} 个暂停项，恢复次数均已用尽` : '没有暂停项';
+      : '没有暂停项';
     refreshAnnotationAvailability();
   }
 
@@ -419,11 +419,62 @@
         <em class="${direction}">${signed}</em>
       </div>`;
     }).join('') : '<span class="news-muted">暂无达到质量门槛的板块标注</span>';
+  }
+
+  function setEventFocusSelection(days) {
+    document.querySelectorAll('[data-news-focus-days]').forEach(button => {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.newsFocusDays) === Number(days)));
+    });
+  }
+
+  function renderEventFocus(data) {
+    const days = Number(data.days || state.eventFocusDays);
     const symbols = data.top_symbols || [];
     const max = Math.max(1, ...symbols.map(item => item.count));
     document.getElementById('news-top-symbols').innerHTML = symbols.length ? symbols.map(item =>
       `<div class="news-symbol-row" title="${html(item.name || '名称待同步')} · ${html(item.symbol)} · 提及 ${Number(item.count || 0)} 次"><span class="news-symbol-identity"><strong>${html(item.name || '名称待同步')}</strong><small>${html(item.symbol)}</small></span><i><b style="transform:scaleX(${item.count / max})"></b></i><span>${item.count}</span></div>`
-    ).join('') : '<span class="news-muted">暂无个股映射</span>';
+    ).join('') : `<span class="news-muted">过去 ${days} 日暂无达到质量门槛的标的提及</span>`;
+  }
+
+  function eventFocusFeedback(message = '', retryDays = null) {
+    const feedback = document.getElementById('news-focus-feedback');
+    feedback.hidden = !message;
+    feedback.querySelector('span').textContent = message;
+    feedback.querySelector('button').hidden = retryDays === null;
+    if (retryDays !== null) state.eventFocusRetryDays = retryDays;
+  }
+
+  async function loadEventFocus(days = state.eventFocusDays) {
+    const requestedDays = Number(days);
+    if (![1, 3, 7, 30].includes(requestedDays)) return null;
+    const requestId = ++state.eventFocusRequest;
+    const symbols = document.getElementById('news-top-symbols');
+    state.eventFocusDays = requestedDays;
+    setEventFocusSelection(requestedDays);
+    symbols.setAttribute('aria-busy', 'true');
+    eventFocusFeedback();
+    try {
+      const data = await api(`/api/v1/news/event-focus?days=${requestedDays}`);
+      if (requestId !== state.eventFocusRequest) return null;
+      if (Number(data.days) !== requestedDays) throw new Error('事件聚焦返回了错误的时间窗口');
+      renderEventFocus(data);
+      state.eventFocusLoadedDays = requestedDays;
+      return data;
+    } catch (error) {
+      if (requestId !== state.eventFocusRequest) return null;
+      const previousDays = state.eventFocusLoadedDays;
+      state.eventFocusDays = previousDays || 7;
+      setEventFocusSelection(state.eventFocusDays);
+      eventFocusFeedback(
+        previousDays
+          ? `${requestedDays} 日数据加载失败，仍显示 ${previousDays} 日结果。`
+          : `${requestedDays} 日数据加载失败，请重试。`,
+        requestedDays,
+      );
+      return null;
+    } finally {
+      if (requestId === state.eventFocusRequest) symbols.removeAttribute('aria-busy');
+    }
   }
 
   async function loadStats() {
@@ -627,7 +678,7 @@
     try {
       const result = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
       report(`采集完成：新增 ${result.saved || 0} 条`, null, 'success');
-      await Promise.all([loadSources(), loadFeed(), loadStats()]);
+      await Promise.all([loadSources(), loadFeed(), loadStats(), loadEventFocus()]);
     } catch (error) { report('来源采集失败', error); }
   };
 
@@ -687,6 +738,12 @@
 
   filterForm.onsubmit = event => { event.preventDefault(); loadFeed(); };
   document.getElementById('news-reset').onclick = () => { filterForm.reset(); loadFeed(); };
+  document.getElementById('news-focus-window').onclick = event => {
+    const button = event.target.closest('[data-news-focus-days]');
+    if (button) loadEventFocus(Number(button.dataset.newsFocusDays));
+  };
+  document.querySelector('#news-focus-feedback button').onclick = () =>
+    loadEventFocus(state.eventFocusRetryDays);
   document.getElementById('news-load-more').onclick = async event => {
     event.currentTarget.disabled = true;
     await loadFeed({append: true});
@@ -699,7 +756,7 @@
     try {
       const result = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
       report(`同步完成：抓取 ${result.fetched || 0} 条，新增 ${result.saved || 0} 条`, null, 'success');
-      await Promise.all([loadFeed(), loadStats(), loadSources()]);
+      await Promise.all([loadFeed(), loadStats(), loadEventFocus(), loadSources()]);
     } catch (error) { report('同步失败', error); }
     finally { button.disabled = false; button.textContent = '立即同步'; }
   };
@@ -720,7 +777,7 @@
     dead_letter: {
       idle: '恢复暂停项', active: '恢复中', preparing: '准备暂停项恢复队列',
       reading: '正在认领可手动恢复的暂停项…', empty: '没有可手动恢复的暂停项',
-      emptyDetail: '当前暂停项的恢复次数均已用尽。', complete: '本轮暂停项恢复已完成',
+      emptyDetail: '当前没有等待手动恢复的暂停项。', complete: '本轮暂停项恢复已完成',
       report: '暂停项恢复完成',
     },
   };
@@ -773,7 +830,10 @@
           });
           mergeAnnotationItems(update.updated_items || []);
           clearTimeout(state.annotationStatsTimer);
-          state.annotationStatsTimer = setTimeout(loadStats, 160);
+          state.annotationStatsTimer = setTimeout(() => {
+            loadStats();
+            loadEventFocus();
+          }, 160);
         }
         if (update.type === 'complete') finalEvent = update;
       });
@@ -805,7 +865,7 @@
           key:'news:annotation:partial',
         });
       }
-      const [, stats] = await Promise.all([loadFeed(), loadStats()]);
+      const [, stats] = await Promise.all([loadFeed(), loadStats(), loadEventFocus()]);
       if (!failed && Number(stats?.queue?.failed || 0) === 0) {
         window.QuantMasterRunInfo.resolve('news:annotation:partial');
       }
@@ -840,7 +900,7 @@
   });
 
   async function loadNews() {
-    await Promise.all([loadFeed(), loadStats(), loadSources()]);
+    await Promise.all([loadFeed(), loadStats(), loadEventFocus(), loadSources()]);
     state.loaded = true;
   }
 

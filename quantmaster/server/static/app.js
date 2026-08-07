@@ -723,12 +723,20 @@ async function streamJson(path, opts, onProgress) {
   }
 }
 
-/* ---------- 版本与更新日志 ---------- */
+/* ---------- 版本与 stockdb 数据状态 ---------- */
 (() => {
   const trigger = document.getElementById('release-trigger');
   const panel = document.getElementById('release-popover');
   const list = document.getElementById('release-list');
   const dateElement = document.getElementById('release-date');
+  const reloadButton = document.getElementById('release-reload-button');
+  const reloadStatus = document.getElementById('release-reload-status');
+  const stockdbTrigger = document.getElementById('stockdb-update-trigger');
+  const stockdbPanel = document.getElementById('stockdb-update-popover');
+  const stockdbDataDate = document.getElementById('stockdb-data-date');
+  const stockdbPopoverSession = document.getElementById('stockdb-popover-session');
+  const stockdbPopoverUpdatedAt = document.getElementById('stockdb-popover-updated-at');
+  const stockdbPopoverState = document.getElementById('stockdb-popover-state');
   const vendorPanel = document.getElementById('free-stockdb-release');
   const vendorSummary = document.getElementById('free-stockdb-release-summary');
   const vendorState = document.getElementById('free-stockdb-release-state');
@@ -762,6 +770,38 @@ async function streamJson(path, opts, onProgress) {
       </section>`).join('') || '<div class="msg">暂无更新日志。</div>';
   }
 
+  function compactSession(value) {
+    const session = String(value || '').slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(session) ? session.replaceAll('-', '.') : '';
+  }
+
+  function formatTimestamp(value, includeYear = false) {
+    const timestamp = new Date(value || '');
+    if (Number.isNaN(timestamp.getTime())) return '';
+    const formatted = timestamp.toLocaleString('zh-CN', {
+      ...(includeYear ? {year:'numeric'} : {}),
+      month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false,
+    });
+    return formatted.replaceAll('/', '.');
+  }
+
+  function renderStockdbStatus(status) {
+    const session = String(status?.validated_session || '');
+    const sessionLabel = compactSession(session);
+    const updatedValue = session ? String(status?.last_update_at || '') : '';
+    const updatedFull = formatTimestamp(updatedValue, true);
+    const stateLabel = String(status?.message || status?.state || '状态未知');
+    stockdbDataDate.textContent = sessionLabel || '待验证';
+    stockdbDataDate.dateTime = session;
+    stockdbPopoverSession.textContent = sessionLabel || '尚无可信验收记录';
+    stockdbPopoverUpdatedAt.textContent = updatedFull || '尚未完成真实数据验收';
+    stockdbPopoverState.textContent = stateLabel;
+    stockdbTrigger.title = sessionLabel
+      ? `stockdb 已验证至 ${session}；最近验收 ${updatedFull || '时间未知'}`
+      : 'stockdb 尚无可信验收记录';
+    stockdbTrigger.setAttribute('aria-label', `${stockdbTrigger.title}，查看更新状态`);
+  }
+
   function renderVendorNotice(notice) {
     if (!notice || (!notice.data_date && !notice.version)) return;
     vendorFingerprint = String(notice.fingerprint || `${notice.data_date || ''}|${notice.version || ''}|${notice.announcement || ''}`);
@@ -770,7 +810,7 @@ async function streamJson(path, opts, onProgress) {
     if (notice.data_date) details.push(`数据更新至 ${notice.data_date}`);
     if (notice.version) details.push(`最新版本 ${notice.version}`);
     vendorSummary.textContent = details.join(' · ');
-    vendorState.textContent = notice.status === 'stale' ? '最近一次官方动态' : '官方动态';
+    vendorState.textContent = notice.status === 'stale' ? '最近一次动态' : '最新动态';
     vendorLink.href = String(notice.url || '').startsWith('https://a.123128.xyz/')
       ? notice.url : 'https://a.123128.xyz/';
     vendorPanel.hidden = false;
@@ -781,9 +821,19 @@ async function streamJson(path, opts, onProgress) {
     }
   }
 
-  function setOpen(open) {
+  function setReleaseOpen(open) {
     panel.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
+    if (open) setStockdbOpen(false);
+  }
+
+  function setStockdbOpen(open) {
+    stockdbPanel.hidden = !open;
+    stockdbTrigger.setAttribute('aria-expanded', String(open));
+    if (open) {
+      panel.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+    }
     if (open && vendorFingerprint) {
       try { localStorage.setItem('qm-free-stockdb-release-seen', vendorFingerprint); } catch (_) {}
       vendorUnread.hidden = true;
@@ -792,14 +842,37 @@ async function streamJson(path, opts, onProgress) {
 
   trigger.addEventListener('click', event => {
     event.stopPropagation();
-    setOpen(panel.hidden);
+    setReleaseOpen(panel.hidden);
+  });
+  reloadButton.addEventListener('click', async () => {
+    reloadButton.disabled = true;
+    reloadStatus.textContent = '正在提交热更新请求…';
+    try {
+      await api('/api/v1/system/reload', {method:'POST'});
+      reloadStatus.textContent = '主站正在安全重载，页面即将刷新…';
+      window.setTimeout(() => window.location.reload(), 3000);
+    } catch (error) {
+      reloadStatus.textContent = error?.message || '热更新请求失败，请查看运行日志';
+      reloadButton.disabled = false;
+    }
+  });
+  stockdbTrigger.addEventListener('click', event => {
+    event.stopPropagation();
+    setStockdbOpen(stockdbPanel.hidden);
   });
   panel.addEventListener('click', event => event.stopPropagation());
-  document.addEventListener('click', () => setOpen(false));
+  stockdbPanel.addEventListener('click', event => event.stopPropagation());
+  document.addEventListener('click', () => {
+    setReleaseOpen(false);
+    setStockdbOpen(false);
+  });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && !panel.hidden) {
-      setOpen(false);
+      setReleaseOpen(false);
       trigger.focus();
+    } else if (event.key === 'Escape' && !stockdbPanel.hidden) {
+      setStockdbOpen(false);
+      stockdbTrigger.focus();
     }
   });
 
@@ -815,7 +888,21 @@ async function streamJson(path, opts, onProgress) {
   }).catch(() => {
     list.innerHTML = '<div class="msg">更新日志暂不可用，版本信息仍可正常查看。</div>';
   });
-  api('/api/v1/settings/free-stockdb/vendor-notice').then(renderVendorNotice).catch(() => {});
+  function refreshStockdbStatus() {
+    api('/api/v1/settings/free-stockdb').then(renderStockdbStatus).catch(() => {
+      stockdbPopoverState.textContent = '暂时无法读取本地库状态';
+    });
+  }
+
+  refreshStockdbStatus();
+  api('/api/v1/settings/free-stockdb/vendor-notice').then(renderVendorNotice).catch(() => {
+    vendorState.textContent = '暂不可用';
+    vendorSummary.textContent = '暂时无法读取 free-stockdb 官方动态，可前往官网查看。';
+  });
+  setInterval(refreshStockdbStatus, 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshStockdbStatus();
+  });
 })();
 
 /* ---------- 导航 ---------- */
@@ -928,6 +1015,8 @@ function loadActiveTab(tab) {
 function activateTab(control, {persist = true, load = true, route = true} = {}) {
   const tab = control?.dataset.tab;
   if (!tab || !document.getElementById('tab-' + tab)) return false;
+  const replayFearGreed = tab === 'market' && control.dataset.marketPage === 'quotes'
+    && control.getAttribute('aria-selected') !== 'true';
   document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
   document.querySelectorAll('header [role="tab"]').forEach(button => {
     button.setAttribute('aria-selected', String(button === control));
@@ -953,6 +1042,12 @@ function activateTab(control, {persist = true, load = true, route = true} = {}) 
   Object.values(charts).forEach(c => c.resize());
   if (load) loadActiveTab(tab);
   if (window.QuantCharts) window.QuantCharts.activateTab(tab);
+  if (replayFearGreed) requestAnimationFrame(() => {
+    const view = document.getElementById('market-quotes-view');
+    if (view && !view.hidden && document.getElementById('tab-market')?.classList.contains('active')) {
+      replayFearGreedGaugeAnimation(view);
+    }
+  });
   return true;
 }
 
@@ -1153,31 +1248,104 @@ function rsiVisualClass(value) {
   return Number.isFinite(parsed) && parsed < threshold ? 'oversold' : '';
 }
 
-function fearGreedGaugeOption(data) {
-  const score = indicatorNumber(data?.score);
-  const available = Number.isFinite(score);
-  const value = available ? Math.max(0,Math.min(100,score)) : 0;
+function fearGreedGaugeGeometry(width, height) {
   return {
-    backgroundColor:'transparent', animation:!REDUCED_MOTION,
+    centerX:width * .5,
+    centerY:height * .54,
+    dialRadius:Math.min(width,height) * .36,
+  };
+}
+
+function fearGreedGaugeLabels(width, height) {
+  const {centerX,centerY,dialRadius} = fearGreedGaugeGeometry(width,height);
+  const radius = dialRadius + 17;
+  return [0,25,45,55,75,100].map(value => {
+    const angle = (210 - value / 100 * 240) * Math.PI / 180;
+    return {
+      type:'text',silent:true,x:centerX + Math.cos(angle) * radius,
+      y:centerY - Math.sin(angle) * radius,
+      style:{text:String(value),fill:MUTED,font:'600 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif',
+        align:'center',verticalAlign:'middle'},
+    };
+  });
+}
+
+function fearGreedGaugeRotation(value) {
+  return (210 - Math.max(0,Math.min(100,value)) * 2.4) * Math.PI / 180;
+}
+
+function fearGreedGaugeNeedle(value, width, height, tone, animatePointer = false) {
+  const {centerX,centerY,dialRadius} = fearGreedGaugeGeometry(width,height);
+  const rotation = fearGreedGaugeRotation(value);
+  const needle = {
+    id:'fear-greed-needle',type:'group',silent:true,x:centerX,y:centerY,rotation,
+    transition:['rotation'],
+    children:[
+      {type:'line',shape:{x1:-7,y1:0,x2:dialRadius * .56,y2:0},
+        style:{stroke:tone,lineWidth:3,lineCap:'round'}},
+      {type:'circle',shape:{cx:0,cy:0,r:5},
+        style:{fill:CHART_COLORS.surface,stroke:tone,lineWidth:2}},
+      {type:'circle',shape:{cx:0,cy:0,r:1.5},style:{fill:tone}},
+    ],
+  };
+  if (animatePointer && !REDUCED_MOTION) {
+    needle.keyframeAnimation = {
+      duration:640,easing:'cubicInOut',
+      keyframes:[
+        {percent:0,rotation:fearGreedGaugeRotation(0)},
+        {percent:1,rotation},
+      ],
+    };
+  }
+  return needle;
+}
+
+function fearGreedGaugeOption(data, width = 240, height = 190, displayScore, animatePointer = false) {
+  const targetScore = indicatorNumber(data?.score);
+  const available = Number.isFinite(targetScore);
+  const shownScore = displayScore === undefined ? targetScore : indicatorNumber(displayScore);
+  const value = available && Number.isFinite(shownScore)
+    ? Math.max(0,Math.min(100,shownScore)) : 0;
+  const tone = targetScore < 25 ? CHART_COLORS.danger : targetScore < 45 ? CHART_COLORS.warning
+    : targetScore < 55 ? CHART_COLORS.neutral : targetScore < 75 ? CHART_COLORS.primary : CHART_COLORS.down;
+  return {
+    __qmMotion:true, backgroundColor:'transparent', animation:!REDUCED_MOTION,
+    animationDuration:REDUCED_MOTION ? 0 : 640, animationEasing:'cubicInOut',
+    animationDurationUpdate:REDUCED_MOTION ? 0 : 320, animationEasingUpdate:'cubicInOut',
+    graphic:[...fearGreedGaugeLabels(width,height),
+      fearGreedGaugeNeedle(value,width,height,tone,animatePointer)],
     series:[{
-      type:'gauge', min:0, max:100, startAngle:205, endAngle:-25,
-      center:['50%','70%'], radius:'96%', splitNumber:10,
-      axisLine:{lineStyle:{width:11,color:[
-        [.10,CHART_COLORS.danger],[.25,CHART_COLORS.warning],
+      id:'fear-greed-dial',type:'gauge',min:0,max:100,startAngle:210,endAngle:-30,
+      center:['50%','54%'], radius:'72%', splitNumber:20,
+      axisLine:{roundCap:true,lineStyle:{width:7,color:[
+        [.25,CHART_COLORS.danger],[.45,CHART_COLORS.warning],
         [.55,CHART_COLORS.neutral],[.75,CHART_COLORS.primary],[1,CHART_COLORS.down],
       ]}},
-      pointer:{show:available,length:'62%',width:4,itemStyle:{color:CHART_COLORS.ink}},
-      anchor:{show:available,size:8,itemStyle:{color:CHART_COLORS.ink,borderColor:CHART_COLORS.surface,borderWidth:2}},
-      axisTick:{distance:-15,length:4,lineStyle:{color:CHART_COLORS.surface,width:1}},
-      splitLine:{distance:-16,length:8,lineStyle:{color:CHART_COLORS.surface,width:1}},
-      axisLabel:{distance:-31,color:MUTED,fontSize:9,
-        formatter:value => [0,10,50,100].includes(value) ? value : ''},
-      title:{offsetCenter:[0,'49%'],color:MUTED,fontSize:11},
-      detail:{offsetCenter:[0,'16%'],color:CHART_COLORS.ink,fontSize:28,fontWeight:700,
-        formatter:() => available ? value.toFixed(1) : '—'},
+      pointer:{show:false},
+      anchor:{show:false},
+      axisTick:{show:false},
+      splitLine:{show:false},
+      axisLabel:{show:false},
+      title:{show:true,offsetCenter:[0,'94%'],color:CHART_COLORS.ink2,
+        fontSize:14,fontWeight:600,lineHeight:16},
+      detail:{offsetCenter:[0,'42%'],color:available ? CHART_COLORS.ink : MUTED,
+        fontSize:30,fontWeight:720,lineHeight:32,valueAnimation:!REDUCED_MOTION,
+        formatter:animatedValue => available ? Number(animatedValue).toFixed(1) : '—'},
       data:[{value,name:data?.rating_label || '暂不可用'}],
     }],
   };
+}
+
+function fearGreedAsOf(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return '';
+  const options = {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'};
+  if (parsed.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('zh-CN',options)
+    .formatToParts(parsed).map(part => [part.type,part.value]));
+  const year = parts.year ? `${parts.year}年` : '';
+  return `${year}${Number(parts.month)}月${Number(parts.day)}日 ${parts.hour}:${parts.minute}`;
 }
 
 function fearGreedHistoryOption(data) {
@@ -1199,16 +1367,51 @@ function fearGreedHistoryOption(data) {
       data:history.map(point => [point.date,Number(point.score)]),
       lineStyle:{width:2,color:CHART_COLORS.primary},
       areaStyle:{color:CHART_COLORS.primary,opacity:.08},
-      markLine:{silent:true,symbol:'none',label:{show:true,formatter:'罕见恐惧 10',color:CHART_COLORS.warning,fontSize:9},
+      markLine:{silent:true,symbol:'none',label:{show:true,formatter:'≤10 · 罕见恐惧',
+        position:'insideStartTop',distance:6,color:CHART_COLORS.warning,fontSize:10,
+        backgroundColor:CHART_COLORS.surface,borderRadius:3,padding:[2,5]},
         lineStyle:{color:CHART_COLORS.warning,width:1,type:'dashed'},data:[{yAxis:10}]},
     }],
   });
 }
 
+function renderFearGreedGauge(element, replay = false) {
+  const chart = mkChart(element.id, false);
+  if (!chart) return;
+  if (replay) chart.__qmFearGreedEntered = false;
+  const animationRevision = (chart.__qmFearGreedAnimationRevision || 0) + 1;
+  chart.__qmFearGreedAnimationRevision = animationRevision;
+  const width = element.clientWidth, height = element.clientHeight;
+  const score = indicatorNumber(marketFearGreed?.score);
+  const shouldEnter = Number.isFinite(score) && !REDUCED_MOTION && !chart.__qmFearGreedEntered;
+  if (shouldEnter) {
+    chart.__qmFearGreedEntered = true;
+    chart.setOption(fearGreedGaugeOption(marketFearGreed,width,height,0),{notMerge:true});
+    requestAnimationFrame(() => {
+      if (chart.isDisposed() || chart.getDom() !== element
+          || chart.__qmFearGreedAnimationRevision !== animationRevision) return;
+      const target = fearGreedGaugeOption(marketFearGreed,width,height,undefined,true);
+      target.animationDurationUpdate = 640;
+      target.animationEasingUpdate = 'cubicInOut';
+      chart.setOption(target,{notMerge:false});
+    });
+    return;
+  }
+  if (Number.isFinite(score)) chart.__qmFearGreedEntered = true;
+  chart.setOption(fearGreedGaugeOption(marketFearGreed,width,height),{
+    notMerge:!chart.__qmFearGreedEntered,
+  });
+}
+
+function replayFearGreedGaugeAnimation(root = document) {
+  root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
+    renderFearGreedGauge(element,true);
+  });
+}
+
 function renderFearGreedVisuals(root = document) {
   root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
-    const chart = mkChart(element.id, false);
-    if (chart) chart.setOption(fearGreedGaugeOption(marketFearGreed),{notMerge:true});
+    renderFearGreedGauge(element);
   });
   root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
     const chart = mkChart(element.id, false);
@@ -1216,20 +1419,104 @@ function renderFearGreedVisuals(root = document) {
   });
 }
 
-function rsiSparkMarkup(history, current) {
-  const values = (Array.isArray(history) ? history : []).slice(-90)
-    .map(point => Number(point?.[1])).filter(Number.isFinite);
-  if (values.length < 2) return '<span class="hint">RSI 曲线暂缺</span>';
-  const width = 160, height = 36, inset = 2;
-  const path = values.map((value,index) => {
-    const x = inset + index * (width - inset * 2) / Math.max(1,values.length - 1);
-    const y = inset + (100 - Math.max(0,Math.min(100,value))) * (height - inset * 2) / 100;
+function rsiSparkPoints(history) {
+  const points = (Array.isArray(history) ? history : []).map(point => {
+    const date = marketSparkParsedDate(point?.[0]);
+    const value = point?.[1] == null || point?.[1] === '' ? Number.NaN : Number(point[1]);
+    return {date:point?.[0], timestamp:date.getTime(), value};
+  }).filter(point => Number.isFinite(point.timestamp) && Number.isFinite(point.value))
+    .sort((left,right) => left.timestamp - right.timestamp);
+  if (!points.length) return [];
+  const latest = new Date(points.at(-1).timestamp);
+  const cutoff = new Date(Date.UTC(latest.getUTCFullYear(),latest.getUTCMonth() - 3,1));
+  const lastCutoffDay = new Date(Date.UTC(
+    cutoff.getUTCFullYear(),cutoff.getUTCMonth() + 1,0)).getUTCDate();
+  cutoff.setUTCDate(Math.min(latest.getUTCDate(),lastCutoffDay));
+  return points.filter(point => point.timestamp >= cutoff.getTime());
+}
+
+function rsiSparkMarkup(points, current) {
+  if (points.length < 2) return '<span class="hint">RSI 曲线暂缺</span>';
+  const width = 160, chartHeight = 42, left = 2, right = 2, top = 2, plotBottom = 36;
+  const firstTime = points[0].timestamp;
+  const timeSpan = Math.max(1,points.at(-1).timestamp - firstTime);
+  const xPosition = point => left + (point.timestamp - firstTime) * (width - left - right) / timeSpan;
+  const path = points.map((point,index) => {
+    const x = xPosition(point);
+    const y = top + (100 - Math.max(0,Math.min(100,point.value))) * (plotBottom - top) / 100;
     return `${index ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`;
   }).join(' ');
-  const thresholdY = inset + (100 - 22) * (height - inset * 2) / 100;
-  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-    <line class="mkt-rsi-threshold" x1="${inset}" x2="${width-inset}" y1="${thresholdY.toFixed(2)}" y2="${thresholdY.toFixed(2)}"></line>
-    <path class="mkt-rsi-path ${rsiVisualClass(current)}" d="${path}"></path></svg>`;
+  const thresholdY = top + (100 - 22) * (plotBottom - top) / 100;
+  const lastIndex = points.length - 1;
+  const tickIndexes = [...new Set([0,Math.floor(lastIndex / 2),lastIndex])];
+  const ticks = tickIndexes.map(index => {
+    const point = points[index];
+    const x = xPosition(point).toFixed(2);
+    return `<line class="mkt-rsi-axis-tick" x1="${x}" x2="${x}" y1="38" y2="41"></line>`;
+  }).join('');
+  const dateLabels = tickIndexes.map(index => {
+    const point = points[index];
+    const position = (xPosition(point) / width * 100).toFixed(2);
+    const edge = index === 0 ? ' first' : index === lastIndex ? ' last' : '';
+    return `<span class="mkt-rsi-date-label${edge}" style="left:${position}%">${marketSparkDate(point.date)}</span>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${width} ${chartHeight}" preserveAspectRatio="none" aria-hidden="true">
+    <line class="mkt-rsi-threshold" x1="${left}" x2="${width-right}" y1="${thresholdY.toFixed(2)}" y2="${thresholdY.toFixed(2)}"></line>
+    <path class="mkt-rsi-path ${rsiVisualClass(current)}" d="${path}"></path>
+    <line class="mkt-rsi-axis" x1="${left}" x2="${width-right}" y1="38" y2="38"></line>${ticks}
+    <line class="mkt-rsi-hover-line" x1="0" x2="0" y1="${top}" y2="${plotBottom}" visibility="hidden"></line>
+    <ellipse class="mkt-rsi-hover-dot" cx="0" cy="0" rx="0" ry="0" visibility="hidden"></ellipse></svg>
+    ${dateLabels}<span class="mkt-rsi-tooltip" hidden aria-hidden="true"><span data-rsi-hover-date></span><strong data-rsi-hover-value></strong></span>`;
+}
+
+function bindRsiSparkInteraction(root, points) {
+  const svg = root.querySelector('svg');
+  const guide = root.querySelector('.mkt-rsi-hover-line');
+  const dot = root.querySelector('.mkt-rsi-hover-dot');
+  const tooltip = root.querySelector('.mkt-rsi-tooltip');
+  if (!svg || !guide || !dot || !tooltip || points.length < 2) return;
+  const width = 160, chartHeight = 42, left = 2, right = 2, top = 2, plotBottom = 36;
+  const dotRadius = 1.4;
+  const firstTime = points[0].timestamp;
+  const timeSpan = Math.max(1,points.at(-1).timestamp - firstTime);
+  const xPosition = point => left + (point.timestamp - firstTime) * (width - left - right) / timeSpan;
+  const yPosition = point => top
+    + (100 - Math.max(0,Math.min(100,point.value))) * (plotBottom - top) / 100;
+  const hide = () => {
+    guide.setAttribute('visibility','hidden');
+    dot.setAttribute('visibility','hidden');
+    tooltip.hidden = true;
+  };
+  const show = (point,bounds) => {
+    const x = xPosition(point), y = yPosition(point), position = x / width * 100;
+    guide.setAttribute('x1',x.toFixed(2)); guide.setAttribute('x2',x.toFixed(2));
+    guide.setAttribute('visibility','visible');
+    dot.setAttribute('cx',x.toFixed(2)); dot.setAttribute('cy',y.toFixed(2));
+    dot.setAttribute('rx',(dotRadius * width / bounds.width).toFixed(2));
+    dot.setAttribute('ry',(dotRadius * chartHeight / bounds.height).toFixed(2));
+    dot.setAttribute('visibility','visible');
+    tooltip.querySelector('[data-rsi-hover-date]').textContent = String(point.date).slice(0,10);
+    tooltip.querySelector('[data-rsi-hover-value]').textContent = `RSI ${point.value.toFixed(1)}`;
+    tooltip.style.left = `${position.toFixed(2)}%`;
+    tooltip.classList.toggle('edge-start',position < 25);
+    tooltip.classList.toggle('edge-end',position > 75);
+    tooltip.hidden = false;
+  };
+  root.onpointermove = event => {
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width) return;
+    const svgX = Math.max(left,Math.min(width - right,
+      (event.clientX - bounds.left) / bounds.width * width));
+    const targetTime = firstTime + (svgX - left) / (width - left - right) * timeSpan;
+    let closest = points[0];
+    for (const point of points.slice(1)) {
+      if (Math.abs(point.timestamp - targetTime) < Math.abs(closest.timestamp - targetTime)) {
+        closest = point;
+      }
+    }
+    show(closest,bounds);
+  };
+  root.onpointerleave = hide;
 }
 
 function refreshSentimentBindings(root = document) {
@@ -1240,6 +1527,9 @@ function refreshSentimentBindings(root = document) {
   root.querySelectorAll('[data-fear-greed-score]').forEach(node => { node.textContent = scoreText; });
   root.querySelectorAll('[data-fear-greed-label]').forEach(node => {
     node.textContent = `${node.dataset.fearGreedPrefix || ''}${label}`;
+  });
+  root.querySelectorAll('[data-fear-greed-gauge]').forEach(node => {
+    node.setAttribute('aria-label',`CNN 当日恐贪指数 ${scoreText}，${label}`);
   });
   root.querySelectorAll('[data-opportunity-rsi]').forEach(node => {
     const signal = marketOpportunity(node.dataset.opportunityRsi);
@@ -1253,10 +1543,19 @@ function refreshSentimentBindings(root = document) {
 function acceptMarketFearGreed(data) {
   marketFearGreed = data || {status:'unavailable', score:null, rating_label:'暂不可用'};
   const status = document.getElementById('market-fear-greed-status');
+  const timestamp = document.getElementById('market-fear-greed-time');
   const note = document.getElementById('market-fear-greed-note');
   if (status) status.textContent = marketFearGreed.status === 'stale'
     ? '本地缓存 · CNN 刷新失败' : marketFearGreed.status === 'ready'
-      ? `全球风险背景 · ${marketFearGreed.as_of || '当前'}` : 'CNN 指数暂不可用';
+      ? '全球风险背景' : 'CNN 指数暂不可用';
+  if (timestamp) {
+    const formatted = fearGreedAsOf(marketFearGreed.as_of);
+    timestamp.textContent = formatted
+      ? `${marketFearGreed.status === 'stale' ? '缓存于' : '更新于'} ${formatted}`
+      : marketFearGreed.status === 'ready' ? '刚刚更新' : '等待更新';
+    if (marketFearGreed.as_of) timestamp.dateTime = marketFearGreed.as_of;
+    else timestamp.removeAttribute('datetime');
+  }
   if (note) note.textContent = marketFearGreed.warning ||
     'CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。';
   refreshSentimentBindings();
@@ -1359,9 +1658,12 @@ function marketSparkOption(item, changeSeries) {
       axisPointer:{type:'line',snap:true,lineStyle:{color:AXIS,width:1,type:'dashed'}},
       formatter:params => {
         const point = params.find(value => value.seriesId === 'market-spark-trend') || params[0];
-        const value = Array.isArray(point?.value) ? Number(point.value[1]) : 0;
-        const date = Array.isArray(point?.value) ? point.value[0] : '';
-        const daily = dailyChanges[Number(point?.dataIndex)];
+        const dataIndex = Number(point?.dataIndex);
+        const rawValue = Array.isArray(point?.value) ? point.value[1] : point?.value;
+        const parsedValue = Number(rawValue);
+        const value = Number.isFinite(parsedValue) ? parsedValue : Number(values[dataIndex] || 0);
+        const date = Array.isArray(point?.value) ? point.value[0] : categories[dataIndex];
+        const daily = dailyChanges[dataIndex];
         const dailyText = Number.isFinite(daily) ? signed(daily) : '—';
         return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b><br><span style="color:${tone}">●</span> 当日涨跌&nbsp;&nbsp;<b>${dailyText}</b>`;
       },
@@ -1440,8 +1742,10 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     rsi.textContent = fixed(item.rsi_14, 1);
     rsi.classList.toggle('oversold',rsiVisualClass(item.rsi_14) === 'oversold');
     const rsiSpark = entry.element.querySelector('.mkt-rsi-spark');
-    rsiSpark.innerHTML = rsiSparkMarkup(item.rsi_history,item.rsi_14);
-    rsiSpark.setAttribute('aria-label',`${item.name} 最近 ${Math.min(90,item.rsi_history?.length || 0)} 个交易日 RSI 曲线，当前 ${fixed(item.rsi_14,1)}，参考线 22`);
+    const recentRsi = rsiSparkPoints(item.rsi_history);
+    rsiSpark.innerHTML = rsiSparkMarkup(recentRsi,item.rsi_14);
+    bindRsiSparkInteraction(rsiSpark,recentRsi);
+    rsiSpark.setAttribute('aria-label',`${item.name} 最近三个月日线 RSI 曲线，共 ${recentRsi.length} 个交易日，当前 ${fixed(item.rsi_14,1)}，参考线 22；鼠标悬停可查看日期和数值`);
     const opportunity = entry.element.querySelector('[data-opportunity-rsi]');
     opportunity.dataset.opportunityRsi = item.rsi_14 == null ? '' : String(item.rsi_14);
     refreshSentimentBindings(entry.element);
@@ -1475,7 +1779,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       element.className = 'mkt-item stream-enter';
       element.style.setProperty('--market-order',String(order));
       element.innerHTML = `<span class="mkt-item-head"><span class="nm"></span><span class="mkt-window"></span></span><span class="px"></span><span class="mkt-memberships" hidden></span><span class="mkt-meta"></span>
-        <span class="mkt-indicators"><span class="mkt-rsi-reading"><span>RSI(14)</span><b class="mkt-rsi">—</b></span><span class="state-pill opportunity-signal" data-opportunity-rsi=""></span></span>
+        <span class="mkt-indicators"><span class="mkt-rsi-reading"><span class="mkt-rsi-label"><span>RSI(14)</span><small>日线</small></span><b class="mkt-rsi">—</b></span><span class="state-pill opportunity-signal" data-opportunity-rsi=""></span></span>
         <span class="mkt-rsi-spark" role="img"></span>
         <span class="mkt-spark-shell"><span class="spark" id="${sparkId}"></span></span>
         <span class="mkt-spark-foot"><span class="mkt-spark-period"></span><span class="mkt-period-return"></span></span>`;
@@ -1628,8 +1932,11 @@ function renderKlineSeries(chart, data) {
       {type:'category',gridIndex:1,data:categories,axisLabel:{show:false},axisLine:{lineStyle:{color:AXIS}},axisTick:{show:false}},
     ],
     yAxis:[priceAxis,volumeAxis],
-    dataZoom:[{type:'inside',xAxisIndex:[0,1]},
-      {type:'slider',xAxisIndex:[0,1],height:16,bottom:2,borderColor:AXIS,textStyle:{color:MUTED}}],
+    dataZoom:[
+      {id:'market-kline-x-wheel',type:'inside',xAxisIndex:[0,1],filterMode:'none'},
+      {id:'market-kline-x-slider',type:'slider',xAxisIndex:[0,1],filterMode:'none',
+        height:16,bottom:2,borderColor:AXIS,textStyle:{color:MUTED}},
+    ],
     series:[
       {type:'candlestick',data:data.kline.map(k => k.slice(1,5)),
         itemStyle:{color:CHART_COLORS.up,color0:CHART_COLORS.down,borderColor:CHART_COLORS.up,borderColor0:CHART_COLORS.down}},
@@ -2057,8 +2364,8 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <div class="panel-heading"><h3>CNN 恐贪指数</h3><span class="state-pill" data-fear-greed-label data-fear-greed-prefix="全球背景 · ">读取中</span></div>
         <div class="decision-fear-greed-visuals">
           <div class="fear-greed-gauge" id="fear-greed-gauge-decision" data-fear-greed-gauge role="img" aria-label="CNN 当日恐贪指数仪表盘"></div>
-          <div class="fear-greed-history-wrap"><div class="indicator-chart-head"><strong>历史曲线</strong><span>10 为罕见恐惧参考线</span></div>
-            <div class="fear-greed-history" id="fear-greed-history-decision" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线"></div></div>
+          <div class="fear-greed-history-wrap"><div class="indicator-chart-head"><strong>历史曲线</strong><span>黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧</span></div>
+            <div class="fear-greed-history" id="fear-greed-history-decision" data-fear-greed-history role="img" aria-label="CNN 恐贪指数历史曲线；黄色虚线表示 10 分罕见恐惧参考阈值"></div></div>
         </div>
         <div class="hint">美国市场风险情绪，仅作全球背景；不代表 A 股或具体板块。</div>
       </section>

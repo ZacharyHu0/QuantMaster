@@ -361,6 +361,92 @@ def cmd_after_close(args) -> int:
     return 0
 
 
+def cmd_stockdb(args) -> int:
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    store = StockDBIngestStore()
+    if args.stockdb_cmd == "status":
+        _print_json({
+            "runtime": free_stockdb_runtime.status(),
+            "latest_ingest": store.history(1)[0].to_dict() if store.history(1) else None,
+        })
+        return 0
+    if args.stockdb_cmd == "audit":
+        source = FreeStockDBSource()
+        probe = source.probe()
+        boards = source.board_hierarchy()
+        catalog = source.security_catalog()
+        _print_json({
+            "status": "ok", "upstream": "tushare", "distribution": "free-stockdb",
+            "independent_cross_validation": False, "probe": probe,
+            "artifact": source.artifact_identity(
+                data_session=str(free_stockdb_runtime.status().get("validated_session") or ""),
+            ).to_dict(),
+            "catalog_count": len(catalog), "board_count": len(boards),
+            "board_levels": sorted({str(item.get("level") or "") for item in boards}),
+        })
+        return 0
+    # A formal stock ingest shares the after-close integrity gate and therefore
+    # also publishes/reuses the corresponding research snapshot.
+    from quantmaster.after_close.service import get_after_close_service
+
+    snapshot = get_after_close_service().scan(as_of=args.as_of or "")
+    _print_json({
+        "ingest_id": snapshot.ingest_id, "artifact_id": snapshot.artifact_id,
+        "as_of_date": snapshot.as_of_date, "coverage": snapshot.coverage,
+    })
+    return 0
+
+
+def cmd_etf_research(args) -> int:
+    from pathlib import Path
+
+    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+    from quantmaster.rotation.etf_research import get_etf_research_service
+    from quantmaster.runtime.json import strict_json_dumps
+
+    service = get_etf_research_service()
+    if args.etf_research_cmd == "scan":
+        import time
+
+        jobs = get_etf_research_jobs()
+        job, _ = jobs.submit(as_of=args.as_of or "")
+        jobs.start()
+        while True:
+            job = jobs.get(str(job["id"]))
+            if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
+                break
+            print(f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'}",
+                  file=sys.stderr)
+            time.sleep(0.5)
+        if job["status"] not in {"completed", "completed_with_warnings"}:
+            _print_json(jobs.public(job))
+            return 1
+        _print_json(service.store.latest().to_dict())
+        return 0
+    if args.etf_research_cmd == "history":
+        _print_json({"items": service.store.history(args.limit)})
+        return 0
+    snapshot = service.store.get(args.snapshot_id) if args.snapshot_id else service.store.latest()
+    if snapshot is None:
+        raise FileNotFoundError("尚无 ETF 研究快照")
+    if args.etf_research_cmd == "export":
+        target = Path(args.output).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if args.format == "json":
+            target.write_text(strict_json_dumps(snapshot.to_dict(), indent=2), encoding="utf-8")
+        else:
+            pd.DataFrame([item.to_dict() for item in snapshot.items]).to_csv(
+                target, index=False, encoding="utf-8-sig",
+            )
+        _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
+        return 0
+    _print_json(snapshot.to_dict())
+    return 0
+
+
 def cmd_factors(args) -> None:
     from quantmaster.ai.sentiment import list_news_factors
     from quantmaster.factors.fundamental import list_fundamental_factors
@@ -1018,6 +1104,31 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--format", choices=["json", "csv"], default="json")
     p.set_defaults(
         func=cmd_after_close, as_of="", snapshot_id="", limit=30, output="", format="json",
+    )
+
+    p = sub.add_parser("stockdb", help="free-stockdb 制品、摄取与能力诊断")
+    sdsub = p.add_subparsers(dest="stockdb_cmd", required=True)
+    sdsub.add_parser("audit", help="运行本地 SDK、目录、板块与制品审计")
+    sdsub.add_parser("status", help="查看托管运行时与最近摄取")
+    sdi = sdsub.add_parser("ingest", help="通过正式完整性门创建或复用 A 股摄取")
+    sdi.add_argument("--as-of", default="")
+    p.set_defaults(func=cmd_stockdb, as_of="")
+
+    p = sub.add_parser("etf-research", help="全场沪深 ETF 分类研究")
+    ersub = p.add_subparsers(dest="etf_research_cmd", required=True)
+    erscan = ersub.add_parser("scan", help="创建或复用 ETF 研究快照")
+    erscan.add_argument("--as-of", default="")
+    ershow = ersub.add_parser("show", help="查看最新或指定 ETF 快照")
+    ershow.add_argument("--snapshot-id", default="")
+    erhistory = ersub.add_parser("history", help="查看 ETF 研究快照历史")
+    erhistory.add_argument("--limit", type=int, default=30)
+    erexport = ersub.add_parser("export", help="导出 ETF 研究快照")
+    erexport.add_argument("output")
+    erexport.add_argument("--snapshot-id", default="")
+    erexport.add_argument("--format", choices=["json", "csv"], default="json")
+    p.set_defaults(
+        func=cmd_etf_research, as_of="", snapshot_id="", limit=30,
+        output="", format="json",
     )
 
     sub.add_parser("factors", help="列出内置因子").set_defaults(func=cmd_factors)

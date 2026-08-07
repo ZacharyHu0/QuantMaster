@@ -25,6 +25,7 @@ from quantmaster.data.resilience import (
     ProviderTimeoutError,
     TushareRateLimiter,
     akshare_call,
+    classify_provider_failure,
     provider_call,
 )
 from quantmaster.data.storage import BarStore
@@ -489,6 +490,25 @@ def test_bar_store_rejects_readable_content_that_changed_outside_commit(tmp_path
     assert store.metadata("600000.SH")["last_status"] == "corrupt"
 
 
+def test_bar_store_suppresses_repeated_missing_file_error_logs(tmp_path, caplog):
+    store = BarStore(root=tmp_path / "bars")
+    store.put(
+        "HG=F.US",
+        pd.DataFrame({"close": [4.2]}, index=pd.to_datetime(["2026-08-07"])),
+    )
+    store._path("HG=F.US").unlink()
+
+    with caplog.at_level("DEBUG", logger="quantmaster.data.storage"):
+        store.read("HG=F.US", enqueue_repair=False)
+        store.read("HG=F.US", enqueue_repair=False)
+        store.read("HG=F.US", enqueue_repair=False)
+
+    errors = [record for record in caplog.records if record.levelname == "ERROR"]
+    suppressed = [record for record in caplog.records if "suppressed" in record.message]
+    assert len(errors) == 1
+    assert len(suppressed) == 2
+
+
 def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkeypatch):
     store = BarStore(root=tmp_path / "bars")
     dates = pd.bdate_range("2024-01-02", "2024-03-29")
@@ -847,6 +867,39 @@ def test_permanent_provider_failure_stays_disabled_until_config_changes(isolated
     isolated_config.data.tushare_token = "new-token"
     assert provider_call(lane, "reconfigured", lambda: "ok") == "ok"
     assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "closed"
+
+
+def test_rate_limit_opens_recoverable_circuit(isolated_config):
+    lane = "yahoo:rate-limit-test"
+    response = httpx.Response(
+        429, request=httpx.Request("GET", "https://example.test/chart"),
+    )
+
+    def rate_limited():
+        response.raise_for_status()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        provider_call(lane, "rate-limit", rate_limited)
+
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["state"] == "open"
+    assert health["failure_class"] == "rate_limit"
+    assert health["permanent"] is False
+
+
+def test_windows_socket_access_error_is_transient_network(isolated_config):
+    error = OSError(10013, "以一种访问权限不允许的方式做了一个访问套接字的尝试。")
+    error.winerror = 10013
+    assert classify_provider_failure(error) == "transient_network"
+
+    lane = "akshare:windows-socket-test"
+    with pytest.raises(OSError):
+        provider_call(lane, "socket-access", lambda: (_ for _ in ()).throw(error))
+
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["state"] == "closed"
+    assert health["failure_class"] == "transient_network"
+    assert health["permanent"] is False
 
 
 def test_expired_half_open_probe_is_reclaimable(isolated_config):

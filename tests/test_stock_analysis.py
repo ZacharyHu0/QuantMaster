@@ -9,9 +9,10 @@ from typing import ClassVar
 
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
-from quantmaster.ai.llm import LLMClient
+from quantmaster.ai.llm import LLMClient, LLMError
 from quantmaster.analysis.stock import StockAnalysisService, analyze_technical
 from quantmaster.analysis.stock_jobs import StockAnalysisJobs
 from quantmaster.analysis.stock_research import (
@@ -1014,6 +1015,7 @@ def test_openai_native_search_parses_citations(monkeypatch):
     class Response:
         status_code = 200
         headers: ClassVar[dict] = {}
+        text = ""
 
         @staticmethod
         def json():
@@ -1052,9 +1054,10 @@ def test_openai_native_search_parses_citations(monkeypatch):
     assert client.web_search_status()["supported"] is True
     assert calls[0]["json"]["include"] == ["web_search_call.action.sources"]
     assert calls[0]["json"]["reasoning"] == {"effort": "medium"}
+    assert calls[0]["json"]["stream"] is False
 
 
-def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatch):
+def test_official_openai_search_retries_minimal_payload(monkeypatch):
     calls = []
 
     class Response:
@@ -1090,10 +1093,9 @@ def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatc
         lambda *args, **kwargs: calls.append(kwargs["json"]) or next(responses),
     )
     client = LLMClient(LLMConfig(
-        provider="openai-compatible",
+        provider="openai",
         model="gateway-search",
         api_key="secret",
-        base_url="https://gateway.test/v1",
     ))
 
     results = client.web_search("查询公告")
@@ -1103,10 +1105,183 @@ def test_openai_native_search_retries_minimal_payload_for_new_gateway(monkeypatc
     assert calls[1] == {
         "model": "gateway-search",
         "input": "查询公告",
-        "reasoning": {"effort": "medium"},
         "tools": [{"type": "web_search"}],
+        "stream": False,
     }
     assert client.web_search_status()["supported"] is True
+
+
+def test_compatible_gateway_search_uses_minimal_payload_without_reasoning(monkeypatch):
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers: ClassVar[dict] = {}
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "output": [{
+                    "type": "web_search_call",
+                    "action": {
+                        "sources": [{
+                            "url": "https://www.csrc.gov.cn/search-result",
+                            "title": "证监会搜索结果",
+                        }],
+                    },
+                }],
+            }
+
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.httpx.Client.post",
+        lambda *args, **kwargs: calls.append(kwargs["json"]) or Response(),
+    )
+    client = LLMClient(LLMConfig(
+        provider="openai-compatible",
+        model="gateway-minimal-search",
+        api_key="secret",
+        base_url="https://gateway.test/v1",
+        reasoning_effort="xhigh",
+    ))
+
+    results = client.web_search("查询公告")
+
+    assert results[0]["url"] == "https://www.csrc.gov.cn/search-result"
+    assert calls == [{
+        "model": "gateway-minimal-search",
+        "input": "查询公告",
+        "tools": [{"type": "web_search"}],
+        "stream": False,
+    }]
+
+
+def test_compatible_gateway_search_parses_sub2api_sse_and_dedupes_citations(
+    monkeypatch,
+):
+    calls = []
+    source = {
+        "url": "https://www.csrc.gov.cn/csrc/c100028/common_list.shtml",
+        "title": "中国证监会公告",
+    }
+    events = [
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "web_search_call",
+                "action": {"sources": [source]},
+            },
+        },
+        {
+            "type": "response.output_text.annotation.added",
+            "output_index": 1,
+            "content_index": 0,
+            "annotation": {
+                "type": "url_citation",
+                "url": source["url"],
+                "title": source["title"],
+                "start_index": 0,
+                "end_index": 6,
+            },
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "证监会公告来源。",
+                    "annotations": [],
+                }],
+            },
+        },
+        {
+            "type": "response.completed",
+            "response": {"status": "completed", "output": []},
+        },
+    ]
+    body = "\n\n".join(
+        f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}"
+        for event in events
+    ) + "\n\n"
+    response = type("Response", (), {
+        "status_code": 200,
+        "headers": {"content-type": "text/event-stream; charset=utf-8"},
+        "text": body,
+    })()
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.httpx.Client.post",
+        lambda *args, **kwargs: calls.append(kwargs["json"]) or response,
+    )
+    client = LLMClient(LLMConfig(
+        provider="openai-compatible",
+        model="sub2api-sse-search",
+        api_key="secret",
+        base_url="https://gateway.test/v1",
+        reasoning_effort="xhigh",
+    ))
+
+    results = client.web_search("查询证监会公告")
+
+    assert results == [{
+        "url": source["url"],
+        "title": source["title"],
+        "text": "",
+        "published_at": "",
+    }]
+    assert calls[0] == {
+        "model": "sub2api-sse-search",
+        "input": "查询证监会公告",
+        "tools": [{"type": "web_search"}],
+        "stream": False,
+    }
+
+
+@pytest.mark.parametrize(("body", "expected_code"), [
+    (
+        "data: " + json.dumps({
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {"message": "upstream leaked sk-secret-do-not-show"},
+            },
+        }) + "\n\n",
+        "response_failed",
+    ),
+    (
+        "data: " + json.dumps({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "message", "content": "sk-secret-do-not-show"},
+        }) + "\n\n",
+        "invalid_response",
+    ),
+    ("data: {malformed sk-secret-do-not-show}\n\n", "invalid_response"),
+])
+def test_openai_search_sse_failures_are_safe(monkeypatch, body, expected_code):
+    response = type("Response", (), {
+        "status_code": 200,
+        "headers": {"content-type": "text/event-stream"},
+        "text": body,
+    })()
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.httpx.Client.post",
+        lambda *args, **kwargs: response,
+    )
+    client = LLMClient(LLMConfig(
+        provider="openai-compatible",
+        model=f"safe-sse-{expected_code}",
+        base_url="https://gateway.test/v1",
+    ))
+
+    with pytest.raises(LLMError) as captured:
+        client.web_search("查询公告")
+
+    assert captured.value.code == expected_code
+    assert captured.value.retryable is True
+    assert "sk-secret-do-not-show" not in str(captured.value)
 
 
 def test_anthropic_native_search_resumes_pause_turn_and_parses_sources(monkeypatch):
