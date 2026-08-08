@@ -248,7 +248,7 @@
     openFactorCompletion();
   }
 
-  function insertFactorMatch(index) {
+  function insertFactorMatch(index, deferClose = false) {
     const item = factorMatches[index];
     if (!item || !factorInput) return;
     const token = currentFactorToken();
@@ -260,8 +260,9 @@
     const caret = prefix.length + replacement.length;
     factorInput.setSelectionRange(caret, caret);
     factorInput.dispatchEvent(new Event('change', {bubbles:true}));
-    closeFactorCompletion();
     factorInput.focus();
+    if (deferClose) window.setTimeout(closeFactorCompletion, 0);
+    else closeFactorCompletion();
   }
 
   function useFactorCatalog(items) {
@@ -327,7 +328,10 @@
     });
     factorMenu.addEventListener('click', event => {
       const option = event.target.closest('[data-factor-option]');
-      if (option) insertFactorMatch(Number(option.dataset.factorOption));
+      if (option) {
+        event.preventDefault();
+        insertFactorMatch(Number(option.dataset.factorOption), true);
+      }
     });
     factorMenu.addEventListener('toggle', () => {
       const open = factorMenuIsOpen();

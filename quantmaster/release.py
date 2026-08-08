@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.89"
+VERSION = "1.3.90"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "浏览器候选弹层回归去竞态",
+                "items": (
+                    (
+                        "因子候选浏览器回归改从稳定关闭态验证按钮打开，再单独验证 Escape"
+                        "关闭，保留交互覆盖并避开 Linux Chromium 原生 popover 的关闭过渡竞态。"
+                    ),
+                    (
+                        "鼠标选中候选时先写入结果，等当前点击任务结束后再关闭原生弹层，"
+                        "避免弹层过早退出顶层造成点击穿透；键盘与鼠标选择现在都稳定收起候选。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.89",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -180,25 +199,6 @@ RELEASES = (
                     (
                         "宽基资金扩展为沪深全场 ETF 分类研究，按资产类别排名并提供分钟补充证据、"
                         "份额时效、历史快照、钻取和导出；在线 Tick/财务默认关闭且受配额、熔断和审计保护。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.80",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "消息推送布局修复",
-                "items": (
-                    (
-                        "修复自动化消息推送双栏中 Bot 通道状态列被操作按钮挤压为零宽的"
-                        "问题，状态恢复单行显示，接入操作改在通道摘要下方完整排列。"
-                    ),
-                    (
-                        "订阅复选框显式覆盖全局输入框最小宽度，恢复 14 像素控件和横排"
-                        "标签；桌面与窄屏展开策略时均不再出现逐字竖排。"
                     ),
                 ),
             },

@@ -809,9 +809,17 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         page.get_by_role("tab", name="回测", exact=True).click()
         page.locator('#bt-form [name="strategy"]').select_option("factor")
         factor_input = page.locator("#bt-factor-input")
-        factor_input.fill("mom_20d,")
-
         menu = page.locator("#bt-factor-options")
+        trigger = page.locator(".factor-completion-trigger")
+        trigger.click()
+        menu.wait_for(state="visible")
+        assert factor_input.get_attribute("aria-expanded") == "true"
+        menu.locator('[role="option"]', has_text="mom_20d").wait_for(state="visible")
+        factor_input.press("Escape")
+        menu.wait_for(state="hidden")
+        assert factor_input.get_attribute("aria-expanded") == "false"
+
+        factor_input.fill("mom_20d,")
         menu.wait_for(state="visible")
         assert factor_input.get_attribute("aria-expanded") == "true"
         assert "人工反转" in menu.inner_text()
@@ -836,14 +844,8 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         assert "人工反转" not in menu.inner_text()
         menu.locator('[role="option"]', has_text="GP 候选 2").click()
         assert factor_input.input_value() == "mom_20d, 人工反转, GP 候选 2"
-
-        factor_input.click()
-        menu.wait_for(state="visible")
-        factor_input.press("Escape")
         menu.wait_for(state="hidden")
-        page.locator(".factor-completion-trigger").click()
-        menu.wait_for(state="visible")
-        assert factor_input.get_attribute("aria-expanded") == "true"
+        assert factor_input.get_attribute("aria-expanded") == "false"
         browser.close()
 
 
