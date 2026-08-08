@@ -1980,7 +1980,16 @@ let decisionLoaded = false, decisionLoading = false, decisionHistoryLoading = fa
 let decisionHistoryKey = '', decisionViewRequest = 0;
 function fixed(v, digits = 2) { return v == null || !Number.isFinite(+v) ? '—' : (+v).toFixed(digits); }
 function directionLabel(value) { return value === 'up' ? '上行' : value === 'down' ? '下行' : '震荡'; }
-function actionLabel(value) { return value === 'buy' ? '入选' : value === 'watch' ? '观察' : '回避'; }
+function actionLabel(value) { return value === 'buy' ? '目标持仓' : value === 'watch' ? '观察候选' : '回避'; }
+function decisionPositionStateLabel(value) {
+  return ({invested:'已配置',reduced:'降仓',flat:'主动空仓',degraded:'数据不足'})[value] || '仓位待定';
+}
+function decisionPositionReasonText(reasons = []) {
+  const labels = {allocated:'仓位已分配',opportunity_limited:'合格机会不足，组合仓位已缩放',
+    market_risk_off:'市场基础仓位低于 20%',no_qualified_candidates:'没有合格标的',
+    insufficient_signal_data:'评分、市场或 20 日波动率数据不足',rebalance_buffer:'变动位于交易缓冲带内'};
+  return reasons.map(reason => labels[reason] || reason).join('；');
+}
 const DECISION_PROFILES = {
   risk_adjusted:'扣费风险收益', short_term:'短期命中收益', stable:'稳定可解释', legacy:'历史模型',
 };
@@ -2318,14 +2327,21 @@ function decisionSignedPercent(value) {
   return `${+value > 0 ? '+' : ''}${pct(+value)}`;
 }
 
+function decisionPositionPicks(snapshot) {
+  const picks = snapshot.picks || [];
+  return picks.some(pick => Object.prototype.hasOwnProperty.call(pick,'target_weight'))
+    ? picks.filter(pick => Number(pick.target_weight || 0) > 0)
+    : picks;
+}
+
 function decisionSnapshotPicksMarkup(snapshot) {
-  const picks = (snapshot.picks || []).slice(0,3);
-  return `<div class="snapshot-pick-list">${picks.map(pick => `<div class="snapshot-pick"><span class="snapshot-pick-name" title="${esc(pick.name || '名称待同步')}">${esc(pick.name || '名称待同步')}</span><span class="snapshot-pick-symbol">${esc(pick.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div>`;
+  const picks = decisionPositionPicks(snapshot).slice(0,3);
+  return `<div class="snapshot-pick-list">${picks.map(pick => `<div class="snapshot-pick"><span class="snapshot-pick-name" title="${esc(pick.name || '名称待同步')}">${esc(pick.name || '名称待同步')}</span><span class="snapshot-pick-symbol">${esc(pick.symbol)}${pick.target_weight == null ? '' : ` · ${pct(pick.target_weight)}`}</span></div>`).join('') || '<span class="snapshot-pick-symbol">空仓，无持仓验证</span>'}</div>`;
 }
 
 function decisionSnapshotSummaryMarkup(snapshot) {
-  const picks = (snapshot.picks || []).slice(0,3);
-  return `<div class="snapshot-pick-summary">${picks.map(pick => `<span title="${esc(`${pick.name || '名称待同步'} · ${pick.symbol || ''}`)}">${esc(pick.name || pick.symbol || '名称待同步')}</span>`).join('<i aria-hidden="true">·</i>') || '<span>—</span>'}</div>`;
+  const picks = decisionPositionPicks(snapshot).slice(0,3);
+  return `<div class="snapshot-pick-summary">${picks.map(pick => `<span title="${esc(`${pick.name || '名称待同步'} · ${pick.symbol || ''}`)}">${esc(pick.name || pick.symbol || '名称待同步')}</span>`).join('<i aria-hidden="true">·</i>') || '<span>空仓</span>'}</div>`;
 }
 
 function decisionFollowUpSummaryMarkup(snapshot) {
@@ -2333,11 +2349,11 @@ function decisionFollowUpSummaryMarkup(snapshot) {
   const horizon = Math.max(1,Number(validation.horizon_days || snapshot.holding_horizon_days || 1));
   const completed = Math.max(0,Math.min(horizon,Number(validation.completed_sessions || 0)));
   const status = validation.status || 'unavailable';
-  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',
+  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',flat:'空仓期',
     unavailable:'行情待更新'})[status] || '行情待更新';
   const average = validation.average_return;
   const averageLabel = average == null || !Number.isFinite(+average)
-    ? '—' : decisionSignedPercent(average);
+    ? (status === 'flat' ? '无持仓' : '—') : decisionSignedPercent(average);
   const progressLabel = `${statusLabel} ${completed}/${horizon}`;
   return `<div class="snapshot-summary-validation" data-status="${esc(status)}">
     <span>${esc(statusLabel)}</span><progress max="${horizon}" value="${completed}" aria-label="${esc(progressLabel)}"></progress><small>${completed}/${horizon}</small><strong class="${cls(average)}">${esc(averageLabel)}</strong>
@@ -2346,17 +2362,18 @@ function decisionFollowUpSummaryMarkup(snapshot) {
 
 function decisionFollowUpMarkup(snapshot) {
   const validation = snapshot.follow_up_validation || {};
-  const picks = (snapshot.picks || []).slice(0,3);
+  const picks = decisionPositionPicks(snapshot).slice(0,3);
   const outcomes = new Map((validation.picks || []).map(item => [item.symbol,item]));
   const horizon = Math.max(1,Number(validation.horizon_days || snapshot.holding_horizon_days || 1));
   const completed = Math.max(0,Math.min(horizon,Number(validation.completed_sessions || 0)));
   const status = validation.status || 'unavailable';
-  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',
+  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',flat:'空仓期',
     unavailable:'行情待更新'})[status] || '行情待更新';
+  if (status === 'flat') return '<div class="snapshot-validation" data-status="flat"><div class="snapshot-validation-head"><span>主动空仓</span><strong>无持仓验证</strong><span class="snapshot-validation-meta">现金期不计入标的收益</span></div></div>';
   const available = Number(validation.available_picks || 0);
   const average = validation.average_return;
   const cohort = picks.length === 3 && available === 3
-    ? 'Top 3 等权' : available ? `可比 ${available} 只` : '暂无可比收益';
+    ? '前三目标持仓' : available ? `可比 ${available} 只` : '暂无可比收益';
   const summary = average == null || !Number.isFinite(+average)
     ? cohort : `${cohort} ${decisionSignedPercent(average)}`;
   const pickRows = picks.map((pick,index) => {
@@ -2402,11 +2419,11 @@ function decisionHistoryTableMarkup(snapshots, emptyText = '生成后会自动�
     <td class="snapshot-picks">${decisionSnapshotSummaryMarkup(snapshot)}</td>
     <td class="snapshot-verification">${decisionFollowUpSummaryMarkup(snapshot)}</td>
   </tr><tr class="snapshot-detail-row" id="${detailId}" hidden><td colspan="5"><div class="snapshot-detail-grid">
-    <div class="snapshot-detail-section"><div class="snapshot-detail-label">前三入选</div>${decisionSnapshotPicksMarkup(snapshot)}</div>
+    <div class="snapshot-detail-section"><div class="snapshot-detail-label">前三目标持仓</div>${decisionSnapshotPicksMarkup(snapshot)}</div>
     <div class="snapshot-detail-section"><div class="snapshot-detail-label">股价变动验证</div>${decisionFollowUpMarkup(snapshot)}</div>
   </div></td></tr>`;
   }).join('') || `<tr><td colspan="5" class="msg">${esc(emptyText)}</td></tr>`;
-  return `<div class="table-scroll snapshot-table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th class="snapshot-picks">前三入选</th><th class="snapshot-verification">股价变动验证</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="table-scroll snapshot-table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th class="snapshot-picks">前三目标持仓</th><th class="snapshot-verification">股价变动验证</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function renderDecision(data, target = document.getElementById('decision-out')) {
@@ -2437,7 +2454,11 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <div class="regime-score"><strong class="${tone}">${fixed(current.bull_score, 1)}</strong><span class="hint">牛熊分 / 100</span></div>
       </div>
       <div class="metric-strip">
-        <div class="metric-cell"><div class="k">建议仓位</div><div class="v">${pct(selection.recommended_exposure)}</div></div>
+        <div class="metric-cell"><div class="k">目标总仓位</div><div class="v">${pct(selection.recommended_exposure)}</div></div>
+        <div class="metric-cell"><div class="k">现金比例</div><div class="v">${pct(selection.cash_weight)}</div></div>
+        <div class="metric-cell"><div class="k">市场基础仓位</div><div class="v">${pct(selection.market_base_exposure)}</div></div>
+        <div class="metric-cell"><div class="k">机会系数</div><div class="v">${pct(selection.opportunity_scale)}</div></div>
+        <div class="metric-cell"><div class="k">合格标的</div><div class="v">${Number(selection.qualified_count || 0)}</div></div>
         <div class="metric-cell"><div class="k">有效组件</div><div class="v">${esc(activeComponents.join(' + ') || '规则')}</div></div>
         <div class="metric-cell"><div class="k">上涨宽度</div><div class="v">${pct(current.advance_ratio)}</div></div>
         <div class="metric-cell"><div class="k">站上 MA20</div><div class="v">${pct(current.above_ma20_ratio)}</div></div>
@@ -2484,16 +2505,16 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
       </div>
     </div>
     <div class="panel reveal reveal-delay">
-      <div class="panel-heading"><h3>今日入选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · T+1 执行` : '正在计算'}</span></div>
-      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead>
+      <div class="panel-heading"><h3>今日目标持仓与观察候选</h3><span class="state-pill">${selectionReady ? `${esc(selection.signal_date)} · ${esc(decisionPositionStateLabel(selection.position_state))} · T+1 执行` : '正在计算'}</span></div>
+      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>目标仓位</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead>
       <tbody>${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击展开行情">
         <td>${p.rank}</td><td><button class="decision-symbol-trigger" type="button" data-decision-kline-trigger="${esc(p.symbol)}" aria-expanded="false" aria-controls="decision-kline-detail"><strong>${esc(p.name || '名称待同步')}</strong><span class="reason">${esc(p.symbol)} · ${esc(p.industry)} · ${fixed(p.last_close,2)}</span></button></td>
         <td>${fixed(p.score, 1)}<div class="score-track"><div class="score-fill" style="--score:${Math.max(0,Math.min(1,p.score/100))}"></div></div></td>
-        <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${pct(p.probability_up)}</td>
+        <td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td><strong>${pct(p.target_weight)}</strong><div class="reason">强度 ${fixed(p.allocation_strength,3)}</div></td><td>${pct(p.probability_up)}</td>
         <td class="${cls(p.expected_return_net ?? p.expected_return)}">${pct(p.expected_return_net ?? p.expected_return)}</td><td>${pct(p.confidence)}<div class="reason">一致 ${pct(p.model_agreement)}</div></td>
         <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td>
-        <td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前条件下没有标的入选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
-      <div class="hint">${esc(selection.risk_note || '决策结果生成后将在此显示依据与风控位。')}</div>
+        <td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || `<tr><td colspan="10" class="msg">${selectionReady ? '当前条件下没有目标持仓或观察候选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
+      <div class="hint">${esc(decisionPositionReasonText(selection.position_reasons) || '')}${selection.position_reasons?.length ? ' · ' : ''}${esc(selection.risk_note || '决策结果生成后将在此显示依据与风控位。')}</div>
     </div>
     <div class="decision-bottom-stack reveal reveal-delay">
       <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill" data-fear-greed-label data-fear-greed-prefix="CNN 恐贪 · ">CNN 恐贪读取中</span></div>
@@ -2519,7 +2540,7 @@ function renderDecisionHistory(snapshots, target = document.getElementById('deci
       <div class="hint">当前候选、策略画像与持有周期没有已保存快照。确认参数后点击“生成今日决策”。</div></div>`;
     return;
   }
-  const latest = snapshots[0], picks = latest.picks || [];
+  const latest = snapshots[0], picks = latest.picks || [], heldPicks = decisionPositionPicks(latest);
   const snapshot = latest.model_snapshot || null;
   const validation = latest.validation_summary || {};
   const regime = latest.market_regime || {};
@@ -2528,7 +2549,7 @@ function renderDecisionHistory(snapshots, target = document.getElementById('deci
       <div class="ready-preview-head"><strong>上一次已保存的决策</strong><span class="state-pill">只读 · 未重新计算</span></div>
       <div class="decision-summary">
         <div class="regime-block"><div><div class="eyebrow">${esc(latest.signal_date)} · 历史快照</div><div class="regime-name">${esc(regime.state_label || latest.profile_label || decisionProfileLabel(latest.profile))}</div></div>
-          <div class="regime-score"><strong>${picks.length}</strong><span class="hint">入选标的</span></div></div>
+          <div class="regime-score"><strong>${heldPicks.length}</strong><span class="hint">目标持仓</span></div></div>
         <div class="metric-strip">
           <div class="metric-cell"><div class="k">建议仓位</div><div class="v">${pct(latest.recommended_exposure)}</div></div>
           <div class="metric-cell"><div class="k">决策周期</div><div class="v">${latest.holding_horizon_days} 日</div></div>
@@ -2540,13 +2561,13 @@ function renderDecisionHistory(snapshots, target = document.getElementById('deci
     </div>
     ${decisionModelEvidenceMarkup(snapshot, latest)}
     <div class="panel reveal reveal-delay">
-      <div class="panel-heading"><h3>${esc(latest.signal_date)} 入选</h3><span class="state-pill">历史决策 · T+1 执行口径</span></div>
-      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead><tbody>
+      <div class="panel-heading"><h3>${esc(latest.signal_date)} 目标持仓与观察候选</h3><span class="state-pill">${esc(decisionPositionStateLabel(latest.position_state))} · T+1 执行口径</span></div>
+      <div class="table-scroll decision-table-scroll"><table class="decision-table"><thead><tr><th>#</th><th>名称 / 代码 / 板块</th><th>综合分</th><th>结论</th><th>目标仓位</th><th>上涨概率</th><th>扣费后预期</th><th>置信 / 一致</th><th>止损 / 止盈</th><th>模型依据</th></tr></thead><tbody>
         ${picks.map(p => `<tr data-symbol="${esc(p.symbol)}" data-name="${esc(p.name || p.symbol)}" title="点击展开行情">
           <td>${p.rank}</td><td><button class="decision-symbol-trigger" type="button" data-decision-kline-trigger="${esc(p.symbol)}" aria-expanded="false" aria-controls="decision-kline-detail"><strong>${esc(p.name || '名称待同步')}</strong><span class="reason">${esc(p.symbol)} · ${esc(p.industry)} · ${fixed(p.last_close,2)}</span></button></td>
-          <td>${fixed(p.score, 1)}</td><td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td>${pct(p.probability_up)}</td>
+          <td>${fixed(p.score, 1)}</td><td><span class="state-pill ${esc(p.action)}">${actionLabel(p.action)}</span></td><td><strong>${pct(p.target_weight)}</strong><div class="reason">强度 ${fixed(p.allocation_strength,3)}</div></td><td>${pct(p.probability_up)}</td>
           <td class="${cls(p.expected_return_net ?? p.expected_return)}">${pct(p.expected_return_net ?? p.expected_return)}</td><td>${pct(p.confidence)}<div class="reason">一致 ${pct(p.model_agreement)}</div></td>
-          <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td><td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || '<tr><td colspan="9" class="msg">该历史快照没有入选标的</td></tr>'}
+          <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td><td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || '<tr><td colspan="10" class="msg">该历史快照没有目标持仓或观察候选</td></tr>'}
       </tbody></table></div><div class="hint">${esc(latest.risk_note || '历史决策风险说明未记录。')}</div>
     </div>
     <div class="panel reveal reveal-delay decision-history-panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">T+1 后续验证 · 相同候选与参数</span></div>

@@ -21,6 +21,7 @@ from quantmaster.backtest.spec import (
     DecisionStrategySpec,
     PaperAccountSpec,
     build_strategy,
+    content_hash,
     pin_decision_strategy,
     split_factor_references,
 )
@@ -840,7 +841,7 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
     panel,
     monkeypatch,
 ):
-    from quantmaster.decision import resolve_policy
+    from quantmaster.decision import hybrid_daily_selection, resolve_policy
     from quantmaster.lab.store import LabStore
 
     symbols = list(panel["close"].columns)
@@ -906,7 +907,28 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
         )
     )
     proposal = paper.propose(account["id"], panel=panel)
-    assert proposal["status"] == "proposed"
+    assert proposal["status"] in {"proposed", "completed"}
+    signal_weights = strategy.signal_bundle(panel, force_latest=True).weights.iloc[-1]
+    expected_target = {
+        str(symbol): float(weight)
+        for symbol, weight in signal_weights.fillna(0).items()
+        if weight > 0
+    }
+    assert proposal["target_weights"] == pytest.approx(expected_target)
+    daily = hybrid_daily_selection(
+        panel,
+        top_n=decision.top_n,
+        horizon=decision.holding_days,
+        profile=decision.profile,
+        universe="demo",
+        policy_snapshot=policy,
+        cap_weight=decision.cap_weight,
+    )
+    daily_target = {
+        pick["symbol"]: pick["target_weight"]
+        for pick in daily["picks"] if pick["target_weight"] > 0
+    }
+    assert daily_target == pytest.approx(expected_target)
     stored_policy = paper.store.account(account["id"])["strategy"]["policy_snapshot"]
     assert stored_policy["policy_hash"] == policy["policy_hash"]
 
@@ -917,6 +939,73 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
             decision.model_copy(update={"policy_snapshot": tampered}),
             "demo",
         )
+
+
+def test_legacy_hybrid_paper_account_upgrades_once_and_supersedes_old_orders(
+    tmp_path,
+    panel,
+):
+    from quantmaster.decision import resolve_policy
+    from quantmaster.lab.store import LabStore
+
+    symbols = list(panel["close"].columns)
+    current = resolve_policy(
+        "demo", 1, "risk_adjusted", symbols=symbols,
+        store=LabStore(tmp_path / "legacy-lab.sqlite"),
+    )
+    legacy = json.loads(json.dumps(current))
+    legacy.pop("position_control", None)
+    legacy["schema_version"] = 2
+    legacy["engine_version"] = "hybrid-v2"
+    legacy.pop("policy_hash", None)
+    legacy.pop("model_version", None)
+    legacy["policy_hash"] = content_hash(legacy)
+    legacy["model_version"] = f"hybrid-v2:risk_adjusted:{legacy['policy_hash'][:12]}"
+    decision = DecisionStrategySpec(
+        profile="risk_adjusted",
+        top_n=3,
+        holding_days=1,
+        cap_weight=0.25,
+        policy_snapshot=legacy,
+    )
+    store = PaperStore(tmp_path / "legacy-paper.sqlite", tmp_path / "legacy-accounts")
+    account = store.create_account(
+        PaperAccountSpec(
+            name="旧 Hybrid 模拟",
+            strategy=decision,
+            universe="demo",
+            initial_capital=100_000,
+            mode="manual",
+        ),
+        symbols=symbols,
+        universe_meta={"quality": "sandbox"},
+    )
+    old_cycle, _ = store.create_cycle(
+        account,
+        "2024-01-02",
+        {symbols[0]: 0.25},
+        {symbols[0]: 10.0},
+        [],
+    )
+    before_cashflows = len(store.ledger(account["id"]).cashflows())
+    service = PaperService(store)
+
+    first = service.propose(account["id"], panel=panel)
+    upgraded = store.account(account["id"])
+    assert upgraded["strategy"]["policy_snapshot"]["schema_version"] == 3
+    assert upgraded["strategy"]["policy_snapshot"]["components"] == legacy["components"]
+    assert store.cycle(old_cycle["id"])["status"] == "superseded"
+    assert {order["status"] for order in store.orders(cycle_id=old_cycle["id"])} == {
+        "superseded"
+    }
+    assert len(store.ledger(account["id"]).cashflows()) == before_cashflows
+
+    second = service.propose(account["id"], panel=panel)
+    assert second["id"] == first["id"]
+    assert second["created"] is False
+    assert store.account(account["id"])["strategy"]["policy_snapshot"][
+        "policy_hash"
+    ] == upgraded["strategy"]["policy_snapshot"]["policy_hash"]
 
 
 def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch):

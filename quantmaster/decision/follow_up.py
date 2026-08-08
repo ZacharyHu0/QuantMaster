@@ -120,6 +120,10 @@ def _pick_outcome(
         "rank": int(pick.get("rank") or position),
         "symbol": symbol,
         "name": str(pick.get("name") or ""),
+        "target_weight": (
+            round(float(pick.get("target_weight") or 0), 6)
+            if "target_weight" in pick else None
+        ),
         "status": "pending" if status == "pending" else "unavailable",
         "entry_date": entry_date.date().isoformat() if entry_date is not None else None,
         "entry_price": None,
@@ -167,10 +171,32 @@ def decision_follow_up(
     of sessions exists, the result is frozen at that session's close even when the
     local cache already contains later prices.
     """
-    raw_picks = snapshot.get("picks") or []
-    picks = [pick for pick in raw_picks[:3] if isinstance(pick, Mapping)]
+    raw_picks = [pick for pick in (snapshot.get("picks") or []) if isinstance(pick, Mapping)]
+    has_position_weights = any("target_weight" in pick for pick in raw_picks)
+    if has_position_weights:
+        picks = [
+            pick for pick in raw_picks
+            if float(pick.get("target_weight") or 0) > 0
+        ][:3]
+    else:
+        picks = raw_picks[:3]
     horizon = _holding_horizon(snapshot)
     signal_date = _signal_date(snapshot)
+    if has_position_weights and not picks and snapshot.get("position_state") == "flat":
+        return {
+            "status": "flat",
+            "method": "no_position_validation",
+            "horizon_days": horizon,
+            "completed_sessions": 0,
+            "progress": 1.0,
+            "entry_date": None,
+            "evaluation_date": None,
+            "data_as_of_date": None,
+            "average_return": None,
+            "available_picks": 0,
+            "winner_count": 0,
+            "picks": [],
+        }
     normalized = {
         str(pick.get("symbol") or ""): _normalize_bars(
             price_frames.get(str(pick.get("symbol") or ""))
@@ -192,6 +218,7 @@ def decision_follow_up(
 
     outcomes: list[dict[str, Any]] = []
     returns: list[float] = []
+    return_weights: list[float] = []
     for position, pick in enumerate(picks, start=1):
         symbol = str(pick.get("symbol") or "")
         frame = normalized.get(symbol)
@@ -200,9 +227,15 @@ def decision_follow_up(
         )
         if price_return is not None:
             returns.append(price_return)
+            return_weights.append(float(pick.get("target_weight") or 1.0))
         outcomes.append(outcome)
 
-    average_return = sum(returns) / len(returns) if returns else None
+    total_weight = sum(return_weights)
+    average_return = (
+        sum(value * weight for value, weight in zip(returns, return_weights, strict=True))
+        / total_weight
+        if returns and total_weight > 0 else None
+    )
     return {
         "status": status,
         "method": "t_plus_one_open_to_horizon_close" if status == "completed"

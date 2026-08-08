@@ -22,8 +22,18 @@ class Strategy(ABC):
     def target_weights(self, panel: PanelDict) -> pd.DataFrame:
         ...
 
-    def signal_bundle(self, panel: PanelDict) -> SignalBundle:
+    def signal_bundle(
+        self,
+        panel: PanelDict,
+        *,
+        eligibility_mask: pd.DataFrame | None = None,
+    ) -> SignalBundle:
         weights = self.target_weights(panel)
+        if eligibility_mask is not None:
+            active = weights.notna().any(axis=1)
+            mask = eligibility_mask.reindex_like(weights).fillna(False).astype(bool)
+            weights = weights.where(mask, 0.0)
+            weights.loc[~active] = float("nan")
         return SignalBundle(weights=weights)
 
 
@@ -36,6 +46,8 @@ class SignalBundle:
     confidence: pd.DataFrame | None = None
     degraded: pd.DataFrame | None = None
     contributions: dict[str, pd.DataFrame] = field(default_factory=dict)
+    intentional_flat: pd.Series | None = None
+    target_exposure: pd.Series | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -243,7 +255,12 @@ class LabVersionStrategy(Strategy):
         }
         return scores, contributions
 
-    def signal_bundle(self, panel: PanelDict) -> SignalBundle:
+    def signal_bundle(
+        self,
+        panel: PanelDict,
+        *,
+        eligibility_mask: pd.DataFrame | None = None,
+    ) -> SignalBundle:
         spec = self.version.get("spec") or {}
         close = panel["close"]
         contributions: dict[str, pd.DataFrame] = {}
@@ -267,6 +284,11 @@ class LabVersionStrategy(Strategy):
         mask = pd.Series(False, index=close.index)
         mask.iloc[::self.rebalance_days] = True
         weights = weights.where(mask, other=float("nan"))
+        if eligibility_mask is not None:
+            active = weights.notna().any(axis=1)
+            allowed = eligibility_mask.reindex_like(weights).fillna(False).astype(bool)
+            weights = weights.where(allowed, 0.0)
+            weights.loc[~active] = float("nan")
         confidence = contributions.get("probability_net_positive")
         uncertainty = contributions.get("uncertainty")
         degraded = (

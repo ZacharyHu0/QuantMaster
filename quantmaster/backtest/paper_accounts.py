@@ -694,6 +694,9 @@ class PaperStore:
             return cycle
         now = utc_now()
         with self._conn() as conn:
+            order_count = int(conn.execute(
+                "SELECT COUNT(*) FROM paper_orders WHERE cycle_id=?", (cycle_id,),
+            ).fetchone()[0])
             conn.execute(
                 "UPDATE paper_orders SET status='superseded',reason='newer_cycle',updated_at=? "
                 "WHERE account_id=? AND cycle_id<>? AND status IN ('queued','blocked')",
@@ -704,10 +707,18 @@ class PaperStore:
                 "AND id<>? AND status IN ('confirmed','blocked')",
                 (now, cycle["account_id"], cycle_id),
             )
-            conn.execute(
-                "UPDATE paper_cycles SET status='confirmed',confirmed_at=? WHERE id=? AND status='proposed'",
-                (now, cycle_id),
-            )
+            if order_count:
+                conn.execute(
+                    "UPDATE paper_cycles SET status='confirmed',confirmed_at=? "
+                    "WHERE id=? AND status='proposed'",
+                    (now, cycle_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE paper_cycles SET status='completed',confirmed_at=?,finished_at=? "
+                    "WHERE id=? AND status='proposed'",
+                    (now, now, cycle_id),
+                )
             conn.execute(
                 "UPDATE paper_orders SET status='queued',updated_at=? WHERE cycle_id=? AND status='proposed'",
                 (now, cycle_id),
@@ -977,7 +988,7 @@ class PaperService:
             champions = [item for item in components if item.get("role") in {"factor", "ml"}]
             if champions:
                 return ""
-            return "Hybrid v2 当前仅使用规则基线；可用于模拟验证，尚未叠加 Quant Lab Champion。"
+            return "Hybrid 当前仅使用规则基线；可用于模拟验证，尚未叠加 Quant Lab Champion。"
         if not isinstance(strategy, FactorStrategySpec):
             return "该规则策略未关联 Quant Lab 批准版本；可用于模拟验证，不代表已通过研究门禁。"
         from quantmaster.backtest.spec import split_factor_references
@@ -1039,8 +1050,6 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             raise ValueError("账户已暂停或归档，不能生成新提案")
-        transition_after = str(account.get("strategy_effective_after") or "")
-        force_transition = bool(transition_after)
         eligible_symbols = list(account["universe_snapshot"].get("symbols") or [])
         symbols = list(eligible_symbols)
         symbols.extend(
@@ -1068,6 +1077,47 @@ class PaperService:
             self.store.set_warning(account_id, message, pause=True)
             raise ValueError(message)
         strategy_spec = account["strategy"]
+        if strategy_spec.get("kind") == "decision":
+            old_snapshot = strategy_spec.get("policy_snapshot") or {}
+            if int(old_snapshot.get("schema_version", 0) or 0) < 3:
+                from quantmaster.backtest.spec import DecisionStrategySpec
+                from quantmaster.decision import resolve_policy, upgrade_policy_snapshot
+
+                upgraded_policy = (
+                    upgrade_policy_snapshot(old_snapshot)
+                    if old_snapshot else resolve_policy(
+                        account["universe"],
+                        int(strategy_spec.get("holding_days") or 3),
+                        str(strategy_spec.get("profile") or "risk_adjusted"),
+                        symbols=eligible_symbols,
+                    )
+                )
+                upgraded_strategy = DecisionStrategySpec.model_validate(strategy_spec).model_copy(
+                    update={"policy_snapshot": upgraded_policy},
+                )
+                metadata = {
+                    key: value for key, value in account["universe_snapshot"].items()
+                    if key not in {"name", "symbols"}
+                }
+                upgraded_account = PaperAccountSpec(
+                    name=account["name"],
+                    strategy=upgraded_strategy,
+                    universe=account["universe"],
+                    initial_capital=account["initial_capital"],
+                    mode=account["mode"],
+                    source_backtest_id=account.get("source_backtest_id", ""),
+                )
+                account = self.store.replace_strategy(
+                    account_id,
+                    upgraded_account,
+                    symbols=eligible_symbols,
+                    universe_meta=metadata,
+                    warning="旧 Hybrid 账户已升级为自动仓位控制；模型组件与历史账本保持不变。",
+                    effective_after=latest_date.strftime("%Y-%m-%d"),
+                )
+                strategy_spec = account["strategy"]
+        transition_after = str(account.get("strategy_effective_after") or "")
+        force_transition = bool(transition_after)
         if strategy_spec.get("kind") == "swing":
             from quantmaster.backtest.spec import SwingStrategySpec
 
@@ -1103,10 +1153,25 @@ class PaperService:
             latest_date.strftime("%Y-%m-%d"),
             universe=account["universe"],
         )
-        weights_frame = strategy.target_weights(strategy_panel)
-        latest = pd.to_numeric(weights_frame.iloc[-1], errors="coerce").fillna(0.0).clip(lower=0)
+        if strategy_spec.get("kind") == "decision":
+            signal_bundle = strategy.signal_bundle(
+                strategy_panel, force_latest=force_transition,
+            )
+        else:
+            signal_bundle = strategy.signal_bundle(strategy_panel)
+        weights_frame = signal_bundle.weights
+        latest_signal = weights_frame.iloc[-1]
+        if not latest_signal.notna().any():
+            return {
+                "status": "signal_withheld",
+                "account_id": account_id,
+                "signal_date": latest_date.strftime("%Y-%m-%d"),
+                "message": "评分或市场输入不足，本期不发新信号，现有持仓保持不变。",
+            }
+        latest = pd.to_numeric(latest_signal, errors="coerce").fillna(0.0).clip(lower=0)
         target = {str(symbol): float(value) for symbol, value in latest.items() if value > 0}
-        for position in self.store.ledger(account_id).positions():
+        held_positions = self.store.ledger(account_id).positions()
+        for position in held_positions:
             if position.shares > 0:
                 target.setdefault(position.symbol, 0.0)
         prices = self._prices_from_row(close.iloc[-1])
@@ -1130,6 +1195,15 @@ class PaperService:
                     ),
                 }
             )
+        if (
+            signal_bundle.intentional_flat is not None
+            and bool(signal_bundle.intentional_flat.iloc[-1])
+        ):
+            warnings.append({
+                "code": "intentional_flat",
+                "level": "info",
+                "message": "仓位计划本期主动空仓；已有持仓将在 T+1 开盘退出。",
+            })
         signal_date = transition_after or latest_date.strftime("%Y-%m-%d")
         cycle, created = self.store.create_cycle(
             account,
@@ -1138,7 +1212,12 @@ class PaperService:
             prices,
             warnings,
         )
-        if (force_transition or account["mode"] == "auto") and (cycle.get("status") == "proposed"):
+        empty_flat_cycle = not target and not any(
+            position.shares > 0 for position in held_positions
+        )
+        if (
+            force_transition or account["mode"] == "auto" or empty_flat_cycle
+        ) and cycle.get("status") == "proposed":
             cycle = self.store.confirm(cycle["id"])
         if force_transition and cycle.get("id"):
             self.store.clear_strategy_transition(account_id, account["strategy_hash"])

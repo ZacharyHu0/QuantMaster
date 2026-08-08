@@ -89,6 +89,29 @@ def test_partial_execution_prices_require_confirmation():
     assert [item["code"] for item in warnings] == ["partial_execution_prices"]
 
 
+def test_intentional_flat_signal_is_valid_cash_period():
+    panel = price_panel(("A",))
+    quality, _ = assess_panel_quality(
+        panel, ["A"], minimum_symbols=1, allow_partial=False,
+    )
+    weights = pd.DataFrame(np.nan, index=panel["close"].index, columns=["A"])
+    weights.iloc[3, 0] = 0.0
+    intentional_flat = pd.Series(False, index=weights.index)
+    intentional_flat.iloc[3] = True
+
+    warnings = assess_signal_quality(
+        panel,
+        weights,
+        quality,
+        allow_partial=False,
+        intentional_flat=intentional_flat,
+    )
+
+    assert [item["code"] for item in warnings] == ["intentional_cash_backtest"]
+    assert quality["intentional_flat_signal_dates"] == 1
+    assert quality["selected_signals"] == 0
+
+
 def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch):
     from quantmaster.backtest.spec import BacktestSpec
     from quantmaster.backtest.workbench import BacktestService, BacktestStore, BacktestWorker

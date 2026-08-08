@@ -11,6 +11,7 @@ from quantmaster.decision.hybrid import (
     hybrid_daily_selection,
     hybrid_score_bundle,
     resolve_policy,
+    upgrade_policy_snapshot,
 )
 from quantmaster.decision.storage import DecisionStore
 from quantmaster.decision.swing import daily_selection, market_exposure, swing_score_panel
@@ -20,4 +21,5 @@ __all__ = [
     "daily_selection", "decision_follow_up", "enrich_decision_snapshots",
     "hybrid_daily_selection", "hybrid_score_bundle", "market_exposure",
     "price_frames_from_panel", "resolve_policy", "swing_score_panel",
+    "upgrade_policy_snapshot",
 ]

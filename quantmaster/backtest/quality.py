@@ -114,13 +114,34 @@ def assess_panel_quality(
 def assess_signal_quality(
     panel: dict[str, pd.DataFrame], weights: pd.DataFrame, quality: dict[str, Any], *,
     allow_partial: bool,
+    intentional_flat: pd.Series | None = None,
 ) -> list[Problem]:
     """Validate that signals can execute at a finite next-session open."""
     warnings: list[Problem] = []
     close = panel["close"]
     aligned = weights.reindex(index=close.index, columns=close.columns)
     positive = aligned.gt(0) & aligned.notna()
+    flat = (
+        intentional_flat.reindex(aligned.index).fillna(False).astype(bool)
+        if intentional_flat is not None
+        else pd.Series(False, index=aligned.index)
+    )
+    quality["intentional_flat_signal_dates"] = int(flat.sum())
     if int(positive.to_numpy().sum()) == 0:
+        if flat.any():
+            quality.update({
+                "valid_signal_dates": int(flat.sum()),
+                "executable_signal_dates": 0,
+                "selected_signals": 0,
+                "executable_signals": 0,
+            })
+            warnings.append(_quality_problem(
+                "intentional_cash_backtest", title="策略按仓控保持现金",
+                message="回测期间仓位计划明确选择空仓，没有把现金期误判为信号失败。",
+                action="可查看仓控状态原因、市场基础仓位与合格标的数量。",
+                blocking=False,
+            ))
+            return warnings
         _raise_quality(422, _quality_problem(
             "no_finite_signal", title="策略没有生成有效信号",
             message="当前数据与参数下没有任何正权重选股信号，继续计算只会得到无意义的空结果。",
@@ -138,6 +159,12 @@ def assess_signal_quality(
         "executable_signal_dates": int(executable.any(axis=1).sum()),
         "selected_signals": selected_count, "executable_signals": executable_count,
     })
+    if flat.any():
+        warnings.append(_quality_problem(
+            "intentional_cash_periods", title="策略包含主动现金期",
+            message=f"仓位计划在 {int(flat.sum())} 个调仓日明确保持空仓。",
+            action="这是仓控结果，可结合状态原因复核。", blocking=False,
+        ))
     if executable_count == 0:
         _raise_quality(422, _quality_problem(
             "no_executable_signal", title="信号无法成交",

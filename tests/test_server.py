@@ -286,7 +286,7 @@ class TestBasics:
         assert 'class="snapshot-record-row"' in app_script
         assert 'class="snapshot-detail-row"' in app_script
         assert "e.target.closest('[data-snapshot-toggle]')" in app_script
-        assert "前三入选" in app_script
+        assert "前三目标持仓" in app_script
         assert "股价变动验证" in app_script
         assert 'colspan="5"' in app_script
         assert ".snapshot-progress {" in app_styles
@@ -628,6 +628,48 @@ class TestBasics:
         assert validation["picks"][0]["price"] == 12.0
         assert validation["picks"][0]["return"] == 0.2
 
+    def test_decision_follow_up_uses_only_positive_target_weights(self):
+        from quantmaster.decision import decision_follow_up
+
+        dates = pd.to_datetime(["2026-08-04", "2026-08-05"])
+        snapshot = {
+            "signal_date": "2026-08-03",
+            "holding_horizon_days": 2,
+            "position_state": "invested",
+            "picks": [
+                {"rank": 1, "symbol": "A", "target_weight": 0.75},
+                {"rank": 2, "symbol": "B", "target_weight": 0.25},
+                {"rank": 3, "symbol": "WATCH", "target_weight": 0.0},
+            ],
+        }
+        prices = {
+            "A": pd.DataFrame({"open": [10, 11], "close": [11, 12]}, index=dates),
+            "B": pd.DataFrame({"open": [20, 19], "close": [19, 18]}, index=dates),
+            "WATCH": pd.DataFrame({"open": [1, 1], "close": [10, 20]}, index=dates),
+        }
+
+        validation = decision_follow_up(snapshot, prices)
+
+        assert [pick["symbol"] for pick in validation["picks"]] == ["A", "B"]
+        assert validation["average_return"] == 0.125
+
+    def test_decision_follow_up_marks_intentional_flat_without_validation(self):
+        from quantmaster.decision import decision_follow_up
+
+        validation = decision_follow_up(
+            {
+                "signal_date": "2026-08-03",
+                "holding_horizon_days": 3,
+                "position_state": "flat",
+                "picks": [{"symbol": "WATCH", "target_weight": 0.0}],
+            },
+            {},
+        )
+
+        assert validation["status"] == "flat"
+        assert validation["method"] == "no_position_validation"
+        assert validation["picks"] == []
+
     def test_selection_history_adds_in_progress_top3_validation(self):
         from quantmaster.data.storage import BarStore
         from quantmaster.decision import DecisionStore
@@ -796,8 +838,16 @@ class TestBasics:
         assert len(data["market"]["sectors"]) == 2
         assert len(data["selection"]["picks"]) == 4
         assert data["selection"]["profile"] == "risk_adjusted"
-        assert data["selection"]["model_version"].startswith("hybrid-v2:")
-        assert data["model_snapshot"]["engine_version"] == "hybrid-v2"
+        assert data["selection"]["model_version"].startswith("hybrid-v3:")
+        assert {
+            "market_base_exposure", "opportunity_scale", "recommended_exposure",
+            "cash_weight", "qualified_count", "position_state", "position_reasons",
+        } <= data["selection"].keys()
+        assert all(
+            {"target_weight", "allocation_strength", "allocation_components"} <= pick.keys()
+            for pick in data["selection"]["picks"]
+        )
+        assert data["model_snapshot"]["engine_version"] == "hybrid-v3-position-control"
         assert all(
             "probability_up" in pick and "component_scores" in pick
             for pick in data["selection"]["picks"]

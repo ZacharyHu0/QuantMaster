@@ -461,7 +461,7 @@ class BacktestService:
         strategy = build_strategy(
             spec.strategy, symbols, spec.start, end, universe=spec.universe,
         )
-        signal_bundle = strategy.signal_bundle(panel)
+        signal_bundle = strategy.signal_bundle(panel, eligibility_mask=membership)
         if (
             resolved_tier == "production"
             and signal_bundle.metadata.get("prediction_source") == "rolling_oof"
@@ -469,15 +469,17 @@ class BacktestService:
         ):
             raise ValueError("production 回测拒绝使用 Sandbox 训练的学习模型")
         weights = signal_bundle.weights
-        if membership is not None:
-            member_mask = membership.reindex(index=weights.index, columns=weights.columns).fillna(False)
+        if (
+            membership is not None
+            and signal_bundle.metadata.get("position_control")
+            != "hybrid-position-control-v1"
+        ):
             active = weights.notna().any(axis=1)
-            weights = weights.where(member_mask, 0.0)
-            weights.loc[~active] = float("nan")
             totals = weights.loc[active].sum(axis=1).replace(0, float("nan"))
             weights.loc[active] = weights.loc[active].div(totals, axis=0).fillna(0.0)
         warnings.extend(assess_signal_quality(
             panel, weights, data_quality, allow_partial=spec.allow_partial,
+            intentional_flat=signal_bundle.intentional_flat,
         ))
 
         if benchmark_close is None and spec.benchmark:
@@ -508,7 +510,11 @@ class BacktestService:
             ),
             benchmark_close=benchmark_close,
         )
-        if not result.trades:
+        if not result.trades and not (
+            signal_bundle.intentional_flat is not None
+            and signal_bundle.intentional_flat.fillna(False).any()
+            and not weights.gt(0).to_numpy().any()
+        ):
             data_quality["status"] = "blocked"
             raise OperationProblem(
                 422,

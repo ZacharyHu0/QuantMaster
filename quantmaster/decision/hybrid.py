@@ -67,6 +67,33 @@ RULE_PRIORS = {
 }
 
 
+def _round_trip_cost() -> float:
+    costs = get_config().trade
+    return float(
+        2 * (costs.commission_rate + costs.transfer_fee_rate + costs.slippage)
+        + costs.stamp_tax_rate
+    )
+
+
+def _position_control_policy() -> dict[str, Any]:
+    round_trip_cost = _round_trip_cost()
+    return {
+        "version": "hybrid-position-control-v1",
+        "round_trip_cost": round(round_trip_cost, 8),
+        "market_flat_below": 0.20,
+        "volatility_window": 20,
+        "winsor_limits": [0.10, 0.90],
+        "stable_min_agreement": round(2 / 3, 8),
+        "strength_formula": (
+            "net_expected_return * (probability_up - 0.50) * confidence / volatility_20d"
+        ),
+        "opportunity_formula": "min(qualified_count / top_n, 1)",
+        "rebalance_band": round(max(0.01, 2 * round_trip_cost), 8),
+        "cash_policy": "unallocated_cap_capacity_remains_cash",
+        "calibration": "expanding_matured_horizon_outcomes_only",
+    }
+
+
 def profile_definition(profile: str) -> ProfileDefinition:
     try:
         return PROFILE_DEFINITIONS[profile]  # type: ignore[index]
@@ -351,8 +378,8 @@ def resolve_policy(
                 f"{component['name']} 在 {component['universe']} 验证，本次跨候选应用。"
             )
     payload = {
-        "schema_version": 2,
-        "engine_version": "hybrid-v2",
+        "schema_version": 3,
+        "engine_version": "hybrid-v3-position-control",
         "profile": profile,
         "profile_label": definition.label,
         "universe": universe,
@@ -364,10 +391,27 @@ def resolve_policy(
             "max_exposure": definition.max_exposure,
             "buy_probability": definition.buy_probability,
         },
+        "position_control": _position_control_policy(),
     }
     payload["policy_hash"] = _content_hash(payload)
-    payload["model_version"] = f"hybrid-v2:{profile}:{payload['policy_hash'][:12]}"
+    payload["model_version"] = f"hybrid-v3:{profile}:{payload['policy_hash'][:12]}"
     return payload
+
+
+def upgrade_policy_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a stored Hybrid policy without re-resolving its model components."""
+    value = json.loads(json.dumps(snapshot, ensure_ascii=False))
+    if int(value.get("schema_version", 0) or 0) >= 3 and value.get("position_control"):
+        return value
+    value.pop("policy_hash", None)
+    value.pop("model_version", None)
+    value["schema_version"] = 3
+    value["engine_version"] = "hybrid-v3-position-control"
+    value["position_control"] = _position_control_policy()
+    value["policy_hash"] = _content_hash(value)
+    profile = str(value.get("profile") or "risk_adjusted")
+    value["model_version"] = f"hybrid-v3:{profile}:{value['policy_hash'][:12]}"
+    return value
 
 
 def _expression_component(
@@ -641,10 +685,13 @@ def hybrid_daily_selection(
     industry_map: dict[str, str] | None = None,
     name_map: dict[str, str] | None = None,
     policy_snapshot: dict[str, Any] | None = None,
+    cap_weight: float = 0.25,
 ) -> dict[str, Any]:
-    """Generate a calibrated, explainable Hybrid v2 daily decision."""
+    """Generate a calibrated Hybrid decision with an executable position plan."""
     if top_n < 1:
         raise ValueError("top_n 必须为正整数")
+    if not 0 < cap_weight <= 1:
+        raise ValueError("cap_weight 必须在 (0, 1] 范围内")
     definition = profile_definition(profile)
     industries = industry_map or {}
     names = name_map or {}
@@ -655,19 +702,40 @@ def hybrid_daily_selection(
     scores = bundle["score"]
     valid = scores.dropna(how="all")
     if valid.empty:
-        raise ValueError("有效历史不足，无法生成 Hybrid v2 决策")
+        raise ValueError("有效历史不足，无法生成 Hybrid 决策")
     date = valid.index[-1]
     ranked = valid.loc[date].dropna().sort_values(ascending=False)
-    latest, concentration_relaxed = _select_diversified(ranked, top_n, industries)
     close = panel["close"].reindex(scores.index).astype(float)
     calibration, calibration_summary = calibrate_latest(scores, close, horizon)
-    returns = close.pct_change(fill_method=None)
-    volatility = returns.rolling(20, min_periods=10).std(ddof=0).loc[date]
-    exposure = float(continuous_market_exposure(panel, profile).loc[date])
-    costs = get_config().trade
-    round_trip_cost = (
-        2 * (costs.commission_rate + costs.transfer_fee_rate + costs.slippage)
-        + costs.stamp_tax_rate
+    snapshot = bundle["model_snapshot"]
+    if int(snapshot.get("schema_version", 0) or 0) < 3:
+        snapshot = upgrade_policy_snapshot(snapshot)
+        bundle["model_snapshot"] = snapshot
+    from quantmaster.decision.position_control import build_position_plan
+
+    rebalance = pd.Series(False, index=scores.index)
+    rebalance.iloc[::horizon] = True
+    rebalance.loc[date] = True
+    plan = build_position_plan(
+        panel,
+        bundle,
+        top_n=top_n,
+        horizon=horizon,
+        profile=profile,
+        cap_weight=cap_weight,
+        policy_snapshot=snapshot,
+        rebalance_mask=rebalance,
+    )
+    target_row = plan.weights.loc[date]
+    positive = target_row[target_row.gt(0)].sort_values(ascending=False)
+    display_symbols = list(positive.index)
+    display_symbols.extend(
+        str(symbol) for symbol in ranked.index
+        if str(symbol) not in display_symbols
+    )
+    display_symbols = display_symbols[:top_n]
+    round_trip_cost = float(
+        (snapshot.get("position_control") or {}).get("round_trip_cost", _round_trip_cost())
     )
     component_latest = {
         role: values.reindex(scores.index).loc[date]
@@ -675,13 +743,13 @@ def hybrid_daily_selection(
         if date in values.index
     }
     picks: list[dict[str, Any]] = []
-    for symbol, raw_score in latest.items():
-        score = float(raw_score)
+    for symbol in display_symbols:
+        score = float(ranked.loc[symbol])
         calibrated = calibration.get(str(symbol), {})
-        probability = float(calibrated.get("probability_up", 0.5))
-        expected = float(calibrated.get("expected_return", 0.0))
-        expected_net = expected - round_trip_cost
-        daily_vol = float(volatility.get(symbol, np.nan))
+        probability = float(plan.probability_up.at[date, symbol])
+        expected = float(plan.expected_return.at[date, symbol])
+        expected_net = float(plan.expected_return_net.at[date, symbol])
+        daily_vol = float(plan.volatility.at[date, symbol])
         if not math.isfinite(daily_vol):
             daily_vol = 0.025
         fallback_stop = daily_vol * math.sqrt(horizon) * 1.5
@@ -703,21 +771,11 @@ def hybrid_daily_selection(
             role: _safe_float(values.get(symbol), 2)
             for role, values in component_latest.items()
         }
-        opinions = [value >= 50 for value in component_scores.values() if value is not None]
-        agreement = sum(opinions) / len(opinions) if opinions else 0.5
-        samples = float(calibrated.get("samples", 0))
-        sample_confidence = min(1.0, samples / 250.0)
-        confidence = min(
-            0.90,
-            0.35
-            + 0.30 * abs(probability - 0.5) * 2
-            + 0.15 * agreement
-            + 0.10 * sample_confidence,
-        )
-        action = "buy" if (
-            probability >= definition.buy_probability and expected_net > 0 and exposure >= 0.20
-            and (profile != "stable" or agreement >= 2 / 3)
-        ) else ("watch" if score >= 50 else "avoid")
+        agreement = float(plan.agreement.at[date, symbol])
+        confidence = float(plan.confidence.at[date, symbol])
+        target_weight = float(target_row.get(symbol, 0.0))
+        strength = float(plan.allocation_strength.at[date, symbol])
+        action = "buy" if target_weight > EPS else "watch"
         strongest = sorted(
             ((role, value) for role, value in component_scores.items() if value is not None),
             key=lambda item: item[1], reverse=True,
@@ -733,6 +791,19 @@ def hybrid_daily_selection(
             "industry": industries.get(str(symbol), "未知"),
             "score": round(score, 2),
             "action": action,
+            "position_role": "holding" if target_weight > EPS else "watchlist",
+            "target_weight": round(target_weight, 6),
+            "allocation_strength": round(strength, 6) if math.isfinite(strength) else None,
+            "allocation_components": {
+                "expected_return_gross": _safe_float(expected, 6),
+                "expected_return_net": _safe_float(expected_net, 6),
+                "probability_up": _safe_float(probability, 6),
+                "probability_edge": _safe_float(probability - 0.5, 6),
+                "confidence": _safe_float(confidence, 6),
+                "agreement": _safe_float(agreement, 6),
+                "volatility_20d": _safe_float(daily_vol, 6),
+                "round_trip_cost": round(round_trip_cost, 8),
+            },
             "holding_days": horizon,
             "confidence": round(confidence, 4),
             "probability_up": round(probability, 4),
@@ -746,11 +817,21 @@ def hybrid_daily_selection(
             "model_agreement": round(agreement, 4),
             "reasons": reasons,
         })
-    snapshot = bundle["model_snapshot"]
     warnings = list(bundle["warnings"])
-    if concentration_relaxed:
-        warnings.append("行业数量不足，已放宽 30% 行业集中度约束以补齐候选。")
-    regime = "bull" if exposure >= 0.75 else ("range" if exposure >= 0.30 else "bear")
+    state = str(plan.position_state.loc[date])
+    state_reasons = list(plan.reasons.get(pd.Timestamp(date), ()))
+    if state == "degraded":
+        warnings.append("评分或市场输入不足，本期不发新仓位信号，既有持仓保持不变。")
+    elif state == "flat":
+        warnings.append("仓位计划主动空仓；本期没有需要持有的标的。")
+    market_exposure = _safe_float(plan.market_exposure.loc[date], 6)
+    actual_exposure = _safe_float(plan.actual_exposure.loc[date], 6)
+    opportunity_scale = _safe_float(plan.opportunity_scale.loc[date], 6)
+    regime = (
+        "unknown" if market_exposure is None else
+        "bull" if market_exposure >= 0.75 else
+        "range" if market_exposure >= 0.30 else "bear"
+    )
     rule_weights = bundle["rule_weights"].loc[date].to_dict()
     return {
         "model_version": snapshot["model_version"],
@@ -760,7 +841,16 @@ def hybrid_daily_selection(
         "signal_date": str(date.date()) if hasattr(date, "date") else str(date),
         "holding_horizon_days": horizon,
         "market_regime": regime,
-        "recommended_exposure": round(exposure, 4),
+        "market_base_exposure": market_exposure,
+        "opportunity_scale": opportunity_scale,
+        "recommended_exposure": actual_exposure,
+        "cash_weight": (
+            round(max(0.0, 1.0 - actual_exposure), 6)
+            if actual_exposure is not None else None
+        ),
+        "qualified_count": int(plan.eligible.loc[date].sum()),
+        "position_state": state,
+        "position_reasons": state_reasons,
         "model_snapshot": snapshot,
         "validation_summary": calibration_summary,
         "shadow_model": bundle["shadow_model"],
@@ -768,6 +858,7 @@ def hybrid_daily_selection(
             "requested_symbols": int(close.shape[1]),
             "scored_symbols": int(valid.loc[date].notna().sum()),
             "status": "complete" if valid.loc[date].notna().all() else "partial",
+            "position_signal": "withheld" if state == "degraded" else "ready",
         },
         "rule_weights": {key: round(float(value), 6) for key, value in rule_weights.items()},
         "warnings": warnings,
@@ -780,7 +871,7 @@ def hybrid_daily_selection(
 
 
 class HybridDecisionStrategy:
-    """Backtest/paper adapter sharing the exact Hybrid v2 score and risk path."""
+    """Backtest/paper adapter sharing the exact Hybrid position-control path."""
 
     def __init__(
         self,
@@ -803,7 +894,7 @@ class HybridDecisionStrategy:
         self.cap_weight = cap_weight
         self.name = f"decision_{profile}_top{top_n}_hold{holding_days}d"
 
-    def target_weights(self, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def _legacy_weights(self, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
         bundle = hybrid_score_bundle(
             panel, horizon=self.holding_days, profile=self.profile,
             universe=self.universe, policy_snapshot=self.policy_snapshot,
@@ -819,13 +910,82 @@ class HybridDecisionStrategy:
         mask.iloc[::self.holding_days] = True
         return weights.where(mask, other=float("nan"))
 
+    def signal_bundle(
+        self,
+        panel: dict[str, pd.DataFrame],
+        *,
+        eligibility_mask: pd.DataFrame | None = None,
+        force_latest: bool = False,
+    ):
+        from quantmaster.backtest.strategy import SignalBundle
+
+        bundle = hybrid_score_bundle(
+            panel, horizon=self.holding_days, profile=self.profile,
+            universe=self.universe, policy_snapshot=self.policy_snapshot,
+        )
+        snapshot = bundle["model_snapshot"]
+        if int(snapshot.get("schema_version", 0) or 0) < 3:
+            return SignalBundle(
+                weights=self._legacy_weights(panel),
+                scores=bundle["score"],
+                contributions=bundle["components"],
+                metadata={"policy_snapshot": snapshot, "position_control": "legacy"},
+            )
+        from quantmaster.decision.position_control import build_position_plan
+
+        rebalance = pd.Series(False, index=bundle["score"].index)
+        rebalance.iloc[::self.holding_days] = True
+        if force_latest and len(rebalance.index):
+            rebalance.iloc[-1] = True
+        plan = build_position_plan(
+            panel,
+            bundle,
+            top_n=self.top_n,
+            horizon=self.holding_days,
+            profile=self.profile,
+            cap_weight=self.cap_weight,
+            policy_snapshot=snapshot,
+            rebalance_mask=rebalance,
+            eligibility_mask=eligibility_mask,
+        )
+        return SignalBundle(
+            weights=plan.weights,
+            scores=bundle["score"],
+            confidence=plan.confidence,
+            degraded=plan.degraded.to_frame("position_control"),
+            contributions={
+                **bundle["components"],
+                "probability_up": plan.probability_up,
+                "expected_return_net": plan.expected_return_net,
+                "volatility_20d": plan.volatility,
+                "allocation_strength": plan.allocation_strength,
+            },
+            intentional_flat=plan.intentional_flat,
+            target_exposure=plan.actual_exposure,
+            metadata={
+                "policy_snapshot": snapshot,
+                "position_control": "hybrid-position-control-v1",
+                "position_state": {
+                    str(date): str(value)
+                    for date, value in plan.position_state.items()
+                    if value != "not_due"
+                },
+                "position_reasons": {
+                    str(date): list(values) for date, values in plan.reasons.items()
+                },
+            },
+        )
+
+    def target_weights(self, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        return self.signal_bundle(panel).weights
+
 
 def policy_public_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Return the stable subset safe to expose through APIs and stored specs."""
     keys = {
         "schema_version", "engine_version", "profile", "profile_label", "universe",
         "horizon", "components", "warnings", "risk", "policy_hash", "model_version",
-        "fallback_active", "effective_weights",
+        "fallback_active", "effective_weights", "position_control",
     }
     return {key: value for key, value in snapshot.items() if key in keys}
 
@@ -843,4 +1003,5 @@ __all__ = [
     "profile_definition",
     "resolve_policy",
     "rule_signal_bundle",
+    "upgrade_policy_snapshot",
 ]

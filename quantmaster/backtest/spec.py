@@ -97,7 +97,7 @@ class SwingStrategySpec(ContractModel):
 
 
 class DecisionStrategySpec(ContractModel):
-    """Hybrid v2 决策策略；policy_snapshot 在进入任务账本前由服务端固化。"""
+    """Hybrid 决策策略；policy_snapshot 在进入任务账本前由服务端固化。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

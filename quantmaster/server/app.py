@@ -1141,6 +1141,7 @@ class SelectionRequest(ContractModel):
     top_n: int = 10
     horizon: Literal[1, 3, 5, 7] = 3
     profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
+    cap_weight: float = Field(0.25, gt=0, le=1)
     include_industry: bool = True
     save: bool = False
 
@@ -1167,6 +1168,7 @@ def selection_daily(req: SelectionRequest) -> dict:
             universe=req.universe,
             industry_map=mapping,
             name_map=names,
+            cap_weight=req.cap_weight,
         )
         if req.save:
             from quantmaster.decision import DecisionStore
@@ -1181,7 +1183,14 @@ def _decision_history_symbols(snapshots: list[dict]) -> list[str]:
     return list(dict.fromkeys(
         str(pick.get("symbol") or "")
         for snapshot in snapshots
-        for pick in (snapshot.get("picks") or [])[:3]
+        for pick in (
+            [
+                item for item in (snapshot.get("picks") or [])
+                if float(item.get("target_weight") or 0) > 0
+            ][:3]
+            if any("target_weight" in item for item in (snapshot.get("picks") or []))
+            else (snapshot.get("picks") or [])[:3]
+        )
         if pick.get("symbol")
     ))
 
@@ -1246,6 +1255,7 @@ class DecisionDashboardRequest(ContractModel):
     top_n: int = Field(10, ge=1, le=50)
     horizon: Literal[1, 3, 5, 7] = 3
     profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
+    cap_weight: float = Field(0.25, gt=0, le=1)
     sector_top: int = Field(10, ge=1, le=50)
     history: int = Field(2600, ge=7, le=3000)
     save: bool = True
@@ -1353,6 +1363,7 @@ def _decision_dashboard_data(
         industry_map=mapping,
         name_map=names,
         policy_snapshot=policy,
+        cap_weight=req.cap_weight,
     )
     if progress:
         progress(

@@ -113,8 +113,8 @@ def test_hybrid_profiles_snapshot_and_storage_are_reproducible(panel, tmp_path):
         industry_map=industries,
         policy_snapshot=stable_policy,
     )
-    assert risk["model_version"].startswith("hybrid-v2:risk_adjusted:")
-    assert stable["model_version"].startswith("hybrid-v2:stable:")
+    assert risk["model_version"].startswith("hybrid-v3:risk_adjusted:")
+    assert stable["model_version"].startswith("hybrid-v3:stable:")
     assert stable["recommended_exposure"] <= risk["recommended_exposure"]
     assert all(0 <= item["probability_up"] <= 1 for item in risk["picks"])
     assert all("component_scores" in item for item in risk["picks"])
@@ -146,6 +146,55 @@ def test_hybrid_strategy_uses_profile_risk_limits(panel, tmp_path):
     signals = weights.dropna(how="all")
     assert len(signals) > 10
     assert (signals.sum(axis=1) <= 0.65 + 1e-9).all()
+
+
+def test_legacy_hybrid_snapshot_replays_equal_weight_logic(panel, tmp_path):
+    import json
+
+    from quantmaster.backtest.spec import content_hash
+    from quantmaster.decision import hybrid_score_bundle
+    from quantmaster.decision.hybrid import continuous_market_exposure
+    from quantmaster.lab.store import LabStore
+
+    policy = resolve_policy(
+        "demo", 3, "risk_adjusted", symbols=list(panel["close"].columns),
+        store=LabStore(tmp_path / "legacy-lab.sqlite"),
+    )
+    legacy = json.loads(json.dumps(policy))
+    legacy.pop("position_control")
+    legacy["schema_version"] = 2
+    legacy["engine_version"] = "hybrid-v2"
+    legacy.pop("policy_hash")
+    legacy.pop("model_version")
+    legacy["policy_hash"] = content_hash(legacy)
+    legacy["model_version"] = f"hybrid-v2:risk_adjusted:{legacy['policy_hash'][:12]}"
+    strategy = HybridDecisionStrategy(
+        top_n=4,
+        holding_days=3,
+        profile="risk_adjusted",
+        universe="demo",
+        policy_snapshot=legacy,
+        cap_weight=0.25,
+    )
+    actual = strategy.target_weights(panel)
+    scores = hybrid_score_bundle(
+        panel,
+        horizon=3,
+        profile="risk_adjusted",
+        universe="demo",
+        policy_snapshot=legacy,
+    )["score"]
+    selected = (scores.rank(axis=1, ascending=False) <= 4).astype(float).where(
+        scores.notna(), 0.0,
+    )
+    expected = selected.div(selected.sum(axis=1).replace(0, np.nan), axis=0)
+    expected = expected.mul(
+        continuous_market_exposure(panel, "risk_adjusted"), axis=0,
+    ).clip(upper=0.25)
+    due = pd.Series(False, index=expected.index)
+    due.iloc[::3] = True
+    expected = expected.where(due, other=float("nan"))
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 def test_profile_constraints_survive_missing_factor_component():
