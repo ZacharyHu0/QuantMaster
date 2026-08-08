@@ -268,6 +268,10 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             "content_sha256": str(item.get("content_sha256") or ""),
             "status": str(item.get("last_status") or "missing"),
         })
+    active_symbol_coverage = (
+        (len(symbols) - len(missing) - len(coverage_gaps)) / max(1, len(symbols))
+    )
+    research_eligible = bool(symbols and active_symbol_coverage >= 0.90)
     requested_active_end = max(
         (value["active_end"] for value in ranges.values()), default=end_label,
     )
@@ -281,7 +285,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     )
     as_of = min(requested_active_end, coverage_threshold) if coverage_threshold else ""
     state = (
-        "incomplete" if not symbols or missing or coverage_gaps
+        "incomplete" if not research_eligible
         else "stale" if as_of and as_of < requested_active_end
         else "ready"
     )
@@ -294,17 +298,21 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             "action": "配置 Tushare 后显式运行数据准备",
         })
     if missing:
-        blockers.append({
+        issue = {
             "code": "DATA_COVERAGE_INSUFFICIENT",
             "message": f"{len(missing)} 只标的缺少所需本地行情区间",
-            "action": "显式运行数据准备，仅补齐列出的标的和区间",
+            "action": (
+                "可继续研究；生产使用前请显式补齐"
+                if research_eligible else "显式运行数据准备，仅补齐列出的标的和区间"
+            ),
             "context": {"missing_count": len(missing), "sample": missing[:20]},
-        })
+        }
+        (warnings if research_eligible else blockers).append(issue)
     if coverage_gaps:
         warnings.append({
             "code": "DATA_COVERAGE_INSUFFICIENT",
             "message": f"{len(coverage_gaps)} 只标的存在局部行情区间缺口",
-            "action": "可使用冻结快照研究；审批或部署前需显式补齐",
+            "action": "可继续研究；生产资格以实际在池价格覆盖率门禁为准",
             "context": {"count": len(coverage_gaps), "sample": coverage_gaps[:20]},
         })
     if warmup_gaps:
@@ -323,6 +331,11 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         "end": end,
         "as_of": as_of,
         "state": state,
+        "active_symbol_coverage": round(active_symbol_coverage, 6),
+        "research_eligible": research_eligible,
+        "production_eligible": bool(
+            state == "ready" and active_symbol_coverage >= 0.98
+        ),
         "symbols": symbols,
         "symbol_count": len(symbols),
         "missing": missing,
@@ -537,7 +550,11 @@ def load_local_dataset(
         as_of=inspection["as_of"] or pd.Timestamp(close.index.max()).strftime("%Y-%m-%d"),
         state=cast(Literal["ready", "stale", "incomplete", "corrupt"], state),
         data_policy=policy,
-        production_eligible=bool(state == "ready" and membership_coverage >= 0.98),
+        production_eligible=bool(
+            state == "ready"
+            and inspection.get("production_eligible")
+            and membership_coverage >= 0.98
+        ),
         warnings=tuple(warnings),
         manifest={
             "bars": list(batch.manifest),

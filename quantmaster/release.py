@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.98"
+VERSION = "1.3.99"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Quant Lab 研究快照判定修正",
+                "items": (
+                    (
+                        "局部个股区间缺口不再把日期最新且文件齐全的本地快照误判为"
+                        " incomplete；因子挖掘可带覆盖告警继续运行。"
+                    ),
+                    (
+                        "生产资格继续以实际在池价格覆盖率判断，避免把停牌或上市边界"
+                        "一概描述成必须补数。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.98",
         "date": RELEASE_DATE,
         "sections": (
             {

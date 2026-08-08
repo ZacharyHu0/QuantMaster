@@ -22,6 +22,7 @@ _DEEP_MODELS = {
 _DATASET_SUMMARY_KEYS = {
     "universe", "start", "end", "as_of", "state", "symbol_count",
     "membership_source", "membership_hash", "bytes", "manifest_hash",
+    "active_symbol_coverage", "research_eligible", "production_eligible",
 }
 
 
@@ -166,16 +167,27 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
         elif policy != DataPolicy.REFRESH_MISSING:
             blockers.extend(dataset.get("blockers") or [])
         warnings.extend(dataset.get("warnings") or [])
+        production_required = (
+            operation in {"approve", "deploy"}
+            or values.get("research_tier") == "production"
+        )
         if dataset.get("state") == "stale":
             stale = {
                 "code": "DATASET_STALE",
                 "message": f"本地快照截至 {dataset.get('as_of') or '未知日期'}",
                 "action": "可继续研究；生产审批前请显式更新数据",
             }
-            if operation in {"approve", "deploy"} or values.get("research_tier") == "production":
+            if production_required:
                 blockers.append(stale)
             else:
                 warnings.append(stale)
+        elif production_required and not dataset.get("production_eligible"):
+            blockers.append(_blocker(
+                "DATA_COVERAGE_INSUFFICIENT",
+                "本地快照的有效标的覆盖率不足生产门禁",
+                "该快照仍可用于研究；生产使用前请显式补齐有效区间",
+                coverage=dataset.get("active_symbol_coverage"), minimum=0.98,
+            ))
 
     symbol_count = int(dataset.get("symbol_count") or 0)
     try:
