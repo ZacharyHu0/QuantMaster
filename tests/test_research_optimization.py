@@ -99,15 +99,15 @@ def test_shared_ridge_emits_all_horizons_and_oof_calibration(tmp_path):
     )
     frame = predictions_to_frame(samples, valid, fitted["_predictions"])
 
-    assert set(frame["horizon"]) == {1, 3, 5, 7}
+    assert set(frame["horizon"]) == {1, 3, 5, 7, 10, 20, 30}
     assert fitted["artifact_sha256"]
     calibrators = fit_probability_calibrators(frame, roundtrip_cost=0.002)
     calibrated = apply_probability_calibrators(frame, calibrators)
-    assert set(calibrators) == {"1", "3", "5", "7"}
+    assert set(calibrators) == {"1", "3", "5", "7", "10", "20", "30"}
     assert calibrated[["probability_up", "probability_net_positive"]].ge(0).all().all()
     assert calibrated[["probability_up", "probability_net_positive"]].le(1).all().all()
     metrics = evaluate_predictions(calibrated, top_n=3, roundtrip_cost=0.002)
-    assert set(metrics["horizons"]) == {"1", "3", "5", "7"}
+    assert set(metrics["horizons"]) == {"1", "3", "5", "7", "10", "20", "30"}
 
 
 def test_research_bundle_production_gate_rejects_legacy_approximations():
@@ -301,7 +301,7 @@ def test_optuna_runner_persists_a_ridge_baseline_and_reuses_sealed_blocks(
     panel = _panel()
     protocol = WalkForwardSpec(
         train_window=120, retrain_every=10, sealed_holdout=20,
-        purge_gap=7, development_folds=2, fold_test_days=10,
+        purge_gap=30, development_folds=2, fold_test_days=10,
     )
     spec = OptimizationSpec(
         universe="demo", start=str(panel["close"].index.min().date()),
@@ -351,4 +351,4 @@ def test_multi_horizon_sample_store_uses_shared_cube_and_compact_metadata(tmp_pa
     assert samples.values[0].shape == (20, len(samples.feature_names))
     first = samples.metadata[0]
     assert first["symbol"] in panel["close"].columns
-    assert set(first["target_dates"]) == {"1", "3", "5", "7"}
+    assert set(first["target_dates"]) == {"1", "3", "5", "7", "10", "20", "30"}

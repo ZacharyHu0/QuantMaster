@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.runtime.json import strict_json_dumps
 
 FactorKind = Literal["expression", "python", "learned", "latent", "composite"]
@@ -83,7 +84,7 @@ class FactorSpec:
     category: str = "未分类"
     direction: int = 1
     required_features: tuple[str, ...] = ()
-    horizons: tuple[int, ...] = (1, 3, 5, 7)
+    horizons: tuple[int, ...] = SUPPORTED_HORIZONS
     rationale: str = ""
     model: dict[str, Any] = field(default_factory=dict)
     artifact: dict[str, Any] = field(default_factory=dict)
@@ -107,8 +108,8 @@ class FactorSpec:
             raise ValueError("Python 因子必须引用不可变工件清单")
         if self.direction not in {-1, 1}:
             raise ValueError("direction 只允许 -1 或 1")
-        if not self.horizons or any(value not in {1, 3, 5, 7} for value in self.horizons):
-            raise ValueError("horizons 只支持 1/3/5/7 日")
+        if not self.horizons or any(value not in SUPPORTED_HORIZONS for value in self.horizons):
+            raise ValueError("horizons 只支持 1/3/5/7/10/20/30 日")
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)

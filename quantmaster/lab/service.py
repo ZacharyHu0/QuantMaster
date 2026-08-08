@@ -13,20 +13,34 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
+from quantmaster.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     create_snapshot,
+    dataset_repair_plan,
     load_csi800_membership,
     load_local_dataset,
     readiness,
 )
+from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import DataPolicy, FactorSpec
 from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
 from quantmaster.lab.store import LabStore
+from quantmaster.lab.strategy import (
+    atomic_horizon_gate,
+    combine_scores,
+    ensemble_weights,
+    execute_daily_targets,
+    holding_actions,
+    moving_block_return_interval,
+    strategy_sealed_gate,
+    target_weights,
+)
 from quantmaster.runtime.json import strict_json_dumps
 
 logger = logging.getLogger(__name__)
@@ -36,6 +50,91 @@ def _slug(prefix: str, expression: str) -> str:
     from quantmaster.lab.models import content_hash
 
     return f"{prefix}_{content_hash(expression)[:10]}"
+
+
+def _extend_panel_with_local_symbols(
+    panel: dict[str, pd.DataFrame], symbols: list[str],
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """Append locally available holdings without contacting a data provider."""
+    from quantmaster.data.storage import BarStore
+
+    reference = set(str(symbol) for symbol in panel["close"].columns)
+    requested = list(dict.fromkeys(
+        str(symbol) for symbol in symbols if symbol and str(symbol) not in reference
+    ))
+    if not requested:
+        return panel, []
+    start = pd.Timestamp(panel["close"].index.min()).strftime("%Y-%m-%d")
+    end = pd.Timestamp(panel["close"].index.max()).strftime("%Y-%m-%d")
+    fields = [
+        field for field in ("open", "high", "low", "close", "volume", "amount")
+        if field in panel
+    ]
+    batch = BarStore().read_many(
+        requested, columns=fields, start=start, end=end,
+        max_workers=min(8, max(1, len(requested))), enqueue_repair=False,
+    )
+    if not batch.frames:
+        return panel, requested
+    enriched = dict(panel)
+    for field in fields:
+        additions = {
+            symbol: frame[field]
+            for symbol, frame in batch.frames.items()
+            if field in frame and not frame[field].dropna().empty
+        }
+        if additions:
+            added = pd.DataFrame(additions).sort_index()
+            enriched[field] = panel[field].join(added, how="outer").sort_index()
+    return enriched, [symbol for symbol in requested if symbol not in batch.frames]
+
+
+def _ledger_weight_context(
+    ledger: Any, panel: dict[str, pd.DataFrame], as_of: pd.Timestamp,
+) -> tuple[dict[str, float], dict[str, Any], set[str]]:
+    """Value the real local ledger at the latest signal date using only local closes."""
+    from quantmaster.portfolio import ledger_report
+
+    positions = [position for position in ledger.positions() if position.shares > 1e-9]
+    close = panel["close"].loc[:as_of]
+    prices: dict[str, float] = {}
+    for position in positions:
+        if position.symbol not in close.columns:
+            continue
+        values = close[position.symbol].replace([np.inf, -np.inf], np.nan).dropna()
+        if len(values) and float(values.iloc[-1]) > 0:
+            prices[position.symbol] = float(values.iloc[-1])
+    report = ledger_report(ledger, prices=prices)
+    total_assets = float(report.get("total_assets") or 0.0)
+    market_value = float(report.get("market_value") or 0.0)
+    denominator = total_assets if total_assets > 1e-9 else market_value
+    current = {
+        str(item["symbol"]): float(item["market_value"]) / denominator
+        for item in report.get("positions") or []
+        if float(item.get("shares") or 0.0) > 1e-9 and denominator > 1e-9
+    }
+    warnings = [str(item) for item in report.get("warnings") or []]
+    trades = ledger.trades()
+    empty_portfolio = not positions and not len(trades)
+    reliable = bool(not warnings and (total_assets > 1e-9 or empty_portfolio))
+    summary = {
+        "source": "local_real_ledger",
+        "ledger": Path(ledger.path).name,
+        "valuation_date": pd.Timestamp(as_of).strftime("%Y-%m-%d"),
+        "last_trade_date": str(trades["date"].max()) if len(trades) else "",
+        "holding_count": len(current),
+        "total_assets": total_assets,
+        "cash": float(report.get("cash") or 0.0),
+        "market_value": market_value,
+        "cash_weight": (
+            float(report.get("cash") or 0.0) / total_assets if total_assets > 1e-9 else 0.0
+        ),
+        "capital_recorded": total_assets > 1e-9,
+        "missing_price": list(report.get("missing_price") or []),
+        "warnings": warnings,
+        "reliable": reliable,
+    }
+    return current, summary, set(prices)
 
 
 class LabService:
@@ -232,7 +331,47 @@ class LabService:
             study = self.store.study(str(values["study_id"]))
             if study:
                 values = {**study.get("config", {}), **values}
-        return run_preflight(operation, values)
+        report = run_preflight(operation, values)
+        universe = str(values.get("universe") or get_config().lab.universe)
+        start = str(values.get("start") or get_config().lab.start)
+        end = str(values.get("end") or pd.Timestamp.today().date().isoformat())
+        repair = dataset_repair_plan(universe, start, end)
+        if repair["repair_symbol_count"] or repair["membership_missing"]:
+            report["coverage"] = repair
+        if operation != "validate" or not values.get("version_id"):
+            return report
+        version = self.store.version(str(values["version_id"]))
+        if version is None:
+            return report
+        spec = FactorSpec.from_dict(version["spec"])
+        expression = spec.expression or spec.slug
+        if "news_sentiment" not in spec.required_features and expression != "news_sentiment":
+            return report
+        from quantmaster.ai.sentiment import news_sentiment_readiness
+
+        readiness_report = news_sentiment_readiness(start, end)
+        report["features"] = {"news_sentiment": readiness_report}
+        if readiness_report["ready"]:
+            return report
+        available = (
+            f"{readiness_report['available_start']} 至 {readiness_report['available_end']}"
+            if readiness_report["available_start"] else "无可用标注"
+        )
+        report.setdefault("blockers", []).append({
+            "code": "FEATURE_HISTORY_INSUFFICIENT",
+            "message": (
+                f"news_sentiment 本地标注历史不足：{available}，"
+                f"不能可信验证 {start} 至 {end} 的研究区间"
+            ),
+            "action": (
+                "继续积累本地新闻标注；达到 756 日开发期、30 日隔离期和 "
+                "252 日密封期后再验证。量价因子研究不受影响"
+            ),
+            "context": readiness_report,
+        })
+        report["runnable"] = False
+        report["state"] = "blocked"
+        return report
 
     def _stage_model_publication(
         self,
@@ -353,7 +492,7 @@ class LabService:
     def enqueue(self, kind: str, params: dict[str, Any]) -> dict:
         allowed = {
             "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
-            "optimize", "bias_audit", "discover_python",
+            "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
         }
         if kind not in allowed:
             raise ValueError(f"未知研究任务: {kind}")
@@ -474,6 +613,130 @@ class LabService:
             progress(52, "数据快照已冻结")
         return panel, membership, stored
 
+    def prepare_data(
+        self,
+        *,
+        universe: str,
+        start: str,
+        end: str,
+        provider: str = "",
+        include_warmup: bool = True,
+        data_policy: str = DataPolicy.REFRESH_MISSING.value,
+        progress=None,
+        cancelled=None,
+    ) -> dict[str, Any]:
+        """Explicitly repair planned local gaps through one user-selected provider."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from quantmaster.data import RefreshMode, load_history
+        from quantmaster.lab.dataset import clear_local_dataset_caches
+
+        del data_policy
+        before = dataset_repair_plan(universe, start, end)
+        selected = str(provider or "").strip().lower()
+        if not selected:
+            stockdb = next(
+                item for item in before["providers"] if item["id"] == "free-stockdb-online"
+            )
+            selected = (
+                "free-stockdb-online"
+                if stockdb["available"] and not before["membership_missing"] else "tushare"
+            )
+        if selected not in {"free-stockdb-online", "tushare"}:
+            raise LabError(
+                "INVALID_REQUEST", f"不支持的数据补齐来源: {selected}",
+                action="选择 Tushare 或 stockdb-online",
+            )
+        if before["membership_missing"]:
+            if selected != "tushare":
+                raise LabError(
+                    "DATASET_MISSING", "stockdb-online 不能补齐 CSI800 点时成分",
+                    action="改用 Tushare，或先导入 PIT 成分缓存",
+                )
+            if progress:
+                progress(3, "通过 Tushare 补齐 CSI800 点时成分")
+            load_csi800_membership(start, end)
+            clear_local_dataset_caches()
+            before = dataset_repair_plan(universe, start, end)
+
+        targets: list[dict[str, Any]] = []
+        for item in before["gaps"]:
+            segments = [
+                segment for segment in item.get("segments") or []
+                if include_warmup or segment.get("kind") == "critical"
+            ]
+            if not segments:
+                continue
+            targets.append({
+                **item,
+                "repair_start": min(str(segment["start"]) for segment in segments),
+                "repair_end": max(str(segment["end"]) for segment in segments),
+            })
+        failures: dict[str, str] = {}
+        completed = 0
+
+        def repair(item: dict[str, Any]) -> str:
+            if cancelled and cancelled():
+                raise InterruptedError("数据补齐已取消")
+            load_history(
+                str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
+                refresh=RefreshMode.INCREMENTAL, priority="interactive",
+                provider=selected,
+            )
+            return str(item["symbol"])
+
+        workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
+            futures = {pool.submit(repair, item): item for item in targets}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    future.result()
+                except InterruptedError:
+                    raise
+                except Exception as exc:
+                    failures[str(item["symbol"])] = str(exc)[:300]
+                completed += 1
+                if progress:
+                    progress(
+                        5 + int(82 * completed / max(1, len(targets))),
+                        f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
+                    )
+        clear_local_dataset_caches()
+        after = dataset_repair_plan(universe, start, end)
+        count_key = "repair_symbol_count" if include_warmup else "critical_repair_symbol_count"
+        resolved = max(0, int(before[count_key]) - int(after[count_key]))
+        snapshot: dict[str, Any] = {}
+        if after["research_eligible"]:
+            _panel, _membership, value = load_local_dataset(
+                universe, start, end, policy=DataPolicy.PREFER_LOCAL.value,
+            )
+            snapshot = self.store.save_snapshot(value)
+        if progress:
+            remaining = int(after[count_key])
+            progress(96, f"补齐完成 · 修复 {resolved} 只，当前范围剩余 {remaining} 只")
+        if targets and not resolved and failures:
+            raise LabError(
+                "EXTERNAL_SERVICE_UNAVAILABLE",
+                f"{selected} 未能补齐任何缺口",
+                action="检查数据源配置或服务状态后重试，也可切换另一数据源",
+                retryable=True,
+                context={"provider": selected, "failed_symbols": len(failures)},
+                status_code=503,
+            )
+        return {
+            "provider": selected,
+            "requested_symbols": len(targets),
+            "resolved_symbols": resolved,
+            "remaining_symbols": after["repair_symbol_count"],
+            "remaining_critical_symbols": after["critical_repair_symbol_count"],
+            "include_warmup": bool(include_warmup),
+            "failures": failures,
+            "before": before,
+            "after": after,
+            "snapshot": snapshot,
+        }
+
     def validate_version(
         self, version_id: str, *, universe: str, start: str, end: str,
         progress=None, cancelled=None,
@@ -484,6 +747,29 @@ class LabService:
         if version is None:
             raise KeyError("因子版本不存在")
         spec = FactorSpec.from_dict(version["spec"])
+        expression = spec.expression or spec.slug
+        if spec.kind == "expression" and (
+            "news_sentiment" in spec.required_features or expression == "news_sentiment"
+        ):
+            from quantmaster.ai.sentiment import news_sentiment_readiness
+
+            feature_readiness = news_sentiment_readiness(start, end)
+            if not feature_readiness["ready"]:
+                available = (
+                    f"{feature_readiness['available_start']} 至 "
+                    f"{feature_readiness['available_end']}"
+                    if feature_readiness["available_start"] else "无可用标注"
+                )
+                raise LabError(
+                    "FEATURE_HISTORY_INSUFFICIENT",
+                    f"news_sentiment 本地标注历史不足：{available}",
+                    action=(
+                        "继续积累本地新闻标注；达到完整开发期、隔离期和密封期后重试"
+                    ),
+                    retryable=True,
+                    context=feature_readiness,
+                    status_code=409,
+                )
         python_features: dict[str, pd.DataFrame] | None = None
         parameter_variants: dict[str, pd.DataFrame] = {}
         python_manifest: dict | None = None
@@ -545,8 +831,6 @@ class LabService:
 
             symbols = list(panel["close"].columns)
             expression = spec.expression or spec.slug
-            if expression == "news_sentiment":
-                raise ValueError("消息面因子需先完成新闻标注；当前快照没有 news_sentiment 字段")
             if progress:
                 progress(58, "计算因子并执行统一标准化")
 
@@ -601,6 +885,7 @@ class LabService:
             research_quality=snapshot["payload"]["research_quality"],
             panel=python_features if spec.kind == "python" else panel,
             parameter_variants=parameter_variants,
+            open_prices=panel.get("open"),
         )
         if spec.kind == "python":
             artifact_root = Path(get_config().data_root).resolve()
@@ -1655,13 +1940,464 @@ class LabService:
         self.store.resolve_suggestion(suggestion_id, "accepted")
         return self.store.version(version["id"]) or version
 
+    @staticmethod
+    def _expression_values(
+        version: dict[str, Any], panel: dict[str, pd.DataFrame], start: str, end: str,
+    ) -> pd.DataFrame:
+        from quantmaster.factors import compute_factor
+        from quantmaster.factors.fundamental import resolve_factor
+
+        spec = FactorSpec.from_dict(version["spec"])
+        if spec.kind != "expression":
+            raise ValueError(f"{spec.kind} 因子尚未接入组合执行内核")
+        factor = resolve_factor(
+            spec.expression or spec.slug, list(panel["close"].columns), start, end,
+        )
+        return compute_factor(factor, panel)
+
+    def research_cycle(
+        self, *, universe: str = "csi800", start: str = "2015-01-01",
+        end: str = "", progress=None, cancelled=None,
+    ) -> dict[str, Any]:
+        """Build horizon-specific ensembles without exposing sealed data to selection."""
+        from quantmaster.lab.research import (
+            WalkForwardSpec,
+            benjamini_hochberg_family,
+            walk_forward_folds,
+        )
+        from quantmaster.lab.validation import validate_factor_values
+
+        end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+        panel, membership, snapshot = self._context(
+            universe, start, end, progress=progress, data_policy=DataPolicy.PREFER_LOCAL.value,
+        )
+        dates = pd.DatetimeIndex(panel["close"].index).normalize().unique().sort_values()
+        protocol = WalkForwardSpec(horizons=SUPPORTED_HORIZONS)
+        folds, sealed = walk_forward_folds(dates, protocol)
+        cycle = self.store.create_research_cycle(
+            snapshot_id=str(snapshot.get("id") or ""),
+            protocol={
+                **protocol.to_dict(), "folds": [item.to_dict() for item in folds],
+                "sealed": sealed.to_dict(), "fdr_family": "candidate_x_horizon",
+            },
+        )
+        development_dates = dates[dates <= pd.Timestamp(sealed.train_end)]
+        development_panel = {
+            key: frame.reindex(index=development_dates) for key, frame in panel.items()
+        }
+        development_membership = (
+            membership.reindex(index=development_dates) if membership is not None else None
+        )
+        records: dict[str, dict[str, Any]] = {}
+        for status in ("approved", "production", "degraded"):
+            for item in self.store.list_factors(status=status, limit=500)["items"]:
+                version_id = str(item["version_id"])
+                version = self.store.version(version_id)
+                if version is not None:
+                    records[version_id] = version
+        reports: dict[str, dict[str, Any]] = {}
+        raw_values: dict[str, pd.DataFrame] = {}
+        skipped: list[dict[str, str]] = []
+        for number, (version_id, version) in enumerate(records.items(), start=1):
+            if cancelled and cancelled():
+                raise InterruptedError("研究周期已取消")
+            if progress:
+                progress(8 + int(42 * number / max(1, len(records))),
+                         f"开发区复验 {number}/{len(records)} · {version.get('name', '')}")
+            try:
+                values = self._expression_values(version, panel, start, end)
+                raw_values[version_id] = values
+                report = validate_factor_values(
+                    values.reindex(index=development_dates), development_panel["close"],
+                    name=str(version.get("name") or version_id),
+                    horizons=SUPPORTED_HORIZONS, membership=development_membership,
+                    research_quality=str((snapshot.get("payload") or {}).get(
+                        "research_quality", "production"
+                    )), panel=development_panel, open_prices=development_panel.get("open"),
+                    essential_only=True,
+                )
+                reports[version_id] = report
+            except Exception as exc:
+                skipped.append({"version_id": version_id, "reason": str(exc)})
+
+        family: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        p_values: list[float] = []
+        for report in reports.values():
+            for evidence in report["horizons"].values():
+                family.append((report, evidence))
+                p_values.append(float(evidence.get("p_value", 1.0)))
+        for (report, evidence), q_value in zip(
+            family, benjamini_hochberg_family(p_values), strict=True,
+        ):
+            evidence["q_value"] = float(q_value)
+            evidence["gates"] = atomic_horizon_gate(
+                evidence, coverage=float(report.get("coverage") or 0),
+                research_quality=str((snapshot.get("payload") or {}).get(
+                    "research_quality", "production"
+                )),
+            )
+        for version_id, report in reports.items():
+            eligible = [
+                int(value["horizon"]) for value in report["horizons"].values()
+                if (value.get("gates") or {}).get("passed")
+            ]
+            report["eligible_horizons"] = eligible
+            report["gates"] = {
+                "passed": bool(eligible), "hard_failures": [],
+                "soft_failures": [] if eligible else ["没有周期通过本轮统一 FDR 门槛"],
+                "override_allowed": True,
+            }
+            self.store.save_validation(
+                version_id, str((snapshot.get("payload") or {}).get("snapshot_hash") or ""),
+                report,
+            )
+
+        sealed_dates = dates[dates >= pd.Timestamp(sealed.test_start)]
+        sealed_panel = {key: frame.reindex(index=sealed_dates) for key, frame in panel.items()}
+        sealed_membership = (
+            membership.reindex(
+                index=sealed_dates, columns=sealed_panel["close"].columns,
+            ).fillna(False)
+            if membership is not None else None
+        )
+        sealed_open = sealed_panel.get("open", sealed_panel["close"])
+        sealed_benchmark = (
+            (sealed_open.shift(-1) / sealed_open - 1)
+            .where(sealed_membership)
+            .mean(axis=1)
+            if sealed_membership is not None else None
+        )
+        from quantmaster.data.industry import load_industry_map
+
+        industry_map = load_industry_map()
+        strategies: list[dict[str, Any]] = []
+        horizon_outcomes: dict[str, dict[str, Any]] = {}
+        for position, horizon in enumerate(SUPPORTED_HORIZONS, start=1):
+            candidates = []
+            directions: dict[str, int] = {}
+            for version_id, report in reports.items():
+                evidence = report["horizons"].get(str(horizon)) or {}
+                if not (evidence.get("gates") or {}).get("passed"):
+                    continue
+                directions[version_id] = int(evidence.get("direction") or 1)
+                execution = evidence.get("execution") or {}
+                candidates.append({
+                    "version_id": version_id,
+                    "development_score": max(
+                        1e-6,
+                        float(execution.get("net_information_ratio") or 0)
+                        + abs(float(evidence.get("oos_icir") or 0)),
+                    ),
+                })
+            development_values = {
+                version_id: (
+                    raw_values[version_id].reindex(index=development_dates)
+                    * directions[version_id]
+                ).where(development_membership)
+                for version_id in directions
+            }
+            components = ensemble_weights(
+                candidates, development_values, horizon=horizon,
+            )
+            if not components:
+                horizon_outcomes[str(horizon)] = {
+                    "qualified_factors": len(candidates),
+                    "status": "no_strategy",
+                    "reason": (
+                        "合格因子不足 3 个" if len(candidates) < 3
+                        else "合格因子高度相关，去重后不足 3 个"
+                    ),
+                }
+                continue
+            for component in components:
+                component["direction"] = directions[component["version_id"]]
+            full_oriented = {
+                component["version_id"]: (
+                    raw_values[component["version_id"]]
+                    * int(component["direction"])
+                ).where(membership)
+                for component in components
+            }
+            combined = combine_scores(components, full_oriented)
+            execution = execute_daily_targets(
+                combined.reindex(index=sealed_dates), sealed_panel,
+                horizon=horizon, top_n=12, cap_weight=0.10,
+                industry_map=industry_map,
+                benchmark_returns=sealed_benchmark,
+            )
+            bootstrap = moving_block_return_interval(
+                execution["daily_excess"], block_days=max(20, 2 * horizon),
+                seed=protocol.seed + horizon,
+            )
+            baseline_calmar = 0.0
+            try:
+                from quantmaster.decision.hybrid import rule_signal_bundle
+
+                rule_score, _weights, _features = rule_signal_bundle(panel, horizon)
+                baseline_result = execute_daily_targets(
+                    rule_score.where(membership).reindex(index=sealed_dates), sealed_panel,
+                    horizon=horizon, top_n=12, cap_weight=0.10,
+                    industry_map=industry_map,
+                    benchmark_returns=sealed_benchmark,
+                )
+                baseline_calmar = float(baseline_result["metrics"].get("calmar") or 0)
+                baseline_annual = float(
+                    baseline_result["metrics"].get("net_annual_excess_return") or 0
+                )
+            except Exception:
+                baseline_annual = 0.0
+            gate = strategy_sealed_gate(
+                execution["metrics"], bootstrap, baseline_calmar=baseline_calmar,
+            )
+            evidence = {
+                "horizon": horizon, "opened_once": True,
+                "period": {"start": sealed.test_start, "end": sealed.test_end},
+                "dataset_id": snapshot.get("id", ""), "metrics": execution["metrics"],
+                "bootstrap": bootstrap, "gates": gate,
+            }
+            candidate = self.store.save_strategy_candidate(
+                cycle_id=cycle["id"], horizon=horizon,
+                name=f"CSI800 {horizon}日多因子组合",
+                components=components,
+                development={
+                    "period_end": sealed.train_end,
+                    "candidate_count": len(candidates),
+                    "selection": "median_fold_net_ir_drawdown_turnover",
+                    "max_component_correlation": 0.70,
+                },
+                sealed_evidence=evidence,
+                return_curve={"baseline_annual_net_excess_return": baseline_annual},
+            )
+            strategies.append(candidate)
+            horizon_outcomes[str(horizon)] = {
+                "qualified_factors": len(candidates),
+                "selected_factors": len(components),
+                "status": candidate["status"],
+                "strategy_id": candidate["id"],
+            }
+            if progress:
+                progress(55 + int(40 * position / len(SUPPORTED_HORIZONS)),
+                         f"{horizon} 日组合密封评估完成")
+        result = {
+            "cycle_id": cycle["id"], "snapshot_id": snapshot.get("id", ""),
+            "protocol": protocol.to_dict(), "sealed": sealed.to_dict(),
+            "factor_reports": len(reports), "family_tests": len(family),
+            "strategies": [item["id"] for item in strategies], "skipped": skipped,
+            "horizon_outcomes": horizon_outcomes,
+            "network_calls": 0,
+        }
+        self.store.complete_research_cycle(cycle["id"], result)
+        return result
+
+    def shadow_score(
+        self, *, strategy_id: str = "", universe: str = "csi800",
+        start: str = "2015-01-01", end: str = "", progress=None,
+    ) -> dict[str, Any]:
+        end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+        candidates = [self.store.strategy(strategy_id)] if strategy_id else [
+            *self.store.strategies(status="shadow_challenger", limit=30),
+            *self.store.strategies(status="paper", limit=30),
+            *self.store.strategies(status="champion", limit=30),
+        ]
+        candidates = [item for item in candidates if item]
+        if not candidates:
+            return {"scored": 0, "signals": [], "network_calls": 0}
+        panel, _membership, _snapshot = self._context(
+            universe, start, end, progress=progress, data_policy=DataPolicy.PREFER_LOCAL.value,
+        )
+        from quantmaster.portfolio import Ledger
+
+        ledger = Ledger()
+        ledger_symbols = [
+            position.symbol for position in ledger.positions() if position.shares > 1e-9
+        ]
+        reference_symbols = [str(symbol) for symbol in panel["close"].columns]
+        panel, missing_holding_bars = _extend_panel_with_local_symbols(
+            panel, ledger_symbols,
+        )
+        versions: dict[str, dict[str, Any]] = {}
+        raw: dict[str, pd.DataFrame] = {}
+        for candidate in candidates:
+            for component in candidate.get("components") or []:
+                version_id = str(component["version_id"])
+                if version_id in raw:
+                    continue
+                version = self.store.version(version_id)
+                if version is None:
+                    continue
+                versions[version_id] = version
+                raw[version_id] = self._expression_values(version, panel, start, end)
+        signals = []
+        open_prices = panel["open"].sort_index()
+        dates = open_prices.index
+        from quantmaster.data.industry import load_industry_map
+
+        industry_map = load_industry_map()
+        for candidate in candidates:
+            components = candidate.get("components") or []
+            values = {
+                str(item["version_id"]): raw[str(item["version_id"])]
+                * int(item.get("direction") or 1)
+                for item in components if str(item["version_id"]) in raw
+            }
+            score = combine_scores(
+                components, values, reference_columns=reference_symbols,
+            )
+            latest = score.dropna(how="all").index[-1]
+            weights = target_weights(
+                score, top_n=12, cap_weight=0.10, industry_map=industry_map,
+            ).loc[latest]
+            target = {str(symbol): float(value) for symbol, value in weights.items() if value > 0}
+            current, portfolio, _priced_holdings = _ledger_weight_context(
+                ledger, panel, pd.Timestamp(latest),
+            )
+            portfolio["unscored_holdings"] = list(missing_holding_bars)
+            score_row = score.loc[latest]
+            latest_prices = panel["close"].loc[:latest].ffill().iloc[-1]
+            confidence: dict[str, float] = {}
+            for symbol in set(target) | set(current):
+                score_ready = symbol in score_row.index and pd.notna(score_row.get(symbol))
+                price = latest_prices.get(symbol)
+                price_ready = pd.notna(price) and np.isfinite(float(price)) and float(price) > 0
+                confidence[symbol] = (
+                    (1.0 if symbol in reference_symbols else 0.75)
+                    if score_ready and price_ready else 0.0
+                )
+            horizon = int(candidate["horizon"])
+            mature_date = (pd.Timestamp(latest) + pd.offsets.BDay(horizon + 1)).strftime("%Y-%m-%d")
+            actions = holding_actions(
+                target, current, evidence_valid=bool(portfolio["reliable"]),
+                confidence=confidence,
+            )
+            signal = self.store.save_shadow_signal(
+                candidate["id"], signal_date=pd.Timestamp(latest).strftime("%Y-%m-%d"),
+                mature_date=mature_date,
+                payload={
+                    "target_weights": target,
+                    "current_weights": current,
+                    "actions": actions,
+                    "portfolio": portfolio,
+                    "confidence": confidence,
+                    "reference_distribution": "csi800",
+                    "strategy_evidence": {
+                        "strategy_id": candidate["id"],
+                        "status": candidate["status"],
+                        "sealed_gates": (
+                            (candidate.get("sealed_evidence") or {}).get("gates") or {}
+                        ),
+                    },
+                    "horizon": horizon,
+                },
+            )
+            for pending in self.store.shadow_signals(candidate["id"], limit=500):
+                if pending.get("status") != "pending":
+                    continue
+                signal_date = pd.Timestamp(pending["signal_date"])
+                positions = np.flatnonzero(dates > signal_date)
+                if len(positions) <= horizon:
+                    continue
+                execution_pos, mature_pos = int(positions[0]), int(positions[horizon])
+                held = pending["payload_json"].get("target_weights") or {}
+                realized = []
+                for symbol, weight in held.items():
+                    if symbol not in open_prices.columns:
+                        continue
+                    first = open_prices.iloc[execution_pos][symbol]
+                    last = open_prices.iloc[mature_pos][symbol]
+                    if pd.notna(first) and pd.notna(last) and first > 0:
+                        realized.append(float(weight) * (float(last) / float(first) - 1.0))
+                gross = float(sum(realized))
+                trade = get_config().trade
+                cost = float(
+                    2 * trade.commission_rate + trade.stamp_tax_rate
+                    + 2 * trade.transfer_fee_rate + 2 * trade.slippage
+                )
+                benchmark = float(
+                    (open_prices.iloc[mature_pos] / open_prices.iloc[execution_pos] - 1.0).mean()
+                )
+                self.store.save_shadow_signal(
+                    candidate["id"], signal_date=pending["signal_date"],
+                    mature_date=pd.Timestamp(dates[mature_pos]).strftime("%Y-%m-%d"),
+                    payload=pending["payload_json"],
+                    realized={"gross_return": gross, "net_return": gross - cost,
+                              "net_excess_return": gross - cost - benchmark},
+                )
+            matured = [
+                item for item in self.store.shadow_signals(candidate["id"], limit=500)
+                if item.get("status") == "matured"
+            ]
+            returns = pd.Series([
+                float(item["realized_json"].get("net_excess_return") or 0) for item in matured
+            ], dtype=float)
+            nav = (1 + returns.clip(lower=-0.999)).cumprod()
+            max_dd = float((1 - nav / nav.cummax()).max()) if len(nav) else 0.0
+            sealed_dd = float(
+                ((candidate.get("sealed_evidence") or {}).get("metrics") or {}).get(
+                    "max_drawdown", 0.25
+                )
+            )
+            summary = {
+                "matured_signal_days": len(matured),
+                "net_excess_return": float(nav.iloc[-1] - 1) if len(nav) else 0.0,
+                "max_drawdown": max_dd,
+                "drawdown_within_stress": max_dd <= max(0.01, sealed_dd),
+                "coverage_degraded": False,
+            }
+            self.store.update_strategy_tracking(candidate["id"], shadow=summary)
+            signals.append({**signal, "actions": actions, "shadow_summary": summary})
+        return {"scored": len(signals), "signals": signals, "network_calls": 0}
+
+    def workbench(self, horizon: int | None = None) -> dict[str, Any]:
+        if horizon is not None and horizon not in SUPPORTED_HORIZONS:
+            raise ValueError("预测周期不受支持")
+        strategies = self.store.strategies(limit=100)
+        latest_cycle = self.store.latest_research_cycle() or {}
+        cycle_outcomes = (latest_cycle.get("result_json") or {}).get("horizon_outcomes") or {}
+        matrix = []
+        for value in SUPPORTED_HORIZONS:
+            items = [item for item in strategies if int(item["horizon"]) == value]
+            latest = items[0] if items else None
+            evidence = (latest or {}).get("sealed_evidence") or {}
+            matrix.append({
+                "horizon": value, "strategy_id": (latest or {}).get("id", ""),
+                "status": (latest or {}).get("status", "missing"),
+                "metrics": evidence.get("metrics") or {},
+                "gates": evidence.get("gates") or {},
+                "bootstrap": evidence.get("bootstrap") or {},
+                "shadow": (latest or {}).get("shadow_summary") or {},
+                "outcome": cycle_outcomes.get(str(value)) or {},
+            })
+        latest_actions: list[dict[str, Any]] = []
+        portfolio: dict[str, Any] = {}
+        for strategy in strategies:
+            signals = self.store.shadow_signals(strategy["id"], limit=1)
+            if signals:
+                payload = signals[0]["payload_json"]
+                if not portfolio and payload.get("portfolio"):
+                    portfolio = dict(payload["portfolio"])
+                latest_actions.extend([
+                    {**item, "horizon": strategy["horizon"], "strategy_id": strategy["id"]}
+                    for item in (payload.get("actions") or [])
+                ])
+        curve = {}
+        curve_source = next((item for item in strategies if item.get("id")), None)
+        if curve_source:
+            curve = self.store.strategy_return_curve(curve_source["id"])
+        return {
+            "horizons": list(SUPPORTED_HORIZONS), "matrix": matrix,
+            "funnel": self.store.overview().get("strategy_statuses", {}),
+            "strategies": strategies, "latest_actions": latest_actions,
+            "portfolio": portfolio,
+            "return_curve": curve,
+            "latest_research_cycle": latest_cycle,
+        }
+
     def run_job(self, job: dict, progress=None, cancelled=None) -> dict:
         params = dict(job["params"])
         params.pop("_scheduled", None)
         kind = job["kind"]
         if kind == "prepare_data":
-            _panel, _membership, snapshot = self._context(progress=progress, **params)
-            return {"snapshot": snapshot}
+            return self.prepare_data(progress=progress, cancelled=cancelled, **params)
         if kind == "validate":
             return self.validate_version(progress=progress, cancelled=cancelled, **params)
         if kind == "discover_genetic":
@@ -1676,6 +2412,10 @@ class LabService:
             return self.optimize_study(progress=progress, cancelled=cancelled, **params)
         if kind == "bias_audit":
             return self.bias_audit(progress=progress, **params)
+        if kind == "research_cycle":
+            return self.research_cycle(progress=progress, cancelled=cancelled, **params)
+        if kind == "shadow_score":
+            return self.shadow_score(progress=progress, **params)
         raise ValueError(f"无法执行任务: {kind}")
 
 

@@ -136,8 +136,8 @@ def _forecast(frame: pd.DataFrame, horizons: tuple[int, ...]) -> list[dict[str, 
     stability = 1.0 - min(float(valid["trend_score"].tail(10).std(ddof=0) or 0.0), 1.0)
     result = []
     for horizon in horizons:
-        if not 1 <= horizon <= 7:
-            raise ValueError("预测周期仅支持 1-7 个交易日")
+        if horizon not in {1, 3, 5, 7, 10, 20, 30}:
+            raise ValueError("预测周期仅支持 1/3/5/7/10/20/30 个交易日")
         decay = math.exp(-(horizon - 1) / 7)
         signal = score * decay
         probability_up = 1.0 / (1.0 + math.exp(-2.2 * signal))
@@ -191,8 +191,8 @@ def _forecast_validation(frame: pd.DataFrame, horizons: tuple[int, ...]) -> list
     return rows
 
 
-def analyze_bars(bars: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 7)) -> dict[str, Any]:
-    """返回当前、过去逐日状态和未来 1-7 日概率展望。"""
+def analyze_bars(bars: pd.DataFrame, horizons: tuple[int, ...] = (1, 3, 5, 7, 10, 20, 30)) -> dict[str, Any]:
+    """返回当前、过去逐日状态和未来 1–30 日概率展望。"""
     frame = indicator_frame(bars)
     past_columns = [
         "close",
@@ -234,7 +234,7 @@ def _market_bars(panel: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataF
 
 
 def analyze_market(
-    panel: dict[str, pd.DataFrame], horizons: tuple[int, ...] = (1, 3, 5, 7)
+    panel: dict[str, pd.DataFrame], horizons: tuple[int, ...] = (1, 3, 5, 7, 10, 20, 30)
 ) -> dict[str, Any]:
     """候选等权市场状态；用宽度修正单一指数可能造成的失真。"""
     bars, breadth = _market_bars(panel)

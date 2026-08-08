@@ -4,6 +4,8 @@
   const state = {
     initialized: false,
     dashboard: null,
+    workbench: null,
+    selectedHorizon: 3,
     overview: null,
     factors: [],
     jobs: [],
@@ -28,6 +30,8 @@
     controllers: new Map(),
     polling: false,
     preflightResolver: null,
+    preflightContext: null,
+    coverageRepairScope: 'critical',
   };
 
   const modelMeta = {
@@ -44,6 +48,8 @@
     production: '生产', degraded: '降级', archived: '归档', queued: '排队',
     running: '运行', interrupted: '恢复中', completed: '完成', failed: '失败',
     completed_with_warnings: '部分完成', cancelled: '取消', paused: '暂停',
+    historical_candidate: '历史候选', shadow_challenger: 'Shadow Challenger',
+    paper: 'Paper', champion: 'Champion', retired: '退役',
   };
 
   const kindLabel = {
@@ -51,6 +57,7 @@
     discover_llm: 'AI 因子发现', discover_python: 'Python AutoMiner',
     train: '模型训练', optimize: '共享多周期优化',
     bias_audit: '防偏差审计',
+    research_cycle: '每周组合研究', shadow_score: '每日影子评分',
   };
 
   const activeJobStatuses = new Set(['queued', 'running', 'paused', 'interrupted']);
@@ -87,6 +94,11 @@
   function number(value, digits = 2) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed.toFixed(digits) : '—';
+  }
+
+  function percent(value, digits = 1) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(digits)}%` : '—';
   }
 
   function formatDate(value, includeSeconds = false) {
@@ -308,10 +320,77 @@
   function resolvePreflight(confirmed) {
     const resolver = state.preflightResolver;
     state.preflightResolver = null;
+    state.preflightContext = null;
     if (document.getElementById('lab-preflight-dialog')?.open) {
       document.getElementById('lab-preflight-dialog').close();
     }
     if (resolver) resolver(Boolean(confirmed));
+  }
+
+  function coverageRepairMarkup(plan) {
+    if (!plan?.repair_symbol_count && !plan?.membership_missing) return '';
+    const counts = plan.counts || {};
+    const gaps = plan.gaps || [];
+    const providers = plan.providers || [];
+    const includeWarmup = state.coverageRepairScope === 'all';
+    const repairCount = Number(
+      includeWarmup ? plan.repair_symbol_count : plan.critical_repair_symbol_count
+    );
+    return `<section class="lab-coverage-repair" aria-labelledby="lab-coverage-title">
+      <div class="lab-coverage-head"><div><span>LOCAL POOL SURFACE</span><h4 id="lab-coverage-title">数据扇区健康度</h4></div><b>${Number(plan.repair_symbol_count || 0).toLocaleString()} / ${Number(plan.symbol_count || 0).toLocaleString()} 只待补</b></div>
+      <div class="lab-coverage-numbers"><div><span>关键缺口</span><b>${Number((counts.critical || 0) + (counts.missing || 0)).toLocaleString()}</b></div><div><span>仅预热缺口</span><b>${Number(counts.warmup || 0).toLocaleString()}</b></div><div><span>估算缺失交易日</span><b>${Number(plan.missing_session_count || 0).toLocaleString()}</b></div><div><span>PIT 成分</span><b>${plan.membership_missing ? '缺失' : '已就绪'}</b></div></div>
+      <div class="lab-coverage-map-wrap"><canvas class="lab-coverage-map" id="lab-coverage-map" role="img" aria-label="${h(`共 ${plan.symbol_count || 0} 个标的，${plan.repair_symbol_count || 0} 个存在数据缺口`)}"></canvas><div class="lab-coverage-tooltip" id="lab-coverage-tooltip" hidden></div></div>
+      <div class="lab-coverage-legend"><span><i data-health="complete"></i>完整 ${Number(counts.complete || 0)}</span><span><i data-health="warmup"></i>预热缺口 ${Number(counts.warmup || 0)}</span><span><i data-health="critical"></i>关键缺口 ${Number(counts.critical || 0)}</span><span><i data-health="missing"></i>缺失/损坏 ${Number(counts.missing || 0)}</span></div>
+      <details class="lab-gap-list"><summary>查看缺口标的与区间 <span>${gaps.length.toLocaleString()} 条</span></summary><div class="lab-gap-list-head"><span>本地只显示前 160 条；完整清单可复制。</span><button type="button" data-copy-coverage>复制完整缺口</button></div><div>${gaps.slice(0, 160).map(item => `<p><b>${h(item.symbol)}</b><span>${h((item.segments || []).map(segment => `${segment.start}→${segment.end}${segment.kind === 'warmup' ? ' 预热' : ''}`).join(' · '))}</span><small>${Number(item.missing_sessions || 0).toLocaleString()} 日</small></p>`).join('')}</div></details>
+      <div class="lab-repair-scope" role="group" aria-label="数据补齐范围"><button type="button" data-coverage-scope="critical" aria-pressed="${!includeWarmup}"><b>关键缺口</b><span>${Number(plan.critical_repair_symbol_count || 0).toLocaleString()} 只 · 推荐</span></button><button type="button" data-coverage-scope="all" aria-pressed="${includeWarmup}"><b>完整补齐</b><span>${Number(plan.repair_symbol_count || 0).toLocaleString()} 只 · 含预热段</span></button></div>
+      <div class="lab-provider-actions">${providers.map(item => {
+        const blocked = !item.available || (plan.membership_missing && !item.can_fill_membership);
+        const requests = includeWarmup ? item.estimated_requests : item.estimated_critical_requests;
+        return `<button type="button" data-coverage-repair="${h(item.id)}" ${blocked || !repairCount ? 'disabled' : ''}><span>${h(item.label)}</span><b>补齐 ${repairCount.toLocaleString()} 只</b><small>最多约 ${Number(requests || 0).toLocaleString()} 次请求 · ${h(item.reason || '')}</small></button>`;
+      }).join('')}</div>
+      <p class="lab-coverage-policy">只有点击上方数据源才会联网；原研究任务不会隐式补数。补齐结果写入本地数据池并重新生成快照。</p>
+    </section>`;
+  }
+
+  function renderCoverageMap(plan) {
+    const canvas = document.getElementById('lab-coverage-map');
+    const tooltip = document.getElementById('lab-coverage-tooltip');
+    const cells = plan?.cells || [];
+    if (!canvas || !tooltip || !cells.length) return;
+    const width = Math.max(280, canvas.parentElement.clientWidth);
+    const pitch = width < 520 ? 6 : 7;
+    const columns = Math.max(20, Math.floor(width / pitch));
+    const rows = Math.ceil(cells.length / columns);
+    const height = Math.max(34, rows * pitch);
+    const ratio = Math.min(2, window.devicePixelRatio || 1);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    const context = canvas.getContext('2d');
+    context.scale(ratio, ratio);
+    const colors = {complete:'#315f52', warmup:'#8b7435', critical:'#9e483f', missing:'#d15b4d'};
+    cells.forEach((item, index) => {
+      const x = (index % columns) * pitch;
+      const y = Math.floor(index / columns) * pitch;
+      context.fillStyle = colors[item.health] || colors.complete;
+      context.fillRect(x, y, pitch - 1, pitch - 1);
+    });
+    const locate = event => {
+      const rect = canvas.getBoundingClientRect();
+      const column = Math.floor((event.clientX - rect.left) / pitch);
+      const row = Math.floor((event.clientY - rect.top) / pitch);
+      return {item:cells[row * columns + column], x:event.clientX - rect.left, y:event.clientY - rect.top};
+    };
+    canvas.addEventListener('pointermove', event => {
+      const found = locate(event);
+      if (!found.item) { tooltip.hidden = true; return; }
+      const labels = {complete:'完整', warmup:'预热缺口', critical:'关键缺口', missing:'缺失/损坏'};
+      tooltip.innerHTML = `<b>${h(found.item.symbol)}</b><span>${h(labels[found.item.health] || found.item.health)} · 缺 ${Number(found.item.missing_sessions || 0)} 日</span><small>需要 ${h((found.item.required || []).join(' → '))}<br>本地 ${h((found.item.available || []).filter(Boolean).join(' → ') || '无')}</small>`;
+      tooltip.style.transform = `translate(${Math.min(width - 210, found.x + 10)}px,${Math.max(4, found.y - 70)}px)`;
+      tooltip.hidden = false;
+    });
+    canvas.addEventListener('pointerleave', () => { tooltip.hidden = true; });
   }
 
   function renderPreflight(report, label) {
@@ -322,15 +401,23 @@
     const estimate = report.estimate || {};
     const dataset = report.dataset || {};
     const compute = report.compute || {};
+    const providerChoiceRequired = Boolean(
+      report.operation === 'prepare_data'
+      && (report.coverage?.repair_symbol_count || report.coverage?.membership_missing)
+    );
     document.getElementById('lab-preflight-title').textContent = label || '确认运行条件';
     target.innerHTML = `<div class="lab-preflight-summary"><div><span>${report.runnable ? '可以运行' : '暂时不能运行'}</span><b>${h(dataset.universe || '本地研究')} · ${Number(dataset.symbol_count || estimate.symbols || 0).toLocaleString()} 标的</b><small>快照截至 ${h(dataset.as_of || '未知')} · ${h(report.data_policy || 'prefer_local')} · ${h(report.resource_class || 'cpu').toUpperCase()}</small></div><div class="lab-preflight-device">${h(compute.effective_device || 'cpu')}</div></div>
       <div class="lab-preflight-issues">${[
         ...blockers.map(item => ({...item, blocker:true})),
         ...warnings.map(item => ({...item, blocker:false})),
       ].map(item => `<div class="lab-preflight-issue ${item.blocker ? 'blocker' : ''}"><b>${h(item.message || item.code)}</b><p>${h(item.action || '确认后继续')}</p><small>${h(item.code || 'NOTICE')}</small></div>`).join('') || '<div class="lab-preflight-issue"><b>未发现阻塞项</b><p>任务会使用当前冻结快照和已显示的计算设备。</p><small>READY</small></div>'}</div>
+      ${coverageRepairMarkup(report.coverage)}
       <div class="lab-preflight-estimate"><span>${Number(estimate.sessions || 0).toLocaleString()} 交易日</span><span>${Number(estimate.samples || 0).toLocaleString()} 样本</span><span>特征 ${h(formatBytes(estimate.feature_bytes))}</span><span>磁盘 ${h(formatBytes(estimate.disk_bytes))}</span></div>`;
-    confirm.disabled = !report.runnable;
-    confirm.textContent = report.runnable ? '确认并运行' : '修复阻塞项后重试';
+    confirm.disabled = !report.runnable || providerChoiceRequired;
+    confirm.textContent = providerChoiceRequired
+      ? '请选择补齐数据源'
+      : report.runnable ? (warnings.length ? '使用当前快照运行' : '确认并运行') : '请先补齐数据';
+    if (report.coverage) renderCoverageMap(report.coverage);
   }
 
   async function confirmPreflight(operation, params, label) {
@@ -338,12 +425,14 @@
       const report = await request('/api/v1/lab/preflight', {
         method:'POST', body:JSON.stringify({operation, params}), requestKey:'preflight',
       });
+      state.coverageRepairScope = 'critical';
+      state.preflightContext = {operation, params:{...params}, report};
       renderPreflight(report, label || kindLabel[operation] || '任务预检');
       const dialog = document.getElementById('lab-preflight-dialog');
       if (!dialog.open) dialog.showModal();
       (report.runnable
         ? document.getElementById('lab-preflight-confirm')
-        : dialog.querySelector('[data-preflight-close]'))?.focus({preventScroll:true});
+        : dialog.querySelector('[data-coverage-repair]:not(:disabled),[data-preflight-close]'))?.focus({preventScroll:true});
       return await new Promise(resolve => {
         if (state.preflightResolver) state.preflightResolver(false);
         state.preflightResolver = resolve;
@@ -352,6 +441,50 @@
       showError('任务预检失败', error);
       return false;
     }
+  }
+
+  async function startCoverageRepair(provider, button) {
+    const context = state.preflightContext;
+    const coverage = context?.report?.coverage;
+    if (!coverage) return;
+    button.disabled = true;
+    const previous = button.innerHTML;
+    button.innerHTML = `<span>${h(button.querySelector('span')?.textContent || provider)}</span><b>正在创建补齐任务…</b><small>原研究任务不会同时运行</small>`;
+    try {
+      const job = await request('/api/v1/lab/jobs', {
+        method:'POST', body:JSON.stringify({kind:'prepare_data', params:{
+          universe:coverage.universe,
+          start:coverage.start,
+          end:coverage.end,
+          provider,
+          include_warmup:state.coverageRepairScope === 'all',
+          data_policy:'refresh_missing',
+        }}),
+      });
+      state.jobs.unshift(job);
+      resolvePreflight(false);
+      renderTaskTray();
+      renderJobTable();
+      setView('automation');
+      announce(`${provider === 'tushare' ? 'Tushare' : 'stockdb-online'} 数据补齐任务已加入队列`);
+      schedulePolling(true);
+    } catch (error) {
+      button.disabled = false;
+      button.innerHTML = previous;
+      showError('数据补齐任务未能创建', error);
+    }
+  }
+
+  async function copyCoverageGaps(button) {
+    const coverage = state.preflightContext?.report?.coverage;
+    if (!coverage) return;
+    const rows = (coverage.gaps || []).flatMap(item => (item.segments || []).map(segment =>
+      `${item.symbol}\t${segment.kind}\t${segment.start}\t${segment.end}\t${item.missing_sessions || 0}`
+    ));
+    await copyText(['symbol\tkind\tstart\tend\tmissing_sessions', ...rows].join('\n'));
+    const previous = button.textContent;
+    button.textContent = `已复制 ${rows.length} 段`;
+    window.setTimeout(() => { button.textContent = previous; }, 1600);
   }
 
   function setView(view) {
@@ -482,6 +615,88 @@
       <div class="lab-budget-number"><strong>${number(research.daily_budget_hours, 1)}</strong><span>小时 / 日</span></div>
       <div class="lab-budget-track"><i></i></div>
       <div class="lab-budget-meta"><span>${h((research.weekly_days || []).join(' · '))} 执行</span><span>${h((research.window || []).join(' → '))}</span></div>`;
+  }
+
+  function renderReturnChart(curve) {
+    const target = document.getElementById('lab-return-chart');
+    if (!target) return;
+    const horizons = [1, 3, 5, 7, 10, 20, 30];
+    const challenger = new Map((curve?.challenger || []).filter(item => !item.missing).map(item => [Number(item.horizon), item]));
+    const champion = new Map((curve?.champion || []).filter(item => !item.missing).map(item => [Number(item.horizon), item]));
+    const baseline = new Map((curve?.baseline || []).map(item => [Number(item.horizon), item]));
+    const values = [
+      ...challenger.values(), ...champion.values(), ...baseline.values(),
+    ].flatMap(item => [
+      Number(item.annual_net_excess_return || 0),
+      ...((item.ci_95 || []).map(Number)),
+    ]).filter(Number.isFinite);
+    if (!challenger.size && !champion.size) {
+      target.innerHTML = '<div class="lab-return-empty">尚无冻结后的组合收益证据。运行每周研究后，这里会显示七周期曲线。</div>';
+      return;
+    }
+    const width = 760, height = 270, left = 58, right = 22, top = 18, bottom = 38;
+    const minimum = Math.min(-0.05, ...values), maximum = Math.max(0.05, ...values);
+    const padding = Math.max(0.02, (maximum - minimum) * 0.12);
+    const low = minimum - padding, high = maximum + padding;
+    const x = horizon => left + horizons.indexOf(horizon) * (width - left - right) / (horizons.length - 1);
+    const y = value => top + (high - value) * (height - top - bottom) / (high - low);
+    const ticks = Array.from({length:5}, (_, index) => low + index * (high - low) / 4);
+    const seriesPath = (series, key) => horizons.filter(item => series.has(item)).map((horizon, index) => {
+      const value = Number(series.get(horizon)[key] || 0);
+      return `${index ? 'L' : 'M'}${x(horizon).toFixed(1)},${y(value).toFixed(1)}`;
+    }).join(' ');
+    const grid = ticks.map(value => `<line class="grid" x1="${left}" x2="${width-right}" y1="${y(value)}" y2="${y(value)}"/><text class="axis-label" x="${left-8}" y="${y(value)+3}" text-anchor="end">${(value*100).toFixed(0)}%</text>`).join('');
+    const labels = horizons.map(value => `<text class="axis-label" x="${x(value)}" y="${height-13}" text-anchor="middle">${value}D</text>`).join('');
+    const confidence = horizons.filter(value => challenger.has(value)).map(value => {
+      const item = challenger.get(value), ci = item.ci_95 || [0, 0];
+      return `<line class="confidence" x1="${x(value)}" x2="${x(value)}" y1="${y(Number(ci[1] || 0))}" y2="${y(Number(ci[0] || 0))}"/>`;
+    }).join('');
+    const points = horizons.filter(value => challenger.has(value)).map(value => {
+      const item = challenger.get(value), annual = Number(item.annual_net_excess_return || 0);
+      const title = `${value}日 · 年化净超额 ${percent(annual)} · 净IR ${number(item.net_information_ratio)} · 最大回撤 ${percent(item.max_drawdown)} · 换手 ${percent(item.turnover)} · 成本 ${percent(item.cost_annual)} · 样本 ${item.samples || 0}`;
+      return `<circle class="point" cx="${x(value)}" cy="${y(annual)}" r="4.5"><title>${h(title)}</title></circle>`;
+    }).join('');
+    target.innerHTML = `<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">${grid}${labels}<line class="grid" x1="${left}" x2="${width-right}" y1="${y(0)}" y2="${y(0)}"/>${confidence}<path class="baseline-line" d="${seriesPath(baseline, 'annual_net_excess_return')}"/><path class="champion-line" d="${seriesPath(champion, 'annual_net_excess_return')}"/><path class="challenger-line" d="${seriesPath(challenger, 'annual_net_excess_return')}"/>${points}</svg>`;
+  }
+
+  function renderStrategyWorkbench() {
+    const workbench = state.workbench || {horizons:[1,3,5,7,10,20,30], matrix:[]};
+    const matrix = workbench.matrix || [];
+    const selected = matrix.find(item => Number(item.horizon) === Number(state.selectedHorizon)) || matrix[0] || {};
+    state.selectedHorizon = Number(selected.horizon || state.selectedHorizon);
+    document.getElementById('lab-strategy-horizons').innerHTML = (workbench.horizons || []).map(value =>
+      `<button type="button" role="tab" data-strategy-horizon="${value}" aria-selected="${Number(value) === state.selectedHorizon}">${value} 日</button>`
+    ).join('');
+    const metrics = selected.metrics || {};
+    const failures = selected.gates?.failures || [];
+    const promotion = selected.status === 'shadow_challenger'
+      ? `<button class="lab-button lab-button-quiet" type="button" data-promote-strategy="${h(selected.strategy_id)}" data-promotion-target="paper">申请进入 Paper</button>`
+      : selected.status === 'paper'
+        ? `<button class="lab-button lab-button-quiet" type="button" data-promote-strategy="${h(selected.strategy_id)}" data-promotion-target="champion">申请成为 Champion</button>` : '';
+    document.getElementById('lab-horizon-evidence').innerHTML = selected.strategy_id ? `
+      <div class="lab-evidence-status"><div><small>${state.selectedHorizon} 日独立证据</small><b>${h(statusLabel[selected.status] || selected.status)}</b></div><span class="${h(selected.status)}">${selected.gates?.passed ? 'SEALED PASS' : 'NOT PROMOTABLE'}</span></div>
+      <div class="lab-evidence-stats"><div><span>年化净超额</span><b>${percent(metrics.net_annual_excess_return)}</b></div><div><span>净 IR</span><b>${number(metrics.net_information_ratio)}</b></div><div><span>最大回撤</span><b>${percent(metrics.max_drawdown)}</b></div><div><span>年化成本</span><b>${percent(metrics.cost_annual)}</b></div><div><span>正收益折</span><b>${Number(metrics.positive_folds || 0)} / 4</b></div><div><span>影子成熟日</span><b>${Number(selected.shadow?.matured_signal_days || 0)}</b></div></div>
+      <p class="lab-evidence-gate ${selected.gates?.passed ? 'pass' : ''}">${selected.gates?.passed ? '密封门槛通过；自动进入影子，Paper 与 Champion 仍需人工确认。' : h(failures[0] || '该周期尚无可晋级组合，不能借用其他周期证据。')}</p>${promotion}` : '<div class="lab-empty">该周期尚无 3–8 个去相关合格因子，不能构建可信组合。</div>';
+    const funnel = workbench.funnel || {};
+    const funnelStages = [
+      ['历史候选', funnel.historical_candidate || 0], ['Shadow', funnel.shadow_challenger || 0],
+      ['Paper', funnel.paper || 0], ['Champion', funnel.champion || 0],
+      ['降级/退役', (funnel.degraded || 0) + (funnel.retired || 0)],
+    ];
+    document.getElementById('lab-strategy-funnel').innerHTML = funnelStages.map(item => `<div><b>${item[1]}</b><span>${item[0]}</span></div>`).join('');
+    const portfolio = workbench.portfolio || {};
+    const actionSource = document.getElementById('lab-action-source');
+    if (actionSource) {
+      actionSource.textContent = portfolio.source === 'local_real_ledger'
+        ? `${portfolio.reliable ? '本地真实账本' : '本地账本需复核'} · ${Number(portfolio.holding_count || 0)} 只 · ${portfolio.valuation_date || '未知日期'}`
+        : '等待每日评分读取本地账本';
+      actionSource.title = (portfolio.warnings || []).join('；');
+    }
+    const actions = (workbench.latest_actions || []).filter(item => Number(item.horizon) === state.selectedHorizon);
+    const actionLabels = {buy:'买入', add:'加仓', hold:'持有', reduce:'减仓', exit:'退出', review:'人工复核'};
+    document.getElementById('lab-action-list').innerHTML = actions.length ? actions.map(item => `<div class="lab-action-row"><b>${h(item.symbol)}</b><strong class="${h(item.action)}">${h(actionLabels[item.action] || item.action)}</strong><span>当前 ${percent(item.current_weight)}</span><span>目标 ${percent(item.target_weight)}</span><span>差异 ${percent(item.difference)}</span></div>`).join('') : '<div class="lab-empty">该周期尚无最新影子动作；数据不足时不会强制退出。</div>';
+    document.getElementById('lab-horizon-matrix').innerHTML = matrix.map(item => `<button type="button" class="lab-horizon-cell ${Number(item.horizon) === state.selectedHorizon ? 'active' : ''}" data-strategy-horizon="${item.horizon}"><b>${item.horizon}D</b><span>${h(statusLabel[item.status] || item.status)}</span><small>${item.strategy_id ? `${percent(item.metrics?.net_annual_excess_return)} · IR ${number(item.metrics?.net_information_ratio)}` : h(item.outcome?.reason || '等待组合')}</small></button>`).join('');
+    renderReturnChart(workbench.return_curve || {});
   }
 
   function syncResearchForms() {
@@ -1071,8 +1286,12 @@
   }
 
   async function refreshOverview() {
-    const dashboard = await request('/api/v1/lab/dashboard', {requestKey:'dashboard'});
+    const [dashboard, workbench] = await Promise.all([
+      request('/api/v1/lab/dashboard', {requestKey:'dashboard'}),
+      request(`/api/v1/lab/workbench?horizon=${state.selectedHorizon}`, {requestKey:'workbench'}),
+    ]);
     state.dashboard = dashboard;
+    state.workbench = workbench;
     state.overview = {
       ...(dashboard.summary || {}),
       capabilities:dashboard.readiness || {},
@@ -1085,6 +1304,7 @@
     renderCapabilities();
     renderSnapshot();
     renderOverview();
+    renderStrategyWorkbench();
     renderExperiments();
     renderJobTable();
     renderStudyList();
@@ -1118,6 +1338,9 @@
         terminalJobStatuses.has(job.status) && activeJobStatuses.has(previous.get(job.id))
       );
       if (finished) announce(`${kindLabel[finished.kind] || finished.kind}${statusLabel[finished.status] || finished.status}`);
+      if (finished && ['research_cycle', 'shadow_score'].includes(finished.kind)) {
+        await refreshOverview();
+      }
       if (state.jobs.some(job => job.kind === 'optimize' && activeJobStatuses.has(job.status))) await refreshStudies();
       if (state.selectedJobId) await refreshJobDetail();
     } catch (error) {
@@ -1177,6 +1400,27 @@
       document.getElementById(id)?.addEventListener('input', () => { state.formsDirty = true; });
     }
     document.getElementById('tab-lab').addEventListener('click', async event => {
+      const scopeButton = event.target.closest('[data-coverage-scope]');
+      if (scopeButton) {
+        state.coverageRepairScope = scopeButton.dataset.coverageScope;
+        const context = state.preflightContext;
+        if (context) renderPreflight(
+          context.report, document.getElementById('lab-preflight-title')?.textContent,
+        );
+        document.querySelector(`[data-coverage-scope="${state.coverageRepairScope}"]`)?.focus({preventScroll:true});
+        return;
+      }
+      const repairButton = event.target.closest('[data-coverage-repair]');
+      if (repairButton) {
+        await startCoverageRepair(repairButton.dataset.coverageRepair, repairButton);
+        return;
+      }
+      const copyCoverage = event.target.closest('[data-copy-coverage]');
+      if (copyCoverage) {
+        try { await copyCoverageGaps(copyCoverage); }
+        catch (error) { showError('复制缺口清单失败', error); }
+        return;
+      }
       if (event.target.closest('[data-preflight-close]')) {
         resolvePreflight(false);
         return;
@@ -1196,6 +1440,43 @@
       }
       const viewButton = event.target.closest('[data-lab-view],[data-lab-go]');
       if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
+      const horizonButton = event.target.closest('[data-strategy-horizon]');
+      if (horizonButton) {
+        state.selectedHorizon = Number(horizonButton.dataset.strategyHorizon);
+        renderStrategyWorkbench();
+      }
+      if (event.target.closest('[data-lab-action="research-cycle"]')) {
+        const research = state.overview?.research || {};
+        try {
+          const job = await enqueue('research_cycle', {
+            universe:research.universe || 'csi800', start:research.start || '2015-01-01',
+            end:new Date().toISOString().slice(0, 10),
+          });
+          if (job) setView('automation');
+        } catch (error) { showError('每周研究任务未能创建', error); }
+      }
+      if (event.target.closest('[data-lab-action="shadow-score"]')) {
+        const research = state.overview?.research || {};
+        try {
+          await enqueue('shadow_score', {
+            universe:research.universe || 'csi800', start:research.start || '2015-01-01',
+            end:new Date().toISOString().slice(0, 10),
+          });
+        } catch (error) { showError('每日影子评分未能创建', error); }
+      }
+      const promotion = event.target.closest('[data-promote-strategy]');
+      if (promotion) {
+        const target = promotion.dataset.promotionTarget;
+        const reason = window.prompt(`请输入进入 ${target === 'paper' ? 'Paper' : 'Champion'} 的人工确认理由：`, '已核对密封证据与实际跟踪结果');
+        if (!reason) return;
+        try {
+          await request(`/api/v1/lab/strategies/${promotion.dataset.promoteStrategy}/promotions`, {
+            method:'POST', body:JSON.stringify({target, actor:'web', reason}),
+          });
+          await refreshOverview();
+          announce('策略生命周期已更新');
+        } catch (error) { showError('策略晋级未通过', error); }
+      }
       if (event.target.closest('[data-lab-action="create-factor"]')) {
         openFactorDialog();
       }

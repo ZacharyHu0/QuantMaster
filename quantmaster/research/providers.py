@@ -72,7 +72,7 @@ def compute_core_factors(bars: pd.DataFrame, kernel: Kernel | None = None) -> pd
 
 
 def compute_forward_labels(
-    bars: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 7),
+    bars: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 7, 10, 20, 30),
 ) -> pd.DataFrame:
     if bars.empty:
         return pd.DataFrame(columns=["trade_date", "symbol"])

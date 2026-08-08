@@ -177,8 +177,8 @@ def rule_signal_bundle(
     min_periods: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
     """Return adaptive rule score, known-at-date weights, and ranked features."""
-    if horizon not in {1, 3, 5, 7}:
-        raise ValueError("horizon 只支持 1/3/5/7 日")
+    if horizon not in {1, 3, 5, 7, 10, 20, 30}:
+        raise ValueError("horizon 只支持 1/3/5/7/10/20/30 日")
     close = panel["close"].sort_index().astype(float)
     features = _rule_features(panel)
     ranked = {name: _rank(values.reindex_like(close)) for name, values in features.items()}
@@ -339,6 +339,31 @@ def resolve_policy(
                 continue
             if role not in selected or rank > selected[role][0]:
                 selected[role] = (rank, deployment, component)
+        champions = (
+            store.strategies(horizon=horizon, status="champion", limit=1)
+            if hasattr(store, "strategies") else []
+        )
+        if champions:
+            champion = champions[0]
+            nested = []
+            for item in champion.get("components") or []:
+                version = store.version(str(item.get("version_id") or ""))
+                if version is None:
+                    continue
+                nested.append({
+                    "version_id": version["id"], "weight": float(item.get("weight") or 0),
+                    "spec": version.get("spec") or {}, "name": version.get("name") or "因子",
+                })
+            if nested:
+                component = {
+                    "role": "factor", "name": champion["name"], "kind": "composite",
+                    "status": "active", "strategy_id": champion["id"],
+                    "version_id": champion["id"], "content_hash": _content_hash(nested),
+                    "scope": "a_share", "universe": "csi800", "horizon": horizon,
+                    "spec": {"kind": "composite", "components": nested},
+                    "validation": champion.get("sealed_evidence") or {},
+                }
+                selected["factor"] = (99, {}, component)
         components.extend(value[2] for value in selected.values())
     except Exception:
         logger.warning("Quant Lab Champion 解析失败，已使用规则基线", exc_info=True)
@@ -484,6 +509,33 @@ def _python_component(
     return 100 * _rank(values * int(spec.get("direction", 1) or 1))
 
 
+def _composite_component(
+    panel: dict[str, pd.DataFrame], component: dict[str, Any],
+) -> pd.DataFrame:
+    spec = component.get("spec") or {}
+    combined: pd.DataFrame | None = None
+    total = 0.0
+    seen: set[str] = set()
+    for nested in spec.get("components") or []:
+        version_id = str(nested.get("version_id") or "")
+        if not version_id or version_id in seen:
+            continue
+        seen.add(version_id)
+        nested_component = {"spec": nested.get("spec") or {}, "horizon": component.get("horizon")}
+        kind = str(nested_component["spec"].get("kind") or "expression")
+        values = (
+            _learned_component(panel, nested_component) if kind == "learned"
+            else _python_component(panel, nested_component) if kind == "python"
+            else _expression_component(panel, nested_component)
+        )
+        weight = float(nested.get("weight") or 0)
+        combined = values * weight if combined is None else combined.add(values * weight, fill_value=0)
+        total += weight
+    if combined is None or total <= 0:
+        raise ValueError("Champion 组合缺少可执行成分")
+    return 100 * _rank(combined / total)
+
+
 def hybrid_score_bundle(
     panel: dict[str, pd.DataFrame],
     *,
@@ -512,6 +564,7 @@ def hybrid_score_bundle(
             values = (
                 _learned_component(panel, component) if role == "ml"
                 else _python_component(panel, component) if spec_kind == "python"
+                else _composite_component(panel, component) if spec_kind == "composite"
                 else _expression_component(panel, component)
             ).reindex_like(close)
             if values.dropna(how="all").empty:
@@ -713,9 +766,8 @@ def hybrid_daily_selection(
         bundle["model_snapshot"] = snapshot
     from quantmaster.decision.position_control import build_position_plan
 
-    rebalance = pd.Series(False, index=scores.index)
-    rebalance.iloc[::horizon] = True
-    rebalance.loc[date] = True
+    # Horizon is the forecast label; target weights still roll every session.
+    rebalance = pd.Series(True, index=scores.index)
     plan = build_position_plan(
         panel,
         bundle,
@@ -883,8 +935,8 @@ class HybridDecisionStrategy:
         policy_snapshot: dict[str, Any] | None = None,
         cap_weight: float = 0.25,
     ):
-        if top_n < 1 or holding_days not in {1, 3, 5, 7}:
-            raise ValueError("top_n 必须为正数，holding_days 只支持 1/3/5/7")
+        if top_n < 1 or holding_days not in {1, 3, 5, 7, 10, 20, 30}:
+            raise ValueError("top_n 必须为正数，holding_days 只支持 1/3/5/7/10/20/30")
         profile_definition(profile)
         self.top_n = top_n
         self.holding_days = holding_days
@@ -906,9 +958,9 @@ class HybridDecisionStrategy:
         weights = selected.div(counts, axis=0)
         exposure = continuous_market_exposure(panel, self.profile)
         weights = weights.mul(exposure, axis=0).clip(upper=self.cap_weight)
-        mask = pd.Series(False, index=scores.index)
-        mask.iloc[::self.holding_days] = True
-        return weights.where(mask, other=float("nan"))
+        due = pd.Series(False, index=weights.index)
+        due.iloc[::self.holding_days] = True
+        return weights.where(due, other=float("nan"))
 
     def signal_bundle(
         self,
@@ -933,10 +985,7 @@ class HybridDecisionStrategy:
             )
         from quantmaster.decision.position_control import build_position_plan
 
-        rebalance = pd.Series(False, index=bundle["score"].index)
-        rebalance.iloc[::self.holding_days] = True
-        if force_latest and len(rebalance.index):
-            rebalance.iloc[-1] = True
+        rebalance = pd.Series(True, index=bundle["score"].index)
         plan = build_position_plan(
             panel,
             bundle,

@@ -150,7 +150,7 @@ def built_in_registry() -> ProviderRegistry:
         provider="forward_returns", description=f"未来 {horizon} 个交易日研究价格收益。",
         tags=("builtin", "label", "point-in-time"), lookahead=horizon,
         dependencies=(DataRequest("bars", ("research_price",), lookahead_sessions=horizon),),
-    ) for horizon in (1, 3, 5, 7))
+    ) for horizon in (1, 3, 5, 7, 10, 20, 30))
     registry.register(FactorProviderSpec(
         id="forward_returns", outputs=label_outputs,
         dependencies=(DataRequest("bars", ("research_price",), lookahead_sessions=7),),

@@ -95,7 +95,7 @@ class DecisionStrategySpec(ContractModel):
     kind: Literal["decision"] = "decision"
     profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
     top_n: int = Field(5, ge=1, le=50)
-    holding_days: Literal[1, 3, 5, 7] = 3
+    holding_days: Literal[1, 3, 5, 7, 10, 20, 30] = 3
     cap_weight: float = Field(0.25, gt=0, le=1)
     policy_snapshot: dict[str, Any] = Field(default_factory=dict)
 
@@ -105,7 +105,7 @@ class LabVersionStrategySpec(ContractModel):
 
     kind: Literal["lab_version"] = "lab_version"
     version_id: str = Field(min_length=1, max_length=64)
-    horizon: Literal[1, 3, 5, 7] = 3
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
     top_n: int = Field(20, ge=1, le=200)
     rebalance_days: int = Field(3, ge=1, le=20)
     cap_weight: float = Field(0.10, gt=0, le=1)

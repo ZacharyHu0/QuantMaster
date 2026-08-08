@@ -474,7 +474,25 @@ class BarStore:
                     and int(row.get("file_mtime_ns") or 0) == stat.st_mtime_ns
                 )
                 if unchanged:
-                    frame = self._normalize_frame_index(pd.read_parquet(path, columns=columns))
+                    if columns:
+                        try:
+                            import pyarrow.parquet as parquet
+
+                            source = parquet.ParquetFile(path, memory_map=True)
+                            pandas_meta = source.schema_arrow.pandas_metadata or {}
+                            index_columns = [
+                                item for item in pandas_meta.get("index_columns", [])
+                                if isinstance(item, str)
+                            ]
+                            projected = list(dict.fromkeys([*columns, *index_columns]))
+                            frame = source.read(
+                                columns=projected, use_threads=False,
+                            ).to_pandas()
+                        except (ImportError, OSError, ValueError, TypeError):
+                            frame = pd.read_parquet(path, columns=columns)
+                    else:
+                        frame = pd.read_parquet(path)
+                    frame = self._normalize_frame_index(frame)
                     if columns is None and int(row.get("row_count") or 0) not in {0, len(frame)}:
                         unchanged = False
                     else:
@@ -494,7 +512,7 @@ class BarStore:
 
         frames: dict[str, pd.DataFrame] = {}
         failures: dict[str, str] = {}
-        workers = min(8, max(1, int(max_workers)), max(1, len(ordered)))
+        workers = min(16, max(1, int(max_workers)), max(1, len(ordered)))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-local") as executor:
             futures = {executor.submit(one, symbol): symbol for symbol in ordered}
             for future in as_completed(futures):

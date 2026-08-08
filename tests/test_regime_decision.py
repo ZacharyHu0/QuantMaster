@@ -29,9 +29,11 @@ def test_uptrend_regime_has_macd_and_probabilistic_future():
     report = analyze_bars(bars)
     assert report["current"]["state"] in {"up", "strong_up"}
     assert report["current"]["macd"] is not None
-    assert [row["horizon_days"] for row in report["future"]] == [1, 3, 5, 7]
+    assert [row["horizon_days"] for row in report["future"]] == [1, 3, 5, 7, 10, 20, 30]
     assert all(0 <= row["probability_up"] <= 1 for row in report["future"])
-    assert all(row["samples"] > 80 for row in report["forecast_validation"])
+    validation = {row["horizon_days"]: row for row in report["forecast_validation"]}
+    assert all(validation[horizon]["samples"] > 80 for horizon in (1, 3, 5, 7))
+    assert all(row["samples"] > 0 for row in report["forecast_validation"])
     assert all(0 <= row["direction_accuracy"] <= 1 for row in report["forecast_validation"])
     assert all(0 <= row["brier_score"] <= 1 for row in report["forecast_validation"])
     assert "确定" in report["forecast_note"]

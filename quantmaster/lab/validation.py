@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.factors.analysis import (
     annualize,
     forward_returns,
@@ -22,6 +23,11 @@ from quantmaster.lab.robustness import (
     penetration_analysis,
     robustness_summary,
     walk_forward_robustness,
+)
+from quantmaster.lab.strategy import (
+    atomic_horizon_gate,
+    execute_daily_targets,
+    moving_block_return_interval,
 )
 
 
@@ -112,7 +118,7 @@ def validate_factor_values(
     close: pd.DataFrame,
     *,
     name: str = "factor",
-    horizons: tuple[int, ...] = (1, 3, 5, 7),
+    horizons: tuple[int, ...] = SUPPORTED_HORIZONS,
     folds: int = 4,
     membership: pd.DataFrame | None = None,
     approved_values: dict[str, pd.DataFrame] | None = None,
@@ -120,6 +126,8 @@ def validate_factor_values(
     panel: dict[str, pd.DataFrame] | None = None,
     parameter_variants: dict[str, pd.DataFrame] | None = None,
     robustness_seed: int = 42,
+    open_prices: pd.DataFrame | None = None,
+    essential_only: bool = False,
 ) -> dict[str, Any]:
     """对表达式、遗传、LLM 和学习型因子使用同一套验证口径。"""
     values, prices = factor_values.align(close, join="inner")
@@ -137,6 +145,7 @@ def validate_factor_values(
     one_way_cost = trade.commission_rate + trade.transfer_fee_rate + trade.slippage
     sell_extra = trade.stamp_tax_rate
     horizon_reports: dict[str, dict] = {}
+    essential_execution_cache: dict[int, dict[str, Any]] = {}
     for horizon in horizons:
         oos, fold_reports, direction, discovery = _walk_forward_ic(
             values, prices, horizon, folds
@@ -160,34 +169,71 @@ def validate_factor_values(
             float(np.corrcoef(np.arange(1, len(annual_values) + 1), annual_values)[0, 1])
             if np.std(annual_values) > 0 else 0.0
         )
-        monte_carlo = monte_carlo_block_bootstrap(
-            oos,
-            net_long_short,
-            horizon=horizon,
-            seed=robustness_seed,
-        )
-        parameter_report = parameter_sensitivity(
-            values,
-            parameter_variants,
-            prices,
-            horizon=horizon,
-            direction=direction,
-            oos_index=oos.index,
-        )
         wfa = walk_forward_robustness(fold_reports)
-        penetration = penetration_analysis(
-            oriented,
-            prices,
-            oos,
-            horizon=horizon,
-            panel=panel,
-        )
-        robustness = robustness_summary(
-            monte_carlo=monte_carlo,
-            parameter_report=parameter_report,
-            walk_forward=wfa,
-            penetration=penetration,
-        )
+        if essential_only:
+            robustness = {
+                "passed": bool(wfa.get("passed", True)),
+                "failed_tests": [] if wfa.get("passed", True) else ["walk_forward"],
+                "essential_only": True,
+                "walk_forward": wfa,
+            }
+        else:
+            monte_carlo = monte_carlo_block_bootstrap(
+                oos,
+                net_long_short,
+                horizon=horizon,
+                seed=robustness_seed,
+            )
+            parameter_report = parameter_sensitivity(
+                values,
+                parameter_variants,
+                prices,
+                horizon=horizon,
+                direction=direction,
+                oos_index=oos.index,
+            )
+            penetration = penetration_analysis(
+                oriented,
+                prices,
+                oos,
+                horizon=horizon,
+                panel=panel,
+            )
+            robustness = robustness_summary(
+                monte_carlo=monte_carlo,
+                parameter_report=parameter_report,
+                walk_forward=wfa,
+                penetration=penetration,
+            )
+        execution: dict[str, Any] = {}
+        execution_bootstrap: dict[str, Any] = {}
+        if open_prices is not None:
+            execution_result = essential_execution_cache.get(direction)
+            if execution_result is None or not essential_only:
+                execution_index = (
+                    oriented.index if essential_only
+                    else oos.index.intersection(oriented.index)
+                )
+                execution_panel = {
+                    key: frame.reindex(index=execution_index, columns=oriented.columns)
+                    for key, frame in (panel or {}).items()
+                    if isinstance(frame, pd.DataFrame)
+                }
+                execution_panel["open"] = open_prices.reindex(
+                    index=execution_index, columns=oriented.columns,
+                )
+                execution_result = execute_daily_targets(
+                    oriented.reindex(execution_index), execution_panel,
+                    horizon=horizon, top_n=12, cap_weight=0.10,
+                )
+                if essential_only:
+                    essential_execution_cache[direction] = execution_result
+            execution = execution_result["metrics"]
+            if not essential_only:
+                execution_bootstrap = moving_block_return_interval(
+                    execution_result["daily_excess"], block_days=max(20, 2 * horizon),
+                    seed=robustness_seed + horizon,
+                )
         horizon_reports[str(horizon)] = {
             "horizon": horizon,
             "direction": direction,
@@ -208,11 +254,16 @@ def validate_factor_values(
             "monotonicity": _finite(monotonicity),
             "folds": fold_reports,
             "robustness": robustness,
+            "execution": execution,
+            "bootstrap": execution_bootstrap,
         }
 
     q_values = benjamini_hochberg([item["p_value"] for item in horizon_reports.values()])
     for item, q_value in zip(horizon_reports.values(), q_values, strict=True):
         item["q_value"] = _finite(q_value, 1.0)
+        item["gates"] = atomic_horizon_gate(
+            item, coverage=coverage, research_quality=research_quality,
+        )
 
     def score(item: dict) -> float:
         novelty = max(0.0, 1.0 - abs(max_corr))
@@ -230,37 +281,13 @@ def validate_factor_values(
         item["candidate_score"] = score(item)
     best = max(horizon_reports.values(), key=lambda item: item["candidate_score"])
 
-    hard_failures = []
-    if research_quality != "production":
-        hard_failures.append("候选不是 point-in-time 生产级快照")
-    if coverage < 0.70:
-        hard_failures.append(f"因子覆盖率 {coverage:.1%} 低于 70%")
-    if best["oos_days"] < 252:
-        hard_failures.append(f"样本外仅 {best['oos_days']} 个交易日，少于 252 日")
-    soft_failures = []
-    if abs(best["oos_rank_ic"]) < 0.02:
-        soft_failures.append("样本外 |RankIC| 低于 0.02")
-    if abs(best["oos_icir"]) < 0.20:
-        soft_failures.append("样本外 |ICIR| 低于 0.20")
-    if best["retention"] < 0.50:
-        soft_failures.append("样本外 IC 保留率低于 50%")
-    if best["fold_same_sign"] < 0.75:
-        soft_failures.append("少于 3/4 walk-forward 分段同号")
-    if best["q_value"] > 0.10:
-        soft_failures.append("多重检验校正 q-value 高于 0.10")
-    if best["edge_cost_ratio"] < 2.0:
-        soft_failures.append("估算毛收益不足交易成本的 2 倍")
-    if abs(max_corr) >= 0.70:
-        soft_failures.append(f"与生产因子 {max_corr_name} 的相关性达到 {max_corr:.2f}")
+    eligible_horizons = [
+        int(item["horizon"]) for item in horizon_reports.values()
+        if item["gates"]["passed"]
+    ]
+    common_hard = list(best["gates"]["hard_failures"])
+    common_soft = [] if eligible_horizons else ["没有任何具体周期通过原子因子门槛"]
     best_robustness = best["robustness"]
-    robustness_labels = {
-        "monte_carlo": "Monte Carlo 区块重采样",
-        "parameter_sensitivity": "参数敏感性",
-        "walk_forward": "WFA 稳定性",
-        "penetration": "穿透性测试",
-    }
-    for failed_test in best_robustness["failed_tests"]:
-        soft_failures.append(f"{robustness_labels.get(failed_test, failed_test)}未通过")
 
     return {
         "factor": name,
@@ -269,12 +296,13 @@ def validate_factor_values(
         "max_existing_factor": max_corr_name,
         "best_horizon": best["horizon"],
         "candidate_score": best["candidate_score"],
+        "eligible_horizons": eligible_horizons,
         "horizons": horizon_reports,
         "robustness": best_robustness,
         "gates": {
-            "passed": not hard_failures and not soft_failures,
-            "hard_failures": hard_failures,
-            "soft_failures": soft_failures,
-            "override_allowed": not hard_failures,
+            "passed": bool(eligible_horizons) and not common_hard,
+            "hard_failures": common_hard,
+            "soft_failures": common_soft,
+            "override_allowed": not common_hard,
         },
     }

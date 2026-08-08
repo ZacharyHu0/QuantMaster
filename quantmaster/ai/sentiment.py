@@ -11,6 +11,79 @@ from quantmaster.config import get_config
 from quantmaster.factors.base import Factor, PanelDict
 
 
+_MINIMUM_RESEARCH_SESSIONS = 756 + 30 + 252
+_MINIMUM_HISTORY_COVERAGE = 0.70
+
+
+def news_sentiment_readiness(
+    start: str,
+    end: str,
+    *,
+    store: NewsStore | None = None,
+    minimum_sessions: int = _MINIMUM_RESEARCH_SESSIONS,
+    minimum_coverage: float = _MINIMUM_HISTORY_COVERAGE,
+) -> dict:
+    """Assess local PIT news history for research without contacting the network."""
+    requested = pd.bdate_range(start, end)
+    database = get_config().data_root / "news.sqlite"
+    if store is None and not database.is_file():
+        return {
+            "ready": False,
+            "available_start": "",
+            "available_end": "",
+            "event_count": 0,
+            "history_sessions": 0,
+            "overlap_sessions": 0,
+            "requested_sessions": len(requested),
+            "coverage": 0.0,
+            "minimum_sessions": int(minimum_sessions),
+            "minimum_coverage": float(minimum_coverage),
+        }
+    coverage = (store or NewsStore(database)).factor_coverage(
+        get_config().news.factor_min_confidence,
+    )
+    first_epoch = float(coverage.get("first_seen_at") or 0)
+    last_epoch = float(coverage.get("last_seen_at") or 0)
+    if not first_epoch or not last_epoch:
+        available = pd.DatetimeIndex([])
+        overlap = pd.DatetimeIndex([])
+        available_start = available_end = ""
+    else:
+        first = pd.Timestamp(first_epoch, unit="s", tz="UTC").tz_convert(
+            "Asia/Shanghai",
+        ).tz_localize(None).normalize()
+        last = pd.Timestamp(last_epoch, unit="s", tz="UTC").tz_convert(
+            "Asia/Shanghai",
+        ).tz_localize(None).normalize()
+        available = pd.bdate_range(first, last)
+        overlap_start = max(first, requested[0]) if len(requested) else first
+        overlap_end = min(last, requested[-1]) if len(requested) else last
+        overlap = (
+            pd.bdate_range(overlap_start, overlap_end)
+            if overlap_start <= overlap_end else pd.DatetimeIndex([])
+        )
+        available_start = first.strftime("%Y-%m-%d")
+        available_end = last.strftime("%Y-%m-%d")
+    ratio = len(overlap) / max(1, len(requested))
+    history_sessions = len(available)
+    return {
+        "ready": (
+            int(coverage.get("event_count") or 0) > 0
+            and history_sessions >= int(minimum_sessions)
+            and ratio >= float(minimum_coverage)
+        ),
+        "available_start": available_start,
+        "available_end": available_end,
+        "event_count": int(coverage.get("event_count") or 0),
+        "history_sessions": history_sessions,
+        "overlap_sessions": len(overlap),
+        "requested_sessions": len(requested),
+        "coverage": round(ratio, 6),
+        "minimum_sessions": int(minimum_sessions),
+        "minimum_coverage": float(minimum_coverage),
+    }
+
+
 def sentiment_panel(
     store: NewsStore | None = None,
     halflife_days: float = 3.0,

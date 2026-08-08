@@ -201,6 +201,7 @@ def test_future_labels_use_only_realized_sessions_and_market_baseline(service) -
     service.evaluate_pending(realized)
     labels = service.store.labels(snapshot.snapshot_id)
 
+    # Seven realized sessions mature only the 1/3/5/7-day labels.
     assert [item["horizon"] for item in labels] == [1, 3, 5, 7]
     assert all(item["baseline"] == "all_market" for item in labels)
     assert all(item["market_mean_return"] is not None for item in labels)

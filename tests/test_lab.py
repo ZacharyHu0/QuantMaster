@@ -550,7 +550,7 @@ def test_learned_model_is_shadow_candidate_until_manual_champion_promotion(
         "max_existing_correlation": 0.31,
         "horizons": {"3": {
             "horizon": 3, "oos_rank_ic": 0.052, "oos_icir": 0.61,
-            "q_value": 0.03, "folds": [],
+            "q_value": 0.03, "folds": [], "gates": {"passed": True},
         }},
         "gates": {
             "passed": True, "hard_failures": [], "soft_failures": [],
@@ -607,8 +607,8 @@ def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     close = panel["close"]
     values = close.pct_change(5, fill_method=None)
     report = validate_factor_values(values, close, name="momentum", research_quality="production")
-    assert report["best_horizon"] in {1, 3, 5, 7}
-    assert len(report["horizons"]) == 4
+    assert report["best_horizon"] in {1, 3, 5, 7, 10, 20, 30}
+    assert len(report["horizons"]) == 7
     assert all(len(item["folds"]) == 4 for item in report["horizons"].values())
     assert set(report["robustness"]["failed_tests"]).issubset({
         "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",

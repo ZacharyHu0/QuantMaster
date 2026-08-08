@@ -924,7 +924,7 @@ class AfterCloseService:
                     )
                 except (ImportError, OSError, RuntimeError, TypeError, ValueError):
                     csi_symbols = set()
-            for horizon in (1, 3, 5, 7):
+            for horizon in (1, 3, 5, 7, 10, 20, 30):
                 if (
                     horizon in existing
                     and (not csi_symbols or existing[horizon].get("csi800_mean_return") is not None)

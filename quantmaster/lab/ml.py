@@ -374,8 +374,8 @@ def make_indexed_samples(
     minimum_coverage: float = 0.80,
 ) -> IndexedSamples:
     """Create compact indices; sequence windows are sliced only for the active batch."""
-    if horizon not in {1, 3, 5, 7}:
-        raise ValueError("horizon 只支持 1/3/5/7 日")
+    if horizon not in {1, 3, 5, 7, 10, 20, 30}:
+        raise ValueError("horizon 只支持 1/3/5/7/10/20/30 日")
     if sequence_length < 1:
         raise ValueError("sequence_length 必须为正整数")
     root = Path(storage_dir) if storage_dir is not None else None
@@ -449,8 +449,8 @@ def make_samples(
     membership: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, str]], list[str]]:
     """将面板转换为按日期顺序排列的截面样本，避免随机切分造成泄漏。"""
-    if horizon not in {1, 3, 5, 7}:
-        raise ValueError("horizon 只支持 1/3/5/7 日")
+    if horizon not in {1, 3, 5, 7, 10, 20, 30}:
+        raise ValueError("horizon 只支持 1/3/5/7/10/20/30 日")
     if sequence_length < 1:
         raise ValueError("sequence_length 必须为正整数")
     close = panel["close"].astype(float)

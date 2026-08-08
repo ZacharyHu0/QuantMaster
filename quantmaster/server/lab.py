@@ -9,6 +9,7 @@ from pydantic import Field
 from starlette.responses import JSONResponse
 
 from quantmaster.config import get_config
+from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.service import LabService
 from quantmaster.runtime.contracts import ContractModel
@@ -62,7 +63,7 @@ class FactorCreate(ContractModel):
 class JobCreate(ContractModel):
     kind: Literal[
         "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
-        "optimize", "bias_audit", "discover_python",
+        "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
     ]
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -70,7 +71,8 @@ class JobCreate(ContractModel):
 class PreflightCreate(ContractModel):
     operation: Literal[
         "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
-        "optimize", "bias_audit", "discover_python", "approve", "deploy",
+        "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
+        "approve", "deploy",
     ]
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -101,7 +103,7 @@ class AuditCreate(ContractModel):
 class MiningPreview(ContractModel):
     start: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-    horizon: Literal[1, 3, 5, 7] = 3
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
 
 
 class Decision(ContractModel):
@@ -111,7 +113,7 @@ class Decision(ContractModel):
 
 class Deployment(ContractModel):
     universe: str = Field(default="csi800", min_length=1, max_length=40)
-    horizon: Literal[1, 3, 5, 7] = 3
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
     profile: Literal["all", "risk_adjusted", "short_term", "stable"] = "all"
     scope: Literal["exact", "a_share"] = "exact"
     actor: str = Field(default="web", min_length=1, max_length=120)
@@ -121,6 +123,12 @@ class SuggestionRequest(ContractModel):
     use_cloud: bool = False
     sample_consent: bool = False
     anonymous_sample: dict[str, Any] | None = None
+
+
+class StrategyPromotion(ContractModel):
+    target: Literal["paper", "champion", "degraded", "retired"]
+    actor: str = Field(default="web", min_length=1, max_length=120)
+    reason: str = Field(min_length=1, max_length=4000)
 
 
 @router.get("/overview")
@@ -133,6 +141,54 @@ def dashboard() -> dict:
     from quantmaster.lab.worker import get_worker
 
     return {**get_lab_service().dashboard(), "worker": get_worker().status()}
+
+
+@router.get("/workbench")
+def workbench(
+    horizon: int | None = Query(default=None),
+) -> dict:
+    if horizon is not None and horizon not in SUPPORTED_HORIZONS:
+        raise HTTPException(422, detail="horizon 只支持 1/3/5/7/10/20/30")
+    return get_lab_service().workbench(horizon)
+
+
+@router.get("/strategies")
+def strategies(
+    horizon: int | None = Query(default=None),
+    status: str = "",
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    if horizon is not None and horizon not in SUPPORTED_HORIZONS:
+        raise HTTPException(422, detail="horizon 只支持 1/3/5/7/10/20/30")
+    return {"items": get_lab_service().store.strategies(
+        horizon=horizon, status=status, limit=limit,
+    )}
+
+
+@router.get("/strategies/{strategy_id}")
+def strategy(strategy_id: str) -> dict:
+    value = get_lab_service().store.strategy(strategy_id)
+    if value is None:
+        raise HTTPException(404, "策略候选不存在")
+    return value
+
+
+@router.get("/strategies/{strategy_id}/return-curve")
+def strategy_return_curve(strategy_id: str) -> dict:
+    try:
+        return get_lab_service().store.strategy_return_curve(strategy_id)
+    except Exception as exc:
+        return _fail(exc)  # type: ignore[return-value]
+
+
+@router.post("/strategies/{strategy_id}/promotions")
+def promote_strategy(strategy_id: str, body: StrategyPromotion) -> dict:
+    try:
+        return get_lab_service().store.promote_strategy(
+            strategy_id, target=body.target, actor=body.actor, reason=body.reason,
+        )
+    except Exception as exc:
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/preflight")

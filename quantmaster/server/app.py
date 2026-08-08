@@ -1163,7 +1163,7 @@ class SelectionRequest(ContractModel):
     start: str = "2022-01-01"
     end: str | None = None
     top_n: int = 10
-    horizon: Literal[1, 3, 5, 7] = 3
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
     profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
     cap_weight: float = Field(0.25, gt=0, le=1)
     include_industry: bool = True
@@ -1172,7 +1172,7 @@ class SelectionRequest(ContractModel):
 
 @app.post("/api/v1/research/selection/daily")
 def selection_daily(req: SelectionRequest) -> dict:
-    """收盘后生成适合次日执行的 1-7 日持有选股决策。"""
+    """收盘后生成适合次日执行的 1–30 日预测选股决策。"""
     from quantmaster.data import load_panel, load_stock_names
     from quantmaster.data.industry import load_industry_map
     from quantmaster.data.universe import load_universe
@@ -1245,8 +1245,8 @@ def selection_history(
     from quantmaster.data import load_stock_names
     from quantmaster.decision import DecisionStore, enrich_decision_snapshots
 
-    if horizon is not None and horizon not in {1, 3, 5, 7}:
-        raise HTTPException(422, "horizon 只支持 1、3、5、7")
+    if horizon is not None and horizon not in {1, 3, 5, 7, 10, 20, 30}:
+        raise HTTPException(422, "horizon 只支持 1、3、5、7、10、20、30")
     snapshots = DecisionStore().history(
         universe,
         min(max(limit, 1), 200),
@@ -1277,7 +1277,7 @@ class DecisionDashboardRequest(ContractModel):
     start: str = "2022-01-01"
     end: str | None = None
     top_n: int = Field(10, ge=1, le=50)
-    horizon: Literal[1, 3, 5, 7] = 3
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
     profile: Literal["risk_adjusted", "short_term", "stable"] = "risk_adjusted"
     cap_weight: float = Field(0.25, gt=0, le=1)
     sector_top: int = Field(10, ge=1, le=50)

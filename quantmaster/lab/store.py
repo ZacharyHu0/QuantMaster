@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.horizons import require_supported_horizon
 from quantmaster.lab.models import (
     FACTOR_STATUSES,
     FactorSpec,
@@ -25,7 +26,7 @@ from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migra
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
-LAB_SCHEMA_VERSION = 8
+LAB_SCHEMA_VERSION = 9
 
 
 def _collision_safe_factor_name(
@@ -195,6 +196,32 @@ class LabStore:
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, publication_id TEXT NOT NULL,
                     event_json TEXT NOT NULL, created_at TEXT NOT NULL,
                     FOREIGN KEY(publication_id) REFERENCES lab_publications(id));
+                CREATE TABLE IF NOT EXISTS research_cycles (
+                    id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL, protocol_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS strategy_candidates (
+                    id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, horizon INTEGER NOT NULL,
+                    name TEXT NOT NULL, status TEXT NOT NULL,
+                    components_json TEXT NOT NULL, development_json TEXT NOT NULL DEFAULT '{}',
+                    sealed_json TEXT NOT NULL DEFAULT '{}', return_curve_json TEXT NOT NULL DEFAULT '{}',
+                    shadow_json TEXT NOT NULL DEFAULT '{}', paper_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(cycle_id,horizon),
+                    FOREIGN KEY(cycle_id) REFERENCES research_cycles(id));
+                CREATE TABLE IF NOT EXISTS shadow_signals (
+                    id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, signal_date TEXT NOT NULL,
+                    mature_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, realized_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL, UNIQUE(strategy_id,signal_date),
+                    FOREIGN KEY(strategy_id) REFERENCES strategy_candidates(id));
+                CREATE TABLE IF NOT EXISTS promotion_events (
+                    id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL,
+                    from_status TEXT NOT NULL, to_status TEXT NOT NULL,
+                    actor TEXT NOT NULL, reason TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                    FOREIGN KEY(strategy_id) REFERENCES strategy_candidates(id));
                 CREATE INDEX IF NOT EXISTS idx_factor_versions_status
                     ON factor_versions(status,updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lab_jobs_status
@@ -211,6 +238,12 @@ class LabStore:
                     ON mining_candidates(run_id,pareto_rank,created_at);
                 CREATE INDEX IF NOT EXISTS idx_lab_publications_due
                     ON lab_publications(status,next_run,created_at);
+                CREATE INDEX IF NOT EXISTS idx_strategy_candidates_status
+                    ON strategy_candidates(status,horizon,updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_shadow_signals_maturity
+                    ON shadow_signals(strategy_id,status,mature_date);
+                CREATE INDEX IF NOT EXISTS idx_promotion_events_strategy
+                    ON promotion_events(strategy_id,created_at DESC);
             """)
             deployment_columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(deployments)")
@@ -585,8 +618,7 @@ class LabStore:
             raise KeyError("因子版本不存在")
         if value["status"] not in {"approved", "production", "degraded"}:
             raise ValueError("只有已批准版本可以设为生产 champion")
-        if horizon not in {1, 3, 5, 7}:
-            raise ValueError("horizon 只支持 1/3/5/7 日")
+        require_supported_horizon(horizon)
         if profile not in {"all", "risk_adjusted", "short_term", "stable"}:
             raise ValueError("profile 只支持 all/risk_adjusted/short_term/stable")
         if scope not in {"exact", "a_share"}:
@@ -603,6 +635,9 @@ class LabStore:
         if (has_horizon_evidence and str(horizon) not in (report.get("horizons") or {})
                 and report.get("best_horizon") != horizon):
             raise ValueError(f"版本没有 {horizon} 日验证证据，不能部署到该周期")
+        horizon_evidence = (report.get("horizons") or {}).get(str(horizon))
+        if horizon_evidence is not None and not (horizon_evidence.get("gates") or {}).get("passed"):
+            raise ValueError(f"版本的 {horizon} 日门槛未通过，不能由其他周期的结果授权部署")
         spec = value.get("spec") or {}
         role = "ml" if spec.get("kind") == "learned" else "factor"
         if role == "ml" and not (spec.get("model") or {}).get("manifest"):
@@ -1569,6 +1604,297 @@ class LabStore:
             raise ValueError("建议不存在或已处理")
         return self.suggestion(suggestion_id) or {}
 
+    def create_research_cycle(
+        self, *, snapshot_id: str, protocol: dict[str, Any], status: str = "running",
+    ) -> dict:
+        cycle_id, now = uuid.uuid4().hex, utc_now()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO research_cycles VALUES (?,?,?,?,?,?,?)",
+                (cycle_id, snapshot_id, status, canonical_json(protocol), "{}", now, ""),
+            )
+        return self.research_cycle(cycle_id) or {}
+
+    def research_cycle(self, cycle_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM research_cycles WHERE id=?", (cycle_id,),
+            ).fetchone()
+        return self._decode(row, ("protocol_json", "result_json"))
+
+    def latest_research_cycle(self) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM research_cycles ORDER BY created_at DESC LIMIT 1",
+            ).fetchone()
+        return self._decode(row, ("protocol_json", "result_json"))
+
+    def complete_research_cycle(self, cycle_id: str, result: dict[str, Any]) -> dict:
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE research_cycles SET status='completed',result_json=?,completed_at=? "
+                "WHERE id=?", (canonical_json(result), utc_now(), cycle_id),
+            ).rowcount
+        if not changed:
+            raise KeyError("研究周期不存在")
+        return self.research_cycle(cycle_id) or {}
+
+    @staticmethod
+    def _decode_strategy(row: sqlite3.Row | None) -> dict | None:
+        value = LabStore._decode(row, (
+            "components_json", "development_json", "sealed_json", "return_curve_json",
+            "shadow_json", "paper_json",
+        ))
+        if value is None:
+            return None
+        for field in (
+            "components", "development", "sealed_evidence", "return_curve",
+            "shadow_summary", "paper_summary",
+        ):
+            value[field] = value.pop({
+                "components": "components_json", "development": "development_json",
+                "sealed_evidence": "sealed_json", "return_curve": "return_curve_json",
+                "shadow_summary": "shadow_json", "paper_summary": "paper_json",
+            }[field])
+        return value
+
+    def save_strategy_candidate(
+        self, *, cycle_id: str, horizon: int, name: str,
+        components: list[dict[str, Any]], development: dict[str, Any],
+        sealed_evidence: dict[str, Any], return_curve: dict[str, Any] | None = None,
+    ) -> dict:
+        require_supported_horizon(horizon)
+        if not 3 <= len({str(item.get("version_id")) for item in components}) <= 8:
+            raise ValueError("多因子组合必须包含 3–8 个不重复成分")
+        weights = [float(item.get("weight") or 0) for item in components]
+        if any(weight < 0.05 - 1e-9 or weight > 0.35 + 1e-9 for weight in weights):
+            raise ValueError("组合成分权重必须在 5%–35% 之间")
+        if abs(sum(weights) - 1.0) > 1e-6:
+            raise ValueError("组合成分权重之和必须为 1")
+        gate = sealed_evidence.get("gates") or {}
+        status = "shadow_challenger" if gate.get("passed") else "historical_candidate"
+        now = utc_now()
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id,status FROM strategy_candidates WHERE cycle_id=? AND horizon=?",
+                (cycle_id, horizon),
+            ).fetchone()
+            strategy_id = existing["id"] if existing else uuid.uuid4().hex
+            if existing:
+                conn.execute(
+                    "UPDATE strategy_candidates SET name=?,status=?,components_json=?,"
+                    "development_json=?,sealed_json=?,return_curve_json=?,updated_at=? WHERE id=?",
+                    (name, status, canonical_json(components), canonical_json(development),
+                     canonical_json(sealed_evidence), canonical_json(return_curve or {}), now,
+                     strategy_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO strategy_candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (strategy_id, cycle_id, horizon, name, status,
+                     canonical_json(components), canonical_json(development),
+                     canonical_json(sealed_evidence), canonical_json(return_curve or {}),
+                     "{}", "{}", now, now),
+                )
+                if status == "shadow_challenger":
+                    conn.execute(
+                        "INSERT INTO promotion_events VALUES (?,?,?,?,?,?,?,?)",
+                        (uuid.uuid4().hex, strategy_id, "historical_candidate", status,
+                         "system", "密封样本门槛通过，自动进入影子", canonical_json(gate), now),
+                    )
+        return self.strategy(strategy_id) or {}
+
+    def strategy(self, strategy_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM strategy_candidates WHERE id=?", (strategy_id,),
+            ).fetchone()
+            events = conn.execute(
+                "SELECT * FROM promotion_events WHERE strategy_id=? ORDER BY created_at",
+                (strategy_id,),
+            ).fetchall()
+        value = self._decode_strategy(row)
+        if value is not None:
+            value["promotion_events"] = [
+                self._decode(item, ("evidence_json",)) for item in events
+            ]
+        return value
+
+    def strategies(
+        self, *, horizon: int | None = None, status: str = "", limit: int = 100,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if horizon is not None:
+            require_supported_horizon(horizon)
+            clauses.append("horizon=?")
+            params.append(horizon)
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(max(1, min(limit, 500)))
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM strategy_candidates" + where
+                + " ORDER BY updated_at DESC LIMIT ?", params,
+            ).fetchall()
+        return [self._decode_strategy(row) or {} for row in rows]
+
+    def update_strategy_tracking(
+        self, strategy_id: str, *, shadow: dict[str, Any] | None = None,
+        paper: dict[str, Any] | None = None,
+    ) -> dict:
+        if self.strategy(strategy_id) is None:
+            raise KeyError("策略候选不存在")
+        assignments, params = [], []
+        if shadow is not None:
+            assignments.append("shadow_json=?")
+            params.append(canonical_json(shadow))
+        if paper is not None:
+            assignments.append("paper_json=?")
+            params.append(canonical_json(paper))
+        if assignments:
+            assignments.append("updated_at=?")
+            params.extend([utc_now(), strategy_id])
+            with self._conn() as conn:
+                conn.execute(
+                    "UPDATE strategy_candidates SET " + ",".join(assignments) + " WHERE id=?",
+                    params,
+                )
+        return self.strategy(strategy_id) or {}
+
+    def save_shadow_signal(
+        self, strategy_id: str, *, signal_date: str, mature_date: str,
+        payload: dict[str, Any], realized: dict[str, Any] | None = None,
+    ) -> dict:
+        if self.strategy(strategy_id) is None:
+            raise KeyError("策略候选不存在")
+        status = "matured" if realized else "pending"
+        signal_id = uuid.uuid4().hex
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO shadow_signals VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(strategy_id,signal_date) DO UPDATE SET "
+                "mature_date=excluded.mature_date,status=excluded.status,"
+                "payload_json=excluded.payload_json,realized_json=excluded.realized_json",
+                (signal_id, strategy_id, signal_date, mature_date, status,
+                 canonical_json(payload), canonical_json(realized or {}), utc_now()),
+            )
+            row = conn.execute(
+                "SELECT * FROM shadow_signals WHERE strategy_id=? AND signal_date=?",
+                (strategy_id, signal_date),
+            ).fetchone()
+        return self._decode(row, ("payload_json", "realized_json")) or {}
+
+    def shadow_signals(self, strategy_id: str, limit: int = 100) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM shadow_signals WHERE strategy_id=? "
+                "ORDER BY signal_date DESC LIMIT ?", (strategy_id, max(1, min(limit, 500))),
+            ).fetchall()
+        return [self._decode(row, ("payload_json", "realized_json")) or {} for row in rows]
+
+    def promote_strategy(
+        self, strategy_id: str, *, target: str, actor: str, reason: str,
+    ) -> dict:
+        target_status = {
+            "paper": "paper", "champion": "champion",
+            "degraded": "degraded", "retired": "retired",
+        }.get(target)
+        if target_status is None:
+            raise ValueError("晋级动作只支持 paper/champion/degraded/retired")
+        if not actor.strip() or not reason.strip():
+            raise ValueError("人工晋级必须记录操作者和理由")
+        current = self.strategy(strategy_id)
+        if current is None:
+            raise KeyError("策略候选不存在")
+        source = str(current["status"])
+        if target_status == "paper":
+            if source != "shadow_challenger":
+                raise ValueError("只有 Shadow Challenger 可以申请模拟盘")
+            shadow = current.get("shadow_summary") or {}
+            minimum = max(20, 2 * int(current["horizon"]))
+            if int(shadow.get("matured_signal_days") or 0) < minimum:
+                raise ValueError(f"影子至少需要 {minimum} 个已成熟信号日")
+            if float(shadow.get("net_excess_return") or 0) <= 0:
+                raise ValueError("影子实际扣费后超额收益必须为正")
+            if shadow.get("drawdown_within_stress") is not True or shadow.get("coverage_degraded"):
+                raise ValueError("影子回撤或数据覆盖硬门槛未通过")
+        elif target_status == "champion":
+            if source != "paper":
+                raise ValueError("只有模拟盘策略可以申请 Champion")
+            paper = current.get("paper_summary") or {}
+            if int(paper.get("trading_days") or 0) < 20:
+                raise ValueError("模拟盘至少需要 20 个实际交易日")
+            if float(paper.get("net_return") or 0) < 0 or int(paper.get("persistent_anomalies") or 0):
+                raise ValueError("模拟盘扣费后收益为负或存在持续订单/数据异常")
+        elif target_status not in {"degraded", "retired"}:
+            raise ValueError("不允许该生命周期迁移")
+        sealed_gate = (current.get("sealed_evidence") or {}).get("gates") or {}
+        if target_status in {"paper", "champion"} and not sealed_gate.get("passed"):
+            raise ValueError("密封集硬门槛未通过，理由不能覆盖")
+        now = utc_now()
+        with self._conn() as conn:
+            if target_status == "champion":
+                champion = conn.execute(
+                    "SELECT * FROM strategy_candidates WHERE horizon=? AND status='champion' "
+                    "AND id<>? ORDER BY updated_at DESC LIMIT 1",
+                    (current["horizon"], strategy_id),
+                ).fetchone()
+                if champion is not None:
+                    old = self._decode_strategy(champion) or {}
+                    new_metrics = (current.get("sealed_evidence") or {}).get("metrics") or {}
+                    old_metrics = (old.get("sealed_evidence") or {}).get("metrics") or {}
+                    new_ir = float(new_metrics.get("net_information_ratio") or 0)
+                    old_ir = float(old_metrics.get("net_information_ratio") or 0)
+                    new_dd = float(new_metrics.get("max_drawdown") or 1)
+                    old_dd = float(old_metrics.get("max_drawdown") or 1)
+                    new_return = float(new_metrics.get("net_annual_excess_return") or 0)
+                    old_return = float(old_metrics.get("net_annual_excess_return") or 0)
+                    superior = new_ir >= old_ir + 0.10 or (
+                        abs(new_ir - old_ir) <= 0.10
+                        and new_dd <= old_dd * 0.90 and new_return >= old_return
+                    )
+                    if not superior:
+                        raise ValueError("Challenger 未满足 Champion 替换优势门槛")
+                    conn.execute(
+                        "UPDATE strategy_candidates SET status='degraded',updated_at=? WHERE id=?",
+                        (now, old["id"]),
+                    )
+            conn.execute(
+                "UPDATE strategy_candidates SET status=?,updated_at=? WHERE id=?",
+                (target_status, now, strategy_id),
+            )
+            conn.execute(
+                "INSERT INTO promotion_events VALUES (?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, strategy_id, source, target_status, actor.strip(),
+                 reason.strip(), canonical_json({"sealed_gate": sealed_gate}), now),
+            )
+        return self.strategy(strategy_id) or {}
+
+    def strategy_return_curve(self, strategy_id: str) -> dict[str, Any]:
+        current = self.strategy(strategy_id)
+        if current is None:
+            raise KeyError("策略候选不存在")
+        from quantmaster.lab.strategy import return_curve_points
+
+        latest: dict[int, dict[str, Any]] = {}
+        for item in self.strategies(limit=500):
+            latest.setdefault(int(item["horizon"]), item)
+        challenger = return_curve_points(list(latest.values()))
+        champions = return_curve_points(self.strategies(status="champion", limit=20))
+        baseline = [
+            {"horizon": point["horizon"], "annual_net_excess_return": float(
+                (point.get("return_curve") or {}).get("baseline_annual_net_excess_return") or 0
+            )}
+            for point in latest.values()
+        ]
+        return {
+            "strategy_id": strategy_id, "horizons": [1, 3, 5, 7, 10, 20, 30],
+            "challenger": challenger, "champion": champions, "baseline": baseline,
+        }
+
     def overview(self) -> dict:
         with self._conn() as conn:
             statuses = {
@@ -1590,6 +1916,11 @@ class LabStore:
             ).fetchone()[0]
             studies = conn.execute("SELECT COUNT(*) FROM optimization_studies").fetchone()[0]
             mining_runs = conn.execute("SELECT COUNT(*) FROM mining_runs").fetchone()[0]
+            strategy_statuses = {
+                row["status"]: row["count"] for row in conn.execute(
+                    "SELECT status,COUNT(*) AS count FROM strategy_candidates GROUP BY status"
+                )
+            }
         return {
             "factor_statuses": statuses,
             "job_statuses": job_statuses,
@@ -1598,4 +1929,5 @@ class LabStore:
             "deployments": deployments,
             "studies": studies,
             "mining_runs": mining_runs,
+            "strategy_statuses": strategy_statuses,
         }

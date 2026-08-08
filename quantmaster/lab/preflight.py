@@ -61,6 +61,10 @@ def compact_preflight(
 ) -> dict[str, Any]:
     """Bound admission payloads so Doctor and first paint stay predictably small."""
     value = dict(report)
+    # The sector map is intentionally returned only by the explicit preflight
+    # endpoint.  Keeping thousands of cells out of dashboard/doctor responses
+    # makes the first paint independent of the size of the research universe.
+    value.pop("coverage", None)
     value["blockers"] = [
         _compact_issue(item, sample_limit) for item in report.get("blockers") or []
     ]
@@ -155,6 +159,34 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
                 "运行 qm lab doctor 并修复本地数据池", reason=type(exc).__name__,
             ))
         if operation == "prepare_data":
+            provider = str(values.get("provider") or "").strip().lower()
+            if provider and provider not in {"tushare", "free-stockdb-online"}:
+                blockers.append(_blocker(
+                    "INVALID_REQUEST", f"不支持的数据补齐来源: {provider}",
+                    "选择 Tushare 或 stockdb-online",
+                ))
+            if provider == "tushare" and not cfg.data.tushare_token:
+                blockers.append(_blocker(
+                    "DEPENDENCY_MISSING", "Tushare 补齐需要先配置 token",
+                    "在设置中心配置 Tushare token 后重新预检", dependency="tushare",
+                ))
+            if provider == "free-stockdb-online" and not (
+                cfg.data.free_stockdb_online_enabled and cfg.data.free_stockdb_online_url
+            ):
+                blockers.append(_blocker(
+                    "DEPENDENCY_MISSING", "stockdb-online 当前未启用",
+                    "在设置中心启用并配置 stockdb-online 地址",
+                    dependency="free-stockdb-online",
+                ))
+            membership = dataset.get("membership_records")
+            membership_missing = bool(
+                universe.lower() == "csi800" and getattr(membership, "empty", True)
+            )
+            if provider == "free-stockdb-online" and membership_missing:
+                blockers.append(_blocker(
+                    "DATASET_MISSING", "stockdb-online 不能补齐 CSI800 点时成分",
+                    "改用 Tushare 补齐成分与行情，或先导入 PIT 成分缓存",
+                ))
             if (
                 universe.lower() == "csi800"
                 and not dataset.get("symbol_count")
@@ -223,6 +255,7 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
         "state": state,
         "resource_class": resource_class.value,
         "data_policy": policy.value,
+        "data_provider": str(values.get("provider") or ""),
         "blockers": blockers,
         "warnings": warnings,
         "estimate": {

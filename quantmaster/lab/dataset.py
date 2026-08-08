@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -25,6 +27,10 @@ _PANEL_CACHE: OrderedDict[
     str, tuple[dict[str, pd.DataFrame], pd.DataFrame | None, dict[str, Any], int]
 ] = OrderedDict()
 _PANEL_CACHE_BYTES = 0
+_PANEL_REQUEST_KEYS: dict[
+    tuple[str, str, str, str, str],
+    tuple[str, tuple[tuple[int, int], ...], tuple[int, int, int]],
+] = {}
 _INSPECTION_CACHE: OrderedDict[
     tuple[str, str, str, str], tuple[dict[str, Any], str, tuple[int, int, int]]
 ] = OrderedDict()
@@ -91,13 +97,30 @@ def load_csi800_membership(
 def _cached_membership_records(start: str, end: str) -> pd.DataFrame:
     """Read enough cached PIT snapshots to establish membership at ``start``."""
     beginning = (pd.Timestamp(start) - pd.DateOffset(months=12)).strftime("%Y-%m-%d")
+    identity = _membership_storage_identity("csi800")
+    cache_root = get_config().data_root / "lab_cache" / "membership"
+    cache_key = content_hash({
+        "identity": identity, "beginning": beginning, "end": end,
+    })[:20]
+    cache_path = cache_root / f"csi800-{cache_key}.parquet"
+    if cache_path.is_file():
+        try:
+            return pd.read_parquet(cache_path)
+        except (OSError, ValueError, ImportError):
+            pass
     lake = load_cached_csi800_records(beginning, end, pull=False)
     legacy = load_legacy_csi800_records(beginning, end)
-    if legacy.empty:
-        return lake
-    return pd.concat((legacy, lake), ignore_index=True).drop_duplicates(
+    result = lake if legacy.empty else pd.concat((legacy, lake), ignore_index=True).drop_duplicates(
         subset=["trade_date", "symbol", "index_code"], keep="last",
     ).sort_values(["trade_date", "index_code", "symbol"], kind="stable")
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        staged = cache_path.with_suffix(".partial.parquet")
+        result.to_parquet(staged, index=False)
+        os.replace(staged, cache_path)
+    except (OSError, ValueError, ImportError):
+        pass
+    return result
 
 
 def _membership_storage_identity(universe: str) -> tuple[int, int, int]:
@@ -122,6 +145,19 @@ def _membership_storage_identity(universe: str) -> tuple[int, int, int]:
         len(identities), sum(size for size, _mtime in identities),
         max((mtime for _size, mtime in identities), default=0),
     )
+
+
+def _fast_pool_identity() -> tuple[tuple[int, int], ...]:
+    """Cheap invalidation key for an already materialized in-process panel."""
+    bars_root = get_config().data_root / "bars"
+    identities: list[tuple[int, int]] = []
+    for path in (bars_root, bars_root / "meta.sqlite"):
+        try:
+            stat = path.stat()
+            identities.append((stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            identities.append((0, 0))
+    return tuple(identities)
 
 
 def _bar_storage_identity(symbols: list[str], store) -> str:
@@ -189,6 +225,40 @@ def _required_ranges(
     return ranges
 
 
+def _cached_required_ranges(
+    universe: str, start: str, end: str, records: pd.DataFrame,
+    fixed_symbols: list[str],
+) -> dict[str, dict[str, str]]:
+    identity: Any = (
+        _membership_storage_identity(universe)
+        if universe.lower() == "csi800" else content_hash(fixed_symbols)
+    )
+    key = content_hash({
+        "universe": universe, "start": start, "end": end, "identity": identity,
+    })[:20]
+    root = get_config().data_root / "lab_cache" / "membership"
+    target = root / f"ranges-{key}.json"
+    if target.is_file():
+        try:
+            value = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                return value
+        except (OSError, ValueError, TypeError):
+            pass
+    ranges = _required_ranges(universe, start, end, records, fixed_symbols)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        staged = target.with_suffix(".partial.json")
+        staged.write_text(
+            json.dumps(ranges, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(staged, target)
+    except OSError:
+        pass
+    return ranges
+
+
 def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]:
     """Inspect local manifests without opening Parquet files or contacting providers."""
     from quantmaster.data.storage import BarStore
@@ -218,8 +288,35 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     else:
         fixed_symbols = sorted(load_universe(universe))
         membership_source = "fixed"
-    ranges = _required_ranges(universe, start, end, records, fixed_symbols)
+    ranges = _cached_required_ranges(universe, start, end, records, fixed_symbols)
     symbols = sorted(ranges)
+    bar_identity = _bar_storage_identity(symbols, store)
+    catalog_identity = []
+    for catalog_path in (store.meta_db,):
+        try:
+            stat = catalog_path.stat()
+            catalog_identity.append((stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            continue
+    persistent_key = content_hash({
+        "root": str(get_config().data_root.resolve()), "universe": universe,
+        "start": start, "end": end, "membership": membership_identity,
+        "bars": bar_identity, "catalog": catalog_identity,
+    })[:20]
+    persistent_root = get_config().data_root / "lab_cache" / "inspection"
+    persistent_path = persistent_root / f"{persistent_key}.json"
+    if persistent_path.is_file():
+        try:
+            saved = json.loads(persistent_path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                saved["membership_records"] = records
+                with _PANEL_CACHE_LOCK:
+                    _INSPECTION_CACHE[cache_key] = (
+                        saved, bar_identity, membership_identity,
+                    )
+                return dict(saved)
+        except (OSError, ValueError, TypeError):
+            pass
     metadata = store.metadata_many(symbols)
     missing: list[dict[str, Any]] = []
     coverage_gaps: list[dict[str, Any]] = []
@@ -353,11 +450,185 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     }
     with _PANEL_CACHE_LOCK:
         _INSPECTION_CACHE[cache_key] = (
-            result, _bar_storage_identity(symbols, store), membership_identity,
+            result, bar_identity, membership_identity,
         )
         while len(_INSPECTION_CACHE) > 8:
             _INSPECTION_CACHE.popitem(last=False)
+    try:
+        persistent_root.mkdir(parents=True, exist_ok=True)
+        serializable = {key: value for key, value in result.items() if key != "membership_records"}
+        staged = persistent_path.with_suffix(".partial.json")
+        staged.write_text(
+            json.dumps(serializable, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(staged, persistent_path)
+    except (OSError, ValueError, TypeError):
+        pass
     return dict(result)
+
+
+def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
+    """Describe exact local coverage gaps and explicit online repair options."""
+    inspected = inspect_local_dataset(universe, start, end)
+    cfg = get_config().data
+    active_symbols = {
+        str(item.get("symbol") or "")
+        for item in inspected.get("coverage_gaps") or []
+    }
+    warmup_symbols = {
+        str(item.get("symbol") or "")
+        for item in inspected.get("warmup_gaps") or []
+    }
+    missing_symbols = {
+        str(item.get("symbol") or "")
+        for item in inspected.get("missing") or []
+    }
+
+    def sessions(first: str, last: str) -> int:
+        if not first or not last or first > last:
+            return 0
+        return int(
+            np.busday_count(
+                np.datetime64(first, "D"), np.datetime64(last, "D") + np.timedelta64(1, "D"),
+            )
+        )
+
+    cells: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+    missing_session_total = 0
+    critical_session_total = 0
+    for row in inspected.get("bars") or []:
+        symbol = str(row.get("symbol") or "")
+        required = dict(row.get("required") or {})
+        required_start = str(required.get("start") or start)
+        required_end = str(required.get("end") or end)
+        active_start = str(required.get("active_start") or required_start)
+        available = list(row.get("coverage") or ["", ""])
+        available_start = str(available[0] or "")
+        available_end = str(available[1] or "")
+        health = "complete"
+        if symbol in missing_symbols:
+            health = "missing"
+        elif symbol in active_symbols:
+            health = "critical"
+        elif symbol in warmup_symbols:
+            health = "warmup"
+        segments: list[dict[str, Any]] = []
+        if health == "missing" or not available_start or not available_end:
+            segments.append({"start": required_start, "end": required_end, "kind": "critical"})
+        else:
+            if available_start > required_start:
+                left_end = (
+                    pd.Timestamp(available_start) - pd.offsets.BDay(1)
+                ).strftime("%Y-%m-%d")
+                if required_start < active_start:
+                    warmup_end = (
+                        pd.Timestamp(active_start) - pd.offsets.BDay(1)
+                    ).strftime("%Y-%m-%d")
+                    if required_start <= min(left_end, warmup_end):
+                        segments.append({
+                            "start": required_start,
+                            "end": min(left_end, warmup_end),
+                            "kind": "warmup",
+                        })
+                if available_start > active_start and active_start <= left_end:
+                    segments.append({
+                        "start": active_start,
+                        "end": min(required_end, left_end),
+                        "kind": "critical",
+                    })
+            if available_end < required_end:
+                right_start = (
+                    pd.Timestamp(available_end) + pd.offsets.BDay(1)
+                ).strftime("%Y-%m-%d")
+                segments.append({
+                    "start": max(required_start, right_start),
+                    "end": required_end,
+                    "kind": "critical",
+                })
+        missing_sessions = sum(
+            sessions(str(segment["start"]), str(segment["end"]))
+            for segment in segments
+        )
+        critical_sessions = sum(
+            sessions(str(segment["start"]), str(segment["end"]))
+            for segment in segments if segment["kind"] == "critical"
+        )
+        missing_session_total += missing_sessions
+        critical_session_total += critical_sessions
+        cell = {
+            "symbol": symbol,
+            "health": health,
+            "required": [required_start, required_end],
+            "available": [available_start, available_end],
+            "missing_sessions": missing_sessions,
+        }
+        cells.append(cell)
+        if segments:
+            gaps.append({**cell, "segments": segments})
+
+    membership_missing = bool(
+        universe.lower() == "csi800"
+        and getattr(inspected.get("membership_records"), "empty", True)
+    )
+    repair_symbols = len({item["symbol"] for item in gaps})
+    critical_repair_symbols = len({
+        item["symbol"]
+        for item in gaps
+        if any(segment["kind"] == "critical" for segment in item["segments"])
+    })
+    return {
+        "universe": universe,
+        "start": start,
+        "end": end,
+        "as_of": inspected.get("as_of", ""),
+        "state": inspected.get("state", "incomplete"),
+        "research_eligible": bool(inspected.get("research_eligible")),
+        "production_eligible": bool(inspected.get("production_eligible")),
+        "symbol_count": len(cells),
+        "repair_symbol_count": repair_symbols,
+        "critical_repair_symbol_count": critical_repair_symbols,
+        "missing_session_count": missing_session_total,
+        "critical_session_count": critical_session_total,
+        "membership_missing": membership_missing,
+        "counts": {
+            "complete": sum(item["health"] == "complete" for item in cells),
+            "critical": sum(item["health"] == "critical" for item in cells),
+            "warmup": sum(item["health"] == "warmup" for item in cells),
+            "missing": sum(item["health"] == "missing" for item in cells),
+        },
+        "cells": cells,
+        "gaps": gaps,
+        "providers": [
+            {
+                "id": "free-stockdb-online",
+                "label": "stockdb-online",
+                "available": bool(cfg.free_stockdb_online_enabled and cfg.free_stockdb_online_url),
+                "can_fill_membership": False,
+                "estimated_requests": repair_symbols,
+                "estimated_critical_requests": critical_repair_symbols,
+                "reason": (
+                    "CSI800 点时成分只能由 Tushare 补齐"
+                    if membership_missing else "按缺口区间补齐前复权日线"
+                ),
+            },
+            {
+                "id": "tushare",
+                "label": "Tushare",
+                "available": bool(cfg.tushare_token),
+                "can_fill_membership": True,
+                "estimated_requests": repair_symbols * 2 + (2 if membership_missing else 0),
+                "estimated_critical_requests": (
+                    critical_repair_symbols * 2 + (2 if membership_missing else 0)
+                ),
+                "reason": (
+                    "可补点时成分及前复权日线"
+                    if cfg.tushare_token else "需要先在设置中配置 Tushare token"
+                ),
+            },
+        ],
+    }
 
 
 def _assemble_panel(
@@ -439,6 +710,7 @@ def clear_local_dataset_caches() -> None:
     global _PANEL_CACHE_BYTES
     with _PANEL_CACHE_LOCK:
         _PANEL_CACHE.clear()
+        _PANEL_REQUEST_KEYS.clear()
         _INSPECTION_CACHE.clear()
         _PANEL_CACHE_BYTES = 0
 
@@ -454,6 +726,20 @@ def load_local_dataset(
     """Materialize a research panel from the local pool with zero network access."""
     from quantmaster.data.storage import BarStore
     from quantmaster.lab.errors import LabError
+
+    request_key = (
+        str(get_config().data_root.resolve()), universe, start, end, policy,
+    )
+    pool_identity = _fast_pool_identity()
+    membership_identity = _membership_storage_identity(universe)
+    with _PANEL_CACHE_LOCK:
+        alias = _PANEL_REQUEST_KEYS.get(request_key)
+    if alias and alias[1] == pool_identity and alias[2] == membership_identity:
+        cached = _cache_get(alias[0])
+        if cached is not None:
+            if progress:
+                progress(52, "复用本地冻结快照")
+            return cached
 
     inspection = inspect_local_dataset(universe, start, end)
     if not inspection["symbols"]:
@@ -480,11 +766,7 @@ def load_local_dataset(
         progress(15, f"本地批量读取 {inspection['symbol_count']} 只标的")
     batch = BarStore().read_many(
         inspection["symbols"], columns=["open", "high", "low", "close", "volume", "amount"],
-        ranges={
-            symbol: (value["start"], value["end"])
-            for symbol, value in inspection["required_ranges"].items()
-        },
-        max_workers=min(8, max(1, int(get_config().lab.max_workers) * 4)),
+        max_workers=min(16, max(1, int(get_config().lab.max_workers) * 8)),
         enqueue_repair=False,
     )
     if not batch.frames:
@@ -493,6 +775,11 @@ def load_local_dataset(
             action="运行数据准备或修复本地数据池", retryable=True, status_code=424,
         )
     panel = _assemble_panel(batch.frames, inspection["symbols"])
+    global_start = min(
+        (value["start"] for value in inspection["required_ranges"].values()),
+        default=start,
+    )
+    panel = {field: frame.loc[global_start:end] for field, frame in panel.items()}
     close = panel.get("close")
     if close is None or close.empty:
         raise LabError("DATASET_MISSING", "本地行情缺少 close 字段", status_code=424)
@@ -512,9 +799,11 @@ def load_local_dataset(
     missing_prices = 0
     membership_coverage = 1.0
     if membership is not None:
-        aligned = membership.reindex(index=close.index, columns=close.columns).fillna(False)
-        expected_prices = int(membership.reindex(index=close.index).fillna(False).sum().sum())
-        observed_prices = int((aligned & close.notna()).sum().sum())
+        aligned = membership.reindex(
+            index=close.index, columns=close.columns, fill_value=False,
+        ).to_numpy(dtype=bool, copy=False)
+        expected_prices = int(aligned.sum())
+        observed_prices = int((aligned & np.isfinite(close.to_numpy(copy=False))).sum())
         missing_prices = max(0, expected_prices - observed_prices)
         membership_coverage = 1 - missing_prices / max(1, expected_prices)
     warnings: list[dict[str, Any]] = [dict(item) for item in inspection.get("warnings") or []]
@@ -573,6 +862,11 @@ def load_local_dataset(
     ).to_dict()
     snapshot["cache_hit"] = False
     _cache_put(key, panel, membership, snapshot)
+    with _PANEL_CACHE_LOCK:
+        if key in _PANEL_CACHE:
+            _PANEL_REQUEST_KEYS[request_key] = (
+                key, _fast_pool_identity(), membership_identity,
+            )
     if progress:
         progress(52, f"本地快照已冻结 · {batch.elapsed_seconds:.2f}s")
     return panel, membership, snapshot

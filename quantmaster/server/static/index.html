@@ -459,7 +459,7 @@
     <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
     <label>研究起点<input name="start" type="date" value="2015-01-01"></label>
     <label>持有周期
-      <select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select>
+      <select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select>
     </label>
     <label>入选数量<input name="top_n" type="number" value="10" min="1" max="50"></label>
     <button class="primary" type="submit">生成今日决策</button>
@@ -473,12 +473,13 @@
   <div class="lab-masthead">
     <div>
       <div class="lab-kicker">QUANT LAB</div>
-      <h2>量化研究工作台</h2>
-      <p>本地快照、因子、模型、验证与审批共用一份可恢复账本。研究任务不会隐式联网，生产晋级始终由人工决定。</p>
+      <h2>1–30 日组合信号工作台</h2>
+      <p>以扣费后风险收益筛选多因子组合，每周重研究、每日影子评分；密封证据、收益曲线与交易动作共用一份账本。</p>
     </div>
     <div class="lab-head-actions">
-      <button class="lab-button lab-button-quiet" type="button" data-lab-action="create-factor">新建因子</button>
-      <button class="lab-button lab-button-primary" type="button" data-lab-action="prepare-data">准备 / 更新数据</button>
+      <button class="lab-button lab-button-quiet" type="button" data-lab-action="prepare-data">检查 / 补齐数据</button>
+      <button class="lab-button lab-button-quiet" type="button" data-lab-action="shadow-score">运行每日评分</button>
+      <button class="lab-button lab-button-primary" type="button" data-lab-action="research-cycle">运行每周研究</button>
     </div>
   </div>
 
@@ -494,19 +495,19 @@
   </section>
 
   <nav class="lab-research-flow" aria-label="研究主流程">
-    <button type="button" data-lab-go="overview"><span>1</span><b>数据快照</b><small>本地冻结与覆盖</small></button>
+    <button type="button" data-lab-go="overview"><span>1</span><b>组合信号</b><small>七周期密封证据</small></button>
     <i aria-hidden="true">→</i>
     <button type="button" data-lab-go="discover"><span>2</span><b>因子研究</b><small>发现与版本化</small></button>
     <i aria-hidden="true">→</i>
     <button type="button" data-lab-go="experiments"><span>3</span><b>模型实验</b><small>CPU / CUDA 实训</small></button>
     <i aria-hidden="true">→</i>
-    <button type="button" data-lab-go="library"><span>4</span><b>验证与审批</b><small>证据、门禁、部署</small></button>
+    <button type="button" data-lab-go="library"><span>4</span><b>影子与晋级</b><small>Paper / Champion</small></button>
   </nav>
 
   <div class="lab-shell">
     <aside class="lab-rail" aria-label="Quant Lab 分区">
       <div class="lab-rail-label">研究分区</div>
-      <button class="active" type="button" data-lab-view="overview" aria-current="page"><span>01</span>数据与总览</button>
+      <button class="active" type="button" data-lab-view="overview" aria-current="page"><span>01</span>组合与动作</button>
       <button type="button" data-lab-view="discover"><span>02</span>因子发现</button>
       <button type="button" data-lab-view="experiments"><span>03</span>模型实验</button>
       <button type="button" data-lab-view="library"><span>04</span>验证与审批</button>
@@ -522,9 +523,24 @@
     <div class="lab-workspace">
       <section class="lab-view active" data-lab-panel="overview">
         <div class="lab-view-head">
-          <div><span class="lab-overline">本地研究状态</span><h3>数据与任务总览</h3></div>
+          <div><span class="lab-overline">STRATEGY WORKBENCH</span><h3>七周期组合证据与今日动作</h3><p>周期独立授权；一个周期通过不会授权另一个周期。</p></div>
           <span class="lab-asof" id="lab-asof">正在读取快照</span>
         </div>
+        <section class="lab-strategy-workbench" aria-label="多因子策略工作台">
+          <div class="lab-horizon-switch" id="lab-strategy-horizons" role="tablist" aria-label="预测周期"></div>
+          <div class="lab-strategy-grid">
+            <article class="lab-block lab-return-curve">
+              <div class="lab-block-head"><div><span>SEALED OOS · AFTER COST</span><h4>持有期收益曲线</h4></div><span class="lab-chart-legend"><i class="challenger"></i>Challenger <i class="champion"></i>Champion <i class="baseline"></i>规则基线</span></div>
+              <div id="lab-return-chart" class="lab-return-chart" role="img" aria-label="1、3、5、7、10、20、30 日密封样本年化扣费后超额收益"></div>
+            </article>
+            <article class="lab-block lab-horizon-evidence" id="lab-horizon-evidence"><div class="lab-empty">正在读取周期证据…</div></article>
+          </div>
+          <div class="lab-strategy-grid lab-strategy-grid-lower">
+            <article class="lab-block"><div class="lab-block-head"><div><span>LIFECYCLE</span><h4>策略晋级漏斗</h4></div></div><div class="lab-strategy-funnel" id="lab-strategy-funnel"></div></article>
+            <article class="lab-block"><div class="lab-block-head"><div><span>POSITION DELTA</span><h4>候选与真实持仓动作</h4></div><span id="lab-action-source">等待每日评分读取本地账本</span></div><div class="lab-action-list" id="lab-action-list"><div class="lab-empty">尚无影子评分动作</div></div></article>
+          </div>
+          <div class="lab-horizon-matrix" id="lab-horizon-matrix" aria-label="七周期状态矩阵"></div>
+        </section>
         <div class="lab-metrics" id="lab-metrics">
           <div class="lab-metric"><span>因子目录</span><strong>—</strong><small>正在同步</small></div>
           <div class="lab-metric"><span>待审候选</span><strong>—</strong><small>人工门控</small></div>
@@ -564,7 +580,7 @@
             <div class="lab-form-grid">
               <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all" required><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
               <label>研究起点<input name="start" type="date" value="2022-01-01" required></label>
-              <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+              <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
               <label data-dsl-field>保留候选<input name="top" type="number" value="10" min="2" max="50"></label>
               <label data-genetic-field>种群<input name="population" type="number" value="60" min="10" max="500"></label>
               <label data-genetic-field>进化代数<input name="generations" type="number" value="8" min="1" max="50"></label>
@@ -610,7 +626,7 @@
           <div class="lab-form-grid lab-form-grid-5">
             <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
             <label>研究起点<input name="start" type="date" value="2022-01-01"></label>
-            <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+            <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
             <label>序列长度<input name="sequence_length" type="number" value="20" min="1" max="120"></label>
             <label>最大轮次<input name="epochs" type="number" value="30" min="1" max="500"></label>
           </div>
@@ -628,7 +644,7 @@
           <span class="lab-asof">756 TRAIN · 20 RETRAIN · 252 SEALED</span>
         </div>
         <div class="lab-protocol-strip" aria-label="固定研究协议">
-          <div><span>预测头</span><b>1 · 3 · 5 · 7 日</b></div>
+          <div><span>预测头</span><b>1 · 3 · 5 · 7 · 10 · 20 · 30 日</b></div>
           <div><span>搜索目标</span><b>净 IR · RankIC · 回撤</b></div>
           <div><span>数据门禁</span><b>RAW EXECUTION · PIT</b></div>
           <div><span>晋升方式</span><b>SHADOW → HUMAN GATE</b></div>
@@ -802,7 +818,7 @@
         </label>
         <label data-bt-field="factor">合成<select name="weighting"><option value="equal">等权</option><option value="ic">滚动 IC 加权</option></select></label>
         <label data-bt-field="factor">调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
-        <label data-bt-field="decision lab_version" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-bt-field="decision lab_version" hidden>持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
         <label data-bt-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
         <label>开始日期<input name="start" type="date" value="2022-01-01" required></label>
@@ -878,7 +894,7 @@
         <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
         <label class="wide" data-paper-field="factor" hidden>因子<input name="factor" list="factor-list" value="mom_20d"></label>
         <label data-paper-field="factor" hidden>调仓频率<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
-        <label data-paper-field="decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-paper-field="decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
         <label data-paper-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" value="5" min="1" max="50" required></label>
         <label>初始资金<input name="initial_capital" type="number" value="1000000" min="10000" step="10000" required></label>
@@ -901,7 +917,7 @@
         <label>候选<select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select></label>
         <label class="wide" data-paper-edit-field="factor" hidden>因子<input name="factor" list="factor-list"></label>
         <label data-paper-edit-field="factor" hidden>调仓频率<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
-        <label data-paper-edit-field="decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option></select></label>
+        <label data-paper-edit-field="decision">持有交易日<select name="holding_days"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
         <label data-paper-edit-field="decision">策略画像<select name="profile"><option value="risk_adjusted">扣费风险收益</option><option value="short_term">短期命中收益</option><option value="stable">稳定可解释</option></select></label>
         <label>持仓数<input name="top_n" type="number" min="1" max="50" required></label>
         <label data-paper-capital>初始资金<input name="initial_capital" type="number" min="10000" step="10000" required></label>
@@ -1406,7 +1422,7 @@
             <label class="toggle-field field-wide"><span><strong>启用内置研究 Worker</strong><small>关闭后停止调度和领取新任务，当前任务完成后退出。</small></span><input name="lab.enabled" type="checkbox" role="switch"></label>
             <label>默认研究候选<div class="candidate-field"><select name="lab.universe" data-candidate-select="all" required><option value="csi800">csi800</option><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">管理</button></div><small>csi800 需要 Tushare index_weight 权限。</small></label>
             <label>研究起点<input name="lab.start" type="date" required></label>
-            <fieldset class="choice-field field-wide"><legend>统一验证周期</legend><div class="choice-row"><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="1">1 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="3">3 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="5">5 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="7">7 日</label></div><small>新建和定时研究使用；既有报告不会被改写。</small></fieldset>
+            <fieldset class="choice-field field-wide"><legend>统一验证周期</legend><div class="choice-row"><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="1">1 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="3">3 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="5">5 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="7">7 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="10">10 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="20">20 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="30">30 日</label></div><small>每个周期独立验证和授权；最长标签使用 30 日 purge。</small></fieldset>
           </div>
           <details class="settings-advanced">
             <summary>调度、计算与数据共享</summary>

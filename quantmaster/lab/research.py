@@ -8,9 +8,10 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from quantmaster.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
 from quantmaster.lab.models import content_hash
 
-HORIZONS = (1, 3, 5, 7)
+HORIZONS = SUPPORTED_HORIZONS
 DEEP_MODELS = ("multi-transformer", "multi-tcn", "multi-gru")
 MODEL_FAMILIES = (*DEEP_MODELS, "ridge")
 
@@ -22,7 +23,7 @@ class WalkForwardSpec:
     train_window: int = 756
     retrain_every: int = 20
     sealed_holdout: int = 252
-    purge_gap: int = 7
+    purge_gap: int = MAX_HORIZON
     development_folds: int = 4
     fold_test_days: int = 63
     horizons: tuple[int, ...] = HORIZONS
@@ -38,7 +39,7 @@ class WalkForwardSpec:
         if self.development_folds < 2 or self.fold_test_days < 10:
             raise ValueError("开发期至少需要 2 折，每折至少 10 个交易日")
         if not self.horizons or any(value not in HORIZONS for value in self.horizons):
-            raise ValueError("horizons 只支持 1/3/5/7 日")
+            raise ValueError("horizons 只支持 1/3/5/7/10/20/30 日")
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -150,7 +151,7 @@ class TimeFold:
 
 
 def sealed_three_way_split(
-    dates: pd.DatetimeIndex, *, purge_gap: int = 7,
+    dates: pd.DatetimeIndex, *, purge_gap: int = MAX_HORIZON,
     minimum_train: int = 504, minimum_holdout: int = 252,
 ) -> dict[str, dict[str, str | int]]:
     """生成 TRAIN/VALID/TEST 三段；TEST 不参与候选排序或参数选择。"""

@@ -139,7 +139,7 @@ class LabConfig:
     enabled: bool = True
     universe: str = "csi800"
     start: str = "2015-01-01"
-    horizons: list[int] = field(default_factory=lambda: [1, 3, 5, 7])
+    horizons: list[int] = field(default_factory=lambda: [1, 3, 5, 7, 10, 20, 30])
     weekly_days: list[int] = field(default_factory=lambda: [1, 3, 5])
     window_start: str = "19:00"
     window_end: str = "07:00"

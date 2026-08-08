@@ -162,10 +162,13 @@ def _full_refresh(
     cached: pd.DataFrame | None,
     store: BarStore,
     priority: str,
+    provider: str = "",
 ) -> pd.DataFrame:
     market = guess_market(symbol)
     errors: list[str] = []
-    for factory in _request_factories(priority=priority, allow_online=False).get(market, []):
+    for factory in _request_factories(
+        priority=priority, allow_online=False, provider=provider,
+    ).get(market, []):
         try:
             source = factory()
             with data_priority(priority), bypass_endpoint_cache():
@@ -208,6 +211,7 @@ def _fetch_segment(
     store: BarStore,
     priority: str,
     refresh_provider_cache: bool = False,
+    provider: str = "",
 ) -> tuple[pd.DataFrame | None, list[str], bool]:
     market = guess_market(symbol)
     errors: list[str] = []
@@ -224,7 +228,9 @@ def _fetch_segment(
         store.mark_checked(symbol, start, end, source=source.name)
         return store.get(symbol), errors, True
 
-    for factory in _request_factories(priority=priority, allow_online=True).get(market, []):
+    for factory in _request_factories(
+        priority=priority, allow_online=True, provider=provider,
+    ).get(market, []):
         try:
             source = factory()
             with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
@@ -324,7 +330,23 @@ def _request_factories(
     *,
     priority: str,
     allow_online: bool,
+    provider: str = "",
 ) -> dict[Market, list]:
+    selected_provider = str(provider or "").strip().lower()
+    if selected_provider:
+        from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource
+        from quantmaster.data.tushare_source import TushareSource
+
+        selected = {
+            "free-stockdb-online": FreeStockDBOnlineSource,
+            "tushare": TushareSource,
+        }.get(selected_provider)
+        if selected is None:
+            raise ValueError(f"不支持的数据源: {selected_provider}")
+        return {
+            market: [selected] if market in selected.markets else []
+            for market in Market
+        }
     factories = _factories()
     if allow_online and priority == "interactive":
         return factories
@@ -499,6 +521,7 @@ def _load_history_locked(
     *,
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
+    provider: str = "",
 ) -> pd.DataFrame:
     """已持有单标的锁时加载标准化日线。"""
     store = store or _default_bar_store()
@@ -510,7 +533,9 @@ def _load_history_locked(
         if cached is not None and not cached.empty:
             fetch_start = min(start, str(cached.index.min().date()))
             fetch_end = max(end, str(cached.index.max().date()))
-        return _full_refresh(symbol, fetch_start, fetch_end, cached, store, priority).loc[start:end]
+        return _full_refresh(
+            symbol, fetch_start, fetch_end, cached, store, priority, provider,
+        ).loc[start:end]
 
     meta = store.metadata(symbol) or {}
     requested_end = pd.Timestamp(end).normalize()
@@ -555,6 +580,7 @@ def _load_history_locked(
             store,
             priority,
             refresh_provider_cache=(mode == RefreshMode.INCREMENTAL or session_refresh_due),
+            provider=provider,
         )
         errors.extend(segment_errors)
         all_segments_succeeded = all_segments_succeeded and succeeded
@@ -579,6 +605,7 @@ def load_history(
     *,
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
+    provider: str = "",
 ) -> pd.DataFrame:
     """加载标准化日线；普通请求只补边界增量，全量重拉必须显式指定。"""
     store = store or _default_bar_store()
@@ -591,6 +618,7 @@ def load_history(
             store=store,
             refresh=refresh,
             priority=priority,
+            provider=provider,
         )
 
 
@@ -698,6 +726,7 @@ def load_bar_panel(
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
     max_workers: int = 8,
+    provider: str = "",
 ) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """加载日线或分钟线多标的面板数据。
 
@@ -722,7 +751,7 @@ def load_bar_panel(
     # A fresh local database can satisfy an uncached A-share universe in one SDK
     # round trip. Existing/partial caches still use the normal per-symbol merge
     # path so adjustment alignment and coverage checks remain authoritative.
-    if frequency == "1d" and daily_store is not None and symbols:
+    if frequency == "1d" and daily_store is not None and symbols and not provider:
         batch_symbols = [
             symbol
             for symbol in symbols
@@ -775,6 +804,7 @@ def load_bar_panel(
                 store=daily_store,
                 refresh=refresh,
                 priority=priority,
+                provider=provider,
             )
         assert intraday_store is not None
         return load_intraday(
@@ -835,6 +865,7 @@ def load_panel(
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
     max_workers: int = 8,
+    provider: str = "",
 ) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """向后兼容的日线面板入口。"""
     return load_bar_panel(
@@ -848,4 +879,5 @@ def load_panel(
         refresh=refresh,
         priority=priority,
         max_workers=max_workers,
+        provider=provider,
     )

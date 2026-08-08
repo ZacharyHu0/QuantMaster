@@ -1198,7 +1198,7 @@ def build_parser() -> argparse.ArgumentParser:
     ldiscover = lq.add_parser("discover", help="提交遗传、DSL LLM 或 Python AutoMiner 任务")
     lab_common(ldiscover)
     ldiscover.add_argument("--method", choices=["genetic", "llm", "python"], default="genetic")
-    ldiscover.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    ldiscover.add_argument("--horizon", type=int, choices=[1, 3, 5, 7, 10, 20, 30], default=3)
     ldiscover.add_argument("--top", type=int, default=10)
     ldiscover.add_argument("--population", type=int, default=60)
     ldiscover.add_argument("--generations", type=int, default=8)
@@ -1210,7 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
     ltrain.add_argument(
         "--model", choices=["ridge", "mlp", "tcn", "gru", "transformer", "dae"], default="ridge"
     )
-    ltrain.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    ltrain.add_argument("--horizon", type=int, choices=[1, 3, 5, 7, 10, 20, 30], default=3)
     ltrain.add_argument("--sequence-length", type=int, default=20)
     ltrain.add_argument("--epochs", type=int, default=30)
     loptimize = lq.add_parser("optimize", help="提交共享多周期 Pareto 优化")
@@ -1242,7 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
     ldeploy = lq.add_parser("deploy", help="设为研究生产 champion（不连接券商）")
     ldeploy.add_argument("version_id")
     ldeploy.add_argument("--universe", default="csi800")
-    ldeploy.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
+    ldeploy.add_argument("--horizon", type=int, choices=[1, 3, 5, 7, 10, 20, 30], default=3)
     p.set_defaults(func=cmd_lab)
 
     p = sub.add_parser("fetch", help="预取行情到本地缓存")
@@ -1299,7 +1299,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("select", help="Hybrid v2 每日决策：规则、Quant Lab 因子与批准模型")
     common(p)
     p.add_argument("--top", type=int, default=10)
-    p.add_argument("--horizon", type=int, default=3, choices=[1, 3, 5, 7])
+    p.add_argument("--horizon", type=int, default=3, choices=[1, 3, 5, 7, 10, 20, 30])
     p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--no-industry", action="store_true", help="不加载行业名称")
     p.add_argument("--no-save", action="store_true", help="不保存本次决策快照")
@@ -1409,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--holding-days",
         type=int,
         default=3,
-        choices=[1, 3, 5, 7],
+        choices=[1, 3, 5, 7, 10, 20, 30],
         help="decision 策略持有与调仓周期",
     )
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
@@ -1473,7 +1473,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         command.add_argument("--factor", default="mom_20d")
         command.add_argument("--top", type=int, default=5)
-        command.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
+        command.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7, 10, 20, 30])
         command.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
         command.add_argument("--capital", type=float, default=1_000_000)
 
@@ -1499,7 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--factor", default="mom_20d")
     p.add_argument("--top", type=int, default=5)
-    p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
+    p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7, 10, 20, 30])
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)

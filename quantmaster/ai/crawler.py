@@ -915,6 +915,26 @@ class NewsStore:
             result.append(value)
         return result
 
+    def factor_coverage(self, minimum_confidence: float = 0.0) -> dict[str, Any]:
+        """Return the usable local annotation span without materialising news rows."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MIN(n.first_seen_at) AS first_seen_at,"
+                "MAX(n.first_seen_at) AS last_seen_at,COUNT(*) AS event_count "
+                "FROM news n LEFT JOIN news_sources s ON s.id=n.source_id "
+                "WHERE n.analysis_status='complete' AND n.first_seen_at>0 "
+                "AND COALESCE(n.confidence,0)>=? "
+                "AND COALESCE(n.importance_score,0)>0 "
+                "AND COALESCE(s.factor_weight,1)>0",
+                (max(0.0, float(minimum_confidence)),),
+            ).fetchone()
+        value = dict(row) if row else {}
+        return {
+            "first_seen_at": float(value.get("first_seen_at") or 0),
+            "last_seen_at": float(value.get("last_seen_at") or 0),
+            "event_count": int(value.get("event_count") or 0),
+        }
+
     def market_sentiment(self, *, as_of: float, days: int = 30) -> dict[str, Any]:
         """Return a quality-weighted market proxy bounded at the requested time."""
         reference = float(as_of)

@@ -259,8 +259,8 @@ class LabSettings(StrictModel):
     enabled: bool = True
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     start: str = Field(default="2015-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$")
-    horizons: list[Literal[1, 3, 5, 7]] = Field(
-        default_factory=lambda: [1, 3, 5, 7], min_length=1, max_length=4
+    horizons: list[Literal[1, 3, 5, 7, 10, 20, 30]] = Field(
+        default_factory=lambda: [1, 3, 5, 7, 10, 20, 30], min_length=1, max_length=7
     )
     weekly_days: list[int] = Field(default_factory=lambda: [1, 3, 5], min_length=1, max_length=7)
     window_start: str = Field(default="19:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -294,7 +294,7 @@ class LabSettings(StrictModel):
     @field_validator("horizons")
     @classmethod
     def normalize_horizons(cls, value: list[int]) -> list[int]:
-        return [item for item in (1, 3, 5, 7) if item in set(value)]
+        return [item for item in (1, 3, 5, 7, 10, 20, 30) if item in set(value)]
 
     @field_validator("weekly_days")
     @classmethod

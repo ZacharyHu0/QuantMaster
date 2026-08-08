@@ -304,7 +304,7 @@ def make_multi_horizon_samples(
 ) -> MultiHorizonSamples:
     feature_spec = feature_spec or FeatureSetSpec(groups=("price_volume_v2",))
     if not horizons or any(value not in HORIZONS for value in horizons):
-        raise ValueError("horizons 只支持 1/3/5/7 日")
+        raise ValueError("horizons 只支持 1/3/5/7/10/20/30 日")
     root = Path(storage_dir) if storage_dir is not None else None
     close = panel["close"].astype(float)
     cube, valid_counts, dates, columns, names = _feature_cube(
