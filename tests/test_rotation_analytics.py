@@ -20,6 +20,7 @@ from quantmaster.rotation.analytics import (
     compute_trend_matrices,
     estimate_etf_flows,
     map_theme_industries,
+    market_temperature_reference_dates,
 )
 from quantmaster.rotation.taxonomy import strict_l1_groups
 
@@ -144,6 +145,91 @@ def test_market_temperature_accepts_same_day_supplemental_evidence():
     assert items["sentiment"]["score"] == 53.95
     assert items["sentiment"]["event_count"] == 120
     assert not result["quality"]["issues"]
+
+
+def test_market_temperature_change_windows_use_prior_trading_sessions():
+    close = _close(120, 24)
+    trend = compute_trend_matrices(close)
+    references = market_temperature_reference_dates(trend)
+    current_as_of = references[0]
+    history_evidence = {
+        references[window]: {
+            "etf_capital": {
+                "available": True,
+                "score": 20.0 + window,
+                "as_of": references[window],
+                "note": f"ETF 历史 {window}",
+            },
+            "sentiment": {
+                "available": True,
+                "score": 40.0 - window,
+                "as_of": references[window],
+                "note": f"情绪历史 {window}",
+            },
+        }
+        for window in (1, 3, 5, 20)
+    }
+    result = compute_market_temperature(
+        close,
+        close * 1_000_000,
+        trend=trend,
+        supplemental_evidence={
+            "etf_capital": {
+                "available": True, "score": 60.0,
+                "as_of": current_as_of, "note": "ETF 当前",
+            },
+            "sentiment": {
+                "available": True, "score": 55.0,
+                "as_of": current_as_of, "note": "情绪当前",
+            },
+        },
+        supplemental_evidence_history=history_evidence,
+    )
+
+    windows = result["change_windows"]
+    assert windows["default_window"] == 5
+    assert windows["supported_windows"] == [1, 3, 5, 20]
+    five = windows["windows"]["5"]
+    assert five["reference_as_of"] == str(close.index[-6].date())
+    history = {row["date"]: row for row in result["history"]}
+    assert five["temperature"]["previous"] == history[five["reference_as_of"]]["temperature"]
+    assert five["temperature"]["change_pp"] == round(
+        result["current"]["temperature"] - five["temperature"]["previous"], 2,
+    )
+    comparisons = {item["id"]: item for item in five["evidence"]["items"]}
+    assert five["evidence"]["comparable_count"] == 5
+    assert comparisons["etf_capital"]["previous_score"] == 25.0
+    assert comparisons["etf_capital"]["change_pp"] == 35.0
+    assert comparisons["sentiment"]["change_pp"] == 20.0
+    assert comparisons["trend"]["change_pp"] == five["temperature"]["change_pp"]
+
+
+def test_market_temperature_change_keeps_missing_history_unavailable():
+    close = _close(100, 24)
+    current_as_of = str(close.index[-1].date())
+    result = compute_market_temperature(
+        close,
+        close * 1_000_000,
+        supplemental_evidence={
+            "etf_capital": {
+                "available": True, "score": 60.0,
+                "as_of": current_as_of, "note": "ETF 当前",
+            },
+            "sentiment": {
+                "available": True, "score": 55.0,
+                "as_of": current_as_of, "note": "情绪当前",
+            },
+        },
+    )
+
+    five = result["change_windows"]["windows"]["5"]
+    comparisons = {item["id"]: item for item in five["evidence"]["items"]}
+    assert five["evidence"]["comparable_count"] == 3
+    assert comparisons["etf_capital"]["current_available"] is True
+    assert comparisons["etf_capital"]["previous_available"] is False
+    assert comparisons["etf_capital"]["change_pp"] is None
+    assert "等待 ETF" in comparisons["etf_capital"]["previous_note"]
+    assert comparisons["sentiment"]["change_pp"] is None
 
 
 def test_market_structure_exposes_distribution_and_three_day_confirmation():

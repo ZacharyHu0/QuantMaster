@@ -22,6 +22,7 @@
   let activeJob = null;
   const ACTIVE_JOB_KEY = 'quantmaster.rotation.active-job.v1';
   const WINDOW_KEY = 'quantmaster.rotation.window.v2';
+  const TEMPERATURE_WINDOW_KEY = 'quantmaster.market.temperature-window.v1';
   const WINDOWS = [1,3,5,20];
   let themeCatalog = [];
   let themeFocus = [];
@@ -31,6 +32,7 @@
   let etfSnapshotId = '';
   let etfLastJob = null;
   let activeWindow = 5;
+  let temperatureWindow = 5;
   let themePage = 1;
   let etfPage = 1;
   let themePageSize = 50;
@@ -53,6 +55,8 @@
   try {
     const savedWindow = Number(localStorage.getItem(WINDOW_KEY));
     if (WINDOWS.includes(savedWindow)) activeWindow = savedWindow;
+    const savedTemperatureWindow = Number(localStorage.getItem(TEMPERATURE_WINDOW_KEY));
+    if (WINDOWS.includes(savedTemperatureWindow)) temperatureWindow = savedTemperatureWindow;
   } catch (_) {}
 
   const number = (value, digits = 1) => {
@@ -85,6 +89,7 @@
   const pp = value => signed(value,1,' pp');
   const scoreEvidenceMarkup = score => `<div class="rotation-evidence-list">${(score?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div>`;
   const windowControl = label => `<div class="rotation-window-control" aria-label="${esc(label)}">${WINDOWS.map(window => `<button type="button" data-rotation-window="${window}" aria-pressed="${String(window === activeWindow)}">${window} 日</button>`).join('')}</div>`;
+  const temperatureWindowControl = available => `<div class="rotation-window-control" aria-label="市场温度变化窗口">${WINDOWS.map(window => `<button type="button" data-temperature-window="${window}" aria-pressed="${String(window === temperatureWindow)}" ${available ? '' : 'disabled'}>${window} 日</button>`).join('')}</div>`;
   const pageControl = (kind, pagination, pageSize) => {
     const page = Number(pagination?.page || 1), pages = Math.max(1, Number(pagination?.pages || 1));
     const numbers = Array.from({length:pages},(_, index) => index + 1).filter(value =>
@@ -248,7 +253,7 @@
     }));
   }
 
-  function evidenceRadarChart(items) {
+  function evidenceRadarChart(items, comparison) {
     const chart = mkChart('rotation-evidence-radar');
     if (!chart) return;
     const dimensions = [
@@ -256,14 +261,45 @@
       ['etf_capital','ETF 资金'], ['sentiment','情绪代理'],
     ];
     const indexed = new Map((items || []).map(item => [item.id,item]));
+    const compared = new Map((comparison?.evidence?.items || []).map(item => [item.id,item]));
     const evidence = dimensions.map(([id,label]) => ({id,label,item:indexed.get(id)}));
-    const complete = evidence.every(({item}) => item?.available && Number.isFinite(Number(item.score)));
-    const values = evidence.map(({item}) => Number(item?.score));
+    const currentComplete = evidence.every(({item}) => item?.available && Number.isFinite(Number(item.score)));
+    const previousComplete = evidence.every(({id}) => {
+      const item = compared.get(id);
+      return item?.previous_available && Number.isFinite(Number(item.previous_score));
+    });
+    const currentValues = evidence.map(({item}) => Number(item?.score));
+    const previousValues = evidence.map(({id}) => Number(compared.get(id)?.previous_score));
+    const currentLabel = `当前 · ${comparison?.current_as_of || '最新'}`;
+    const previousLabel = `${temperatureWindow} 日前 · ${comparison?.reference_as_of || '历史不足'}`;
+    const series = [];
+    if (currentComplete) {
+      series.push({
+        name:currentLabel,type:'radar',symbol:'circle',symbolSize:4,
+        lineStyle:{color:CHART_COLORS.primary,width:1.7},itemStyle:{color:CHART_COLORS.primary},
+        areaStyle:{color:'rgba(57,135,229,.14)'},data:[{name:currentLabel,value:currentValues}],
+      });
+    }
+    if (currentComplete && previousComplete) {
+      series.push({
+        name:previousLabel,type:'radar',symbol:'none',
+        lineStyle:{color:CHART_COLORS.neutral,width:1.4,type:'dashed'},
+        itemStyle:{color:CHART_COLORS.neutral},areaStyle:{opacity:0},
+        data:[{name:previousLabel,value:previousValues}],
+      });
+    }
     chart.setOption(baseOpt({
-      tooltip:complete ? {trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:10},formatter:params => `${params.name}<br>${evidence.map(({label},index) => `${label} ${number(params.value[index],1)}`).join('<br>')}`} : {show:false},
-      radar:{center:['50%','52%'],radius:'68%',startAngle:90,splitNumber:4,indicator:evidence.map(({label}) => ({name:label,max:100})),axisName:{color:INK2,fontSize:10},axisNameGap:7,axisLine:{lineStyle:{color:AXIS}},splitLine:{lineStyle:{color:GRID}},splitArea:{show:false}},
-      series:complete ? [{name:'五维证据',type:'radar',symbol:'circle',symbolSize:4,lineStyle:{color:CHART_COLORS.primary,width:1.6},itemStyle:{color:CHART_COLORS.primary},areaStyle:{color:'rgba(57,135,229,.14)'},data:[{name:'五维证据',value:values}]}] : [],
-      graphic:complete ? [] : [{type:'text',left:'center',top:'middle',style:{text:'等待完整五维证据',fill:MUTED,font:'10px sans-serif'}}],
+      legend:currentComplete ? {top:0,data:series.map(item => item.name),textStyle:{color:INK2,fontSize:9},itemWidth:18,itemHeight:6} : undefined,
+      tooltip:currentComplete ? {
+        trigger:'item',backgroundColor:'#1a1a19',borderColor:AXIS,textStyle:{color:'#fff',fontSize:10},
+        formatter:() => `${esc(currentLabel)}<br>${evidence.map(({id,label}) => {
+          const current = indexed.get(id), prior = compared.get(id);
+          return `${esc(label)} ${number(current?.score,1)} / ${number(prior?.previous_score,1)} · ${signed(prior?.change_pp,1)}`;
+        }).join('<br>')}`,
+      } : {show:false},
+      radar:{center:['50%','57%'],radius:'61%',startAngle:90,splitNumber:4,indicator:evidence.map(({label}) => ({name:label,max:100})),axisName:{color:INK2,fontSize:10},axisNameGap:7,axisLine:{lineStyle:{color:AXIS}},splitLine:{lineStyle:{color:GRID}},splitArea:{show:false}},
+      series,
+      graphic:currentComplete ? [] : [{type:'text',left:'center',top:'middle',style:{text:'等待完整五维证据',fill:MUTED,font:'10px sans-serif'}}],
     }));
   }
 
@@ -279,9 +315,29 @@
     const current = data.current;
     const ratios = current.ratios || {};
     const recent = (data.history || []).slice(-15);
+    const changePayload = data.change_windows || {};
+    const comparison = changePayload.windows?.[String(temperatureWindow)] || {};
+    const temperatureChange = Number(comparison.temperature?.change_pp);
+    const roundedTemperatureChange = Number.isFinite(temperatureChange)
+      ? Math.round(temperatureChange * 10) / 10 : Number.NaN;
+    const temperatureDirection = roundedTemperatureChange > 0
+      ? '升温' : roundedTemperatureChange < 0
+        ? '降温' : Number.isFinite(roundedTemperatureChange) ? '持平' : '历史不足';
+    const comparedItems = new Map(
+      (comparison.evidence?.items || []).map(item => [item.id,item]),
+    );
+    const comparableCount = Number(comparison.evidence?.comparable_count || 0);
+    const totalEvidence = Number(comparison.evidence?.total_count || 5);
+    const changeAvailable = Boolean(changePayload.windows);
+    const radarNote = comparableCount === totalEvidence
+      ? `五维均可与 ${comparison.reference_as_of || `${temperatureWindow} 日前`} 比较`
+      : comparison.reference_as_of
+        ? `${temperatureWindow} 日前仅 ${comparableCount}/${totalEvidence} 维可比，历史轮廓未绘制`
+        : '生成 V7 市场快照后可查看历史轮廓';
     out.innerHTML = `
+      <div class="rotation-commandbar rotation-temperature-commandbar"><div><strong>温度变化窗口</strong><span>比较当前与 N 个交易日前；只改变本页变化参照</span></div>${temperatureWindowControl(changeAvailable)}</div>
       <div class="rotation-kpis">
-        <div class="rotation-kpi"><span>市场温度</span><strong class="${Number(current.temperature) > 50 ? 'up' : ''}">${percent(current.temperature)}</strong><small>趋势向上样本占比</small></div>
+        <div class="rotation-kpi"><span>市场温度</span><strong class="${Number(current.temperature) > 50 ? 'up' : ''}">${percent(current.temperature)}</strong><small>趋势向上样本占比 · <span class="rotation-temperature-change ${tone(roundedTemperatureChange)}">${temperatureWindow} 日 ${signed(roundedTemperatureChange,1)} · ${temperatureDirection}</span></small></div>
         <div class="rotation-kpi"><span>温度区间</span><strong class="rotation-regime" data-regime="${esc(current.regime || 'unavailable')}">${esc(current.regime_label || '—')}</strong><small>${esc(current.regime || '')}</small></div>
         <div class="rotation-kpi"><span>强势加速</span><strong>${percent(ratios.strong_up)}</strong><small>${Number(current.counts?.strong_up || 0).toLocaleString()} 只</small></div>
         <div class="rotation-kpi"><span>有效样本</span><strong>${Number(current.eligible_count || 0).toLocaleString()}</strong><small>停牌与缺失不进分母</small></div>
@@ -295,12 +351,12 @@
           <section class="rotation-section"><div class="rotation-section-head"><div><h3>近 15 日温度路径</h3><p>最近 15 个已完成交易日</p></div></div><div class="rotation-chart rotation-temperature-recent-chart" id="rotation-temperature-recent-chart"></div></section>
         </div>
       </div>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>证据分解</h3><p>缺失维度从有效权重中剔除，不按零分处理</p></div><output>有效权重 ${data.evidence?.available_weight || 0}/100 · 综合 ${number(data.evidence?.score,1)}</output></div>
-        <div class="rotation-evidence-layout"><div class="rotation-chart rotation-evidence-radar" id="rotation-evidence-radar" aria-label="市场温度五维证据雷达图"></div><div class="rotation-evidence-list">${(data.evidence?.items || []).map(item => `<div class="rotation-evidence-row" data-available="${item.available}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i></div><span>${esc(item.note || '')}</span></div><output>${item.available ? number(item.score,1) : '待补'} · ${item.weight}</output></div>`).join('')}</div></div>
+      <section class="rotation-section"><div class="rotation-section-head"><div><h3>证据分解</h3><p>填充条为当前分，细刻度为 ${temperatureWindow} 个交易日前；缺失维度不补零</p></div><output>有效权重 ${data.evidence?.available_weight || 0}/100 · 综合 ${number(data.evidence?.score,1)}</output></div>
+        <div class="rotation-evidence-layout"><div class="rotation-evidence-radar-wrap"><div class="rotation-chart rotation-evidence-radar" id="rotation-evidence-radar" aria-label="市场温度五维证据当前与历史雷达图"></div><p>${esc(radarNote)}</p></div><div class="rotation-evidence-list">${(data.evidence?.items || []).map(item => { const compared = comparedItems.get(item.id) || {}; const previousRatio = compared.previous_available ? Math.max(0,Math.min(1,Number(compared.previous_score)/100)) : null; const comparisonTitle = compared.previous_available ? `${temperatureWindow} 日前 ${number(compared.previous_score,1)}；变化 ${signed(compared.change_pp,1)}` : (compared.previous_note || '历史证据不足'); return `<div class="rotation-evidence-row" data-available="${item.available}" data-comparable="${Boolean(compared.comparable)}" title="${esc(comparisonTitle)}"><strong>${esc(item.label)}</strong><div><div class="rotation-meter rotation-evidence-meter"><i style="--ratio:${item.available ? Math.max(0,Math.min(1,Number(item.score)/100)) : 0}"></i>${previousRatio == null ? '' : `<b class="rotation-meter-reference" style="--reference:${previousRatio}" aria-label="${temperatureWindow} 日前 ${number(compared.previous_score,1)}"></b>`}</div><span>${esc(item.note || '')}</span></div><output><strong>${item.available ? number(item.score,1) : '待补'}</strong><span class="${tone(compared.change_pp)}">${compared.comparable ? signed(compared.change_pp,1) : '不可比'}</span><small>权重 ${item.weight}</small></output></div>`; }).join('')}</div></div>
       </section>${issuesMarkup(meta)}`;
     temperatureChart(data.history || []);
     recentTemperatureChart(recent);
-    evidenceRadarChart(data.evidence?.items || []);
+    evidenceRadarChart(data.evidence?.items || [], comparison);
   }
 
   const structureBarPoint = (row, key, direction) => {
@@ -1241,6 +1297,18 @@
         activeWindow = selected; themePage = 1; etfPage = 1;
         try { localStorage.setItem(WINDOW_KEY,String(activeWindow)); } catch (_) {}
         loadCurrent();
+      }
+      return;
+    }
+    const temperatureWindowButton = event.target.closest('[data-temperature-window]');
+    if (temperatureWindowButton) {
+      const selected = Number(temperatureWindowButton.dataset.temperatureWindow);
+      if (WINDOWS.includes(selected) && selected !== temperatureWindow) {
+        temperatureWindow = selected;
+        try { localStorage.setItem(TEMPERATURE_WINDOW_KEY,String(temperatureWindow)); } catch (_) {}
+        const cached = cache.get('temperature');
+        if (cached && typeof cached.then !== 'function') renderTemperature(cached);
+        else loadCurrent();
       }
       return;
     }

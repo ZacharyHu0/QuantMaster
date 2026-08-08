@@ -158,9 +158,14 @@ def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
     assert "min:lower,max:upper > lower ? upper : Math.min(100,lower + 5)" in script
     assert "recentTemperatureChart(recent)" in script
     assert script.count('id="rotation-evidence-radar"') == 1
-    assert "const complete = evidence.every" in script
-    assert "series:complete ?" in script
+    assert "const currentComplete = evidence.every" in script
+    assert "const previousComplete = evidence.every" in script
+    assert "currentComplete && previousComplete" in script
+    assert "type:'dashed'" in script
     assert "等待完整五维证据" in script
+    assert 'data-temperature-window="${window}"' in script
+    assert "TEMPERATURE_WINDOW_KEY" in script
+    assert "rotation-meter-reference" in script
     assert "dataZoom:chartZoom(points.length)" in script
     assert "dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1],initialPoints:260})" in script
     assert "orient:'vertical',yAxisIndex" in script
@@ -172,6 +177,7 @@ def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
     assert "grid-template-columns:minmax(0,2.3fr) minmax(240px,.5fr)" in stylesheet
     assert ".rotation-temperature-recent-chart { height:136px; }" in stylesheet
     assert ".rotation-evidence-radar { height:240px; }" in stylesheet
+    assert ".rotation-meter-reference" in stylesheet
     assert "grid-template-columns:minmax(220px,.7fr) minmax(0,1.3fr)" in stylesheet
     assert ".rotation-state-row { grid-template-columns:52px minmax(0,1fr) 92px; gap:8px; }" in stylesheet
     assert '.rotation-regime[data-regime="ice"] { color:var(--s1); }' in stylesheet
@@ -319,10 +325,10 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     monkeypatch.setattr(
         service_module,
         "compute_etf_capital_evidence",
-        lambda *_args, **_kwargs: {
+        lambda *_args, as_of, **_kwargs: {
             "available": True,
             "score": 18.45,
-            "as_of": str(close.index[-1].date()),
+            "as_of": str(as_of),
             "note": "近 5 日净申购率 -3.98%",
             "fund_count": 20,
             "reference_windows": 252,
@@ -392,6 +398,11 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     }
     assert evidence["etf_capital"]["score"] == 18.45
     assert evidence["sentiment"]["score"] == 53.95
+    changes = temperature["data"]["change_windows"]
+    assert changes["default_window"] == 5
+    assert set(changes["windows"]) == {"1", "3", "5", "20"}
+    assert changes["windows"]["5"]["evidence"]["comparable_count"] == 5
+    assert changes["windows"]["5"]["reference_as_of"] == str(close.index[-6].date())
     assert "tushare:fund_share" in temperature["meta"]["sources"]
     assert "local:news" in temperature["meta"]["sources"]
     assert len(industries["data"]["items"]) == 4

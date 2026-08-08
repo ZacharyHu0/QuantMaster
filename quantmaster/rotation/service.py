@@ -33,6 +33,7 @@ from quantmaster.rotation.analytics import (
     compute_trend_matrices,
     estimate_etf_flows,
     map_theme_industries,
+    market_temperature_reference_dates,
 )
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.store import (
@@ -661,11 +662,26 @@ class RotationService:
 
         if scope in {"all", "close", "market"}:
             progress(compute_base, "计算市场温度", "汇总四档趋势分布与证据权重")
+            assert trend is not None
+            temperature_dates = market_temperature_reference_dates(trend)
+            temperature_as_of = temperature_dates.get(0, as_of)
             etf_evidence = compute_etf_capital_evidence(
                 etf_observations,
-                as_of=as_of,
+                as_of=temperature_as_of,
             )
-            sentiment_evidence = _news_sentiment_evidence(as_of)
+            sentiment_evidence = _news_sentiment_evidence(temperature_as_of)
+            historical_evidence: dict[str, dict[str, dict[str, Any]]] = {}
+            for window in ROTATION_WINDOWS:
+                reference_as_of = temperature_dates.get(window)
+                if not reference_as_of or reference_as_of in historical_evidence:
+                    continue
+                historical_evidence[reference_as_of] = {
+                    "etf_capital": compute_etf_capital_evidence(
+                        etf_observations,
+                        as_of=reference_as_of,
+                    ),
+                    "sentiment": _news_sentiment_evidence(reference_as_of),
+                }
             temperature = compute_market_temperature(
                 close,
                 amount,
@@ -675,22 +691,31 @@ class RotationService:
                     "etf_capital": etf_evidence,
                     "sentiment": sentiment_evidence,
                 },
+                supplemental_evidence_history=historical_evidence,
             )
             temperature_quality = temperature.pop("quality")
             temperature_quality["issues"] = list(dict.fromkeys([
                 *(temperature_quality.get("issues") or []), *provider_issues["market"],
             ]))
             temperature_quality = _mark_stale(
-                temperature_quality, as_of, expected_as_of,
+                temperature_quality, str(temperature.get("as_of") or ""), expected_as_of,
             )
             temperature_sources = list(sources)
-            if etf_evidence.get("available"):
+            all_etf_evidence = [
+                etf_evidence,
+                *(value["etf_capital"] for value in historical_evidence.values()),
+            ]
+            all_sentiment_evidence = [
+                sentiment_evidence,
+                *(value["sentiment"] for value in historical_evidence.values()),
+            ]
+            if any(value.get("available") for value in all_etf_evidence):
                 temperature_sources.extend(["tushare:fund_share", "local:rotation_cache"])
                 if "nav" in etf_observations and etf_observations["nav"].notna().any():
                     temperature_sources.append("tushare:fund_nav")
                 if "close" in etf_observations and etf_observations["close"].notna().any():
                     temperature_sources.append("tushare:fund_daily")
-            if sentiment_evidence.get("available"):
+            if any(value.get("available") for value in all_sentiment_evidence):
                 temperature_sources.append("local:news")
             computed["temperature"] = self._envelope(
                 temperature,

@@ -14,7 +14,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-ALGORITHM_VERSION = "QM_ROTATION_V6"
+ALGORITHM_VERSION = "QM_ROTATION_V7"
 ROTATION_WINDOWS = (1, 3, 5, 20)
 MIN_HISTORY = 30
 EPS = 1e-12
@@ -25,7 +25,7 @@ GROUP_SCORE_WEIGHTS = {
     "volume": 15,
     "relative_return": 15,
     "rotation": 10,
-}
+    }
 MIN_GROUP_SCORE_WEIGHT = 60
 MIN_PERCENTILE_PEERS = 8
 
@@ -235,8 +235,9 @@ def compute_market_temperature(
     history: int = 760,
     trend: TrendMatrices | None = None,
     supplemental_evidence: dict[str, dict[str, Any]] | None = None,
+    supplemental_evidence_history: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Return market temperature, moving averages and evidence decomposition."""
+    """Return market temperature, evidence decomposition and point-in-time changes."""
     trend = trend if trend is not None else compute_trend_matrices(close)
     masks = _state_masks(trend)
     counts = pd.DataFrame({name: mask.sum(axis=1) for name, mask in masks.items()})
@@ -269,19 +270,14 @@ def compute_market_temperature(
         })
 
     advance = (trend.returns > 0).sum(axis=1) / trend.returns.notna().sum(axis=1).replace(0, np.nan)
-    trend_evidence = temperature
-    breadth_evidence = _number(100 * advance.loc[current_date], 2)
-    volume_evidence = None
-    volume_note = "本地成交额不足"
+    volume_scores = pd.Series(np.nan, index=valid.index, dtype=float)
+    volume_ratios = pd.Series(np.nan, index=valid.index, dtype=float)
     if amount is not None and not amount.empty:
         amounts = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
         total = amounts.sum(axis=1, min_count=max(1, min(10, len(amounts.columns))))
         ratio = total.rolling(5, min_periods=3).mean() / (total.rolling(20, min_periods=10).mean() + EPS)
-        if pd.notna(ratio.get(current_date)):
-            raw_volume_score = (float(ratio.loc[current_date]) - 0.70) / 0.60 * 100
-            volume_evidence = _number(min(100.0, max(0.0, raw_volume_score)), 2)
-            volume_note = f"全样本成交额 5/20 日比值 {_number(ratio.loc[current_date], 3)}"
-    external = supplemental_evidence or {}
+        volume_ratios = ratio.reindex(valid.index)
+        volume_scores = ((volume_ratios - 0.70) / 0.60 * 100).clip(lower=0, upper=100)
     current_date_text = _date(current_date)
 
     def external_item(
@@ -289,6 +285,8 @@ def compute_market_temperature(
         label: str,
         weight: int,
         fallback_note: str,
+        evidence_date: str,
+        external: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         payload = dict(external.get(identifier) or {})
         score = _number(payload.get("score"), 2)
@@ -296,9 +294,9 @@ def compute_market_temperature(
         note = str(payload.get("note") or fallback_note)
         if payload.get("available") is False or score is None or not 0 <= score <= 100:
             score = None
-        if evidence_as_of and evidence_as_of != current_date_text:
+        if evidence_as_of and evidence_as_of != evidence_date:
             score = None
-            note = f"证据日期 {evidence_as_of} 与行情日 {current_date_text} 不一致"
+            note = f"证据日期 {evidence_as_of} 与行情日 {evidence_date} 不一致"
         item: dict[str, Any] = {
             "id": identifier,
             "label": label,
@@ -315,23 +313,128 @@ def compute_market_temperature(
                 item[field_name] = payload[field_name]
         return item
 
-    evidence_items = [
-        {"id": "trend", "label": "趋势分布", "score": trend_evidence, "weight": 40, "note": "温度本身"},
-        {
-            "id": "breadth", "label": "涨跌宽度", "score": breadth_evidence,
-            "weight": 20, "note": "当日上涨家数占比",
-        },
-        {"id": "volume", "label": "量能确认", "score": volume_evidence, "weight": 15, "note": volume_note},
-        external_item("etf_capital", "ETF 资金", 15, "等待 ETF 份额快照"),
-        external_item("sentiment", "情绪代理", 10, "等待可核查资讯情绪"),
-    ]
-    available_weight = sum(item["weight"] for item in evidence_items if item["score"] is not None)
-    evidence_score = (
-        sum(float(item["score"]) * item["weight"] for item in evidence_items if item["score"] is not None)
-        / available_weight if available_weight else None
-    )
-    for item in evidence_items:
-        item["available"] = item["score"] is not None
+    def evidence_at(
+        evidence_date: Any,
+        external: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        date_text = _date(evidence_date)
+        volume_ratio = volume_ratios.get(evidence_date)
+        volume_score = _number(volume_scores.get(evidence_date), 2)
+        volume_note = "本地成交额不足"
+        if pd.notna(volume_ratio):
+            volume_note = f"全样本成交额 5/20 日比值 {_number(volume_ratio, 3)}"
+        items = [
+            {
+                "id": "trend", "label": "趋势分布",
+                "score": _number(valid.at[evidence_date, "temperature"], 2),
+                "weight": 40, "note": "温度本身",
+            },
+            {
+                "id": "breadth", "label": "涨跌宽度",
+                "score": _number(100 * advance.get(evidence_date), 2),
+                "weight": 20, "note": "当日上涨股票占比",
+            },
+            {
+                "id": "volume", "label": "量能确认", "score": volume_score,
+                "weight": 15, "note": volume_note,
+            },
+            external_item(
+                "etf_capital", "ETF 资金", 15, "等待 ETF 份额快照",
+                date_text, external,
+            ),
+            external_item(
+                "sentiment", "情绪代理", 10, "等待可核查资讯情绪",
+                date_text, external,
+            ),
+        ]
+        for item in items:
+            item["available"] = item["score"] is not None
+        available_weight = sum(item["weight"] for item in items if item["available"])
+        score = (
+            sum(float(item["score"]) * item["weight"] for item in items if item["available"])
+            / available_weight if available_weight else None
+        )
+        return {
+            "score": _number(score, 2),
+            "available_weight": available_weight,
+            "items": items,
+        }
+
+    evidence = evidence_at(current_date, supplemental_evidence or {})
+    evidence_items = evidence["items"]
+    available_weight = int(evidence["available_weight"])
+    evidence_history = supplemental_evidence_history or {}
+    change_windows: dict[str, dict[str, Any]] = {}
+    valid_dates = list(valid.index)
+    for window in ROTATION_WINDOWS:
+        history_note = (
+            f"历史仅有 {len(valid_dates)} 个有效交易日，无法回看 {window} 日"
+        )
+        reference_date = valid_dates[-window - 1] if len(valid_dates) > window else None
+        reference_text = _date(reference_date) if reference_date is not None else ""
+        previous = (
+            evidence_at(reference_date, evidence_history.get(reference_text) or {})
+            if reference_date is not None else None
+        )
+        previous_items = {
+            item["id"]: item for item in (previous or {}).get("items", [])
+        }
+        compared_items = []
+        for current_item in evidence_items:
+            previous_item = previous_items.get(current_item["id"])
+            current_available = bool(current_item["available"])
+            previous_available = bool(previous_item and previous_item["available"])
+            comparable = current_available and previous_available
+            previous_score = previous_item.get("score") if previous_item else None
+            change_pp = None
+            if (
+                comparable
+                and current_item["score"] is not None
+                and previous_score is not None
+            ):
+                change_pp = _number(
+                    float(current_item["score"]) - float(previous_score), 2,
+                )
+            compared_items.append({
+                "id": current_item["id"],
+                "label": current_item["label"],
+                "weight": current_item["weight"],
+                "current_score": current_item["score"],
+                "previous_score": previous_score,
+                "change_pp": change_pp,
+                "current_available": current_available,
+                "previous_available": previous_available,
+                "comparable": comparable,
+                "current_note": current_item["note"],
+                "previous_note": (
+                    str(previous_item.get("note") or "") if previous_item else history_note
+                ),
+            })
+        previous_temperature = (
+            _number(valid.at[reference_date, "temperature"], 2)
+            if reference_date is not None else None
+        )
+        change_windows[str(window)] = {
+            "window": window,
+            "current_as_of": current_date_text,
+            "reference_as_of": reference_text,
+            "temperature": {
+                "current": temperature,
+                "previous": previous_temperature,
+                "change_pp": _number(
+                    float(temperature) - float(previous_temperature), 2,
+                ) if temperature is not None and previous_temperature is not None else None,
+            },
+            "evidence": {
+                "previous_score": (previous or {}).get("score"),
+                "previous_available_weight": int(
+                    (previous or {}).get("available_weight") or 0,
+                ),
+                "comparable_count": sum(item["comparable"] for item in compared_items),
+                "total_count": len(compared_items),
+                "items": compared_items,
+            },
+        }
     quality = _quality(
         int(current["eligible"]), len(trend.close.columns), expected_count,
         issues=[] if available_weight == 100 else [f"证据维度覆盖权重 {available_weight}/100"],
@@ -351,9 +454,14 @@ def compute_market_temperature(
         },
         "history": history_rows,
         "evidence": {
-            "score": _number(evidence_score, 2),
+            "score": evidence["score"],
             "available_weight": available_weight,
             "items": evidence_items,
+        },
+        "change_windows": {
+            "default_window": 5,
+            "supported_windows": list(ROTATION_WINDOWS),
+            "windows": change_windows,
         },
         "quality": quality,
         "definition": {
@@ -380,7 +488,22 @@ def compute_market_temperature(
                 "sentiment": "近 30 日质量加权资讯情绪由 [-100,100] 线性映射到 [0,100]",
             },
         },
-    }
+}
+
+
+def market_temperature_reference_dates(
+    trend: TrendMatrices,
+) -> dict[int, str]:
+    """Return current and prior valid market-temperature trading dates."""
+    eligible = trend.eligible.sum(axis=1)
+    dates = list(eligible[eligible > 0].index)
+    if not dates:
+        return {}
+    values = {0: _date(dates[-1])}
+    for window in ROTATION_WINDOWS:
+        if len(dates) > window:
+            values[window] = _date(dates[-window - 1])
+    return values
 
 
 def _candidate(spread: Any) -> str:

@@ -1101,7 +1101,7 @@ def test_market_style_confirmation_path_chart_layout(live_server):
     payload = {
         "meta": {
             "as_of": "2026-07-12",
-            "algorithm_version": "QM_ROTATION_V6",
+            "algorithm_version": "QM_ROTATION_V7",
             "sources": ["local:bars"],
             "quality": {"status": "complete", "issues": []},
         },
@@ -1348,7 +1348,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
     selected_codes = {"L2-A", "L2-B"}
     meta = {
         "as_of": "2026-08-08",
-        "algorithm_version": "QM_ROTATION_V6",
+        "algorithm_version": "QM_ROTATION_V7",
         "sources": ["SW2021"],
         "quality": {"status": "complete", "issues": []},
     }
@@ -1573,7 +1573,7 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
     items = [theme_item(index) for index in range(6)]
     meta = {
         "as_of": "2026-08-08",
-        "algorithm_version": "QM_ROTATION_V6",
+        "algorithm_version": "QM_ROTATION_V7",
         "sources": ["local:bars"],
         "quality": {"status": "complete", "issues": []},
     }
@@ -1677,6 +1677,145 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert page_errors == []
         assert console_errors == []
+        browser.close()
+
+
+def test_market_temperature_change_window_rerenders_cached_evidence(live_server):
+    url, _ = live_server
+    current_items = [
+        {"id": identifier, "label": label, "score": score, "weight": weight,
+         "note": f"{label}当前证据", "available": True}
+        for identifier, label, score, weight in [
+            ("trend", "趋势分布", 40.0, 40),
+            ("breadth", "涨跌宽度", 55.0, 20),
+            ("volume", "量能确认", 50.0, 15),
+            ("etf_capital", "ETF 资金", 60.0, 15),
+            ("sentiment", "情绪代理", 55.0, 10),
+        ]
+    ]
+
+    def comparison(window: int, change: float, *, partial: bool = False) -> dict:
+        compared = []
+        for index, item in enumerate(current_items):
+            comparable = not partial or index < 3
+            previous = item["score"] - change if comparable else None
+            compared.append({
+                "id": item["id"], "label": item["label"], "weight": item["weight"],
+                "current_score": item["score"], "previous_score": previous,
+                "change_pp": change if comparable else None,
+                "current_available": True, "previous_available": comparable,
+                "comparable": comparable, "current_note": item["note"],
+                "previous_note": "历史证据" if comparable else "历史证据不足",
+            })
+        return {
+            "window": window,
+            "current_as_of": "2026-08-08",
+            "reference_as_of": f"2026-07-{30 - window:02d}",
+            "temperature": {
+                "current": 40.0, "previous": 40.0 - change, "change_pp": change,
+            },
+            "evidence": {
+                "previous_score": 50.0 - change,
+                "previous_available_weight": 100 if not partial else 75,
+                "comparable_count": 5 if not partial else 3,
+                "total_count": 5,
+                "items": compared,
+            },
+        }
+
+    history = [
+        {
+            "date": f"2026-07-{day:02d}", "temperature": 30.0 + day / 3,
+            "ma5": 32.0, "ma10": 31.0, "ma20": 30.0,
+            "eligible": 100, "strong_up": 20, "up": 20,
+            "range": 35, "weak": 25,
+        }
+        for day in range(1, 31)
+    ]
+    payload = {
+        "meta": {
+            "as_of": "2026-08-08", "algorithm_version": "QM_ROTATION_V7",
+            "sources": ["local:bars", "local:news"],
+            "quality": {"status": "complete", "issues": []},
+        },
+        "data": {
+            "as_of": "2026-08-08",
+            "current": {
+                "temperature": 40.0, "regime": "expansion",
+                "regime_label": "强势扩散区", "eligible_count": 100,
+                "counts": {"strong_up": 20, "up": 20, "range": 35, "weak": 25},
+                "ratios": {"strong_up": 20.0, "up": 20.0, "range": 35.0, "weak": 25.0},
+            },
+            "history": history,
+            "evidence": {"score": 49.75, "available_weight": 100, "items": current_items},
+            "change_windows": {
+                "default_window": 5, "supported_windows": [1, 3, 5, 20],
+                "windows": {
+                    "1": comparison(1, 1.0),
+                    "3": comparison(3, 3.0, partial=True),
+                    "5": comparison(5, 5.0),
+                    "20": comparison(20, -2.0),
+                },
+            },
+        },
+    }
+    requests = []
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 1000}, reduced_motion="reduce")
+        page.add_init_script(
+            "localStorage.setItem('quantmaster.rotation.window.v2','20')"
+        )
+        page.route(
+            "**/api/v1/market/temperature",
+            lambda route: (requests.append(route.request.url), route.fulfill(json=payload))[-1],
+        )
+        page.goto(f"{url}/#observe/temperature")
+
+        five = page.locator('[data-temperature-window="5"]')
+        playwright_sync.expect(five).to_have_attribute("aria-pressed", "true")
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
+            "5 日 +5.0 · 升温"
+        )
+        playwright_sync.expect(page.locator(".rotation-meter-reference")).to_have_count(5)
+        etf_row = page.locator(".rotation-evidence-row", has_text="ETF 资金")
+        playwright_sync.expect(etf_row).to_contain_text("+5.0")
+        page.wait_for_function(
+            "window.echarts && echarts.getInstanceByDom(document.getElementById('rotation-evidence-radar'))"
+        )
+        radar = page.evaluate(
+            "echarts.getInstanceByDom(document.getElementById('rotation-evidence-radar')).getOption()"
+        )
+        assert len(radar["series"]) == 2
+        assert radar["series"][1]["lineStyle"]["type"] == "dashed"
+
+        page.locator('[data-temperature-window="20"]').click()
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
+            "20 日 -2.0 · 降温"
+        )
+        assert len(requests) == 1
+        assert page.evaluate("localStorage.getItem('quantmaster.rotation.window.v2')") == "20"
+        assert page.evaluate("localStorage.getItem('quantmaster.market.temperature-window.v1')") == "20"
+
+        page.locator('[data-temperature-window="1"]').click()
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
+            "1 日 +1.0 · 升温"
+        )
+        playwright_sync.expect(page.locator(".rotation-meter-reference")).to_have_count(5)
+        assert len(requests) == 1
+
+        page.locator('[data-temperature-window="3"]').click()
+        playwright_sync.expect(page.locator(".rotation-evidence-radar-wrap")).to_contain_text(
+            "3 日前仅 3/5 维可比"
+        )
+        playwright_sync.expect(page.locator(".rotation-meter-reference")).to_have_count(3)
+        radar = page.evaluate(
+            "echarts.getInstanceByDom(document.getElementById('rotation-evidence-radar')).getOption()"
+        )
+        assert len(radar["series"]) == 1
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
         browser.close()
 
 
