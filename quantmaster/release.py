@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.96"
+VERSION = "1.3.97"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Quant Lab 发布门禁修复",
+                "items": (
+                    (
+                        "Lab 账本迁移前备份统一使用共享 SQLite 连接工厂，保持 WAL、"
+                        "维护屏障与连接回收策略一致。"
+                    ),
+                    (
+                        "多重预检阻塞现在优先显示数据集缺失或覆盖问题，再提示可选依赖，"
+                        "研究任务会先给出最根本且可执行的修复动作。"
+                    ),
+                    (
+                        "批量行情读取与自动研究调度收窄预期异常边界，"
+                        "不再扩大仓库的宽泛异常捕获审计基线。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.96",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -212,21 +235,6 @@ RELEASES = (
                         "拆分本次同步新增的五个复杂入口，将历史 C901 基线由过时的 93"
                         "校准为同步前主线实测 110，并补齐 free-stockdb 类型标注，"
                         "恢复复杂度与 mypy 门禁。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.87",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "历史验证表紧凑展开",
-                "items": (
-                    (
-                        "历史决策默认收为单行摘要，保留日期、周期、仓位、Top 3 名称、"
-                        "验证状态与进度；点击整行后展开逐股代码、价格区间和涨跌结果。"
                     ),
                 ),
             },

@@ -195,6 +195,15 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
             required_bytes=disk_estimate, free_bytes=disk_free,
         ))
 
+    blocker_priority = {
+        "INVALID_REQUEST": 0,
+        "DATASET_MISSING": 10,
+        "DATA_COVERAGE_INSUFFICIENT": 11,
+        "DATASET_STALE": 12,
+        "DEPENDENCY_MISSING": 20,
+        "CUDA_UNAVAILABLE": 21,
+    }
+    blockers.sort(key=lambda item: blocker_priority.get(str(item.get("code") or ""), 50))
     state = "blocked" if blockers else "degraded" if warnings else "ready"
     report = {
         "operation": operation,

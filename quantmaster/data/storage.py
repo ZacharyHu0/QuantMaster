@@ -488,7 +488,7 @@ class BarStore:
                 if frame is not None and not frame.empty:
                     return frame, ""
                 return None, result.reason or result.status
-            except Exception as exc:  # storage boundary; caller receives a safe summary
+            except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
                 logger.warning("批量读取本地行情失败 symbol=%s: %s", symbol, exc)
                 return None, f"本地行情读取失败: {type(exc).__name__}"
 

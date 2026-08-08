@@ -75,7 +75,7 @@ class LabStore:
         if not self.path.is_file() or self.path.stat().st_size == 0:
             return
         try:
-            with sqlite3.connect(self.path) as source:
+            with connect_sqlite(self.path) as source:
                 version = int(source.execute("PRAGMA user_version").fetchone()[0])
                 if version <= 0 or version >= LAB_SCHEMA_VERSION:
                     return
@@ -84,7 +84,7 @@ class LabStore:
                 target = backup_dir / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"
                 if target.exists():
                     return
-                with sqlite3.connect(target) as destination:
+                with connect_sqlite(target) as destination:
                     source.backup(destination)
         except sqlite3.Error:
             target = self.path.parent / "backups" / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"

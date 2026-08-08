@@ -13,7 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
-from quantmaster.lab.errors import classify_lab_error
+from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.preflight import require_runnable
 from quantmaster.lab.service import LabService
 
@@ -258,7 +258,7 @@ class LabWorker:
         }
         try:
             self.service.enqueue("prepare_data", base)
-        except Exception as exc:
+        except (LabError, OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
             failure = classify_lab_error(exc)
             logger.info("Quant Lab daily prepare skipped code=%s", failure.code)
         for deployment in self.service.store.active_deployments():
@@ -266,7 +266,7 @@ class LabWorker:
                 self.service.enqueue("validate", {
                     **base, "version_id": deployment["version_id"],
                 })
-            except Exception as exc:
+            except (LabError, OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
                 failure = classify_lab_error(exc)
                 logger.info(
                     "Quant Lab scheduled validation skipped version=%s code=%s",
@@ -293,7 +293,7 @@ class LabWorker:
             )
             try:
                 self.service.create_study({**spec.to_dict(), "_scheduled": True})
-            except Exception as exc:
+            except (LabError, OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
                 failure = classify_lab_error(exc)
                 logger.info("Quant Lab scheduled optimization skipped code=%s", failure.code)
         if (cfg.ai_python_mining_enabled
