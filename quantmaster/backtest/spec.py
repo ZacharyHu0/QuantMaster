@@ -87,15 +87,6 @@ class FactorStrategySpec(ContractModel):
         return self
 
 
-class SwingStrategySpec(ContractModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: Literal["swing"] = "swing"
-    top_n: int = Field(5, ge=1, le=50)
-    holding_days: int = Field(3, ge=1, le=7)
-    cap_weight: float = Field(0.25, gt=0, le=1)
-
-
 class DecisionStrategySpec(ContractModel):
     """Hybrid 决策策略；policy_snapshot 在进入任务账本前由服务端固化。"""
 
@@ -121,7 +112,7 @@ class LabVersionStrategySpec(ContractModel):
 
 
 StrategySpec = Annotated[
-    FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
+    FactorStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     Field(discriminator="kind"),
 ]
 
@@ -176,11 +167,11 @@ class PaperAccountSpec(ContractModel):
 
 
 def pin_decision_strategy(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
+    spec: FactorStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     universe: str,
     *,
     symbols: list[str] | None = None,
-) -> FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec:
+) -> FactorStrategySpec | DecisionStrategySpec | LabVersionStrategySpec:
     """Resolve or verify the immutable Hybrid policy used by a stored experiment."""
     if not isinstance(spec, DecisionStrategySpec):
         return spec
@@ -215,7 +206,7 @@ def pin_decision_strategy(
 
 
 def build_strategy(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
+    spec: FactorStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     symbols: list[str],
     start: str,
     end: str,
@@ -227,7 +218,6 @@ def build_strategy(
         FactorStrategy,
         LabVersionStrategy,
         MultiFactorStrategy,
-        SwingStrategy,
     )
 
     if isinstance(spec, LabVersionStrategySpec):
@@ -243,10 +233,6 @@ def build_strategy(
             rebalance_days=spec.rebalance_days, cap_weight=spec.cap_weight,
         )
 
-    if isinstance(spec, SwingStrategySpec):
-        return SwingStrategy(
-            top_n=spec.top_n, holding_days=spec.holding_days, cap_weight=spec.cap_weight,
-        )
     if isinstance(spec, DecisionStrategySpec):
         from quantmaster.decision import HybridDecisionStrategy
 
@@ -312,7 +298,7 @@ def preflight_strategy(spec: BacktestSpec) -> None:
 
 
 def signal_is_due(
-    spec: FactorStrategySpec | SwingStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
+    spec: FactorStrategySpec | DecisionStrategySpec | LabVersionStrategySpec,
     dates,
     position: int,
 ) -> bool:
@@ -323,7 +309,7 @@ def signal_is_due(
     if position < 0 or position >= len(index):
         return False
     current = index[position]
-    if isinstance(spec, (SwingStrategySpec, DecisionStrategySpec, LabVersionStrategySpec)):
+    if isinstance(spec, (DecisionStrategySpec, LabVersionStrategySpec)):
         if isinstance(spec, LabVersionStrategySpec):
             return position % spec.rebalance_days == 0
         return position % spec.holding_days == 0

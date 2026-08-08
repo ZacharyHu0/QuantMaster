@@ -32,6 +32,27 @@ from quantmaster.data.storage import BarStore
 from quantmaster.data.tushare_source import TushareSource, _current_session_cache_floor
 
 
+def test_default_daily_bar_store_is_reused_per_root(tmp_path, monkeypatch):
+    created = []
+
+    def factory(*, root):
+        store = object()
+        created.append((root, store))
+        return store
+
+    config = type("Config", (), {"data_root": tmp_path})()
+    registry._DEFAULT_BAR_STORES.clear()
+    monkeypatch.setattr(registry, "BarStore", factory)
+    monkeypatch.setattr(registry, "get_config", lambda: config)
+
+    first = registry._default_bar_store()
+    second = registry._default_bar_store()
+
+    assert first is second
+    assert created == [((tmp_path / "bars").resolve(), first)]
+    registry._DEFAULT_BAR_STORES.clear()
+
+
 def _hold_cross_process_bar_lock(root: str, start, events) -> None:
     store = BarStore(Path(root))
     start.wait(10)
@@ -713,7 +734,7 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
             "close": 10.0, "volume": 1.0,
         }, index=index)
 
-    monkeypatch.setattr(registry, "BarStore", lambda: store)
+    monkeypatch.setattr(registry, "BarStore", lambda *, root: store)
     monkeypatch.setattr(FreeStockDBSource, "native_batch_available", lambda _self: True)
 
     def daily_many(_self, symbols, start, end):

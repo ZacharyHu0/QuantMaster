@@ -14,8 +14,8 @@
 .qm-chart-fade { animation: qm-chart-fade 150ms var(--ease-out-quart) both; }
 
 table { font-variant-numeric: tabular-nums; }
-:where(.table-scroll, .rotation-table-wrap, .trading-table-wrap, .backtest-trades-scroll, .paper-orders) { overflow-x: auto; }
-:where(.rotation-table-wrap, .trading-table-wrap, .backtest-trades-scroll, .paper-orders) thead th {
+:where(.table-scroll, .rotation-table-wrap, .trading-table-wrap, .paper-orders) { overflow-x: auto; }
+:where(.rotation-table-wrap, .trading-table-wrap, .paper-orders) thead th {
   position: sticky;
   top: 0;
   z-index: 2;

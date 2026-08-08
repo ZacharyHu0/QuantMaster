@@ -13,6 +13,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import threading
 import tokenize
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,21 @@ _BOARD_CATEGORIES = {
     2: "申万二级",
     3: "申万三级",
 }
+_SDK_CACHE_LOCK = threading.RLock()
+_SDK_MODULE_CACHE: dict[tuple[str, int, int], Any] = {}
+_SDK_THREAD_CLIENTS = threading.local()
+_SDK_RUNTIME_GENERATION = 0
+
+
+def _sdk_runtime_generation() -> int:
+    with _SDK_CACHE_LOCK:
+        return _SDK_RUNTIME_GENERATION
+
+
+def _invalidate_sdk_clients() -> None:
+    global _SDK_RUNTIME_GENERATION
+    with _SDK_CACHE_LOCK:
+        _SDK_RUNTIME_GENERATION += 1
 
 
 def resolve_free_stockdb_sdk_path(value: str | None = None) -> Path | None:
@@ -114,7 +130,6 @@ class FreeStockDBSource(DataSource):
         self._sdk_checked = False
         self._client: Any | None = None
         self._sdk_error: BaseException | None = None
-        self._loaded_artifact_id = ""
 
     def _load_sdk_module(self):
         if not self.sdk_path:
@@ -123,40 +138,44 @@ class FreeStockDBSource(DataSource):
         sdk_file = configured if configured.is_file() else configured / "stock_sdk.py"
         if not sdk_file.is_file():
             raise ModuleNotFoundError(f"未找到 free-stockdb SDK：{sdk_file}")
-        directory = str(sdk_file.parent)
-        if directory not in sys.path:
-            # stock_sdk 会继续加载同目录的 stockdb 原生模块；保留该显式用户路径。
-            sys.path.insert(0, directory)
-        # The vendor updates files in place.  A path-only module key would keep
-        # old code alive until QuantMaster itself restarts.
-        digest = hashlib.sha256(sdk_file.read_bytes()).hexdigest()[:16]
-        module_name = f"_quantmaster_free_stockdb_{digest}"
-        cached = sys.modules.get(module_name)
-        if cached is not None:
-            return cached
-        spec = importlib.util.spec_from_file_location(module_name, sdk_file)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"无法加载 free-stockdb SDK：{sdk_file}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        try:
-            # SourceFileLoader may reuse a same-size/same-second .pyc after an
-            # in-place vendor update. Compile the selected content directly so
-            # the content-hash module name and executed code cannot diverge.
-            with tokenize.open(sdk_file) as stream:
-                code = compile(stream.read(), str(sdk_file), "exec")
-            exec(code, module.__dict__)
-        except (ImportError, OSError, AttributeError, RuntimeError):
-            sys.modules.pop(module_name, None)
-            raise
-        return module
+        stat = sdk_file.stat()
+        identity = (str(sdk_file), int(stat.st_size), int(stat.st_mtime_ns))
+        with _SDK_CACHE_LOCK:
+            cached = _SDK_MODULE_CACHE.get(identity)
+            if cached is not None:
+                return cached
+            directory = str(sdk_file.parent)
+            if directory not in sys.path:
+                # stock_sdk 会继续加载同目录的 stockdb 原生模块；保留该显式用户路径。
+                sys.path.insert(0, directory)
+            digest = hashlib.sha256("\0".join(map(str, identity)).encode()).hexdigest()[:16]
+            module_name = f"_quantmaster_free_stockdb_{digest}"
+            spec = importlib.util.spec_from_file_location(module_name, sdk_file)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"无法加载 free-stockdb SDK：{sdk_file}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                # Compile the selected source directly so an in-place update
+                # cannot accidentally reuse SourceFileLoader's stale bytecode.
+                with tokenize.open(sdk_file) as stream:
+                    code = compile(stream.read(), str(sdk_file), "exec")
+                exec(code, module.__dict__)
+            except (ImportError, OSError, AttributeError, RuntimeError):
+                sys.modules.pop(module_name, None)
+                raise
+            for key in tuple(_SDK_MODULE_CACHE):
+                if key[0] == identity[0] and key != identity:
+                    _SDK_MODULE_CACHE.pop(key, None)
+            _SDK_MODULE_CACHE[identity] = module
+            return module
 
     def reset_runtime(self) -> None:
         """Discard clients after a data/runtime update; the next call re-probes."""
+        _invalidate_sdk_clients()
         self._sdk_checked = False
         self._client = None
         self._sdk_error = None
-        self._loaded_artifact_id = ""
 
     def _sdk_client(self):
         if self._sdk_checked:
@@ -168,7 +187,20 @@ class FreeStockDBSource(DataSource):
             parsed = urlparse(self.base_url)
             host = parsed.hostname or "127.0.0.1"
             port = parsed.port or (443 if parsed.scheme == "https" else 7899)
-            self._client = client_class(host=host, port=port, password="")
+            generation = _sdk_runtime_generation()
+            clients = getattr(_SDK_THREAD_CLIENTS, "clients", None)
+            if clients is None:
+                clients = {}
+                _SDK_THREAD_CLIENTS.clients = clients
+            key = (generation, module.__name__, host, port, client_class)
+            client = clients.get(key)
+            if client is None:
+                client = client_class(host=host, port=port, password="")
+                for cached_key in tuple(clients):
+                    if cached_key[0] != generation:
+                        clients.pop(cached_key, None)
+                clients[key] = client
+            self._client = client
         except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
             # SDK 是用户安装的可选能力；加载失败时仍允许兼容 HTTP 服务或其他源。
             self._sdk_error = exc

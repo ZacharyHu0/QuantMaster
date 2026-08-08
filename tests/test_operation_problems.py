@@ -119,7 +119,7 @@ def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch
     store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
     service = BacktestService(store)
     spec = BacktestSpec.model_validate({
-        "strategy": {"kind": "swing", "top_n": 1, "holding_days": 3},
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
         "universe": "demo", "start": "2026-01-01", "end": "2026-07-01",
         "benchmark": None,
     })

@@ -611,6 +611,160 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         browser.close()
 
 
+def test_kline_cache_and_stale_view_protection(live_server):
+    url, _ = live_server
+    empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route(
+            "**/api/v1/market/overview/stream*",
+            lambda route: route.fulfill(
+                status=200, content_type="application/x-ndjson", body=empty_market,
+            ),
+        )
+        page.goto(url)
+        result = page.evaluate(
+            """async () => {
+              const originalApi = api;
+              const originalLoadKlineSeries = loadKlineSeries;
+              const originalNow = Date.now;
+              const originalMarketLoading = marketLoading;
+              const networkCalls = [];
+              const bar = symbol => ({
+                symbol, frequency:'1d',
+                kline:[
+                  ['2026-08-07',10,10.2,9.8,10.3,1000],
+                  ['2026-08-08',10.2,10.4,10.1,10.5,1100],
+                ],
+              });
+              let now = 1_800_000_000_000;
+              try {
+                Date.now = () => now;
+                api = async path => {
+                  networkCalls.push(path);
+                  return bar(path.includes('60m') ? 'MINUTE.SH' : 'CACHE.SH');
+                };
+
+                invalidateKlineSeriesCache();
+                await loadKlineSeries('CACHE.SH','1d');
+                await loadKlineSeries('CACHE.SH','1d');
+                const cachedDailyCalls = networkCalls.length;
+                now += KLINE_DAILY_TTL_MS - 1;
+                await loadKlineSeries('CACHE.SH','1d');
+                const beforeDailyExpiry = networkCalls.length;
+                now += 2;
+                await loadKlineSeries('CACHE.SH','1d');
+                const afterDailyExpiry = networkCalls.length;
+
+                invalidateKlineSeriesCache();
+                await loadKlineSeries('MINUTE.SH','60m');
+                now += KLINE_INTRADAY_TTL_MS - 1;
+                await loadKlineSeries('MINUTE.SH','60m');
+                const beforeMinuteExpiry = networkCalls.length;
+                now += 2;
+                await loadKlineSeries('MINUTE.SH','60m');
+                const afterMinuteExpiry = networkCalls.length;
+                invalidateKlineSeriesCache();
+                await loadKlineSeries('MINUTE.SH','60m');
+                const afterManualInvalidation = networkCalls.length;
+
+                invalidateKlineSeriesCache();
+                for (let index = 0; index < 65; index += 1) {
+                  await loadKlineSeries(`LRU${index}.SH`,'1d');
+                }
+                const lruSize = klineSeriesCache.size;
+                const oldestEvicted = !Array.from(klineSeriesCache.keys()).some(
+                  key => key.startsWith('LRU0.SH\u0000'),
+                );
+
+                invalidateKlineSeriesCache();
+                let finishShared;
+                let sharedNetworkSignal;
+                const sharedStart = networkCalls.length;
+                api = (path, options) => {
+                  networkCalls.push(path);
+                  sharedNetworkSignal = options.signal;
+                  return new Promise(resolve => {
+                    finishShared = () => resolve(bar('SHARED.SH'));
+                  });
+                };
+                const firstConsumer = new AbortController();
+                const secondConsumer = new AbortController();
+                const firstShared = loadKlineSeries(
+                  'SHARED.SH','1d',{signal:firstConsumer.signal},
+                ).catch(error => error.name);
+                const secondShared = loadKlineSeries(
+                  'SHARED.SH','1d',{signal:secondConsumer.signal},
+                );
+                firstConsumer.abort();
+                const sharedStayedAlive = !sharedNetworkSignal.aborted;
+                finishShared();
+                const firstSharedState = await firstShared;
+                const secondSharedData = await secondShared;
+                const sharedNetworkCalls = networkCalls.length - sharedStart;
+
+                Date.now = originalNow;
+                const pendingViews = {};
+                loadKlineSeries = (symbol, frequency, {signal} = {}) =>
+                  new Promise(resolve => {
+                    pendingViews[symbol] = {resolve,signal};
+                  });
+                marketLoading = true;
+                const startedAt = performance.now();
+                const firstView = showKline('FIRST.SH','旧标的');
+                const showLatencyMs = performance.now() - startedAt;
+                const panel = document.getElementById('kline-panel');
+                const panelVisibleImmediately = getComputedStyle(panel).display !== 'none';
+                const panelTop = panel.getBoundingClientRect().top;
+                const secondView = showKline('SECOND.SH','新标的');
+                const firstSignalAborted = pendingViews['FIRST.SH'].signal.aborted;
+                pendingViews['SECOND.SH'].resolve(bar('SECOND.SH'));
+                await secondView;
+                pendingViews['FIRST.SH'].resolve(bar('FIRST.SH'));
+                await firstView;
+                const renderedSymbol = charts.kline.__quantmasterKlineData.symbol;
+
+                return {
+                  cachedDailyCalls, beforeDailyExpiry, afterDailyExpiry,
+                  beforeMinuteExpiry, afterMinuteExpiry, afterManualInvalidation,
+                  lruSize, oldestEvicted, sharedStayedAlive, firstSharedState,
+                  secondSharedSymbol:secondSharedData.symbol, sharedNetworkCalls,
+                  showLatencyMs, panelVisibleImmediately, panelTop,
+                  viewportHeight:window.innerHeight,
+                  firstSignalAborted, renderedSymbol,
+                  title:document.getElementById('kline-title').textContent,
+                };
+              } finally {
+                Date.now = originalNow;
+                api = originalApi;
+                loadKlineSeries = originalLoadKlineSeries;
+                marketLoading = originalMarketLoading;
+                invalidateKlineSeriesCache();
+              }
+            }"""
+        )
+
+        assert result["cachedDailyCalls"] == 1
+        assert result["beforeDailyExpiry"] == 1
+        assert result["afterDailyExpiry"] == 2
+        assert result["afterMinuteExpiry"] == result["beforeMinuteExpiry"] + 1
+        assert result["afterManualInvalidation"] == result["afterMinuteExpiry"] + 1
+        assert result["lruSize"] == 64
+        assert result["oldestEvicted"] is True
+        assert result["sharedNetworkCalls"] == 1
+        assert result["sharedStayedAlive"] is True
+        assert result["firstSharedState"] == "AbortError"
+        assert result["secondSharedSymbol"] == "SHARED.SH"
+        assert result["showLatencyMs"] < 100
+        assert result["panelVisibleImmediately"] is True
+        assert 0 <= result["panelTop"] < result["viewportHeight"] / 2
+        assert result["firstSignalAborted"] is True
+        assert result["renderedSymbol"] == "SECOND.SH"
+        assert result["title"] == "新标的（SECOND.SH）· 日线"
+        browser.close()
+
+
 def test_major_indexes_are_first_and_personal_group_shows_memberships(live_server):
     url, _ = live_server
     personal = {
@@ -648,6 +802,14 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         [f"2026-06-{day:02d}", price, price + 0.2, price - 0.3, price + 0.5, 1000 + day]
         for day, price in enumerate([100.0] + [10.0 + index * 0.1 for index in range(27)],1)
     ]
+    history_calls = []
+
+    def history_handler(route):
+        history_calls.append(route.request.url)
+        route.fulfill(json={
+            "symbol": "000300.SH", "frequency": "1d", "kline": kline,
+        })
+
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
@@ -658,9 +820,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         )
         page.route(
             "**/api/v1/market/history/**",
-            lambda route: route.fulfill(json={
-                "symbol": "000300.SH", "frequency": "1d", "kline": kline,
-            }),
+            history_handler,
         )
         page.goto(url)
         personal_section = page.locator('[data-market-group="我的股票"]')
@@ -744,6 +904,15 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         tooltip.wait_for(state="hidden")
         index_section.locator(".mkt-item").click()
         page.locator("#kline canvas").wait_for()
+        assert len(history_calls) == 1
+        assert "start=2023-01-01" not in history_calls[0]
+        panel_top = page.locator("#kline-panel").evaluate(
+            "element => element.getBoundingClientRect().top",
+        )
+        assert 0 <= panel_top < page.viewport_size["height"] / 2
+        index_section.locator(".mkt-item").click()
+        page.wait_for_timeout(50)
+        assert len(history_calls) == 1
         zoom_snapshot = """() => {
           const chart = charts.kline;
           const option = chart.getOption();

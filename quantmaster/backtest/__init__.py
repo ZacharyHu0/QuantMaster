@@ -7,7 +7,7 @@ from quantmaster.backtest.spec import (
     LabVersionStrategySpec,
     PaperAccountSpec,
 )
-from quantmaster.backtest.strategy import FactorStrategy, SignalBundle, Strategy, SwingStrategy
+from quantmaster.backtest.strategy import FactorStrategy, SignalBundle, Strategy
 from quantmaster.backtest.validation import grid_search, train_test_ic, walk_forward_ic
 
 __all__ = [
@@ -20,7 +20,6 @@ __all__ = [
     "PaperAccountSpec",
     "SignalBundle",
     "Strategy",
-    "SwingStrategy",
     "full_report",
     "grid_search",
     "monthly_return_table",

@@ -9,6 +9,8 @@ dist/
 venv/
 .pytest_cache/
 .pytest_tmp*/
+/.pytest-tmp*/
+/.test-runtime/
 /.test-tmp/
 /.uv-cache/
 .mypy_cache/

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import StrEnum
+from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -32,6 +34,20 @@ logger = logging.getLogger(__name__)
 
 # 各市场按优先级排列的数据源工厂
 _SOURCE_FACTORIES: dict[str, list] = {}
+_DEFAULT_STORE_LOCK = threading.Lock()
+_DEFAULT_BAR_STORES: dict[tuple[str, object], BarStore] = {}
+
+
+def _default_bar_store() -> BarStore:
+    """Reuse the default daily store without affecting explicitly supplied stores."""
+    root = (Path(get_config().data_root) / "bars").resolve()
+    key = (str(root), BarStore)
+    with _DEFAULT_STORE_LOCK:
+        store = _DEFAULT_BAR_STORES.get(key)
+        if store is None:
+            store = BarStore(root=root)
+            _DEFAULT_BAR_STORES[key] = store
+        return store
 
 
 class RefreshMode(StrEnum):
@@ -485,7 +501,7 @@ def _load_history_locked(
     priority: str = "normal",
 ) -> pd.DataFrame:
     """已持有单标的锁时加载标准化日线。"""
-    store = store or BarStore()
+    store = store or _default_bar_store()
     cfg = get_config()
     cached = store.get(symbol)
     mode = _mode(use_cache, refresh)
@@ -565,7 +581,7 @@ def load_history(
     priority: str = "normal",
 ) -> pd.DataFrame:
     """加载标准化日线；普通请求只补边界增量，全量重拉必须显式指定。"""
-    store = store or BarStore()
+    store = store or _default_bar_store()
     with store.lock(symbol):
         return _load_history_locked(
             symbol,
@@ -689,7 +705,7 @@ def load_bar_panel(
     指定 field（如 "close"）时直接返回该字段的 DataFrame。
     """
     frequency = validate_frequency(frequency)
-    daily_store = BarStore() if frequency == "1d" else None
+    daily_store = _default_bar_store() if frequency == "1d" else None
     intraday_store = IntradayBarStore(frequency) if frequency != "1d" else None
     frames: dict[str, pd.DataFrame] = {}
     failures: list[tuple[str, str]] = []

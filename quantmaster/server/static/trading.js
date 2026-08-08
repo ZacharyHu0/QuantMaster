@@ -33,7 +33,7 @@
       }[strategy.profile] || strategy.profile;
       return `Hybrid v2 · ${profile} · ${strategy.holding_days} 日`;
     }
-    if (strategy?.kind === 'swing') return `${strategy.holding_days} 日短线`;
+    if (strategy?.kind === 'swing') return '旧 Swing · 只读';
     if (strategy?.kind === 'lab_version') return `Lab OOF · ${strategy.horizon} 日 · ${String(strategy.version_id).slice(0, 8)}`;
     return strategy?.factor || '因子策略';
   };
@@ -376,9 +376,6 @@
       kind:'lab_version', version_id:String(fd.get('version_id') || '').trim(),
       horizon:Number(fd.get('holding_days')), top_n:Number(fd.get('top_n')),
       rebalance_days:Number(fd.get('holding_days')), cap_weight:0.10,
-    } : kind === 'swing' ? {
-      kind: 'swing', top_n: Number(fd.get('top_n')),
-      holding_days: Number(fd.get('holding_days')), cap_weight: 0.25,
     } : {
       kind: 'factor', factor: String(fd.get('factor') || '').trim(),
       top_n: Number(fd.get('top_n')), rebalance: String(fd.get('rebalance')),
@@ -505,7 +502,7 @@
 
   async function promptBacktestProblem(run) {
     const problem = run.result?.problem;
-    if (!problem || btState.prompted.has(run.id)) return;
+    if (!problem || run.legacy_read_only || btState.prompted.has(run.id)) return;
     btState.prompted.add(run.id);
     const accepted = await window.QuantMasterProblemDialog.open(
       problem, run.result?.data_quality || null,
@@ -553,7 +550,7 @@
       <div class="trading-result-actions">
         <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=json">导出完整 JSON</a>
         <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=trades_csv">导出成交 CSV</a>
-        ${run.config?.strategy?.kind === 'lab_version' ? '<span class="trading-secondary">OOF 回测不可直接提升模拟账户</span>' : '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>'}
+        ${run.legacy_read_only ? '<span class="trading-secondary">旧 Swing 回测仅供历史查看</span>' : run.config?.strategy?.kind === 'lab_version' ? '<span class="trading-secondary">OOF 回测不可直接提升模拟账户</span>' : '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>'}
         <form class="trading-promote" data-bt-promote hidden><input name="name" maxlength="40" required value="${escapeHtml(run.name.slice(0, 34))} 验证" aria-label="模拟账户名称"><button class="trading-primary" type="submit">确认创建</button></form>
       </div>
       <div class="trading-chart-grid"><div class="trading-chart-block"><h4>策略净值与基准</h4><div class="trading-chart" id="bt-workbench-nav"></div></div><div class="trading-chart-block"><h4>回撤路径</h4><div class="trading-chart small" id="bt-workbench-dd"></div></div></div>
@@ -596,7 +593,7 @@
       return `<div class="trading-history-row" data-run-id="${run.id}">
         <input type="checkbox" data-bt-select aria-label="选择 ${escapeHtml(run.name)} 进行比较" ${btState.selected.has(run.id) ? 'checked' : ''} ${selectable ? '' : 'disabled'}>
         <span class="trading-history-name" title="${escapeHtml(run.name)}">${escapeHtml(run.name)}</span>
-        <span>${escapeHtml(run.config?.universe || '—')} · ${escapeHtml(run.config?.strategy?.kind || '—')}</span>
+        <span>${escapeHtml(run.config?.universe || '—')} · ${escapeHtml(strategyLabel(run.config?.strategy))}</span>
         <span class="${signedClass(metrics.annual_return)}">${percent(metrics.annual_return)}</span>
         <span class="trading-status ${run.status}">${statusLabel[run.status] || run.status}</span>
         <button type="button" data-bt-open>${run.id === btState.activeId ? '当前' : '打开'}</button>
@@ -737,8 +734,6 @@
       Number(original.holding_days) === holdingDays ? original.policy_snapshot || {} : {};
     return kind === 'decision'
       ? {kind:'decision', profile, top_n:Number(fd.get('top_n')), holding_days:holdingDays, cap_weight:Number(original?.cap_weight || 0.25), policy_snapshot:preservedPolicy}
-      : kind === 'swing'
-      ? {kind:'swing', top_n:Number(fd.get('top_n')), holding_days:holdingDays, cap_weight:Number(original?.cap_weight || 0.25)}
       : {kind:'factor', factor:String(fd.get('factor')).trim(), top_n:Number(fd.get('top_n')), rebalance:String(fd.get('rebalance')), weighting:String(original?.weighting || 'equal'), cap_weight:Number(original?.cap_weight || 0.35)};
   }
 

@@ -1563,7 +1563,56 @@ async function loadMarketFearGreed(force = false) {
   }
 }
 
+let marketSparkObserver = null;
+const marketSparkRenderers = new WeakMap();
+const marketSparkTasks = new Map();
+
+function cancelMarketSparkTask(element) {
+  const task = marketSparkTasks.get(element);
+  if (!task) return;
+  if (task.idle) window.cancelIdleCallback(task.handle);
+  else window.clearTimeout(task.handle);
+  marketSparkTasks.delete(element);
+}
+
+function scheduleMarketSpark(element) {
+  cancelMarketSparkTask(element);
+  const invoke = () => {
+    marketSparkTasks.delete(element);
+    if (!element.isConnected) return;
+    marketSparkRenderers.get(element)?.();
+  };
+  const idle = typeof window.requestIdleCallback === 'function';
+  const handle = idle
+    ? window.requestIdleCallback(invoke,{timeout:250})
+    : window.setTimeout(invoke,0);
+  marketSparkTasks.set(element,{idle,handle});
+}
+
+function queueMarketSpark(element, render) {
+  marketSparkRenderers.set(element,render);
+  if (!('IntersectionObserver' in window)) {
+    scheduleMarketSpark(element);
+    return;
+  }
+  if (!marketSparkObserver) {
+    marketSparkObserver = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        entry.target.dataset.marketSparkVisible = 'true';
+        marketSparkObserver?.unobserve(entry.target);
+        scheduleMarketSpark(entry.target);
+      });
+    },{rootMargin:'320px 0px'});
+  }
+  if (element.dataset.marketSparkVisible === 'true') scheduleMarketSpark(element);
+  else marketSparkObserver.observe(element);
+}
+
 function disposeMarketSparks() {
+  marketSparkObserver?.disconnect();
+  marketSparkObserver = null;
+  for (const element of marketSparkTasks.keys()) cancelMarketSparkTask(element);
   for (const [id, chart] of Object.entries(charts)) {
     if (id.startsWith('spark-stream-')) {
       chart.dispose();
@@ -1750,7 +1799,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.element.setAttribute('aria-label',
       `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
-    queueMicrotask(() => {
+    queueMarketSpark(entry.element,() => {
       if (!document.getElementById(entry.sparkId)) return;
       const chart = mkChart(entry.sparkId);
       chart.setOption(marketSparkOption(item,changeSeries),{notMerge:true});
@@ -1879,6 +1928,7 @@ async function loadMarket(refresh = 'auto') {
 }
 document.getElementById('mkt-refresh').onsubmit = async e => {
   e.preventDefault(); busy(e.target, true, '同步中…');
+  invalidateKlineSeriesCache();
   await loadMarket('incremental');
   busy(e.target, false);
 };
@@ -1887,18 +1937,120 @@ function klineFrequencyName(frequency) {
 }
 
 function klineStartDate(frequency) {
-  return frequency === '1d'
-    ? '2023-01-01'
-    : new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+  if (frequency !== '1d') {
+    return new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+  }
+  const start = new Date();
+  start.setHours(0,0,0,0);
+  start.setFullYear(start.getFullYear() - 3);
+  return [start.getFullYear(),String(start.getMonth() + 1).padStart(2,'0'),
+    String(start.getDate()).padStart(2,'0')].join('-');
 }
 
-async function loadKlineSeries(symbol, frequency) {
-  const data = await api('/api/v1/market/history/' + encodeURIComponent(symbol)
-    + `?frequency=${encodeURIComponent(frequency)}&start=${klineStartDate(frequency)}`);
-  if (!Array.isArray(data.kline) || !data.kline.length) {
-    throw new Error('所选周期暂无本地或远端数据');
+const KLINE_CACHE_LIMIT = 64;
+const KLINE_DAILY_TTL_MS = 5 * 60 * 1000;
+const KLINE_INTRADAY_TTL_MS = 30 * 1000;
+const klineSeriesCache = new Map();
+const klineSeriesInflight = new Map();
+let klineCacheGeneration = 0;
+
+function invalidateKlineSeriesCache() {
+  klineSeriesCache.clear();
+  klineSeriesInflight.clear();
+  klineCacheGeneration += 1;
+}
+
+function cachedKlineSeries(key) {
+  const cached = klineSeriesCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    klineSeriesCache.delete(key);
+    return null;
   }
-  return data;
+  klineSeriesCache.delete(key);
+  klineSeriesCache.set(key,cached);
+  return cached.data;
+}
+
+function storeKlineSeries(key, data, ttl) {
+  klineSeriesCache.delete(key);
+  klineSeriesCache.set(key,{data,expiresAt:Date.now() + ttl});
+  while (klineSeriesCache.size > KLINE_CACHE_LIMIT) {
+    klineSeriesCache.delete(klineSeriesCache.keys().next().value);
+  }
+}
+
+function consumeKlineRequest(entry, signal) {
+  entry.consumers += 1;
+  return new Promise((resolve,reject) => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      signal?.removeEventListener('abort',onAbort);
+      entry.consumers -= 1;
+      if (!entry.consumers && !entry.settled) entry.controller.abort();
+    };
+    const onAbort = () => {
+      release();
+      reject(new DOMException('请求已取消','AbortError'));
+    };
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort',onAbort,{once:true});
+    entry.promise.then(data => {
+      if (released) return;
+      release(); resolve(data);
+    },error => {
+      if (released) return;
+      release(); reject(error);
+    });
+  });
+}
+
+async function loadKlineSeries(symbol, frequency, {signal} = {}) {
+  const start = klineStartDate(frequency);
+  const key = `${symbol}\u0000${frequency}\u0000${start}`;
+  const cached = cachedKlineSeries(key);
+  if (cached) return cached;
+  let entry = klineSeriesInflight.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const generation = klineCacheGeneration;
+    const path = '/api/v1/market/history/' + encodeURIComponent(symbol)
+      + `?frequency=${encodeURIComponent(frequency)}&start=${start}`;
+    entry = {controller,consumers:0,settled:false,promise:null};
+    entry.promise = api(path,{signal:controller.signal,cache:'no-store'}).then(data => {
+      if (!Array.isArray(data.kline) || !data.kline.length) {
+        throw new Error('所选周期暂无本地或远端数据');
+      }
+      if (generation === klineCacheGeneration) {
+        storeKlineSeries(key,data,frequency === '1d' ? KLINE_DAILY_TTL_MS : KLINE_INTRADAY_TTL_MS);
+      }
+      return data;
+    }).finally(() => {
+      entry.settled = true;
+      if (klineSeriesInflight.get(key) === entry) klineSeriesInflight.delete(key);
+    });
+    klineSeriesInflight.set(key,entry);
+  }
+  return consumeKlineRequest(entry,signal);
+}
+
+function rollingMean(values, windowSize) {
+  const result = Array(values.length).fill(null);
+  let total = 0, valid = 0;
+  values.forEach((raw,index) => {
+    const value = Number(raw);
+    if (Number.isFinite(value)) { total += value; valid += 1; }
+    if (index >= windowSize) {
+      const expired = Number(values[index - windowSize]);
+      if (Number.isFinite(expired)) { total -= expired; valid -= 1; }
+    }
+    if (index + 1 >= windowSize && valid === windowSize) {
+      result[index] = +(total / windowSize).toFixed(3);
+    }
+  });
+  return result;
 }
 
 function renderKlineSeries(chart, data) {
@@ -1906,8 +2058,7 @@ function renderKlineSeries(chart, data) {
   const compact = chart.getDom().clientWidth < 520;
   const closes = data.kline.map(k => k[2]);
   const categories = data.kline.map(k => k[0]);
-  const ma = n => closes.map((_, i) =>
-    i + 1 < n ? null : +(closes.slice(i + 1 - n, i + 1).reduce((a, b) => a + b, 0) / n).toFixed(3));
+  const ma5 = rollingMean(closes,5), ma20 = rollingMean(closes,20);
   const priceAxis = valAxis();
   priceAxis.axisLabel = {...priceAxis.axisLabel, fontSize:compact ? 10 : 12};
   const volumeAxis = valAxis(v => v >= 1e8
@@ -1933,8 +2084,8 @@ function renderKlineSeries(chart, data) {
     series:[
       {type:'candlestick',data:data.kline.map(k => k.slice(1,5)),
         itemStyle:{color:CHART_COLORS.up,color0:CHART_COLORS.down,borderColor:CHART_COLORS.up,borderColor0:CHART_COLORS.down}},
-      {name:'MA5',type:'line',data:ma(5),showSymbol:false,lineStyle:{width:1.5}},
-      {name:'MA20',type:'line',data:ma(20),showSymbol:false,lineStyle:{width:1.5}},
+      {name:'MA5',type:'line',data:ma5,showSymbol:false,lineStyle:{width:1.5}},
+      {name:'MA20',type:'line',data:ma20,showSymbol:false,lineStyle:{width:1.5}},
       {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,
         data:data.kline.map(k => ({value:k[5],itemStyle:{color:k[2] >= k[1] ? 'rgba(230,103,103,.52)' : 'rgba(36,160,107,.52)'}})),
         barMaxWidth:8,silent:true},
@@ -1942,11 +2093,14 @@ function renderKlineSeries(chart, data) {
   }), {notMerge:true});
 }
 
-let activeKline = {symbol:'', name:'', frequency:'1d', request:0};
+let activeKline = {symbol:'', name:'', frequency:'1d', request:0, controller:null};
 async function showKline(symbol, name, frequency = '1d') {
+  const previousController = activeKline.controller;
   const request = activeKline.request + 1;
-  activeKline = {symbol, name, frequency, request};
-  document.getElementById('kline-panel').style.display = '';
+  const controller = new AbortController();
+  activeKline = {symbol, name, frequency, request, controller};
+  const panel = document.getElementById('kline-panel');
+  panel.style.display = '';
   document.querySelectorAll('#kline-frequency button').forEach(button => {
     const active = button.dataset.frequency === frequency;
     button.classList.toggle('active', active);
@@ -1956,14 +2110,16 @@ async function showKline(symbol, name, frequency = '1d') {
     `${name}（${symbol}）· ${klineFrequencyName(frequency)}`;
   const chart = mkChart('kline', false);
   chart.showLoading({textColor:INK2,maskColor:'rgba(13,13,13,0.6)'});
+  panel.scrollIntoView({behavior:'auto',block:'start'});
   try {
-    const data = await loadKlineSeries(symbol, frequency);
+    const pending = loadKlineSeries(symbol, frequency, {signal:controller.signal});
+    previousController?.abort();
+    const data = await pending;
     if (request !== activeKline.request) return;
     chart.hideLoading();
     renderKlineSeries(chart, data);
-    document.getElementById('kline-panel').scrollIntoView({behavior:REDUCED_MOTION ? 'auto' : 'smooth'});
   } catch (error) {
-    if (request !== activeKline.request) return;
+    if (request !== activeKline.request || error?.name === 'AbortError') return;
     chart.hideLoading();
     reportLocalError('K 线', '行情加载失败', error);
   }
@@ -2064,7 +2220,7 @@ function decisionKlineDetailMarkup() {
     const active = decisionKlineState.frequency === value;
     return `<button type="button" data-decision-frequency="${value}" class="${active ? 'active' : ''}" aria-pressed="${active}">${label}</button>`;
   }).join('');
-  return `<tr class="decision-detail-row" data-decision-detail="${esc(decisionKlineState.symbol)}"><td colspan="9">
+  return `<tr class="decision-detail-row" data-decision-detail="${esc(decisionKlineState.symbol)}"><td colspan="10">
     <div class="decision-detail-shell" id="decision-kline-detail">
       <div class="decision-detail-toolbar">
         <div class="decision-detail-title"><span class="eyebrow">行情核查</span><strong>${esc(decisionKlineState.name)}</strong><span class="badge">${esc(decisionKlineState.symbol)}</span></div>
@@ -2841,123 +2997,6 @@ document.getElementById('validate-form').onsubmit = async e => {
   } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);
 };
-
-/* ---------- 回测 ---------- */
-function backtestQualityMarkup(data) {
-  const quality = data?.data_quality;
-  if (!quality) return '';
-  const partial = quality.status === 'partial';
-  const warnings = (data.warnings || []).map(value => normalizeProblem(value, {
-    severity:'warning', source:'策略回测', title:'数据注意事项',
-  }));
-  const benchmark = {
-    complete:'已加载', unavailable:'不可用', not_requested:'未选择', not_checked:'未检查',
-  }[quality.benchmark_status] || quality.benchmark_status || '—';
-  const range = quality.actual_start && quality.actual_end
-    ? `${quality.actual_start} — ${quality.actual_end}` : '—';
-  const cells = [
-    ['可用标的', `${quality.usable_symbol_count ?? 0} / ${quality.requested_symbol_count ?? 0}`],
-    ['实际区间', range],
-    ['有效交易日', `${quality.trading_days ?? 0} 天`],
-    ['可成交信号日', `${quality.executable_signal_dates ?? 0} / ${quality.valid_signal_dates ?? 0}`],
-    ['基准', benchmark],
-  ].map(([label, value]) => `<div><span>${esc(label)}</span><strong title="${esc(value)}">${esc(value)}</strong></div>`).join('');
-  const warningList = warnings.length
-    ? `<ul class="quality-warning-list">${warnings.map(item => `<li>${esc(item.title)}：${esc(item.message)}</li>`).join('')}</ul>` : '';
-  return `<section class="quality-summary" data-status="${partial ? 'partial' : 'complete'}" aria-label="回测数据质量">
-    <div class="quality-summary-head"><strong>数据质量</strong><span class="quality-state">${partial ? '部分数据' : '完整'}</span></div>
-    <div class="quality-summary-grid">${cells}</div>${warningList}</section>`;
-}
-
-document.getElementById('bt-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('bt-out');
-  out.innerHTML = '<div class="msg">回测中…</div>';
-  try {
-    const fd = new FormData(form);
-    const body = {
-      strategy:fd.get('strategy'), factor: fd.get('factor'), universe: fd.get('universe'), start: fd.get('start'),
-      top_n: +fd.get('top_n'), rebalance: fd.get('rebalance'), benchmark: fd.get('benchmark'),
-      holding_days:+fd.get('holding_days'),
-      stop_loss: fd.get('stop_loss') ? +fd.get('stop_loss') : null,
-      take_profit: fd.get('take_profit') ? +fd.get('take_profit') : null,
-      weighting: fd.get('weighting'), allow_partial:false,
-    };
-    let data;
-    while (!data) {
-      try {
-        data = await post('/api/v1/backtest/run', body);
-      } catch (error) {
-        if (error?.problem) {
-          const continueWithPartial = await operationProblemDialog.open(error.problem, error.dataQuality);
-          if (continueWithPartial && error.problem.can_continue && !body.allow_partial) {
-            body.allow_partial = true;
-            out.innerHTML = '<div class="msg">正在用可用数据重新计算…</div>';
-            continue;
-          }
-        }
-        throw error;
-      }
-    }
-    const m = data.metrics;
-    out.innerHTML = `
-      ${backtestQualityMarkup(data)}
-      <div class="cards">
-        <div class="card"><div class="k">累计收益</div><div class="v ${cls(m.total_return)}">${pct(m.total_return)}</div></div>
-        <div class="card"><div class="k">年化收益</div><div class="v ${cls(m.annual_return)}">${pct(m.annual_return)}</div></div>
-        <div class="card"><div class="k">夏普</div><div class="v">${m.sharpe}</div></div>
-        <div class="card"><div class="k">最大回撤</div><div class="v">${pct(m.max_drawdown)}</div></div>
-        <div class="card"><div class="k">卡玛</div><div class="v">${m.calmar}</div></div>
-        <div class="card"><div class="k">超额年化</div><div class="v ${cls(m.excess_annual_return)}">${pct(m.excess_annual_return)}</div></div>
-        <div class="card"><div class="k">信息比率</div><div class="v">${m.information_ratio ?? '—'}</div></div>
-        <div class="card"><div class="k">交易成本</div><div class="v">${(m.total_trade_cost ?? 0).toLocaleString()}</div></div>
-      </div>
-      <div class="panel"><h3>净值曲线（起点=1）</h3><div class="chart" id="nav-chart"></div></div>
-      <div class="panel"><h3>回撤</h3><div class="chart-sm" id="dd-chart"></div></div>
-      <div class="row">
-        <div class="panel"><h3>年度收益</h3>${yearlyTable(data.yearly)}</div>
-        <div class="panel"><h3>月度收益（%）</h3><div style="overflow-x:auto">${monthlyTable(data.monthly)}</div></div>
-      </div>
-      <div class="panel"><h3>最近成交（${data.trades.length} 条）</h3>
-        <div class="backtest-trades-scroll" style="max-height:300px;overflow:auto"><table><thead><tr>
-        <th>日期</th><th>代码</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th></tr></thead>
-        <tbody>${data.trades.slice().reverse().map(t => `<tr><td>${t.date}</td><td>${esc(t.symbol)}</td>
-          <td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? '买' : '卖'}</td>
-          <td>${t.price}</td><td>${t.shares}</td><td>${t.amount.toLocaleString()}</td><td>${t.cost}</td></tr>`).join('')}
-        </tbody></table></div></div>`;
-    mkChart('nav-chart').setOption(baseOpt({
-      legend: { textStyle: { color: INK2 }, top: 0 },
-      xAxis: timeAxis(), yAxis: valAxis(),
-      series: [
-        { name: data.strategy, type: 'line', data: data.nav, showSymbol: false, lineStyle: { width: 2 } },
-        ...(data.benchmark_nav.length ? [{ name: '基准', type: 'line', data: data.benchmark_nav, showSymbol: false, lineStyle: { width: 2 } }] : []),
-      ],
-    }));
-    mkChart('dd-chart').setOption(baseOpt({
-      xAxis: timeAxis(), yAxis: valAxis(v => (v * 100).toFixed(0) + '%'),
-      series: [{ name: '回撤', type: 'line', data: data.drawdown, showSymbol: false,
-        lineStyle: { width: 2, color: CHART_COLORS.danger }, areaStyle: { opacity: 0.18, color: CHART_COLORS.danger } }],
-    }));
-  } catch (err) { out.innerHTML = `<div class="err" role="alert">${esc(err.message)}</div>`; }
-  finally { busy(form, false); }
-};
-
-function yearlyTable(rows) {
-  if (!rows || !rows.length) return '<div class="msg">无数据</div>';
-  return `<table><thead><tr><th>年份</th><th>收益</th><th>波动</th><th>最大回撤</th><th>夏普</th></tr></thead>
-    <tbody>${rows.map(r => `<tr><td>${r.year}</td>
-      <td class="${cls(r.return)}">${pct(r.return)}</td><td>${pct(r.volatility)}</td>
-      <td>${pct(r.max_drawdown)}</td><td>${r.sharpe ?? '—'}</td></tr>`).join('')}</tbody></table>`;
-}
-function monthlyTable(rows) {
-  if (!rows || !rows.length) return '<div class="msg">无数据</div>';
-  const months = Array.from({length: 12}, (_, i) => String(i + 1));
-  return `<table><thead><tr><th>年份</th>${months.map(m => `<th>${m}月</th>`).join('')}</tr></thead>
-    <tbody>${rows.map(r => `<tr><td>${r.year}</td>${months.map(m => {
-      const v = r[m];
-      return v == null ? '<td>—</td>' : `<td class="${cls(v)}">${(v * 100).toFixed(1)}</td>`;
-    }).join('')}</tr>`).join('')}</tbody></table>`;
-}
 
 /* ---------- 挖掘 ---------- */
 function renderMined(list, extraCols) {

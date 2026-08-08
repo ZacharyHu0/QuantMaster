@@ -31,7 +31,7 @@
   *::-webkit-scrollbar-corner { background:var(--scrollbar-track); }
   :where(
     html, .release-popover, .runtime-list, .problem-dialog-items,
-    .backtest-trades-scroll, .news-sector-list, .source-list,
+    .news-sector-list, .source-list,
     .candidate-instrument-options, .sa-suggestions, .factor-completion-options,
     .trading-table-wrap, .lab-factor-pane, .lab-job-drawer-body,
     .lab-job-raw pre, .lab-dialog-card, .help-sidebar nav
@@ -560,17 +560,6 @@
   .problem-dialog-quality strong { display:block; margin-top:2px; overflow:hidden; text-overflow:ellipsis; color:var(--ink-2); font-size:12px; white-space:nowrap; }
   .problem-dialog-actions { display:flex; justify-content:flex-end; gap:8px; padding:14px 20px 18px; border-top:1px solid var(--border); }
   .problem-dialog-actions .runtime-tool { margin-right:auto; }
-  .quality-summary { margin-bottom:16px; border:1px solid var(--axis); border-radius:10px; background:var(--surface); overflow:hidden; }
-  .quality-summary-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border-bottom:1px solid var(--border); }
-  .quality-summary-head strong { font-size:13px; }
-  .quality-state { border:1px solid var(--axis); border-radius:999px; padding:2px 7px; color:var(--s3); font-size:10px; }
-  .quality-summary[data-status="partial"] .quality-state { color:var(--s4); border-color:color-mix(in oklch,var(--s4) 45%,transparent); }
-  .quality-summary-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); }
-  .quality-summary-grid div { min-width:0; padding:10px 13px; border-right:1px solid var(--border); }
-  .quality-summary-grid div:last-child { border-right:0; }
-  .quality-summary-grid span { display:block; color:var(--muted); font-size:10px; }
-  .quality-summary-grid strong { display:block; margin-top:2px; overflow:hidden; text-overflow:ellipsis; color:var(--ink-2); font-size:12px; white-space:nowrap; }
-  .quality-warning-list { margin:0; padding:9px 28px 11px; border-top:1px solid var(--border); color:var(--s4); font-size:11px; }
   @keyframes reveal-in { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
   @keyframes stream-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
   @keyframes market-card-in { from { opacity:0; transform:translate3d(0,8px,0); } to { opacity:1; transform:translate3d(0,0,0); } }
@@ -629,8 +618,6 @@
     .runtime-label { display:none; }
     .runtime-count { display:none; }
     .problem-dialog-quality { grid-template-columns:1fr; }
-    .quality-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .quality-summary-grid div { border-bottom:1px solid var(--border); }
     .problem-dialog-actions { flex-wrap:wrap; }
     .problem-dialog-actions .runtime-tool { width:100%; margin-right:0; text-align:left; }
     .runtime-entry { grid-template-columns:42px minmax(0,1fr); gap:7px; }

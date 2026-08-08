@@ -11,7 +11,7 @@ from quantmaster.server.app import app
 def _spec(name: str = "统一任务") -> BacktestSpec:
     return BacktestSpec.model_validate({
         "name": name,
-        "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3},
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 3},
         "universe": "demo",
         "start": "2023-01-01",
         "end": "2023-12-31",

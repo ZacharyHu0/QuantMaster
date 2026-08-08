@@ -69,6 +69,37 @@ class BacktestStore:
                 CREATE INDEX IF NOT EXISTS idx_backtest_events
                     ON backtest_events(run_id,seq);
             """)
+            now = utc_now()
+            active = conn.execute(
+                "SELECT id,config_json,progress FROM backtest_runs "
+                "WHERE status IN ('queued','running','interrupted')"
+            ).fetchall()
+            for row in active:
+                try:
+                    config = json.loads(row["config_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if config.get("strategy", {}).get("kind") != "swing":
+                    continue
+                detail = "旧 Swing 执行器已移除；任务保留为只读历史记录。"
+                conn.execute(
+                    "UPDATE backtest_runs SET status='cancelled',cancel_requested=1,worker='',"
+                    "phase='旧策略已归档',detail=?,heartbeat_at=?,finished_at=? WHERE id=?",
+                    (detail, now, now, row["id"]),
+                )
+                conn.execute(
+                    "INSERT INTO backtest_events(run_id,event_json,created_at) VALUES (?,?,?)",
+                    (
+                        row["id"],
+                        canonical_json({
+                            "type": "cancelled",
+                            "progress": int(row["progress"] or 0),
+                            "phase": "旧策略已归档",
+                            "detail": detail,
+                        }),
+                        now,
+                    ),
+                )
 
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict | None:
@@ -78,6 +109,9 @@ class BacktestStore:
         for field in ("config_json", "manifest_json", "result_json"):
             value[field.removesuffix("_json")] = json.loads(value.pop(field) or "{}")
         value["cancel_requested"] = bool(value["cancel_requested"])
+        value["legacy_read_only"] = (
+            value.get("config", {}).get("strategy", {}).get("kind") == "swing"
+        )
         return value
 
     def create(self, spec: BacktestSpec) -> dict:

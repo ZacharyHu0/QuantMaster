@@ -648,10 +648,6 @@ def cmd_backtest(args) -> None:
             profile=args.profile,
             universe=args.universe,
         )
-    elif args.strategy == "swing":
-        from quantmaster.backtest import SwingStrategy
-
-        strategy = SwingStrategy(top_n=args.top, holding_days=args.holding_days)
     elif len(names) > 1:
         from quantmaster.backtest.strategy import MultiFactorStrategy
 
@@ -771,6 +767,26 @@ def cmd_crawl(args) -> None:
     _print_json(result)
 
 
+def _paper_strategy_payload(args) -> dict:
+    if args.strategy == "decision":
+        return {
+            "kind": "decision",
+            "profile": args.profile,
+            "top_n": args.top,
+            "holding_days": args.holding_days,
+            "cap_weight": 0.25,
+            "policy_snapshot": {},
+        }
+    return {
+        "kind": "factor",
+        "factor": args.factor,
+        "top_n": args.top,
+        "rebalance": args.rebalance,
+        "weighting": "equal",
+        "cap_weight": 0.35,
+    }
+
+
 def cmd_paper(args) -> None:
     from quantmaster.backtest.paper_accounts import get_paper_service
     from quantmaster.backtest.spec import PaperAccountSpec
@@ -798,27 +814,7 @@ def cmd_paper(args) -> None:
         _print_json(service.propose(args.account))
         return
 
-    strategy = (
-        {
-            "kind": "decision",
-            "profile": args.profile,
-            "top_n": args.top,
-            "holding_days": args.holding_days,
-            "cap_weight": 0.25,
-            "policy_snapshot": {},
-        }
-        if args.strategy == "decision"
-        else {"kind": "swing", "top_n": args.top, "holding_days": args.holding_days, "cap_weight": 0.25}
-        if args.strategy == "swing"
-        else {
-            "kind": "factor",
-            "factor": args.factor,
-            "top_n": args.top,
-            "rebalance": args.rebalance,
-            "weighting": "equal",
-            "cap_weight": 0.35,
-        }
-    )
+    strategy = _paper_strategy_payload(args)
     if args.paper_cmd == "create":
         account = service.create_account(
             PaperAccountSpec.model_validate(
@@ -886,27 +882,7 @@ def cmd_daily(args) -> None:
     )
 
     print("== 4/4 处理模拟订单并生成收盘提案 ==", file=sys.stderr)
-    strategy = (
-        {
-            "kind": "decision",
-            "profile": args.profile,
-            "top_n": args.top,
-            "holding_days": args.holding_days,
-            "cap_weight": 0.25,
-            "policy_snapshot": {},
-        }
-        if args.strategy == "decision"
-        else {"kind": "swing", "top_n": args.top, "holding_days": args.holding_days, "cap_weight": 0.25}
-        if args.strategy == "swing"
-        else {
-            "kind": "factor",
-            "factor": args.factor,
-            "top_n": args.top,
-            "rebalance": args.rebalance,
-            "weighting": "equal",
-            "cap_weight": 0.35,
-        }
-    )
+    strategy = _paper_strategy_payload(args)
     service = get_paper_service()
     desired_spec = PaperAccountSpec.model_validate(
         {
@@ -1397,8 +1373,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--strategy",
         default="factor",
-        choices=["factor", "decision", "swing"],
-        help="factor=传统因子；decision=Hybrid v2；swing=旧版短线",
+        choices=["factor", "decision"],
+        help="factor=传统因子；decision=Hybrid v2",
     )
     p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument(
@@ -1413,7 +1389,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         choices=[1, 3, 5, 7],
-        help="decision / swing 策略持有与调仓周期",
+        help="decision 策略持有与调仓周期",
     )
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
@@ -1470,7 +1446,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def paper_strategy_args(command):
         command.add_argument("--universe", default="demo")
-        command.add_argument("--strategy", default="factor", choices=["factor", "decision", "swing"])
+        command.add_argument("--strategy", default="factor", choices=["factor", "decision"])
         command.add_argument(
             "--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"]
         )
@@ -1498,7 +1474,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("daily", help="每日例程：更新行情、抓快讯、处理订单并生成模拟提案")
     p.add_argument("--universe", default="demo")
     p.add_argument("--start", default="2022-01-01")
-    p.add_argument("--strategy", default="decision", choices=["factor", "decision", "swing"])
+    p.add_argument("--strategy", default="decision", choices=["factor", "decision"])
     p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--factor", default="mom_20d")
     p.add_argument("--top", type=int, default=5)

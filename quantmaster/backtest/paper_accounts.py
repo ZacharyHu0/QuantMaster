@@ -38,11 +38,88 @@ from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migra
 from quantmaster.trading_sessions import SHANGHAI
 
 logger = logging.getLogger(__name__)
-PAPER_SCHEMA_VERSION = 2
+PAPER_SCHEMA_VERSION = 3
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _migrate_swing_accounts(conn: sqlite3.Connection) -> None:
+    """Retire executable Swing accounts without rewriting their ledger history."""
+    from quantmaster.backtest.spec import DecisionStrategySpec
+    from quantmaster.decision import resolve_policy
+
+    now = utc_now()
+    current = datetime.now(SHANGHAI)
+    signal_day = current.date()
+    if (current.hour, current.minute) >= (15, 0):
+        signal_day += timedelta(days=1)
+    rows = conn.execute(
+        "SELECT id,status,strategy_json,universe,universe_json FROM paper_accounts"
+    ).fetchall()
+    for row in rows:
+        try:
+            legacy = json.loads(row["strategy_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if legacy.get("kind") != "swing":
+            continue
+        account_id = str(row["id"])
+        conn.execute(
+            "UPDATE paper_orders SET status='superseded',reason='strategy_changed',"
+            "updated_at=? WHERE account_id=? AND status IN ('proposed','queued','blocked')",
+            (now, account_id),
+        )
+        conn.execute(
+            "UPDATE paper_cycles SET status='superseded',finished_at=? WHERE account_id=? "
+            "AND status IN ('proposed','confirmed','blocked')",
+            (now, account_id),
+        )
+        conn.execute(
+            "UPDATE paper_auto_runs SET status='cancelled',next_retry_at=0,lease_owner='',"
+            "lease_expires=0,lease_token='',heartbeat_at=0,updated_at=? "
+            "WHERE account_id=? AND status<>'completed'",
+            (now, account_id),
+        )
+        warning = "旧 Swing 策略已迁移为 Hybrid v2 短期画像；历史账本与成交保持不变。"
+        try:
+            universe_snapshot = json.loads(row["universe_json"] or "{}")
+            symbols = list(universe_snapshot.get("symbols") or [])
+            holding_days = int(legacy.get("holding_days") or 3)
+            strategy = DecisionStrategySpec(
+                profile="short_term",
+                top_n=int(legacy.get("top_n") or 5),
+                holding_days=holding_days,
+                cap_weight=float(legacy.get("cap_weight") or 0.25),
+                policy_snapshot=resolve_policy(
+                    str(row["universe"]), holding_days, "short_term", symbols=symbols,
+                ),
+            ).model_dump(mode="json")
+            strategy_hash = content_hash({
+                "strategy": strategy,
+                "universe": universe_snapshot,
+            })
+        except (TypeError, ValueError, AttributeError):
+            logger.exception("旧 Swing 模拟账户迁移失败 account_id=%s", account_id)
+            conn.execute(
+                "UPDATE paper_accounts SET status='archived',mode='manual',"
+                "source_backtest_id='',warning=?,strategy_warning=?,runtime_warning='',"
+                "strategy_effective_after='',updated_at=? WHERE id=?",
+                ("旧 Swing 配置无法安全迁移，账户已转为只读归档。",) * 2
+                + (now, account_id),
+            )
+            continue
+        effective_after = "" if row["status"] == "archived" else signal_day.isoformat()
+        conn.execute(
+            "UPDATE paper_accounts SET strategy_json=?,strategy_hash=?,source_backtest_id='',"
+            "warning=?,strategy_warning=?,runtime_warning='',strategy_effective_after=?,"
+            "updated_at=? WHERE id=?",
+            (
+                canonical_json(strategy), strategy_hash, warning, warning,
+                effective_after, now, account_id,
+            ),
+        )
 
 
 class PaperStore:
@@ -131,7 +208,10 @@ class PaperStore:
                 )
 
         with self._conn() as conn:
-            migrate_schema(conn, ((1, schema_v1), (PAPER_SCHEMA_VERSION, schema_v2)))
+            migrate_schema(
+                conn,
+                ((1, schema_v1), (2, schema_v2), (PAPER_SCHEMA_VERSION, _migrate_swing_accounts)),
+            )
 
     @staticmethod
     def _account_value(row: sqlite3.Row | None) -> dict | None:
@@ -1118,11 +1198,7 @@ class PaperService:
                 strategy_spec = account["strategy"]
         transition_after = str(account.get("strategy_effective_after") or "")
         force_transition = bool(transition_after)
-        if strategy_spec.get("kind") == "swing":
-            from quantmaster.backtest.spec import SwingStrategySpec
-
-            parsed_strategy = SwingStrategySpec.model_validate(strategy_spec)
-        elif strategy_spec.get("kind") == "decision":
+        if strategy_spec.get("kind") == "decision":
             from quantmaster.backtest.spec import DecisionStrategySpec
 
             parsed_strategy = DecisionStrategySpec.model_validate(strategy_spec)

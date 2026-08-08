@@ -4,13 +4,44 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.94"
+VERSION = "1.3.95"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "K 线关键路径提速与历史减负",
+                "items": (
+                    (
+                        "点击标的会立即定位 K 线加载态；日线和分钟线加入有界缓存、"
+                        "并发合并与旧请求取消，日线窗口改为滚动三年，市场卡片图按视口空闲绘制。"
+                    ),
+                    (
+                        "默认日线 BarStore、free-stockdb SDK 模块及线程客户端可安全复用，"
+                        "K 线接口改用低开销序列化并记录超过 500ms 的分阶段慢请求。"
+                    ),
+                    (
+                        "旧 Swing 执行器、同步回测孤立接口和重复进度文档已删除；旧模拟账户"
+                        "迁移至 Hybrid 短期画像，历史回测保留只读且未完成旧任务安全取消。"
+                    ),
+                    (
+                        "测试临时目录规则已统一，仓库不再收集连字符 pytest 缓存与 .test-runtime，"
+                        "并清理权限允许安全删除的历史生成目录。"
+                    ),
+                    (
+                        "同机 20 次热接口 P95 从 53.52ms 降至 28.67ms；当前瓶颈不在"
+                        "数值计算，本轮不引入增加构建负担的 Rust。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.94",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -188,21 +219,6 @@ RELEASES = (
                     (
                         "真实 free-stockdb 契约套件覆盖日周月、同步异步、午休聚合、大批取消与"
                         "指标接口；兼容档案按制品逐方法放行，原生加速默认关闭且失败自动回退。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.85",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "历史验证列布局校正",
-                "items": (
-                    (
-                        "历史决策表保留原有前三入选列，并在其右侧新增独立股价变动"
-                        "验证列；周期进度、逐股涨跌和价格区间不再与入选名单混排。"
                     ),
                 ),
             },

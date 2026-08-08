@@ -36,7 +36,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
         "status": "ok", "current": 1, "expected": 1,
     }
     assert operations["database_schemas"]["paper"] == {
-        "status": "ok", "current": 2, "expected": 2,
+        "status": "ok", "current": 3, "expected": 3,
     }
 
 

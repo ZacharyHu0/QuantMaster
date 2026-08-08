@@ -29,7 +29,6 @@ from pydantic import Field
 
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
-from quantmaster.backtest.quality import assess_panel_quality, assess_signal_quality
 from quantmaster.config import get_config
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
@@ -1066,7 +1065,7 @@ def market_overview_stream(
 
 @app.get("/api/v1/market/history/{symbol}")
 def market_history(
-    symbol: str, start: str = "2023-01-01", end: str | None = None, frequency: str = "1d"
+    symbol: str, start: str | None = None, end: str | None = None, frequency: str = "1d"
 ) -> dict:
     from quantmaster.data import load_bars
     from quantmaster.data.base import validate_frequency, validate_symbol
@@ -1077,25 +1076,50 @@ def market_history(
         frequency = validate_frequency(frequency)
     except ValueError:
         raise HTTPException(422, "标的代码或行情频率无效") from None
+    if not start:
+        end_stamp = pd.Timestamp(end)
+        start_stamp = (
+            end_stamp - pd.DateOffset(years=3)
+            if frequency == "1d"
+            else end_stamp - pd.Timedelta(days=12)
+        )
+        start = str(start_stamp.date())
+    started = time.perf_counter()
     try:
         df = load_bars(symbol, start, end, frequency=frequency)
     except Exception:
         logger.warning("行情历史读取失败 symbol=%s frequency=%s", symbol, frequency, exc_info=True)
         raise HTTPException(503, f"{symbol} 行情暂不可用，请查看本机日志") from None
+    loaded = time.perf_counter()
+    positions = {column: offset + 1 for offset, column in enumerate(df.columns)}
+    volume_position = positions.get("volume")
+    kline = [
+        [
+            str(values[0].date()) if frequency == "1d" else str(values[0]),
+            round(values[positions["open"]], 3),
+            round(values[positions["close"]], 3),
+            round(values[positions["low"]], 3),
+            round(values[positions["high"]], 3),
+            round(values[volume_position], 0) if volume_position is not None else 0.0,
+        ]
+        for values in df.itertuples(index=True, name=None)
+    ]
+    finished = time.perf_counter()
+    total_ms = (finished - started) * 1000
+    if total_ms >= 500:
+        logger.warning(
+            "行情历史读取缓慢 symbol=%s frequency=%s rows=%d load_ms=%.1f serialize_ms=%.1f total_ms=%.1f",
+            symbol,
+            frequency,
+            len(kline),
+            (loaded - started) * 1000,
+            (finished - loaded) * 1000,
+            total_ms,
+        )
     return {
         "symbol": symbol,
         "frequency": frequency,
-        "kline": [
-            [
-                str(idx.date()) if frequency == "1d" else str(idx),
-                round(row["open"], 3),
-                round(row["close"], 3),
-                round(row["low"], 3),
-                round(row["high"], 3),
-                round(row.get("volume", 0.0), 0),
-            ]
-            for idx, row in df.iterrows()
-        ],
+        "kline": kline,
     }
 
 
@@ -1487,146 +1511,6 @@ def factors_test(req: FactorTestRequest) -> dict:
         "quantile_nav": {
             col: _series_to_points(report.quantile_returns[col]) for col in report.quantile_returns.columns
         },
-    }
-
-
-# ---------- 回测 ----------
-
-
-class BacktestRequest(ContractModel):
-    strategy: Literal["factor", "swing"] = "factor"
-    factor: str = "mom_20d"
-    universe: str = "demo"
-    start: str = "2022-01-01"
-    end: str | None = None
-    top_n: int = Field(5, ge=1, le=200)
-    rebalance: Literal["D", "W", "M"] = "W"
-    benchmark: str = "000300.SH"
-    initial_capital: float = Field(1_000_000.0, ge=10_000)
-    stop_loss: float | None = None
-    take_profit: float | None = None
-    weighting: Literal["equal", "ic"] = "equal"
-    holding_days: int = Field(3, ge=1, le=7)
-    allow_partial: bool = False
-
-
-@app.post("/api/v1/backtest/run")
-def backtest_run(req: BacktestRequest) -> dict:
-    from quantmaster.backtest import BacktestConfig, FactorStrategy, full_report, run_backtest
-    from quantmaster.backtest.strategy import MultiFactorStrategy
-    from quantmaster.data import load_history, load_panel
-    from quantmaster.data.universe import load_universe
-    from quantmaster.factors.fundamental import resolve_factor
-
-    end = req.end or str(pd.Timestamp.now().date())
-    quality: dict = {}
-    warnings: list[dict] = []
-    try:
-        symbols = load_universe(req.universe)
-        panel = load_panel(symbols, req.start, end)
-        quality, panel_warnings = assess_panel_quality(
-            panel,
-            symbols,
-            minimum_symbols=req.top_n,
-            allow_partial=req.allow_partial,
-        )
-        warnings.extend(panel_warnings)
-        from quantmaster.backtest.spec import split_factor_references
-
-        names = split_factor_references(req.factor)
-        if req.strategy == "swing":
-            from quantmaster.backtest import SwingStrategy
-
-            strategy = SwingStrategy(top_n=req.top_n, holding_days=req.holding_days)
-        elif len(names) > 1:
-            strategy = MultiFactorStrategy(
-                [resolve_factor(n, symbols, req.start, end) for n in names],
-                top_n=req.top_n,
-                rebalance=req.rebalance,
-                weighting=req.weighting,
-            )
-        else:
-            if not names:
-                raise ValueError("因子表达式不能为空")
-            strategy = FactorStrategy(
-                resolve_factor(names[0], symbols, req.start, end), top_n=req.top_n, rebalance=req.rebalance
-            )
-        weights = strategy.target_weights(panel)
-        warnings.extend(
-            assess_signal_quality(
-                panel,
-                weights,
-                quality,
-                allow_partial=req.allow_partial,
-            )
-        )
-        benchmark = None
-        if req.benchmark:
-            try:
-                benchmark = load_history(req.benchmark, req.start, end)["close"]
-                if benchmark.empty:
-                    raise ValueError("基准没有可用收盘价")
-                quality["benchmark_status"] = "complete"
-            except Exception as e:
-                logger.warning("基准 %s 加载失败: %s", req.benchmark, e)
-                quality["benchmark_status"] = "unavailable"
-                quality["status"] = "partial"
-                warnings.append(
-                    make_problem(
-                        "benchmark_unavailable",
-                        severity="warning",
-                        source="策略回测",
-                        title="基准数据不可用",
-                        message=f"{req.benchmark} 未能加载，超额收益和信息比率将不可用。",
-                        action="回测主体结果仍可使用；需要相对收益时请刷新基准行情后重试。",
-                        problem_id=f"backtest:benchmark:{req.benchmark}",
-                    )
-                )
-        else:
-            quality["benchmark_status"] = "not_requested"
-        result = run_backtest(
-            panel,
-            weights,
-            BacktestConfig(
-                initial_capital=req.initial_capital, stop_loss=req.stop_loss, take_profit=req.take_profit
-            ),
-            benchmark_close=benchmark,
-        )
-        if not result.trades:
-            problem = make_problem(
-                "no_valid_trades",
-                source="策略回测",
-                title="回测没有产生有效成交",
-                message="所有信号均未形成可验证成交，不能把空净值曲线当作有效回测结果。",
-                action="检查成交日价格、涨跌停限制、资金规模和策略信号后重试。",
-                blocking=True,
-                problem_id="backtest:no-valid-trades",
-            )
-            quality["status"] = "blocked"
-            raise OperationProblem(422, problem, data_quality=quality)
-    except OperationProblem:
-        raise
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
-
-    drawdown = 1.0 - result.nav / result.nav.cummax()
-    report = full_report(result)
-    quality["warning_count"] = len(warnings)
-    quality["trade_count"] = len(result.trades)
-    return {
-        "strategy": strategy.name,
-        "metrics": result.metrics,
-        "nav": _series_to_points(result.nav),
-        "benchmark_nav": _series_to_points(result.benchmark_nav) if result.benchmark_nav is not None else [],
-        "drawdown": _series_to_points(-drawdown),
-        "trades": [t.__dict__ for t in result.trades[-200:]],
-        "yearly": report["yearly"],
-        "monthly": report["monthly"],
-        "trade_stats": report["trade_stats"],
-        "data_quality": quality,
-        "warnings": warnings,
     }
 
 

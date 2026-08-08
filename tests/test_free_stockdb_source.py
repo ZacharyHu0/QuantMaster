@@ -176,6 +176,32 @@ def test_sdk_path_auto_discovers_managed_pybao_and_explicit_path_wins(
     assert free_stockdb.resolve_free_stockdb_sdk_path(str(explicit)) == explicit
 
 
+def test_sdk_module_and_client_are_reused_until_runtime_reset(tmp_path) -> None:
+    sdk = tmp_path / "stock_sdk.py"
+    sdk.write_text(
+        "class StockDBClient:\n"
+        "    def __init__(self, **kwargs):\n"
+        "        self.options = kwargs\n",
+        encoding="utf-8",
+    )
+    first_source = FreeStockDBSource(sdk_path=str(sdk))
+    second_source = FreeStockDBSource(sdk_path=str(sdk))
+
+    first_module = first_source._load_sdk_module()
+    first_client = first_source._sdk_client()
+
+    assert second_source._load_sdk_module() is first_module
+    assert second_source._sdk_client() is first_client
+
+    sdk.write_text(sdk.read_text(encoding="utf-8") + "# updated\n", encoding="utf-8")
+    updated_source = FreeStockDBSource(sdk_path=str(sdk))
+    assert updated_source._load_sdk_module() is not first_module
+
+    first_source.reset_runtime()
+    refreshed = FreeStockDBSource(sdk_path=str(sdk))._sdk_client()
+    assert refreshed is not first_client
+
+
 def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None:
     source, client = _source(monkeypatch)
 

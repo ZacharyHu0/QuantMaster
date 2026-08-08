@@ -48,6 +48,7 @@ def _iso_time(value: Any) -> str:
 def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
     status = str(value.get("status") or "unknown")
     job_id = str(value.get("id") or "")
+    legacy_read_only = domain == "backtests" and bool(value.get("legacy_read_only"))
     return {
         "domain": domain,
         "id": job_id,
@@ -62,7 +63,7 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
             value.get("updated_at") or value.get("heartbeat_at") or value.get("created_at")
         ),
         "can_cancel": status in _ACTIVE,
-        "can_retry": status in _RETRYABLE,
+        "can_retry": status in _RETRYABLE and not legacy_read_only,
         "links": {
             "self": f"/api/v1/jobs/{domain}/{job_id}",
             "events": f"/api/v1/jobs/{domain}/{job_id}/events",
@@ -204,6 +205,8 @@ def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
     source = worker.service.store.get(job_id)
     if source is None:
         raise KeyError(job_id)
+    if source.get("legacy_read_only"):
+        raise ValueError("旧 Swing 回测仅供历史查看，不能重试")
     if str(source.get("status")) not in _RETRYABLE:
         raise ValueError("当前回测不能重试")
     spec = BacktestSpec.model_validate(source["config"])

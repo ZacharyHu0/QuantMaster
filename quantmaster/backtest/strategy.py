@@ -165,33 +165,6 @@ class BuyAndHold(Strategy):
         return weights
 
 
-class SwingStrategy(Strategy):
-    """1-7 日短周期选股策略：综合趋势、MACD、资金量与波动，每 N 日调仓。"""
-
-    def __init__(self, top_n: int = 5, holding_days: int = 3, cap_weight: float = 0.25):
-        if not 1 <= holding_days <= 7:
-            raise ValueError("holding_days 必须在 1-7 之间")
-        if top_n < 1:
-            raise ValueError("top_n 必须为正整数")
-        self.top_n = top_n
-        self.holding_days = holding_days
-        self.cap_weight = cap_weight
-        self.name = f"swing_top{top_n}_hold{holding_days}d"
-
-    def target_weights(self, panel: PanelDict) -> pd.DataFrame:
-        from quantmaster.decision import market_exposure, swing_score_panel
-
-        scores = swing_score_panel(panel)
-        ranks = scores.rank(axis=1, ascending=False)
-        selected = (ranks <= self.top_n).astype(float).where(scores.notna(), 0.0)
-        counts = selected.sum(axis=1).replace(0, float("nan"))
-        weights = selected.div(counts, axis=0)
-        weights = weights.mul(market_exposure(panel), axis=0).clip(upper=self.cap_weight)
-        mask = pd.Series(False, index=scores.index)
-        mask.iloc[::self.holding_days] = True
-        return weights.where(mask, other=float("nan"))
-
-
 class LabVersionStrategy(Strategy):
     """固定 Quant Lab 版本；学习模型历史回测只读取滚动 OOF 预测。"""
 

@@ -42,6 +42,33 @@ class TestBasics:
         assert response.status_code == 503
         assert "行情暂不可用" in response.json()["detail"]
 
+    def test_market_history_uses_rolling_default_and_stable_wire_shape(self, monkeypatch):
+        calls = []
+        frame = pd.DataFrame(
+            {
+                "open": [10.1234], "high": [11.2345], "low": [9.8765],
+                "close": [10.9876], "volume": [1234.4],
+            },
+            index=pd.DatetimeIndex(["2026-08-07"]),
+        )
+
+        def fake_load(symbol, start, end, *, frequency):
+            calls.append((symbol, start, end, frequency))
+            return frame
+
+        monkeypatch.setattr("quantmaster.data.load_bars", fake_load)
+        response = client.get(
+            "/api/v1/market/history/600519.SH?frequency=1d&end=2026-08-08",
+        )
+
+        assert response.status_code == 200
+        assert calls == [("600519.SH", "2023-08-08", "2026-08-08", "1d")]
+        assert response.json() == {
+            "symbol": "600519.SH",
+            "frequency": "1d",
+            "kline": [["2026-08-07", 10.123, 10.988, 9.877, 11.235, 1234.0]],
+        }
+
     def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
         monkeypatch.setattr(
             "quantmaster.server.problems.collect_health_report",
@@ -196,7 +223,6 @@ class TestBasics:
         assert "scrollbar-gutter:stable" in app_styles
         assert ".segmented {" in app_styles
         assert "overflow-x:auto; overflow-y:hidden" in app_styles
-        assert 'class="backtest-trades-scroll"' in app_script
         assert "createLoadProgress" in app_script
         assert "createMarketStreamRenderer" in app_script
         assert "/api/v1/market/fear-greed" in app_script
@@ -259,11 +285,20 @@ class TestBasics:
         assert "createDecisionStreamRenderer" in app_script
         assert "function loadKlineSeries" in app_script
         assert "function renderKlineSeries" in app_script
+        assert "const KLINE_CACHE_LIMIT = 64" in app_script
+        assert "KLINE_DAILY_TTL_MS = 5 * 60 * 1000" in app_script
+        assert "panel.scrollIntoView({behavior:'auto',block:'start'})" in app_script
+        assert "previousController?.abort()" in app_script
+        assert "const klineSeriesInflight = new Map()" in app_script
+        assert "new IntersectionObserver" in app_script
+        assert "requestIdleCallback" in app_script
+        assert "2023-01-01" not in app_script.split("function klineStartDate", 1)[1].split("function", 1)[0]
         assert "id:'market-kline-x-wheel'" in app_script
         assert "id:'market-kline-x-slider'" in app_script
         assert "xAxisIndex:[0,1],filterMode:'none'" in app_script
         assert "function openDecisionKline" in app_script
         assert "data-decision-kline-trigger" in app_script
+        assert 'data-decision-detail="${esc(decisionKlineState.symbol)}"><td colspan="10">' in app_script
         assert "data-decision-asset-toggle" in app_script
         assert "showKline(row.dataset.symbol" not in app_script
         assert 'src="/static/charts.js"' in resp.text
@@ -272,6 +307,7 @@ class TestBasics:
         assert 'src="/static/brand-intro.js"' in resp.text
         assert 'href="/static/brand/quantmaster-favicon.svg"' in resp.text
         assert 'src="/static/brand/quantmaster-mark-inverse.svg"' in resp.text
+        assert 'option value="swing"' not in resp.text
         assert 'id="brand-replay"' in resp.text
         assert "window.QuantCharts.activateTab(tab)" in app_script
         assert "ACTIVE_TAB_STORAGE_KEY" in app_script
@@ -332,7 +368,6 @@ class TestBasics:
         assert "window.QuantMasterNDJSON" in app_script
         assert "runtimeInfo.sync('health'" in app_script
         assert 'id="operation-problem-dialog"' in resp.text
-        assert 'class="quality-summary"' in app_script
         assert 'data-runtime-filter="problem"' in resp.text
         assert 'data-runtime-filter="running"' in resp.text
         assert '<summary>诊断信息</summary>' in app_script
@@ -541,28 +576,9 @@ class TestBasics:
         assert unknown.status_code == 422
         assert unknown.json()["error_id"] == unknown.headers["X-Request-ID"]
 
-    def test_backtest_partial_data_returns_confirmation_problem(self, monkeypatch):
-        dates = pd.bdate_range("2026-06-01", periods=25)
-        panel = {
-            "open": pd.DataFrame({"A": range(10, 35)}, index=dates),
-            "close": pd.DataFrame({"A": range(11, 36)}, index=dates),
-        }
-        monkeypatch.setattr(
-            "quantmaster.data.universe.load_universe", lambda name: ["A", "B"],
-        )
-        monkeypatch.setattr("quantmaster.data.load_panel", lambda *args, **kwargs: panel)
-
-        resp = client.post("/api/v1/backtest/run", json={
-            "strategy": "factor", "factor": "mom_20d", "universe": "demo",
-            "start": "2026-06-01", "top_n": 1,
-        })
-
-        assert resp.status_code == 409
-        data = resp.json()
-        assert data["problem"]["code"] == "partial_market_data"
-        assert data["problem"]["blocking"] is True
-        assert data["problem"]["can_continue"] is True
-        assert data["data_quality"]["missing_symbols"] == ["B"]
+    def test_legacy_synchronous_backtest_route_is_removed(self):
+        resp = client.post("/api/v1/backtest/run", json={})
+        assert resp.status_code == 404
 
     def test_stream_error_message_redacts_credentials(self):
         from quantmaster.server import app as app_module

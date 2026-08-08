@@ -59,7 +59,7 @@ BASELINE = {
     "quantmaster/runtime/maintenance.py": 2,
     "quantmaster/runtime/process.py": 2,
     "quantmaster/runtime/sqlite.py": 2,
-    "quantmaster/server/app.py": 17,
+    "quantmaster/server/app.py": 15,
     "quantmaster/server/automation.py": 11,
     "quantmaster/server/diagnostics.py": 1,
     "quantmaster/server/lab.py": 14,

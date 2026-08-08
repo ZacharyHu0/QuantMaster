@@ -46,7 +46,10 @@ def price_panel(dates, first=(10.0, 11.0), second=None):
     }
 
 
-_ROUTE_STRATEGY = {"kind": "swing", "top_n": 3, "holding_days": 3, "cap_weight": 0.25}
+_ROUTE_STRATEGY = {
+    "kind": "factor", "factor": "mom_20d", "top_n": 3,
+    "rebalance": "W", "weighting": "equal", "cap_weight": 0.35,
+}
 _ROUTE_ARTIFACT = {
     "summary": {"return": 0.1},
     "trades": [
@@ -1008,13 +1011,136 @@ def test_legacy_hybrid_paper_account_upgrades_once_and_supersedes_old_orders(
     ] == upgraded["strategy"]["policy_snapshot"]["policy_hash"]
 
 
+@pytest.mark.parametrize("status", ["active", "archived"])
+def test_swing_paper_account_migrates_to_short_term_hybrid(
+    tmp_path, monkeypatch, status,
+):
+    path = tmp_path / "paper.sqlite"
+    account_root = tmp_path / "accounts"
+    original = PaperStore(path, account_root)
+    account_id = "a" * 32
+    strategy = {"kind": "swing", "top_n": 7, "holding_days": 5, "cap_weight": 0.2}
+    universe = {"name": "demo", "symbols": ["600000.SH", "000001.SZ"]}
+    with original._conn() as conn:
+        conn.execute(
+            "INSERT INTO paper_accounts "
+            "(id,name,status,mode,initial_capital,strategy_json,strategy_hash,universe,"
+            "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
+            "strategy_effective_after,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                account_id, "旧短线", status, "auto", 100_000,
+                json.dumps(strategy), "legacy-hash", "demo", json.dumps(universe),
+                "legacy-run", "", "", "", "", "2026-08-01", "2026-08-01",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO paper_cycles "
+            "(id,account_id,signal_date,status,strategy_hash,target_json,reference_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "legacy-cycle", account_id, "2026-08-01", "proposed",
+                "legacy-hash", "{}", "{}", "2026-08-01",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO paper_orders "
+            "(id,cycle_id,account_id,symbol,target_weight,side,status,idempotency_key,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy-order", "legacy-cycle", account_id, "600000.SH", 0.2,
+                "buy", "proposed", "legacy-order-key", "2026-08-01", "2026-08-01",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO paper_auto_runs(run_date,account_id,status,lease_owner,"
+            "lease_expires,lease_token,heartbeat_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "2026-08-02", account_id, "running", "legacy-worker", 9_999_999_999,
+                "legacy-lease", 9_999_999_000, "2026-08-02",
+            ),
+        )
+        conn.execute("PRAGMA user_version=2")
+    monkeypatch.setattr(
+        "quantmaster.decision.resolve_policy",
+        lambda universe, horizon, profile, **kwargs: {
+            "schema_version": 3, "universe": universe, "horizon": horizon,
+            "profile": profile, "policy_hash": "migrated-policy",
+        },
+    )
+
+    migrated = PaperStore(path, account_root)
+    account = migrated.account(account_id)
+
+    assert account["strategy"] == {
+        "kind": "decision", "profile": "short_term", "top_n": 7,
+        "holding_days": 5, "cap_weight": 0.2,
+        "policy_snapshot": {
+            "schema_version": 3, "universe": "demo", "horizon": 5,
+            "profile": "short_term", "policy_hash": "migrated-policy",
+        },
+    }
+    assert account["source_backtest_id"] == ""
+    assert bool(account["strategy_effective_after"]) is (status == "active")
+    assert migrated.cycle("legacy-cycle")["status"] == "superseded"
+    assert migrated.orders(cycle_id="legacy-cycle")[0]["status"] == "superseded"
+    with migrated._conn() as conn:
+        auto_run = dict(conn.execute(
+            "SELECT status,lease_owner,lease_expires,lease_token,heartbeat_at "
+            "FROM paper_auto_runs WHERE account_id=?",
+            (account_id,),
+        ).fetchone())
+    assert auto_run == {
+        "status": "cancelled", "lease_owner": "", "lease_expires": 0.0,
+        "lease_token": "", "heartbeat_at": 0.0,
+    }
+    strategy_hash = account["strategy_hash"]
+    assert PaperStore(path, account_root).account(account_id)["strategy_hash"] == strategy_hash
+
+
+def test_swing_backtests_become_read_only_and_active_runs_are_cancelled(tmp_path):
+    path = tmp_path / "backtests.sqlite"
+    artifacts = tmp_path / "artifacts"
+    store = BacktestStore(path, artifacts)
+    config = json.dumps({
+        "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3},
+        "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
+    })
+    with store._conn() as conn:
+        for run_id, status in (("legacy-queued", "queued"), ("legacy-completed", "completed")):
+            conn.execute(
+                "INSERT INTO backtest_runs "
+                "(id,name,status,config_json,config_hash,created_at,finished_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    run_id, run_id, status, config, "legacy-hash", "2026-08-01",
+                    "2026-08-02" if status == "completed" else "",
+                ),
+            )
+
+    migrated = BacktestStore(path, artifacts)
+
+    assert migrated.get("legacy-queued")["status"] == "cancelled"
+    assert migrated.get("legacy-queued")["legacy_read_only"] is True
+    completed = migrated.get("legacy-completed")
+    assert completed["status"] == "completed"
+    assert completed["config"]["strategy"]["kind"] == "swing"
+    assert completed["legacy_read_only"] is True
+    assert [event["type"] for event in migrated.events("legacy-queued")].count("cancelled") == 1
+    BacktestStore(path, artifacts)
+    assert [event["type"] for event in migrated.events("legacy-queued")].count("cancelled") == 1
+
+
 def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch):
     client = TestClient(app)
     worker = get_backtest_worker()
     monkeypatch.setattr(worker, "start", lambda: None)
     payload = {
         "name": "接口回测",
-        "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3, "cap_weight": 0.25},
+        "strategy": {
+            "kind": "factor", "factor": "mom_20d", "top_n": 3,
+            "rebalance": "W", "weighting": "equal", "cap_weight": 0.35,
+        },
         "universe": "demo",
         "start": "2023-01-01",
         "end": "2023-12-31",
@@ -1032,12 +1158,17 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert created.status_code == 202
     assert created.json()["status"] == "queued"
     worker.service.store.cancel(created.json()["id"])
+    legacy = {**payload, "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3}}
+    assert client.post(
+        "/api/v1/backtests", json=legacy, headers={"X-CSRF-Token": token},
+    ).status_code == 422
 
     page = client.get("/").text
     assert 'href="/static/trading.css"' in page
     assert 'src="/static/trading.js"' in page
     assert "回测工作台" in page
     assert "Hybrid v2 决策" in page
+    assert 'option value="swing"' not in page
     assert 'data-bt-field="decision"' in page
     assert 'data-paper-field="decision"' in page
     assert 'id="bt-factor-input"' in page
