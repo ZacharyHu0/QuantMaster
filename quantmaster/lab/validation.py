@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.factors.analysis import (
     annualize,
     forward_returns,
@@ -17,6 +16,7 @@ from quantmaster.factors.analysis import (
     quantile_backtest,
     top_quantile_turnover,
 )
+from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.robustness import (
     monte_carlo_block_bootstrap,
     parameter_sensitivity,

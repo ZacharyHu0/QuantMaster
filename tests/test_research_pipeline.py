@@ -77,7 +77,7 @@ def test_contracts_are_versioned_and_reject_lookahead_factor():
 def test_builtin_registry_groups_outputs_and_exposes_curated_48():
     registry = built_in_registry()
     catalog = registry.catalog()
-    assert len(catalog) == 63
+    assert len(catalog) == 66
     assert len(registry.provider("cross_asset_core").outputs) == 6
     assert len(registry.select(("cross_asset_core",))) == 6
     assert len([item for item in catalog if "curated-48" in item["tags"]]) == 48
@@ -586,7 +586,7 @@ def test_research_management_api_is_local_and_csrf_protected(monkeypatch):
     token = settings.json()["csrf_token"]
     catalog = client.get("/api/v1/research/data/catalog")
     assert catalog.status_code == 200
-    assert len(catalog.json()["specs"]) == 63
+    assert len(catalog.json()["specs"]) == 66
     assert client.post("/api/v1/research/data/plans", json={}).status_code == 403
     planned = client.post(
         "/api/v1/research/data/plans",

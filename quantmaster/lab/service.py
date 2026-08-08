@@ -18,7 +18,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
-from quantmaster.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
+from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     create_snapshot,
@@ -66,7 +66,7 @@ def _extend_panel_with_local_symbols(
         return panel, []
     start = pd.Timestamp(panel["close"].index.min()).strftime("%Y-%m-%d")
     end = pd.Timestamp(panel["close"].index.max()).strftime("%Y-%m-%d")
-    fields = [
+    fields: list[str] = [
         field for field in ("open", "high", "low", "close", "volume", "amount")
         if field in panel
     ]
@@ -694,7 +694,7 @@ class LabService:
                     future.result()
                 except InterruptedError:
                     raise
-                except Exception as exc:
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     failures[str(item["symbol"])] = str(exc)[:300]
                 completed += 1
                 if progress:
@@ -2017,7 +2017,7 @@ class LabService:
                     essential_only=True,
                 )
                 reports[version_id] = report
-            except Exception as exc:
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 skipped.append({"version_id": version_id, "reason": str(exc)})
 
         family: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -2144,7 +2144,7 @@ class LabService:
                 baseline_annual = float(
                     baseline_result["metrics"].get("net_annual_excess_return") or 0
                 )
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 baseline_annual = 0.0
             gate = strategy_sealed_gate(
                 execution["metrics"], bootstrap, baseline_calmar=baseline_calmar,

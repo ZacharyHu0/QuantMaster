@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 RELEASE_DATE = "2026-08-09"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Quant Lab 1.4 发布前向修复",
+                "items": (
+                    (
+                        "收窄数据补齐、研究周期和策略 API 的预期异常边界，保持失败可诊断"
+                        "且不扩大宽泛异常捕获。"
+                    ),
+                    (
+                        "研究目录的七周期标签数量同步为 66，并恢复发布接口只返回最近 10 条"
+                        "记录，避免首屏响应随历史版本增长。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.4.0",
+        "date": "2026-08-09",
         "sections": (
             {
                 "title": "Quant Lab 1–30 日组合信号",

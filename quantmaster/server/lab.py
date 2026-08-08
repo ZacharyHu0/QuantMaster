@@ -177,7 +177,7 @@ def strategy(strategy_id: str) -> dict:
 def strategy_return_curve(strategy_id: str) -> dict:
     try:
         return get_lab_service().store.strategy_return_curve(strategy_id)
-    except Exception as exc:
+    except (LabError, KeyError, TypeError, ValueError) as exc:
         return _fail(exc)  # type: ignore[return-value]
 
 
@@ -187,7 +187,7 @@ def promote_strategy(strategy_id: str, body: StrategyPromotion) -> dict:
         return get_lab_service().store.promote_strategy(
             strategy_id, target=body.target, actor=body.actor, reason=body.reason,
         )
-    except Exception as exc:
+    except (LabError, KeyError, TypeError, ValueError) as exc:
         return _fail(exc)  # type: ignore[return-value]
 
 

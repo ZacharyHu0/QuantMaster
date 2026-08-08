@@ -81,7 +81,7 @@ def target_weights(
     selected = (ranks <= top_n) & scores.notna()
     if industry_map:
         selected.loc[:, :] = False
-        maximum_per_industry = max(1, int(math.floor(top_n * industry_cap + 1e-9)))
+        maximum_per_industry = max(1, math.floor(top_n * industry_cap + 1e-9))
         for date, row in scores.iterrows():
             counts: dict[str, int] = {}
             chosen: list[str] = []
@@ -179,7 +179,7 @@ def execute_daily_targets(
             "calmar": annual / max(max_drawdown, 1e-12),
             "turnover": float(turnover.mean()),
             "cost_annual": float(costs.mean() * TRADING_DAYS),
-            "samples": int(len(excess)),
+            "samples": len(excess),
             "positive_folds": int(sum(value > 0 for value in fold_returns)),
             "fold_net_returns": fold_returns,
         },

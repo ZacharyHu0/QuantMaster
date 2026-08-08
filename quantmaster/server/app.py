@@ -631,7 +631,7 @@ def release_info() -> dict:
     return {
         "version": __version__,
         "release_date": RELEASE_DATE,
-        "releases": RELEASES,
+        "releases": RELEASES[:10],
         "history_url": RELEASE_HISTORY_URL,
     }
 

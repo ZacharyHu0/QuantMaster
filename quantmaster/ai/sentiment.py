@@ -10,7 +10,6 @@ from quantmaster.ai.crawler import NewsStore
 from quantmaster.config import get_config
 from quantmaster.factors.base import Factor, PanelDict
 
-
 _MINIMUM_RESEARCH_SESSIONS = 756 + 30 + 252
 _MINIMUM_HISTORY_COVERAGE = 0.70
 
