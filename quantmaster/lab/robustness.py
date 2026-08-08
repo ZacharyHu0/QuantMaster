@@ -114,7 +114,7 @@ def monte_carlo_block_bootstrap(
     blocks = math.ceil(len(ic) / block_days)
     rng = np.random.default_rng(int(seed) + int(horizon) * 1009)
     starts = rng.integers(0, len(ic), size=(paths, blocks, 1))
-    offsets = np.arange(block_days, dtype=int).reshape(1, 1, -1)
+    offsets: Any = np.arange(block_days, dtype=int).reshape(1, 1, -1)
     indices = ((starts + offsets) % len(ic)).reshape(paths, -1)[:, : len(ic)]
     ic_paths = ic.to_numpy(dtype=float)[indices]
     ic_means = ic_paths.mean(axis=1)
@@ -222,7 +222,7 @@ def parameter_sensitivity(
     forward = forward_returns(close, periods=horizon)
     baseline_ic = information_coefficient(baseline, forward).reindex(oos_index) * direction
     baseline_mean = float(baseline_ic.dropna().mean()) if baseline_ic.notna().any() else 0.0
-    rows = []
+    rows: list[dict[str, Any]] = []
     for label, values in variants.items():
         aligned = values.reindex(index=baseline.index, columns=baseline.columns)
         daily_ic = information_coefficient(aligned, forward).reindex(oos_index) * direction
@@ -313,7 +313,7 @@ def penetration_analysis(
         "high_volatility": trailing_volatility >= volatility_cut,
         "normal_volatility": trailing_volatility < volatility_cut,
     }
-    regimes = []
+    regimes: list[dict[str, Any]] = []
     for name, mask in regime_masks.items():
         values = ic.reindex(dates)[mask.fillna(False)]
         if len(values) < 20:
@@ -337,7 +337,7 @@ def penetration_analysis(
     if source is not None:
         trailing = source.reindex(index=close.index, columns=close.columns).rolling(20).mean()
         percentile = trailing.rank(axis=1, pct=True)
-        buckets = []
+        buckets: list[dict[str, Any]] = []
         for name, mask in (("low", percentile <= 0.5), ("high", percentile > 0.5)):
             bucket_ic = _slice_ic(factor.loc[dates], forward.loc[dates], mask.loc[dates])
             buckets.append({

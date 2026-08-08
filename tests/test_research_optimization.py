@@ -234,7 +234,7 @@ def test_study_ledger_persists_protocol_and_resume_state(tmp_path):
     assert paused["result"]["sealed_completed_blocks"] == 3
 
 
-def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path):
+def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path, monkeypatch):
     cfg = Config()
     cfg.data.root = str(tmp_path)
     cfg.lab.enabled = False
@@ -245,6 +245,18 @@ def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path):
         client.headers["X-CSRF-Token"] = client.get(
             "/api/v1/session",
         ).json()["csrf_token"]
+        created = client.post("/api/v1/lab/studies", json={
+            "universe": "csi800", "start": "2015-01-01", "end": "2026-07-28",
+            "models": ["ridge"], "budget_hours": 0.5, "max_trials": 2,
+        })
+        assert created.status_code == 409
+        assert created.json()["error"]["code"] == "DATASET_MISSING"
+        from quantmaster.server import lab as lab_api
+
+        monkeypatch.setattr(lab_api.get_lab_service(), "preflight", lambda *_args, **_kwargs: {
+            "runnable": True, "state": "ready", "resource_class": "cpu",
+            "blockers": [], "warnings": [], "dataset": {},
+        })
         created = client.post("/api/v1/lab/studies", json={
             "universe": "csi800", "start": "2015-01-01", "end": "2026-07-28",
             "models": ["ridge"], "budget_hours": 0.5, "max_trials": 2,
@@ -318,9 +330,9 @@ def test_optuna_runner_persists_a_ridge_baseline_and_reuses_sealed_blocks(
     assert resumed["prediction_sha256"] == result["prediction_sha256"]
 
 
-def test_multi_horizon_sample_store_uses_memmap_and_compact_metadata(tmp_path):
+def test_multi_horizon_sample_store_uses_shared_cube_and_compact_metadata(tmp_path):
     panel = _panel(days=180, symbols=4)
-    root = tmp_path / "sample-store-v3"
+    root = tmp_path / "sample-store-v4"
 
     samples = make_multi_horizon_samples(
         panel,
@@ -331,10 +343,12 @@ def test_multi_horizon_sample_store_uses_memmap_and_compact_metadata(tmp_path):
         storage_dir=root,
     )
 
-    assert isinstance(samples.values, np.memmap)
+    assert isinstance(samples.values.cube, np.memmap)
     assert isinstance(samples.metadata.date_positions, np.memmap)
-    assert (root / "features.npy").is_file()
+    assert (root / "feature-cube.npy").is_file()
+    assert not (root / "features.npy").exists()
     assert len(samples.metadata) == len(samples.values)
+    assert samples.values[0].shape == (20, len(samples.feature_names))
     first = samples.metadata[0]
     assert first["symbol"] in panel["close"].columns
     assert set(first["target_dates"]) == {"1", "3", "5", "7"}

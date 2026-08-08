@@ -220,7 +220,7 @@ def benjamini_hochberg_family(p_values: list[float]) -> list[float]:
     """对一次研究批次中的全部候选/周期统一执行 BH-FDR。"""
     if not p_values:
         return []
-    values = np.asarray(p_values, dtype=float)
+    values: Any = np.asarray(p_values, dtype=float)
     values = np.where(np.isfinite(values), np.clip(values, 0, 1), 1.0)
     order = np.argsort(values)
     ranked = values[order]

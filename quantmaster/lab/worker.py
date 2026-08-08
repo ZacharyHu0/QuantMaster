@@ -9,9 +9,12 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
+from quantmaster.lab.errors import classify_lab_error
+from quantmaster.lab.preflight import require_runnable
 from quantmaster.lab.service import LabService
 
 logger = logging.getLogger(__name__)
@@ -25,7 +28,7 @@ class LabWorker:
         self._stop = threading.Event()
         self._accepting = threading.Event()
         self._thread: threading.Thread | None = None
-        self._scheduler = None
+        self._scheduler: Any = None
         self._lock = threading.RLock()
         self._task_threads: dict[str, threading.Thread] = {}
         self._active_job_ids: set[str] = set()
@@ -47,6 +50,9 @@ class LabWorker:
             # 上一进程遗留任务。只有当前实例确实没有活动任务时才恢复 stale 任务。
             if not self._active_job_ids:
                 self.service.store.interrupt_stale()
+                recovered = self.service.store.recover_orphaned_records()
+                if any(recovered.values()):
+                    logger.info("Quant Lab recovered orphaned records: %s", recovered)
             self._thread = threading.Thread(
                 target=self.run_forever, name="quant-lab-dispatcher", daemon=True)
             self._thread.start()
@@ -111,6 +117,11 @@ class LabWorker:
                     self.worker_id,
                     allow_scheduled=allow_scheduled,
                     max_running=limit,
+                    resource_limits={
+                        "gpu": max(1, int(get_config().lab.gpu_max_concurrent_jobs)),
+                        "external": 1,
+                        "io": 1,
+                    },
                 )
                 if job is None:
                     break
@@ -184,10 +195,16 @@ class LabWorker:
         )
         heartbeat_thread.start()
         try:
+            preflight = getattr(self.service, "preflight", None)
+            if callable(preflight):
+                admission = preflight(str(job["kind"]), dict(job.get("params") or {}))
+                require_runnable(admission)
             result = self.service.run_job(job, progress=progress, cancelled=cancelled)
             if lease_alive.is_set():
                 self.service.store.finish_job(
-                    job_id, result=result, expected_worker=self.worker_id,
+                    job_id, result=result,
+                    telemetry=(result.get("telemetry") if isinstance(result, dict) else None),
+                    expected_worker=self.worker_id,
                 )
         except InterruptedError:
             if not lease_alive.is_set():
@@ -199,8 +216,10 @@ class LabWorker:
             self.service.store.finish_job(job_id, expected_worker=self.worker_id)
         except Exception as exc:
             logger.exception("Quant Lab 任务失败 job=%s kind=%s", job_id, job["kind"])
+            failure = classify_lab_error(exc)
             self.service.store.finish_job(
-                job_id, error=str(exc), expected_worker=self.worker_id,
+                job_id, error=failure.message, error_info=failure.to_dict(),
+                expected_worker=self.worker_id,
             )
         finally:
             heartbeat_stop.set()
@@ -237,11 +256,22 @@ class LabWorker:
             "universe": cfg.universe, "start": cfg.start, "end": end,
             "_scheduled": True,
         }
-        self.service.store.enqueue("prepare_data", base)
+        try:
+            self.service.enqueue("prepare_data", base)
+        except Exception as exc:
+            failure = classify_lab_error(exc)
+            logger.info("Quant Lab daily prepare skipped code=%s", failure.code)
         for deployment in self.service.store.active_deployments():
-            self.service.store.enqueue("validate", {
-                **base, "version_id": deployment["version_id"],
-            })
+            try:
+                self.service.enqueue("validate", {
+                    **base, "version_id": deployment["version_id"],
+                })
+            except Exception as exc:
+                failure = classify_lab_error(exc)
+                logger.info(
+                    "Quant Lab scheduled validation skipped version=%s code=%s",
+                    deployment["version_id"], failure.code,
+                )
 
     def _enqueue_heavy_research(self) -> None:
         cfg = get_config().lab
@@ -261,11 +291,11 @@ class LabWorker:
                 protocol=protocol,
                 research_tier="production" if cfg.universe.lower() == "csi800" else "sandbox",
             )
-            study = self.service.store.create_study(spec.to_dict())
-            job = self.service.store.enqueue(
-                "optimize", {"study_id": study["id"], "_scheduled": True},
-            )
-            self.service.store.update_study(study["id"], job_id=job["id"], status="queued")
+            try:
+                self.service.create_study({**spec.to_dict(), "_scheduled": True})
+            except Exception as exc:
+                failure = classify_lab_error(exc)
+                logger.info("Quant Lab scheduled optimization skipped code=%s", failure.code)
         if (cfg.ai_python_mining_enabled
                 and self.service.store.reserve_schedule(f"python:{week}")):
             self.service.enqueue("discover_python", {
@@ -378,6 +408,8 @@ def run_standalone() -> None:
                 "lab.enabled", "lab.window_start", "automation.timezone",
                 "lab.universe", "lab.start", "lab.horizons", "lab.weekly_days",
                 "lab.window_end", "lab.daily_budget_hours", "lab.max_workers", "lab.device",
+                "lab.data_policy", "lab.panel_cache_mb", "lab.feature_cache_gb",
+                "lab.gpu_memory_fraction", "lab.gpu_max_concurrent_jobs",
                 "lab.allow_cloud_sample", "lab.ai_python_mining_enabled",
             ])
     except KeyboardInterrupt:

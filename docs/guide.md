@@ -162,15 +162,28 @@ Web 顶部的 **Quant Lab** 把发现、模型实验、因子版本、统一验�
 使用安全 DSL，AI 不能执行任意 Python。
 
 ```bash
-# 基础安装可直接运行 Ridge；深度模型使用可选依赖
-pip install -e ".[data,ml]"
+# Windows 源码环境：先装项目依赖，再按显卡环境安装官方 CUDA wheel
+.\.venv\Scripts\python.exe -m pip install -e ".[data,ml]"
+.\.venv\Scripts\python.exe -m pip install "torch==2.13.0+cu130" --index-url https://download.pytorch.org/whl/cu130
 
 qm lab doctor
+qm lab benchmark --universe csi800 --start 2015-01-01
 qm lab prepare-data --universe demo --start 2022-01-01
 qm lab discover --method genetic --universe demo --start 2022-01-01
 qm lab train --model transformer --universe demo --start 2022-01-01
 qm lab jobs
 ```
+
+`qm lab doctor` 会分别显示请求设备与实际设备。明确配置 `lab.device=cuda` 时，
+`torch.cuda.is_available()` 为假会在入队前阻止深度任务，不会静默回退到 CPU。
+官方安装选择与运行时检查见 [PyTorch 安装说明](https://pytorch.org/get-started/locally/)
+和 [`torch.cuda.is_available`](https://docs.pytorch.org/docs/main/generated/torch.cuda.is_available.html)。
+CUDA 运行时不会加入所有跨平台桌面包；源码环境和需要 GPU 的机器按上述命令安装。
+
+研究任务默认使用 `prefer_local`：允许读取带 `as_of` 的本地冻结快照，但不会隐式访问
+Tushare。只有 `prepare-data` 或网页中的“准备 / 更新数据”会尝试补齐远端数据；本地覆盖
+不足时，预检会列出缺失区间和修复动作。`qm lab benchmark` 只测本地冷读与缓存命中，
+并保证网络调用数为 0。
 
 `qm serve` 会承载本地 Worker；需要把重型训练隔离到单独进程时，运行
 `qm lab worker`。自动研究只在 `lab.window_start` / `window_end` 内消费定时任务，

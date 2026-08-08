@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -17,8 +18,14 @@ import pandas as pd
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
 from quantmaster.lab.catalog import curated_catalog
-from quantmaster.lab.dataset import create_snapshot, load_csi800_membership, readiness
-from quantmaster.lab.models import FactorSpec
+from quantmaster.lab.dataset import (
+    create_snapshot,
+    load_csi800_membership,
+    load_local_dataset,
+    readiness,
+)
+from quantmaster.lab.models import DataPolicy, FactorSpec
+from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
 from quantmaster.lab.store import LabStore
 from quantmaster.runtime.json import strict_json_dumps
 
@@ -71,6 +78,161 @@ class LabService:
             "recent_experiments": self.store.list_experiments(6),
             "recent_studies": self.store.studies(6),
         }
+
+    def dashboard(self) -> dict[str, Any]:
+        """One compact first-paint payload; large results stay on detail routes."""
+        cfg = get_config().lab
+        admission = self.preflight("validate", {
+            "universe": cfg.universe, "start": cfg.start,
+            "end": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        })
+        snapshot_record = self.store.latest_snapshot(cfg.universe) or {}
+        snapshot_payload = dict(snapshot_record.get("payload") or {})
+        snapshot = {
+            "id": snapshot_record.get("id", ""),
+            "created_at": snapshot_record.get("created_at", ""),
+            **{
+                key: snapshot_payload.get(key)
+                for key in (
+                    "snapshot_hash", "manifest_hash", "universe", "start", "end",
+                    "as_of", "state", "symbol_count", "research_quality",
+                    "production_eligible", "data_policy",
+                )
+            },
+        }
+        return {
+            "summary": self.store.overview(),
+            "readiness": self.capabilities(),
+            "preflight": compact_preflight(admission, sample_limit=3),
+            "snapshot": snapshot,
+            "jobs": self.store.jobs(12, summary=True),
+            "experiments": self.store.list_experiments(8, summary=True),
+            "studies": self.store.studies(6),
+            "research": {
+                "universe": cfg.universe, "start": cfg.start,
+                "horizons": cfg.horizons, "data_policy": cfg.data_policy,
+                "device": cfg.device, "daily_budget_hours": cfg.daily_budget_hours,
+                "max_workers": cfg.max_workers,
+                "window": [cfg.window_start, cfg.window_end],
+                "weekly_days": cfg.weekly_days,
+                "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
+            },
+        }
+
+    def doctor(self) -> dict[str, Any]:
+        """Compact, actionable, network-free runtime diagnosis."""
+        cfg = get_config()
+        admission = self.preflight("validate", {
+            "universe": cfg.lab.universe, "start": cfg.lab.start,
+            "end": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        })
+        capabilities = self.capabilities()
+        models = capabilities["models"]
+        dataset = admission.get("dataset") or {}
+        overview = self.store.overview()
+        job_statuses = overview.get("job_statuses") or {}
+        checks = [
+            {
+                "name": "本地快照", "state": dataset.get("state", "missing"),
+                "detail": (
+                    f"{dataset.get('symbol_count', 0)} 标的 · as_of "
+                    f"{dataset.get('as_of') or '未知'}"
+                ),
+                "action": (
+                    (admission.get("blockers") or admission.get("warnings") or [{}])[0]
+                    .get("action", "无需处理")
+                ),
+            },
+            {
+                "name": "PyTorch", "state": "ready" if models.get("torch") else "missing",
+                "detail": str(models.get("torch_version") or "未安装"),
+                "action": (
+                    "安装 quantmaster[ml] 的 CUDA 版 PyTorch"
+                    if not models.get("torch") else "无需处理"
+                ),
+            },
+            {
+                "name": "CUDA", "state": "ready" if (models.get("gpu") or {}).get("available") else "missing",
+                "detail": str((models.get("gpu") or {}).get("name") or "不可用"),
+                "action": (
+                    "验证 torch.cuda.is_available() 与 NVIDIA 驱动"
+                    if not (models.get("gpu") or {}).get("available") else "无需处理"
+                ),
+            },
+            {
+                "name": "Optuna", "state": "ready" if capabilities.get("optuna") else "missing",
+                "detail": "多目标优化可用" if capabilities.get("optuna") else "未安装",
+                "action": "安装 quantmaster[ml]" if not capabilities.get("optuna") else "无需处理",
+            },
+            {
+                "name": "LLM", "state": "ready" if capabilities["llm"]["configured"] else "optional",
+                "detail": capabilities["llm"].get("provider") or "未配置",
+                "action": "仅 AI 发现需要配置" if not capabilities["llm"]["configured"] else "无需处理",
+            },
+            {
+                "name": "Tushare", "state": "ready" if capabilities["tushare"]["configured"] else "optional",
+                "detail": "远端更新可用" if capabilities["tushare"]["configured"] else "仅本地研究可用",
+                "action": (
+                    "仅显式更新数据时需要配置"
+                    if not capabilities["tushare"]["configured"] else "无需处理"
+                ),
+            },
+            {
+                "name": "Worker", "state": "busy" if job_statuses.get("running") else "idle",
+                "detail": (
+                    f"运行 {job_statuses.get('running', 0)} · "
+                    f"排队 {job_statuses.get('queued', 0)}"
+                ),
+                "action": "通过 qm serve 或 qm lab worker 执行队列",
+            },
+        ]
+        admission = compact_preflight(admission, sample_limit=3)
+        dataset = admission.get("dataset") or {}
+        return {
+            "state": admission["state"], "runnable": admission["runnable"],
+            "checks": checks, "blockers": admission["blockers"],
+            "warnings": admission["warnings"], "resource": admission["resource_class"],
+            "compute": admission["compute"], "dataset": dataset,
+        }
+
+    def benchmark_local(
+        self, *, universe: str, start: str, end: str, runs: int = 2,
+    ) -> dict[str, Any]:
+        """Measure the offline snapshot path; this function cannot invoke providers."""
+        from quantmaster.lab.dataset import clear_local_dataset_caches
+
+        clear_local_dataset_caches()
+        timings = []
+        snapshots = []
+        for _run in range(max(2, min(int(runs), 5))):
+            started = time.perf_counter()
+            panel, _membership, snapshot = load_local_dataset(
+                universe, start, end, policy=DataPolicy.LOCAL_ONLY.value,
+            )
+            timings.append(time.perf_counter() - started)
+            snapshots.append(snapshot)
+        return {
+            "universe": universe, "start": start, "end": end,
+            "symbols": len(panel["close"].columns),
+            "dates": len(panel["close"].index),
+            "cold_seconds": round(timings[0], 6),
+            "cache_seconds": round(min(timings[1:]), 6),
+            "runs": [round(value, 6) for value in timings],
+            "network_calls": 0,
+            "snapshot_hash": snapshots[-1]["snapshot_hash"],
+            "as_of": snapshots[-1].get("as_of", ""),
+            "state": snapshots[-1].get("state", ""),
+            "targets": {"cold_seconds": 8.0, "cache_seconds": 1.0},
+            "passed": timings[0] <= 8.0 and min(timings[1:]) <= 1.0,
+        }
+
+    def preflight(self, operation: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        values = dict(params or {})
+        if operation == "optimize" and values.get("study_id") and not values.get("models"):
+            study = self.store.study(str(values["study_id"]))
+            if study:
+                values = {**study.get("config", {}), **values}
+        return run_preflight(operation, values)
 
     def _stage_model_publication(
         self,
@@ -195,19 +357,44 @@ class LabService:
         }
         if kind not in allowed:
             raise ValueError(f"未知研究任务: {kind}")
+        clean = dict(params)
+        if kind == "prepare_data":
+            clean.setdefault("data_policy", DataPolicy.REFRESH_MISSING.value)
+        admission = self.preflight(kind, clean)
+        require_runnable(admission)
         if kind == "discover_python":
             if not get_config().lab.ai_python_mining_enabled:
                 raise ValueError("受限 Python AutoMiner 尚未在设置中心启用")
-            clean = dict(params)
             clean["rounds"] = min(3, max(1, int(clean.get("rounds", 3))))
             clean["candidate_limit"] = min(24, max(1, int(clean.get("candidate_limit", 24))))
             clean["finalists"] = min(3, max(1, int(clean.get("finalists", 3))))
             run = self.store.create_mining_run(clean)
             clean["run_id"] = run["id"]
-            job = self.store.enqueue(kind, clean)
+            job = self.store.enqueue(kind, clean, preflight=admission)
             self.store.update_mining_run(run["id"], job_id=job["id"])
             return job
-        return self.store.enqueue(kind, params)
+        return self.store.enqueue(kind, clean, preflight=admission)
+
+    def retry_job(self, job_id: str) -> dict:
+        source = self.store.job(job_id)
+        if source is None:
+            raise KeyError("任务不存在")
+        if source["status"] not in {
+            "paused", "completed", "completed_with_warnings", "failed", "cancelled",
+        }:
+            raise ValueError("只能按相同参数重新运行已结束的任务")
+        params = dict(source.get("params") or {})
+        params.pop("_scheduled", None)
+        created = self.enqueue(str(source["kind"]), params)
+        self.store.append_event(created["id"], {
+            "type": "retry_of", "source_job_id": job_id,
+            "phase": "预检通过，按历史参数重新运行",
+        })
+        self.store.append_event(job_id, {
+            "type": "retried_as", "job_id": created["id"],
+            "phase": "已创建重新运行任务",
+        })
+        return self.store.job(created["id"]) or created
 
     def preview_python_mining(self, *, start: str, end: str, horizon: int = 3) -> dict:
         from quantmaster.lab.research import sealed_three_way_split
@@ -227,10 +414,14 @@ class LabService:
         from quantmaster.lab.research import OptimizationSpec
 
         config = dict(payload)
+        scheduled = bool(config.pop("_scheduled", False))
         config["end"] = config.get("end") or date.today().isoformat()
         spec = OptimizationSpec.from_dict(config)
+        require_runnable(self.preflight("optimize", spec.to_dict()))
         study = self.store.create_study(spec.to_dict())
-        job = self.enqueue("optimize", {"study_id": study["id"]})
+        job = self.enqueue("optimize", {
+            "study_id": study["id"], **({"_scheduled": True} if scheduled else {}),
+        })
         return self.store.update_study(study["id"], job_id=job["id"], status="queued")
 
     def resume_study(self, study_id: str) -> dict:
@@ -244,10 +435,18 @@ class LabService:
 
     def _context(
         self, universe: str, start: str, end: str,
-        progress=None,
+        progress=None, data_policy: str | None = None,
     ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None, dict]:
         from quantmaster.data import load_panel
         from quantmaster.data.universe import load_universe
+
+        policy = DataPolicy(data_policy or get_config().lab.data_policy)
+        if policy != DataPolicy.REFRESH_MISSING or not get_config().data.tushare_token:
+            panel, membership, snapshot = load_local_dataset(
+                universe, start, end, policy=policy.value, progress=progress,
+            )
+            stored = self.store.save_snapshot(snapshot)
+            return panel, membership, stored
 
         membership = None
         if universe.lower() == "csi800":
@@ -812,7 +1011,7 @@ class LabService:
         sequence_length: int = 20, config: dict | None = None, progress=None,
         cancelled=None,
     ) -> dict:
-        from quantmaster.lab.ml import artifact_sha256, make_samples, train
+        from quantmaster.lab.ml import artifact_sha256, make_indexed_samples, train_indexed
         from quantmaster.lab.models import utc_now
         from quantmaster.lab.validation import validate_factor_values
 
@@ -825,22 +1024,32 @@ class LabService:
             panel, membership, snapshot = self._context(universe, start, end, progress)
             if progress:
                 progress(57, "构造 48 维时序特征")
-            samples, targets, metadata, feature_names = make_samples(
-                panel, horizon=horizon, sequence_length=sequence_length, membership=membership)
+            cache_root = (
+                Path(get_config().data_root) / "lab_cache" / "features"
+                / f"{snapshot['snapshot_hash']}-lab-v3"
+            )
+            samples = make_indexed_samples(
+                panel, horizon=horizon, sequence_length=sequence_length,
+                membership=membership, storage_dir=cache_root,
+            )
+            feature_names = samples.feature_names
             artifact_dir = (
                 Path(get_config().data_root) / "lab_artifacts" / experiment["id"]
             )
-            result = train(
-                model, samples, targets, metadata, artifact_dir=artifact_dir,
-                config={"device": get_config().lab.device, **(config or {})},
+            result = train_indexed(
+                model, samples, artifact_dir=artifact_dir,
+                config={
+                    "device": get_config().lab.device,
+                    "gpu_memory_fraction": get_config().lab.gpu_memory_fraction,
+                    **(config or {}),
+                },
                 progress=progress, cancelled=cancelled,
             )
             predicted = result.pop("_predicted")
             result.pop("_actual")
-            validation_metadata = result.pop("_validation_metadata")
-            prediction_rows = pd.DataFrame(validation_metadata)
+            validation_positions = result.pop("_validation_positions")
+            prediction_rows = samples.metadata_frame(validation_positions)
             prediction_rows["value"] = predicted
-            prediction_rows["date"] = pd.to_datetime(prediction_rows["date"])
             predicted_values = prediction_rows.pivot(
                 index="date", columns="symbol", values="value",
             ).reindex(columns=panel["close"].columns)
@@ -954,6 +1163,8 @@ class LabService:
                     "gates": report.get("gates", {}),
                 },
                 "manifest": manifest_relative,
+                "sample_representation": "indexed-feature-cube",
+                "feature_cache_hit": samples.cache_hit,
                 "research_artifact": (
                     publication.get("result", {}) if publication else {
                         "ref": f"artifact:model:stock:{learned.slug}@1.0.0",

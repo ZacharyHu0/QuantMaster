@@ -3,6 +3,7 @@
 
   const state = {
     initialized: false,
+    dashboard: null,
     overview: null,
     factors: [],
     jobs: [],
@@ -24,6 +25,9 @@
     jobLastSeq: 0,
     jobDetailLoading: false,
     jobDrawerOpener: null,
+    controllers: new Map(),
+    polling: false,
+    preflightResolver: null,
   };
 
   const modelMeta = {
@@ -135,10 +139,35 @@
   }
 
   async function request(path, options = {}) {
-    return window.QuantMasterAPI(path, {
-      headers: {'Content-Type': 'application/json', ...(options.headers || {})},
-      ...options,
-    });
+    const {requestKey = '', ...requestOptions} = options;
+    let controller = null;
+    if (requestKey) {
+      state.controllers.get(requestKey)?.abort();
+      controller = new AbortController();
+      state.controllers.set(requestKey, controller);
+      requestOptions.signal = controller.signal;
+    }
+    try {
+      return await window.QuantMasterAPI(path, {
+        headers: {'Content-Type': 'application/json', ...(requestOptions.headers || {})},
+        ...requestOptions,
+      });
+    } finally {
+      if (requestKey && state.controllers.get(requestKey) === controller) {
+        state.controllers.delete(requestKey);
+      }
+    }
+  }
+
+  function announce(message) {
+    const target = document.getElementById('lab-announcer');
+    if (!target) return;
+    target.textContent = '';
+    window.setTimeout(() => { target.textContent = message; }, 20);
+  }
+
+  function issueAction(error) {
+    return error?.problem?.action || error?.error?.action || '';
   }
 
   function showError(title, error) {
@@ -146,7 +175,8 @@
       window.reportLocalError('Quant Lab', title, error);
     } else {
       console.error(title, error);
-      window.alert(`${title}：${error.message || error}`);
+      const action = issueAction(error);
+      window.alert(`${title}：${error.message || error}${action ? `\n${action}` : ''}`);
     }
   }
 
@@ -267,9 +297,68 @@
     return document.getElementById('tab-lab')?.classList.contains('active');
   }
 
+  function formatBytes(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return '—';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    const power = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return `${number(bytes / (1024 ** power), power > 1 ? 1 : 0)} ${units[power]}`;
+  }
+
+  function resolvePreflight(confirmed) {
+    const resolver = state.preflightResolver;
+    state.preflightResolver = null;
+    if (document.getElementById('lab-preflight-dialog')?.open) {
+      document.getElementById('lab-preflight-dialog').close();
+    }
+    if (resolver) resolver(Boolean(confirmed));
+  }
+
+  function renderPreflight(report, label) {
+    const target = document.getElementById('lab-preflight-body');
+    const confirm = document.getElementById('lab-preflight-confirm');
+    const blockers = report.blockers || [];
+    const warnings = report.warnings || [];
+    const estimate = report.estimate || {};
+    const dataset = report.dataset || {};
+    const compute = report.compute || {};
+    document.getElementById('lab-preflight-title').textContent = label || '确认运行条件';
+    target.innerHTML = `<div class="lab-preflight-summary"><div><span>${report.runnable ? '可以运行' : '暂时不能运行'}</span><b>${h(dataset.universe || '本地研究')} · ${Number(dataset.symbol_count || estimate.symbols || 0).toLocaleString()} 标的</b><small>快照截至 ${h(dataset.as_of || '未知')} · ${h(report.data_policy || 'prefer_local')} · ${h(report.resource_class || 'cpu').toUpperCase()}</small></div><div class="lab-preflight-device">${h(compute.effective_device || 'cpu')}</div></div>
+      <div class="lab-preflight-issues">${[
+        ...blockers.map(item => ({...item, blocker:true})),
+        ...warnings.map(item => ({...item, blocker:false})),
+      ].map(item => `<div class="lab-preflight-issue ${item.blocker ? 'blocker' : ''}"><b>${h(item.message || item.code)}</b><p>${h(item.action || '确认后继续')}</p><small>${h(item.code || 'NOTICE')}</small></div>`).join('') || '<div class="lab-preflight-issue"><b>未发现阻塞项</b><p>任务会使用当前冻结快照和已显示的计算设备。</p><small>READY</small></div>'}</div>
+      <div class="lab-preflight-estimate"><span>${Number(estimate.sessions || 0).toLocaleString()} 交易日</span><span>${Number(estimate.samples || 0).toLocaleString()} 样本</span><span>特征 ${h(formatBytes(estimate.feature_bytes))}</span><span>磁盘 ${h(formatBytes(estimate.disk_bytes))}</span></div>`;
+    confirm.disabled = !report.runnable;
+    confirm.textContent = report.runnable ? '确认并运行' : '修复阻塞项后重试';
+  }
+
+  async function confirmPreflight(operation, params, label) {
+    try {
+      const report = await request('/api/v1/lab/preflight', {
+        method:'POST', body:JSON.stringify({operation, params}), requestKey:'preflight',
+      });
+      renderPreflight(report, label || kindLabel[operation] || '任务预检');
+      const dialog = document.getElementById('lab-preflight-dialog');
+      if (!dialog.open) dialog.showModal();
+      (report.runnable
+        ? document.getElementById('lab-preflight-confirm')
+        : dialog.querySelector('[data-preflight-close]'))?.focus({preventScroll:true});
+      return await new Promise(resolve => {
+        if (state.preflightResolver) state.preflightResolver(false);
+        state.preflightResolver = resolve;
+      });
+    } catch (error) {
+      showError('任务预检失败', error);
+      return false;
+    }
+  }
+
   function setView(view) {
     document.querySelectorAll('[data-lab-view]').forEach(button => {
       button.classList.toggle('active', button.dataset.labView === view);
+      if (button.dataset.labView === view) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
     });
     document.querySelectorAll('[data-lab-panel]').forEach(panel => {
       panel.classList.toggle('active', panel.dataset.labPanel === view);
@@ -277,6 +366,60 @@
     if (view === 'automation') refreshJobs();
     if (view === 'optimization') refreshStudies();
     if (view === 'discover') refreshMiningRuns();
+    if (view === 'library' && !state.factors.length) refreshFactors();
+  }
+
+  function renderReadiness() {
+    const dashboard = state.dashboard || {};
+    const admission = dashboard.preflight || {};
+    const capabilities = dashboard.readiness || {};
+    const models = capabilities.models || {};
+    const dataset = admission.dataset || {};
+    const worker = dashboard.worker || {};
+    const firstIssue = (admission.blockers || admission.warnings || [])[0] || {};
+    const cuda = models.gpu || {};
+    const dependencyReady = Boolean(models.sklearn && models.torch && capabilities.optuna);
+    const cards = [
+      {
+        label:'数据快照', state:admission.runnable ? (admission.state === 'ready' ? 'ready' : 'degraded') : 'blocked',
+        title:`${Number(dataset.symbol_count || 0).toLocaleString()} 标的 · ${dataset.state || '未知'}`,
+        detail:`as_of ${dataset.as_of || '未知'}${firstIssue.action ? ` · ${firstIssue.action}` : ''}`,
+      },
+      {
+        label:'计算设备', state:cuda.available ? 'ready' : models.torch ? 'degraded' : 'blocked',
+        title:cuda.available ? (cuda.name || 'CUDA 可用') : (models.sklearn ? 'CPU / Ridge 可用' : '模型后端缺失'),
+        detail:`请求 ${models.requested_device || 'auto'} · 实际 ${models.device || 'cpu'}`,
+      },
+      {
+        label:'研究依赖', state:dependencyReady ? 'ready' : models.sklearn ? 'degraded' : 'blocked',
+        title:dependencyReady ? 'PyTorch · Optuna · Ridge' : '部分能力需要安装',
+        detail:`LLM ${capabilities.llm?.configured ? '已配置' : '按需配置'} · Tushare ${capabilities.tushare?.configured ? '已配置' : '按需配置'}`,
+      },
+      {
+        label:'任务 Worker', state:worker.status === 'running' ? 'ready' : worker.status === 'draining' ? 'degraded' : 'blocked',
+        title:worker.status === 'running' ? `就绪 · ${worker.active_job_ids?.length || 0} 个活动任务` : (worker.status || '未启动'),
+        detail:`最大并发 ${worker.max_workers || '—'} · ${worker.accepting ? '正在接收任务' : '未接收新任务'}`,
+      },
+    ];
+    const target = document.getElementById('lab-readiness-grid');
+    target.innerHTML = cards.map(card => `<div class="lab-readiness-card ${card.state}"><span>${h(card.label)}</span><strong title="${h(card.title)}">${h(card.title)}</strong><small>${h(card.detail)}</small></div>`).join('');
+    target.setAttribute('aria-busy', 'false');
+    const stateTarget = document.getElementById('lab-readiness-state');
+    stateTarget.className = admission.state || 'blocked';
+    stateTarget.textContent = admission.runnable ? (admission.state === 'ready' ? '全部就绪' : '可运行 · 有提示') : '存在阻塞项';
+  }
+
+  function renderSnapshot() {
+    const target = document.getElementById('lab-snapshot-card');
+    const dashboard = state.dashboard || {};
+    const snapshot = dashboard.snapshot?.snapshot_hash
+      ? dashboard.snapshot : (dashboard.preflight?.dataset || {});
+    const admission = dashboard.preflight || {};
+    const issue = (admission.blockers || admission.warnings || [])[0] || {};
+    const snapshotState = snapshot.state || admission.state || 'unknown';
+    target.innerHTML = `<div class="lab-snapshot-head"><div><span>当前冻结快照</span><b>${h(snapshot.universe || state.overview?.research?.universe || '—')}</b><small>${h(snapshot.start || state.overview?.research?.start || '—')} → ${h(snapshot.end || '今天')}</small></div><span class="lab-snapshot-state ${h(snapshotState)}">${h(String(snapshotState).toUpperCase())}</span></div>
+      <dl class="lab-snapshot-grid"><div><dt>实际 as_of</dt><dd>${h(snapshot.as_of || '未知')}</dd></div><div><dt>历史标的</dt><dd>${Number(snapshot.symbol_count || 0).toLocaleString()}</dd></div><div><dt>本地大小</dt><dd>${h(formatBytes(snapshot.bytes))}</dd></div><div><dt>生产资格</dt><dd>${snapshot.production_eligible ? '可进入门禁' : '仅限研究'}</dd></div></dl>
+      <p class="lab-snapshot-action">${h(issue.action || '文件身份未变化时，验证、训练与优化会复用同一份快照。')}</p>`;
   }
 
   function renderCapabilities() {
@@ -284,16 +427,15 @@
     if (!capabilities) return;
     const available = new Set(capabilities.models?.available_models || []);
     const items = [
-      ['safe-dsl', 'SAFE DSL', true],
-      ['pit', 'PIT CSI800', capabilities.tushare?.production_membership],
+      ['safe-dsl', '安全 DSL', true],
+      ['pit', 'CSI800 点时成分', capabilities.tushare?.production_membership],
       ['ridge', 'RIDGE', available.has('ridge')],
-      ['torch', 'DEEP LEARNING', capabilities.models?.torch],
-      ['llm', `AI · ${capabilities.llm?.provider || 'OFFLINE'}`, capabilities.llm?.configured],
-      ['python-miner', 'PYTHON AUTOMINER', capabilities.python_mining_enabled],
-      ['worker', 'RECOVERABLE WORKER', true],
+      ['torch', '深度学习', capabilities.models?.torch],
+      ['llm', `AI · ${capabilities.llm?.provider || '未配置'}`, capabilities.llm?.configured],
+      ['python-miner', 'Python AutoMiner', capabilities.python_mining_enabled],
     ];
     document.getElementById('lab-capabilities').innerHTML = items.map(item =>
-      `<span class="lab-capability ${item[2] ? 'ready' : 'warning'}" data-capability="${item[0]}"><i></i>${h(item[1])} · ${item[2] ? 'READY' : 'SETUP'}</span>`
+      `<span class="lab-capability ${item[2] ? 'ready' : 'warning'}" data-capability="${item[0]}"><i></i>${h(item[1])} · ${item[2] ? '就绪' : '按需配置'}</span>`
     ).join('');
     syncPythonMiningGate();
   }
@@ -417,9 +559,13 @@
       target.innerHTML = '<div class="lab-empty">暂无研究任务</div>';
       return;
     }
-    target.innerHTML = jobs.map(job => `<button type="button" class="lab-job-row ${h(job.status)}" data-job-detail="${h(job.id)}">
-      <span><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(jobPhase(job))} · ${h(formatDate(job.created_at))}</small></span>
-      <strong>${job.progress || 0}%</strong></button>`).join('');
+    target.innerHTML = jobs.map(job => {
+      const device = job.telemetry?.effective_device || job.preflight?.compute?.effective_device || 'cpu';
+      const resource = job.resource_class || job.preflight?.resource_class || 'cpu';
+      return `<button type="button" class="lab-job-row ${h(job.status)}" data-job-detail="${h(job.id)}">
+      <span><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(resource.toUpperCase())} · ${h(device)} · ${h(jobPhase(job))} · ${h(formatDate(job.created_at))}</small></span>
+      <strong>${job.progress || 0}%</strong></button>`;
+    }).join('');
   }
 
   function renderJobTable() {
@@ -429,10 +575,14 @@
       target.innerHTML = '<div class="lab-empty">暂无任务。可从 AI 发现或模型实验创建。</div>';
       return;
     }
-    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>任务</th><th>状态</th><th>阶段</th><th>进度</th><th>创建</th><th>操作</th></tr></thead><tbody>${state.jobs.map(job => `<tr>
+    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>任务</th><th>状态</th><th>资源 / 设备</th><th>阶段</th><th>进度</th><th>创建</th><th>操作</th></tr></thead><tbody>${state.jobs.map(job => {
+      const device = job.telemetry?.effective_device || job.preflight?.compute?.effective_device || 'cpu';
+      const resource = job.resource_class || job.preflight?.resource_class || 'cpu';
+      return `<tr>
       <td><button class="lab-job-link" type="button" data-job-detail="${h(job.id)}">${h(kindLabel[job.kind] || job.kind)}</button></td><td><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span></td>
-      <td title="${h(jobPhase(job))}">${h(jobPhase(job))}</td><td>${job.progress || 0}%</td><td>${h(formatDate(job.created_at))}</td>
-      <td class="lab-job-actions"><button type="button" data-job-detail="${h(job.id)}">查看</button>${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">取消</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+      <td>${h(resource.toUpperCase())} · ${h(device)}</td><td title="${h(jobPhase(job))}">${h(jobPhase(job))}</td><td>${job.progress || 0}%</td><td>${h(formatDate(job.created_at))}</td>
+      <td class="lab-job-actions"><button type="button" data-job-detail="${h(job.id)}">查看</button>${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">取消</button>` : ''}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
   }
 
   function renderTaskTray() {
@@ -508,6 +658,12 @@
   }
 
   function jobErrorCopy(job) {
+    const structured = job.error_info && typeof job.error_info === 'object' ? job.error_info : {};
+    if (structured.code) return {
+      what: structured.message || job.error || '任务未能完成',
+      why: `错误代码 ${structured.code}${structured.retryable ? ' · 修复后可重试' : ''}`,
+      how: structured.action || '查看最后事件与本机日志后重试。',
+    };
     const raw = String(job.error || job.detail || '任务未能完成');
     const timeout = /timed?\s*out|timeout|read operation|超时/i.test(raw);
     if (timeout) return {
@@ -542,6 +698,12 @@
     if (result.sealed_metrics?.net_information_ratio != null) resultItems.push(['密封净 IR', number(result.sealed_metrics.net_information_ratio, 3)]);
     if (result.metrics?.correlation != null) resultItems.push(['相关性', number(result.metrics.correlation, 4)]);
     if (result.metrics?.mse != null) resultItems.push(['验证 MSE', number(result.metrics.mse, 6)]);
+    const telemetry = job.telemetry || result.telemetry || {};
+    if (telemetry.effective_device) resultItems.push(['实际设备', telemetry.effective_device]);
+    if (telemetry.gpu_name) resultItems.push(['GPU', telemetry.gpu_name]);
+    if (telemetry.amp) resultItems.push(['混合精度', String(telemetry.amp).toUpperCase()]);
+    if (telemetry.peak_gpu_memory_mb > 0) resultItems.push(['峰值显存', `${number(telemetry.peak_gpu_memory_mb, 1)} MiB`]);
+    if (telemetry.samples_per_second > 0) resultItems.push(['训练吞吐', `${number(telemetry.samples_per_second, 1)} samples/s`]);
     if (result.snapshot?.snapshot_hash) resultItems.push(['数据快照', String(result.snapshot.snapshot_hash).slice(0, 16)]);
     if (!Object.keys(result).length && job.status !== 'failed') {
       return '<div class="lab-job-empty-line">任务结束后将在这里显示候选、指标或数据快照。</div>';
@@ -576,6 +738,9 @@
     const heartbeatFresh = job.status === 'running' && heartbeatAge >= 0 && heartbeatAge < 15000;
     const duration = formatDuration(job.started_at || job.created_at, job.finished_at || new Date().toISOString());
     const title = kindLabel[job.kind] || job.kind;
+    const telemetry = job.telemetry || {};
+    const effectiveDevice = telemetry.effective_device || job.preflight?.compute?.effective_device || 'cpu';
+    const resourceClass = job.resource_class || job.preflight?.resource_class || 'cpu';
     document.getElementById('lab-job-drawer-title').textContent = title;
     document.getElementById('lab-job-drawer-kicker').textContent = `RESEARCH JOB · ${String(job.id).slice(0, 8).toUpperCase()}`;
     const errorCopy = job.status === 'failed' ? jobErrorCopy(job) : null;
@@ -584,7 +749,7 @@
         <div class="lab-job-detail-progress"><i style="--progress:${progress / 100}"></i></div>
         <h4>${h(job.phase || statusLabel[job.status] || job.status)}</h4>
         <p>${h(job.detail || (job.status === 'running' ? '执行器正在处理当前阶段。' : job.error || '任务记录已保存。'))}</p>
-        <div class="lab-job-runtime"><span class="${heartbeatFresh ? 'live' : ''}"><i></i>${heartbeatFresh ? '执行器心跳正常' : job.worker ? `执行器 ${h(job.worker)}` : '无活动执行器'}</span><span>耗时 ${h(duration)}</span></div>
+        <div class="lab-job-runtime"><span class="${heartbeatFresh ? 'live' : ''}"><i></i>${heartbeatFresh ? '执行器心跳正常' : job.worker ? `执行器 ${h(job.worker)}` : '无活动执行器'}</span><span>${h(resourceClass.toUpperCase())} · ${h(effectiveDevice)} · 耗时 ${h(duration)}</span></div>
       </div>
       ${errorCopy ? `<section class="lab-job-error"><span>FAILED</span><h4>${h(errorCopy.what)}</h4><dl><div><dt>可能原因</dt><dd>${h(errorCopy.why)}</dd></div><div><dt>下一步</dt><dd>${h(errorCopy.how)}</dd></div></dl></section>` : ''}
       <div class="lab-job-drawer-actions">
@@ -634,6 +799,7 @@
     const drawer = document.getElementById('lab-job-drawer');
     drawer.classList.add('is-open');
     drawer.setAttribute('aria-hidden', 'false');
+    document.getElementById('lab-job-backdrop').hidden = false;
     if (changed) {
       state.jobDetail = state.jobs.find(job => job.id === jobId) || null;
       state.jobEvents = [];
@@ -648,6 +814,7 @@
     const drawer = document.getElementById('lab-job-drawer');
     drawer.classList.remove('is-open');
     drawer.setAttribute('aria-hidden', 'true');
+    document.getElementById('lab-job-backdrop').hidden = true;
     state.selectedJobId = '';
     const opener = state.jobDrawerOpener;
     state.jobDrawerOpener = null;
@@ -756,9 +923,12 @@
       target.innerHTML = '<div class="lab-empty">尚无模型实验。选择上方模型发起第一次基线训练。</div>';
       return;
     }
-    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>实验</th><th>模型</th><th>状态</th><th>相关性</th><th>验证 MSE</th><th>产出版本</th><th>更新时间</th></tr></thead><tbody>${state.experiments.map(item => `<tr>
+    target.innerHTML = `<div class="table-scroll"><table class="lab-job-table"><thead><tr><th>实验</th><th>模型</th><th>状态</th><th>实际设备</th><th>相关性</th><th>吞吐</th><th>峰值显存</th><th>产出版本</th><th>更新时间</th></tr></thead><tbody>${state.experiments.map(item => {
+      const telemetry = item.result_json?.telemetry || {};
+      return `<tr>
       <td>${h(item.name)}</td><td>${h((item.method || '').toUpperCase())}</td><td><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span></td>
-      <td>${number(item.result_json?.metrics?.correlation, 4)}</td><td>${number(item.result_json?.metrics?.mse, 6)}</td><td>${item.result_json?.version_id ? `<button type="button" data-factor-version="${h(item.result_json.version_id)}">${h(statusLabel[item.result_json.version_status] || item.result_json.version_status || '影子候选')}</button>` : '—'}</td><td>${h((item.updated_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}</tbody></table></div>`;
+      <td>${h(telemetry.effective_device || item.result_json?.device || 'cpu')}</td><td>${number(item.result_json?.metrics?.correlation, 4)}</td><td>${telemetry.samples_per_second ? `${number(telemetry.samples_per_second, 1)}/s` : '—'}</td><td>${telemetry.peak_gpu_memory_mb ? `${number(telemetry.peak_gpu_memory_mb, 1)} MiB` : '—'}</td><td>${item.result_json?.version_id ? `<button type="button" data-factor-version="${h(item.result_json.version_id)}">${h(statusLabel[item.result_json.version_status] || item.result_json.version_status || '影子候选')}</button>` : '—'}</td><td>${h((item.updated_at || '').slice(0, 16).replace('T', ' '))}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
   }
 
   function renderStudyList() {
@@ -901,11 +1071,19 @@
   }
 
   async function refreshOverview() {
-    state.overview = await request('/api/v1/lab/overview');
-    state.jobs = state.overview.recent_jobs || [];
-    state.experiments = state.overview.recent_experiments || [];
-    state.studies = state.overview.recent_studies || state.studies;
+    const dashboard = await request('/api/v1/lab/dashboard', {requestKey:'dashboard'});
+    state.dashboard = dashboard;
+    state.overview = {
+      ...(dashboard.summary || {}),
+      capabilities:dashboard.readiness || {},
+      research:dashboard.research || {},
+    };
+    state.jobs = dashboard.jobs || [];
+    state.experiments = dashboard.experiments || [];
+    state.studies = dashboard.studies || state.studies;
+    renderReadiness();
     renderCapabilities();
+    renderSnapshot();
     renderOverview();
     renderExperiments();
     renderJobTable();
@@ -925,37 +1103,88 @@
 
   async function refreshJobs() {
     try {
-      const response = await request('/api/v1/lab/jobs?limit=100');
+      const previous = new Map(state.jobs.map(job => [job.id, job.status]));
+      const [response, experiments] = await Promise.all([
+        request('/api/v1/lab/jobs?limit=100&summary=true', {requestKey:'jobs'}),
+        request('/api/v1/lab/experiments?limit=50&summary=true', {requestKey:'experiments'}),
+      ]);
       state.jobs = response.items || [];
       renderJobList('lab-overview-jobs', state.jobs.slice(0, 5));
       renderJobTable();
       renderTaskTray();
-      const experiments = await request('/api/v1/lab/experiments?limit=50');
       state.experiments = experiments.items || [];
       renderExperiments();
-      if (state.jobs.some(job => job.kind === 'optimize')) await refreshStudies();
+      const finished = state.jobs.find(job =>
+        terminalJobStatuses.has(job.status) && activeJobStatuses.has(previous.get(job.id))
+      );
+      if (finished) announce(`${kindLabel[finished.kind] || finished.kind}${statusLabel[finished.status] || finished.status}`);
+      if (state.jobs.some(job => job.kind === 'optimize' && activeJobStatuses.has(job.status))) await refreshStudies();
       if (state.selectedJobId) await refreshJobDetail();
     } catch (error) {
-      if (isLabActive()) showError('任务状态刷新失败', error);
+      if (error?.cause?.name !== 'AbortError' && isLabActive()) showError('任务状态刷新失败', error);
     }
   }
 
   async function enqueue(kind, params) {
+    const confirmed = await confirmPreflight(kind, params, kindLabel[kind] || '任务预检');
+    if (!confirmed) return null;
     const job = await request('/api/v1/lab/jobs', {
       method: 'POST', body: JSON.stringify({kind, params}),
     });
     state.jobs.unshift(job);
     renderTaskTray();
     renderJobTable();
+    announce(`${kindLabel[kind] || kind}已加入队列`);
+    schedulePolling(true);
     return job;
+  }
+
+  function pollingNeeded() {
+    return !document.hidden && isLabActive()
+      && state.jobs.some(job => activeJobStatuses.has(job.status));
+  }
+
+  function pollingDelay() {
+    if (state.jobs.some(job => job.status === 'running')) return 2200;
+    if (state.jobs.some(job => job.status === 'queued' || job.status === 'interrupted')) return 3800;
+    return 7000;
+  }
+
+  function schedulePolling(immediate = false) {
+    if (state.timer) window.clearTimeout(state.timer);
+    state.timer = null;
+    if (!pollingNeeded()) return;
+    state.timer = window.setTimeout(async () => {
+      if (state.polling || !pollingNeeded()) return;
+      state.polling = true;
+      try {
+        await refreshJobs();
+      } finally {
+        state.polling = false;
+        schedulePolling();
+      }
+    }, immediate ? 0 : pollingDelay());
   }
 
   function bindEvents() {
     setupDraggableDialog(document.getElementById('lab-factor-dialog'));
+    const preflightDialog = document.getElementById('lab-preflight-dialog');
+    preflightDialog.addEventListener('cancel', event => {
+      event.preventDefault();
+      resolvePreflight(false);
+    });
     for (const id of ['lab-discovery-form', 'lab-train-form']) {
       document.getElementById(id)?.addEventListener('input', () => { state.formsDirty = true; });
     }
     document.getElementById('tab-lab').addEventListener('click', async event => {
+      if (event.target.closest('[data-preflight-close]')) {
+        resolvePreflight(false);
+        return;
+      }
+      if (event.target.closest('#lab-preflight-confirm')) {
+        if (!event.target.closest('#lab-preflight-confirm').disabled) resolvePreflight(true);
+        return;
+      }
       if (event.target.closest('[data-close-job-drawer]')) {
         closeJobDetail();
         return;
@@ -969,6 +1198,16 @@
       if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
       if (event.target.closest('[data-lab-action="create-factor"]')) {
         openFactorDialog();
+      }
+      if (event.target.closest('[data-lab-action="prepare-data"]')) {
+        const research = state.overview?.research || {};
+        try {
+          const job = await enqueue('prepare_data', {
+            universe:research.universe || 'csi800', start:research.start || '2015-01-01',
+            end:new Date().toISOString().slice(0, 10), data_policy:'refresh_missing',
+          });
+          if (job) setView('automation');
+        } catch (error) { showError('数据准备任务未能创建', error); }
       }
       if (event.target.closest('[data-lab-close-dialog]')) {
         document.getElementById('lab-factor-dialog').close();
@@ -1003,6 +1242,7 @@
       const resumeStudy = event.target.closest('[data-resume-study]');
       if (resumeStudy) try {
         resumeStudy.disabled = true;
+        if (!await confirmPreflight('optimize', {study_id:resumeStudy.dataset.resumeStudy}, '恢复滚动优化')) return;
         await request(`/api/v1/lab/studies/${encodeURIComponent(resumeStudy.dataset.resumeStudy)}/resume`, {method:'POST'});
         await Promise.all([refreshStudies(), refreshJobs()]);
       } catch (error) { showError('Study 恢复失败', error); } finally { resumeStudy.disabled = false; }
@@ -1040,6 +1280,7 @@
       if (approve) {
         const reason = window.prompt('如需覆盖软门槛，请填写可审计的研究理由；全部通过可留空。', '') ?? null;
         if (reason !== null) try {
+          if (!await confirmPreflight('approve', {version_id:approve.dataset.approveVersion}, '批准候选版本')) return;
           await request(`/api/v1/lab/factors/${approve.dataset.approveVersion}/approve`, {method:'POST', body:JSON.stringify({actor:'web', reason})});
           await Promise.all([refreshOverview(), refreshFactors()]);
         } catch (error) { showError('候选未能批准', error); }
@@ -1047,10 +1288,11 @@
       const audit = event.target.closest('[data-audit-version]');
       if (audit) try {
         const research = state.overview?.research || {};
-        await request('/api/v1/lab/audits', {method:'POST', body:JSON.stringify({
+        const job = await enqueue('bias_audit', {
           version_id:audit.dataset.auditVersion, universe:research.universe || 'csi800',
           start:research.start || '2015-01-01', end:new Date().toISOString().slice(0,10),
-        })});
+        });
+        if (!job) return;
         await refreshJobs();
         setView('automation');
       } catch (error) { showError('偏差审计任务未能创建', error); }
@@ -1061,12 +1303,21 @@
         const horizon = Number(config?.querySelector('[data-deploy-horizon]')?.value || 3);
         const profile = config?.querySelector('[data-deploy-profile]')?.value || 'all';
         const scope = config?.querySelector('[data-deploy-scope]')?.value || 'exact';
+        if (!await confirmPreflight('deploy', {
+          version_id:deploy.dataset.deployVersion, universe:research.universe || 'csi800',
+          horizon, profile, scope,
+        }, '部署研究 Champion')) return;
         await request(`/api/v1/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
         await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
       } catch (error) { showError('Champion 切换失败', error); }
       const suggest = event.target.closest('[data-suggest-version]');
       if (suggest) try {
         suggest.disabled = true;
+        const research = state.overview?.research || {};
+        if (!await confirmPreflight('discover_llm', {
+          universe:research.universe || 'csi800', start:research.start || '2015-01-01',
+          end:new Date().toISOString().slice(0,10),
+        }, '生成 AI 修正建议')) return;
         state.suggestion = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}/suggestions`, {method:'POST', body:JSON.stringify({use_cloud:false})});
         const detail = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}`);
         renderCopilot(detail);
@@ -1092,6 +1343,7 @@
         if (!confirmed) return;
         try {
           retry.disabled = true;
+          if (!await confirmPreflight(source.kind, source.params || {}, '按原参数重跑')) return;
           const created = await request(`/api/v1/lab/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
           await refreshJobs();
           openJobDetail(created.id, retry);
@@ -1140,9 +1392,11 @@
         return;
       }
       try {
-        if (method === 'llm') await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
-        else if (method === 'python') await enqueue('discover_python', {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')});
-        else await enqueue('discover_genetic', {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')});
+        let job;
+        if (method === 'llm') job = await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
+        else if (method === 'python') job = await enqueue('discover_python', {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')});
+        else job = await enqueue('discover_genetic', {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')});
+        if (!job) return;
         state.formsDirty = false;
         setView('automation');
       } catch (error) { showError('发现任务未能创建', error); }
@@ -1157,11 +1411,12 @@
         return;
       }
       try {
-        await enqueue('train', {
+        const job = await enqueue('train', {
           model:form.get('model'), universe:form.get('universe'), start:form.get('start'),
           end:new Date().toISOString().slice(0,10), horizon:+form.get('horizon'),
           sequence_length:+form.get('sequence_length'), config:{epochs:+form.get('epochs')},
         });
+        if (!job) return;
         state.formsDirty = false;
         setView('automation');
       } catch (error) { showError('训练任务未能创建', error); }
@@ -1177,12 +1432,14 @@
       }
       const universe = String(form.get('universe'));
       try {
-        const study = await request('/api/v1/lab/studies', {method:'POST', body:JSON.stringify({
+        const params = {
           universe, start:form.get('start'), end:new Date().toISOString().slice(0,10), models,
           budget_hours:+form.get('budget_hours'), max_trials:+form.get('max_trials'),
           top_n:+form.get('top_n'), sequence_length:+form.get('sequence_length'),
           research_tier:universe === 'csi800' ? 'production' : 'sandbox',
-        })});
+        };
+        if (!await confirmPreflight('optimize', params, '创建滚动优化 Study')) return;
+        const study = await request('/api/v1/lab/studies', {method:'POST', body:JSON.stringify(params)});
         state.formsDirty = false;
         state.selectedStudyId = study.id;
         await Promise.all([refreshStudies(), refreshJobs()]);
@@ -1218,7 +1475,36 @@
       if (button) loadMiningRun(button.dataset.miningRun, {reveal:true});
     });
     document.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && state.selectedJobId) closeJobDetail();
+      if (event.key === 'Escape' && state.selectedJobId) {
+        closeJobDetail();
+        return;
+      }
+      if (event.key !== 'Tab' || !state.selectedJobId) return;
+      const drawer = document.getElementById('lab-job-drawer');
+      const focusable = [...drawer.querySelectorAll(
+        'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      )].filter(item => item.getClientRects().length);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (state.timer) window.clearTimeout(state.timer);
+        state.timer = null;
+        state.controllers.forEach(controller => controller.abort());
+        return;
+      }
+      if (!isLabActive()) return;
+      const refresh = state.dashboard ? refreshJobs() : refreshOverview();
+      refresh.finally(() => schedulePolling());
     });
   }
 
@@ -1227,15 +1513,13 @@
       state.initialized = true;
       bindEvents();
       try {
-        await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
+        await refreshOverview();
       } catch (error) {
         showError('研究工作台加载失败', error);
       }
-      state.timer = window.setInterval(() => {
-        if (isLabActive() && (state.selectedJobId || state.jobs.some(job => activeJobStatuses.has(job.status)))) refreshJobs();
-      }, 3000);
+      schedulePolling();
     } else {
-      refreshJobs();
+      refreshJobs().finally(() => schedulePolling());
     }
   }
 

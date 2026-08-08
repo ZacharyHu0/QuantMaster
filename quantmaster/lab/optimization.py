@@ -216,7 +216,7 @@ class OptimizationRunner:
             panel, horizons=spec.protocol.horizons,
             sequence_length=spec.sequence_length, membership=membership,
             fundamentals=fundamentals, feature_spec=spec.features,
-            storage_dir=root / "sample-store-v3",
+            storage_dir=root / "sample-store-v4",
         )
         dates = pd.DatetimeIndex(panel["close"].index)
         mature_dates = dates[:-max(spec.protocol.horizons)]
@@ -242,6 +242,7 @@ class OptimizationRunner:
                 raise KeyboardInterrupt
             kind, config = _trial_config(trial, available_models)
             fold_frames = []
+            fold_telemetry = []
             for number, fold in enumerate(development_folds, start=1):
                 if time.monotonic() >= deadline:
                     raise optuna.TrialPruned("time_budget")
@@ -256,6 +257,7 @@ class OptimizationRunner:
                 fold_frame = predictions_to_frame(samples, valid, result["_predictions"])
                 fold_frame["fold"] = fold.name
                 fold_frames.append(fold_frame)
+                fold_telemetry.append(result.get("telemetry", {}))
             combined = pd.concat(fold_frames, ignore_index=True)
             trial_root = root / "trials" / str(trial.number)
             trial_root.mkdir(parents=True, exist_ok=True)
@@ -264,6 +266,7 @@ class OptimizationRunner:
                 combined, top_n=spec.top_n,
                 roundtrip_cost=cost,
             )
+            metrics["telemetry"] = fold_telemetry
             metrics["folds"] = [
                 {
                     "name": fold_name,
@@ -394,6 +397,7 @@ class OptimizationRunner:
                     artifacts.append({
                         "fold": fold.to_dict(), "artifact": str(artifact.resolve()),
                         "artifact_sha256": metadata["artifact_sha256"],
+                        "telemetry": metadata.get("telemetry", {}),
                     })
                     if progress:
                         progress(
@@ -412,11 +416,13 @@ class OptimizationRunner:
                 "identity": block_identity,
                 "artifact_sha256": result["artifact_sha256"],
                 "prediction_sha256": _sha256(prediction_block),
+                "telemetry": result.get("telemetry", {}),
             }, ensure_ascii=False), encoding="utf-8")
             sealed_frames.append(block_frame)
             artifacts.append({
                 "fold": fold.to_dict(), "artifact": str(artifact.resolve()),
                 "artifact_sha256": result["artifact_sha256"],
+                "telemetry": result.get("telemetry", {}),
             })
             if progress:
                 progress(82 + int(12 * number / len(sealed_folds)),
@@ -438,6 +444,7 @@ class OptimizationRunner:
             "prediction_artifact": str(prediction_path.resolve()),
             "prediction_sha256": _sha256(prediction_path),
             "fold_artifacts": artifacts, "live_artifact": artifacts[-1],
+            "telemetry": artifacts[-1].get("telemetry", {}),
             "candidate": bool(sealed_gate["feasible"]), "completed_at": utc_now(),
         }
         if checkpoint:

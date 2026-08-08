@@ -146,6 +146,11 @@ class LabConfig:
     daily_budget_hours: float = 10.0
     max_workers: int = 2
     device: str = "auto"
+    data_policy: str = "prefer_local"
+    panel_cache_mb: int = 2048
+    feature_cache_gb: int = 8
+    gpu_memory_fraction: float = 0.80
+    gpu_max_concurrent_jobs: int = 1
     allow_cloud_sample: bool = False
     ai_python_mining_enabled: bool = False
 

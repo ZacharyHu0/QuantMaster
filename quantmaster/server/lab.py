@@ -6,8 +6,10 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field
+from starlette.responses import JSONResponse
 
 from quantmaster.config import get_config
+from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.service import LabService
 from quantmaster.runtime.contracts import ContractModel
 
@@ -25,12 +27,27 @@ def get_lab_service() -> LabService:
     return _service
 
 
-def _fail(exc: Exception) -> HTTPException:
+def _fail(exc: Exception) -> JSONResponse:
     if isinstance(exc, KeyError):
-        return HTTPException(404, str(exc).strip("'"))
-    if isinstance(exc, (ValueError, RuntimeError, FileNotFoundError)):
-        return HTTPException(400, str(exc))
-    return HTTPException(500, "Quant Lab 操作失败")
+        error = LabError("NOT_FOUND", str(exc).strip("'"), status_code=404)
+    elif isinstance(exc, ValueError):
+        error = LabError("INVALID_REQUEST", str(exc), status_code=400)
+    else:
+        error = classify_lab_error(exc)
+    return JSONResponse(
+        status_code=error.status_code,
+        content={
+            "detail": error.message,
+            "error": error.to_dict(),
+            "problem": {
+                "id": f"lab:{error.code.lower()}", "code": error.code,
+                "severity": "warning" if error.status_code == 409 else "error",
+                "source": "Quant Lab", "title": "任务未能运行",
+                "message": error.message, "action": error.action,
+                "blocking": True, "can_continue": False,
+            },
+        },
+    )
 
 
 class FactorCreate(ContractModel):
@@ -46,6 +63,14 @@ class JobCreate(ContractModel):
     kind: Literal[
         "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
         "optimize", "bias_audit", "discover_python",
+    ]
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreflightCreate(ContractModel):
+    operation: Literal[
+        "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+        "optimize", "bias_audit", "discover_python", "approve", "deploy",
     ]
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -103,6 +128,18 @@ def overview() -> dict:
     return get_lab_service().overview()
 
 
+@router.get("/dashboard")
+def dashboard() -> dict:
+    from quantmaster.lab.worker import get_worker
+
+    return {**get_lab_service().dashboard(), "worker": get_worker().status()}
+
+
+@router.post("/preflight")
+def preflight(body: PreflightCreate) -> dict:
+    return get_lab_service().preflight(body.operation, body.params)
+
+
 @router.get("/capabilities")
 def capabilities() -> dict:
     return get_lab_service().capabilities()
@@ -133,16 +170,20 @@ def create_factor(body: FactorCreate) -> dict:
     try:
         return get_lab_service().create_expression(**body.model_dump())
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/factors/{version_id}/approve")
 def approve(version_id: str, body: Decision) -> dict:
     try:
+        report = get_lab_service().preflight("approve", {"version_id": version_id})
+        from quantmaster.lab.preflight import require_runnable
+
+        require_runnable(report)
         return get_lab_service().store.approve(
             version_id, actor=body.actor, reason=body.reason)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/factors/{version_id}/reject")
@@ -151,17 +192,23 @@ def reject(version_id: str, body: Decision) -> dict:
         return get_lab_service().store.reject(
             version_id, actor=body.actor, reason=body.reason)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/factors/{version_id}/deploy")
 def deploy(version_id: str, body: Deployment) -> dict:
     try:
+        report = get_lab_service().preflight("deploy", {
+            "version_id": version_id, "universe": body.universe,
+        })
+        from quantmaster.lab.preflight import require_runnable
+
+        require_runnable(report)
         return get_lab_service().store.deploy(
             version_id, universe=body.universe, horizon=body.horizon, actor=body.actor,
             profile=body.profile, scope=body.scope)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/factors/{version_id}/suggestions")
@@ -172,7 +219,7 @@ def suggest(version_id: str, body: SuggestionRequest) -> dict:
             sample_consent=body.sample_consent, sample=body.anonymous_sample,
         )
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/suggestions/{suggestion_id}/apply")
@@ -180,7 +227,7 @@ def apply_suggestion(suggestion_id: str, body: Decision) -> dict:
     try:
         return get_lab_service().apply_suggestion(suggestion_id, actor=body.actor)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/suggestions/{suggestion_id}/dismiss")
@@ -188,7 +235,7 @@ def dismiss_suggestion(suggestion_id: str) -> dict:
     try:
         return get_lab_service().store.resolve_suggestion(suggestion_id, "dismissed")
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/jobs", status_code=202)
@@ -196,7 +243,7 @@ def enqueue_job(body: JobCreate) -> dict:
     try:
         return get_lab_service().enqueue(body.kind, body.params)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/mining/preview")
@@ -204,7 +251,7 @@ def mining_preview(body: MiningPreview) -> dict:
     try:
         return get_lab_service().preview_python_mining(**body.model_dump())
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.get("/mining/runs")
@@ -233,7 +280,7 @@ def create_study(body: StudyCreate) -> dict:
     try:
         return get_lab_service().create_study(body.model_dump())
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.get("/studies")
@@ -254,7 +301,7 @@ def resume_study(study_id: str) -> dict:
     try:
         return get_lab_service().resume_study(study_id)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/audits", status_code=202)
@@ -262,7 +309,7 @@ def create_audit(body: AuditCreate) -> dict:
     try:
         return get_lab_service().enqueue("bias_audit", body.model_dump())
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.get("/audits/{audit_id}")
@@ -274,8 +321,21 @@ def audit(audit_id: str) -> dict:
 
 
 @router.get("/jobs")
-def jobs(limit: int = Query(50, ge=1, le=500)) -> dict:
-    return {"items": get_lab_service().store.jobs(limit)}
+def jobs(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    cursor: str | None = None,
+    status: str | None = None,
+    kind: str | None = None,
+    summary: bool = True,
+) -> dict:
+    items = get_lab_service().store.jobs(
+        limit, offset=offset, cursor=cursor, status=status, kind=kind, summary=summary,
+    )
+    return {
+        "items": items,
+        "next_cursor": items[-1]["id"] if len(items) == limit else "",
+    }
 
 
 @router.get("/jobs/{job_id}")
@@ -291,15 +351,15 @@ def cancel_job(job_id: str) -> dict:
     try:
         return get_lab_service().store.request_cancel(job_id)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.post("/jobs/{job_id}/retry", status_code=202)
 def retry_job(job_id: str) -> dict:
     try:
-        return get_lab_service().store.retry_job(job_id)
+        return get_lab_service().retry_job(job_id)
     except Exception as exc:
-        raise _fail(exc) from exc
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.get("/jobs/{job_id}/events")
@@ -312,5 +372,25 @@ def job_events(
 
 
 @router.get("/experiments")
-def experiments(limit: int = Query(50, ge=1, le=500)) -> dict:
-    return {"items": get_lab_service().store.list_experiments(limit)}
+def experiments(
+    limit: int = Query(50, ge=1, le=500),
+    cursor: str | None = None,
+    status: str | None = None,
+    method: str | None = None,
+    summary: bool = True,
+) -> dict:
+    items = get_lab_service().store.list_experiments(
+        limit, cursor=cursor, status=status, method=method, summary=summary,
+    )
+    return {
+        "items": items,
+        "next_cursor": items[-1]["id"] if len(items) == limit else "",
+    }
+
+
+@router.get("/experiments/{experiment_id}")
+def experiment(experiment_id: str) -> dict:
+    value = get_lab_service().store.experiment(experiment_id)
+    if value is None:
+        raise HTTPException(404, "实验不存在")
+    return value

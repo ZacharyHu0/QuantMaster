@@ -15,11 +15,12 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from io import BufferedRandom
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -180,6 +181,16 @@ class BarReadResult:
     status: BarIntegrityStatus
     reason: str = ""
     content_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class BarBatchReadResult:
+    """One-pass local panel read with manifest and explicit failures."""
+
+    frames: dict[str, pd.DataFrame]
+    failures: dict[str, str]
+    manifest: tuple[dict[str, Any], ...]
+    elapsed_seconds: float
 
 
 class BarStore:
@@ -407,6 +418,109 @@ class BarStore:
         """Compatibility convenience over :meth:`read`; integrity remains queryable."""
         return self.read(symbol, columns).frame
 
+    def read_many(
+        self,
+        symbols: list[str],
+        columns: list[str] | None = None,
+        *,
+        start: str = "",
+        end: str = "",
+        ranges: dict[str, tuple[str, str]] | None = None,
+        max_workers: int = 8,
+        enqueue_repair: bool = True,
+    ) -> BarBatchReadResult:
+        """Read catalogued Parquet files exactly once and never contact a provider.
+
+        The catalog is fetched in one logical operation. Files whose size and mtime
+        still match the persisted SHA-256 identity skip re-hashing; changed files go
+        through the normal integrity boundary before they are returned.
+        """
+        ordered = list(dict.fromkeys(str(symbol) for symbol in symbols if symbol))
+        started = time.perf_counter()
+        metadata = self.metadata_many(ordered)
+        manifest: list[dict[str, Any]] = []
+        for symbol in ordered:
+            row = metadata.get(symbol) or {}
+            path = self._path(symbol)
+            stat = path.stat() if path.is_file() else None
+            identity_matches = bool(
+                stat is not None
+                and int(row.get("file_size") or 0) == stat.st_size
+                and int(row.get("file_mtime_ns") or 0) == stat.st_mtime_ns
+            )
+            manifest.append({
+                "symbol": symbol,
+                "coverage": [
+                    str(row.get("coverage_start") or row.get("start") or ""),
+                    str(row.get("coverage_end") or row.get("end") or ""),
+                ],
+                "bytes": int(stat.st_size if stat is not None else 0),
+                "mtime_ns": int(stat.st_mtime_ns if stat is not None else 0),
+                "content_sha256": str(row.get("content_sha256") or "") if identity_matches else "",
+                "status": str(row.get("last_status") or ("missing" if not path.is_file() else "")),
+            })
+
+        def one(symbol: str) -> tuple[pd.DataFrame | None, str]:
+            row = metadata.get(symbol)
+            path = self._path(symbol)
+            if row is None or not path.is_file():
+                return None, "本地行情文件不存在"
+            try:
+                requested_start, requested_end = (ranges or {}).get(symbol, (start, end))
+                stat = path.stat()
+                unchanged = bool(
+                    row.get("content_sha256")
+                    and int(row.get("file_size") or 0) == stat.st_size
+                    and int(row.get("file_mtime_ns") or 0) == stat.st_mtime_ns
+                )
+                if unchanged:
+                    frame = self._normalize_frame_index(pd.read_parquet(path, columns=columns))
+                    if columns is None and int(row.get("row_count") or 0) not in {0, len(frame)}:
+                        unchanged = False
+                    else:
+                        if requested_start or requested_end:
+                            frame = frame.loc[requested_start or None:requested_end or None]
+                        return (frame, "") if not frame.empty else (None, "请求区间没有本地行情")
+                result = self.read(symbol, columns, enqueue_repair=enqueue_repair)
+                frame = result.frame
+                if frame is not None and (requested_start or requested_end):
+                    frame = frame.loc[requested_start or None:requested_end or None]
+                if frame is not None and not frame.empty:
+                    return frame, ""
+                return None, result.reason or result.status
+            except Exception as exc:  # storage boundary; caller receives a safe summary
+                logger.warning("批量读取本地行情失败 symbol=%s: %s", symbol, exc)
+                return None, f"本地行情读取失败: {type(exc).__name__}"
+
+        frames: dict[str, pd.DataFrame] = {}
+        failures: dict[str, str] = {}
+        workers = min(8, max(1, int(max_workers)), max(1, len(ordered)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-local") as executor:
+            futures = {executor.submit(one, symbol): symbol for symbol in ordered}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                frame, error = future.result()
+                if frame is not None:
+                    frames[symbol] = frame
+                else:
+                    failures[symbol] = error
+        frames = {symbol: frames[symbol] for symbol in ordered if symbol in frames}
+        for item in manifest:
+            frame = frames.get(str(item["symbol"]))
+            if frame is not None and not frame.empty:
+                item["actual_coverage"] = [
+                    pd.Timestamp(frame.index.min()).strftime("%Y-%m-%d"),
+                    pd.Timestamp(frame.index.max()).strftime("%Y-%m-%d"),
+                ]
+            elif str(item["symbol"]) in failures:
+                item["read_error"] = failures[str(item["symbol"])]
+        return BarBatchReadResult(
+            frames=frames,
+            failures=failures,
+            manifest=tuple(manifest),
+            elapsed_seconds=time.perf_counter() - started,
+        )
+
     def _record_integrity_failure(
         self,
         symbol: str,
@@ -619,10 +733,13 @@ class BarStore:
         with self._conn() as conn:
             conn.row_factory = sqlite3.Row
             if symbols:
-                placeholders = ",".join("?" for _ in symbols)
-                rows = conn.execute(
-                    f"SELECT * FROM bar_meta WHERE symbol IN ({placeholders})", symbols
-                ).fetchall()
+                rows = []
+                for start in range(0, len(symbols), 500):
+                    chunk = symbols[start:start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(conn.execute(
+                        f"SELECT * FROM bar_meta WHERE symbol IN ({placeholders})", chunk
+                    ).fetchall())
             else:
                 rows = conn.execute("SELECT * FROM bar_meta").fetchall()
         return {str(row["symbol"]): dict(row) for row in rows}

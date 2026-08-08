@@ -10,6 +10,7 @@ import hashlib
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from quantmaster.runtime.json import strict_json_dumps
@@ -22,6 +23,24 @@ JobStatus = Literal[
     "queued", "running", "paused", "completed", "completed_with_warnings",
     "failed", "cancelled", "interrupted",
 ]
+
+
+class DataPolicy(StrEnum):
+    """Controls whether a research operation may contact external providers."""
+
+    LOCAL_ONLY = "local_only"
+    PREFER_LOCAL = "prefer_local"
+    REFRESH_MISSING = "refresh_missing"
+
+
+class ResourceClass(StrEnum):
+    IO = "io"
+    CPU = "cpu"
+    GPU = "gpu"
+    EXTERNAL = "external"
+
+
+ReadinessState = Literal["ready", "degraded", "blocked"]
 
 FACTOR_STATUSES = {
     "draft", "validating", "candidate", "approved", "production", "degraded", "archived",
@@ -115,11 +134,17 @@ class DatasetSnapshot:
     feature_version: str = "lab-v1"
     membership_source: str = "fixed"
     research_quality: Literal["production", "sandbox"] = "sandbox"
+    as_of: str = ""
+    state: Literal["ready", "stale", "incomplete", "corrupt"] = "ready"
+    data_policy: str = DataPolicy.PREFER_LOCAL.value
+    production_eligible: bool = False
+    warnings: tuple[dict[str, Any], ...] = ()
     manifest: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["symbols"] = list(self.symbols)
+        value["warnings"] = list(self.warnings)
         value["snapshot_hash"] = content_hash(value)
         return value
 

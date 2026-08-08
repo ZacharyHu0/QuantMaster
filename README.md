@@ -99,6 +99,7 @@ qm ledger import my_trades.csv                       # 导入实盘成交记录
 qm ledger report                                     # 实盘收益报告
 qm automation doctor                                # 检查 Bot、任务、依赖与绑定状态
 qm lab doctor                                       # Quant Lab 能力、预算与队列状态
+qm lab benchmark --universe csi800 --start 2015-01-01 # 零联网冷读 / 缓存性能基准
 qm lab discover --method genetic --universe demo    # 提交可恢复的因子发现任务
 qm lab discover --method python --rounds 3 --candidates 24 --finalists 3 --universe csi800
 qm lab train --model ridge --universe demo           # Ridge 基线；ml 依赖支持五种深度模型

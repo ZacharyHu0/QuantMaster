@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.96（2026-08-08）
+
+### Quant Lab 本地快照与 CUDA 研究工作台
+- 数据策略新增 `local_only` / `prefer_local` / `refresh_missing`，研究默认优先使用明确 `as_of` 的本地冻结快照且不隐式联网；CSI800 按每只历史成分的实际在池区间与 120 日预热规划，退出成分不再被错误要求覆盖到今天
+- BarStore 新增一次目录查询和批量列投影读取，快照按行情文件、PIT 成分与请求区间寻址并受 2 GiB 面板 / 8 GiB 特征 LRU 预算约束；实机 1,577 标的冷读 6.83 秒、热读 0.76 秒，网络调用为 0
+- 所有任务在入队和重试前统一预检数据、PyTorch / Optuna / LLM / Tushare、CUDA、磁盘与生产门禁；IO、CPU、GPU、外部任务分级调度，GPU 默认单任务互斥，旧失败保留并归类为 `LEGACY_FAILURE`
+- 样本管线改为 `float32` 特征 cube / memmap、日期与标的位置索引及目标数组，Ridge 流式读取最后时点，深度模型按 batch 动态切窗并启用 pinned memory、non-blocking copy、BF16 / FP16 AMP、梯度累积和 OOM 批量探测
+- 训练账本记录 requested / effective device、GPU 型号、PyTorch / CUDA、AMP、有效 batch、峰值显存、耗时和 samples/s；实机 2,055,989 样本最坏内存峰值 1.818 GiB，RTX 4080 真实训练报告 `cuda:0` 与非零显存
+- 新增 `/api/v1/lab/dashboard` 与 `/preflight`，列表支持游标、筛选和摘要，SQLite v8 迁移前在线备份且仅新增字段；紧凑 Doctor 不再展开整份账本，并提供 `qm lab benchmark` 零联网性能复测
+- Quant Lab 界面改为数据快照 → 因子研究 → 模型实验 → 验证审批主流程，首屏直接显示数据、计算、依赖和 Worker 就绪度；按钮先展示预检，任务中心显示资源、设备、阶段、错误与修复动作，并仅在页面可见且有活动任务时轮询
+
 ## v1.3.95（2026-08-08）
 
 ### K 线关键路径提速与历史减负

@@ -22,14 +22,18 @@ from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     build_membership_mask,
     create_snapshot,
+    inspect_local_dataset,
     load_csi800_members_as_of,
+    load_local_dataset,
 )
 from quantmaster.lab.ml import (
     artifact_sha256,
     engineer_features,
+    make_indexed_samples,
     make_samples,
     predict_panel,
     train,
+    train_indexed,
 )
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.research import sealed_three_way_split
@@ -378,6 +382,116 @@ def test_feature_engineering_and_ridge_training(tmp_path):
     assert (tmp_path / "model" / "ridge.npz").is_file()
 
 
+def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path, monkeypatch):
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+
+    records = pd.DataFrame([
+        {"index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH"},
+        {"index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "B.SH"},
+        {"index_code": "000300.SH", "trade_date": "2023-07-03", "symbol": "A.SH"},
+    ])
+    monkeypatch.setattr(
+        "quantmaster.lab.dataset._cached_membership_records",
+        lambda _start, _end: records.copy(),
+    )
+    dates = pd.bdate_range("2022-06-01", "2023-12-29")
+
+    def bars(index):
+        base = np.linspace(10.0, 20.0, len(index))
+        return pd.DataFrame({
+            "open": base, "high": base + 0.2, "low": base - 0.2,
+            "close": base + 0.1, "volume": 1_000.0, "amount": 10_000.0,
+        }, index=index)
+
+    store = BarStore()
+    store.put("A.SH", bars(dates))
+    store.put("B.SH", bars(dates[dates <= "2023-06-30"]))
+
+    inspected = inspect_local_dataset("csi800", "2023-01-02", "2023-12-29")
+    assert inspected["state"] == "ready"
+    assert inspected["required_ranges"]["B.SH"]["end"] == "2023-06-30"
+    assert inspected["required_ranges"]["A.SH"]["end"] == "2023-12-29"
+    panel, membership, snapshot = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+    assert snapshot["production_eligible"] is True
+    assert membership is not None and not membership.loc["2023-07-03":, "B.SH"].any()
+    assert panel["close"].index.min() < pd.Timestamp("2023-01-02")
+
+    _panel2, _membership2, repeated = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+    assert repeated["cache_hit"] is True
+    changed = bars(dates)
+    changed.iloc[-1, changed.columns.get_loc("close")] += 1
+    store.put("A.SH", changed, replace=True)
+    _panel3, _membership3, refreshed = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+    assert refreshed["cache_hit"] is False
+    assert refreshed["snapshot_hash"] != snapshot["snapshot_hash"]
+
+
+def test_indexed_samples_match_legacy_ridge_and_reuse_cube(tmp_path):
+    _config(tmp_path)
+    panel = _panel(days=240, symbols=6)
+    legacy_x, legacy_y, legacy_metadata, _names = make_samples(
+        panel, sequence_length=10,
+    )
+    cache = tmp_path / "feature-cache" / "snapshot-unit"
+    indexed = make_indexed_samples(
+        panel, sequence_length=10, storage_dir=cache,
+    )
+
+    assert isinstance(indexed.cube, np.memmap)
+    assert indexed.cube.dtype == np.float32
+    assert len(indexed) == len(legacy_x)
+    assert np.allclose(indexed.window(0), legacy_x[0], atol=1e-6)
+    assert np.allclose(indexed.targets, legacy_y, atol=1e-6)
+    assert indexed.metadata_frame(slice(0, 1)).iloc[0]["symbol"] == legacy_metadata[0]["symbol"]
+
+    legacy = train(
+        "ridge", legacy_x, legacy_y, legacy_metadata,
+        artifact_dir=tmp_path / "legacy-ridge", config={"alpha": 2.0},
+    )
+    compact = train_indexed(
+        "ridge", indexed, artifact_dir=tmp_path / "indexed-ridge",
+        config={"alpha": 2.0},
+    )
+    assert np.allclose(compact["_predicted"], legacy["_predicted"], atol=2e-5)
+    assert compact["telemetry"]["effective_device"] == "cpu"
+
+    reused = make_indexed_samples(
+        panel, sequence_length=10, storage_dir=cache,
+    )
+    assert reused.cache_hit is True
+    assert not (cache / "sample-windows.npy").exists()
+
+
+def test_indexed_torch_reports_real_cuda_telemetry(tmp_path):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA runtime is not available")
+    _config(tmp_path)
+    panel = _panel(days=180, symbols=8)
+    samples = make_indexed_samples(
+        panel, sequence_length=10, storage_dir=tmp_path / "gpu-cache",
+    )
+    result = train_indexed(
+        "mlp", samples, artifact_dir=tmp_path / "gpu-model",
+        config={"device": "cuda", "epochs": 1, "batch_size": 128, "patience": 2},
+    )
+
+    telemetry = result["telemetry"]
+    assert telemetry["effective_device"] == "cuda:0"
+    assert telemetry["gpu_name"]
+    assert telemetry["amp"] in {"bf16", "fp16"}
+    assert telemetry["peak_gpu_memory_mb"] > 0
+    assert telemetry["samples_per_second"] > 0
+    assert (tmp_path / "gpu-model" / "mlp.pt").is_file()
+
+
 def test_ridge_artifact_inference_and_integrity_check(tmp_path):
     _config(tmp_path)
     panel = _panel(days=240, symbols=6)
@@ -586,7 +700,7 @@ def test_expression_version_validation_builds_safe_parameter_neighborhood(tmp_pa
     }
 
 
-def test_lab_api_catalog_create_and_queue(tmp_path):
+def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
     _config(tmp_path, enabled=False)
     from quantmaster.server.app import app
 
@@ -618,10 +732,22 @@ def test_lab_api_catalog_create_and_queue(tmp_path):
             "params": {"version_id": version_id, "universe": "demo",
                        "start": "2023-01-01", "end": "2024-01-01"},
         })
-        assert queued.status_code == 202
-        assert queued.json()["status"] == "queued"
+        assert queued.status_code == 409
+        assert queued.json()["error"]["code"] == "DATA_COVERAGE_INSUFFICIENT"
         from quantmaster.server import lab as lab_api
 
+        service = lab_api.get_lab_service()
+        monkeypatch.setattr(service, "preflight", lambda *_args, **_kwargs: {
+            "runnable": True, "state": "ready", "resource_class": "cpu",
+            "blockers": [], "warnings": [], "dataset": {},
+        })
+        queued = client.post("/api/v1/lab/jobs", json={
+            "kind": "validate",
+            "params": {"version_id": version_id, "universe": "demo",
+                       "start": "2023-01-01", "end": "2024-01-01"},
+        })
+        assert queued.status_code == 202
+        assert queued.json()["status"] == "queued"
         lab_api.get_lab_service().store.finish_job(
             queued.json()["id"], error="测试失败",
         )
@@ -708,7 +834,7 @@ def test_python_miner_freezes_order_before_sealed_test():
     assert report.finalists[0].test_metrics["days"] > 200
 
 
-def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path):
+def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path, monkeypatch):
     cfg = _config(tmp_path, enabled=False)
     from quantmaster.server.app import app
 
@@ -726,8 +852,19 @@ def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path):
                 "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",
             },
         })
-        assert disabled.status_code == 400
+        assert disabled.status_code == 409
+        blockers = disabled.json()["error"]["context"]["preflight"]["blockers"]
+        assert any(
+            item.get("context", {}).get("dependency") == "ai_python_mining"
+            for item in blockers
+        )
         cfg.lab.ai_python_mining_enabled = True
+        from quantmaster.server import lab as lab_api
+
+        monkeypatch.setattr(lab_api.get_lab_service(), "preflight", lambda *_args, **_kwargs: {
+            "runnable": True, "state": "ready", "resource_class": "external",
+            "blockers": [], "warnings": [], "dataset": {},
+        })
         queued = client.post("/api/v1/lab/jobs", json={
             "kind": "discover_python", "params": {
                 "universe": "demo", "start": "2018-01-01", "end": "2026-01-01",

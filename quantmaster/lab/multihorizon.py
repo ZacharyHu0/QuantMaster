@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
-from quantmaster.lab.ml import artifact_sha256, engineer_features, normalize_features
+from quantmaster.config import get_config
+from quantmaster.lab.cache import feature_cache_lock
+from quantmaster.lab.ml import _engineered_features, _resolve_torch_device, artifact_sha256
 from quantmaster.lab.research import HORIZONS, FeatureSetSpec, TimeFold
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.paths import confined_path
@@ -62,12 +66,59 @@ class SampleMetadata:
 
 @dataclass
 class MultiHorizonSamples:
-    values: np.ndarray
+    values: WindowCubeView
     excess_targets: np.ndarray
     raw_targets: np.ndarray
     metadata: SampleMetadata
     feature_names: list[str]
     horizons: tuple[int, ...]
+
+
+class WindowCubeView:
+    """Array-like dynamic window view backed by one shared feature cube."""
+
+    def __init__(
+        self, cube: np.ndarray, date_positions: np.ndarray,
+        symbol_positions: np.ndarray, sequence_length: int,
+    ):
+        self.cube = cube
+        self.date_positions = date_positions
+        self.symbol_positions = symbol_positions
+        self.sequence_length = sequence_length
+        self.shape = (len(date_positions), sequence_length, cube.shape[-1])
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def _window(self, position: int) -> np.ndarray:
+        date_position = int(self.date_positions[position])
+        symbol_position = int(self.symbol_positions[position])
+        return np.asarray(
+            self.cube[
+                date_position - self.sequence_length + 1:date_position + 1,
+                symbol_position,
+                :,
+            ], dtype=np.float32,
+        )
+
+    def __getitem__(self, selection):
+        if isinstance(selection, tuple):
+            primary, *remaining = selection
+            values = self[primary]
+            if not remaining:
+                return values
+            if np.isscalar(primary):
+                return values[tuple(remaining)]
+            return values[(slice(None), *remaining)]
+        if np.isscalar(selection):
+            return self._window(int(cast(Any, selection)))
+        positions = np.arange(len(self))[selection]
+        result = np.empty(
+            (len(positions), self.sequence_length, self.cube.shape[-1]), dtype=np.float32,
+        )
+        for row, position in enumerate(positions):
+            result[row] = self._window(int(position))
+        return result
 
 
 @dataclass
@@ -87,35 +138,33 @@ def _broadcast(series: pd.Series, columns: pd.Index) -> pd.DataFrame:
     return pd.DataFrame(values, index=series.index, columns=columns)
 
 
-def engineer_research_features(
+def _engineered_research_features(
     panel: dict[str, pd.DataFrame], *, fundamentals: dict[str, pd.DataFrame] | None = None,
     spec: FeatureSetSpec | None = None,
-) -> dict[str, pd.DataFrame]:
-    """版本化特征注册表；所有变换仅使用当日及过去数据。"""
+):
     spec = spec or FeatureSetSpec(groups=("price_volume_v2",))
     close = panel["close"].astype(float)
-    features: dict[str, pd.DataFrame] = {}
     if "price_volume_v2" in spec.groups:
-        features.update(engineer_features(panel))
+        yield from _engineered_features(panel)
     if "market_context_v1" in spec.groups:
         returns = close.pct_change(fill_method=None)
         market_return = returns.median(axis=1)
         for window in (1, 5, 20):
             series = market_return if window == 1 else market_return.rolling(window).sum()
-            features[f"market_return_{window}"] = _broadcast(series, close.columns)
-        features["market_breadth_up"] = _broadcast((returns > 0).mean(axis=1), close.columns)
+            yield f"market_return_{window}", _broadcast(series, close.columns)
+        yield "market_breadth_up", _broadcast((returns > 0).mean(axis=1), close.columns)
         moving = close.rolling(20).mean()
-        features["market_breadth_above_20"] = _broadcast(
+        yield "market_breadth_above_20", _broadcast(
             (close > moving).mean(axis=1), close.columns,
         )
-        features["market_dispersion_20"] = _broadcast(
+        yield "market_dispersion_20", _broadcast(
             returns.rolling(20).std().median(axis=1), close.columns,
         )
-        features["market_volatility_20"] = _broadcast(
+        yield "market_volatility_20", _broadcast(
             market_return.rolling(20).std(), close.columns,
         )
         market_index = (1 + market_return.fillna(0)).cumprod()
-        features["market_drawdown_60"] = _broadcast(
+        yield "market_drawdown_60", _broadcast(
             market_index / market_index.rolling(60).max() - 1, close.columns,
         )
     if "pit_fundamental_v1" in spec.groups:
@@ -131,12 +180,20 @@ def engineer_research_features(
             raw = source.get(source_name, close * np.nan).reindex(
                 index=close.index, columns=close.columns,
             )
-            features[f"fundamental_{output}"] = transform(raw.astype(float))
-            features[f"fundamental_{output}_observed"] = raw.notna().astype(float)
+            yield f"fundamental_{output}", transform(raw.astype(float))
+            yield f"fundamental_{output}_observed", raw.notna().astype(float)
     if spec.include_news and "news_v1" in spec.groups:
         news = (fundamentals or {}).get("news_sentiment", close * np.nan)
-        features["news_sentiment"] = news.reindex_like(close)
-        features["news_sentiment_observed"] = news.reindex_like(close).notna().astype(float)
+        yield "news_sentiment", news.reindex_like(close)
+        yield "news_sentiment_observed", news.reindex_like(close).notna().astype(float)
+
+
+def engineer_research_features(
+    panel: dict[str, pd.DataFrame], *, fundamentals: dict[str, pd.DataFrame] | None = None,
+    spec: FeatureSetSpec | None = None,
+) -> dict[str, pd.DataFrame]:
+    """版本化特征注册表；所有变换仅使用当日及过去数据。"""
+    features = dict(_engineered_research_features(panel, fundamentals=fundamentals, spec=spec))
     if not features:
         raise ValueError("特征注册表为空")
     return features
@@ -144,22 +201,98 @@ def engineer_research_features(
 
 def _feature_cube(
     panel: dict[str, pd.DataFrame], fundamentals: dict[str, pd.DataFrame] | None,
-    feature_spec: FeatureSetSpec,
+    feature_spec: FeatureSetSpec, storage_dir: Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex, pd.Index, list[str]]:
-    raw = engineer_research_features(panel, fundamentals=fundamentals, spec=feature_spec)
-    normalized, validity = normalize_features(raw)
+    if storage_dir is None:
+        return _feature_cube_unlocked(panel, fundamentals, feature_spec)
+    with feature_cache_lock(storage_dir):
+        return _feature_cube_unlocked(
+            panel, fundamentals, feature_spec, storage_dir=storage_dir,
+        )
+
+
+def _feature_cube_unlocked(
+    panel: dict[str, pd.DataFrame], fundamentals: dict[str, pd.DataFrame] | None,
+    feature_spec: FeatureSetSpec, storage_dir: Path | None = None,
+) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex, pd.Index, list[str]]:
     close = panel["close"].astype(float)
     dates, columns = pd.DatetimeIndex(close.index), close.columns
-    names = list(normalized)
-    cube = np.stack([
-        normalized[name].reindex(index=dates, columns=columns).to_numpy(np.float32)
-        for name in names
-    ], axis=-1)
-    valid = np.stack([
-        validity[name].reindex(index=dates, columns=columns).fillna(False).to_numpy(bool)
-        for name in names
-    ], axis=-1)
-    return cube, valid, dates, columns, names
+    feature_count = (
+        (48 if "price_volume_v2" in feature_spec.groups else 0)
+        + (8 if "market_context_v1" in feature_spec.groups else 0)
+        + (10 if "pit_fundamental_v1" in feature_spec.groups else 0)
+        + (2 if feature_spec.include_news and "news_v1" in feature_spec.groups else 0)
+    )
+    if not feature_count:
+        raise ValueError("特征注册表为空")
+    cube_file = storage_dir / "feature-cube.npy" if storage_dir is not None else None
+    counts_file = storage_dir / "valid-counts.npy" if storage_dir is not None else None
+    metadata_file = storage_dir / "cube.json" if storage_dir is not None else None
+    if cube_file and counts_file and metadata_file:
+        try:
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            if (
+                metadata.get("feature_spec") == feature_spec.to_dict()
+                and metadata.get("dates") == dates.strftime("%Y-%m-%d").tolist()
+                and metadata.get("symbols") == columns.astype(str).tolist()
+            ):
+                return (
+                    np.load(cube_file, mmap_mode="r"),
+                    np.load(counts_file, mmap_mode="r"),
+                    dates, columns, list(metadata["features"]),
+                )
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            pass
+    shape = (len(dates), len(columns), feature_count)
+    if storage_dir is None:
+        cube: Any = np.empty(shape, dtype=np.float32)
+        valid_counts: Any = np.zeros(shape[:2], dtype=np.uint8)
+    else:
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        cube = np.lib.format.open_memmap(
+            storage_dir / "feature-cube.partial.npy", mode="w+",
+            dtype=np.float32, shape=shape,
+        )
+        valid_counts = np.lib.format.open_memmap(
+            storage_dir / "valid-counts.partial.npy", mode="w+",
+            dtype=np.uint8, shape=shape[:2],
+        )
+        valid_counts[:] = 0
+    names: list[str] = []
+    for position, (name, raw) in enumerate(_engineered_research_features(
+        panel, fundamentals=fundamentals, spec=feature_spec,
+    )):
+        values = raw.astype(float).replace([np.inf, -np.inf], np.nan)
+        valid = values.notna()
+        lower = values.quantile(0.01, axis=1)
+        upper = values.quantile(0.99, axis=1)
+        clipped = values.clip(lower=lower, upper=upper, axis=0)
+        mean = clipped.mean(axis=1)
+        std = clipped.std(axis=1, ddof=0).replace(0, np.nan)
+        normalized = clipped.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
+        cube[:, :, position] = normalized.reindex(
+            index=dates, columns=columns,
+        ).to_numpy(np.float32)
+        valid_counts[:] += valid.reindex(
+            index=dates, columns=columns,
+        ).fillna(False).to_numpy(np.uint8)
+        names.append(name)
+    if len(names) != feature_count:
+        raise AssertionError(f"研究特征数量不一致：预计 {feature_count}，实际 {len(names)}")
+    if storage_dir is not None and cube_file and counts_file and metadata_file:
+        cube.flush()
+        valid_counts.flush()
+        del cube, valid_counts
+        os.replace(storage_dir / "feature-cube.partial.npy", cube_file)
+        os.replace(storage_dir / "valid-counts.partial.npy", counts_file)
+        metadata_file.write_text(strict_json_dumps({
+            "feature_spec": feature_spec.to_dict(),
+            "dates": dates.strftime("%Y-%m-%d").tolist(),
+            "symbols": columns.astype(str).tolist(), "features": names,
+        }, indent=2), encoding="utf-8")
+        cube = np.load(cube_file, mmap_mode="r")
+        valid_counts = np.load(counts_file, mmap_mode="r")
+    return cube, valid_counts, dates, columns, names
 
 
 def make_multi_horizon_samples(
@@ -172,9 +305,10 @@ def make_multi_horizon_samples(
     feature_spec = feature_spec or FeatureSetSpec(groups=("price_volume_v2",))
     if not horizons or any(value not in HORIZONS for value in horizons):
         raise ValueError("horizons 只支持 1/3/5/7 日")
+    root = Path(storage_dir) if storage_dir is not None else None
     close = panel["close"].astype(float)
-    cube, validity, dates, columns, names = _feature_cube(
-        panel, fundamentals, feature_spec,
+    cube, valid_counts, dates, columns, names = _feature_cube(
+        panel, fundamentals, feature_spec, storage_dir=root,
     )
     raw_frames = [close.shift(-horizon) / close - 1 for horizon in horizons]
     excess_frames = [frame.sub(frame.median(axis=1), axis=0) for frame in raw_frames]
@@ -192,11 +326,10 @@ def make_multi_horizon_samples(
             for symbol_pos in range(len(columns)):
                 if member_values is not None and not member_values[date_pos, symbol_pos]:
                     continue
-                sample = cube[date_pos - sequence_length + 1:date_pos + 1, symbol_pos]
                 coverage = float(
-                    validity[
+                    valid_counts[
                         date_pos - sequence_length + 1:date_pos + 1, symbol_pos
-                    ].mean()
+                    ].sum() / (sequence_length * len(names))
                 )
                 raw = np.asarray(
                     [array[date_pos, symbol_pos] for array in raw_arrays], dtype=np.float32,
@@ -206,21 +339,17 @@ def make_multi_horizon_samples(
                 )
                 if (
                     coverage >= feature_spec.minimum_coverage
-                    and np.isfinite(sample).all()
                     and np.isfinite(raw).all()
                     and np.isfinite(excess).all()
                 ):
-                    yield date_pos, symbol_pos, coverage, sample, raw, excess
+                    yield date_pos, symbol_pos, coverage, raw, excess
 
     sample_count = sum(1 for _ in eligible_samples())
     if not sample_count:
         raise ValueError("清洗后没有共享多周期训练样本")
 
-    root = Path(storage_dir) if storage_dir is not None else None
-    shape = (sample_count, sequence_length, len(names))
     estimated_bytes = (
-        int(np.prod(shape)) * np.dtype(np.float32).itemsize
-        + sample_count * len(horizons) * np.dtype(np.float32).itemsize * 2
+        sample_count * len(horizons) * np.dtype(np.float32).itemsize * 2
         + sample_count * 12
     )
     if root is not None:
@@ -240,29 +369,27 @@ def make_multi_horizon_samples(
             root / f"{name}.npy", mode="w+", dtype=dtype, shape=array_shape,
         )
 
-    values = allocate("features", np.float32, shape)
     raw_targets = allocate("raw-targets", np.float32, (sample_count, len(horizons)))
     excess_targets = allocate("excess-targets", np.float32, (sample_count, len(horizons)))
     date_positions = allocate("date-positions", np.int32, (sample_count,))
     symbol_positions = allocate("symbol-positions", np.int32, (sample_count,))
     coverages = allocate("feature-coverage", np.float32, (sample_count,))
 
-    for row, (date_pos, symbol_pos, coverage, sample, raw, excess) in enumerate(
+    for row, (date_pos, symbol_pos, coverage, raw, excess) in enumerate(
         eligible_samples()
     ):
-        values[row] = sample
         raw_targets[row] = raw
         excess_targets[row] = excess
         date_positions[row] = date_pos
         symbol_positions[row] = symbol_pos
         coverages[row] = coverage
     for array in (
-        values, raw_targets, excess_targets, date_positions, symbol_positions, coverages,
+        raw_targets, excess_targets, date_positions, symbol_positions, coverages,
     ):
         if isinstance(array, np.memmap):
             array.flush()
     return MultiHorizonSamples(
-        values=values,
+        values=WindowCubeView(cube, date_positions, symbol_positions, sequence_length),
         excess_targets=excess_targets,
         raw_targets=raw_targets,
         metadata=SampleMetadata(
@@ -276,13 +403,15 @@ def make_multi_inference_samples(
     panel: dict[str, pd.DataFrame], *, sequence_length: int,
     fundamentals: dict[str, pd.DataFrame] | None, feature_spec: FeatureSetSpec,
 ) -> tuple[np.ndarray, list[dict[str, Any]], list[str]]:
-    cube, validity, dates, columns, names = _feature_cube(panel, fundamentals, feature_spec)
+    cube, valid_counts, dates, columns, names = _feature_cube(panel, fundamentals, feature_spec)
     values, metadata = [], []
     for date_pos in range(sequence_length - 1, len(dates)):
         for symbol_pos, symbol in enumerate(columns):
             sample = cube[date_pos - sequence_length + 1:date_pos + 1, symbol_pos]
             coverage = float(
-                validity[date_pos - sequence_length + 1:date_pos + 1, symbol_pos].mean()
+                valid_counts[
+                    date_pos - sequence_length + 1:date_pos + 1, symbol_pos,
+                ].sum() / (sequence_length * len(names))
             )
             if coverage >= feature_spec.minimum_coverage and np.isfinite(sample).all():
                 values.append(sample)
@@ -615,18 +744,29 @@ def _fit_torch(
     kind: str, samples: MultiHorizonSamples, train: np.ndarray, valid: np.ndarray,
     artifact: Path, config: dict[str, Any], roundtrip_cost: float,
     progress: Progress | None, cancelled: Cancelled | None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     try:
         import torch
         from torch import nn
         from torch.utils.data import DataLoader, Dataset
     except ImportError as exc:
         raise RuntimeError("共享深度模型需要安装 PyTorch：pip install 'quantmaster[ml]'") from exc
-    device_setting = str(config.get("device", "auto"))
-    device = torch.device(
-        "cuda" if device_setting == "auto" and torch.cuda.is_available()
-        else device_setting if device_setting != "auto" else "cpu"
-    )
+    from quantmaster.lab.errors import LabError
+
+    started = time.perf_counter()
+    device_setting = str(config.get("device", get_config().lab.device or "auto"))
+    device = _resolve_torch_device(torch, device_setting)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        try:
+            torch.cuda.set_per_process_memory_fraction(
+                float(config.get("gpu_memory_fraction", get_config().lab.gpu_memory_fraction)),
+                device,
+            )
+        except (RuntimeError, ValueError):
+            pass
     torch.manual_seed(int(config.get("seed", 42)))
     fit_positions, early_stop_positions = _internal_early_stop_positions(samples, train)
     model = _build_torch_model(
@@ -647,7 +787,7 @@ def _fit_torch(
         def __getitem__(self, index):
             position = int(self.positions[index])
             return (
-                torch.from_numpy(np.asarray(samples.values[position])),
+                torch.from_numpy(np.asarray(samples.values[position]).copy()),
                 torch.from_numpy(np.asarray(samples.excess_targets[position])),
                 torch.from_numpy(np.asarray(samples.raw_targets[position])),
             )
@@ -659,7 +799,10 @@ def _fit_torch(
         pin_memory=device.type == "cuda",
     )
     use_amp = device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    use_bfloat16 = use_amp and bool(torch.cuda.is_bf16_supported())
+    amp_dtype = torch.bfloat16 if use_bfloat16 else torch.float16
+    amp_name = "bf16" if use_bfloat16 else "fp16" if use_amp else "off"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp and not use_bfloat16)
     quantile_levels = torch.tensor([0.1, 0.5, 0.9], device=device)
 
     def loss_for(output, excess_target, raw_target):
@@ -680,6 +823,25 @@ def _fit_torch(
         PositionDataset(early_stop_positions), batch_size=batch_size, shuffle=False,
         pin_memory=device.type == "cuda",
     )
+    try:
+        probe_x, _probe_excess, _probe_raw = next(iter(loader))
+        probe_x = probe_x.to(device, non_blocking=True)
+        with torch.no_grad(), torch.autocast(
+            device_type=device.type, dtype=amp_dtype, enabled=use_amp,
+        ):
+            model(probe_x)
+        del probe_x
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+    except torch.cuda.OutOfMemoryError as exc:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        raise LabError(
+            "MEMORY_BUDGET_EXCEEDED",
+            f"CUDA 批量探测失败，batch_size={batch_size} 超出显存预算",
+            action="降低 batch_size 或提高 gradient_accumulation 后重试", retryable=True,
+            context={"batch_size": batch_size, "device": str(device)}, status_code=409,
+        ) from exc
     for epoch in range(epochs):
         if cancelled and cancelled():
             raise InterruptedError("训练已取消")
@@ -689,7 +851,7 @@ def _fit_torch(
             batch_x = batch_x.to(device, non_blocking=True)
             batch_excess = batch_excess.to(device, non_blocking=True)
             batch_raw = batch_raw.to(device, non_blocking=True)
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 loss = loss_for(model(batch_x), batch_excess, batch_raw) / accumulation
             scaler.scale(loss).backward()
             if (step + 1) % accumulation == 0 or step + 1 == len(loader):
@@ -707,7 +869,7 @@ def _fit_torch(
                 valid_excess = valid_excess.to(device, non_blocking=True)
                 valid_raw = valid_raw.to(device, non_blocking=True)
                 with torch.autocast(
-                    device_type=device.type, dtype=torch.float16, enabled=use_amp,
+                    device_type=device.type, dtype=amp_dtype, enabled=use_amp,
                 ):
                     batch_loss = loss_for(model(valid_x), valid_excess, valid_raw)
                 validation_total += float(batch_loss.cpu()) * len(valid_x)
@@ -746,10 +908,28 @@ def _fit_torch(
         "ood_mean": ood_mean, "ood_precision": ood_precision,
         "ood_threshold": ood_threshold,
     }, artifact)
-    return _predict_torch_sample_positions(
+    predictions: dict[str, Any] = _predict_torch_sample_positions(
         model, samples, valid, device,
         ood_mean=ood_mean, ood_precision=ood_precision, ood_threshold=ood_threshold,
     )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    predictions["_telemetry"] = {
+        "resource_class": "gpu" if device.type == "cuda" else "cpu",
+        "requested_device": device_setting, "effective_device": str(device),
+        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "",
+        "torch_version": str(torch.__version__), "cuda_runtime": str(torch.version.cuda or ""),
+        "amp": amp_name, "batch_size": batch_size,
+        "gradient_accumulation": accumulation,
+        "effective_batch_size": batch_size * accumulation,
+        "peak_gpu_memory_mb": round(
+            float(torch.cuda.max_memory_allocated(device) / 1024 ** 2), 2,
+        ) if device.type == "cuda" else 0.0,
+        "elapsed_seconds": round(elapsed, 4),
+        "samples_per_second": round(len(fit_positions) * (epoch + 1) / elapsed, 2),
+    }
+    return predictions
 
 
 def _latent_sample_positions(
@@ -960,6 +1140,7 @@ def fit_multi_fold(
     progress: Progress | None = None, cancelled: Cancelled | None = None,
 ) -> dict[str, Any]:
     config = dict(config or {})
+    started = time.perf_counter()
     path = Path(artifact_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if kind == "ridge":
@@ -973,6 +1154,15 @@ def fit_multi_fold(
         )
     else:
         raise ValueError(f"未知共享模型: {kind}")
+    telemetry = predictions.pop("_telemetry", None)
+    if telemetry is None:
+        elapsed = max(time.perf_counter() - started, 1e-9)
+        telemetry = {
+            "resource_class": "cpu", "requested_device": str(config.get("device", "auto")),
+            "effective_device": "cpu", "cpu_bound": True,
+            "peak_gpu_memory_mb": 0.0, "elapsed_seconds": round(elapsed, 4),
+            "samples_per_second": round(len(train_positions) / elapsed, 2),
+        }
     actual = samples.excess_targets[valid_positions]
     predicted = predictions["expected_excess"]
     correlations = []
@@ -984,6 +1174,7 @@ def fit_multi_fold(
         "artifact_sha256": artifact_sha256(path),
         "train_samples": len(train_positions), "validation_samples": len(valid_positions),
         "metrics": {"mean_correlation": float(np.mean(correlations)) if correlations else 0.0},
+        "telemetry": telemetry,
         "_predictions": predictions, "_valid_positions": valid_positions,
     }
 

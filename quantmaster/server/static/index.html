@@ -472,41 +472,58 @@
 <section class="tab" id="tab-lab">
   <div class="lab-masthead">
     <div>
-      <div class="lab-kicker"><span class="lab-live-dot"></span>AI QUANT LAB · RESEARCH OS</div>
-      <h2>从研究假设到可审计因子</h2>
-      <p>AI 提案、人工修正、统一验证和模型实验共用同一份版本账本；只有人工批准的版本才能进入研究生产。</p>
+      <div class="lab-kicker">QUANT LAB</div>
+      <h2>量化研究工作台</h2>
+      <p>本地快照、因子、模型、验证与审批共用一份可恢复账本。研究任务不会隐式联网，生产晋级始终由人工决定。</p>
     </div>
     <div class="lab-head-actions">
       <button class="lab-button lab-button-quiet" type="button" data-lab-action="create-factor">新建因子</button>
-      <button class="lab-button lab-button-primary" type="button" data-lab-go="discover">启动发现任务</button>
+      <button class="lab-button lab-button-primary" type="button" data-lab-action="prepare-data">准备 / 更新数据</button>
     </div>
   </div>
 
-  <div class="lab-capability-strip" id="lab-capabilities" aria-live="polite">
-    <span class="lab-capability"><i></i>正在读取研究环境…</span>
-  </div>
+  <section class="lab-readiness" aria-labelledby="lab-readiness-title">
+    <div class="lab-readiness-head"><div><h3 id="lab-readiness-title">运行就绪度</h3><p>提交任务前先确认数据、计算、依赖与 Worker。</p></div><span id="lab-readiness-state">检查中</span></div>
+    <div class="lab-readiness-grid" id="lab-readiness-grid" aria-live="polite" aria-busy="true">
+      <div class="lab-readiness-card"><span>数据快照</span><strong>检查中</strong><small>读取本地 manifest</small></div>
+      <div class="lab-readiness-card"><span>计算设备</span><strong>检查中</strong><small>检测 CPU / CUDA</small></div>
+      <div class="lab-readiness-card"><span>研究依赖</span><strong>检查中</strong><small>检测模型与优化后端</small></div>
+      <div class="lab-readiness-card"><span>任务 Worker</span><strong>检查中</strong><small>读取队列状态</small></div>
+    </div>
+    <div class="lab-capability-strip" id="lab-capabilities"><span class="lab-capability"><i></i>正在读取能力明细…</span></div>
+  </section>
+
+  <nav class="lab-research-flow" aria-label="研究主流程">
+    <button type="button" data-lab-go="overview"><span>1</span><b>数据快照</b><small>本地冻结与覆盖</small></button>
+    <i aria-hidden="true">→</i>
+    <button type="button" data-lab-go="discover"><span>2</span><b>因子研究</b><small>发现与版本化</small></button>
+    <i aria-hidden="true">→</i>
+    <button type="button" data-lab-go="experiments"><span>3</span><b>模型实验</b><small>CPU / CUDA 实训</small></button>
+    <i aria-hidden="true">→</i>
+    <button type="button" data-lab-go="library"><span>4</span><b>验证与审批</b><small>证据、门禁、部署</small></button>
+  </nav>
 
   <div class="lab-shell">
     <aside class="lab-rail" aria-label="Quant Lab 分区">
-      <div class="lab-rail-label">WORKSPACE</div>
-      <button class="active" type="button" data-lab-view="overview"><span>01</span>总览</button>
-      <button type="button" data-lab-view="discover"><span>02</span>AI 发现</button>
+      <div class="lab-rail-label">研究分区</div>
+      <button class="active" type="button" data-lab-view="overview" aria-current="page"><span>01</span>数据与总览</button>
+      <button type="button" data-lab-view="discover"><span>02</span>因子发现</button>
       <button type="button" data-lab-view="experiments"><span>03</span>模型实验</button>
-      <button type="button" data-lab-view="optimization"><span>04</span>滚动优化</button>
-      <button type="button" data-lab-view="library"><span>05</span>因子库</button>
-      <button type="button" data-lab-view="automation"><span>06</span>研究自动化</button>
+      <button type="button" data-lab-view="library"><span>04</span>验证与审批</button>
+      <button type="button" data-lab-view="optimization"><span>05</span>滚动优化</button>
+      <button type="button" data-lab-view="automation"><span>06</span>任务中心</button>
       <div class="lab-rail-foot">
-        <span>APPROVAL MODE</span>
-        <strong>Human gated</strong>
-        <small>不连接真实券商</small>
+        <span>晋级规则</span>
+        <strong>人工门控</strong>
+        <small>研究部署不连接真实券商</small>
       </div>
     </aside>
 
     <div class="lab-workspace">
       <section class="lab-view active" data-lab-panel="overview">
         <div class="lab-view-head">
-          <div><span class="lab-overline">CONTROL ROOM</span><h3>研究总览</h3></div>
-          <span class="lab-asof" id="lab-asof">LOCAL LEDGER</span>
+          <div><span class="lab-overline">本地研究状态</span><h3>数据与任务总览</h3></div>
+          <span class="lab-asof" id="lab-asof">正在读取快照</span>
         </div>
         <div class="lab-metrics" id="lab-metrics">
           <div class="lab-metric"><span>因子目录</span><strong>—</strong><small>正在同步</small></div>
@@ -515,16 +532,19 @@
           <div class="lab-metric"><span>生产 Champion</span><strong>—</strong><small>仅研究部署</small></div>
         </div>
         <div class="lab-overview-grid">
+          <article class="lab-block lab-snapshot-block" id="lab-snapshot-card">
+            <div class="lab-empty">正在读取当前本地快照…</div>
+          </article>
           <article class="lab-block lab-pipeline-block">
-            <div class="lab-block-head"><div><span>RESEARCH PIPELINE</span><h4>因子晋级漏斗</h4></div><button type="button" data-lab-go="library">查看全部</button></div>
+            <div class="lab-block-head"><div><span>版本状态</span><h4>因子晋级漏斗</h4></div><button type="button" data-lab-go="library">查看全部</button></div>
             <div class="lab-pipeline" id="lab-pipeline"></div>
           </article>
           <article class="lab-block">
-            <div class="lab-block-head"><div><span>ACTIVE QUEUE</span><h4>研究任务</h4></div><button type="button" data-lab-go="automation">任务中心</button></div>
+            <div class="lab-block-head"><div><span>活动队列</span><h4>研究任务</h4></div><button type="button" data-lab-go="automation">任务中心</button></div>
             <div class="lab-job-list" id="lab-overview-jobs"><div class="lab-empty">暂无任务</div></div>
           </article>
           <article class="lab-block lab-wide">
-            <div class="lab-block-head"><div><span>MODEL BENCH</span><h4>统一模型后端</h4></div><button type="button" data-lab-go="experiments">发起实验</button></div>
+            <div class="lab-block-head"><div><span>计算后端</span><h4>统一模型运行时</h4></div><button type="button" data-lab-go="experiments">发起实验</button></div>
             <div class="lab-model-ribbon" id="lab-model-ribbon"></div>
           </article>
         </div>
@@ -691,7 +711,8 @@
     <button type="button" id="lab-task-open">查看</button>
   </div>
 
-  <aside class="lab-job-drawer" id="lab-job-drawer" aria-labelledby="lab-job-drawer-title" aria-hidden="true">
+  <button class="lab-job-backdrop" id="lab-job-backdrop" type="button" data-close-job-drawer aria-label="关闭研究任务详情" hidden></button>
+  <aside class="lab-job-drawer" id="lab-job-drawer" role="dialog" aria-modal="true" aria-labelledby="lab-job-drawer-title" aria-hidden="true">
     <div class="lab-job-drawer-head">
       <div><span id="lab-job-drawer-kicker">RESEARCH JOB</span><h3 id="lab-job-drawer-title">研究任务详情</h3></div>
       <button type="button" data-close-job-drawer aria-label="关闭研究任务详情">×</button>
@@ -700,6 +721,14 @@
       <div class="lab-empty">选择任务后查看参数、阶段、事件与产出。</div>
     </div>
   </aside>
+
+  <dialog class="lab-dialog lab-preflight-dialog" id="lab-preflight-dialog" aria-labelledby="lab-preflight-title">
+    <div class="lab-dialog-card">
+      <div class="lab-dialog-head"><div><span>任务预检</span><h3 id="lab-preflight-title">确认运行条件</h3></div><button type="button" data-preflight-close aria-label="关闭">×</button></div>
+      <div id="lab-preflight-body" class="lab-preflight-body" aria-live="polite"></div>
+      <div class="lab-dialog-actions"><button class="lab-button lab-button-quiet" type="button" data-preflight-close>取消</button><button class="lab-button lab-button-primary" id="lab-preflight-confirm" type="button">确认并运行</button></div>
+    </div>
+  </dialog>
 
   <dialog class="lab-dialog" id="lab-factor-dialog">
     <form method="dialog" class="lab-dialog-card" id="lab-factor-create-form">
@@ -711,6 +740,7 @@
       <div class="lab-dialog-actions"><button class="lab-button lab-button-quiet" type="button" data-lab-close-dialog>取消</button><button class="lab-button lab-button-primary" type="submit" value="default">创建草稿</button></div>
     </form>
   </dialog>
+  <div class="lab-announcer" id="lab-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
 </section>
 
 <!-- ================= 因子 ================= -->

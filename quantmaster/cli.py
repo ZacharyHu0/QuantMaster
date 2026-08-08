@@ -127,7 +127,22 @@ def cmd_lab(args) -> None:
         return
     service = LabService()
     if args.lab_cmd == "doctor":
-        _print_json(service.overview())
+        report = service.doctor()
+        if args.json:
+            _print_json(report)
+        else:
+            print("检查\t状态\t详情\t修复动作")
+            for item in report["checks"]:
+                print(
+                    f"{item['name']}\t{item['state']}\t{item['detail']}\t{item['action']}"
+                )
+            print(f"\n总体: {report['state']} · {'可运行' if report['runnable'] else '已阻止'}")
+        return
+    if args.lab_cmd == "benchmark":
+        _print_json(service.benchmark_local(
+            universe=args.universe, start=args.start,
+            end=args.end or _today(), runs=args.runs,
+        ))
         return
     if args.lab_cmd == "list":
         _print_json(service.store.list_factors(status=args.status, search=args.search, limit=args.limit))
@@ -1150,7 +1165,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lab", help="AI Quant Lab：发现、训练、验证、审批和 Worker")
     lq = p.add_subparsers(dest="lab_cmd", required=True)
-    lq.add_parser("doctor", help="查看研究配置、依赖与任务状态")
+    ldoctor = lq.add_parser("doctor", help="紧凑检查数据、依赖、CUDA 与 Worker")
+    ldoctor.add_argument("--json", action="store_true")
+    lbenchmark = lq.add_parser("benchmark", help="运行零网络本地快照冷/热基准")
+    lbenchmark.add_argument("--universe", default="csi800")
+    lbenchmark.add_argument("--start", default="2015-01-01")
+    lbenchmark.add_argument("--end", default=None)
+    lbenchmark.add_argument("--runs", type=int, default=2)
     lq.add_parser("worker", help="启动独立研究 Worker")
     llist = lq.add_parser("list", help="列出版本化因子目录")
     llist.add_argument("--status", default=None)

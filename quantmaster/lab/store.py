@@ -25,7 +25,7 @@ from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migra
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
-LAB_SCHEMA_VERSION = 7
+LAB_SCHEMA_VERSION = 8
 
 
 def _collision_safe_factor_name(
@@ -67,13 +67,35 @@ class LabStore:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else get_config().data_root / "lab.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._backup_before_migration()
         self._migrate()
+
+    def _backup_before_migration(self) -> None:
+        """Create one recoverable online backup before upgrading a real ledger."""
+        if not self.path.is_file() or self.path.stat().st_size == 0:
+            return
+        try:
+            with sqlite3.connect(self.path) as source:
+                version = int(source.execute("PRAGMA user_version").fetchone()[0])
+                if version <= 0 or version >= LAB_SCHEMA_VERSION:
+                    return
+                backup_dir = self.path.parent / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                target = backup_dir / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"
+                if target.exists():
+                    return
+                with sqlite3.connect(target) as destination:
+                    source.backup(destination)
+        except sqlite3.Error:
+            target = self.path.parent / "backups" / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"
+            target.unlink(missing_ok=True)
+            raise
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path, row_factory=True)
 
     def _migrate(self) -> None:
-        def schema_v7(conn: sqlite3.Connection) -> None:
+        def schema_v8(conn: sqlite3.Connection) -> None:
             previous_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
             execute_sql_script(conn, """
                 CREATE TABLE IF NOT EXISTS factor_definitions (
@@ -114,8 +136,13 @@ class LabStore:
                 CREATE TABLE IF NOT EXISTS lab_jobs (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
                     params_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
+                    dataset_id TEXT NOT NULL DEFAULT '',
+                    resource_class TEXT NOT NULL DEFAULT 'cpu',
+                    preflight_json TEXT NOT NULL DEFAULT '{}',
                     progress INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT '',
                     detail TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                    error_code TEXT NOT NULL DEFAULT '', error_json TEXT NOT NULL DEFAULT '{}',
+                    telemetry_json TEXT NOT NULL DEFAULT '{}',
                     cancel_requested INTEGER NOT NULL DEFAULT 0, worker TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '',
                     heartbeat_at TEXT NOT NULL DEFAULT '', finished_at TEXT NOT NULL DEFAULT '');
@@ -217,9 +244,32 @@ class LabStore:
                 "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
                 "ON deployments(status,universe,horizon,profile,role)"
             )
+            job_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(lab_jobs)")
+            }
+            for name, declaration in (
+                ("dataset_id", "TEXT NOT NULL DEFAULT ''"),
+                ("resource_class", "TEXT NOT NULL DEFAULT 'cpu'"),
+                ("preflight_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("error_code", "TEXT NOT NULL DEFAULT ''"),
+                ("error_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("telemetry_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if name not in job_columns:
+                    conn.execute(f"ALTER TABLE lab_jobs ADD COLUMN {name} {declaration}")
+            conn.execute(
+                "UPDATE lab_jobs SET error_code='LEGACY_FAILURE',"
+                "error_json=json_object('code','LEGACY_FAILURE','message',error,"
+                "'action','查看历史任务详情','retryable',1,'context',json('{}')) "
+                "WHERE error<>'' AND error_code=''"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_lab_jobs_resource "
+                "ON lab_jobs(status,resource_class,created_at)"
+            )
 
         with self._conn() as conn:
-            migrate_schema(conn, ((LAB_SCHEMA_VERSION, schema_v7),))
+            migrate_schema(conn, ((LAB_SCHEMA_VERSION, schema_v8),))
 
     @staticmethod
     def _repair_factor_names(conn: sqlite3.Connection) -> None:
@@ -621,12 +671,29 @@ class LabStore:
         value["payload"] = value.pop("payload_json")
         return value
 
+    def latest_snapshot(self, universe: str = "") -> dict | None:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dataset_snapshots ORDER BY created_at DESC LIMIT 50"
+            ).fetchall()
+        for row in rows:
+            value = self._decode(row, ("payload_json",)) or {}
+            payload = value.pop("payload_json")
+            if universe and str(payload.get("universe") or "") != universe:
+                continue
+            value["payload"] = payload
+            return value
+        return None
+
     def create_experiment(self, name: str, method: str, config: dict) -> dict:
         now, experiment_id = utc_now(), uuid.uuid4().hex
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO experiments VALUES (?,?,?,?,?,?,?,?,?)",
-                (experiment_id, name, method, "", "queued", canonical_json(config), "{}", now, now),
+                (
+                    experiment_id, name, method, "", "running",
+                    canonical_json(config), "{}", now, now,
+                ),
             )
         return self.experiment(experiment_id) or {}
 
@@ -649,13 +716,58 @@ class LabStore:
             )
         return self.experiment(experiment_id) or {}
 
-    def list_experiments(self, limit: int = 50) -> list[dict]:
+    def list_experiments(
+        self,
+        limit: int = 50,
+        *,
+        status: str | None = None,
+        method: str | None = None,
+        cursor: str | None = None,
+        summary: bool = False,
+    ) -> list[dict]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if method:
+            clauses.append("method=?")
+            params.append(method)
         with self._conn() as conn:
+            if cursor:
+                cursor_row = conn.execute(
+                    "SELECT created_at,id FROM experiments WHERE id=?", (cursor,),
+                ).fetchone()
+                if cursor_row is not None:
+                    clauses.append("(created_at<? OR (created_at=? AND id<?))")
+                    params.extend([
+                        cursor_row["created_at"], cursor_row["created_at"], cursor_row["id"],
+                    ])
+            where = "WHERE " + " AND ".join(clauses) if clauses else ""
             rows = conn.execute(
-                "SELECT * FROM experiments ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(limit, 500)),),
+                f"SELECT * FROM experiments {where} "
+                "ORDER BY created_at DESC,id DESC LIMIT ?",
+                (*params, max(1, min(limit, 500))),
             ).fetchall()
-        return [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
+        result = [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
+        if summary:
+            for value in result:
+                config = value.get("config_json") or {}
+                result_value = value.get("result_json") or {}
+                value["config_json"] = {
+                    key: config.get(key)
+                    for key in ("universe", "start", "end", "horizon", "sequence_length")
+                    if key in config
+                }
+                value["result_json"] = {
+                    key: result_value.get(key)
+                    for key in (
+                        "metrics", "version_id", "version_status", "telemetry",
+                        "train_samples", "validation_samples", "device",
+                    )
+                    if key in result_value
+                }
+        return result
 
     @staticmethod
     def _publication(row: sqlite3.Row | None) -> dict | None:
@@ -959,16 +1071,17 @@ class LabStore:
         split: dict | None = None, result: dict | None = None,
         snapshot_hash: str | None = None,
     ) -> dict:
-        assignments, params = ["updated_at=?"], [utc_now()]
+        assignments: list[str] = ["updated_at=?"]
+        params: list[Any] = [utc_now()]
         for column, value in (("status", status), ("job_id", job_id),
                               ("snapshot_hash", snapshot_hash)):
             if value is not None:
                 assignments.append(f"{column}=?")
                 params.append(value)
-        for column, value in (("split_json", split), ("result_json", result)):
-            if value is not None:
+        for column, payload in (("split_json", split), ("result_json", result)):
+            if payload is not None:
                 assignments.append(f"{column}=?")
-                params.append(canonical_json(value))
+                params.append(canonical_json(payload))
         params.append(run_id)
         with self._conn() as conn:
             changed = conn.execute(
@@ -1035,15 +1148,30 @@ class LabStore:
             result.append(value)
         return result
 
-    def enqueue(self, kind: str, params: dict) -> dict:
+    def enqueue(
+        self,
+        kind: str,
+        params: dict,
+        *,
+        preflight: dict[str, Any] | None = None,
+        dataset_id: str = "",
+    ) -> dict:
         job_id, now = uuid.uuid4().hex, utc_now()
+        admission = dict(preflight or {})
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO lab_jobs "
-                "(id,kind,status,params_json,created_at) VALUES (?,?,?,?,?)",
-                (job_id, kind, "queued", canonical_json(params), now),
+                "(id,kind,status,params_json,dataset_id,resource_class,preflight_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    job_id, kind, "queued", canonical_json(params), dataset_id,
+                    str(admission.get("resource_class") or "cpu"), canonical_json(admission), now,
+                ),
             )
-        self.append_event(job_id, {"type": "queued", "progress": 0, "phase": "等待执行"})
+        self.append_event(job_id, {
+            "type": "queued", "progress": 0, "phase": "等待执行",
+            "resource_class": str(admission.get("resource_class") or "cpu"),
+        })
         return self.job(job_id) or {}
 
     def claim_next(
@@ -1052,6 +1180,7 @@ class LabStore:
         *,
         allow_scheduled: bool = True,
         max_running: int | None = None,
+        resource_limits: dict[str, int] | None = None,
     ) -> dict | None:
         now = utc_now()
         with self._conn() as conn:
@@ -1062,10 +1191,22 @@ class LabStore:
                 ).fetchone()[0])
                 if running >= max(1, int(max_running)):
                     return None
+            resource_clauses: list[str] = []
+            resource_params: list[Any] = []
+            for resource, limit in (resource_limits or {}).items():
+                resource_clauses.append(
+                    "NOT (resource_class=? AND (SELECT COUNT(*) FROM lab_jobs "
+                    "WHERE status='running' AND resource_class=?)>=?)"
+                )
+                resource_params.extend([resource, resource, max(1, int(limit))])
+            resource_sql = (
+                " AND " + " AND ".join(resource_clauses) if resource_clauses else ""
+            )
             row = conn.execute(
                 "SELECT id FROM lab_jobs WHERE status IN ('queued','interrupted') "
                 "AND (? OR params_json NOT LIKE '%\"_scheduled\":true%') "
-                "ORDER BY created_at LIMIT 1", (int(allow_scheduled),),
+                f"{resource_sql} ORDER BY created_at LIMIT 1",
+                (int(allow_scheduled), *resource_params),
             ).fetchone()
             if row is None:
                 return None
@@ -1197,6 +1338,8 @@ class LabStore:
         *,
         result: dict | None = None,
         error: str = "",
+        error_info: dict[str, Any] | None = None,
+        telemetry: dict[str, Any] | None = None,
         expected_worker: str = "",
     ) -> bool:
         current = self.job(job_id) or {}
@@ -1219,10 +1362,14 @@ class LabStore:
         )
         detail = (error if error else warning_text)[:1000]
         now = utc_now()
+        failure = dict(error_info or {})
+        error_code = str(failure.get("code") or ("INTERNAL_ERROR" if error else ""))
+        runtime_telemetry = dict(telemetry or payload.get("telemetry") or {})
         with self._conn() as conn:
             where = "id=?"
             params: list[Any] = [
                 status, progress, phase, detail, canonical_json(payload), error[:1000],
+                error_code, canonical_json(failure), canonical_json(runtime_telemetry),
                 now, now, job_id,
             ]
             if expected_worker:
@@ -1230,6 +1377,7 @@ class LabStore:
                 params.append(expected_worker)
             changed = conn.execute(
                 "UPDATE lab_jobs SET status=?,progress=?,phase=?,detail=?,result_json=?,error=?,"
+                "error_code=?,error_json=?,telemetry_json=?,"
                 f"finished_at=?,heartbeat_at=? WHERE {where}", params,
             ).rowcount
         if not changed:
@@ -1277,26 +1425,99 @@ class LabStore:
                 )
         return cursor.rowcount
 
+    def recover_orphaned_records(self) -> dict[str, int]:
+        """Close derived ledgers left running after their owning worker disappeared."""
+        now = utc_now()
+        recovered = {"experiments": 0, "studies": 0, "mining_runs": 0}
+        with self._conn() as conn:
+            running_jobs = int(conn.execute(
+                "SELECT COUNT(*) FROM lab_jobs WHERE status='running'",
+            ).fetchone()[0])
+            if not running_jobs:
+                recovered["experiments"] = conn.execute(
+                    "UPDATE experiments SET status='interrupted',updated_at=? "
+                    "WHERE status='running'", (now,),
+                ).rowcount
+            for table, key in (
+                ("optimization_studies", "studies"),
+                ("mining_runs", "mining_runs"),
+            ):
+                recovered[key] = conn.execute(
+                    f"UPDATE {table} SET status='interrupted',updated_at=? "
+                    "WHERE status='running' AND (job_id='' OR NOT EXISTS ("
+                    f"SELECT 1 FROM lab_jobs WHERE lab_jobs.id={table}.job_id "
+                    "AND lab_jobs.status IN ('queued','running'))) ",
+                    (now,),
+                ).rowcount
+        return recovered
+
+    @staticmethod
+    def _public_job(value: dict[str, Any]) -> dict[str, Any]:
+        value["params"] = value.pop("params_json")
+        value["result"] = value.pop("result_json")
+        value["preflight"] = value.pop("preflight_json", {})
+        value["error_info"] = value.pop("error_json", {})
+        value["telemetry"] = value.pop("telemetry_json", {})
+        if value.get("error") and not value.get("error_code"):
+            value["error_code"] = "LEGACY_FAILURE"
+            value["error_info"] = {
+                "code": "LEGACY_FAILURE", "message": value["error"],
+                "action": "查看历史任务详情", "retryable": True, "context": {},
+            }
+        return value
+
     def job(self, job_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM lab_jobs WHERE id=?", (job_id,)).fetchone()
-        value = self._decode(row, ("params_json", "result_json"))
+        value = self._decode(
+            row, ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
+        )
         if value is not None:
-            value["params"] = value.pop("params_json")
-            value["result"] = value.pop("result_json")
+            self._public_job(value)
         return value
 
-    def jobs(self, limit: int = 50) -> list[dict]:
+    def jobs(
+        self,
+        limit: int = 50,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        cursor: str | None = None,
+        offset: int = 0,
+        summary: bool = False,
+    ) -> list[dict]:
+        clauses, params = [], []
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
         with self._conn() as conn:
+            if cursor:
+                cursor_row = conn.execute(
+                    "SELECT created_at,id FROM lab_jobs WHERE id=?", (cursor,),
+                ).fetchone()
+                if cursor_row is not None:
+                    clauses.append("(created_at<? OR (created_at=? AND id<?))")
+                    params.extend([
+                        cursor_row["created_at"], cursor_row["created_at"], cursor_row["id"],
+                    ])
+            where = "WHERE " + " AND ".join(clauses) if clauses else ""
             rows = conn.execute(
-                "SELECT * FROM lab_jobs ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(limit, 500)),),
+                f"SELECT * FROM lab_jobs {where} "
+                "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                (*params, max(1, min(limit, 500)), max(0, int(offset))),
             ).fetchall()
         result = []
         for row in rows:
-            value = self._decode(row, ("params_json", "result_json")) or {}
-            value["params"] = value.pop("params_json")
-            value["result"] = value.pop("result_json")
+            value = self._decode(
+                row,
+                ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
+            ) or {}
+            self._public_job(value)
+            if summary:
+                value["result"] = {}
             result.append(value)
         return result
 
@@ -1358,6 +1579,11 @@ class LabStore:
             running = conn.execute(
                 "SELECT COUNT(*) FROM lab_jobs WHERE status IN ('queued','running','paused','interrupted')"
             ).fetchone()[0]
+            job_statuses = {
+                row["status"]: row["count"] for row in conn.execute(
+                    "SELECT status,COUNT(*) AS count FROM lab_jobs GROUP BY status"
+                )
+            }
             experiments = conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
             deployments = conn.execute(
                 "SELECT COUNT(*) FROM deployments WHERE status='active'"
@@ -1366,6 +1592,7 @@ class LabStore:
             mining_runs = conn.execute("SELECT COUNT(*) FROM mining_runs").fetchone()[0]
         return {
             "factor_statuses": statuses,
+            "job_statuses": job_statuses,
             "active_jobs": running,
             "experiments": experiments,
             "deployments": deployments,

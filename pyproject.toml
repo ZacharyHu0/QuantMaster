@@ -117,6 +117,7 @@ check_untyped_defs = true
 show_error_codes = true
 files = [
     "quantmaster/runtime",
+    "quantmaster/lab",
     "quantmaster/data/base.py",
     "quantmaster/data/registry.py",
     "quantmaster/data/free_stockdb_source.py",
