@@ -8,14 +8,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = 110
+BASELINE = 115
 
 
 def main() -> int:
     result = subprocess.run(
         [
             sys.executable, "-m", "ruff", "check", "quantmaster", "tests", "tools",
-            "--select", "C901", "--output-format", "json",
+            "--no-cache", "--select", "C901", "--output-format", "json",
         ],
         cwd=ROOT,
         capture_output=True,

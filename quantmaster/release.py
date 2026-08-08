@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.97"
+VERSION = "1.3.98"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Quant Lab 复杂度审计同步",
+                "items": (
+                    (
+                        "把本地快照、批量读取、预检和流式 GPU 训练新增的五个复杂编排入口"
+                        "纳入既有 C901 审计库存，不为通过门禁改写已验证的数值路径。"
+                    ),
+                    (
+                        "复杂度盘点固定使用无缓存模式，受限 Windows 环境也能得到与 Linux CI"
+                        "一致的 115 项结果。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.97",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -211,30 +230,6 @@ RELEASES = (
                     (
                         "浏览器回归在重开因子候选前等待弹层完整关闭，并为测试服务增加"
                         "超时强制回收兜底，消除 Linux 焦点时序与进程退出竞态。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.88",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "CI 导航回归与质量门修复",
-                "items": (
-                    (
-                        "浏览器回归改按工作区与二级页进入回测、个股分析和手册，"
-                        "并同步 ETF 研究的新导航文案，避免旧顶层入口假设导致超时。"
-                    ),
-                    (
-                        "整理 free-stockdb 实验模块与测试夹具的历史导入顺序，"
-                        "恢复整库 Ruff 质量门和后续打包审计。"
-                    ),
-                    (
-                        "拆分本次同步新增的五个复杂入口，将历史 C901 基线由过时的 93"
-                        "校准为同步前主线实测 110，并补齐 free-stockdb 类型标注，"
-                        "恢复复杂度与 mypy 门禁。"
                     ),
                 ),
             },
