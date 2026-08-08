@@ -400,7 +400,31 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
                 },
             ],
         },
-        "history": [],
+        "history": [
+            {
+                "signal_date": "2026-07-24", "holding_horizon_days": 3,
+                "profile": "risk_adjusted", "recommended_exposure": 0.5,
+                "picks": [
+                    {"rank": 1, "symbol": "600519.SH", "name": "贵州茅台"},
+                    {"rank": 2, "symbol": "300750.SZ", "name": "宁德时代"},
+                    {"rank": 3, "symbol": "000858.SZ", "name": "五粮液"},
+                ],
+                "follow_up_validation": {
+                    "status": "in_progress", "horizon_days": 3,
+                    "completed_sessions": 2, "available_picks": 3,
+                    "average_return": 0.018, "entry_date": "2026-07-25",
+                    "evaluation_date": "2026-07-27",
+                    "picks": [
+                        {"symbol": "600519.SH", "status": "ready", "entry_price": 1500,
+                         "price": 1530, "price_date": "2026-07-27", "return": 0.02},
+                        {"symbol": "300750.SZ", "status": "ready", "entry_price": 260,
+                         "price": 265.2, "price_date": "2026-07-27", "return": 0.02},
+                        {"symbol": "000858.SZ", "status": "ready", "entry_price": 120,
+                         "price": 121.68, "price_date": "2026-07-27", "return": 0.014},
+                    ],
+                },
+            }
+        ],
     }
     lists = {
         "favorites": [{"symbol": "600519.SH", "name": "贵州茅台"}],
@@ -464,6 +488,26 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
             }""",
             decision,
         )
+
+        history_row = page.locator(".snapshot-record-row").first
+        history_detail = page.locator(".snapshot-detail-row").first
+        history_box = history_row.bounding_box()
+        assert history_box is not None and history_box["height"] <= 56
+        playwright_sync.expect(history_row.locator(".snapshot-pick-summary")).to_contain_text(
+            "贵州茅台"
+        )
+        playwright_sync.expect(
+            history_row.locator(".snapshot-summary-validation")
+        ).to_contain_text("验证中")
+        assert history_detail.is_hidden()
+        history_row.click()
+        playwright_sync.expect(history_detail).to_be_visible()
+        assert history_row.get_attribute("aria-expanded") == "true"
+        assert history_detail.locator(".snapshot-pick").count() == 3
+        assert history_detail.locator(".snapshot-result-row").count() == 3
+        history_row.click()
+        playwright_sync.expect(history_detail).to_be_hidden()
+        assert history_row.get_attribute("aria-expanded") == "false"
 
         first_row = page.locator('tr[data-symbol="600519.SH"]')
         first_trigger = first_row.locator("[data-decision-kline-trigger]")
@@ -1091,7 +1135,7 @@ def test_market_style_confirmation_path_chart_layout(live_server):
             "**/api/v1/market/structure",
             lambda route: route.fulfill(json=payload),
         )
-        page.goto(f"{url}/#market/style")
+        page.goto(f"{url}/#observe/style")
 
         path_chart = page.locator("#rotation-style-path-chart")
         path_chart.locator("canvas").wait_for(state="visible")
@@ -1150,19 +1194,25 @@ def test_market_style_confirmation_path_chart_layout(live_server):
               const weak = structure.series.find(series => series.name === '低位样本');
               const spread = structure.series.find(series => series.name === '强弱差');
               return {
-                spreadColors: [-.004,.001,.005].map(value =>
-                  spread.itemStyle.color({value:['2026-07-12',value]})
-                ),
-                expectedSpreadColors: [
-                  CHART_COLORS.down,CHART_COLORS.primary,CHART_COLORS.up,
-                ],
-                strongLine: {
-                  color: strong.lineStyle.color, type: strong.lineStyle.type,
+                strongBar: {
+                  type: strong.type, color: strong.itemStyle.color,
+                  plotted: strong.data[0].value[1], raw: strong.data[0].rawReturn,
                 },
-                weakLine: {
-                  color: weak.lineStyle.color, type: weak.lineStyle.type,
+                weakBar: {
+                  type: weak.type, color: weak.itemStyle.color,
+                  plotted: weak.data[0].value[1], raw: weak.data[0].rawReturn,
                 },
+                spreadLine: {
+                  type: spread.type, color: spread.lineStyle.color,
+                  lineType: spread.lineStyle.type, showSymbol: spread.showSymbol,
+                },
+                axisExtent: [structure.yAxis.min,structure.yAxis.max],
+                tooltipText: structure.tooltip.formatter([{
+                  seriesName: weak.name, axisValue: weak.data[0].value[0],
+                  data: weak.data[0], value: weak.data[0].value, marker: '',
+                }]),
                 deadZone: spread.markArea.data[0].map(point => point.yAxis),
+                deadZoneColor: spread.markArea.itemStyle.color,
                 pathBandCount: path.series[0].markArea.data.length,
                 pathAxisColors: {
                   weak: path.yAxis.axisLabel.rich.weak.color,
@@ -1172,16 +1222,30 @@ def test_market_style_confirmation_path_chart_layout(live_server):
               };
             }"""
         )
-        assert chart_colors["spreadColors"] == chart_colors["expectedSpreadColors"]
-        assert chart_colors["strongLine"] == {
+        assert chart_colors["strongBar"] == {
+            "type": "bar",
             "color": "#e66767",
-            "type": "solid",
+            "plotted": pytest.approx(0.001),
+            "raw": pytest.approx(0.001),
         }
-        assert chart_colors["weakLine"] == {
+        assert chart_colors["weakBar"] == {
+            "type": "bar",
             "color": "#24a06b",
-            "type": "dashed",
+            "plotted": pytest.approx(-0.005),
+            "raw": pytest.approx(0.005),
         }
+        assert chart_colors["spreadLine"] == {
+            "type": "line",
+            "color": "#4f8fd8",
+            "lineType": "solid",
+            "showSymbol": False,
+        }
+        assert chart_colors["axisExtent"][0] == pytest.approx(
+            -chart_colors["axisExtent"][1]
+        )
+        assert "低位样本 +0.50%" in chart_colors["tooltipText"]
         assert chart_colors["deadZone"] == [-0.0025, 0.0025]
+        assert chart_colors["deadZoneColor"] == "rgba(201,150,66,.07)"
         assert chart_colors["pathBandCount"] == 3
         assert chart_colors["pathAxisColors"] == {
             "weak": "#24a06b",
@@ -1608,42 +1672,46 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         )
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.goto(f"{url}/#market/temperature")
+        page.goto(f"{url}/#observe/temperature")
 
         page.locator("#market-temperature-view").wait_for(state="visible")
+        assert page.url.endswith("#observe/temperature")
         assert page.locator("#market-temperature-view h2").inner_text() == "市场温度"
         assert page.locator("#market-quotes-view").is_hidden()
         _wait_for_text(page.locator("#market-temperature-content"), "等待")
 
         page.get_by_role("tab", name="市场风格", exact=True).click()
         page.locator("#market-style-view").wait_for(state="visible")
-        assert page.url.endswith("#market/style")
+        assert page.url.endswith("#observe/style")
 
-        page.get_by_role("button", name="轮动", exact=True).click()
+        page.get_by_role("tab", name="轮动总览", exact=True).click()
         page.locator("#rotation-overview-view").wait_for(state="visible")
-        assert page.url.endswith("#rotation/overview")
+        assert page.url.endswith("#observe/rotation")
         _wait_for_text(page.locator("#rotation-overview-content"), "等待")
         assert page.locator("#rotation-overview-view #rotation-industry-scatter").count() == 0
-        page.goto(f"{url}/#rotation/radar")
+        page.goto(f"{url}/#observe/rotation")
         page.locator("#rotation-overview-view").wait_for(state="visible")
-        assert page.url.endswith("#rotation/overview")
+        assert page.url.endswith("#observe/rotation")
         assert "· 0%" not in page.locator(
-            '[data-rotation-meta="rotation"] .rotation-meta-line'
+            '[data-rotation-asof="overview"]'
         ).inner_text()
         page.get_by_role("tab", name="行业周期", exact=True).click()
         page.locator("#rotation-industry-view").wait_for(state="visible")
+        assert page.url.endswith("#observe/industry")
         page.get_by_role("tab", name="细分题材", exact=True).click()
         page.locator("#rotation-themes-view").wait_for(state="visible")
+        assert page.url.endswith("#observe/themes")
         playwright_sync.expect(page.locator("#rotation-themes-content")).to_contain_text(
             re.compile("等待|计算"), timeout=30_000,
         )
-        theme_meta = page.locator(
-            '[data-rotation-meta="rotation"] .rotation-meta-line'
-        ).inner_text()
-        assert "等待快照" in theme_meta or "正在计算" in theme_meta
+        theme_meta = page.locator('[data-rotation-asof="themes"]').inner_text()
+        assert any(
+            marker in theme_meta for marker in ("等待刷新", "尚无快照", "正在计算")
+        )
         assert "· 0%" not in theme_meta
-        page.get_by_role("tab", name="宽基资金", exact=True).click()
+        page.get_by_role("tab", name="ETF 研究", exact=True).click()
         page.locator("#rotation-etf-view").wait_for(state="visible")
+        assert page.url.endswith("#observe/etf-flows")
 
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert page_errors == []

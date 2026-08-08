@@ -43,6 +43,7 @@ class EtfResearchItem:
     snapshot_id: str = ""
     ingest_id: str = ""
     artifact_id: str = ""
+    share_semantic_status: str = "unavailable"
     score_version: str = ETF_SCORE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,15 +64,19 @@ class EtfResearchSnapshot:
     schema_version: str = ETF_SCHEMA_VERSION
     score_version: str = ETF_SCORE_VERSION
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
-    staleness: dict[str, Any] = field(default_factory=lambda: {
-        "stale": False, "reason": "", "last_attempt_at": "",
-    })
+    staleness: dict[str, Any] = field(
+        default_factory=lambda: {
+            "stale": False,
+            "reason": "",
+            "last_attempt_at": "",
+        }
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "EtfResearchSnapshot":
+    def from_dict(cls, value: dict[str, Any]) -> EtfResearchSnapshot:
         data = dict(value)
         data["items"] = tuple(EtfResearchItem(**item) for item in data.get("items") or ())
         data["categories"] = tuple(data.get("categories") or ())

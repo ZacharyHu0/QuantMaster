@@ -104,10 +104,12 @@ class ResearchLake:
                 if target_ready:
                     metadata = dict(intent["metadata"])
                     stat = target.stat()
-                    metadata.update({
-                        "file_size": stat.st_size,
-                        "file_mtime_ns": stat.st_mtime_ns,
-                    })
+                    metadata.update(
+                        {
+                            "file_size": stat.st_size,
+                            "file_mtime_ns": stat.st_mtime_ns,
+                        }
+                    )
                     self.catalog.commit_partition_write(key, owner, metadata)
                     staged.unlink(missing_ok=True)
                     backup.unlink(missing_ok=True)
@@ -125,10 +127,12 @@ class ResearchLake:
                     _sync_directory(target.parent)
                     metadata = dict(intent["metadata"])
                     stat = target.stat()
-                    metadata.update({
-                        "file_size": stat.st_size,
-                        "file_mtime_ns": stat.st_mtime_ns,
-                    })
+                    metadata.update(
+                        {
+                            "file_size": stat.st_size,
+                            "file_mtime_ns": stat.st_mtime_ns,
+                        }
+                    )
                     self.catalog.commit_partition_write(key, owner, metadata)
                     backup.unlink(missing_ok=True)
                     recovered += 1
@@ -153,7 +157,8 @@ class ResearchLake:
     def _enqueue_integrity_failure(self, metadata: dict[str, Any], reason: str) -> None:
         logger.error(
             "ResearchLake integrity failure partition=%s reason=%s",
-            metadata.get("partition_key", "unknown"), reason,
+            metadata.get("partition_key", "unknown"),
+            reason,
         )
         try:
             from quantmaster.data.repair import enqueue_repair
@@ -170,15 +175,16 @@ class ResearchLake:
             logger.error("Unable to enqueue research repair: %s", exc)
 
     def validate_partition(
-        self, metadata: dict[str, Any], *, enqueue_repair: bool = True,
+        self,
+        metadata: dict[str, Any],
+        *,
+        enqueue_repair: bool = True,
     ) -> Path:
         """Validate one catalog record and persist a repair request on failure."""
         try:
             path = self.path_for_repair(metadata)
             if not path.is_file():
-                raise ResearchDataIntegrityError(
-                    f"研究分区文件缺失: {metadata['path']}"
-                )
+                raise ResearchDataIntegrityError(f"研究分区文件缺失: {metadata['path']}")
             stat = path.stat()
             unchanged = (
                 int(metadata.get("file_size") or 0) == stat.st_size
@@ -187,9 +193,7 @@ class ResearchLake:
             )
             actual = file_sha256(path)
             if actual != str(metadata["content_sha256"]):
-                raise ResearchDataIntegrityError(
-                    f"研究分区内容校验失败: {metadata['path']}"
-                )
+                raise ResearchDataIntegrityError(f"研究分区内容校验失败: {metadata['path']}")
             if not unchanged:
                 self.catalog.update_partition_file_identity(
                     str(metadata["partition_key"]),
@@ -209,7 +213,9 @@ class ResearchLake:
         return self.validate_partition(metadata)
 
     def _read_partition_file(
-        self, metadata: dict[str, Any], columns: list[str] | None = None,
+        self,
+        metadata: dict[str, Any],
+        columns: list[str] | None = None,
     ) -> pd.DataFrame:
         path = self.validate_partition(metadata)
         try:
@@ -288,8 +294,7 @@ class ResearchLake:
             raise ValueError(f"研究分区主键重复: {duplicate}")
         value = value.replace([np.inf, -np.inf], np.nan)
         numeric = [
-            column for column in value
-            if column not in keys and pd.api.types.is_numeric_dtype(value[column])
+            column for column in value if column not in keys and pd.api.types.is_numeric_dtype(value[column])
         ]
         target_type = "float64" if kind == ArtifactKind.RAW else "float32"
         for column in numeric:
@@ -330,17 +335,27 @@ class ResearchLake:
         target = self.partition_path(kind, asset_class, frequency, dataset_id, date_text)
         try:
             previous_metadata = self.catalog.partition(
-                kind, asset_class, frequency, dataset, date_text,
+                kind,
+                asset_class,
+                frequency,
+                dataset,
+                date_text,
             )
             normalized = self._normalize_frame(
-                frame, kind=kind, frequency=frequency, trade_date=date_text,
+                frame,
+                kind=kind,
+                frequency=frequency,
+                trade_date=date_text,
             )
             if merge_columns and target.exists():
                 if previous_metadata is None:
                     raise ResearchDataIntegrityError(f"研究分区存在但目录记录缺失: {target}")
                 existing = self._read_partition_file(previous_metadata)
                 existing = self._normalize_frame(
-                    existing, kind=kind, frequency=frequency, trade_date=date_text,
+                    existing,
+                    kind=kind,
+                    frequency=frequency,
+                    trade_date=date_text,
                 )
                 keys = ["trade_date", "symbol"]
                 if frequency != Frequency.DAILY:
@@ -349,12 +364,17 @@ class ResearchLake:
                 existing = existing.drop(columns=[c for c in replacing if c in existing], errors="ignore")
                 normalized = existing.merge(normalized, on=keys, how="outer", validate="one_to_one")
                 normalized = self._normalize_frame(
-                    normalized, kind=kind, frequency=frequency, trade_date=date_text,
+                    normalized,
+                    kind=kind,
+                    frequency=frequency,
+                    trade_date=date_text,
                 )
             target.parent.mkdir(parents=True, exist_ok=True)
             table = pa.Table.from_pandas(normalized, preserve_index=False)
             fd, temp_name = tempfile.mkstemp(
-                prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=target.parent,
+                prefix=f".{target.stem}.",
+                suffix=".parquet.tmp",
+                dir=target.parent,
             )
             os.close(fd)
             temp = Path(temp_name)
@@ -391,8 +411,12 @@ class ResearchLake:
                     "file_mtime_ns": stat.st_mtime_ns,
                 }
                 self.catalog.begin_partition_write(
-                    key, owner, target_path=relative, staged_path=staged_relative,
-                    backup_path=backup_relative, content_sha256=metadata["content_sha256"],
+                    key,
+                    owner,
+                    target_path=relative,
+                    staged_path=staged_relative,
+                    backup_path=backup_relative,
+                    content_sha256=metadata["content_sha256"],
                     metadata=metadata,
                 )
                 if target.exists():
@@ -400,13 +424,29 @@ class ResearchLake:
                 os.replace(temp, target)
                 _sync_directory(target.parent)
                 stat = target.stat()
-                metadata.update({
-                    "file_size": stat.st_size,
-                    "file_mtime_ns": stat.st_mtime_ns,
-                })
+                metadata.update(
+                    {
+                        "file_size": stat.st_size,
+                        "file_mtime_ns": stat.st_mtime_ns,
+                    }
+                )
                 metadata = self.catalog.commit_partition_write(key, owner, metadata)
                 backup.unlink(missing_ok=True)
                 _sync_directory(target.parent)
+                try:
+                    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+                    ingest_store = StockDBIngestStore()
+                    for ingest_id in ingest_store._ingest_ids(merged_inputs):
+                        ingest_store.pin(
+                            ingest_id,
+                            "research_lake",
+                            key,
+                            {"trade_date": date_text, "dataset_id": dataset},
+                            require_exists=False,
+                        )
+                except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+                    logger.warning("研究分区 %s 的 stockdb 摄取引用未能写入", key)
             finally:
                 temp.unlink(missing_ok=True)
             return metadata
@@ -423,7 +463,10 @@ class ResearchLake:
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
         metadata = self.catalog.partition(
-            kind, asset_class, frequency, self.dataset_for_kind(kind, dataset_id),
+            kind,
+            asset_class,
+            frequency,
+            self.dataset_for_kind(kind, dataset_id),
             _as_date(trade_date),
         )
         if metadata is None:
@@ -441,8 +484,12 @@ class ResearchLake:
         columns: list[str] | None = None,
     ) -> pd.DataFrame:
         partitions = self.catalog.partitions(
-            kind=kind, asset_class=asset_class, frequency=frequency,
-            dataset_id=self.dataset_for_kind(kind, dataset_id), start=start, end=end,
+            kind=kind,
+            asset_class=asset_class,
+            frequency=frequency,
+            dataset_id=self.dataset_for_kind(kind, dataset_id),
+            start=start,
+            end=end,
         )
         frames = []
         for item in partitions:
@@ -476,27 +523,45 @@ class ResearchLake:
             raise ValueError(f"{spec.id} 不支持资产 {selected_asset.value}")
         records = []
         for date_value, group in output.groupby(pd.to_datetime(output["trade_date"]).dt.date):
-            records.append(self.write_partition(
-                spec.kind, selected_asset, spec.frequency, spec.id, str(date_value), group,
-                merge_columns=spec.kind in {ArtifactKind.FACTOR, ArtifactKind.LABEL},
-                spec_versions={spec.id: spec.version}, input_hashes=input_hashes,
-                run_id=run_id,
-            ))
+            records.append(
+                self.write_partition(
+                    spec.kind,
+                    selected_asset,
+                    spec.frequency,
+                    spec.id,
+                    str(date_value),
+                    group,
+                    merge_columns=spec.kind in {ArtifactKind.FACTOR, ArtifactKind.LABEL},
+                    spec_versions={spec.id: spec.version},
+                    input_hashes=input_hashes,
+                    run_id=run_id,
+                )
+            )
         return records
 
     def artifact_panel(self, ref: ArtifactRef, start: str, end: str) -> pd.DataFrame:
         dataset_id = "QM_STYLE_V1" if ref.kind == ArtifactKind.RISK else ref.id
         data = self.read_range(
-            ref.kind, ref.asset_class, ref.frequency, dataset_id, start, end,
+            ref.kind,
+            ref.asset_class,
+            ref.frequency,
+            dataset_id,
+            start,
+            end,
             columns=["trade_date", "symbol", ref.storage_column],
         )
         if data.empty or ref.storage_column not in data:
             return pd.DataFrame()
         panel = data.pivot(
-            index="trade_date", columns="symbol", values=ref.storage_column,
+            index="trade_date",
+            columns="symbol",
+            values=ref.storage_column,
         ).sort_index()
         calendar = self.catalog.trading_dates(
-            ref.asset_class, ref.frequency, start, end,
+            ref.asset_class,
+            ref.frequency,
+            start,
+            end,
         )
         if calendar:
             panel.index = pd.DatetimeIndex(pd.to_datetime(panel.index), name="trade_date")
@@ -523,9 +588,9 @@ class ResearchLake:
 
                 instruments = InstrumentStore().get_many(selected)
                 selected = [
-                    symbol for symbol in selected
-                    if instruments.get(symbol)
-                    and instruments[symbol].asset_type == asset_class.value
+                    symbol
+                    for symbol in selected
+                    if instruments.get(symbol) and instruments[symbol].asset_type == asset_class.value
                 ]
             except Exception:
                 # An absent master must not invent asset classes; explicit symbols remain available.
@@ -546,12 +611,18 @@ class ResearchLake:
         dataset = dataset_id or f"{asset_class.value}_bars"
         records = []
         for trade_date, frames in sorted(by_date.items()):
-            records.append(self.write_partition(
-                ArtifactKind.RAW, asset_class, Frequency.DAILY, dataset, trade_date,
-                pd.concat(frames, ignore_index=True),
-                input_hashes={"barstore": content_hash(sorted(selected))},
-                run_id="barstore-materialize",
-            ))
+            records.append(
+                self.write_partition(
+                    ArtifactKind.RAW,
+                    asset_class,
+                    Frequency.DAILY,
+                    dataset,
+                    trade_date,
+                    pd.concat(frames, ignore_index=True),
+                    input_hashes={"barstore": content_hash(sorted(selected))},
+                    run_id="barstore-materialize",
+                )
+            )
         return records
 
     def project_to_bar_store(self, frame: pd.DataFrame) -> int:
@@ -592,7 +663,9 @@ class ResearchLake:
             if table is not None and not table.empty:
                 target = run / f"{_safe(name)}.parquet"
                 fd, temp_name = tempfile.mkstemp(
-                    prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=run,
+                    prefix=f".{target.stem}.",
+                    suffix=".parquet.tmp",
+                    dir=run,
                 )
                 os.close(fd)
                 temp = Path(temp_name)
@@ -609,7 +682,9 @@ class ResearchLake:
                     temp.unlink(missing_ok=True)
         if commit and not manifest_path.exists():
             fd, temp_name = tempfile.mkstemp(
-                prefix=".manifest.", suffix=".json.tmp", dir=run,
+                prefix=".manifest.",
+                suffix=".json.tmp",
+                dir=run,
             )
             os.close(fd)
             temp = Path(temp_name)
@@ -636,16 +711,25 @@ class FeatureBatchProvider:
         for ref in refs:
             dataset_id = "QM_STYLE_V1" if ref.kind == ArtifactKind.RISK else ref.id
             partitions = self.lake.catalog.partitions(
-                kind=ref.kind, asset_class=ref.asset_class, frequency=ref.frequency,
-                dataset_id=dataset_id, start=start, end=end,
+                kind=ref.kind,
+                asset_class=ref.asset_class,
+                frequency=ref.frequency,
+                dataset_id=dataset_id,
+                start=start,
+                end=end,
             )
-            inputs.append({
-                "ref": ref.to_dict(),
-                "partitions": [item["content_sha256"] for item in partitions],
-                "trading_dates": self.lake.catalog.trading_dates(
-                    ref.asset_class, ref.frequency, start, end,
-                ),
-            })
+            inputs.append(
+                {
+                    "ref": ref.to_dict(),
+                    "partitions": [item["content_sha256"] for item in partitions],
+                    "trading_dates": self.lake.catalog.trading_dates(
+                        ref.asset_class,
+                        ref.frequency,
+                        start,
+                        end,
+                    ),
+                }
+            )
         return content_hash({"start": start, "end": end, "inputs": inputs})
 
     def tabular(self, refs: Iterable[ArtifactRef], start: str, end: str) -> pd.DataFrame:
@@ -659,8 +743,14 @@ class FeatureBatchProvider:
             panel = self.lake.artifact_panel(ref, start, end)
             if panel.empty:
                 continue
-            values = panel.rename_axis(index="trade_date", columns="symbol").reset_index().melt(
-                id_vars="trade_date", var_name="symbol", value_name=ref.id,
+            values = (
+                panel.rename_axis(index="trade_date", columns="symbol")
+                .reset_index()
+                .melt(
+                    id_vars="trade_date",
+                    var_name="symbol",
+                    value_name=ref.id,
+                )
             )
             tables.append(values)
         if not tables:
@@ -700,17 +790,18 @@ class FeatureBatchProvider:
             group = group.sort_values("trade_date")
             values = group[features].to_numpy(dtype="float64")
             for index in range(lookback - 1, len(group)):
-                window = values[index - lookback + 1:index + 1]
+                window = values[index - lookback + 1 : index + 1]
                 samples.append(np.nan_to_num(window, nan=0.0).astype("float32"))
                 masks.append(np.isfinite(window))
-                keys.append({
-                    "trade_date": str(group.iloc[index]["trade_date"].date()),
-                    "symbol": str(symbol),
-                })
+                keys.append(
+                    {
+                        "trade_date": str(group.iloc[index]["trade_date"].date()),
+                        "symbol": str(symbol),
+                    }
+                )
         return {
             "values": (
-                np.stack(samples)
-                if samples else np.empty((0, lookback, len(features)), dtype="float32")
+                np.stack(samples) if samples else np.empty((0, lookback, len(features)), dtype="float32")
             ),
             "mask": np.stack(masks) if masks else np.empty((0, lookback, len(features)), dtype=bool),
             "keys": keys,

@@ -33,25 +33,32 @@ class _Source:
     def daily_cross_section(self, symbols, start, end):
         dates = pd.to_datetime(self.frame["date"])
         return self.frame.loc[
-            self.frame["symbol"].isin(symbols)
-            & (dates >= pd.Timestamp(start))
-            & (dates <= pd.Timestamp(end))
+            self.frame["symbol"].isin(symbols) & (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
         ].copy()
 
     def board_hierarchy(self):
         symbols = sorted(self.frame["symbol"].unique())
         return [
             {
-                "code": "801010.SL", "name": "一级甲", "category": "申万一级",
-                "level": "L1", "members": symbols,
+                "code": "801010.SL",
+                "name": "一级甲",
+                "category": "申万一级",
+                "level": "L1",
+                "members": symbols,
             },
             {
-                "code": "801011.SL", "name": "二级甲", "category": "申万二级",
-                "level": "L2", "members": symbols[:2],
+                "code": "801011.SL",
+                "name": "二级甲",
+                "category": "申万二级",
+                "level": "L2",
+                "members": symbols[:2],
             },
             {
-                "code": "BK_TEST", "name": "测试概念", "category": "概念",
-                "level": "CONCEPT", "members": symbols[1:],
+                "code": "BK_TEST",
+                "name": "测试概念",
+                "category": "概念",
+                "level": "CONCEPT",
+                "members": symbols[1:],
             },
         ]
 
@@ -62,7 +69,7 @@ class _Source:
         return "test-sdk"
 
 
-def _frame(days: int = 80) -> pd.DataFrame:
+def _frame(days: int = 190) -> pd.DataFrame:
     dates = pd.bdate_range(end="2026-08-05", periods=days)
     rows = []
     specs = {
@@ -74,13 +81,23 @@ def _frame(days: int = 80) -> pd.DataFrame:
     for symbol, (base, growth, amount, is_st) in specs.items():
         closes = np.linspace(base, base * growth, len(dates))
         for stamp, close in zip(dates, closes, strict=True):
-            rows.append({
-                "symbol": symbol, "date": stamp, "open": close * .99,
-                "high": close * 1.01, "low": close * .98, "close": close,
-                "volume": 1_000_000, "amount": amount, "float_mv": 1e10,
-                "total_mv": 1.2e10, "pe_ttm": 20.0, "pb": 2.0,
-                "is_st": is_st,
-            })
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": stamp,
+                    "open": close * 0.99,
+                    "high": close * 1.01,
+                    "low": close * 0.98,
+                    "close": close,
+                    "volume": 1_000_000,
+                    "amount": amount,
+                    "float_mv": 1e10,
+                    "total_mv": 1.2e10,
+                    "pe_ttm": 20.0,
+                    "pb": 2.0,
+                    "is_st": is_st,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -105,7 +122,8 @@ def service(tmp_path, isolated_config, monkeypatch):
         },
     )
     value = AfterCloseService(
-        source=_Source(_frame()), instruments=_Instruments(),
+        source=_Source(_frame()),
+        instruments=_Instruments(),
         store=AfterCloseStore(tmp_path / "after-close.sqlite"),
     )
     monkeypatch.setattr(value, "_write_research_lake", lambda *_args: None)
@@ -128,11 +146,23 @@ def test_after_close_scan_is_immutable_auditable_and_filters_stock_pool(service)
     assert all(item.snapshot_id == first.snapshot_id for item in first.sectors)
     assert all(item.snapshot_id == first.snapshot_id for item in first.candidates)
     assert all(item.score_version == first.score_version for item in first.sectors)
+    assert first.score_version == "QM_AFTER_CLOSE_V1"
+    assert first.shadow_candidates
+    assert all(item.score_version == "QM_AFTER_CLOSE_V2_SHADOW" for item in first.shadow_candidates)
+    assert first.validation["shadow_comparison"]["formal_score_version"] == "QM_AFTER_CLOSE_V1"
+    assert all(item.sensitivity.get("amount_weighted") for item in first.sectors)
+    ingest = service.ingest.store.get(first.ingest_id)
+    assert ingest is not None
+    assert len(ingest.session_dates) == 180
+    assert ingest.session_source == "stockdb_broad_coverage"
+    assert ingest.catalog_id.startswith("sdc_")
+    assert ingest.coverage["observed_history_sessions"] == 180
+    assert any(item["field"] == "amount" and item["unit"] == "CNY" for item in ingest.coverage["fields"])
+    assert service.ingest.store.references(first.ingest_id)[0]["namespace"] == "after_close"
 
     revised = service.source.frame.copy()
-    mask = (
-        (revised["symbol"] == "600001.SH")
-        & (revised["date"] == revised.loc[revised["symbol"] == "600001.SH", "date"].min())
+    mask = (revised["symbol"] == "600001.SH") & (
+        revised["date"] == revised.loc[revised["symbol"] == "600001.SH", "date"].min()
     )
     revised.loc[mask, "close"] *= 1.01
     assert service._frame_hash(revised) != service._frame_hash(service.source.frame)
@@ -140,9 +170,7 @@ def test_after_close_scan_is_immutable_auditable_and_filters_stock_pool(service)
 
 def test_gate_failure_keeps_previous_snapshot_and_marks_it_stale(service) -> None:
     published = service.scan()
-    service.source.frame = service.source.frame.loc[
-        service.source.frame["symbol"] == "600001.SH"
-    ].copy()
+    service.source.frame = service.source.frame.loc[service.source.frame["symbol"] == "600001.SH"].copy()
 
     with pytest.raises(DataGateRejected):
         service.scan(force=True)
@@ -166,7 +194,7 @@ def test_future_labels_use_only_realized_sessions_and_market_baseline(service) -
         latest = group.sort_values("date").iloc[-1]
         for offset, stamp in enumerate(future_dates, 1):
             row = latest.to_dict()
-            row.update(date=stamp, close=float(latest["close"]) * (1 + offset * .01))
+            row.update(date=stamp, close=float(latest["close"]) * (1 + offset * 0.01))
             extension.append(row)
     realized = pd.concat((service.source.frame, pd.DataFrame(extension)), ignore_index=True)
 
@@ -179,6 +207,7 @@ def test_future_labels_use_only_realized_sessions_and_market_baseline(service) -
     assert all(item["csi800_mean_return"] is not None for item in labels)
     assert all(item["excess_vs_csi800"] is not None for item in labels)
     assert all(item["mean_max_drawdown"] <= 0 for item in labels)
+    assert all("QM_AFTER_CLOSE_V2_SHADOW" in item["score_versions"] for item in labels)
 
 
 def test_strategy_health_never_promotes_research_to_trading(service) -> None:
@@ -196,11 +225,17 @@ def test_board_membership_lake_uses_relationship_key(service) -> None:
     snapshot = service.scan()
     boards = service.source.board_hierarchy()
     AfterCloseService._write_research_lake(
-        service, snapshot, service.source.frame, boards,
+        service,
+        snapshot,
+        service.source.frame,
+        boards,
     )
     frame = ResearchLake().read_partition(
-        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
-        "after_close_board_membership", snapshot.as_of_date,
+        ArtifactKind.RAW,
+        AssetClass.STOCK,
+        Frequency.DAILY,
+        "after_close_board_membership",
+        snapshot.as_of_date,
     )
 
     assert not frame.empty
@@ -220,9 +255,7 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     client = TestClient(app)
 
     latest = client.get("/api/v1/after-close/snapshots/latest")
-    exported = client.get(
-        f"/api/v1/after-close/export/{snapshot.snapshot_id}?format=csv"
-    )
+    exported = client.get(f"/api/v1/after-close/export/{snapshot.snapshot_id}?format=csv")
     page = client.get("/")
 
     assert latest.status_code == 200
@@ -230,9 +263,9 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     assert exported.status_code == 200
     assert "600001.SH" in exported.content.decode("utf-8-sig")
     assert 'id="tab-after-close"' in page.text
-    assert '/static/after-close.js?rev=' in page.text
+    assert "/static/after-close.js?rev=" in page.text
     assert "Tushare 和其他页面的行情缓存不参与本扫描" in page.text
-    assert 'data-after-close-open-stockdb' in page.text
+    assert "data-after-close-open-stockdb" in page.text
     assert 'id="after-close-update-data"' in page.text
     assert "更新扫描数据" in page.text
     assert "按当前数据重新计算" in page.text
@@ -249,12 +282,21 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
 def test_after_close_cli_contract_supports_csv_export() -> None:
     from quantmaster.cli import build_parser
 
-    args = build_parser().parse_args([
-        "after-close", "export", "scan.csv", "--format", "csv",
-    ])
+    args = build_parser().parse_args(
+        [
+            "after-close",
+            "export",
+            "scan.csv",
+            "--format",
+            "csv",
+        ]
+    )
 
     assert args.after_close_cmd == "export"
     assert args.format == "csv"
+
+    score = build_parser().parse_args(["after-close", "score-version", "status"])
+    assert score.score_version_cmd == "status"
 
 
 def test_after_close_submit_only_coalesces_active_jobs() -> None:
@@ -263,10 +305,14 @@ def test_after_close_submit_only_coalesces_active_jobs() -> None:
     class _Runtime:
         def __init__(self) -> None:
             self.store = self
-            self.items = [{
-                "id": "old-failure", "type": TASK_TYPE, "status": "failed",
-                "spec": {"as_of": "", "force": False},
-            }]
+            self.items = [
+                {
+                    "id": "old-failure",
+                    "type": TASK_TYPE,
+                    "status": "failed",
+                    "spec": {"as_of": "", "force": False},
+                }
+            ]
             self.submissions = []
 
         def register(self, *_args) -> None:
@@ -278,8 +324,10 @@ def test_after_close_submit_only_coalesces_active_jobs() -> None:
         def submit(self, job_type, spec, **options):
             self.submissions.append((job_type, spec, options))
             created = {
-                "id": f"new-{len(self.submissions)}", "type": job_type,
-                "status": "queued", "spec": spec,
+                "id": f"new-{len(self.submissions)}",
+                "type": job_type,
+                "status": "queued",
+                "spec": spec,
             }
             self.items.insert(0, created)
             return created, True

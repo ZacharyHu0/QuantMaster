@@ -1,22 +1,22 @@
 """命令行入口 `qm`。
 
-    qm serve                                    启动 Web 界面
-    qm fetch --universe demo --start 2022-01-01 预取行情到本地缓存
-    qm regime --universe demo                     牛熊/趋势/板块状态
-    qm select --universe demo --horizon 3          每日短周期选股
-    qm factors                                  列出内置因子
-    qm factor-test "rank(-delta(close, 5))"     因子体检
-    qm backtest --factor mom_20d --top 5        因子选股回测（--full 输出年/月收益，--stop-loss 止损）
-    qm validate "expr" --split 2024-01-01       样本外验证（防过拟合）
-    qm grid --factors mom_20d,rev_5d            参数网格扫描
-    qm fund-test ep                             基本面因子体检（PE/PB/股息/市值/ROE）
-    qm mine --generations 8                     遗传规划挖因子
-    qm mine-llm --rounds 2                      LLM 挖因子
-    qm crawl [--skip-llm]                       抓取财经快讯
-    qm paper create --name 动量观察 --factor mom_20d  创建独立模拟账户
-    qm ledger import trades.csv                 导入券商成交
-    qm ledger report                            实盘收益报告
-    qm ledger nav                               实盘每日净值（TWR）与基准对比
+qm serve                                    启动 Web 界面
+qm fetch --universe demo --start 2022-01-01 预取行情到本地缓存
+qm regime --universe demo                     牛熊/趋势/板块状态
+qm select --universe demo --horizon 3          每日短周期选股
+qm factors                                  列出内置因子
+qm factor-test "rank(-delta(close, 5))"     因子体检
+qm backtest --factor mom_20d --top 5        因子选股回测（--full 输出年/月收益，--stop-loss 止损）
+qm validate "expr" --split 2024-01-01       样本外验证（防过拟合）
+qm grid --factors mom_20d,rev_5d            参数网格扫描
+qm fund-test ep                             基本面因子体检（PE/PB/股息/市值/ROE）
+qm mine --generations 8                     遗传规划挖因子
+qm mine-llm --rounds 2                      LLM 挖因子
+qm crawl [--skip-llm]                       抓取财经快讯
+qm paper create --name 动量观察 --factor mom_20d  创建独立模拟账户
+qm ledger import trades.csv                 导入券商成交
+qm ledger report                            实盘收益报告
+qm ledger nav                               实盘每日净值（TWR）与基准对比
 """
 
 from __future__ import annotations
@@ -57,9 +57,7 @@ def cmd_serve(args) -> None:
         from quantmaster.config import get_config
 
         cfg = get_config().server
-        browser_timer = threading.Timer(
-            1.5, webbrowser.open, args=(f"http://{cfg.host}:{cfg.port}",)
-        )
+        browser_timer = threading.Timer(1.5, webbrowser.open, args=(f"http://{cfg.host}:{cfg.port}",))
         browser_timer.daemon = True
         browser_timer.start()
     try:
@@ -102,18 +100,20 @@ def cmd_automation(args) -> None:
             checks[module] = {"ok": False, "message": str(exc)}
     cfg = get_config().automation
     accounts = service.store.bot_accounts()
-    _print_json({
-        "enabled": cfg.enabled,
-        "timezone": cfg.timezone,
-        "dependencies": checks,
-        "channels": [
-            {key: value for key, value in account.items() if key != "secret_target"}
-            for account in accounts
-        ],
-        "targets": service.public_targets(),
-        "jobs": service.store.jobs(),
-        "hint": "定时任务和 Bot 长连接由 qm serve 承载",
-    })
+    _print_json(
+        {
+            "enabled": cfg.enabled,
+            "timezone": cfg.timezone,
+            "dependencies": checks,
+            "channels": [
+                {key: value for key, value in account.items() if key != "secret_target"}
+                for account in accounts
+            ],
+            "targets": service.public_targets(),
+            "jobs": service.store.jobs(),
+            "hint": "定时任务和 Bot 长连接由 qm serve 承载",
+        }
+    )
 
 
 def cmd_lab(args) -> None:
@@ -130,8 +130,7 @@ def cmd_lab(args) -> None:
         _print_json(service.overview())
         return
     if args.lab_cmd == "list":
-        _print_json(service.store.list_factors(
-            status=args.status, search=args.search, limit=args.limit))
+        _print_json(service.store.list_factors(status=args.status, search=args.search, limit=args.limit))
         return
     if args.lab_cmd == "jobs":
         _print_json({"items": service.store.jobs(args.limit)})
@@ -143,31 +142,44 @@ def cmd_lab(args) -> None:
         _print_json(service.resume_study(args.study_id))
         return
     if args.lab_cmd == "approve":
-        _print_json(service.store.approve(
-            args.version_id, actor="cli", reason=args.reason))
+        _print_json(service.store.approve(args.version_id, actor="cli", reason=args.reason))
         return
     if args.lab_cmd == "deploy":
-        _print_json(service.store.deploy(
-            args.version_id, universe=args.universe, horizon=args.horizon, actor="cli"))
+        _print_json(
+            service.store.deploy(args.version_id, universe=args.universe, horizon=args.horizon, actor="cli")
+        )
         return
     if args.lab_cmd == "optimize":
-        study = service.create_study({
-            "universe": args.universe, "start": args.start, "end": args.end or _today(),
-            "models": [item.strip() for item in args.models.split(",") if item.strip()],
-            "budget_hours": args.budget_hours, "max_trials": args.max_trials,
-            "top_n": args.top, "sequence_length": args.sequence_length,
-            "research_tier": args.research_tier,
-        })
-        _print_json({
-            "study": study,
-            "hint": "Study 已进入可恢复队列；只会产出 Shadow 候选，不会自动晋升 Champion",
-        })
+        study = service.create_study(
+            {
+                "universe": args.universe,
+                "start": args.start,
+                "end": args.end or _today(),
+                "models": [item.strip() for item in args.models.split(",") if item.strip()],
+                "budget_hours": args.budget_hours,
+                "max_trials": args.max_trials,
+                "top_n": args.top,
+                "sequence_length": args.sequence_length,
+                "research_tier": args.research_tier,
+            }
+        )
+        _print_json(
+            {
+                "study": study,
+                "hint": "Study 已进入可恢复队列；只会产出 Shadow 候选，不会自动晋升 Champion",
+            }
+        )
         return
     if args.lab_cmd == "audit":
-        job = service.enqueue("bias_audit", {
-            "version_id": args.version_id, "universe": args.universe,
-            "start": args.start, "end": args.end or _today(),
-        })
+        job = service.enqueue(
+            "bias_audit",
+            {
+                "version_id": args.version_id,
+                "universe": args.universe,
+                "start": args.start,
+                "end": args.end or _today(),
+            },
+        )
         _print_json({"job": job, "hint": "偏差审计已进入研究队列"})
         return
 
@@ -179,31 +191,42 @@ def cmd_lab(args) -> None:
         job = service.enqueue("validate", {"version_id": args.version_id, **base})
     elif args.lab_cmd == "discover":
         kind = {
-            "llm": "discover_llm", "python": "discover_python",
+            "llm": "discover_llm",
+            "python": "discover_python",
         }.get(args.method, "discover_genetic")
         params = {**base, "horizon": args.horizon, "top_n": args.top}
         if args.method == "llm":
             params = {**base, "horizon": args.horizon, "count": args.top, "rounds": args.rounds}
         elif args.method == "python":
             params = {
-                **base, "horizon": args.horizon, "rounds": args.rounds,
-                "candidate_limit": args.candidates, "finalists": args.finalists,
+                **base,
+                "horizon": args.horizon,
+                "rounds": args.rounds,
+                "candidate_limit": args.candidates,
+                "finalists": args.finalists,
             }
         else:
             params.update({"population": args.population, "generations": args.generations})
         job = service.enqueue(kind, params)
     elif args.lab_cmd == "train":
-        job = service.enqueue("train", {
-            **base, "model": args.model, "horizon": args.horizon,
-            "sequence_length": args.sequence_length,
-            "config": {"epochs": args.epochs},
-        })
+        job = service.enqueue(
+            "train",
+            {
+                **base,
+                "model": args.model,
+                "horizon": args.horizon,
+                "sequence_length": args.sequence_length,
+                "config": {"epochs": args.epochs},
+            },
+        )
     else:  # pragma: no cover - argparse 保证子命令完整
         raise ValueError(f"未知 lab 子命令: {args.lab_cmd}")
-    _print_json({
-        "job": job,
-        "hint": "任务已进入可恢复队列；由 qm serve 或 qm lab worker 执行",
-    })
+    _print_json(
+        {
+            "job": job,
+            "hint": "任务已进入可恢复队列；由 qm serve 或 qm lab worker 执行",
+        }
+    )
 
 
 def cmd_fetch(args) -> None:
@@ -215,10 +238,8 @@ def cmd_fetch(args) -> None:
     ok = failed = 0
     for symbol in symbols:
         try:
-            df = load_bars(symbol, args.start, end, frequency=args.frequency,
-                           use_cache=not args.force)
-            print(f"  {symbol} {args.frequency}: {len(df)} 条 "
-                  f"({df.index.min()} ~ {df.index.max()})")
+            df = load_bars(symbol, args.start, end, frequency=args.frequency, use_cache=not args.force)
+            print(f"  {symbol} {args.frequency}: {len(df)} 条 ({df.index.min()} ~ {df.index.max()})")
             ok += 1
         except Exception as e:
             print(f"  {symbol}: 失败 {e}", file=sys.stderr)
@@ -237,11 +258,13 @@ def cmd_regime(args) -> None:
     payload = {
         **report,
         "past": [
-            {"date": str(idx.date()), **{
-                key: (None if pd.isna(value) else (
-                    value.item() if hasattr(value, "item") else value))
-                for key, value in row.items()
-            }}
+            {
+                "date": str(idx.date()),
+                **{
+                    key: (None if pd.isna(value) else (value.item() if hasattr(value, "item") else value))
+                    for key, value in row.items()
+                },
+            }
             for idx, row in past.iterrows()
         ],
         "sectors": [],
@@ -263,8 +286,13 @@ def cmd_select(args) -> None:
     mapping = {} if args.no_industry else load_industry_map()
     names = load_stock_names(list(panel["close"].columns))
     report = hybrid_daily_selection(
-        panel, top_n=args.top, horizon=args.horizon, profile=args.profile,
-        universe=args.universe, industry_map=mapping, name_map=names,
+        panel,
+        top_n=args.top,
+        horizon=args.horizon,
+        profile=args.profile,
+        universe=args.universe,
+        industry_map=mapping,
+        name_map=names,
     )
     if not args.no_save:
         DecisionStore().save(report, args.universe)
@@ -285,12 +313,44 @@ def cmd_after_close(args) -> int:
     from quantmaster.runtime.json import strict_json_dumps
 
     service = get_after_close_service()
+    if args.after_close_cmd == "score-version":
+        from quantmaster.after_close.models import SCORE_VERSION, SHADOW_SCORE_VERSION
+
+        health = service.store.health(500)
+        if args.score_version_cmd == "status":
+            _print_json(health)
+            return 0
+        if args.score_version_cmd == "promote":
+            if not health["manual_review_eligible"]:
+                _print_json(
+                    {
+                        "status": "rejected",
+                        "reason": "V2 尚未通过人工评审资格门",
+                        "checks": health["promotion_checks"],
+                    }
+                )
+                return 1
+            _print_json(
+                {
+                    "status": "promoted",
+                    **service.store.set_active_score_version(SHADOW_SCORE_VERSION),
+                }
+            )
+            return 0
+        _print_json(
+            {
+                "status": "rolled_back",
+                **service.store.set_active_score_version(SCORE_VERSION),
+            }
+        )
+        return 0
     if args.after_close_cmd in {"scan", "rerun"}:
         import time
 
         jobs = get_after_close_jobs()
         job, created = jobs.submit(
-            as_of=args.as_of or "", force=args.after_close_cmd == "rerun",
+            as_of=args.as_of or "",
+            force=args.after_close_cmd == "rerun",
         )
         jobs.start()
         print(
@@ -302,8 +362,8 @@ def cmd_after_close(args) -> int:
             if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
                 break
             print(
-                f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'} "
-                f"{job.get('detail') or ''}", file=sys.stderr,
+                f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'} {job.get('detail') or ''}",
+                file=sys.stderr,
             )
             time.sleep(0.5)
         if job["status"] not in {"completed", "completed_with_warnings"}:
@@ -316,8 +376,7 @@ def cmd_after_close(args) -> int:
         _print_json({"items": service.store.history(args.limit)})
         return 0
     snapshot = (
-        service.store.get(args.snapshot_id) if getattr(args, "snapshot_id", "")
-        else service.store.latest()
+        service.store.get(args.snapshot_id) if getattr(args, "snapshot_id", "") else service.store.latest()
     )
     if snapshot is None:
         raise FileNotFoundError("尚无盘后研究快照")
@@ -333,26 +392,41 @@ def cmd_after_close(args) -> int:
             import csv
 
             fields = [
-                "rank", "symbol", "name", "score", "as_of_date", "sectors", "reasons",
-                "return_5d", "return_20d", "trend_20d", "avg_amount_20d",
-                "amount_change", "volatility_20d", "drawdown_20d", "float_mv",
-                "total_mv", "pe_ttm", "pb",
+                "rank",
+                "symbol",
+                "name",
+                "score",
+                "as_of_date",
+                "sectors",
+                "reasons",
+                "return_5d",
+                "return_20d",
+                "trend_20d",
+                "avg_amount_20d",
+                "amount_change",
+                "volatility_20d",
+                "drawdown_20d",
+                "float_mv",
+                "total_mv",
+                "pe_ttm",
+                "pb",
             ]
             with target.open("w", encoding="utf-8-sig", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=fields)
                 writer.writeheader()
                 for candidate in snapshot.candidates:
-                    writer.writerow({
-                        "rank": candidate.rank, "symbol": candidate.symbol,
-                        "name": candidate.name, "score": candidate.score,
-                        "as_of_date": candidate.as_of_date,
-                        "sectors": " / ".join(item["name"] for item in candidate.sectors),
-                        "reasons": "；".join(candidate.reasons),
-                        **{
-                            key: candidate.metrics.get(key)
-                            for key in fields if key in candidate.metrics
-                        },
-                    })
+                    writer.writerow(
+                        {
+                            "rank": candidate.rank,
+                            "symbol": candidate.symbol,
+                            "name": candidate.name,
+                            "score": candidate.score,
+                            "as_of_date": candidate.as_of_date,
+                            "sectors": " / ".join(item["name"] for item in candidate.sectors),
+                            "reasons": "；".join(candidate.reasons),
+                            **{key: candidate.metrics.get(key) for key in fields if key in candidate.metrics},
+                        }
+                    )
         else:
             target.write_text(strict_json_dumps(payload, indent=2), encoding="utf-8")
         _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
@@ -362,41 +436,82 @@ def cmd_after_close(args) -> int:
 
 
 def cmd_stockdb(args) -> int:
+    from quantmaster.config import get_config
     from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
 
     store = StockDBIngestStore()
+    if args.stockdb_cmd == "validate-native":
+        from datetime import date, timedelta
+
+        from quantmaster.data.free_stockdb_compatibility import validate_runtime_profile
+
+        end = args.end or date.today().isoformat()
+        start = args.start or (date.fromisoformat(end) - timedelta(days=300)).isoformat()
+        samples = [
+            {"symbol": symbol, "start": start, "end": end, "kind": kind}
+            for symbol, kind in (
+                ("600000.SH", "ordinary"),
+                ("000001.SZ", "suspension_or_boundary"),
+                ("510300.SH", "etf"),
+            )
+        ]
+        profile = validate_runtime_profile(FreeStockDBSource(), samples)
+        _print_json(profile.to_dict())
+        return 0 if profile.status in {"compatible", "partial"} else 1
     if args.stockdb_cmd == "status":
-        _print_json({
-            "runtime": free_stockdb_runtime.status(),
-            "latest_ingest": store.history(1)[0].to_dict() if store.history(1) else None,
-        })
+        from quantmaster.data.free_stockdb_compatibility import StockDBCompatibilityStore
+
+        source = FreeStockDBSource()
+        compatibility = StockDBCompatibilityStore().get(source.artifact_identity().artifact_id)
+        _print_json(
+            {
+                "runtime": free_stockdb_runtime.status(),
+                "latest_ingest": store.history(1)[0].to_dict() if store.history(1) else None,
+                "compatibility": compatibility.to_dict() if compatibility else None,
+                "native_acceleration_enabled": get_config().data.free_stockdb_native_acceleration_enabled,
+            }
+        )
         return 0
     if args.stockdb_cmd == "audit":
+        from quantmaster.data.free_stockdb_compatibility import StockDBCompatibilityStore
+
         source = FreeStockDBSource()
         probe = source.probe()
         boards = source.board_hierarchy()
         catalog = source.security_catalog()
-        _print_json({
-            "status": "ok", "upstream": "tushare", "distribution": "free-stockdb",
-            "independent_cross_validation": False, "probe": probe,
-            "artifact": source.artifact_identity(
-                data_session=str(free_stockdb_runtime.status().get("validated_session") or ""),
-            ).to_dict(),
-            "catalog_count": len(catalog), "board_count": len(boards),
-            "board_levels": sorted({str(item.get("level") or "") for item in boards}),
-        })
+        compatibility = StockDBCompatibilityStore().get(source.artifact_identity().artifact_id)
+        _print_json(
+            {
+                "status": "ok",
+                "upstream": "tushare",
+                "distribution": "free-stockdb",
+                "independent_cross_validation": False,
+                "probe": probe,
+                "artifact": source.artifact_identity(
+                    data_session=str(free_stockdb_runtime.status().get("validated_session") or ""),
+                ).to_dict(),
+                "catalog_count": len(catalog),
+                "board_count": len(boards),
+                "board_levels": sorted({str(item.get("level") or "") for item in boards}),
+                "compatibility": compatibility.to_dict() if compatibility else None,
+            }
+        )
         return 0
     # A formal stock ingest shares the after-close integrity gate and therefore
     # also publishes/reuses the corresponding research snapshot.
     from quantmaster.after_close.service import get_after_close_service
 
     snapshot = get_after_close_service().scan(as_of=args.as_of or "")
-    _print_json({
-        "ingest_id": snapshot.ingest_id, "artifact_id": snapshot.artifact_id,
-        "as_of_date": snapshot.as_of_date, "coverage": snapshot.coverage,
-    })
+    _print_json(
+        {
+            "ingest_id": snapshot.ingest_id,
+            "artifact_id": snapshot.artifact_id,
+            "as_of_date": snapshot.as_of_date,
+            "coverage": snapshot.coverage,
+        }
+    )
     return 0
 
 
@@ -408,6 +523,16 @@ def cmd_etf_research(args) -> int:
     from quantmaster.runtime.json import strict_json_dumps
 
     service = get_etf_research_service()
+    if args.etf_research_cmd == "cancel":
+        jobs = get_etf_research_jobs()
+        _print_json(jobs.public(jobs.cancel(args.job_id)))
+        return 0
+    if args.etf_research_cmd == "resume":
+        jobs = get_etf_research_jobs()
+        resumed = jobs.retry(args.job_id)
+        jobs.start()
+        _print_json(jobs.public(resumed))
+        return 0
     if args.etf_research_cmd == "scan":
         import time
 
@@ -418,8 +543,7 @@ def cmd_etf_research(args) -> int:
             job = jobs.get(str(job["id"]))
             if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
                 break
-            print(f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'}",
-                  file=sys.stderr)
+            print(f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'}", file=sys.stderr)
             time.sleep(0.5)
         if job["status"] not in {"completed", "completed_with_warnings"}:
             _print_json(jobs.public(job))
@@ -439,7 +563,9 @@ def cmd_etf_research(args) -> int:
             target.write_text(strict_json_dumps(snapshot.to_dict(), indent=2), encoding="utf-8")
         else:
             pd.DataFrame([item.to_dict() for item in snapshot.items]).to_csv(
-                target, index=False, encoding="utf-8-sig",
+                target,
+                index=False,
+                encoding="utf-8-sig",
             )
         _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
         return 0
@@ -497,8 +623,10 @@ def cmd_backtest(args) -> None:
         from quantmaster.decision import HybridDecisionStrategy
 
         strategy = HybridDecisionStrategy(
-            top_n=args.top, holding_days=args.holding_days,
-            profile=args.profile, universe=args.universe,
+            top_n=args.top,
+            holding_days=args.holding_days,
+            profile=args.profile,
+            universe=args.universe,
         )
     elif args.strategy == "swing":
         from quantmaster.backtest import SwingStrategy
@@ -509,21 +637,25 @@ def cmd_backtest(args) -> None:
 
         strategy = MultiFactorStrategy(
             [resolve_factor(n, symbols, args.start, end) for n in names],
-            top_n=args.top, rebalance=args.rebalance, weighting=args.weighting)
+            top_n=args.top,
+            rebalance=args.rebalance,
+            weighting=args.weighting,
+        )
     else:
         strategy = FactorStrategy(
-            resolve_factor(names[0], symbols, args.start, end),
-            top_n=args.top, rebalance=args.rebalance)
+            resolve_factor(names[0], symbols, args.start, end), top_n=args.top, rebalance=args.rebalance
+        )
     benchmark = None
     try:
         benchmark = load_history(args.benchmark, args.start, end)["close"]
     except Exception as e:
         print(f"基准 {args.benchmark} 加载失败: {e}", file=sys.stderr)
-    result = run_backtest(panel, strategy.target_weights(panel),
-                          BacktestConfig(initial_capital=args.capital,
-                                         stop_loss=args.stop_loss,
-                                         take_profit=args.take_profit),
-                          benchmark_close=benchmark)
+    result = run_backtest(
+        panel,
+        strategy.target_weights(panel),
+        BacktestConfig(initial_capital=args.capital, stop_loss=args.stop_loss, take_profit=args.take_profit),
+        benchmark_close=benchmark,
+    )
     _print_json(result.metrics)
     if args.full:
         print("\n== 年度收益 ==")
@@ -647,21 +779,38 @@ def cmd_paper(args) -> None:
         return
 
     strategy = (
-        {"kind": "decision", "profile": args.profile, "top_n": args.top,
-         "holding_days": args.holding_days, "cap_weight": 0.25,
-         "policy_snapshot": {}}
+        {
+            "kind": "decision",
+            "profile": args.profile,
+            "top_n": args.top,
+            "holding_days": args.holding_days,
+            "cap_weight": 0.25,
+            "policy_snapshot": {},
+        }
         if args.strategy == "decision"
-        else {"kind": "swing", "top_n": args.top,
-         "holding_days": args.holding_days, "cap_weight": 0.25}
+        else {"kind": "swing", "top_n": args.top, "holding_days": args.holding_days, "cap_weight": 0.25}
         if args.strategy == "swing"
-        else {"kind": "factor", "factor": args.factor, "top_n": args.top,
-              "rebalance": args.rebalance, "weighting": "equal", "cap_weight": 0.35}
+        else {
+            "kind": "factor",
+            "factor": args.factor,
+            "top_n": args.top,
+            "rebalance": args.rebalance,
+            "weighting": "equal",
+            "cap_weight": 0.35,
+        }
     )
     if args.paper_cmd == "create":
-        account = service.create_account(PaperAccountSpec.model_validate({
-            "name": args.name, "strategy": strategy, "universe": args.universe,
-            "initial_capital": args.capital, "mode": args.mode,
-        }))
+        account = service.create_account(
+            PaperAccountSpec.model_validate(
+                {
+                    "name": args.name,
+                    "strategy": strategy,
+                    "universe": args.universe,
+                    "initial_capital": args.capital,
+                    "mode": args.mode,
+                }
+            )
+        )
         _print_json(account)
         return
 
@@ -702,33 +851,55 @@ def cmd_daily(args) -> None:
     print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
     panel = load_panel(symbols, args.start, end)
     selection = hybrid_daily_selection(
-        panel, top_n=args.top, horizon=args.holding_days, profile=args.profile,
+        panel,
+        top_n=args.top,
+        horizon=args.holding_days,
+        profile=args.profile,
         universe=args.universe,
         name_map=load_stock_names(symbols),
     )
     DecisionStore().save(selection, args.universe)
-    print(f"  {selection['signal_date']}：{len(selection['picks'])} 只候选，"
-          f"建议仓位 {selection['recommended_exposure']:.0%}", file=sys.stderr)
+    print(
+        f"  {selection['signal_date']}：{len(selection['picks'])} 只候选，"
+        f"建议仓位 {selection['recommended_exposure']:.0%}",
+        file=sys.stderr,
+    )
 
     print("== 4/4 处理模拟订单并生成收盘提案 ==", file=sys.stderr)
     strategy = (
-        {"kind": "decision", "profile": args.profile, "top_n": args.top,
-         "holding_days": args.holding_days, "cap_weight": 0.25,
-         "policy_snapshot": {}}
+        {
+            "kind": "decision",
+            "profile": args.profile,
+            "top_n": args.top,
+            "holding_days": args.holding_days,
+            "cap_weight": 0.25,
+            "policy_snapshot": {},
+        }
         if args.strategy == "decision"
-        else {"kind": "swing", "top_n": args.top,
-         "holding_days": args.holding_days, "cap_weight": 0.25}
+        else {"kind": "swing", "top_n": args.top, "holding_days": args.holding_days, "cap_weight": 0.25}
         if args.strategy == "swing"
-        else {"kind": "factor", "factor": args.factor, "top_n": args.top,
-              "rebalance": args.rebalance, "weighting": "equal", "cap_weight": 0.35}
+        else {
+            "kind": "factor",
+            "factor": args.factor,
+            "top_n": args.top,
+            "rebalance": args.rebalance,
+            "weighting": "equal",
+            "cap_weight": 0.35,
+        }
     )
     service = get_paper_service()
-    desired_spec = PaperAccountSpec.model_validate({
-        "name": "每日例程模拟盘", "strategy": strategy, "universe": args.universe,
-        "initial_capital": args.capital, "mode": "manual",
-    })
+    desired_spec = PaperAccountSpec.model_validate(
+        {
+            "name": "每日例程模拟盘",
+            "strategy": strategy,
+            "universe": args.universe,
+            "initial_capital": args.capital,
+            "mode": "manual",
+        }
+    )
     account = next(
-        (item for item in service.store.accounts() if item["name"] == "每日例程模拟盘"), None,
+        (item for item in service.store.accounts() if item["name"] == "每日例程模拟盘"),
+        None,
     )
     if account is None:
         account = service.create_account(desired_spec)
@@ -736,7 +907,8 @@ def cmd_daily(args) -> None:
         from quantmaster.backtest.spec import pin_decision_strategy
 
         desired_strategy = pin_decision_strategy(
-            desired_spec.strategy, desired_spec.universe,
+            desired_spec.strategy,
+            desired_spec.universe,
         ).model_dump(mode="json")
         if account["strategy"] != desired_strategy or account["universe"] != args.universe:
             raise ValueError("每日例程模拟盘的策略快照不同；请新建账户或恢复原参数")
@@ -819,9 +991,16 @@ def cmd_ledger(args) -> None:
         count = ledger.import_csv(args.file)
         print(f"导入 {count} 条成交记录")
     elif args.ledger_cmd == "add":
-        ledger.add_trade(TradeRecord(date=args.date or _today(), symbol=args.symbol,
-                                     side=args.side, price=args.price,
-                                     shares=args.shares, fee=args.fee))
+        ledger.add_trade(
+            TradeRecord(
+                date=args.date or _today(),
+                symbol=args.symbol,
+                side=args.side,
+                price=args.price,
+                shares=args.shares,
+                fee=args.fee,
+            )
+        )
         print("已记录")
     elif args.ledger_cmd == "cash":
         ledger.add_cashflow(args.date or _today(), args.amount, args.kind)
@@ -872,24 +1051,35 @@ def cmd_data(args) -> None:
             candidates = BarStore().symbols()
             instruments = InstrumentStore().get_many(candidates)
             symbols = [
-                symbol for symbol in candidates
+                symbol
+                for symbol in candidates
                 if (instruments.get(symbol) and instruments[symbol].asset_type == args.asset)
             ]
         records = engine.lake.materialize_bar_store(
-            symbols, args.start, args.end or _today(), asset_class=_research_assets(args.asset)[0],
+            symbols,
+            args.start,
+            args.end or _today(),
+            asset_class=_research_assets(args.asset)[0],
         )
-        _print_json({
-            "asset_class": args.asset, "symbols": len(symbols),
-            "partitions": len(records), "rows": sum(item["row_count"] for item in records),
-        })
+        _print_json(
+            {
+                "asset_class": args.asset,
+                "symbols": len(symbols),
+                "partitions": len(records),
+                "rows": sum(item["row_count"] for item in records),
+            }
+        )
         return
 
     end = args.end or _today()
     plan = engine.plan(
-        args.start, end, asset_classes=_research_assets(args.assets),
+        args.start,
+        end,
+        asset_classes=_research_assets(args.assets),
         datasets=tuple(item.strip() for item in args.datasets.split(",") if item.strip()) or None,
         spec_ids=tuple(item.strip() for item in args.specs.split(",") if item.strip()) or None,
-        mode=args.mode, backend=KernelBackend(args.backend),
+        mode=args.mode,
+        backend=KernelBackend(args.backend),
     )
     if args.data_cmd == "plan":
         if args.output:
@@ -907,7 +1097,8 @@ def cmd_data(args) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qm", description="QuantMaster — A股量化研究平台")
     parser.add_argument(
-        "--verbose", action="store_true",
+        "--verbose",
+        action="store_true",
         help="展开每次完整 traceback；可放在任意子命令前后",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -920,11 +1111,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve", help="启动 Web 界面")
     p.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
     p.add_argument(
-        "--reload", action="store_true",
+        "--reload",
+        action="store_true",
         help="监视主站代码并安全热更新（FreeStockDB 保持运行）",
     )
     p.add_argument(
-        "--no-reload", dest="reload", action="store_false",
+        "--no-reload",
+        dest="reload",
+        action="store_false",
         help="关闭主站代码热更新",
     )
     p.set_defaults(reload=False)
@@ -942,10 +1136,18 @@ def build_parser() -> argparse.ArgumentParser:
     asub = p.add_subparsers(dest="automation_cmd", required=True)
     asub.add_parser("doctor", help="检查依赖、Bot 账号、推送目标和任务状态")
     arun = asub.add_parser("run", help="立即提交一个自动化任务")
-    arun.add_argument("task", choices=[
-        "intraday_monitor", "fast_news_scan", "official_news_scan", "periodic_news_scan",
-        "daily_close_pipeline", "news_digest", "paper_rebalance_proposal",
-    ])
+    arun.add_argument(
+        "task",
+        choices=[
+            "intraday_monitor",
+            "fast_news_scan",
+            "official_news_scan",
+            "periodic_news_scan",
+            "daily_close_pipeline",
+            "news_digest",
+            "paper_rebalance_proposal",
+        ],
+    )
     adispatch = asub.add_parser("dispatch", help="立即投递待发消息")
     adispatch.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_automation)
@@ -989,8 +1191,8 @@ def build_parser() -> argparse.ArgumentParser:
     ltrain = lq.add_parser("train", help="提交 Ridge/深度学习实验")
     lab_common(ltrain)
     ltrain.add_argument(
-        "--model", choices=["ridge", "mlp", "tcn", "gru", "transformer", "dae"],
-        default="ridge")
+        "--model", choices=["ridge", "mlp", "tcn", "gru", "transformer", "dae"], default="ridge"
+    )
     ltrain.add_argument("--horizon", type=int, choices=[1, 3, 5, 7], default=3)
     ltrain.add_argument("--sequence-length", type=int, default=20)
     ltrain.add_argument("--epochs", type=int, default=30)
@@ -999,7 +1201,8 @@ def build_parser() -> argparse.ArgumentParser:
     loptimize.add_argument("--start", default="2015-01-01")
     loptimize.add_argument("--end", default=None)
     loptimize.add_argument(
-        "--models", default="multi-transformer,multi-tcn,multi-gru,ridge",
+        "--models",
+        default="multi-transformer,multi-tcn,multi-gru,ridge",
         help="逗号分隔的共享模型；Ridge 始终可作 CPU 基线",
     )
     loptimize.add_argument("--budget-hours", type=float, default=10.0)
@@ -1007,7 +1210,9 @@ def build_parser() -> argparse.ArgumentParser:
     loptimize.add_argument("--top", type=int, default=20)
     loptimize.add_argument("--sequence-length", type=int, default=20)
     loptimize.add_argument(
-        "--research-tier", choices=["production", "sandbox"], default="production",
+        "--research-tier",
+        choices=["production", "sandbox"],
+        default="production",
     )
     laudit = lq.add_parser("audit", help="提交防前视、递归稳定性与 PIT 审计")
     laudit.add_argument("version_id")
@@ -1025,9 +1230,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("fetch", help="预取行情到本地缓存")
     common(p)
-    p.add_argument("--frequency", default="1d",
-                   choices=["1d", "1m", "5m", "15m", "30m", "60m"],
-                   help="K线频率；分钟线会按频率独立长期归档")
+    p.add_argument(
+        "--frequency",
+        default="1d",
+        choices=["1d", "1m", "5m", "15m", "30m", "60m"],
+        help="K线频率；分钟线会按频率独立长期归档",
+    )
     p.add_argument("--force", action="store_true", help="忽略缓存强制刷新")
     p.set_defaults(func=cmd_fetch)
 
@@ -1075,8 +1283,7 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--horizon", type=int, default=3, choices=[1, 3, 5, 7])
-    p.add_argument("--profile", default="risk_adjusted",
-                   choices=["risk_adjusted", "short_term", "stable"])
+    p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--no-industry", action="store_true", help="不加载行业名称")
     p.add_argument("--no-save", action="store_true", help="不保存本次决策快照")
     p.set_defaults(func=cmd_select)
@@ -1102,14 +1309,28 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("output")
     export.add_argument("--snapshot-id", default="")
     export.add_argument("--format", choices=["json", "csv"], default="json")
+    score_version = acsub.add_parser("score-version", help="查看、提升或回滚盘后评分版本")
+    score_sub = score_version.add_subparsers(dest="score_version_cmd", required=True)
+    score_sub.add_parser("status", help="查看 V2 人工评审资格与当前正式版本")
+    score_sub.add_parser("promote", help="资格门通过后人工提升 V2，仅影响后续快照")
+    score_sub.add_parser("rollback", help="将后续快照正式评分回滚到 V1")
     p.set_defaults(
-        func=cmd_after_close, as_of="", snapshot_id="", limit=30, output="", format="json",
+        func=cmd_after_close,
+        as_of="",
+        snapshot_id="",
+        limit=30,
+        output="",
+        format="json",
+        score_version_cmd="",
     )
 
     p = sub.add_parser("stockdb", help="free-stockdb 制品、摄取与能力诊断")
     sdsub = p.add_subparsers(dest="stockdb_cmd", required=True)
     sdsub.add_parser("audit", help="运行本地 SDK、目录、板块与制品审计")
     sdsub.add_parser("status", help="查看托管运行时与最近摄取")
+    native = sdsub.add_parser("validate-native", help="校验当前制品原生指标并写入兼容档案")
+    native.add_argument("--start", default="")
+    native.add_argument("--end", default="")
     sdi = sdsub.add_parser("ingest", help="通过正式完整性门创建或复用 A 股摄取")
     sdi.add_argument("--as-of", default="")
     p.set_defaults(func=cmd_stockdb, as_of="")
@@ -1122,13 +1343,22 @@ def build_parser() -> argparse.ArgumentParser:
     ershow.add_argument("--snapshot-id", default="")
     erhistory = ersub.add_parser("history", help="查看 ETF 研究快照历史")
     erhistory.add_argument("--limit", type=int, default=30)
+    ercancel = ersub.add_parser("cancel", help="安全取消 ETF 研究任务")
+    ercancel.add_argument("job_id")
+    erresume = ersub.add_parser("resume", help="恢复失败、取消或中断的 ETF 研究任务")
+    erresume.add_argument("job_id")
     erexport = ersub.add_parser("export", help="导出 ETF 研究快照")
     erexport.add_argument("output")
     erexport.add_argument("--snapshot-id", default="")
     erexport.add_argument("--format", choices=["json", "csv"], default="json")
     p.set_defaults(
-        func=cmd_etf_research, as_of="", snapshot_id="", limit=30,
-        output="", format="json",
+        func=cmd_etf_research,
+        as_of="",
+        snapshot_id="",
+        limit=30,
+        output="",
+        format="json",
+        job_id="",
     )
 
     sub.add_parser("factors", help="列出内置因子").set_defaults(func=cmd_factors)
@@ -1137,23 +1367,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("expression", help="内置因子名或表达式")
     common(p)
     p.add_argument("--quantiles", type=int, default=5)
-    p.add_argument("--neutralize", action="store_true",
-                   help="行业中性化：行业内去均值后再评估（剔除行业押注）")
+    p.add_argument(
+        "--neutralize", action="store_true", help="行业中性化：行业内去均值后再评估（剔除行业押注）"
+    )
     p.set_defaults(func=cmd_factor_test)
 
     p = sub.add_parser("backtest", help="因子选股回测（--factor 逗号分隔多个名字 = 多因子组合）")
     common(p)
-    p.add_argument("--strategy", default="factor", choices=["factor", "decision", "swing"],
-                   help="factor=传统因子；decision=Hybrid v2；swing=旧版短线")
-    p.add_argument("--profile", default="risk_adjusted",
-                   choices=["risk_adjusted", "short_term", "stable"])
-    p.add_argument("--factor", default="mom_20d",
-                   help="因子名/表达式；逗号分隔多个则做多因子合成，如 mom_20d,rev_5d,ep")
-    p.add_argument("--weighting", default="equal", choices=["equal", "ic"],
-                   help="多因子合成方式：等权 或 滚动IC动态加权")
+    p.add_argument(
+        "--strategy",
+        default="factor",
+        choices=["factor", "decision", "swing"],
+        help="factor=传统因子；decision=Hybrid v2；swing=旧版短线",
+    )
+    p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
+    p.add_argument(
+        "--factor", default="mom_20d", help="因子名/表达式；逗号分隔多个则做多因子合成，如 mom_20d,rev_5d,ep"
+    )
+    p.add_argument(
+        "--weighting", default="equal", choices=["equal", "ic"], help="多因子合成方式：等权 或 滚动IC动态加权"
+    )
     p.add_argument("--top", type=int, default=5)
-    p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7],
-                   help="decision / swing 策略持有与调仓周期")
+    p.add_argument(
+        "--holding-days",
+        type=int,
+        default=3,
+        choices=[1, 3, 5, 7],
+        help="decision / swing 策略持有与调仓周期",
+    )
     p.add_argument("--rebalance", default="W", choices=["D", "W", "M"])
     p.add_argument("--benchmark", default="000300.SH")
     p.add_argument("--capital", type=float, default=1_000_000)
@@ -1174,8 +1415,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--factors", default="mom_20d,rev_5d", help="逗号分隔的因子名/表达式")
     p.add_argument("--tops", default="3,5,10", help="逗号分隔的持仓数")
     p.add_argument("--rebalances", default="W,M", help="逗号分隔的调仓频率")
-    p.add_argument("--metric", default="sharpe",
-                   choices=["sharpe", "annual_return", "max_drawdown", "calmar"])
+    p.add_argument(
+        "--metric", default="sharpe", choices=["sharpe", "annual_return", "max_drawdown", "calmar"]
+    )
     p.add_argument("--benchmark", default="000300.SH")
     p.set_defaults(func=cmd_grid)
 
@@ -1205,11 +1447,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("paper", help="多账户模拟盘")
     psub = p.add_subparsers(dest="paper_cmd", required=True)
+
     def paper_strategy_args(command):
         command.add_argument("--universe", default="demo")
         command.add_argument("--strategy", default="factor", choices=["factor", "decision", "swing"])
-        command.add_argument("--profile", default="risk_adjusted",
-                             choices=["risk_adjusted", "short_term", "stable"])
+        command.add_argument(
+            "--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"]
+        )
         command.add_argument("--factor", default="mom_20d")
         command.add_argument("--top", type=int, default=5)
         command.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
@@ -1235,8 +1479,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--universe", default="demo")
     p.add_argument("--start", default="2022-01-01")
     p.add_argument("--strategy", default="decision", choices=["factor", "decision", "swing"])
-    p.add_argument("--profile", default="risk_adjusted",
-                   choices=["risk_adjusted", "short_term", "stable"])
+    p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--factor", default="mom_20d")
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--holding-days", type=int, default=3, choices=[1, 3, 5, 7])
@@ -1302,6 +1545,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if len(raw_argv) == 3 and raw_argv[0] == "__factor-runner":
         from quantmaster.factors.python_artifact import _worker
+
         return _worker(raw_argv[1], raw_argv[2])
     parsed_argv, verbose = _extract_verbose(raw_argv)
     configure_logging(verbose=verbose)
@@ -1315,7 +1559,8 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except Exception:
         logging.getLogger(__name__).exception(
-            "命令执行失败", extra={"traceback_policy": "always"},
+            "命令执行失败",
+            extra={"traceback_policy": "always"},
         )
         return 1
 

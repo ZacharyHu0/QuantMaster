@@ -1,5 +1,10 @@
 """每日选股与短周期交易决策。"""
 
+from quantmaster.decision.follow_up import (
+    decision_follow_up,
+    enrich_decision_snapshots,
+    price_frames_from_panel,
+)
 from quantmaster.decision.hybrid import (
     HybridDecisionStrategy,
     adaptive_rule_score_panel,
@@ -12,6 +17,7 @@ from quantmaster.decision.swing import daily_selection, market_exposure, swing_s
 
 __all__ = [
     "DecisionStore", "HybridDecisionStrategy", "adaptive_rule_score_panel",
-    "daily_selection", "hybrid_daily_selection", "hybrid_score_bundle",
-    "market_exposure", "resolve_policy", "swing_score_panel",
+    "daily_selection", "decision_follow_up", "enrich_decision_snapshots",
+    "hybrid_daily_selection", "hybrid_score_bundle", "market_exposure",
+    "price_frames_from_panel", "resolve_policy", "swing_score_panel",
 ]

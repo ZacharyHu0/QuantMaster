@@ -1177,6 +1177,31 @@ def selection_daily(req: SelectionRequest) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
+def _decision_history_symbols(snapshots: list[dict]) -> list[str]:
+    return list(dict.fromkeys(
+        str(pick.get("symbol") or "")
+        for snapshot in snapshots
+        for pick in (snapshot.get("picks") or [])[:3]
+        if pick.get("symbol")
+    ))
+
+
+def _cached_decision_price_frames(snapshots: list[dict]) -> dict[str, pd.DataFrame]:
+    """Read follow-up prices from the local cache without triggering a refresh."""
+    symbols = _decision_history_symbols(snapshots)
+    if not symbols:
+        return {}
+    from quantmaster.data.storage import BarStore
+
+    store = BarStore()
+    frames: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        result = store.read(symbol, enqueue_repair=False)
+        if result.frame is not None:
+            frames[symbol] = result.frame
+    return frames
+
+
 @app.get("/api/v1/research/selection/history")
 def selection_history(
     universe: str | None = None,
@@ -1185,7 +1210,7 @@ def selection_history(
     horizon: int | None = None,
 ) -> dict:
     from quantmaster.data import load_stock_names
-    from quantmaster.decision import DecisionStore
+    from quantmaster.decision import DecisionStore, enrich_decision_snapshots
 
     if horizon is not None and horizon not in {1, 3, 5, 7}:
         raise HTTPException(422, "horizon 只支持 1、3、5、7")
@@ -1208,6 +1233,9 @@ def selection_history(
         for pick in snapshot.get("picks", []):
             if not pick.get("name") or pick.get("name") == "名称待同步":
                 pick["name"] = names.get(pick.get("symbol"), "名称待同步")
+    snapshots = enrich_decision_snapshots(
+        snapshots, _cached_decision_price_frames(snapshots),
+    )
     return {"snapshots": snapshots}
 
 
@@ -1239,7 +1267,13 @@ def _decision_dashboard_data(
     from quantmaster.data import load_panel, load_stock_names
     from quantmaster.data.industry import load_industry_map
     from quantmaster.data.universe import load_universe
-    from quantmaster.decision import DecisionStore, hybrid_daily_selection, resolve_policy
+    from quantmaster.decision import (
+        DecisionStore,
+        enrich_decision_snapshots,
+        hybrid_daily_selection,
+        price_frames_from_panel,
+        resolve_policy,
+    )
     from quantmaster.market import analyze_market, analyze_sectors
 
     end = req.end or str(pd.Timestamp.now().date())
@@ -1338,11 +1372,15 @@ def _decision_dashboard_data(
         for pick in snapshot.get("picks", []):
             if not pick.get("name") or pick.get("name") == "名称待同步":
                 pick["name"] = names.get(pick.get("symbol"), "名称待同步")
+    history_symbols = _decision_history_symbols(history)
+    history = enrich_decision_snapshots(
+        history, price_frames_from_panel(panel, history_symbols),
+    )
     if progress:
         progress(
             99,
-            "历史快照已就绪",
-            f"已读取 {len(history)} 条本地记录",
+            "历史快照与验证已就绪",
+            f"已读取 {len(history)} 条本地记录并核对后续价格",
             {"kind": "decision_history", "history": history},
         )
     result = {

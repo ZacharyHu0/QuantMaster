@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from quantmaster.after_close.models import AfterCloseSnapshot, utc_now
+from quantmaster.after_close.models import (
+    SCORE_VERSION,
+    SHADOW_SCORE_VERSION,
+    AfterCloseSnapshot,
+    utc_now,
+)
 from quantmaster.config import get_config
 from quantmaster.research.contracts import content_hash
 from quantmaster.runtime.json import strict_json_dumps
@@ -39,6 +45,10 @@ class AfterCloseStore:
                     snapshot_id TEXT NOT NULL, horizon INTEGER NOT NULL,
                     payload_json TEXT NOT NULL, calculated_at TEXT NOT NULL,
                     PRIMARY KEY(snapshot_id,horizon));
+                CREATE TABLE IF NOT EXISTS score_control (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    active_version TEXT NOT NULL, previous_version TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL);
             """)
 
     def _conn(self) -> sqlite3.Connection:
@@ -61,8 +71,16 @@ class AfterCloseStore:
                 "INSERT OR IGNORE INTO snapshots "
                 "(snapshot_id,as_of_date,score_version,input_hash,payload_json,payload_hash,"
                 "generated_at,published_at) VALUES (?,?,?,?,?,?,?,?)",
-                (snapshot.snapshot_id, snapshot.as_of_date, snapshot.score_version,
-                 snapshot.input_hash, encoded, digest, snapshot.generated_at, now),
+                (
+                    snapshot.snapshot_id,
+                    snapshot.as_of_date,
+                    snapshot.score_version,
+                    snapshot.input_hash,
+                    encoded,
+                    digest,
+                    snapshot.generated_at,
+                    now,
+                ),
             )
             connection.execute(
                 "INSERT INTO attempts(status,as_of_date,reasons_json,coverage_json,snapshot_id,created_at) "
@@ -72,14 +90,17 @@ class AfterCloseStore:
         return {"snapshot_id": snapshot.snapshot_id, "payload_hash": digest, "published_at": now}
 
     def record_failure(
-        self, reasons: list[str], *, as_of_date: str = "", coverage: dict | None = None,
+        self,
+        reasons: list[str],
+        *,
+        as_of_date: str = "",
+        coverage: dict | None = None,
     ) -> None:
         with self._conn() as connection:
             connection.execute(
                 "INSERT INTO attempts(status,as_of_date,reasons_json,coverage_json,created_at) "
                 "VALUES ('rejected',?,?,?,?)",
-                (as_of_date, strict_json_dumps(reasons),
-                 strict_json_dumps(coverage or {}), utc_now()),
+                (as_of_date, strict_json_dumps(reasons), strict_json_dumps(coverage or {}), utc_now()),
             )
 
     @staticmethod
@@ -94,7 +115,8 @@ class AfterCloseStore:
     def get(self, snapshot_id: str) -> AfterCloseSnapshot | None:
         with self._conn() as connection:
             row = connection.execute(
-                "SELECT * FROM snapshots WHERE snapshot_id=?", (snapshot_id,),
+                "SELECT * FROM snapshots WHERE snapshot_id=?",
+                (snapshot_id,),
             ).fetchone()
         return self._decode(row)
 
@@ -108,8 +130,8 @@ class AfterCloseStore:
     def for_date(self, as_of_date: str) -> AfterCloseSnapshot | None:
         with self._conn() as connection:
             row = connection.execute(
-                "SELECT * FROM snapshots WHERE as_of_date=? "
-                "ORDER BY published_at DESC LIMIT 1", (as_of_date,),
+                "SELECT * FROM snapshots WHERE as_of_date=? ORDER BY published_at DESC LIMIT 1",
+                (as_of_date,),
             ).fetchone()
         return self._decode(row)
 
@@ -119,9 +141,7 @@ class AfterCloseStore:
             return None
         value = snapshot.to_dict()
         with self._conn() as connection:
-            attempt = connection.execute(
-                "SELECT * FROM attempts ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+            attempt = connection.execute("SELECT * FROM attempts ORDER BY id DESC LIMIT 1").fetchone()
         if attempt and str(attempt["status"]) == "rejected":
             value["staleness"] = {
                 "stale": True,
@@ -155,82 +175,271 @@ class AfterCloseStore:
     def labels(self, snapshot_id: str) -> list[dict[str, Any]]:
         with self._conn() as connection:
             rows = connection.execute(
-                "SELECT horizon,payload_json,calculated_at FROM labels "
-                "WHERE snapshot_id=? ORDER BY horizon", (snapshot_id,),
+                "SELECT horizon,payload_json,calculated_at FROM labels WHERE snapshot_id=? ORDER BY horizon",
+                (snapshot_id,),
             ).fetchall()
         return [
-            {"horizon": int(row["horizon"]), "calculated_at": row["calculated_at"],
-             **json.loads(str(row["payload_json"]))}
+            {
+                "horizon": int(row["horizon"]),
+                "calculated_at": row["calculated_at"],
+                **json.loads(str(row["payload_json"])),
+            }
             for row in rows
         ]
+
+    def active_score_version(self) -> str:
+        with self._conn() as connection:
+            row = connection.execute("SELECT active_version FROM score_control WHERE singleton=1").fetchone()
+        value = str(row["active_version"]) if row else SCORE_VERSION
+        return value if value in {SCORE_VERSION, SHADOW_SCORE_VERSION} else SCORE_VERSION
+
+    def set_active_score_version(self, version: str) -> dict[str, Any]:
+        if version not in {SCORE_VERSION, SHADOW_SCORE_VERSION}:
+            raise ValueError(f"未知盘后评分版本: {version}")
+        current = self.active_score_version()
+        with self._conn() as connection:
+            connection.execute(
+                "INSERT INTO score_control(singleton,active_version,previous_version,updated_at) "
+                "VALUES (1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
+                "active_version=excluded.active_version,previous_version=excluded.previous_version,"
+                "updated_at=excluded.updated_at",
+                (version, current, utc_now()),
+            )
+        return {"active_version": version, "previous_version": current}
+
+    @staticmethod
+    def _psi(actual: list[float], expected: list[float]) -> float | None:
+        if len(actual) < 20 or len(expected) < 20:
+            return None
+        ordered = sorted(expected)
+        boundaries = [
+            ordered[min(len(ordered) - 1, int(len(ordered) * index / 10))] for index in range(1, 10)
+        ]
+
+        def bucket(values: list[float]) -> list[float]:
+            counts = [0] * 10
+            for value in values:
+                index = sum(value > boundary for boundary in boundaries)
+                counts[index] += 1
+            total = len(values)
+            return [max(count / total, 1e-6) for count in counts]
+
+        actual_bins, expected_bins = bucket(actual), bucket(expected)
+        return sum(
+            (left - right) * math.log(left / right)
+            for left, right in zip(actual_bins, expected_bins, strict=True)
+        )
 
     def health(self, limit: int = 100) -> dict[str, Any]:
         snapshots = self.history(limit)
         rows: list[dict[str, Any]] = []
+        loaded: list[AfterCloseSnapshot] = []
         for meta in snapshots:
             snapshot = self.get(str(meta["snapshot_id"]))
             if snapshot is None:
                 continue
+            loaded.append(snapshot)
             for label in self.labels(snapshot.snapshot_id):
-                rows.append({
-                    "snapshot_id": snapshot.snapshot_id,
-                    "as_of_date": snapshot.as_of_date,
-                    "score_version": snapshot.score_version,
-                    "market_regime": snapshot.validation.get("market_regime", "unknown"),
-                    **label,
-                })
-        grouped: dict[str, dict[str, Any]] = {}
+                versions = label.get("score_versions") or {snapshot.score_version: label}
+                for score_version, metrics in versions.items():
+                    if not isinstance(metrics, dict):
+                        continue
+                    common = {
+                        "snapshot_id": snapshot.snapshot_id,
+                        "as_of_date": snapshot.as_of_date,
+                        "score_version": score_version,
+                        "market_regime": snapshot.validation.get("market_regime", "unknown"),
+                        "primary_l1": "all",
+                        "filter_signature": content_hash(snapshot.filters)[:12],
+                        "coverage_anomaly": bool(
+                            snapshot.coverage.get("issues")
+                            or snapshot.coverage.get("status") not in {None, "complete"}
+                        ),
+                        "horizon": label["horizon"],
+                    }
+                    rows.append({**common, **metrics})
+                    for primary_l1, sector_metrics in (metrics.get("sector_groups") or {}).items():
+                        rows.append(
+                            {
+                                **common,
+                                **sector_metrics,
+                                "primary_l1": str(primary_l1),
+                            }
+                        )
+        grouped: dict[tuple[str, int, str, str, str], dict[str, Any]] = {}
         for row in rows:
-            key = f'{row["score_version"]}:{row["horizon"]}'
-            bucket = grouped.setdefault(key, {
-                "score_version": row["score_version"], "horizon": row["horizon"],
-                "observations": 0, "mean_return": [], "excess_return": [],
-                "hit_rate": [], "mean_max_drawdown": [],
-            })
+            key = (
+                str(row["score_version"]),
+                int(row["horizon"]),
+                str(row["market_regime"]),
+                str(row["primary_l1"]),
+                str(row["filter_signature"]),
+            )
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "score_version": row["score_version"],
+                    "horizon": row["horizon"],
+                    "market_regime": row["market_regime"],
+                    "primary_l1": row["primary_l1"],
+                    "filter_signature": row["filter_signature"],
+                    "observations": 0,
+                    "mean_return": [],
+                    "excess_return": [],
+                    "excess_vs_csi800": [],
+                    "hit_rate": [],
+                    "mean_max_drawdown": [],
+                    "candidate_turnover": [],
+                    "capacity_avg_amount_20d": [],
+                    "sector_concentration": [],
+                },
+            )
             bucket["observations"] += 1
             for source, target in (
                 ("mean_return", "mean_return"),
                 ("excess_mean_return", "excess_return"),
+                ("excess_vs_csi800", "excess_vs_csi800"),
                 ("hit_rate", "hit_rate"),
                 ("mean_max_drawdown", "mean_max_drawdown"),
+                ("candidate_turnover", "candidate_turnover"),
+                ("capacity_avg_amount_20d", "capacity_avg_amount_20d"),
+                ("sector_concentration", "sector_concentration"),
             ):
                 if row.get(source) is not None:
                     bucket[target].append(float(row[source]))
         summaries = []
         for bucket in grouped.values():
-            summaries.append({
-                "score_version": bucket["score_version"],
-                "horizon": bucket["horizon"],
-                "observations": bucket["observations"],
-                "mean_return": (
-                    sum(bucket["mean_return"]) / len(bucket["mean_return"])
-                    if bucket["mean_return"] else None
-                ),
-                "excess_return": (
-                    sum(bucket["excess_return"]) / len(bucket["excess_return"])
-                    if bucket["excess_return"] else None
-                ),
-                "hit_rate": (
-                    sum(bucket["hit_rate"]) / len(bucket["hit_rate"])
-                    if bucket["hit_rate"] else None
-                ),
-                "mean_max_drawdown": (
-                    sum(bucket["mean_max_drawdown"]) / len(bucket["mean_max_drawdown"])
-                    if bucket["mean_max_drawdown"] else None
-                ),
-            })
+            summary = {key: value for key, value in bucket.items() if not isinstance(value, list)}
+            summary.update(
+                {
+                    key: (sum(values) / len(values) if values else None)
+                    for key, values in bucket.items()
+                    if isinstance(values, list)
+                }
+            )
+            summary["conclusion"] = "样本不足" if bucket["observations"] < 20 else "仅供研究观察"
+            summaries.append(summary)
+
+        drift: dict[str, Any] = {"status": "insufficient", "features": {}}
+        if loaded:
+            latest_distributions = loaded[0].validation.get("feature_distributions") or {}
+            historical: dict[str, list[float]] = {}
+            for snapshot in loaded[1:61]:
+                for feature, values in (snapshot.validation.get("feature_distributions") or {}).items():
+                    historical.setdefault(str(feature), []).extend(
+                        float(value) for value in values if value is not None
+                    )
+            severities = []
+            for feature in ("coverage", "returns", "amount", "turnover", "volatility", "float_mv"):
+                actual = [
+                    float(value) for value in latest_distributions.get(feature, []) if value is not None
+                ]
+                psi = self._psi(actual, historical.get(feature, []))
+                status = (
+                    "unavailable"
+                    if psi is None
+                    else "degraded"
+                    if psi >= 0.25
+                    else "warning"
+                    if psi >= 0.10
+                    else "stable"
+                )
+                drift["features"][feature] = {"psi": psi, "status": status}
+                severities.append(status)
+            drift["status"] = (
+                "degraded"
+                if "degraded" in severities
+                else "warning"
+                if "warning" in severities
+                else "stable"
+                if "stable" in severities
+                else "insufficient"
+            )
+
+        five_day_v2 = [
+            row
+            for row in rows
+            if row["score_version"] == SHADOW_SCORE_VERSION
+            and row["horizon"] == 5
+            and row["primary_l1"] == "all"
+        ]
+        five_day_v1 = [
+            row
+            for row in rows
+            if row["score_version"] == SCORE_VERSION and row["horizon"] == 5 and row["primary_l1"] == "all"
+        ]
+
+        def average(values: list[dict[str, Any]], field: str) -> float | None:
+            numbers = [float(item[field]) for item in values if item.get(field) is not None]
+            return sum(numbers) / len(numbers) if numbers else None
+
+        v2_excess, v1_excess = (
+            average(five_day_v2, "excess_mean_return"),
+            average(five_day_v1, "excess_mean_return"),
+        )
+        v2_drawdown, v1_drawdown = (
+            average(five_day_v2, "mean_max_drawdown"),
+            average(five_day_v1, "mean_max_drawdown"),
+        )
+        anomaly_ratio = (
+            sum(bool(item["coverage_anomaly"]) for item in five_day_v2) / len(five_day_v2)
+            if five_day_v2
+            else 1.0
+        )
+        promotion_checks = {
+            "five_day_snapshots": {
+                "value": len(five_day_v2),
+                "required": 60,
+                "passed": len(five_day_v2) >= 60,
+            },
+            "coverage_anomaly_ratio": {
+                "value": anomaly_ratio,
+                "maximum": 0.05,
+                "passed": anomaly_ratio < 0.05,
+            },
+            "excess_not_degraded": {
+                "v1": v1_excess,
+                "v2": v2_excess,
+                "passed": v1_excess is not None and v2_excess is not None and v2_excess >= v1_excess - 0.002,
+            },
+            "drawdown_not_degraded": {
+                "v1": v1_drawdown,
+                "v2": v2_drawdown,
+                "passed": v1_drawdown is not None
+                and v2_drawdown is not None
+                and v2_drawdown >= v1_drawdown - 0.005,
+            },
+        }
+        manual_review_eligible = all(item["passed"] for item in promotion_checks.values())
         latest = self.public_latest()
         latest_value = latest or {}
         coverage = latest_value.get("coverage", {})
         issues = list(coverage.get("issues") or [])
         if latest_value.get("staleness", {}).get("stale"):
-            issues.append(str(
-                latest_value["staleness"].get("reason") or "latest attempt rejected"
-            ))
+            issues.append(str(latest_value["staleness"].get("reason") or "latest attempt rejected"))
         return {
-            "status": "observation" if issues or not rows else "validated_observation",
+            "status": (
+                "degraded"
+                if drift["status"] == "degraded"
+                else "observation"
+                if issues or not rows
+                else "validated_observation"
+            ),
             "candidate_promotion_allowed": False,
+            "manual_review_eligible": manual_review_eligible,
+            "active_score_version": self.active_score_version(),
+            "promotion_checks": promotion_checks,
             "reason": "研究健康度仅作观察，不等同于交易建议",
             "coverage": coverage,
-            "summaries": sorted(summaries, key=lambda item: (item["score_version"], item["horizon"])),
+            "drift": drift,
+            "summaries": sorted(
+                summaries,
+                key=lambda item: (
+                    item["score_version"],
+                    item["horizon"],
+                    item["market_regime"],
+                    item["primary_l1"],
+                    item["filter_signature"],
+                ),
+            ),
         }

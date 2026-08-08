@@ -24,10 +24,17 @@ from quantmaster.credentials import CredentialError, CredentialStore
 
 CONFIG_VERSION = 1
 AUTO_SNAPSHOT_LIMIT = 20
-SETTINGS_CHECK_KINDS = frozenset({
-    "llm-models", "llm-web-search", "tushare", "storage",
-    "data-sources", "server", "lab",
-})
+SETTINGS_CHECK_KINDS = frozenset(
+    {
+        "llm-models",
+        "llm-web-search",
+        "tushare",
+        "storage",
+        "data-sources",
+        "server",
+        "lab",
+    }
+)
 
 
 def normalize_api_base(provider: str, value: str) -> str:
@@ -42,7 +49,7 @@ def normalize_api_base(provider: str, value: str) -> str:
     lowered = value.lower()
     for suffix in suffixes:
         if lowered.endswith(suffix):
-            value = value[:-len(suffix)].rstrip("/")
+            value = value[: -len(suffix)].rstrip("/")
             break
     # 常见 OpenAI-compatible 地址没有 /v1 时也允许；不能擅自补齐网关路径。
     return value
@@ -57,7 +64,13 @@ class LLMSettings(StrictModel):
     model: str = Field(default="claude-sonnet-5", min_length=1, max_length=200)
     base_url: str = Field(default="", max_length=2048)
     reasoning_effort: Literal[
-        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
     ] = "medium"
     max_tokens: int = Field(default=2048, ge=1, le=1_000_000)
     temperature: float = Field(default=0.3, ge=0.0, le=2.0)
@@ -87,15 +100,20 @@ class DataSettings(StrictModel):
     free_stockdb_update_time: str = Field(default="18:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     free_stockdb_online_enabled: bool = True
     free_stockdb_online_url: str = Field(
-        default="http://8.138.149.215:7899", max_length=2048,
+        default="http://8.138.149.215:7899",
+        max_length=2048,
     )
     free_stockdb_online_timeout: float = Field(default=4.0, ge=0.5, le=30.0)
     free_stockdb_ingest_retain: int = Field(default=30, ge=5, le=365)
+    free_stockdb_stock_history_sessions: int = Field(default=180, ge=60, le=500)
+    free_stockdb_stock_initial_lookback_days: int = Field(default=300, ge=180, le=720)
+    free_stockdb_stock_max_lookback_days: int = Field(default=540, ge=300, le=1500)
     free_stockdb_etf_research_enabled: bool = True
     free_stockdb_etf_minutes_enabled: bool = True
     free_stockdb_experimental_tick_enabled: bool = False
     free_stockdb_experimental_fundamentals_enabled: bool = False
     free_stockdb_experimental_daily_quota: int = Field(default=20, ge=1, le=200)
+    free_stockdb_native_acceleration_enabled: bool = False
     cache_days: int = Field(default=1, ge=0, le=3650)
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
@@ -173,7 +191,13 @@ class NewsSettings(StrictModel):
     annotation_timeout: float = Field(default=180.0, ge=5.0, le=600.0)
     annotation_model: str = Field(default="", max_length=200)
     annotation_reasoning_effort: Literal[
-        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
     ] = "low"
     factor_halflife_days: float = Field(default=3.0, gt=0, le=30)
     factor_min_confidence: float = Field(default=0.35, ge=0, le=1)
@@ -184,9 +208,16 @@ class AutomationSettings(StrictModel):
     timezone: str = Field(default="Asia/Shanghai", min_length=1, max_length=100)
     primary_universe: str = Field(default="demo", min_length=1, max_length=40)
     watchlist: list[str] = Field(default_factory=list, max_length=10_000)
-    sentinel_indices: list[str] = Field(default_factory=lambda: [
-        "000300.SH", "000905.SH", "000852.SH", "399006.SZ",
-    ], min_length=1, max_length=12)
+    sentinel_indices: list[str] = Field(
+        default_factory=lambda: [
+            "000300.SH",
+            "000905.SH",
+            "000852.SH",
+            "399006.SZ",
+        ],
+        min_length=1,
+        max_length=12,
+    )
     weixin_api_base: str = Field(default="https://ilinkai.weixin.qq.com", max_length=2048)
     feishu_app_id: str = Field(default="", max_length=200)
     retention_days: int = Field(default=90, ge=7, le=3650)
@@ -228,9 +259,9 @@ class LabSettings(StrictModel):
     universe: str = Field(default="csi800", min_length=1, max_length=40)
     start: str = Field(default="2015-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$")
     horizons: list[Literal[1, 3, 5, 7]] = Field(
-        default_factory=lambda: [1, 3, 5, 7], min_length=1, max_length=4)
-    weekly_days: list[int] = Field(
-        default_factory=lambda: [1, 3, 5], min_length=1, max_length=7)
+        default_factory=lambda: [1, 3, 5, 7], min_length=1, max_length=4
+    )
+    weekly_days: list[int] = Field(default_factory=lambda: [1, 3, 5], min_length=1, max_length=7)
     window_start: str = Field(default="19:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     window_end: str = Field(default="07:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     daily_budget_hours: float = Field(default=10.0, gt=0, le=24)
@@ -313,22 +344,25 @@ class SettingsDocument(StrictModel):
             raise ValueError(f"不支持的配置版本: {value}")
         return value
 
+
 class SettingsUpdate(SettingsDocument):
     secrets: SecretMutations = Field(default_factory=SecretMutations)
     allow_plaintext_secrets: bool = False
 
 
 def document_from_config(cfg: Config) -> SettingsDocument:
-    return SettingsDocument.model_validate({
-        "config_version": CONFIG_VERSION,
-        "llm": {k: getattr(cfg.llm, k) for k in LLMSettings.model_fields},
-        "data": {k: getattr(cfg.data, k) for k in DataSettings.model_fields},
-        "trade": {k: getattr(cfg.trade, k) for k in TradeSettings.model_fields},
-        "news": {k: getattr(cfg.news, k) for k in NewsSettings.model_fields},
-        "server": {k: getattr(cfg.server, k) for k in ServerSettings.model_fields},
-        "automation": {k: getattr(cfg.automation, k) for k in AutomationSettings.model_fields},
-        "lab": {k: getattr(cfg.lab, k) for k in LabSettings.model_fields},
-    })
+    return SettingsDocument.model_validate(
+        {
+            "config_version": CONFIG_VERSION,
+            "llm": {k: getattr(cfg.llm, k) for k in LLMSettings.model_fields},
+            "data": {k: getattr(cfg.data, k) for k in DataSettings.model_fields},
+            "trade": {k: getattr(cfg.trade, k) for k in TradeSettings.model_fields},
+            "news": {k: getattr(cfg.news, k) for k in NewsSettings.model_fields},
+            "server": {k: getattr(cfg.server, k) for k in ServerSettings.model_fields},
+            "automation": {k: getattr(cfg.automation, k) for k in AutomationSettings.model_fields},
+            "lab": {k: getattr(cfg.lab, k) for k in LabSettings.model_fields},
+        }
+    )
 
 
 def _setting_check_fingerprint(
@@ -338,8 +372,7 @@ def _setting_check_fingerprint(
 ) -> str:
     """Hash only the settings that can affect one check; never persist credentials."""
     secret_hashes = {
-        name: hashlib.sha256(f"quantmaster:{name}\0{value}".encode()).hexdigest()
-        if value else ""
+        name: hashlib.sha256(f"quantmaster:{name}\0{value}".encode()).hexdigest() if value else ""
         for name, value in secrets.items()
     }
     if kind in {"llm-models", "llm-web-search"}:
@@ -448,8 +481,11 @@ class ConfigManager:
     ):
         self.path = _resolve_config_path(path)
         self.check_state_path = self.path.with_suffix(".checks.json")
-        self.backup_dir = (Path(backup_dir).expanduser().resolve() if backup_dir else
-                           (Path.home() / ".quantmaster" / "backups").resolve())
+        self.backup_dir = (
+            Path(backup_dir).expanduser().resolve()
+            if backup_dir
+            else (Path.home() / ".quantmaster" / "backups").resolve()
+        )
         self.credentials = credential_store or CredentialStore()
         self._lock = threading.RLock()
 
@@ -458,8 +494,7 @@ class ConfigManager:
         raw = _read_yaml(self.path)
         metadata = raw.get("_secrets") or {}
         pairs = (
-            ("llm", cfg.llm, "api_key",
-             CredentialStore.llm_target(cfg.llm.provider, cfg.llm.base_url)),
+            ("llm", cfg.llm, "api_key", CredentialStore.llm_target(cfg.llm.provider, cfg.llm.base_url)),
             ("tushare", cfg.data, "tushare_token", CredentialStore.tushare_target()),
         )
         for name, owner, attr, default_target in pairs:
@@ -477,19 +512,21 @@ class ConfigManager:
         document = document_from_config(cfg)
         doc = document.model_dump()
         meta = raw.get("_secrets") or {}
-        doc.update({
-            "managed_by_gui": bool(raw.get("managed_by_gui")),
-            "config_path": str(self.path),
-            "config_revision": _hash_config(raw or doc),
-            "secrets": {
-                "llm": self._secret_public("llm", cfg.llm.api_key, meta),
-                "tushare": self._secret_public("tushare", cfg.data.tushare_token, meta),
-            },
-            "checks": self.check_results(
-                document,
-                {"llm": cfg.llm.api_key, "tushare": cfg.data.tushare_token},
-            ),
-        })
+        doc.update(
+            {
+                "managed_by_gui": bool(raw.get("managed_by_gui")),
+                "config_path": str(self.path),
+                "config_revision": _hash_config(raw or doc),
+                "secrets": {
+                    "llm": self._secret_public("llm", cfg.llm.api_key, meta),
+                    "tushare": self._secret_public("tushare", cfg.data.tushare_token, meta),
+                },
+                "checks": self.check_results(
+                    document,
+                    {"llm": cfg.llm.api_key, "tushare": cfg.data.tushare_token},
+                ),
+            }
+        )
         return doc
 
     def _read_check_state(self) -> dict[str, Any]:
@@ -520,7 +557,9 @@ class ConfigManager:
                 continue
             value = copy.deepcopy(result)
             value["stale"] = item.get("fingerprint") != _setting_check_fingerprint(
-                kind, document, secrets,
+                kind,
+                document,
+                secrets,
             )
             public[kind] = value
         return public
@@ -569,8 +608,10 @@ class ConfigManager:
         root = Path(doc.data.root).expanduser()
         if not root.is_absolute():
             warnings.append(f"数据目录将相对于启动目录解析：{root}")
-        for label, universe in (("自动化主候选", doc.automation.primary_universe),
-                                ("Quant Lab 默认候选", doc.lab.universe)):
+        for label, universe in (
+            ("自动化主候选", doc.automation.primary_universe),
+            ("Quant Lab 默认候选", doc.lab.universe),
+        ):
             if universe.lower() in {"demo", "csi800"}:
                 continue
             from quantmaster.data.universe import normalize_symbols
@@ -606,39 +647,58 @@ class ConfigManager:
             current_raw = _read_yaml(self.path)
             current_cfg = self.load()
             current_doc = document_from_config(current_cfg)
-            if (not allow_root_change and
-                    Path(value.data.root).expanduser().resolve() !=
-                    Path(current_doc.data.root).expanduser().resolve()):
+            if (
+                not allow_root_change
+                and Path(value.data.root).expanduser().resolve()
+                != Path(current_doc.data.root).expanduser().resolve()
+            ):
                 raise ValueError("数据根目录不能直接保存，请使用数据迁移的‘复制并切换’或‘仅切换’")
 
-            warnings = self.validate(SettingsDocument.model_validate(
-                value.model_dump(exclude={"secrets", "allow_plaintext_secrets"})))['warnings']
+            warnings = self.validate(
+                SettingsDocument.model_validate(
+                    value.model_dump(exclude={"secrets", "allow_plaintext_secrets"})
+                )
+            )["warnings"]
             payload = value.model_dump(exclude={"secrets", "allow_plaintext_secrets"})
             payload["managed_by_gui"] = True
             payload["_secrets"] = {}
 
-            old_llm_target = CredentialStore.llm_target(
-                current_cfg.llm.provider, current_cfg.llm.base_url)
+            old_llm_target = CredentialStore.llm_target(current_cfg.llm.provider, current_cfg.llm.base_url)
             new_llm_target = CredentialStore.llm_target(value.llm.provider, value.llm.base_url)
             self._apply_secret(
-                name="llm", mutation=value.secrets.llm, current_raw=current_raw,
-                current_value=current_cfg.llm.api_key, old_target=old_llm_target,
-                new_target=new_llm_target, payload=payload,
-                section="llm", field="api_key", allow_plaintext=value.allow_plaintext_secrets,
+                name="llm",
+                mutation=value.secrets.llm,
+                current_raw=current_raw,
+                current_value=current_cfg.llm.api_key,
+                old_target=old_llm_target,
+                new_target=new_llm_target,
+                payload=payload,
+                section="llm",
+                field="api_key",
+                allow_plaintext=value.allow_plaintext_secrets,
                 warnings=warnings,
             )
             tushare_target = CredentialStore.tushare_target()
             self._apply_secret(
-                name="tushare", mutation=value.secrets.tushare, current_raw=current_raw,
-                current_value=current_cfg.data.tushare_token, old_target=tushare_target,
-                new_target=tushare_target, payload=payload,
-                section="data", field="tushare_token", allow_plaintext=value.allow_plaintext_secrets,
+                name="tushare",
+                mutation=value.secrets.tushare,
+                current_raw=current_raw,
+                current_value=current_cfg.data.tushare_token,
+                old_target=tushare_target,
+                new_target=tushare_target,
+                payload=payload,
+                section="data",
+                field="tushare_token",
+                allow_plaintext=value.allow_plaintext_secrets,
                 warnings=warnings,
             )
 
             if not current_raw.get("managed_by_gui"):
-                self._create_snapshot(current_raw or document_from_config(current_cfg).model_dump(),
-                                      kind="initial", name="首次 GUI 保存前")
+                self._create_snapshot(
+                    current_raw or document_from_config(current_cfg).model_dump(),
+                    kind="initial",
+                    name="首次 GUI 保存前",
+                )
             _atomic_write(self.path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
             set_config(self.load())
             snapshot = self._create_snapshot(payload, kind="automatic")
@@ -647,16 +707,34 @@ class ConfigManager:
             changed = sorted(
                 key for key in set(old_flat) | set(new_flat) if old_flat.get(key) != new_flat.get(key)
             )
-            restart = [f"server.{name}" for name in ("host", "port")
-                       if getattr(current_doc.server, name) != getattr(value.server, name)]
-            return {"status": "ok", "warnings": warnings,
-                    "changed_fields": changed, "config_revision": _hash_config(payload),
-                    "restart_required": restart, "snapshot_id": snapshot["id"]}
+            restart = [
+                f"server.{name}"
+                for name in ("host", "port")
+                if getattr(current_doc.server, name) != getattr(value.server, name)
+            ]
+            return {
+                "status": "ok",
+                "warnings": warnings,
+                "changed_fields": changed,
+                "config_revision": _hash_config(payload),
+                "restart_required": restart,
+                "snapshot_id": snapshot["id"],
+            }
 
     def _apply_secret(
-        self, *, name: str, mutation: SecretMutation, current_raw: dict[str, Any],
-        current_value: str, old_target: str, new_target: str, payload: dict[str, Any],
-        section: str, field: str, allow_plaintext: bool, warnings: list[str],
+        self,
+        *,
+        name: str,
+        mutation: SecretMutation,
+        current_raw: dict[str, Any],
+        current_value: str,
+        old_target: str,
+        new_target: str,
+        payload: dict[str, Any],
+        section: str,
+        field: str,
+        allow_plaintext: bool,
+        warnings: list[str],
     ) -> None:
         old_meta = (current_raw.get("_secrets") or {}).get(name) or {}
         if mutation.action == "clear":
@@ -683,8 +761,11 @@ class ConfigManager:
             return
 
         # 已经在同一目标的 keyring 中时，keep 不需要再次写入。
-        if (mutation.action == "keep" and old_meta.get("state") == "keyring" and
-                old_meta.get("target", new_target) == new_target):
+        if (
+            mutation.action == "keep"
+            and old_meta.get("state") == "keyring"
+            and old_meta.get("target", new_target) == new_target
+        ):
             payload["_secrets"][name] = {"state": "keyring", "target": new_target}
             payload[section].pop(field, None)
             return
@@ -716,9 +797,14 @@ class ConfigManager:
             _atomic_write(self.path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
             set_config(self.load())
             snap = self._create_snapshot(payload, kind="automatic")
-            return {"status": "ok", "warnings": [], "restart_required": [],
-                    "changed_fields": ["data.root"], "config_revision": _hash_config(payload),
-                    "snapshot_id": snap["id"]}
+            return {
+                "status": "ok",
+                "warnings": [],
+                "restart_required": [],
+                "changed_fields": ["data.root"],
+                "config_revision": _hash_config(payload),
+                "snapshot_id": snap["id"],
+            }
 
     def list_snapshots(self) -> list[dict[str, Any]]:
         if not self.backup_dir.exists():
@@ -727,8 +813,9 @@ class ConfigManager:
         for path in self.backup_dir.glob("*.json"):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-                items.append({key: raw.get(key) for key in
-                              ("id", "kind", "name", "created_at", "config_hash")})
+                items.append(
+                    {key: raw.get(key) for key in ("id", "kind", "name", "created_at", "config_hash")}
+                )
             except (OSError, ValueError):
                 continue
         return sorted(items, key=lambda item: item.get("created_at") or "", reverse=True)
@@ -748,11 +835,16 @@ class ConfigManager:
                     return item
         now = datetime.now(UTC)
         snap_id = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex[:8]}"
-        item = {"id": snap_id, "kind": kind, "name": name,
-                "created_at": now.isoformat(), "config_hash": digest, "config": safe}
+        item = {
+            "id": snap_id,
+            "kind": kind,
+            "name": name,
+            "created_at": now.isoformat(),
+            "config_hash": digest,
+            "config": safe,
+        }
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.backup_dir / f"{snap_id}.json",
-                      json.dumps(item, ensure_ascii=False, indent=2))
+        _atomic_write(self.backup_dir / f"{snap_id}.json", json.dumps(item, ensure_ascii=False, indent=2))
         if kind == "automatic":
             autos = [entry for entry in self.list_snapshots() if entry.get("kind") == "automatic"]
             for old in autos[AUTO_SNAPSHOT_LIMIT:]:
@@ -771,8 +863,11 @@ class ConfigManager:
         target = _sanitize(self._load_snapshot(snapshot_id)["config"])
         current = _sanitize(_read_yaml(self.path))
         left, right = _flatten(current), _flatten(target)
-        return [{"field": key, "current": left.get(key), "target": right.get(key)}
-                for key in sorted(set(left) | set(right)) if left.get(key) != right.get(key)]
+        return [
+            {"field": key, "current": left.get(key), "target": right.get(key)}
+            for key in sorted(set(left) | set(right))
+            if left.get(key) != right.get(key)
+        ]
 
     def rollback(self, snapshot_id: str) -> dict[str, Any]:
         with self._lock:
@@ -793,13 +888,15 @@ class ConfigManager:
             set_config(self.load())
             before = _flatten(_sanitize(current))
             after = _flatten(_sanitize(merged))
-            changed = sorted(
-                key for key in set(before) | set(after) if before.get(key) != after.get(key)
-            )
+            changed = sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key))
             restart = [field for field in ("server.host", "server.port") if field in changed]
-            return {"status": "ok", "snapshot_id": snapshot_id,
-                    "changed_fields": changed, "config_revision": _hash_config(merged),
-                    "restart_required": restart}
+            return {
+                "status": "ok",
+                "snapshot_id": snapshot_id,
+                "changed_fields": changed,
+                "config_revision": _hash_config(merged),
+                "restart_required": restart,
+            }
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         item = self._load_snapshot(snapshot_id)

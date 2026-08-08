@@ -26,15 +26,19 @@ data:
   free_stockdb_auto_update: true          # 到点自动停库、更新、验收并恢复服务
   free_stockdb_update_time: "18:30"
   free_stockdb_online_enabled: true       # 仅用于小批交互补缺
-    free_stockdb_online_url: http://8.138.149.215:7899
-    free_stockdb_online_timeout: 4
-    free_stockdb_ingest_retain: 30      # 保留最近成功摄取清单；内容块按引用去重
-    free_stockdb_etf_research_enabled: true
-    free_stockdb_etf_minutes_enabled: true # 分钟证据不参与日频排名
-    free_stockdb_experimental_tick_enabled: false
-    free_stockdb_experimental_fundamentals_enabled: false
-    free_stockdb_experimental_daily_quota: 20
-    after_close_enabled: true
+  free_stockdb_online_url: http://8.138.149.215:7899
+  free_stockdb_online_timeout: 4
+  free_stockdb_ingest_retain: 30      # 保留最近成功摄取清单；内容块按引用去重
+  free_stockdb_stock_history_sessions: 180
+  free_stockdb_stock_initial_lookback_days: 300
+  free_stockdb_stock_max_lookback_days: 540
+  free_stockdb_etf_research_enabled: true
+  free_stockdb_etf_minutes_enabled: true # 分钟证据不参与日频排名
+  free_stockdb_experimental_tick_enabled: false
+  free_stockdb_experimental_fundamentals_enabled: false
+  free_stockdb_experimental_daily_quota: 20
+  free_stockdb_native_acceleration_enabled: false # 当前制品方法通过兼容档案后才可启用
+  after_close_enabled: true
   after_close_auto_run: true
   after_close_include_bj: true
   after_close_min_listing_sessions: 60

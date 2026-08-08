@@ -29,13 +29,15 @@ class EtfScanBody(ContractModel):
 
 
 def _pagination(
-    values: list[dict[str, Any]], page: int, page_size: int,
+    values: list[dict[str, Any]],
+    page: int,
+    page_size: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     total = len(values)
     pages = max(1, (total + page_size - 1) // page_size)
     current = min(max(1, page), pages)
     start = (current - 1) * page_size
-    return values[start:start + page_size], {
+    return values[start : start + page_size], {
         "page": current,
         "page_size": page_size,
         "total": total,
@@ -98,7 +100,10 @@ _THEME_FOCUS_CRITERIA = (
 
 
 def _theme_focus_items(
-    items: list[dict[str, Any]], window: int, *, limit: int = 4,
+    items: list[dict[str, Any]],
+    window: int,
+    *,
+    limit: int = 4,
 ) -> list[dict[str, Any]]:
     """Rank auditable theme evidence without inventing a new composite score."""
     ranked: list[dict[str, Any]] = []
@@ -115,14 +120,16 @@ def _theme_focus_items(
         for criterion, label in _THEME_FOCUS_CRITERIA:
             if checks[criterion]:
                 reasons.append({"id": criterion, "label": label})
-        ranked.append({
-            **item,
-            "focus": {
-                "evidence_count": len(reasons),
-                "evidence_total": len(_THEME_FOCUS_CRITERIA),
-                "reasons": reasons,
-            },
-        })
+        ranked.append(
+            {
+                **item,
+                "focus": {
+                    "evidence_count": len(reasons),
+                    "evidence_total": len(_THEME_FOCUS_CRITERIA),
+                    "reasons": reasons,
+                },
+            }
+        )
 
     def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         current = (item.get("signals") or {}).get(str(window)) or {}
@@ -235,18 +242,13 @@ def rotation_industries(
     window = _rotation_window(window)
     service = get_rotation_service()
     snapshot = service.snapshot("industries")
-    values = [
-        _materialize_group_score(item, window)
-        for item in snapshot.get("data", {}).get("items") or []
-    ]
+    values = [_materialize_group_score(item, window) for item in snapshot.get("data", {}).get("items") or []]
     selected_l2 = set(service.store.preferences()["l2_codes"])
     needle = query.strip().casefold()
     items = [
-        item for item in values
-        if (
-            str(item.get("level")) == "L1"
-            or str(item.get("code") or "").upper() in selected_l2
-        )
+        item
+        for item in values
+        if (str(item.get("level")) == "L1" or str(item.get("code") or "").upper() in selected_l2)
         if (level == "all" or str(item.get("level")) == level)
         and (
             not needle
@@ -283,13 +285,11 @@ def rotation_themes(
     window = _rotation_window(window)
     service = get_rotation_service()
     snapshot = service.snapshot("themes")
-    values = [
-        _materialize_group_score(item, window)
-        for item in snapshot.get("data", {}).get("items") or []
-    ]
+    values = [_materialize_group_score(item, window) for item in snapshot.get("data", {}).get("items") or []]
     needle = query.strip().casefold()
     items = [
-        item for item in values
+        item
+        for item in values
         if (
             not needle
             or needle in str(item.get("name") or "").casefold()
@@ -300,23 +300,26 @@ def rotation_themes(
         and (not grade or str(item.get("grade") or "") == grade)
     ]
     data = {key: value for key, value in snapshot.get("data", {}).items() if key != "details"}
-    data.update({
-        "focus_items": _theme_focus_items(values, window),
-        "focus_definition": {
-            "criteria": [
-                {"id": criterion, "label": label}
-                for criterion, label in _THEME_FOCUS_CRITERIA
-            ],
-            "limit": 4,
-            "window": window,
-        },
-    })
+    data.update(
+        {
+            "focus_items": _theme_focus_items(values, window),
+            "focus_definition": {
+                "criteria": [{"id": criterion, "label": label} for criterion, label in _THEME_FOCUS_CRITERIA],
+                "limit": 4,
+                "window": window,
+            },
+        }
+    )
     if page is None and page_size is None:
         selected_limit = limit or int(service.store.preferences()["theme_limit"])
-        data.update({
-            "items": items[:selected_limit], "total": len(items),
-            "limit": selected_limit, "window": window,
-        })
+        data.update(
+            {
+                "items": items[:selected_limit],
+                "total": len(items),
+                "limit": selected_limit,
+                "window": window,
+            }
+        )
         return {"meta": snapshot["meta"], "data": data}
 
     def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
@@ -363,7 +366,8 @@ def rotation_etf_flow_items(
     values = list(snapshot.get("data", {}).get("items") or [])
     needle = query.strip().casefold()
     items = [
-        item for item in values
+        item
+        for item in values
         if (
             not needle
             or needle in str(item.get("name") or "").casefold()
@@ -377,8 +381,10 @@ def rotation_etf_flow_items(
         if sort == "name":
             return (str(item.get("name") or "").casefold(), str(item.get("symbol") or ""))
         value = (
-            item.get("flows", {}).get(str(window)) if sort == "flow"
-            else item.get("flow") if sort == "daily"
+            item.get("flows", {}).get(str(window))
+            if sort == "flow"
+            else item.get("flow")
+            if sort == "daily"
             else item.get("flow_streak_sessions")
         )
         return (_number(value), str(item.get("name") or ""), str(item.get("symbol") or ""))
@@ -397,15 +403,19 @@ def rotation_etf_flow_items(
 
 @router.get("/rotation/etfs")
 def rotation_etfs(
-    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
-    query: str = Query("", max_length=80), category: str = Query("", max_length=80),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    query: str = Query("", max_length=80),
+    category: str = Query("", max_length=80),
     rankable: bool | None = None,
     sort: Literal["rank", "score", "amount", "return", "name"] = "rank",
     order: Literal["asc", "desc"] = "asc",
+    snapshot_id: str = Query("", max_length=80),
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().store.latest()
+    store = get_etf_research_service().store
+    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
     if snapshot is None:
         return {
             "meta": {"quality": {"status": "cold", "issues": ["尚未生成 ETF 研究快照"]}},
@@ -413,17 +423,23 @@ def rotation_etfs(
         }
     needle = query.strip().casefold()
     items = [item.to_dict() for item in snapshot.items]
-    items = [item for item in items if (
-        (not needle or needle in item["symbol"].casefold() or needle in item["name"].casefold())
-        and (not category or item["category"] == category)
-        and (rankable is None or bool(item["rankable"]) is rankable)
-    )]
+    items = [
+        item
+        for item in items
+        if (
+            (not needle or needle in item["symbol"].casefold() or needle in item["name"].casefold())
+            and (not category or item["category"] == category)
+            and (rankable is None or bool(item["rankable"]) is rankable)
+        )
+    ]
 
     def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
         metric = item.get("metrics") or {}
         values = {
-            "rank": item.get("category_rank"), "score": item.get("score"),
-            "amount": metric.get("avg_amount_20d"), "return": metric.get("return_20d"),
+            "rank": item.get("category_rank"),
+            "score": item.get("score"),
+            "amount": metric.get("avg_amount_20d"),
+            "return": metric.get("return_20d"),
             "name": item.get("name"),
         }
         if sort == "name":
@@ -435,21 +451,30 @@ def rotation_etfs(
     if sort == "name":
         items.sort(key=sort_key, reverse=order == "desc")
     else:
-        items.sort(key=lambda item: (
-            sort_key(item)[0],
-            -sort_key(item)[1] if order == "desc" else sort_key(item)[1],
-            sort_key(item)[2],
-        ))
+        items.sort(
+            key=lambda item: (
+                sort_key(item)[0],
+                -sort_key(item)[1] if order == "desc" else sort_key(item)[1],
+                sort_key(item)[2],
+            )
+        )
     visible, pagination = _pagination(items, page, page_size)
     return {
         "meta": {
-            "snapshot_id": snapshot.snapshot_id, "ingest_id": snapshot.ingest_id,
-            "artifact_id": snapshot.artifact_id, "as_of": snapshot.as_of_date,
-            "quality": snapshot.coverage, "staleness": snapshot.staleness,
+            "snapshot_id": snapshot.snapshot_id,
+            "ingest_id": snapshot.ingest_id,
+            "artifact_id": snapshot.artifact_id,
+            "as_of": snapshot.as_of_date,
+            "quality": snapshot.coverage,
+            "staleness": snapshot.staleness,
             "score_version": snapshot.score_version,
         },
-        "data": {"items": visible, "categories": list(snapshot.categories),
-                 "pagination": pagination, "provenance": snapshot.provenance},
+        "data": {
+            "items": visible,
+            "categories": list(snapshot.categories),
+            "pagination": pagination,
+            "provenance": snapshot.provenance,
+        },
     }
 
 
@@ -460,9 +485,51 @@ def rotation_etf_snapshots(limit: int = Query(50, ge=1, le=500)) -> dict[str, An
     return {"items": get_etf_research_service().store.history(limit)}
 
 
+@router.get("/rotation/etfs/snapshots/{snapshot_id}/coverage")
+def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
+    from quantmaster.rotation.etf_research import get_etf_research_service
+
+    snapshot = get_etf_research_service().store.get(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(404, "ETF 研究快照不存在")
+    semantic_counts: dict[str, int] = {}
+    minute_complete = 0
+    minute_rows = 0
+    excluded: dict[str, int] = {}
+    for item in snapshot.items:
+        semantic_counts[item.share_semantic_status] = (
+            semantic_counts.get(
+                item.share_semantic_status,
+                0,
+            )
+            + 1
+        )
+        minute_complete += int(bool(item.minute_evidence.get("complete_session")))
+        minute_rows += int(item.minute_evidence.get("rows") or 0)
+        if item.excluded_reason:
+            excluded[item.excluded_reason] = excluded.get(item.excluded_reason, 0) + 1
+    return {
+        "meta": {
+            "snapshot_id": snapshot.snapshot_id,
+            "ingest_id": snapshot.ingest_id,
+            "as_of": snapshot.as_of_date,
+            "staleness": snapshot.staleness,
+        },
+        "data": {
+            "coverage": snapshot.coverage,
+            "share_semantic_counts": semantic_counts,
+            "minute_complete_symbols": minute_complete,
+            "minute_rows": minute_rows,
+            "excluded_reasons": excluded,
+            "total_symbols": len(snapshot.items),
+        },
+    }
+
+
 @router.get("/rotation/etfs/export/{snapshot_id}")
 def rotation_etf_export(
-    snapshot_id: str, format: Literal["json", "csv"] = "json",
+    snapshot_id: str,
+    format: Literal["json", "csv"] = "json",
 ) -> Response:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
@@ -471,32 +538,54 @@ def rotation_etf_export(
         raise HTTPException(404, "ETF 研究快照不存在")
     if format == "json":
         return Response(
-            strict_json_dumps(snapshot.to_dict(), indent=2), media_type="application/json",
+            strict_json_dumps(snapshot.to_dict(), indent=2),
+            media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{snapshot_id}.json"'},
         )
     output = io.StringIO(newline="")
     fields = [
-        "category", "category_rank", "symbol", "name", "score", "as_of_date",
-        "rankable", "excluded_reason", "return_5d", "return_20d", "return_60d",
-        "avg_amount_20d", "drawdown_20d", "total_share", "shares_effective_date",
-        "share_lag_sessions", "price_source", "share_source",
+        "category",
+        "category_rank",
+        "symbol",
+        "name",
+        "score",
+        "as_of_date",
+        "rankable",
+        "excluded_reason",
+        "return_5d",
+        "return_20d",
+        "return_60d",
+        "avg_amount_20d",
+        "drawdown_20d",
+        "total_share",
+        "shares_effective_date",
+        "share_lag_sessions",
+        "price_source",
+        "share_source",
     ]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     for item in snapshot.items:
-        writer.writerow({
-            "category": item.category, "category_rank": item.category_rank,
-            "symbol": item.symbol, "name": item.name, "score": item.score,
-            "as_of_date": item.as_of_date, "rankable": item.rankable,
-            "excluded_reason": item.excluded_reason,
-            **{key: item.metrics.get(key) for key in fields if key in item.metrics},
-            "shares_effective_date": item.shares_effective_date,
-            "share_lag_sessions": item.share_lag_sessions,
-            "price_source": item.provenance.get("price"),
-            "share_source": item.provenance.get("shares"),
-        })
+        writer.writerow(
+            {
+                "category": item.category,
+                "category_rank": item.category_rank,
+                "symbol": item.symbol,
+                "name": item.name,
+                "score": item.score,
+                "as_of_date": item.as_of_date,
+                "rankable": item.rankable,
+                "excluded_reason": item.excluded_reason,
+                **{key: item.metrics.get(key) for key in fields if key in item.metrics},
+                "shares_effective_date": item.shares_effective_date,
+                "share_lag_sessions": item.share_lag_sessions,
+                "price_source": item.provenance.get("price"),
+                "share_source": item.provenance.get("shares"),
+            }
+        )
     return Response(
-        output.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
+        output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{snapshot_id}.csv"'},
     )
 
@@ -520,11 +609,38 @@ def rotation_etf_job(job_id: str) -> dict[str, Any]:
         raise HTTPException(404, "ETF 研究任务不存在") from None
 
 
+@router.post("/rotation/etfs/jobs/{job_id}/cancel")
+def rotation_etf_job_cancel(job_id: str, request: Request) -> dict[str, Any]:
+    require_csrf(request)
+    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+
+    try:
+        jobs = get_etf_research_jobs()
+        return jobs.public(jobs.cancel(job_id))
+    except KeyError:
+        raise HTTPException(404, "ETF 研究任务不存在") from None
+
+
+@router.post("/rotation/etfs/jobs/{job_id}/retry", status_code=202)
+def rotation_etf_job_retry(job_id: str, request: Request) -> dict[str, Any]:
+    require_csrf(request)
+    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+
+    try:
+        jobs = get_etf_research_jobs()
+        return jobs.public(jobs.retry(job_id))
+    except KeyError:
+        raise HTTPException(404, "ETF 研究任务不存在") from None
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 @router.get("/rotation/etfs/{symbol}")
-def rotation_etf_detail(symbol: str) -> dict[str, Any]:
+def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().store.latest()
+    store = get_etf_research_service().store
+    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
     canonical = symbol.upper()
@@ -532,8 +648,11 @@ def rotation_etf_detail(symbol: str) -> dict[str, Any]:
     if item is None:
         raise HTTPException(404, f"ETF 不在当前研究股票池: {canonical}")
     return {
-        "meta": {"snapshot_id": snapshot.snapshot_id, "as_of": snapshot.as_of_date,
-                 "staleness": snapshot.staleness},
+        "meta": {
+            "snapshot_id": snapshot.snapshot_id,
+            "as_of": snapshot.as_of_date,
+            "staleness": snapshot.staleness,
+        },
         "data": item.to_dict(),
     }
 

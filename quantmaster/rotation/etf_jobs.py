@@ -5,7 +5,13 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.rotation.etf_research import get_etf_research_service
-from quantmaster.runtime.jobs import ACTIVE_STATUSES, JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
+from quantmaster.runtime.jobs import (
+    ACTIVE_STATUSES,
+    JobContext,
+    JobOutcome,
+    UnifiedJobRuntime,
+    UnifiedJobStore,
+)
 
 TASK_TYPE = "rotation.etf.scan"
 
@@ -13,7 +19,8 @@ TASK_TYPE = "rotation.etf.scan"
 class EtfResearchJobs:
     def __init__(self, runtime: UnifiedJobRuntime | None = None):
         self.runtime = runtime or UnifiedJobRuntime(
-            UnifiedJobStore(get_config().data_root / "jobs.sqlite"), max_workers=1,
+            UnifiedJobStore(get_config().data_root / "jobs.sqlite"),
+            max_workers=1,
         )
         self._submit_lock = threading.Lock()
         self.runtime.register(TASK_TYPE, self._handle)
@@ -23,18 +30,23 @@ class EtfResearchJobs:
         service = get_etf_research_service()
         try:
             snapshot = service.scan(
-                as_of=str(spec.get("as_of") or ""), progress=context.progress,
+                as_of=str(spec.get("as_of") or ""),
+                progress=context.progress,
                 cancelled=context.cancelled,
             )
         except (InterruptedError, OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
             service.store.record_failure(str(exc) or exc.__class__.__name__)
             raise
         artifact = context.write_artifact(
-            "rotation.etf.snapshot", snapshot.to_dict(), {
+            "rotation.etf.snapshot",
+            snapshot.to_dict(),
+            {
                 "schema_version": snapshot.schema_version,
                 "lineage": {
-                    "snapshot_id": snapshot.snapshot_id, "ingest_id": snapshot.ingest_id,
-                    "artifact_id": snapshot.artifact_id, "input_hash": snapshot.input_hash,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "ingest_id": snapshot.ingest_id,
+                    "artifact_id": snapshot.artifact_id,
+                    "input_hash": snapshot.input_hash,
                 },
             },
         )
@@ -47,7 +59,11 @@ class EtfResearchJobs:
                 if existing.get("status") in ACTIVE_STATUSES and existing.get("spec") == spec:
                     return existing, False
             return self.runtime.submit(
-                TASK_TYPE, spec, idempotency_key="", deadline_seconds=3600, max_attempts=2,
+                TASK_TYPE,
+                spec,
+                idempotency_key="",
+                deadline_seconds=3600,
+                max_attempts=2,
             )
 
     def get(self, job_id: str) -> dict[str, Any]:
@@ -58,6 +74,14 @@ class EtfResearchJobs:
 
     def public(self, value: dict[str, Any]) -> dict[str, Any]:
         return self.runtime.public(value)
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        self.get(job_id)
+        return self.runtime.store.cancel(job_id)
+
+    def retry(self, job_id: str) -> dict[str, Any]:
+        self.get(job_id)
+        return self.runtime.retry(job_id)
 
     def start(self) -> None:
         self.runtime.start()

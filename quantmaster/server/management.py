@@ -87,13 +87,13 @@ def _runtime_status() -> dict[str, Any]:
     cfg = get_config()
     configured = {"host": cfg.server.host, "port": cfg.server.port}
     running = _running_server or configured
-    restart = [f"server.{name}" for name in ("host", "port")
-               if running.get(name) != configured.get(name)]
+    restart = [f"server.{name}" for name in ("host", "port") if running.get(name) != configured.get(name)]
     return {
         "config_revision": settings_manager.public().get("config_revision", ""),
         "server": {
             "status": "restart_required" if restart else "applied",
-            "running": dict(running), "configured": configured,
+            "running": dict(running),
+            "configured": configured,
             "restart_required": restart,
         },
         "automation": get_runtime().status(),
@@ -133,15 +133,19 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
         if "data.root" in changed:
             active = runtime.start() if get_config().automation.enabled else False
             apply_status["automation"] = {
-                "status": "applied" if active else
-                "disabled" if not get_config().automation.enabled else "standby"
+                "status": "applied"
+                if active
+                else "disabled"
+                if not get_config().automation.enabled
+                else "standby"
             }
         elif any(field.startswith("automation.") for field in changed):
             apply_status["automation"] = runtime.apply_config(changed)
     except Exception:  # 配置已安全保存；运行态失败降级为可操作警告。
         logger.warning("自动化运行时热应用失败", exc_info=True)
         apply_status["automation"] = {
-            "status": "degraded", "message": "运行时热应用失败，请重启服务",
+            "status": "degraded",
+            "message": "运行时热应用失败，请重启服务",
         }
         result.setdefault("warnings", []).append("自动化配置已保存，但运行时热应用失败")
     try:
@@ -157,7 +161,8 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.warning("Quant Lab Worker 热应用失败", exc_info=True)
         apply_status["lab"] = {
-            "status": "degraded", "message": "Worker 热应用失败，请重启服务",
+            "status": "degraded",
+            "message": "Worker 热应用失败，请重启服务",
         }
         result.setdefault("warnings", []).append("Quant Lab 配置已保存，但 Worker 热应用失败")
     if "data.root" in changed:
@@ -175,11 +180,10 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             logger.warning("数据目录切换后后台执行器恢复失败", exc_info=True)
             apply_status["data_workers"] = {
-                "status": "degraded", "message": "后台执行器恢复失败，请重启服务",
+                "status": "degraded",
+                "message": "后台执行器恢复失败，请重启服务",
             }
-            result.setdefault("warnings", []).append(
-                "数据目录已切换，但部分后台执行器需要重启服务后恢复"
-            )
+            result.setdefault("warnings", []).append("数据目录已切换，但部分后台执行器需要重启服务后恢复")
     result["apply_status"] = apply_status
     result["runtime"] = _runtime_status()
     return result
@@ -190,8 +194,12 @@ def get_settings(request: Request, response: Response) -> dict:
     _require_local(request)
     token = _issue_csrf()
     attach_csrf_cookie(response, request, token)
-    return {**settings_manager.public(), "csrf_token": token, "remote_management": False,
-            "runtime": _runtime_status()}
+    return {
+        **settings_manager.public(),
+        "csrf_token": token,
+        "remote_management": False,
+        "runtime": _runtime_status(),
+    }
 
 
 @router.get("/settings/runtime")
@@ -229,8 +237,8 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
     _require_local(request)
     from collections import Counter
 
-    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
     from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
 
@@ -255,39 +263,123 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 issues.append(f"{label}不可用：{str(exc)[:200]}")
     root = Path(get_config().data.free_stockdb_root).expanduser().resolve()
-    mounts = [
-        {"name": item.name, "path": str(item), "automatic_union": False}
-        for item in sorted(root.glob("data*")) if item.is_dir()
-    ] if root.is_dir() else []
+    mounts = (
+        [
+            {"name": item.name, "path": str(item), "automatic_union": False}
+            for item in sorted(root.glob("data*"))
+            if item.is_dir()
+        ]
+        if root.is_dir()
+        else []
+    )
     levels = Counter(str(item.get("level") or "OTHER") for item in boards)
     ingests = StockDBIngestStore().history(1)
     runtime = free_stockdb_runtime.status()
+    artifact = source.artifact_identity(
+        data_session=str(runtime.get("validated_session") or ""),
+    )
+    compatibility_artifact_id = source.artifact_identity().artifact_id
+    from quantmaster.data.free_stockdb_compatibility import StockDBCompatibilityStore
+
+    compatibility = StockDBCompatibilityStore().get(compatibility_artifact_id)
+    latest_ingest = ingests[0] if ingests else None
+
+    def capability(
+        state: str,
+        assets: list[str],
+        frequencies: list[str],
+        *,
+        verified: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "state": state,
+            "installed": bool(source.sdk_path),
+            "connected": bool(probe),
+            "data_ready": bool(latest_ingest),
+            "verified": verified,
+            "asset_classes": assets,
+            "frequencies": frequencies,
+            "coverage": latest_ingest.coverage if latest_ingest else None,
+            "as_of_date": latest_ingest.as_of_date if latest_ingest else "",
+        }
+
     capabilities = {
-        "daily_bars": "verified" if probe else "unavailable",
-        "daily_cross_section": "verified" if probe else "unavailable",
-        "intraday_bars": "unverified" if probe else "unavailable",
-        "eod_snapshot": "verified" if probe else "unavailable",
-        "realtime_tick": (
-            "experimental" if get_config().data.free_stockdb_experimental_tick_enabled
-            else "disabled"
+        "daily_bars": capability(
+            "verified" if probe else "unavailable",
+            ["stock", "etf"],
+            ["1d"],
+            verified=bool(probe),
         ),
-        "security_catalog": "verified" if catalog else "degraded",
-        "board_hierarchy": "verified" if boards else "degraded",
-        "etf_shares": "semantic_lag_disclosed" if probe else "unavailable",
-        "native_indicators": "unverified" if probe else "unavailable",
+        "daily_cross_section": capability(
+            "verified" if probe else "unavailable",
+            ["stock", "etf"],
+            ["1d"],
+            verified=bool(probe),
+        ),
+        "intraday_bars": capability(
+            "unverified" if probe else "unavailable",
+            ["stock", "etf"],
+            ["1m", "5m", "15m", "30m", "60m"],
+        ),
+        "eod_snapshot": capability(
+            "verified" if probe else "unavailable",
+            ["stock", "etf"],
+            ["1d"],
+            verified=bool(probe),
+        ),
+        "realtime_tick": capability(
+            "experimental" if get_config().data.free_stockdb_experimental_tick_enabled else "disabled",
+            ["stock"],
+            ["tick"],
+        ),
+        "security_catalog": capability(
+            "verified" if catalog else "degraded",
+            ["stock", "etf", "fund"],
+            ["snapshot"],
+            verified=bool(catalog),
+        ),
+        "board_hierarchy": capability(
+            "verified" if boards else "degraded",
+            ["stock"],
+            ["snapshot"],
+            verified=bool(boards),
+        ),
+        "etf_shares": capability(
+            "semantic_lag_disclosed" if probe else "unavailable",
+            ["etf"],
+            ["1d"],
+        ),
+        "native_indicators": capability(
+            (
+                "verified"
+                if compatibility and compatibility.status == "compatible"
+                else "partially_verified"
+                if compatibility and compatibility.status == "partial"
+                else "unverified"
+                if probe
+                else "unavailable"
+            ),
+            ["stock", "etf"],
+            ["1d"],
+            verified=bool(compatibility and compatibility.status in {"compatible", "partial"}),
+        ),
     }
     return {
         "status": "ok" if not issues else ("degraded" if probe else "unavailable"),
-        "upstream": "tushare", "distribution": "free-stockdb",
+        "upstream": "tushare",
+        "distribution": "free-stockdb",
         "independent_cross_validation": False,
-        "runtime": runtime, "probe": probe,
-        "artifact": source.artifact_identity(
-            data_session=str(runtime.get("validated_session") or ""),
-        ).to_dict(),
+        "runtime": runtime,
+        "probe": probe,
+        "artifact": artifact.to_dict(),
+        "compatibility": compatibility.to_dict() if compatibility else None,
+        "compatibility_artifact_id": compatibility_artifact_id,
+        "native_acceleration_enabled": get_config().data.free_stockdb_native_acceleration_enabled,
         "capabilities": capabilities,
         "catalog": {"securities": len(catalog), "delisted_records": len(delisted)},
         "boards": {"total": len(boards), "levels": dict(sorted(levels.items()))},
-        "mounts": mounts, "mount_policy": "diagnostic_only_no_automatic_union",
+        "mounts": mounts,
+        "mount_policy": "diagnostic_only_no_automatic_union",
         "latest_ingest": ingests[0].to_dict() if ingests else None,
         "experimental_online": StockDBExperimentalOnline().status(),
         "issues": issues,
@@ -296,7 +388,8 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
 
 @router.get("/data-sources/free-stockdb/ingests")
 def free_stockdb_ingests(
-    request: Request, limit: int = 50,
+    request: Request,
+    limit: int = 50,
 ) -> dict[str, Any]:
     _require_local(request)
     from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
@@ -305,9 +398,32 @@ def free_stockdb_ingests(
     return {"items": [item.to_dict() for item in StockDBIngestStore().history(limit)]}
 
 
+@router.get("/data-sources/free-stockdb/ingests/{ingest_id}")
+def free_stockdb_ingest_detail(ingest_id: str, request: Request) -> dict[str, Any]:
+    _require_local(request)
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+    store = StockDBIngestStore()
+    snapshot = store.get(ingest_id)
+    if snapshot is None:
+        raise HTTPException(404, "free-stockdb 摄取不存在或已损坏")
+    references = store.references(ingest_id)
+    return {
+        "ingest": snapshot.to_dict(),
+        "references": references,
+        "protected": bool(references),
+        "content_ready": {
+            name: (store.content / f"{digest}.parquet").is_file()
+            or (store.content / f"{digest}.json").is_file()
+            for name, digest in snapshot.content_hashes.items()
+        },
+    }
+
+
 @router.post("/data-sources/free-stockdb/experimental/tick")
 def free_stockdb_experimental_tick(
-    body: StockDBTickRequest, request: Request,
+    body: StockDBTickRequest,
+    request: Request,
 ) -> dict[str, Any]:
     _require_csrf(request)
     from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
@@ -322,14 +438,17 @@ def free_stockdb_experimental_tick(
 
 @router.post("/data-sources/free-stockdb/experimental/fundamentals")
 def free_stockdb_experimental_fundamentals(
-    body: StockDBFundamentalsRequest, request: Request,
+    body: StockDBFundamentalsRequest,
+    request: Request,
 ) -> dict[str, Any]:
     _require_csrf(request)
     from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
 
     try:
         return StockDBExperimentalOnline().fundamentals(
-            body.symbol, dataset=body.dataset, stat_date=body.stat_date,
+            body.symbol,
+            dataset=body.dataset,
+            stat_date=body.stat_date,
         )
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
@@ -376,23 +495,27 @@ def save_settings(request: Request, update: SettingsUpdate) -> dict:
 def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutations]:
     settings_value = body.get("settings")
     source: dict[str, Any] = settings_value if isinstance(settings_value, dict) else body
-    clean = {key: source[key] for key in (
-        "config_version", "llm", "data", "trade", "news", "server", "automation", "lab")
-             if key in source}
+    clean = {
+        key: source[key]
+        for key in ("config_version", "llm", "data", "trade", "news", "server", "automation", "lab")
+        if key in source
+    }
     if clean:
         document = SettingsDocument.model_validate(clean)
     else:
-        document = SettingsDocument.model_validate({key: settings_manager.public()[key]
-                                                    for key in SettingsDocument.model_fields})
+        document = SettingsDocument.model_validate(
+            {key: settings_manager.public()[key] for key in SettingsDocument.model_fields}
+        )
     secrets_value = body.get("secrets") or source.get("secrets") or {}
     return document, SecretMutations.model_validate(secrets_value)
 
 
 @router.post("/settings/check/{kind}")
-def check_setting(kind: Literal[
-        "llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
-                  request: Request,
-                  body: Annotated[dict[str, Any] | None, Body()] = None) -> dict:
+def check_setting(
+    kind: Literal["llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
+    request: Request,
+    body: Annotated[dict[str, Any] | None, Body()] = None,
+) -> dict:
     _require_csrf(request)
     from quantmaster.settings_checks import (
         check_data_sources,
@@ -411,10 +534,9 @@ def check_setting(kind: Literal[
     elif mutations.llm.action == "clear":
         llm_secret = ""
     else:
-        same_llm_target = (
-            document.llm.provider == current.llm.provider and
-            document.llm.base_url.rstrip("/") == current.llm.base_url.rstrip("/")
-        )
+        same_llm_target = document.llm.provider == current.llm.provider and document.llm.base_url.rstrip(
+            "/"
+        ) == current.llm.base_url.rstrip("/")
         # provider/base URL 改变时绝不把旧服务的密钥拿去探测新地址。
         llm_secret = current.llm.api_key if same_llm_target else ""
     if mutations.tushare.action == "replace":
@@ -519,10 +641,14 @@ def get_migration(task_id: str, request: Request) -> dict:
         task = migration_manager.get(task_id)
         if task.get("status") == "completed" and task_id not in _applied_migrations:
             _applied_migrations.add(task_id)
-            task["apply"] = _apply_runtime({
-                "status": "ok", "changed_fields": ["data.root"],
-                "restart_required": [], "warnings": [],
-            }).get("apply_status")
+            task["apply"] = _apply_runtime(
+                {
+                    "status": "ok",
+                    "changed_fields": ["data.root"],
+                    "restart_required": [],
+                    "warnings": [],
+                }
+            ).get("apply_status")
         return task
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
@@ -658,13 +784,19 @@ def _universe_references(name: str) -> list[dict[str, str]]:
     cfg = settings_manager.load()
     references = []
     if cfg.automation.primary_universe.casefold() == name.casefold():
-        references.append({
-            "key": "automation.primary_universe", "label": "自动化主候选",
-        })
+        references.append(
+            {
+                "key": "automation.primary_universe",
+                "label": "自动化主候选",
+            }
+        )
     if cfg.lab.universe.casefold() == name.casefold():
-        references.append({
-            "key": "lab.universe", "label": "Quant Lab 默认候选",
-        })
+        references.append(
+            {
+                "key": "lab.universe",
+                "label": "Quant Lab 默认候选",
+            }
+        )
     return references
 
 
@@ -686,20 +818,26 @@ def _universe_members(symbols: list[str]) -> list[dict[str, Any]]:
     result = []
     for symbol in symbols:
         instrument = store.get(symbol)
-        result.append({
-            "symbol": symbol, "name": instrument.name if instrument else None,
-            "market": instrument.market if instrument else None,
-            "exchange": instrument.exchange if instrument else None,
-            "asset_type": instrument.asset_type if instrument else None,
-            "status": instrument.status if instrument else None,
-            "source": instrument.source if instrument else None,
-        })
+        result.append(
+            {
+                "symbol": symbol,
+                "name": instrument.name if instrument else None,
+                "market": instrument.market if instrument else None,
+                "exchange": instrument.exchange if instrument else None,
+                "asset_type": instrument.asset_type if instrument else None,
+                "status": instrument.status if instrument else None,
+                "source": instrument.source if instrument else None,
+            }
+        )
     return result
 
 
 @router.get("/market/instruments/search")
 def instrument_search(
-    request: Request, q: str = "", limit: int = 20, online: bool = True,
+    request: Request,
+    q: str = "",
+    limit: int = 20,
+    online: bool = True,
 ) -> dict:
     _require_local(request)
     from quantmaster.data.instruments import search_instruments
@@ -751,19 +889,26 @@ def universes(request: Request) -> dict:
 
     fixed = [_fixed_universe_metadata(item) for item in list_universes()]
     dynamic = {
-        "name": "csi800", "count": None, "readonly": True, "kind": "dynamic",
-        "source": "tushare:index_weight", "research_quality": "production",
+        "name": "csi800",
+        "count": None,
+        "readonly": True,
+        "kind": "dynamic",
+        "source": "tushare:index_weight",
+        "research_quality": "production",
         "references": _universe_references("csi800"),
     }
     data_root = Path(settings_manager.load().data.root).expanduser().resolve()
     conflicts = []
     conflict = data_root / "universe" / "csi800.json"
     if conflict.is_file():
-        conflicts.append({
-            "name": "csi800", "path": str(conflict),
-            "message": "检测到与系统动态候选同名的旧文件；文件已保留，请先改名再使用。",
-        })
-    ordered = ([fixed[0], dynamic, *fixed[1:]] if fixed else [dynamic])
+        conflicts.append(
+            {
+                "name": "csi800",
+                "path": str(conflict),
+                "message": "检测到与系统动态候选同名的旧文件；文件已保留，请先改名再使用。",
+            }
+        )
+    ordered = [fixed[0], dynamic, *fixed[1:]] if fixed else [dynamic]
     return {
         "universes": ordered,
         "index_presets": [dict(item) for item in INDEX_UNIVERSE_PRESETS],
@@ -786,21 +931,30 @@ def universe_detail(name: str, request: Request, as_of: date | None = None) -> d
             dynamic = load_csi800_members_as_of(chosen.isoformat())
             symbols = dynamic["symbols"]
             return {
-                "name": "csi800", "symbols": symbols,
-                "members": _universe_members(symbols), "count": len(symbols),
-                "readonly": True, "kind": "dynamic", "source": "tushare:index_weight",
-                "research_quality": "production", "as_of": dynamic["as_of"],
+                "name": "csi800",
+                "symbols": symbols,
+                "members": _universe_members(symbols),
+                "count": len(symbols),
+                "readonly": True,
+                "kind": "dynamic",
+                "source": "tushare:index_weight",
+                "research_quality": "production",
+                "as_of": dynamic["as_of"],
                 "snapshot_dates": dynamic["snapshot_dates"],
                 "references": _universe_references("csi800"),
             }
         symbols = load_universe(name)
         built_in = name.casefold() == "demo"
         return {
-            "name": "demo" if built_in else name, "symbols": symbols,
-            "members": _universe_members(symbols), "count": len(symbols),
-            "readonly": built_in, "kind": "fixed",
+            "name": "demo" if built_in else name,
+            "symbols": symbols,
+            "members": _universe_members(symbols),
+            "count": len(symbols),
+            "readonly": built_in,
+            "kind": "fixed",
             "source": "built_in" if built_in else "custom",
-            "research_quality": "sandbox", "references": _universe_references(name),
+            "research_quality": "sandbox",
+            "references": _universe_references(name),
         }
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
@@ -818,14 +972,14 @@ def preview_universe(request: Request, value: UniversePreview) -> dict:
         symbols = index_universe(value.index_symbol) if value.kind == "index" else value.symbols
         resolution = resolve_instruments(symbols, selections=value.selections)
         normalized = [item["instrument"]["symbol"] for item in resolution["resolved"]]
-        errors = [
-            {"value": item["query"], "message": item["message"]}
-            for item in resolution["unresolved"]
-        ]
+        errors = [{"value": item["query"], "message": item["message"]} for item in resolution["unresolved"]]
         return {
-            "symbols": normalized, "members": _universe_members(normalized),
-            "count": len(normalized), "preview": normalized[:100],
-            "duplicates": resolution["duplicates"], "errors": errors,
+            "symbols": normalized,
+            "members": _universe_members(normalized),
+            "count": len(normalized),
+            "preview": normalized[:100],
+            "duplicates": resolution["duplicates"],
+            "errors": errors,
             "ambiguous": resolution["ambiguous"],
             "unresolved": resolution["unresolved"],
             "corrections": resolution["corrections"],
@@ -913,9 +1067,13 @@ def _validate_universe_instruments(symbols: list[str]) -> None:
         try:
             validate_bar_capability(item["instrument"]["symbol"], verify_foreign=True)
         except ValueError as exc:
-            raise HTTPException(422, {
-                "message": str(exc), "symbol": item["instrument"]["symbol"],
-            }) from None
+            raise HTTPException(
+                422,
+                {
+                    "message": str(exc),
+                    "symbol": item["instrument"]["symbol"],
+                },
+            ) from None
 
 
 @router.post("/settings/universes/{name}/rename")
@@ -929,8 +1087,10 @@ def rename_universe_route(name: str, request: Request, value: UniverseRename) ->
         renamed = True
         changed, runtime = _rewrite_universe_references(name, value.new_name)
         return {
-            "status": "ok", "name": value.new_name,
-            "updated_references": changed, "runtime": runtime.get("runtime") if runtime else None,
+            "status": "ok",
+            "name": value.new_name,
+            "updated_references": changed,
+            "runtime": runtime.get("runtime") if runtime else None,
         }
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from None
@@ -957,18 +1117,24 @@ def delete_universe_route(name: str, request: Request, replacement: str | None =
         replacement_name = None
         if references:
             if not replacement:
-                raise HTTPException(409, detail={
-                    "message": "该候选正在使用中，请先选择替代候选。",
-                    "references": references, "requires_replacement": True,
-                })
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": "该候选正在使用中，请先选择替代候选。",
+                        "references": references,
+                        "requires_replacement": True,
+                    },
+                )
             replacement_name = _validate_replacement(replacement, references)
             if replacement_name.casefold() == name.casefold():
                 raise ValueError("替代候选不能与待删除候选相同")
             changed, runtime = _rewrite_universe_references(name, replacement_name)
         delete_universe(name)
         return {
-            "status": "ok", "replacement": replacement_name,
-            "updated_references": changed, "runtime": runtime.get("runtime") if runtime else None,
+            "status": "ok",
+            "replacement": replacement_name,
+            "updated_references": changed,
+            "runtime": runtime.get("runtime") if runtime else None,
         }
     except HTTPException:
         raise
@@ -1024,19 +1190,22 @@ async def submit_ledger_csv(
         raise HTTPException(400, str(exc)) from None
     failed = [row.public() for row in parsed.rows if row.errors]
     if strict and failed:
-        raise HTTPException(422, {"message": f"严格模式：{len(failed)} 行校验失败",
-                                  "failed_rows": failed})
+        raise HTTPException(422, {"message": f"严格模式：{len(failed)} 行校验失败", "failed_rows": failed})
     if ledger.has_import_hash(parsed.file_hash) and not include_duplicates:
         raise HTTPException(409, "该文件已导入；如确需再次导入，请显式包含重复记录")
     rows = [row for row in parsed.valid_rows if include_duplicates or not row.duplicate]
     records = [row.record for row in rows if row.record]
     try:
-        count = ledger.import_records(records, parsed.file_hash, file.filename or "trades.csv",
-                                      parsed.encoding)
+        count = ledger.import_records(
+            records, parsed.file_hash, file.filename or "trades.csv", parsed.encoding
+        )
     except Exception:
         # 不返回数据库内部信息，也不把任何原始行写进日志。
         raise HTTPException(500, "数据库写入失败，全部记录已回滚") from None
-    return {"status": "ok", "imported": count,
-            "skipped_invalid": len(failed) if not strict else 0,
-            "skipped_duplicates": len(parsed.valid_rows) - len(rows),
-            "failed_rows": failed}
+    return {
+        "status": "ok",
+        "imported": count,
+        "skipped_invalid": len(failed) if not strict else 0,
+        "skipped_duplicates": len(parsed.valid_rows) - len(rows),
+        "failed_rows": failed,
+    }

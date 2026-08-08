@@ -50,11 +50,15 @@ class DataConfig:
     free_stockdb_online_url: str = "http://8.138.149.215:7899"
     free_stockdb_online_timeout: float = 4.0
     free_stockdb_ingest_retain: int = 30
+    free_stockdb_stock_history_sessions: int = 180
+    free_stockdb_stock_initial_lookback_days: int = 300
+    free_stockdb_stock_max_lookback_days: int = 540
     free_stockdb_etf_research_enabled: bool = True
     free_stockdb_etf_minutes_enabled: bool = True
     free_stockdb_experimental_tick_enabled: bool = False
     free_stockdb_experimental_fundamentals_enabled: bool = False
     free_stockdb_experimental_daily_quota: int = 20
+    free_stockdb_native_acceleration_enabled: bool = False
     tushare_token: str = ""
     cache_days: int = 1                   # 日线缓存有效期（天）
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔

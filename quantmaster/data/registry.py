@@ -61,7 +61,10 @@ def _covers_requested_range(df: pd.DataFrame, start: str, end: str) -> bool:
 
 
 def _is_complete_refresh(
-    fresh: pd.DataFrame, cached: pd.DataFrame | None, start: str, end: str,
+    fresh: pd.DataFrame,
+    cached: pd.DataFrame | None,
+    start: str,
+    end: str,
 ) -> bool:
     """只有确认新响应完整时，才允许覆盖前复权日线缓存。
 
@@ -75,8 +78,7 @@ def _is_complete_refresh(
     fresh_index = pd.DatetimeIndex(fresh.index).normalize()
     cached_index = pd.DatetimeIndex(cached.index).normalize()
     known = cached_index[
-        (cached_index >= pd.Timestamp(start).normalize())
-        & (cached_index <= pd.Timestamp(end).normalize())
+        (cached_index >= pd.Timestamp(start).normalize()) & (cached_index <= pd.Timestamp(end).normalize())
     ]
     return known.difference(fresh_index).empty
 
@@ -105,8 +107,11 @@ def _align_increment(
     common = cached.index.intersection(fresh.index)
     if common.empty or "close" not in cached or "close" not in fresh:
         raise AdjustmentMismatch("增量响应没有可用于校准的重叠交易日")
-    ratios = (fresh.loc[common, "close"] / cached.loc[common, "close"]).replace(
-        [float("inf"), float("-inf")], pd.NA).dropna()
+    ratios = (
+        (fresh.loc[common, "close"] / cached.loc[common, "close"])
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .dropna()
+    )
     ratios = ratios[ratios > 0]
     if ratios.empty:
         raise AdjustmentMismatch("重叠交易日价格无效")
@@ -118,8 +123,11 @@ def _align_increment(
         if int(stable.sum()) < max(2, math.ceil(len(ratios) * 0.8)):
             raise AdjustmentMismatch("重叠交易日无法形成稳定的复权比例")
         ratio = float(ratios.loc[stable].median())
-    ohlc = [column for column in ("open", "high", "low", "close")
-            if column in cached.columns and column in fresh.columns]
+    ohlc = [
+        column
+        for column in ("open", "high", "low", "close")
+        if column in cached.columns and column in fresh.columns
+    ]
     if direction == "left":
         aligned = fresh.copy()
         aligned[ohlc] = aligned[ohlc] / ratio
@@ -153,14 +161,18 @@ def _full_refresh(
                 errors.append(f"{factory.__name__}: 响应缺失已有交易日或内部过于稀疏")
                 continue
             store.put(symbol, frame, replace=True)
-            store.mark_checked(
-                symbol, start, end, source=source.name, replace_coverage=True)
+            store.mark_checked(symbol, start, end, source=source.name, replace_coverage=True)
             stored = store.get(symbol)
             if stored is None:
                 raise RuntimeError(f"{source.name} 日线写入后无法读取")
             return stored.loc[start:end]
         except (
-            httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError,
+            httpx.HTTPError,
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
         ) as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
@@ -184,13 +196,10 @@ def _fetch_segment(
     market = guess_market(symbol)
     errors: list[str] = []
     cached_latest = (
-        pd.Timestamp(cached.index.max()).normalize()
-        if cached is not None and not cached.empty else None
+        pd.Timestamp(cached.index.max()).normalize() if cached is not None and not cached.empty else None
     )
     prefer_extension = (
-        direction == "right"
-        and cached_latest is not None
-        and cached_latest < pd.Timestamp(end).normalize()
+        direction == "right" and cached_latest is not None and cached_latest < pd.Timestamp(end).normalize()
     )
     best: tuple[DataSource, pd.DataFrame, pd.Timestamp] | None = None
 
@@ -210,12 +219,10 @@ def _fetch_segment(
             if not _covers_requested_range(frame, start, end):
                 errors.append(f"{factory.__name__}: 响应内部过于稀疏")
                 continue
-            merged = frame if cached is None or cached.empty else _align_increment(
-                cached, frame, direction)
+            merged = frame if cached is None or cached.empty else _align_increment(cached, frame, direction)
             fresh_latest = pd.Timestamp(frame.index.max()).normalize()
             if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
-                errors.append(
-                    f"{factory.__name__}: 未返回 {cached_latest.date()} 之后的新行情")
+                errors.append(f"{factory.__name__}: 未返回 {cached_latest.date()} 之后的新行情")
                 if best is None or fresh_latest > best[2]:
                     best = (source, merged, fresh_latest)
                 continue
@@ -272,14 +279,13 @@ def _factories() -> dict[Market, list]:
     from quantmaster.data.yfinance_source import YFinanceSource
 
     ak, free, online, yf, tu = (
-        AkshareSource, FreeStockDBSource, FreeStockDBOnlineSource,
-        YFinanceSource, TushareSource,
+        AkshareSource,
+        FreeStockDBSource,
+        FreeStockDBOnlineSource,
+        YFinanceSource,
+        TushareSource,
     )
-    local_first = (
-        [free, online, ak, tu]
-        if get_config().data.free_stockdb_online_enabled
-        else [free, ak, tu]
-    )
+    local_first = [free, online, ak, tu] if get_config().data.free_stockdb_online_enabled else [free, ak, tu]
     orders = {
         "free-stockdb": local_first,
         "akshare": [ak, tu, free],
@@ -299,7 +305,9 @@ def _factories() -> dict[Market, list]:
 
 
 def _request_factories(
-    *, priority: str, allow_online: bool,
+    *,
+    priority: str,
+    allow_online: bool,
 ) -> dict[Market, list]:
     factories = _factories()
     if allow_online and priority == "interactive":
@@ -327,8 +335,15 @@ def data_source_capabilities() -> dict[str, object]:
                 declared.sort()
             capability_status = {
                 value: {
-                    "state": "declared", "installed": None, "connected": None,
-                    "data_ready": None, "verified": False,
+                    "state": "declared",
+                    "installed": None,
+                    "connected": None,
+                    "data_ready": None,
+                    "verified": False,
+                    "asset_classes": [],
+                    "frequencies": [],
+                    "coverage": None,
+                    "as_of_date": "",
                 }
                 for value in declared
             }
@@ -337,6 +352,29 @@ def data_source_capabilities() -> dict[str, object]:
 
                 sdk_available = resolve_free_stockdb_sdk_path() is not None
                 local_configured = bool(str(get_config().data.free_stockdb_url or "").strip())
+                latest_ingest = None
+                try:
+                    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+                    history = StockDBIngestStore().history(1)
+                    latest_ingest = history[0] if history else None
+                except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+                    latest_ingest = None
+                shape = {
+                    DataCapability.DAILY_BARS: (["stock", "etf"], ["1d"]),
+                    DataCapability.DAILY: (["stock", "etf"], ["1d"]),
+                    DataCapability.DAILY_CROSS_SECTION: (["stock", "etf"], ["1d"]),
+                    DataCapability.INTRADAY_BARS: (["stock", "etf"], ["1m", "5m", "15m", "30m", "60m"]),
+                    DataCapability.INTRADAY: (["stock", "etf"], ["1m", "5m", "15m", "30m", "60m"]),
+                    DataCapability.EOD_SNAPSHOT: (["stock", "etf"], ["1d"]),
+                    DataCapability.SECURITY_CATALOG: (["stock", "etf", "fund"], ["snapshot"]),
+                    DataCapability.ADJUSTMENT_FACTORS: (["stock"], ["1d"]),
+                    DataCapability.ETF_SHARES: (["etf"], ["1d"]),
+                    DataCapability.INDUSTRY: (["stock"], ["snapshot"]),
+                    DataCapability.THEMES: (["stock"], ["snapshot"]),
+                    DataCapability.BOARD_HIERARCHY: (["stock"], ["snapshot"]),
+                    DataCapability.NATIVE_INDICATORS: (["stock", "etf"], ["1d"]),
+                }
                 for capability in factory.capabilities:
                     needs_sdk = capability in {
                         DataCapability.DAILY_CROSS_SECTION,
@@ -347,14 +385,27 @@ def data_source_capabilities() -> dict[str, object]:
                     installed = sdk_available if needs_sdk else local_configured
                     capability_status[capability.value] = {
                         "state": "unverified" if installed else "unavailable",
-                        "installed": installed, "connected": None,
-                        "data_ready": None, "verified": False,
+                        "installed": installed,
+                        "connected": None,
+                        "data_ready": bool(latest_ingest) if installed else False,
+                        "verified": False,
+                        "asset_classes": shape.get(capability, ([], []))[0],
+                        "frequencies": shape.get(capability, ([], []))[1],
+                        "coverage": latest_ingest.coverage if latest_ingest else None,
+                        "as_of_date": latest_ingest.as_of_date if latest_ingest else "",
                     }
                 if name == "free-stockdb":
                     capability_status[DataCapability.SPOT.value] = {
-                        "state": "deprecated_unavailable", "installed": sdk_available,
-                        "connected": None, "data_ready": None, "verified": False,
+                        "state": "deprecated_unavailable",
+                        "installed": sdk_available,
+                        "connected": None,
+                        "data_ready": None,
+                        "verified": False,
                         "replacement": DataCapability.EOD_SNAPSHOT.value,
+                        "asset_classes": [],
+                        "frequencies": [],
+                        "coverage": None,
+                        "as_of_date": "",
                     }
             providers.setdefault(
                 name,
@@ -377,11 +428,7 @@ def get_source(
     capability: DataCapability | str = DataCapability.DAILY,
 ) -> DataSource:
     """返回该市场第一个声明所需能力且可以初始化的数据源。"""
-    required = (
-        capability
-        if isinstance(capability, DataCapability)
-        else DataCapability(str(capability))
-    )
+    required = capability if isinstance(capability, DataCapability) else DataCapability(str(capability))
     errors = []
     for factory in _factories().get(market, []):
         try:
@@ -390,9 +437,7 @@ def get_source(
                 return source
         except Exception as e:  # pragma: no cover - 依赖安装情况
             errors.append(f"{factory.__name__}: {e}")
-    raise RuntimeError(
-        f"市场 {market.value} 没有支持 {required.value} 的可用数据源: {errors}"
-    )
+    raise RuntimeError(f"市场 {market.value} 没有支持 {required.value} 的可用数据源: {errors}")
 
 
 def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
@@ -403,7 +448,8 @@ def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
     errors: list[str] = []
     allow_online = priority == "interactive" and len(requested) <= 20
     for factory in _request_factories(
-        priority=priority, allow_online=allow_online,
+        priority=priority,
+        allow_online=allow_online,
     ).get(Market.CN, []):
         missing = [symbol for code, symbol in by_code.items() if code not in rows]
         if not missing:
@@ -448,8 +494,7 @@ def _load_history_locked(
         if cached is not None and not cached.empty:
             fetch_start = min(start, str(cached.index.min().date()))
             fetch_end = max(end, str(cached.index.max().date()))
-        return _full_refresh(
-            symbol, fetch_start, fetch_end, cached, store, priority).loc[start:end]
+        return _full_refresh(symbol, fetch_start, fetch_end, cached, store, priority).loc[start:end]
 
     meta = store.metadata(symbol) or {}
     requested_end = pd.Timestamp(end).normalize()
@@ -461,7 +506,8 @@ def _load_history_locked(
     checked = store.check_freshness(symbol)
     ttl_fresh = checked is not None and checked < cfg.data.cache_days * 86400
     session_refresh_due = _session_refresh_due(
-        symbol, requested_end, cached, float(meta.get("checked_at") or 0))
+        symbol, requested_end, cached, float(meta.get("checked_at") or 0)
+    )
     if session_refresh_due:
         ttl_fresh = False
     sliced = _cached_slice(cached, start, end)
@@ -476,8 +522,7 @@ def _load_history_locked(
         if not covers_start:
             overlap_end = str(cached.index[min(4, len(cached) - 1)].date())
             segments.append((start, overlap_end, "left"))
-        force_tail = near_current and (
-            mode == RefreshMode.INCREMENTAL or not ttl_fresh)
+        force_tail = near_current and (mode == RefreshMode.INCREMENTAL or not ttl_fresh)
         if not covers_end or force_tail:
             overlap_start = str(cached.index[max(0, len(cached) - 5)].date())
             segments.append((overlap_start, end, "right"))
@@ -486,7 +531,13 @@ def _load_history_locked(
     all_segments_succeeded = True
     for fetch_start, fetch_end, direction in segments:
         cached, segment_errors, succeeded = _fetch_segment(
-            symbol, fetch_start, fetch_end, direction, cached, store, priority,
+            symbol,
+            fetch_start,
+            fetch_end,
+            direction,
+            cached,
+            store,
+            priority,
             refresh_provider_cache=(mode == RefreshMode.INCREMENTAL or session_refresh_due),
         )
         errors.extend(segment_errors)
@@ -517,8 +568,13 @@ def load_history(
     store = store or BarStore()
     with store.lock(symbol):
         return _load_history_locked(
-            symbol, start, end, use_cache=use_cache, store=store,
-            refresh=refresh, priority=priority,
+            symbol,
+            start,
+            end,
+            use_cache=use_cache,
+            store=store,
+            refresh=refresh,
+            priority=priority,
         )
 
 
@@ -553,17 +609,18 @@ def load_intraday(
     if use_cache and cached is not None and not cached.empty:
         covers_end = (
             cached.index.max().normalize() >= requested_end_date
-            if end_is_date else cached.index.max() >= end_ts
+            if end_is_date
+            else cached.index.max() >= end_ts
         )
         covers_start = (
             cached.index.min().normalize() <= start_ts.normalize()
-            if start_is_date else cached.index.min() <= start_ts
+            if start_is_date
+            else cached.index.min() <= start_ts
         )
         covers = covers_start and covers_end
         fresh = store.freshness(symbol)
         if end_is_date and requested_end_date >= pd.Timestamp.now().normalize():
-            covers = covers and fresh is not None and (
-                fresh < get_config().data.intraday_cache_minutes * 60)
+            covers = covers and fresh is not None and (fresh < get_config().data.intraday_cache_minutes * 60)
         if covers:
             sliced = cached.loc[start_ts:end_ts]
             if not sliced.empty:
@@ -609,10 +666,8 @@ def load_bars(
     """日线/分钟线统一入口。"""
     frequency = validate_frequency(frequency)
     if frequency == "1d":
-        return load_history(
-            symbol, start, end, use_cache=use_cache, refresh=refresh, priority=priority)
-    return load_intraday(
-        symbol, start, end, frequency, use_cache=use_cache, priority=priority)
+        return load_history(symbol, start, end, use_cache=use_cache, refresh=refresh, priority=priority)
+    return load_intraday(symbol, start, end, frequency, use_cache=use_cache, priority=priority)
 
 
 def load_bar_panel(
@@ -653,7 +708,8 @@ def load_bar_panel(
     # path so adjustment alignment and coverage checks remain authoritative.
     if frequency == "1d" and daily_store is not None and symbols:
         batch_symbols = [
-            symbol for symbol in symbols
+            symbol
+            for symbol in symbols
             if guess_market(symbol) == Market.CN
             and ((cached := daily_store.get(symbol)) is None or cached.empty)
         ]
@@ -667,14 +723,24 @@ def load_bar_panel(
                         batch = source.daily_many(batch_symbols, start, end)
                     for symbol in batch_symbols:
                         frame = batch.get(symbol)
-                        if frame is None or frame.empty or not _is_complete_refresh(
-                            frame, None, start, end,
+                        if (
+                            frame is None
+                            or frame.empty
+                            or not _is_complete_refresh(
+                                frame,
+                                None,
+                                start,
+                                end,
+                            )
                         ):
                             continue
                         with daily_store.lock(symbol):
                             daily_store.put(symbol, frame, replace=True)
                             daily_store.mark_checked(
-                                symbol, start, end, source=source.name,
+                                symbol,
+                                start,
+                                end,
+                                source=source.name,
                                 replace_coverage=True,
                             )
                         frames[symbol] = frame.loc[start:end]
@@ -686,13 +752,23 @@ def load_bar_panel(
         if frequency == "1d":
             assert daily_store is not None
             return load_history(
-                symbol, start, end, use_cache=use_cache, store=daily_store,
-                refresh=refresh, priority=priority,
+                symbol,
+                start,
+                end,
+                use_cache=use_cache,
+                store=daily_store,
+                refresh=refresh,
+                priority=priority,
             )
         assert intraday_store is not None
         return load_intraday(
-            symbol, start, end, frequency=frequency, use_cache=use_cache,
-            store=intraday_store, priority=priority,
+            symbol,
+            start,
+            end,
+            frequency=frequency,
+            use_cache=use_cache,
+            store=intraday_store,
+            priority=priority,
         )
 
     pending = [symbol for symbol in symbols if symbol not in frames]
@@ -714,7 +790,9 @@ def load_bar_panel(
         samples = "；".join(f"{symbol}: {error}" for symbol, error in failures[:5])
         logger.warning(
             "行情批量加载失败 %s/%s 个标的（样本：%s）",
-            len(failures), total, samples,
+            len(failures),
+            total,
+            samples,
         )
     if not frames:
         raise RuntimeError("没有任何标的成功加载数据")
@@ -744,6 +822,14 @@ def load_panel(
 ) -> pd.DataFrame | dict[str, pd.DataFrame]:
     """向后兼容的日线面板入口。"""
     return load_bar_panel(
-        symbols, start, end, frequency="1d", field=field, use_cache=use_cache,
-        progress=progress, refresh=refresh, priority=priority, max_workers=max_workers,
+        symbols,
+        start,
+        end,
+        frequency="1d",
+        field=field,
+        use_cache=use_cache,
+        progress=progress,
+        refresh=refresh,
+        priority=priority,
+        max_workers=max_workers,
     )

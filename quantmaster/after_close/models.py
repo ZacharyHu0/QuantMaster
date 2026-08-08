@@ -4,8 +4,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 SCORE_VERSION = "QM_AFTER_CLOSE_V1"
+SHADOW_SCORE_VERSION = "QM_AFTER_CLOSE_V2_SHADOW"
 
 
 def utc_now() -> str:
@@ -36,6 +37,7 @@ class SectorRank:
     staleness: dict[str, Any] = field(default_factory=lambda: {
         "stale": False, "reason": "", "last_attempt_at": "",
     })
+    sensitivity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -57,6 +59,7 @@ class ResearchCandidate:
     staleness: dict[str, Any]
     snapshot_id: str = ""
     score_version: str = SCORE_VERSION
+    shadow: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,6 +76,7 @@ class AfterCloseSnapshot:
     sectors: tuple[SectorRank, ...]
     candidates: tuple[ResearchCandidate, ...]
     excluded_counts: dict[str, int]
+    shadow_candidates: tuple[ResearchCandidate, ...] = ()
     validation: dict[str, Any] = field(default_factory=dict)
     ingest_id: str = ""
     artifact_id: str = ""
@@ -100,5 +104,16 @@ class AfterCloseSnapshot:
                 }
             )
             for item in data.get("candidates") or ()
+        )
+        data["shadow_candidates"] = tuple(
+            ResearchCandidate(
+                **{
+                    **item,
+                    "sectors": tuple(item.get("sectors") or ()),
+                    "reasons": tuple(item.get("reasons") or ()),
+                    "exclusion_rules": tuple(item.get("exclusion_rules") or ()),
+                }
+            )
+            for item in data.get("shadow_candidates") or ()
         )
         return cls(**data)

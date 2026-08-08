@@ -258,8 +258,21 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">ETF RESEARCH</span><h2>全场 ETF 研究</h2>
         <p>覆盖沪深场内 ETF 与 QDII，按资产类别比较趋势、流动性和份额证据；分钟数据只作补充，不构成交易评级。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待盘后扫描</dd><dt>血缘</dt><dd>Tushare · stockdb 本地分发</dd></dl><div><button class="rotation-refresh" type="button" data-etf-research-scan>运行 ETF 扫描</button><button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button></div>
+      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待盘后扫描</dd><dt>血缘</dt><dd>Tushare · stockdb 本地分发</dd></dl>
+      <div class="rotation-etf-actions">
+        <label class="rotation-compact-field">研究快照<select id="rotation-etf-history"><option value="">最新正式快照</option></select></label>
+        <button class="rotation-refresh" type="button" data-etf-research-scan>运行 ETF 扫描</button>
+        <button class="rotation-refresh" type="button" data-etf-research-cancel hidden>安全取消</button>
+        <button class="rotation-refresh" type="button" data-etf-research-retry hidden>恢复任务</button>
+        <button class="rotation-refresh" type="button" data-etf-coverage>覆盖诊断</button>
+        <a class="rotation-refresh" id="rotation-etf-json" href="#" download>JSON</a>
+        <a class="rotation-refresh" id="rotation-etf-csv" href="#" download>CSV</a>
+        <button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button>
+      </div>
     </div>
+    <aside class="rotation-etf-job" id="rotation-etf-job" hidden aria-live="polite"><strong>ETF 扫描</strong><span data-etf-job-status>准备中</span></aside>
+    <section class="rotation-detail rotation-etf-drawer" id="rotation-etf-detail" role="dialog" aria-modal="false" aria-label="ETF 研究详情" aria-hidden="true" hidden></section>
+    <section class="rotation-detail" id="rotation-etf-coverage" hidden></section>
     <div id="rotation-etf-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
 </section>
@@ -419,6 +432,10 @@
   </div>
   <section class="after-close-validation" id="after-close-validation" aria-labelledby="after-close-validation-title">
     <div><h3 id="after-close-validation-title">事后验证</h3><p>只有未来交易日真实发生后才写入 1/3/5/7 日标签。</p></div><div data-after-close-labels>尚无可计算标签</div>
+  </section>
+  <section class="after-close-health" aria-labelledby="after-close-health-title">
+    <div class="after-close-pane-head"><div><h3 id="after-close-health-title">策略健康与影子评分</h3><span>V2 不会自动提升；PSI ≥ 0.10 警告，≥ 0.25 降级。</span></div><strong data-after-close-health-status>等待验证</strong></div>
+    <div class="after-close-health-grid" data-after-close-health></div>
   </section>
 </section>
 

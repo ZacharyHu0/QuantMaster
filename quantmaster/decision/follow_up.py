@@ -1,0 +1,192 @@
+"""历史选股快照的 T+1 事后价格验证。"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+import pandas as pd
+
+
+def _finite_price(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _normalize_bars(frame: pd.DataFrame | None) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["open", "close"])
+    columns = {str(column).casefold(): column for column in frame.columns}
+    values = pd.DataFrame(index=frame.index)
+    for field in ("open", "close"):
+        source = columns.get(field)
+        values[field] = (
+            pd.to_numeric(frame[source], errors="coerce")
+            if source is not None
+            else float("nan")
+        )
+    dates = pd.DatetimeIndex(pd.to_datetime(values.index, errors="coerce"))
+    if dates.tz is not None:
+        dates = dates.tz_localize(None)
+    values.index = dates.normalize()
+    values = values.loc[~values.index.isna()]
+    values = values.loc[~values.index.duplicated(keep="last")]
+    return values.sort_index()
+
+
+def price_frames_from_panel(
+    panel: Mapping[str, pd.DataFrame], symbols: Sequence[str],
+) -> dict[str, pd.DataFrame]:
+    """Extract per-symbol open/close frames from a field-oriented price panel."""
+    frames: dict[str, pd.DataFrame] = {}
+    for symbol in dict.fromkeys(symbols):
+        columns: dict[str, pd.Series] = {}
+        for field in ("open", "close"):
+            values = panel.get(field)
+            if isinstance(values, pd.DataFrame) and symbol in values.columns:
+                columns[field] = values[symbol]
+        if columns:
+            frames[symbol] = pd.DataFrame(columns)
+    return frames
+
+
+def decision_follow_up(
+    snapshot: Mapping[str, Any], price_frames: Mapping[str, pd.DataFrame],
+) -> dict[str, Any]:
+    """Evaluate a snapshot from T+1 open to the horizon/latest session close.
+
+    The first post-signal session is holding day one.  Once the configured number
+    of sessions exists, the result is frozen at that session's close even when the
+    local cache already contains later prices.
+    """
+    raw_picks = snapshot.get("picks") or []
+    picks = [pick for pick in raw_picks[:3] if isinstance(pick, Mapping)]
+    try:
+        horizon = max(1, int(snapshot.get("holding_horizon_days") or 1))
+    except (TypeError, ValueError):
+        horizon = 1
+    try:
+        signal_date = pd.Timestamp(str(snapshot.get("signal_date") or "")).normalize()
+    except (TypeError, ValueError):
+        signal_date = pd.NaT
+
+    normalized = {
+        str(pick.get("symbol") or ""): _normalize_bars(
+            price_frames.get(str(pick.get("symbol") or ""))
+        )
+        for pick in picks
+        if pick.get("symbol")
+    }
+    calendar: set[pd.Timestamp] = set()
+    all_close_dates: set[pd.Timestamp] = set()
+    if not pd.isna(signal_date):
+        for frame in normalized.values():
+            close_dates = frame.index[frame["close"].notna()]
+            all_close_dates.update(close_dates)
+            calendar.update(date for date in close_dates if date > signal_date)
+    sessions = sorted(calendar)
+    completed_sessions = min(len(sessions), horizon)
+    entry_date = sessions[0] if sessions else None
+    evaluation_date = sessions[completed_sessions - 1] if completed_sessions else None
+
+    has_price_data = any(not frame.empty for frame in normalized.values())
+    if not picks or pd.isna(signal_date):
+        status = "unavailable"
+    elif completed_sessions >= horizon:
+        status = "completed"
+    elif completed_sessions:
+        status = "in_progress"
+    elif has_price_data:
+        status = "pending"
+    else:
+        status = "unavailable"
+
+    outcomes: list[dict[str, Any]] = []
+    returns: list[float] = []
+    for position, pick in enumerate(picks, start=1):
+        symbol = str(pick.get("symbol") or "")
+        outcome: dict[str, Any] = {
+            "rank": int(pick.get("rank") or position),
+            "symbol": symbol,
+            "name": str(pick.get("name") or ""),
+            "status": "pending" if status == "pending" else "unavailable",
+            "entry_date": entry_date.date().isoformat() if entry_date is not None else None,
+            "entry_price": None,
+            "price_date": None,
+            "price": None,
+            "price_change": None,
+            "return": None,
+        }
+        frame = normalized.get(symbol)
+        if frame is None or frame.empty or entry_date is None or evaluation_date is None:
+            outcomes.append(outcome)
+            continue
+        entry_price = _finite_price(frame.at[entry_date, "open"] if entry_date in frame.index else None)
+        if entry_price is None:
+            outcome["status"] = "missing_entry"
+            outcomes.append(outcome)
+            continue
+        marks = frame.loc[
+            (frame.index >= entry_date) & (frame.index <= evaluation_date), "close"
+        ].dropna()
+        if marks.empty:
+            outcome["status"] = "missing_price"
+            outcome["entry_price"] = round(entry_price, 4)
+            outcomes.append(outcome)
+            continue
+        price = _finite_price(marks.iloc[-1])
+        if price is None:
+            outcome["status"] = "missing_price"
+            outcome["entry_price"] = round(entry_price, 4)
+            outcomes.append(outcome)
+            continue
+        price_date = pd.Timestamp(marks.index[-1])
+        price_return = price / entry_price - 1
+        outcome.update({
+            "status": "ready",
+            "entry_price": round(entry_price, 4),
+            "price_date": price_date.date().isoformat(),
+            "price": round(price, 4),
+            "price_change": round(price - entry_price, 4),
+            "return": round(price_return, 6),
+        })
+        returns.append(price_return)
+        outcomes.append(outcome)
+
+    average_return = sum(returns) / len(returns) if returns else None
+    return {
+        "status": status,
+        "method": "t_plus_one_open_to_horizon_close" if status == "completed"
+        else "t_plus_one_open_to_latest_close",
+        "horizon_days": horizon,
+        "completed_sessions": completed_sessions,
+        "progress": round(completed_sessions / horizon, 4),
+        "entry_date": entry_date.date().isoformat() if entry_date is not None else None,
+        "evaluation_date": (
+            evaluation_date.date().isoformat() if evaluation_date is not None else None
+        ),
+        "data_as_of_date": (
+            max(all_close_dates).date().isoformat() if all_close_dates else None
+        ),
+        "average_return": round(average_return, 6) if average_return is not None else None,
+        "available_picks": len(returns),
+        "winner_count": sum(value > 0 for value in returns),
+        "picks": outcomes,
+    }
+
+
+def enrich_decision_snapshots(
+    snapshots: Sequence[Mapping[str, Any]],
+    price_frames: Mapping[str, pd.DataFrame],
+) -> list[dict[str, Any]]:
+    """Attach derived follow-up data without altering immutable stored payloads."""
+    enriched: list[dict[str, Any]] = []
+    for snapshot in snapshots:
+        value = dict(snapshot)
+        value["follow_up_validation"] = decision_follow_up(snapshot, price_frames)
+        enriched.append(value)
+    return enriched

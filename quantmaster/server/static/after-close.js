@@ -48,7 +48,7 @@
       <tr data-sector-code="${esc(item.code)}" class="${item.code === state.sector ? 'selected' : ''}">
         <td class="after-close-rank">${item.rank}</td>
         <td><span class="after-close-name"><strong>${esc(item.name)}</strong><small>${esc(item.code)} · ${item.eligible_members}/${item.total_members}</small></span></td>
-        <td class="after-close-score">${number(item.score)}</td>
+        <td class="after-close-score">${number(item.score)}<small>${item.sensitivity?.equal?.['20']?.rank_delta ?? 0} 位敏感性差</small></td>
         <td class="${signClass(item.return_20d)}">${percent(item.return_20d)}</td>
         <td class="${signClass(item.relative_20d)}">${percent(item.relative_20d)}</td>
         <td>${percent(item.breadth_20d)}</td><td>${percent(item.coverage)}</td>
@@ -66,7 +66,7 @@
       <tr data-candidate-symbol="${esc(item.symbol)}">
         <td class="after-close-rank">${item.rank}</td>
         <td><span class="after-close-name"><strong>${esc(item.name || item.symbol)}</strong><small>${esc(item.symbol)}</small></span></td>
-        <td class="after-close-score">${number(item.score)}</td>
+        <td class="after-close-score">${number(item.score)}<small>${item.shadow?.score == null ? '影子无排名' : `影子 ${number(item.shadow.score)} · ${item.shadow.rank_delta > 0 ? '+' : ''}${item.shadow.rank_delta || 0}`}</small></td>
         <td class="${signClass(item.metrics?.return_20d)}">${percent(item.metrics?.return_20d)}</td>
         <td class="${signClass(item.metrics?.amount_change)}">${percent(item.metrics?.amount_change)}</td>
         <td class="${signClass(item.metrics?.drawdown_20d)}">${percent(item.metrics?.drawdown_20d)}</td>
@@ -79,6 +79,28 @@
     target.innerHTML = state.labels.length ? state.labels.map(item =>
       `<span><strong>${item.horizon}D</strong> 命中 ${percent(item.hit_rate)} · 均值 ${percent(item.mean_return)} · 全市场超额 ${percent(item.excess_mean_return)} · 中证800超额 ${percent(item.excess_vs_csi800)} · 回撤 ${percent(item.mean_max_drawdown)}</span>`
     ).join('') : '尚无足够未来交易日，未生成标签';
+  }
+
+  async function loadHealth() {
+    const target = document.querySelector('[data-after-close-health]');
+    const status = document.querySelector('[data-after-close-health-status]');
+    if (!target || !status) return;
+    try {
+      const health = await api('/api/v1/after-close/health?limit=500');
+      status.textContent = health.manual_review_eligible ? 'V2 可人工评审' : 'V2 观察中';
+      const v2 = (health.summaries || []).find(item => item.score_version === 'QM_AFTER_CLOSE_V2_SHADOW' && item.horizon === 5);
+      const drift = health.drift || {};
+      const worst = Object.entries(drift.features || {}).sort((a,b) => Number(b[1].psi || 0) - Number(a[1].psi || 0))[0];
+      const check = health.promotion_checks?.five_day_snapshots || {};
+      target.innerHTML = `
+        <article><small>当前正式评分</small><strong>${esc(health.active_score_version || 'QM_AFTER_CLOSE_V1')}</strong><p>提升或回滚只影响之后创建的快照。</p></article>
+        <article><small>V2 五日有效标签</small><strong>${check.value || 0} / ${check.required || 60}</strong><p>${v2?.conclusion || '样本不足'}</p></article>
+        <article><small>分布漂移</small><strong>${esc(drift.status || 'insufficient')}</strong><p>${worst ? `${esc(worst[0])} PSI ${number(worst[1].psi, 3)}` : '尚无足够历史分布'}</p></article>
+        <article><small>人工评审资格</small><strong>${health.manual_review_eligible ? '通过' : '未通过'}</strong><p>不会自动替换 V1，也不会触发交易动作。</p></article>`;
+    } catch (error) {
+      status.textContent = '健康度读取失败';
+      target.innerHTML = `<article><p>${esc(error.message)}</p></article>`;
+    }
   }
 
   function staleCopy(snapshot) {
@@ -126,7 +148,7 @@
     const csv = document.getElementById('after-close-csv');
     json.href = `/api/v1/after-close/export/${encodeURIComponent(snapshot.snapshot_id)}?format=json`;
     csv.href = `/api/v1/after-close/export/${encodeURIComponent(snapshot.snapshot_id)}?format=csv`;
-    renderCoverage(); renderSectors(); renderCandidates(); renderLabels();
+    renderCoverage(); renderSectors(); renderCandidates(); renderLabels(); void loadHealth();
   }
 
   async function loadHistory() {

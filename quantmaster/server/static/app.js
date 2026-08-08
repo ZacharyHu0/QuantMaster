@@ -1072,13 +1072,6 @@ function routeFromHash() {
   const match = location.hash.match(/^#(observe|select|research|trade)\/([a-z-]+)$/);
   if (match && ROUTE_PAGE[match[1]]?.[match[2]]) return {workspace:match[1], page:match[2]};
   if (location.hash === '#automation') return {workspace:'automation', page:'automation'};
-  const legacy = location.hash.match(/^#(market|rotation)\/([a-z-]+)$/);
-  if (legacy) {
-    const map = legacy[1] === 'market'
-      ? {quotes:'quotes', temperature:'temperature', style:'style'}
-      : {overview:'rotation', industry:'industry', themes:'themes', 'etf-flows':'etf-flows', radar:'rotation'};
-    if (map[legacy[2]]) return {workspace:'observe', page:map[legacy[2]]};
-  }
   return null;
 }
 
@@ -2320,6 +2313,102 @@ function renderDecisionRsiChart(market, sectors) {
   }),{notMerge:true});
 }
 
+function decisionSignedPercent(value) {
+  if (value == null || !Number.isFinite(+value)) return '—';
+  return `${+value > 0 ? '+' : ''}${pct(+value)}`;
+}
+
+function decisionSnapshotPicksMarkup(snapshot) {
+  const picks = (snapshot.picks || []).slice(0,3);
+  return `<div class="snapshot-pick-list">${picks.map(pick => `<div class="snapshot-pick"><span class="snapshot-pick-name" title="${esc(pick.name || '名称待同步')}">${esc(pick.name || '名称待同步')}</span><span class="snapshot-pick-symbol">${esc(pick.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div>`;
+}
+
+function decisionSnapshotSummaryMarkup(snapshot) {
+  const picks = (snapshot.picks || []).slice(0,3);
+  return `<div class="snapshot-pick-summary">${picks.map(pick => `<span title="${esc(`${pick.name || '名称待同步'} · ${pick.symbol || ''}`)}">${esc(pick.name || pick.symbol || '名称待同步')}</span>`).join('<i aria-hidden="true">·</i>') || '<span>—</span>'}</div>`;
+}
+
+function decisionFollowUpSummaryMarkup(snapshot) {
+  const validation = snapshot.follow_up_validation || {};
+  const horizon = Math.max(1,Number(validation.horizon_days || snapshot.holding_horizon_days || 1));
+  const completed = Math.max(0,Math.min(horizon,Number(validation.completed_sessions || 0)));
+  const status = validation.status || 'unavailable';
+  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',
+    unavailable:'行情待更新'})[status] || '行情待更新';
+  const average = validation.average_return;
+  const averageLabel = average == null || !Number.isFinite(+average)
+    ? '—' : decisionSignedPercent(average);
+  const progressLabel = `${statusLabel} ${completed}/${horizon}`;
+  return `<div class="snapshot-summary-validation" data-status="${esc(status)}">
+    <span>${esc(statusLabel)}</span><progress max="${horizon}" value="${completed}" aria-label="${esc(progressLabel)}"></progress><small>${completed}/${horizon}</small><strong class="${cls(average)}">${esc(averageLabel)}</strong>
+  </div>`;
+}
+
+function decisionFollowUpMarkup(snapshot) {
+  const validation = snapshot.follow_up_validation || {};
+  const picks = (snapshot.picks || []).slice(0,3);
+  const outcomes = new Map((validation.picks || []).map(item => [item.symbol,item]));
+  const horizon = Math.max(1,Number(validation.horizon_days || snapshot.holding_horizon_days || 1));
+  const completed = Math.max(0,Math.min(horizon,Number(validation.completed_sessions || 0)));
+  const status = validation.status || 'unavailable';
+  const statusLabel = ({completed:'周期已到',in_progress:'验证中',pending:'等待 T+1',
+    unavailable:'行情待更新'})[status] || '行情待更新';
+  const available = Number(validation.available_picks || 0);
+  const average = validation.average_return;
+  const cohort = picks.length === 3 && available === 3
+    ? 'Top 3 等权' : available ? `可比 ${available} 只` : '暂无可比收益';
+  const summary = average == null || !Number.isFinite(+average)
+    ? cohort : `${cohort} ${decisionSignedPercent(average)}`;
+  const pickRows = picks.map((pick,index) => {
+    const outcome = outcomes.get(pick.symbol) || {};
+    const ready = outcome.status === 'ready' && Number.isFinite(+outcome.return);
+    const resultLabel = ({pending:'待入场',missing_entry:'无 T+1 开盘价',
+      missing_price:'收盘价暂缺',unavailable:'本地行情待更新'})[outcome.status] || '本地行情待更新';
+    const detail = ready
+      ? `<span class="snapshot-pick-result ${cls(outcome.return)}" title="${esc(`T+1 开盘 ${fixed(outcome.entry_price,2)}，${status === 'completed' ? '周期' : '最新'}收盘 ${fixed(outcome.price,2)} · ${outcome.price_date || ''}`)}"><strong>${decisionSignedPercent(outcome.return)}</strong><small>${fixed(outcome.entry_price,2)} → ${fixed(outcome.price,2)}</small></span>`
+      : `<span class="snapshot-pick-result pending"><strong>—</strong><small>${esc(resultLabel)}</small></span>`;
+    return `<div class="snapshot-result-row"><span class="snapshot-result-rank">#${Number(pick.rank || index + 1)}</span>${detail}</div>`;
+  }).join('') || '<span class="snapshot-pick-symbol">该快照没有入选标的</span>';
+  const progressLabel = `${statusLabel} ${completed}/${horizon}`;
+  const fullPeriodLabel = validation.entry_date && validation.evaluation_date
+    ? `T+1 ${validation.entry_date} 开盘 → ${status === 'completed' ? '周期' : '最新'} ${validation.evaluation_date} 收盘`
+    : '等待本地日线出现 T+1 开盘与收盘';
+  const periodLabel = validation.entry_date && validation.evaluation_date
+    ? `${String(validation.entry_date).slice(5)} 开 → ${String(validation.evaluation_date).slice(5)} 收`
+    : '等待 T+1 行情';
+  return `<div class="snapshot-validation" data-status="${esc(status)}">
+    <div class="snapshot-validation-head" title="${esc(fullPeriodLabel)}"><span>${esc(progressLabel)}</span><strong class="${cls(average)}">${esc(summary)}</strong><span class="snapshot-validation-meta">${esc(periodLabel)}</span></div>
+    <progress class="snapshot-progress" max="${horizon}" value="${completed}" aria-label="${esc(progressLabel)}"></progress>
+    <div class="snapshot-result-list">${pickRows}</div>
+  </div>`;
+}
+
+function toggleDecisionSnapshotRow(row) {
+  const detail = document.getElementById(row?.dataset.snapshotToggle || '');
+  if (!row || !detail) return;
+  const expanded = row.getAttribute('aria-expanded') === 'true';
+  row.setAttribute('aria-expanded',String(!expanded));
+  detail.hidden = expanded;
+  row.querySelector('[data-snapshot-toggle-button]')?.setAttribute('aria-expanded',String(!expanded));
+}
+
+function decisionHistoryTableMarkup(snapshots, emptyText = '生成后会自动保存快照') {
+  const rows = snapshots.map((snapshot,index) => {
+    const detailId = `decision-snapshot-detail-${index}`;
+    return `<tr class="snapshot-record-row" data-snapshot-toggle="${detailId}" aria-expanded="false" title="点击展开该日完整验证">
+    <td class="snapshot-date"><button class="snapshot-row-toggle" type="button" data-snapshot-toggle-button aria-expanded="false" aria-controls="${detailId}">${esc(snapshot.signal_date)}</button></td>
+    <td class="snapshot-period">${snapshot.holding_horizon_days} 日<div class="reason">${esc(decisionProfileLabel(snapshot.profile))}</div></td>
+    <td class="snapshot-exposure">${pct(snapshot.recommended_exposure)}</td>
+    <td class="snapshot-picks">${decisionSnapshotSummaryMarkup(snapshot)}</td>
+    <td class="snapshot-verification">${decisionFollowUpSummaryMarkup(snapshot)}</td>
+  </tr><tr class="snapshot-detail-row" id="${detailId}" hidden><td colspan="5"><div class="snapshot-detail-grid">
+    <div class="snapshot-detail-section"><div class="snapshot-detail-label">前三入选</div>${decisionSnapshotPicksMarkup(snapshot)}</div>
+    <div class="snapshot-detail-section"><div class="snapshot-detail-label">股价变动验证</div>${decisionFollowUpMarkup(snapshot)}</div>
+  </div></td></tr>`;
+  }).join('') || `<tr><td colspan="5" class="msg">${esc(emptyText)}</td></tr>`;
+  return `<div class="table-scroll snapshot-table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th class="snapshot-picks">前三入选</th><th class="snapshot-verification">股价变动验证</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 function renderDecision(data, target = document.getElementById('decision-out')) {
   const out = target;
   const market = data.market, current = market.current;
@@ -2406,15 +2495,13 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || `<tr><td colspan="9" class="msg">${selectionReady ? '当前条件下没有标的入选' : '市场状态已可查看，决策结果仍在计算…'}</td></tr>`}</tbody></table></div>
       <div class="hint">${esc(selection.risk_note || '决策结果生成后将在此显示依据与风控位。')}</div>
     </div>
-    <div class="decision-grid reveal reveal-delay">
+    <div class="decision-bottom-stack reveal reveal-delay">
       <div class="panel"><div class="panel-heading"><h3>板块强弱</h3><span class="state-pill" data-fear-greed-label data-fear-greed-prefix="CNN 恐贪 · ">CNN 恐贪读取中</span></div>
         <div class="table-scroll"><table><thead><tr><th>板块</th><th>成分</th><th>状态</th><th>牛熊分</th><th>RSI14</th><th>机会提示</th><th>上涨宽度</th></tr></thead><tbody>
         ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td><span class="rsi-badge ${rsiVisualClass(s.rsi_14)}">${fixed(s.rsi_14,1)}</span></td><td><span class="state-pill opportunity-signal" data-opportunity-rsi="${fixed(s.rsi_14,2)}"></span></td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="7" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
         </tbody></table></div></div>
-      <div class="panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">本地 SQLite</span></div>
-        <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
-        ${(data.history || []).map(h => `<tr><td class="snapshot-date">${esc(h.signal_date)}</td><td class="snapshot-period">${h.holding_horizon_days} 日<div class="reason">${esc(decisionProfileLabel(h.profile))}</div></td><td class="snapshot-exposure">${pct(h.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(h.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('') || `<tr><td colspan="4" class="msg">${historyReady ? '生成后会自动保存快照' : '正在读取本地快照…'}</td></tr>`}
-        </tbody></table></div></div>
+      <div class="panel decision-history-panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">T+1 后续验证 · 本地行情</span></div>
+        ${decisionHistoryTableMarkup(data.history || [], historyReady ? '生成后会自动保存快照' : '正在读取本地快照…')}</div>
     </div>`;
 
   regimeHistory = market.past || [];
@@ -2462,10 +2549,8 @@ function renderDecisionHistory(snapshots, target = document.getElementById('deci
           <td><span class="down">-${pct(p.stop_loss)}</span> / <span class="up">+${pct(p.take_profit)}</span></td><td>${decisionPickEvidenceMarkup(p)}</td></tr>`).join('') || '<tr><td colspan="9" class="msg">该历史快照没有入选标的</td></tr>'}
       </tbody></table></div><div class="hint">${esc(latest.risk_note || '历史决策风险说明未记录。')}</div>
     </div>
-    <div class="panel reveal reveal-delay"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">相同候选与参数</span></div>
-      <div class="table-scroll"><table class="snapshot-table"><thead><tr><th class="snapshot-date">日期</th><th class="snapshot-period">周期</th><th class="snapshot-exposure">仓位</th><th>前三入选</th></tr></thead><tbody>
-        ${snapshots.map(item => `<tr><td class="snapshot-date">${esc(item.signal_date)}</td><td class="snapshot-period">${item.holding_horizon_days} 日<div class="reason">${esc(decisionProfileLabel(item.profile))}</div></td><td class="snapshot-exposure">${pct(item.recommended_exposure)}</td><td><div class="snapshot-pick-list">${(item.picks || []).slice(0,3).map(p => `<div class="snapshot-pick">${p.name ? `<span class="snapshot-pick-name" title="${esc(p.name)}">${esc(p.name)}</span>` : ''}<span class="snapshot-pick-symbol">${esc(p.symbol)}</span></div>`).join('') || '<span class="snapshot-pick-symbol">—</span>'}</div></td></tr>`).join('')}
-      </tbody></table></div></div>`;
+    <div class="panel reveal reveal-delay decision-history-panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">T+1 后续验证 · 相同候选与参数</span></div>
+      ${decisionHistoryTableMarkup(snapshots)}</div>`;
   mountDecisionKline();
 }
 
@@ -2614,6 +2699,8 @@ document.addEventListener('quantmaster:candidates-updated', () => {
 });
 decisionForm.onsubmit = e => { e.preventDefault(); loadDecision(e.target); };
 document.getElementById('decision-out').addEventListener('click', e => {
+  const snapshotRow = e.target.closest('[data-snapshot-toggle]');
+  if (snapshotRow) { toggleDecisionSnapshotRow(snapshotRow); return; }
   const preview = e.target.closest('[data-preview-symbol]');
   if (preview) {
     document.querySelector('nav button[data-tab="market"]').click();

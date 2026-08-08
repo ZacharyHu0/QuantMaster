@@ -196,10 +196,17 @@ def test_market_style_confirmation_path_uses_compact_chart_layout():
     assert script.count('id="rotation-style-path-chart"') == 1
     assert "structurePathChart(data.history || [])" in script
     assert "step:'end'" in script
-    assert "const structureSpreadColor = value =>" in script
-    assert "if (parsed > .0025) return CHART_COLORS.up;" in script
-    assert "if (parsed < -.0025) return CHART_COLORS.down;" in script
-    assert "lineStyle:{color:CHART_COLORS.down,width:1.7,type:'dashed'}" in script
+    assert "const structureBarPoint = (row, key, direction) =>" in script
+    assert "direction * Math.abs(rawReturn)" in script
+    assert "name:'强势样本',type:'bar'" in script
+    assert "name:'低位样本',type:'bar'" in script
+    assert "barGap:'-100%'" in script
+    assert "itemStyle:{color:CHART_COLORS.up,borderRadius:[2,2,0,0]}" in script
+    assert "itemStyle:{color:CHART_COLORS.down,borderRadius:[0,0,2,2]}" in script
+    assert "name:'强弱差',type:'line',showSymbol:false" in script
+    assert "lineStyle:{color:CHART_COLORS.primary,width:1.8,type:'solid'}" in script
+    assert "min:-structureExtent,max:structureExtent" in script
+    assert "rgba(201,150,66,.07)" in script
     assert "data:[[{yAxis:-.0025},{yAxis:.0025}]]" in script
     assert "const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};" in script
     assert "rgba(36,160,107,.055)" in script

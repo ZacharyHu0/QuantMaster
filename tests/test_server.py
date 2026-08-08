@@ -280,6 +280,17 @@ class TestBasics:
         assert 'class="snapshot-table"' in app_script
         assert 'class="snapshot-period"' in app_script
         assert 'class="snapshot-pick"' in app_script
+        assert "function decisionFollowUpMarkup" in app_script
+        assert "function decisionSnapshotPicksMarkup" in app_script
+        assert "function toggleDecisionSnapshotRow" in app_script
+        assert 'class="snapshot-record-row"' in app_script
+        assert 'class="snapshot-detail-row"' in app_script
+        assert "e.target.closest('[data-snapshot-toggle]')" in app_script
+        assert "前三入选" in app_script
+        assert "股价变动验证" in app_script
+        assert 'colspan="5"' in app_script
+        assert ".snapshot-progress {" in app_styles
+        assert '.snapshot-validation[data-status="completed"]' in app_styles
         assert "event.partial" in app_script
         assert "/api/v1/research/decision/dashboard/stream" in app_script
         assert 'id="asset-workbench"' in resp.text
@@ -589,6 +600,76 @@ class TestBasics:
             "/api/v1/research/selection/history", params={"horizon": "2"},
         )
         assert invalid.status_code == 422
+
+    def test_decision_follow_up_uses_t1_open_and_freezes_at_horizon(self):
+        from quantmaster.decision import decision_follow_up
+
+        dates = pd.to_datetime([
+            "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07",
+        ])
+        snapshot = {
+            "signal_date": "2026-08-03",
+            "holding_horizon_days": 3,
+            "picks": [{"rank": 1, "symbol": "600000.SH", "name": "浦发银行"}],
+        }
+        bars = pd.DataFrame({
+            "open": [10.0, 10.8, 11.4, 20.0],
+            "close": [10.5, 11.0, 12.0, 25.0],
+        }, index=dates)
+
+        validation = decision_follow_up(snapshot, {"600000.SH": bars})
+
+        assert validation["status"] == "completed"
+        assert validation["completed_sessions"] == 3
+        assert validation["entry_date"] == "2026-08-04"
+        assert validation["evaluation_date"] == "2026-08-06"
+        assert validation["data_as_of_date"] == "2026-08-07"
+        assert validation["picks"][0]["entry_price"] == 10.0
+        assert validation["picks"][0]["price"] == 12.0
+        assert validation["picks"][0]["return"] == 0.2
+
+    def test_selection_history_adds_in_progress_top3_validation(self):
+        from quantmaster.data.storage import BarStore
+        from quantmaster.decision import DecisionStore
+
+        symbols = ["600000.SH", "000001.SZ", "600001.SH"]
+        report = {
+            "signal_date": "2026-08-03",
+            "holding_horizon_days": 3,
+            "profile": "risk_adjusted",
+            "policy_hash": "policy",
+            "model_version": "hybrid-v2:test",
+            "recommended_exposure": 0.6,
+            "picks": [
+                {"rank": rank, "symbol": symbol, "name": f"股票{rank}"}
+                for rank, symbol in enumerate(symbols, start=1)
+            ],
+        }
+        DecisionStore().save(report, "demo")
+        dates = pd.to_datetime(["2026-08-03", "2026-08-04", "2026-08-05"])
+        closes = ([9.8, 10.5, 12.0], [20.1, 19.0, 18.0], [30.0, 30.3, 30.0])
+        opens = ([9.7, 10.0, 11.0], [20.2, 20.0, 19.0], [30.1, 30.0, 30.2])
+        store = BarStore()
+        for symbol, open_values, close_values in zip(symbols, opens, closes, strict=True):
+            store.put(symbol, pd.DataFrame({
+                "open": open_values,
+                "high": [max(a, b) for a, b in zip(open_values, close_values, strict=True)],
+                "low": [min(a, b) for a, b in zip(open_values, close_values, strict=True)],
+                "close": close_values,
+                "volume": [1_000_000.0] * 3,
+            }, index=dates))
+
+        response = client.get("/api/v1/research/selection/history", params={
+            "universe": "demo", "profile": "risk_adjusted", "horizon": 3,
+        })
+
+        assert response.status_code == 200
+        validation = response.json()["snapshots"][0]["follow_up_validation"]
+        assert validation["status"] == "in_progress"
+        assert validation["completed_sessions"] == 2
+        assert validation["progress"] == 0.6667
+        assert [item["return"] for item in validation["picks"]] == [0.2, -0.1, 0.0]
+        assert validation["average_return"] == 0.033333
 
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
         from quantmaster.server import app as app_module

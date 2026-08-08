@@ -32,8 +32,8 @@ from quantmaster.data.base import (
     normalize_bars,
     validate_frequency,
 )
-from quantmaster.data.resilience import provider_call
 from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
+from quantmaster.data.resilience import provider_call
 
 _BOARD_CATEGORIES = {
     0: "概念",
@@ -68,11 +68,7 @@ def _canonical_cn_symbol(value: Any) -> str:
     code = str(value or "").strip().upper().partition(".")[0].zfill(6)
     if len(code) != 6 or not code.isdigit():
         return ""
-    suffix = (
-        "BJ" if code.startswith(("4", "8", "920"))
-        else "SH" if code.startswith(("6", "9"))
-        else "SZ"
-    )
+    suffix = "BJ" if code.startswith(("4", "8", "920")) else "SH" if code.startswith(("6", "9")) else "SZ"
     return f"{code}.{suffix}"
 
 
@@ -81,21 +77,23 @@ class FreeStockDBSource(DataSource):
 
     name = "free-stockdb"
     markets = (Market.CN,)
-    capabilities = frozenset({
-        DataCapability.DAILY_BARS,
-        DataCapability.DAILY,
-        DataCapability.DAILY_CROSS_SECTION,
-        DataCapability.INTRADAY_BARS,
-        DataCapability.INTRADAY,
-        DataCapability.EOD_SNAPSHOT,
-        DataCapability.SECURITY_CATALOG,
-        DataCapability.ADJUSTMENT_FACTORS,
-        DataCapability.ETF_SHARES,
-        DataCapability.INDUSTRY,
-        DataCapability.THEMES,
-        DataCapability.BOARD_HIERARCHY,
-        DataCapability.NATIVE_INDICATORS,
-    })
+    capabilities = frozenset(
+        {
+            DataCapability.DAILY_BARS,
+            DataCapability.DAILY,
+            DataCapability.DAILY_CROSS_SECTION,
+            DataCapability.INTRADAY_BARS,
+            DataCapability.INTRADAY,
+            DataCapability.EOD_SNAPSHOT,
+            DataCapability.SECURITY_CATALOG,
+            DataCapability.ADJUSTMENT_FACTORS,
+            DataCapability.ETF_SHARES,
+            DataCapability.INDUSTRY,
+            DataCapability.THEMES,
+            DataCapability.BOARD_HIERARCHY,
+            DataCapability.NATIVE_INDICATORS,
+        }
+    )
 
     def __init__(
         self,
@@ -109,7 +107,9 @@ class FreeStockDBSource(DataSource):
         resolved_sdk = resolve_free_stockdb_sdk_path(sdk_path)
         self.sdk_path = str(resolved_sdk) if resolved_sdk is not None else ""
         self._trust_env = urlparse(self.base_url).hostname not in {
-            "127.0.0.1", "localhost", "::1",
+            "127.0.0.1",
+            "localhost",
+            "::1",
         }
         self._sdk_checked = False
         self._client: Any | None = None
@@ -242,11 +242,18 @@ class FreeStockDBSource(DataSource):
         return f"sha256:{digest[:16]}" if digest else ""
 
     def artifact_identity(
-        self, *, data_session: str = "", catalog_hash: str = "", board_hash: str = "",
+        self,
+        *,
+        data_session: str = "",
+        catalog_hash: str = "",
+        board_hash: str = "",
     ) -> StockDBArtifactIdentity:
         return StockDBArtifactIdentity.discover(
-            self.sdk_path or None, get_config().data.free_stockdb_root,
-            data_session=data_session, catalog_hash=catalog_hash, board_hash=board_hash,
+            self.sdk_path or None,
+            get_config().data.free_stockdb_root,
+            data_session=data_session,
+            catalog_hash=catalog_hash,
+            board_hash=board_hash,
         )
 
     def _request(self, params: dict[str, str], *, probe: bool = False):
@@ -298,11 +305,7 @@ class FreeStockDBSource(DataSource):
         records: list[dict] = []
         fallback: list[Any] = []
         for item in payload:
-            if (
-                isinstance(item, (list, tuple))
-                and len(item) == len(names)
-                and len(item) > 2
-            ):
+            if isinstance(item, (list, tuple)) and len(item) == len(names) and len(item) > 2:
                 records.append(dict(zip(names, item, strict=True)))
             else:
                 fallback.append(item)
@@ -325,12 +328,16 @@ class FreeStockDBSource(DataSource):
             range_query = f"key:{start}"
         else:
             range_query = "all:"
-        modern = self._records(self._request({
-            "cmd": "vals",
-            "t": table,
-            "k1": f"key:{code}",
-            "k2": range_query,
-        }))
+        modern = self._records(
+            self._request(
+                {
+                    "cmd": "vals",
+                    "t": table,
+                    "k1": f"key:{code}",
+                    "k2": range_query,
+                }
+            )
+        )
         if modern or not raw_fallback:
             return modern
         if "*" in code:
@@ -407,7 +414,10 @@ class FreeStockDBSource(DataSource):
         return self._frame(records, intraday=False).loc[start:end]
 
     def daily_many(
-        self, symbols: list[str], start: str, end: str,
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
     ) -> dict[str, pd.DataFrame]:
         """Fetch many A-share histories in one native SDK request."""
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
@@ -434,15 +444,35 @@ class FreeStockDBSource(DataSource):
         return result
 
     def daily_cross_section(
-        self, symbols: list[str], start: str, end: str,
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
     ) -> pd.DataFrame:
         """批量读取盘后点时截面；可选字段缺失时保留 NaN。"""
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
         columns = [
-            "symbol", "date", "open", "high", "low", "close", "volume",
-            "amount", "float_mv", "total_mv", "pe_ttm", "pb", "is_st",
-            "pre_close", "pct_chg", "amplitude", "turnover", "vol_ratio",
-            "total_share", "float_share", "name",
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "float_mv",
+            "total_mv",
+            "pe_ttm",
+            "pb",
+            "is_st",
+            "pre_close",
+            "pct_chg",
+            "amplitude",
+            "turnover",
+            "vol_ratio",
+            "total_share",
+            "float_share",
+            "name",
         ]
         if not ordered:
             return pd.DataFrame(columns=columns)
@@ -471,10 +501,7 @@ class FreeStockDBSource(DataSource):
                 for item in self._records_for_fields(values, fields):
                     records.append({**item, "symbol": symbol})
         elif len(ordered) == 1:
-            records = [
-                {**item, "symbol": ordered[0]}
-                for item in self._records_for_fields(payload, fields)
-            ]
+            records = [{**item, "symbol": ordered[0]} for item in self._records_for_fields(payload, fields)]
         frame = pd.DataFrame(records)
         for column in columns:
             if column not in frame:
@@ -484,15 +511,34 @@ class FreeStockDBSource(DataSource):
         digits = frame["date"].astype(str).str.replace(r"\D", "", regex=True).str[:8]
         frame["date"] = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
         for column in (
-            "open", "high", "low", "close", "volume", "amount",
-            "float_mv", "total_mv", "pe_ttm", "pb", "pre_close", "pct_chg",
-            "amplitude", "turnover", "vol_ratio", "total_share", "float_share",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "float_mv",
+            "total_mv",
+            "pe_ttm",
+            "pb",
+            "pre_close",
+            "pct_chg",
+            "amplitude",
+            "turnover",
+            "vol_ratio",
+            "total_share",
+            "float_share",
         ):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         # ETF valuation sentinels mean not-applicable, never a literal zero.
         etf_mask = frame["symbol"].astype(str).str.partition(".")[0].str.startswith(("1", "5"))
         frame.loc[etf_mask & frame["pb"].eq(0), "pb"] = pd.NA
-        return frame[columns].dropna(subset=["date"]).sort_values(["symbol", "date"])
+        return (
+            frame[columns]
+            .dropna(subset=["date"])
+            .sort_values(["symbol", "date"], kind="mergesort")
+            .reset_index(drop=True)
+        )
 
     def board_hierarchy(self) -> list[dict[str, Any]]:
         levels = {"申万一级": "L1", "申万二级": "L2", "申万三级": "L3", "概念": "CONCEPT"}
@@ -506,7 +552,11 @@ class FreeStockDBSource(DataSource):
         ]
 
     def native_indicators(
-        self, names: list[str], symbols: list[str], start: str, end: str,
+        self,
+        names: list[str],
+        symbols: list[str],
+        start: str,
+        end: str,
     ) -> dict:
         """调用 SDK 指标模块，仅供显式校验/性能路径使用。"""
         module = self._load_sdk_module()
@@ -515,11 +565,74 @@ class FreeStockDBSource(DataSource):
         if not callable(calculate):
             raise RuntimeError("free-stockdb SDK 未暴露公开 zb.get 指标接口")
         codes = [str(symbol).partition(".")[0].zfill(6) for symbol in symbols]
-        return calculate(names, codes, start=_compact_time(start, intraday=False),
-                         end=_compact_time(end, intraday=False), frequency="1d")
+        normalized = [str(name).lower() for name in names]
+        parameters = {
+            "ma": "20",
+            "ema": "20",
+            "macd": "12,26,9",
+            "rsi": "14",
+            "atr": "14",
+            "boll": "20,2",
+        }
+        return calculate(
+            normalized,
+            codes,
+            start=_compact_time(start, intraday=False),
+            end=_compact_time(end, intraday=False),
+            frequency="1d",
+            fq="qfq",
+            n=[parameters.get(name) for name in normalized],
+        )
+
+    def accelerated_indicators(
+        self,
+        names: list[str],
+        symbols: list[str],
+        start: str,
+        end: str,
+    ) -> dict[str, Any]:
+        """Use only methods admitted for this exact artifact; callers retain fallback."""
+        cfg = get_config().data
+        if not cfg.free_stockdb_native_acceleration_enabled:
+            return {"status": "fallback", "path": "quantmaster", "reason": "disabled"}
+        from quantmaster.data.free_stockdb_compatibility import StockDBCompatibilityStore
+
+        artifact_id = self.artifact_identity().artifact_id
+        store = StockDBCompatibilityStore()
+        denied = [name for name in names if not store.admitted(artifact_id, name)]
+        admitted = [name for name in names if name not in denied]
+        if not admitted:
+            return {
+                "status": "fallback",
+                "path": "quantmaster",
+                "reason": "artifact_not_validated",
+                "artifact_id": artifact_id,
+                "denied_methods": denied,
+            }
+        try:
+            payload = self.native_indicators(admitted, symbols, start, end)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            return {
+                "status": "fallback",
+                "path": "quantmaster",
+                "reason": f"native_failed:{str(exc)[:160]}",
+                "artifact_id": artifact_id,
+            }
+        return {
+            "status": "partial" if denied else "ok",
+            "path": "hybrid" if denied else "free-stockdb-native",
+            "artifact_id": artifact_id,
+            "native_methods": admitted,
+            "fallback_methods": denied,
+            "payload": payload,
+        }
 
     def intraday(
-        self, symbol: str, start: str, end: str, frequency: str = "5m",
+        self,
+        symbol: str,
+        start: str,
+        end: str,
+        frequency: str = "5m",
     ) -> pd.DataFrame:
         frequency = validate_frequency(frequency)
         if frequency == "1d":
@@ -535,7 +648,10 @@ class FreeStockDBSource(DataSource):
         if frame.empty or frequency == "1m":
             return frame
         aggregation = {
-            "open": "first", "high": "max", "low": "min", "close": "last",
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
             "volume": "sum",
         }
         if "amount" in frame:
@@ -543,7 +659,11 @@ class FreeStockDBSource(DataSource):
         return self._aggregate_cn_minutes(frame, frequency, aggregation)
 
     def intraday_many(
-        self, symbols: list[str], start: str, end: str, frequency: str = "1m",
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
+        frequency: str = "1m",
     ) -> pd.DataFrame:
         """Batch minute bars for coverage/evidence jobs; never implies realtime."""
         frequency = validate_frequency(frequency)
@@ -555,8 +675,11 @@ class FreeStockDBSource(DataSource):
             return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
         codes = [symbol.partition(".")[0].zfill(6) for symbol in ordered]
         payload = self._sdk_data(
-            codes, _compact_time(start, intraday=True), _compact_time(end, intraday=True),
-            frequency, fq=None,
+            codes,
+            _compact_time(start, intraday=True),
+            _compact_time(end, intraday=True),
+            frequency,
+            fq=None,
         )
         if not isinstance(payload, dict):
             return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
@@ -569,13 +692,19 @@ class FreeStockDBSource(DataSource):
             frame = frame.reset_index()
             frame.insert(0, "symbol", symbol)
             frames.append(frame)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-            columns=["symbol", "date", *OHLCV_COLUMNS, "amount"],
+        return (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(
+                columns=["symbol", "date", *OHLCV_COLUMNS, "amount"],
+            )
         )
 
     @staticmethod
     def _aggregate_cn_minutes(
-        frame: pd.DataFrame, frequency: str, aggregation: dict[str, str],
+        frame: pd.DataFrame,
+        frequency: str,
+        aggregation: dict[str, str],
     ) -> pd.DataFrame:
         """Aggregate within each A-share session so buckets never cross lunch."""
         minutes = int(frequency[:-1])
@@ -592,13 +721,16 @@ class FreeStockDBSource(DataSource):
         origin = pd.Series(780, index=values.index)
         origin.loc[session.eq("am")] = 570
         bucket = ((minute_of_day - origin) // minutes).astype(int)
-        grouped = values.groupby([
-            values.index.normalize(), session.to_numpy(), bucket,
-        ], sort=True)
+        grouped = values.groupby(
+            [
+                values.index.normalize(),
+                session.to_numpy(),
+                bucket,
+            ],
+            sort=True,
+        )
         result = grouped.agg(aggregation).dropna(subset=["close"])
-        result.index = pd.DatetimeIndex([
-            group.index[0] for _, group in grouped
-        ], name="date")
+        result.index = pd.DatetimeIndex([group.index[0] for _, group in grouped], name="date")
         return result.sort_index()
 
     @staticmethod
@@ -620,7 +752,11 @@ class FreeStockDBSource(DataSource):
             for offset in range(10):
                 trading_date = (now - timedelta(days=offset)).strftime("%Y%m%d")
                 payload = self._sdk_data(
-                    sorted(requested), trading_date, trading_date, "1d", fq=None,
+                    sorted(requested),
+                    trading_date,
+                    trading_date,
+                    "1d",
+                    fq=None,
                 )
                 records = self._flatten_batch(payload)
                 if records:
@@ -629,7 +765,11 @@ class FreeStockDBSource(DataSource):
             for offset in range(10):
                 trading_date = (now - timedelta(days=offset)).strftime("%Y%m%d")
                 records = self._query_http(
-                    "日k", "*", trading_date, trading_date, raw_fallback=False,
+                    "日k",
+                    "*",
+                    trading_date,
+                    trading_date,
+                    raw_fallback=False,
                 )
                 if records:
                     break
@@ -641,36 +781,48 @@ class FreeStockDBSource(DataSource):
             change = item.get("pct_chg")
             if change is None and item.get("pre_close"):
                 change = (float(item["close"]) / float(item["pre_close"]) - 1) * 100
-            rows.append({
-                "code": code,
-                "symbol": _canonical_cn_symbol(code),
-                "name": str(item.get("name") or ""),
-                "price": float(item["close"]),
-                "change_pct": float(change or 0),
-                "as_of_date": str(item.get("date") or trading_date)[:8],
-                "realtime": False,
-            })
-        return pd.DataFrame(rows, columns=[
-            "code", "symbol", "name", "price", "change_pct", "as_of_date", "realtime",
-        ])
+            rows.append(
+                {
+                    "code": code,
+                    "symbol": _canonical_cn_symbol(code),
+                    "name": str(item.get("name") or ""),
+                    "price": float(item["close"]),
+                    "change_pct": float(change or 0),
+                    "as_of_date": str(item.get("date") or trading_date)[:8],
+                    "realtime": False,
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "code",
+                "symbol",
+                "name",
+                "price",
+                "change_pct",
+                "as_of_date",
+                "realtime",
+            ],
+        )
 
     def spot(self, symbols: list[str]) -> pd.DataFrame:
         """Deprecated compatibility method; this source does not advertise SPOT."""
         return self.eod_snapshot(symbols)
 
     def adjustment_factors(
-        self, symbols: list[str], start: str, end: str,
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
     ) -> pd.DataFrame:
-        requested = {
-            str(item).upper().partition(".")[0].zfill(6): str(item).upper()
-            for item in symbols
-        }
+        requested = {str(item).upper().partition(".")[0].zfill(6): str(item).upper() for item in symbols}
         begin = _compact_time(start, intraday=False)
         finish = _compact_time(end, intraday=False)
         client = self._sdk_client()
         if client is not None:
             raw = provider_call(
-                self.name, "sdk:adjustment-factors",
+                self.name,
+                "sdk:adjustment-factors",
                 lambda: client.rd.get("复权*").get("cum"),
             )
             by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -682,7 +834,8 @@ class FreeStockDBSource(DataSource):
                     continue
                 try:
                     row = {
-                        "symbol": requested[parts[-2]], "date": parts[-1][:8],
+                        "symbol": requested[parts[-2]],
+                        "date": parts[-1][:8],
                         "adj_factor": float(item[1]),
                     }
                 except (TypeError, ValueError):
@@ -762,20 +915,20 @@ class FreeStockDBSource(DataSource):
             if isinstance(category, int) or str(category).isdigit():
                 category = _BOARD_CATEGORIES.get(int(str(category)), str(category))
             symbols = [
-                symbol
-                for raw in value.get("symbols", []) or []
-                if (symbol := _canonical_cn_symbol(raw))
+                symbol for raw in value.get("symbols", []) or [] if (symbol := _canonical_cn_symbol(raw))
             ]
             code = str(value.get("code") or "").strip().upper()
             name = str(value.get("name") or "").strip()
             if code and name and category and symbols:
-                boards.append({
-                    **value,
-                    "code": code,
-                    "name": name,
-                    "category": str(category),
-                    "symbols": sorted(set(symbols)),
-                })
+                boards.append(
+                    {
+                        **value,
+                        "code": code,
+                        "name": name,
+                        "category": str(category),
+                        "symbols": sorted(set(symbols)),
+                    }
+                )
         return boards
 
     def boards(self, category: int | str | None = None) -> list[dict[str, Any]]:
@@ -823,8 +976,10 @@ class FreeStockDBSource(DataSource):
             today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
             self._sdk_data("000001", today, today, "1d", fq=None, probe=True)
             return {
-                "status": "ok", "engine": "stock_sdk",
-                "sdk_path": self.sdk_path, "service_url": self.base_url.rstrip("/"),
+                "status": "ok",
+                "engine": "stock_sdk",
+                "sdk_path": self.sdk_path,
+                "service_url": self.base_url.rstrip("/"),
                 "sdk_version": self.sdk_version(),
                 "artifact": self.artifact_identity().to_dict(),
             }

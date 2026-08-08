@@ -54,6 +54,12 @@
 .after-close-validation h3 { font-size:13px; }
 .after-close-validation p { color:var(--muted); font-size:10px; }
 .after-close-validation [data-after-close-labels] { display:flex; gap:12px; flex-wrap:wrap; color:var(--ink-2); font-size:11px; }
+.after-close-health { margin-top:16px; border:1px solid var(--border); border-radius:10px; background:var(--surface); overflow:hidden; }
+.after-close-health-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:var(--border); }
+.after-close-health-grid article { min-width:0; padding:12px 14px; background:var(--surface); }
+.after-close-health-grid small { display:block; color:var(--muted); font-size:9px; }
+.after-close-health-grid strong { display:block; margin-top:3px; color:var(--ink-2); font-size:13px; }
+.after-close-health-grid p { margin-top:4px; color:var(--muted); font-size:10px; line-height:1.45; }
 .after-close-empty { padding:28px 14px; color:var(--muted); text-align:center; }
 .section-divider { display:flex; align-items:baseline; gap:10px; padding-top:14px; border-top:1px solid var(--border); }
 .section-divider strong { color:var(--ink-2); }
@@ -75,6 +81,7 @@
   .after-close-workbench { margin-inline:-12px; }
   .after-close-sector-pane,.after-close-candidate-pane { border-radius:0; }
   .after-close-validation { align-items:flex-start; flex-direction:column; }
+  .after-close-health-grid { grid-template-columns:1fr 1fr; }
 }
 @media (prefers-reduced-motion:reduce) {
   .after-close-workbench tbody tr { transition:none; }
