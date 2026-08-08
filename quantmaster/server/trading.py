@@ -47,9 +47,9 @@ def create_backtest(spec: BacktestSpec, request: Request) -> dict:
     worker = get_backtest_worker()
     try:
         run = worker.service.enqueue(spec)
-    except ValueError as exc:
+    except ValueError:
         logger.warning("回测入队参数校验失败", exc_info=True)
-        raise HTTPException(422, "回测参数无效，请检查策略、标的池和日期范围") from exc
+        raise HTTPException(422, "回测参数无效，请检查策略、标的池和日期范围") from None
     worker.start()
     return run
 
@@ -72,7 +72,7 @@ def backtest_events(run_id: str, after: int = Query(0, ge=0)) -> dict:
     try:
         return {"items": _service().store.events(run_id, after=after)}
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.post("/backtests/{run_id}/cancel")
@@ -81,7 +81,7 @@ def cancel_backtest(run_id: str, request: Request) -> dict:
     try:
         return _service().store.cancel(run_id)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 class CompareRequest(ContractModel):
@@ -95,7 +95,7 @@ def compare_backtests(payload: CompareRequest, request: Request) -> dict:
     try:
         return _service().compare(payload.run_ids)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.get("/backtests/{run_id}/export")
@@ -151,7 +151,7 @@ def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> 
         })
         return _wake_auto_account(get_paper_service().create_account(spec))
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.post("/paper/accounts", status_code=201)
@@ -160,7 +160,7 @@ def create_paper_account(spec: PaperAccountSpec, request: Request) -> dict:
     try:
         return _wake_auto_account(get_paper_service().create_account(spec))
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.get("/paper/accounts")
@@ -174,7 +174,7 @@ def get_paper_account(account_id: str) -> dict:
     try:
         return get_paper_service().account_details(account_id)
     except (KeyError, ValueError) as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 class PaperAccountUpdate(ContractModel):
@@ -204,7 +204,7 @@ def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: 
         )
         return _wake_auto_account(account)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.delete("/paper/accounts/{account_id}")
@@ -215,7 +215,7 @@ def delete_paper_account(account_id: str, request: Request) -> dict:
         account = get_paper_service().archive_account(account_id)
         return {"deleted": True, "recoverable": True, "account": account}
     except (KeyError, ValueError) as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 class CloneAccountRequest(ContractModel):
@@ -232,7 +232,7 @@ def clone_paper_account(account_id: str, payload: CloneAccountRequest, request: 
             get_paper_service().clone_account(account_id, name=payload.name, mode=payload.mode)
         )
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.post("/paper/accounts/{account_id}/proposals")
@@ -241,7 +241,7 @@ def propose_paper_cycle(account_id: str, request: Request) -> dict:
     try:
         return get_paper_service().propose(account_id)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.post("/paper/cycles/{cycle_id}/confirm")
@@ -250,7 +250,7 @@ def confirm_paper_cycle(cycle_id: str, request: Request) -> dict:
     try:
         return get_paper_service().store.confirm(cycle_id)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.post("/paper/accounts/{account_id}/process")
@@ -259,7 +259,7 @@ def process_paper_account(account_id: str, request: Request) -> dict:
     try:
         return get_paper_service().process(account_id)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.get("/paper/accounts/{account_id}/report")
@@ -267,7 +267,7 @@ def paper_account_report(account_id: str) -> dict:
     try:
         return get_paper_service().report(account_id)
     except Exception as exc:
-        raise _error(exc) from exc
+        raise _error(exc) from None
 
 
 @router.get("/paper/accounts/{account_id}/cycles")

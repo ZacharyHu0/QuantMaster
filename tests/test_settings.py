@@ -133,6 +133,8 @@ def test_setting_check_results_persist_and_track_relevant_changes(tmp_path, kind
     state_text = reloaded.check_state_path.read_text(encoding="utf-8")
     assert "llm-secret-value" not in state_text
     assert "tushare-secret-value" not in state_text
+    fingerprint_key = credentials.values[CredentialStore.settings_check_fingerprint_target()]
+    assert fingerprint_key not in state_text
 
     changed = document.model_copy(deep=True)
     changed_secrets = dict(secrets)
@@ -152,6 +154,24 @@ def test_setting_check_results_persist_and_track_relevant_changes(tmp_path, kind
         changed.lab.device = "cpu"
 
     assert reloaded.check_results(changed, changed_secrets)[kind]["stale"] is True
+
+
+def test_setting_check_fingerprint_is_bound_to_private_credential_store_key(tmp_path):
+    path = tmp_path / "config.yaml"
+    backups = tmp_path / "backups"
+    credentials = FakeCredentials()
+    manager = ConfigManager(path, backups, credentials)
+    document = document_from_config(manager.load())
+    secret_values = {"llm": "candidate-api-key", "tushare": "candidate-token"}
+    manager.record_check_result("tushare", document, secret_values, {"status": "success"})
+
+    unrelated_credentials = FakeCredentials()
+    reloaded = ConfigManager(path, backups, unrelated_credentials)
+
+    assert reloaded.check_results(document, secret_values)["tushare"]["stale"] is True
+    assert credentials.values[CredentialStore.settings_check_fingerprint_target()] != (
+        unrelated_credentials.values[CredentialStore.settings_check_fingerprint_target()]
+    )
 
 
 def test_corrupt_setting_check_state_is_ignored(tmp_path):

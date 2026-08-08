@@ -35,6 +35,11 @@ class CredentialStore:
         return "data:tushare"
 
     @staticmethod
+    def settings_check_fingerprint_target() -> str:
+        """Return the private key slot used to authenticate persisted check fingerprints."""
+        return "settings:check-fingerprint-key"
+
+    @staticmethod
     def weixin_target(account_id: str) -> str:
         return f"bot:weixin:{account_id.strip()}"
 

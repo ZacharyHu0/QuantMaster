@@ -508,3 +508,18 @@ def test_stockdb_audit_api_discloses_same_upstream_and_experimental_state(
     assert payload["capabilities"]["realtime_tick"]["state"] == "disabled"
     assert payload["capabilities"]["daily_bars"]["asset_classes"] == ["stock", "etf"]
     assert payload["experimental_online"]["max_concurrency"] == 2
+
+
+def test_stockdb_audit_api_redacts_probe_exception_details(monkeypatch, isolated_config):
+    internal = r"C:\private\stockdb.sqlite Bearer secret-value"
+
+    def fail_probe(_self):
+        raise RuntimeError(internal)
+
+    monkeypatch.setattr(FreeStockDBSource, "probe", fail_probe)
+    response = TestClient(app).get("/api/v1/data-sources/free-stockdb/audit")
+
+    assert response.status_code == 200
+    assert response.json()["issues"] == ["连接探测失败；详细信息已写入本机日志"]
+    assert "private" not in response.text
+    assert "secret-value" not in response.text

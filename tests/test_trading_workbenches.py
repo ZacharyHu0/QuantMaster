@@ -982,6 +982,61 @@ def test_trading_api_errors_never_expose_exception_details() -> None:
         assert "secret-value" not in str(public.detail)
 
 
+def test_trading_route_suppresses_internal_exception_chain(monkeypatch) -> None:
+    from quantmaster.server import trading
+
+    class FailingPaperService:
+        @staticmethod
+        def update_account(*_args, **_kwargs):
+            raise RuntimeError(r"C:\private\ledger.sqlite Bearer secret-value")
+
+    monkeypatch.setattr(trading, "get_paper_service", FailingPaperService)
+    token = _issue_csrf()
+    client = TestClient(app)
+    client.cookies.set("qm_csrf", token)
+    response = client.patch(
+        "/api/v1/paper/accounts/account-1",
+        json={"name": "安全名称"},
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "交易请求执行失败，请查看本机日志"
+    assert "private" not in response.text
+    assert "secret-value" not in response.text
+
+
+def test_management_snapshot_and_migration_errors_are_redacted(monkeypatch) -> None:
+    from quantmaster.server import management
+
+    internal = r"C:\private\config.yaml Bearer secret-value"
+
+    def fail_rollback(_snapshot_id):
+        raise FileNotFoundError(internal)
+
+    def fail_get(_task_id):
+        raise KeyError(internal)
+
+    monkeypatch.setattr(management.settings_manager, "rollback", fail_rollback)
+    monkeypatch.setattr(management.migration_manager, "get", fail_get)
+    token = _issue_csrf()
+    client = TestClient(app)
+    client.cookies.set("qm_csrf", token)
+
+    snapshot = client.post(
+        "/api/v1/settings/snapshots/missing/rollback",
+        headers={"X-CSRF-Token": token},
+    )
+    migration = client.get("/api/v1/data/migrations/missing")
+
+    assert snapshot.status_code == 404
+    assert snapshot.json()["detail"] == "设置快照不存在"
+    assert migration.status_code == 404
+    assert migration.json()["detail"] == "数据迁移任务不存在"
+    assert "private" not in snapshot.text + migration.text
+    assert "secret-value" not in snapshot.text + migration.text
+
+
 def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
     client = TestClient(app)
     worker = get_backtest_worker()

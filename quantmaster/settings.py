@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import tempfile
 import threading
 import uuid
@@ -369,10 +371,15 @@ def _setting_check_fingerprint(
     kind: str,
     document: SettingsDocument,
     secrets: dict[str, str],
+    fingerprint_key: bytes,
 ) -> str:
-    """Hash only the settings that can affect one check; never persist credentials."""
+    """Authenticate settings that affect one check without persisting guessable secret hashes."""
     secret_hashes = {
-        name: hashlib.sha256(f"quantmaster:{name}\0{value}".encode()).hexdigest() if value else ""
+        name: hmac.new(
+            fingerprint_key,
+            f"quantmaster:{name}\0{value}".encode(),
+            hashlib.sha256,
+        ).hexdigest() if value else ""
         for name, value in secrets.items()
     }
     if kind in {"llm-models", "llm-web-search"}:
@@ -488,6 +495,24 @@ class ConfigManager:
         )
         self.credentials = credential_store or CredentialStore()
         self._lock = threading.RLock()
+        self._fingerprint_key: bytes | None = None
+
+    def _settings_check_fingerprint_key(self) -> bytes:
+        """Load a per-installation HMAC key, falling back to an in-memory key if unavailable."""
+        if self._fingerprint_key is not None:
+            return self._fingerprint_key
+        target = CredentialStore.settings_check_fingerprint_target()
+        try:
+            value = self.credentials.get(target)
+            if not value:
+                value = secrets.token_urlsafe(48)
+                self.credentials.set(target, value)
+            self._fingerprint_key = value.encode("utf-8")
+        except CredentialError:
+            # A source-only install without keyring can still use checks during this process.
+            # Persisted results deliberately become stale after restart instead of storing the key.
+            self._fingerprint_key = secrets.token_bytes(48)
+        return self._fingerprint_key
 
     def load(self) -> Config:
         cfg = load_config(self.path)
@@ -560,6 +585,7 @@ class ConfigManager:
                 kind,
                 document,
                 secrets,
+                self._settings_check_fingerprint_key(),
             )
             public[kind] = value
         return public
@@ -584,7 +610,12 @@ class ConfigManager:
         with self._lock:
             state = self._read_check_state()
             state["checks"][kind] = {
-                "fingerprint": _setting_check_fingerprint(kind, document, secrets),
+                "fingerprint": _setting_check_fingerprint(
+                    kind,
+                    document,
+                    secrets,
+                    self._settings_check_fingerprint_key(),
+                ),
                 "result": safe,
             }
             self.check_state_path.parent.mkdir(parents=True, exist_ok=True)

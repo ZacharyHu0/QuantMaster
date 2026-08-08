@@ -45,6 +45,12 @@ _applied_migrations: set[str] = set()
 logger = logging.getLogger(__name__)
 
 
+def _public_error(status_code: int, detail: str, context: str) -> HTTPException:
+    """Log the active exception locally while returning only stable public text."""
+    logger.warning("%s", context, exc_info=True)
+    return HTTPException(status_code, detail)
+
+
 class StockDBTickRequest(ContractModel):
     symbol: str = Field(min_length=6, max_length=12)
     count: int = Field(default=1, ge=1, le=20)
@@ -250,8 +256,9 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
     delisted: list[dict[str, Any]] = []
     try:
         probe = source.probe()
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        issues.append(f"连接探测失败：{str(exc)[:300]}")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        logger.warning("FreeStockDB 连接探测失败", exc_info=True)
+        issues.append("连接探测失败；详细信息已写入本机日志")
     if probe:
         for label, reader, target in (
             ("板块目录", source.board_hierarchy, boards),
@@ -260,8 +267,9 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
         ):
             try:
                 target.extend(reader())
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                issues.append(f"{label}不可用：{str(exc)[:200]}")
+            except (OSError, RuntimeError, TypeError, ValueError):
+                logger.warning("FreeStockDB %s读取失败", label, exc_info=True)
+                issues.append(f"{label}不可用；详细信息已写入本机日志")
     root = Path(get_config().data.free_stockdb_root).expanduser().resolve()
     mounts = (
         [
@@ -582,8 +590,8 @@ def create_snapshot(request: Request, value: SnapshotCreate) -> dict:
     _require_csrf(request)
     try:
         return settings_manager.create_named_snapshot(value.name)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
+    except ValueError:
+        raise _public_error(400, "设置快照名称或状态无效", "创建设置快照失败") from None
 
 
 @router.get("/settings/snapshots/{snapshot_id}/diff")
@@ -591,8 +599,8 @@ def snapshot_diff(snapshot_id: str, request: Request) -> dict:
     _require_local(request)
     try:
         return {"diff": settings_manager.snapshot_diff(snapshot_id)}
-    except (ValueError, FileNotFoundError) as exc:
-        raise HTTPException(404, str(exc)) from None
+    except (ValueError, FileNotFoundError):
+        raise _public_error(404, "设置快照不存在或不可读取", "读取设置快照差异失败") from None
 
 
 @router.post("/settings/snapshots/{snapshot_id}/rollback")
@@ -600,10 +608,10 @@ def rollback_snapshot(snapshot_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
         return _apply_runtime(settings_manager.rollback(snapshot_id))
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
+    except FileNotFoundError:
+        raise _public_error(404, "设置快照不存在", "回滚设置快照失败") from None
+    except ValueError:
+        raise _public_error(400, "设置快照无效，无法回滚", "回滚设置快照失败") from None
 
 
 @router.delete("/settings/snapshots/{snapshot_id}")
@@ -612,10 +620,10 @@ def delete_snapshot(snapshot_id: str, request: Request) -> dict:
     try:
         settings_manager.delete_snapshot(snapshot_id)
         return {"status": "ok"}
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
+    except FileNotFoundError:
+        raise _public_error(404, "设置快照不存在", "删除设置快照失败") from None
+    except ValueError:
+        raise _public_error(400, "设置快照无效，无法删除", "删除设置快照失败") from None
 
 
 class MigrationCreate(ContractModel):
@@ -628,10 +636,10 @@ def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
     try:
         return migration_manager.create(value.target, value.mode)
-    except (TimeoutError, RuntimeError) as exc:
-        raise HTTPException(409, str(exc)) from None
-    except MigrationError as exc:
-        raise HTTPException(400, str(exc)) from None
+    except (TimeoutError, RuntimeError):
+        raise _public_error(409, "已有数据迁移占用资源，请稍后重试", "创建数据迁移失败") from None
+    except MigrationError:
+        raise _public_error(400, "数据迁移参数或目标无效", "创建数据迁移失败") from None
 
 
 @router.get("/data/migrations/{task_id}")
@@ -650,8 +658,8 @@ def get_migration(task_id: str, request: Request) -> dict:
                 }
             ).get("apply_status")
         return task
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
+    except KeyError:
+        raise _public_error(404, "数据迁移任务不存在", "读取数据迁移任务失败") from None
 
 
 @router.post("/data/migrations/{task_id}/cancel")
@@ -659,8 +667,8 @@ def cancel_migration(task_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
         return migration_manager.cancel(task_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
+    except KeyError:
+        raise _public_error(404, "数据迁移任务不存在", "取消数据迁移任务失败") from None
 
 
 class DataRefreshRequest(ContractModel):

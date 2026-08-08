@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.90"
+VERSION = "1.3.91"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "设置密钥指纹与 API 异常脱敏",
+                "items": (
+                    (
+                        "设置检测结果改用保存在系统凭据库中的每安装 HMAC 密钥认证，"
+                        "不再落盘可供离线猜测的稳定密钥哈希；无凭据库时仅在当前进程复用。"
+                    ),
+                    (
+                        "FreeStockDB 审计、设置快照、数据迁移与交易接口只返回稳定公开错误，"
+                        "底层路径、凭据和异常链仅写入本机日志。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.90",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -176,29 +195,6 @@ RELEASES = (
                     (
                         "移除旧版市场、轮动与 radar 深链接兼容；旧书签不再"
                         "定向迁移，页面切换和浏览器回归只验证当前正式地址。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.81",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "free-stockdb 可复现摄取与全场 ETF 研究",
-                "items": (
-                    (
-                        "free-stockdb 能力拆分为日线、截面、分钟、收盘快照、目录、复权因子、"
-                        "ETF 份额与实验在线接口；制品和目录哈希会使原地更新安全失效。"
-                    ),
-                    (
-                        "全 A 股盘后扫描冻结未复权行情、复权因子、证券与板块目录到内容寻址"
-                        "摄取，研究湖按 ingest_id 复用，并披露 Tushare 上游与 free-stockdb 分发路径。"
-                    ),
-                    (
-                        "宽基资金扩展为沪深全场 ETF 分类研究，按资产类别排名并提供分钟补充证据、"
-                        "份额时效、历史快照、钻取和导出；在线 Tick/财务默认关闭且受配额、熔断和审计保护。"
                     ),
                 ),
             },
