@@ -4,13 +4,37 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.87"
+VERSION = "1.3.88"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "CI 导航回归与质量门修复",
+                "items": (
+                    (
+                        "浏览器回归改按工作区与二级页进入回测、个股分析和手册，"
+                        "并同步 ETF 研究的新导航文案，避免旧顶层入口假设导致超时。"
+                    ),
+                    (
+                        "整理 free-stockdb 实验模块与测试夹具的历史导入顺序，"
+                        "恢复整库 Ruff 质量门和后续打包审计。"
+                    ),
+                    (
+                        "拆分本次同步新增的五个复杂入口，将历史 C901 基线由过时的 93"
+                        "校准为同步前主线实测 110，并补齐 free-stockdb 类型标注，"
+                        "恢复复杂度与 mypy 门禁。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.87",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -175,21 +199,6 @@ RELEASES = (
                     (
                         "强弱收益图增加方向着色柱、蓝色死区带和实虚线区分；最近 10 日"
                         "确认路径增加三档淡色背景与彩色轴标签，布局和数据口径保持不变。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.78",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "市场温度十五日路径",
-                "items": (
-                    (
-                        "右栏温度路径由最近 5 个交易日扩展为最近 15 个交易日；横轴按约"
-                        "每 3 日标注并保留首末日期，纵轴跟随区间自动缩放且限制在 0–100。"
                     ),
                 ),
             },

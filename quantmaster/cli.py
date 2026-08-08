@@ -305,73 +305,130 @@ def cmd_decisions(args) -> None:
     _print_json({"snapshots": DecisionStore().history(args.universe, args.limit)})
 
 
-def cmd_after_close(args) -> int:
-    from pathlib import Path
+def _after_close_score_version(args, service) -> int:
+    from quantmaster.after_close.models import SCORE_VERSION, SHADOW_SCORE_VERSION
 
-    from quantmaster.after_close.jobs import get_after_close_jobs
-    from quantmaster.after_close.service import get_after_close_service
-    from quantmaster.runtime.json import strict_json_dumps
-
-    service = get_after_close_service()
-    if args.after_close_cmd == "score-version":
-        from quantmaster.after_close.models import SCORE_VERSION, SHADOW_SCORE_VERSION
-
-        health = service.store.health(500)
-        if args.score_version_cmd == "status":
-            _print_json(health)
-            return 0
-        if args.score_version_cmd == "promote":
-            if not health["manual_review_eligible"]:
-                _print_json(
-                    {
-                        "status": "rejected",
-                        "reason": "V2 尚未通过人工评审资格门",
-                        "checks": health["promotion_checks"],
-                    }
-                )
-                return 1
+    health = service.store.health(500)
+    if args.score_version_cmd == "status":
+        _print_json(health)
+        return 0
+    if args.score_version_cmd == "promote":
+        if not health["manual_review_eligible"]:
             _print_json(
                 {
-                    "status": "promoted",
-                    **service.store.set_active_score_version(SHADOW_SCORE_VERSION),
+                    "status": "rejected",
+                    "reason": "V2 尚未通过人工评审资格门",
+                    "checks": health["promotion_checks"],
                 }
             )
-            return 0
+            return 1
         _print_json(
             {
-                "status": "rolled_back",
-                **service.store.set_active_score_version(SCORE_VERSION),
+                "status": "promoted",
+                **service.store.set_active_score_version(SHADOW_SCORE_VERSION),
             }
         )
         return 0
-    if args.after_close_cmd in {"scan", "rerun"}:
-        import time
+    _print_json(
+        {
+            "status": "rolled_back",
+            **service.store.set_active_score_version(SCORE_VERSION),
+        }
+    )
+    return 0
 
-        jobs = get_after_close_jobs()
-        job, created = jobs.submit(
-            as_of=args.as_of or "",
-            force=args.after_close_cmd == "rerun",
-        )
-        jobs.start()
+
+def _run_after_close_job(args, service) -> int:
+    import time
+
+    from quantmaster.after_close.jobs import get_after_close_jobs
+
+    jobs = get_after_close_jobs()
+    job, created = jobs.submit(
+        as_of=args.as_of or "",
+        force=args.after_close_cmd == "rerun",
+    )
+    jobs.start()
+    print(
+        f"盘后扫描任务 {job['id']} {'已创建' if created else '已复用'}",
+        file=sys.stderr,
+    )
+    while True:
+        job = jobs.get(str(job["id"]))
+        if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
+            break
         print(
-            f"盘后扫描任务 {job['id']} {'已创建' if created else '已复用'}",
+            f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'} {job.get('detail') or ''}",
             file=sys.stderr,
         )
-        while True:
-            job = jobs.get(str(job["id"]))
-            if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
-                break
-            print(
-                f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'} {job.get('detail') or ''}",
-                file=sys.stderr,
-            )
-            time.sleep(0.5)
-        if job["status"] not in {"completed", "completed_with_warnings"}:
-            _print_json(jobs.public(job))
-            return 1
-        snapshot = service.store.public_latest()
-        _print_json({"job": jobs.public(job), "snapshot": snapshot})
-        return 0
+        time.sleep(0.5)
+    if job["status"] not in {"completed", "completed_with_warnings"}:
+        _print_json(jobs.public(job))
+        return 1
+    snapshot = service.store.public_latest()
+    _print_json({"job": jobs.public(job), "snapshot": snapshot})
+    return 0
+
+
+def _export_after_close_snapshot(args, snapshot, payload) -> None:
+    from pathlib import Path
+
+    from quantmaster.runtime.json import strict_json_dumps
+
+    target = Path(args.output).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if args.format == "csv":
+        import csv
+
+        fields = [
+            "rank",
+            "symbol",
+            "name",
+            "score",
+            "as_of_date",
+            "sectors",
+            "reasons",
+            "return_5d",
+            "return_20d",
+            "trend_20d",
+            "avg_amount_20d",
+            "amount_change",
+            "volatility_20d",
+            "drawdown_20d",
+            "float_mv",
+            "total_mv",
+            "pe_ttm",
+            "pb",
+        ]
+        with target.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for candidate in snapshot.candidates:
+                writer.writerow(
+                    {
+                        "rank": candidate.rank,
+                        "symbol": candidate.symbol,
+                        "name": candidate.name,
+                        "score": candidate.score,
+                        "as_of_date": candidate.as_of_date,
+                        "sectors": " / ".join(item["name"] for item in candidate.sectors),
+                        "reasons": "；".join(candidate.reasons),
+                        **{key: candidate.metrics.get(key) for key in fields if key in candidate.metrics},
+                    }
+                )
+    else:
+        target.write_text(strict_json_dumps(payload, indent=2), encoding="utf-8")
+    _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
+
+
+def cmd_after_close(args) -> int:
+    from quantmaster.after_close.service import get_after_close_service
+
+    service = get_after_close_service()
+    if args.after_close_cmd == "score-version":
+        return _after_close_score_version(args, service)
+    if args.after_close_cmd in {"scan", "rerun"}:
+        return _run_after_close_job(args, service)
     if args.after_close_cmd == "history":
         _print_json({"items": service.store.history(args.limit)})
         return 0
@@ -386,50 +443,7 @@ def cmd_after_close(args) -> int:
         "labels": service.store.labels(snapshot.snapshot_id),
     }
     if args.after_close_cmd == "export":
-        target = Path(args.output).expanduser().resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if args.format == "csv":
-            import csv
-
-            fields = [
-                "rank",
-                "symbol",
-                "name",
-                "score",
-                "as_of_date",
-                "sectors",
-                "reasons",
-                "return_5d",
-                "return_20d",
-                "trend_20d",
-                "avg_amount_20d",
-                "amount_change",
-                "volatility_20d",
-                "drawdown_20d",
-                "float_mv",
-                "total_mv",
-                "pe_ttm",
-                "pb",
-            ]
-            with target.open("w", encoding="utf-8-sig", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=fields)
-                writer.writeheader()
-                for candidate in snapshot.candidates:
-                    writer.writerow(
-                        {
-                            "rank": candidate.rank,
-                            "symbol": candidate.symbol,
-                            "name": candidate.name,
-                            "score": candidate.score,
-                            "as_of_date": candidate.as_of_date,
-                            "sectors": " / ".join(item["name"] for item in candidate.sectors),
-                            "reasons": "；".join(candidate.reasons),
-                            **{key: candidate.metrics.get(key) for key in fields if key in candidate.metrics},
-                        }
-                    )
-        else:
-            target.write_text(strict_json_dumps(payload, indent=2), encoding="utf-8")
-        _print_json({"status": "ok", "path": str(target), "snapshot_id": snapshot.snapshot_id})
+        _export_after_close_snapshot(args, snapshot, payload)
     else:
         _print_json(payload)
     return 0
@@ -515,6 +529,27 @@ def cmd_stockdb(args) -> int:
     return 0
 
 
+def _run_etf_research_job(args, service) -> int:
+    import time
+
+    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+
+    jobs = get_etf_research_jobs()
+    job, _ = jobs.submit(as_of=args.as_of or "")
+    jobs.start()
+    while True:
+        job = jobs.get(str(job["id"]))
+        if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
+            break
+        print(f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'}", file=sys.stderr)
+        time.sleep(0.5)
+    if job["status"] not in {"completed", "completed_with_warnings"}:
+        _print_json(jobs.public(job))
+        return 1
+    _print_json(service.store.latest().to_dict())
+    return 0
+
+
 def cmd_etf_research(args) -> int:
     from pathlib import Path
 
@@ -534,22 +569,7 @@ def cmd_etf_research(args) -> int:
         _print_json(jobs.public(resumed))
         return 0
     if args.etf_research_cmd == "scan":
-        import time
-
-        jobs = get_etf_research_jobs()
-        job, _ = jobs.submit(as_of=args.as_of or "")
-        jobs.start()
-        while True:
-            job = jobs.get(str(job["id"]))
-            if job["status"] not in {"queued", "running", "cancelling", "interrupted"}:
-                break
-            print(f"{int(job.get('progress') or 0):3d}% {job.get('phase') or '等待'}", file=sys.stderr)
-            time.sleep(0.5)
-        if job["status"] not in {"completed", "completed_with_warnings"}:
-            _print_json(jobs.public(job))
-            return 1
-        _print_json(service.store.latest().to_dict())
-        return 0
+        return _run_etf_research_job(args, service)
     if args.etf_research_cmd == "history":
         _print_json({"items": service.store.history(args.limit)})
         return 0

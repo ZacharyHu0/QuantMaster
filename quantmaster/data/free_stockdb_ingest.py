@@ -194,22 +194,25 @@ class StockDBIngestStore:
             found.add(value)
         return found
 
-    def backfill_references(self) -> dict[str, Any]:
-        """Rebuild pins from existing formal stores before garbage collection."""
-        root = get_config().data_root
+    def _after_close_references(self, root: Path) -> dict[tuple[str, str], str]:
         found: dict[tuple[str, str], str] = {}
         after_close = root / "after_close.sqlite"
-        if after_close.is_file():
-            try:
-                from quantmaster.runtime.sqlite import connect_sqlite
+        if not after_close.is_file():
+            return found
+        try:
+            from quantmaster.runtime.sqlite import connect_sqlite
 
-                with connect_sqlite(after_close, row_factory=True) as connection:
-                    rows = connection.execute("SELECT snapshot_id,payload_json FROM snapshots").fetchall()
-                for row in rows:
-                    for ingest_id in self._ingest_ids(json.loads(str(row["payload_json"]))):
-                        found[("after_close", str(row["snapshot_id"]))] = ingest_id
-            except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-                pass
+            with connect_sqlite(after_close, row_factory=True) as connection:
+                rows = connection.execute("SELECT snapshot_id,payload_json FROM snapshots").fetchall()
+            for row in rows:
+                for ingest_id in self._ingest_ids(json.loads(str(row["payload_json"]))):
+                    found[("after_close", str(row["snapshot_id"]))] = ingest_id
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            pass
+        return found
+
+    def _etf_references(self, root: Path) -> dict[tuple[str, str], str]:
+        found: dict[tuple[str, str], str] = {}
         for path in (root / "etf-research" / "snapshots").glob("*.json"):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -217,20 +220,33 @@ class StockDBIngestStore:
                     found[("etf_research", str(value.get("snapshot_id") or path.stem))] = ingest_id
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
-        research_catalog = root / "research_lake" / "_meta" / "catalog.sqlite"
-        if research_catalog.is_file():
-            try:
-                from quantmaster.runtime.sqlite import connect_sqlite
+        return found
 
-                with connect_sqlite(research_catalog, row_factory=True) as connection:
-                    rows = connection.execute(
-                        "SELECT partition_key,input_hashes_json FROM research_partitions"
-                    ).fetchall()
-                for row in rows:
-                    for ingest_id in self._ingest_ids(json.loads(str(row["input_hashes_json"]))):
-                        found[("research_lake", str(row["partition_key"]))] = ingest_id
-            except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-                pass
+    def _research_references(self, root: Path) -> dict[tuple[str, str], str]:
+        found: dict[tuple[str, str], str] = {}
+        research_catalog = root / "research_lake" / "_meta" / "catalog.sqlite"
+        if not research_catalog.is_file():
+            return found
+        try:
+            from quantmaster.runtime.sqlite import connect_sqlite
+
+            with connect_sqlite(research_catalog, row_factory=True) as connection:
+                rows = connection.execute(
+                    "SELECT partition_key,input_hashes_json FROM research_partitions"
+                ).fetchall()
+            for row in rows:
+                for ingest_id in self._ingest_ids(json.loads(str(row["input_hashes_json"]))):
+                    found[("research_lake", str(row["partition_key"]))] = ingest_id
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            pass
+        return found
+
+    def backfill_references(self) -> dict[str, Any]:
+        """Rebuild pins from existing formal stores before garbage collection."""
+        root = get_config().data_root
+        found = self._after_close_references(root)
+        found.update(self._etf_references(root))
+        found.update(self._research_references(root))
         for (namespace, reference_id), ingest_id in found.items():
             self.pin(ingest_id, namespace, reference_id, require_exists=False)
         missing = sorted({value for value in found.values() if self.get(value) is None})

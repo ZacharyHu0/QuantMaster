@@ -668,8 +668,8 @@ class FreeStockDBSource(DataSource):
         """Batch minute bars for coverage/evidence jobs; never implies realtime."""
         frequency = validate_frequency(frequency)
         if frequency == "1d":
-            frames = self.daily_cross_section(symbols, start, end)
-            return frames
+            daily_frames = self.daily_cross_section(symbols, start, end)
+            return daily_frames
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
         if not ordered:
             return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
@@ -833,34 +833,40 @@ class FreeStockDBSource(DataSource):
                 if len(parts) < 3 or parts[-2] not in requested:
                     continue
                 try:
-                    row = {
-                        "symbol": requested[parts[-2]],
-                        "date": parts[-1][:8],
-                        "adj_factor": float(item[1]),
-                    }
+                    sdk_symbol = requested[parts[-2]]
+                    date_value = parts[-1][:8]
+                    factor = float(item[1])
                 except (TypeError, ValueError):
                     continue
-                if row["date"] <= finish:
-                    by_symbol.setdefault(row["symbol"], []).append(row)
-            rows: list[dict[str, Any]] = []
+                if date_value <= finish:
+                    by_symbol.setdefault(sdk_symbol, []).append(
+                        {
+                            "symbol": sdk_symbol,
+                            "date": date_value,
+                            "adj_factor": factor,
+                        }
+                    )
+            sdk_rows: list[dict[str, Any]] = []
             for values in by_symbol.values():
                 values.sort(key=lambda row: row["date"])
                 previous = [row for row in values if row["date"] < begin]
                 if previous:
-                    rows.append(previous[-1])
-                rows.extend(row for row in values if row["date"] >= begin)
-            frame = pd.DataFrame(rows, columns=["symbol", "date", "adj_factor"])
+                    sdk_rows.append(previous[-1])
+                sdk_rows.extend(row for row in values if row["date"] >= begin)
+            frame = pd.DataFrame(sdk_rows, columns=["symbol", "date", "adj_factor"])
             if not frame.empty:
                 frame["date"] = pd.to_datetime(frame["date"], format="%Y%m%d", errors="coerce")
                 return frame.dropna(subset=["date", "adj_factor"]).sort_values(["symbol", "date"])
 
-        rows: list[dict[str, Any]] = []
+        http_rows: list[dict[str, Any]] = []
         for symbol in dict.fromkeys(str(item).upper() for item in symbols):
             code = symbol.partition(".")[0].zfill(6)
             for item in self._query_http("复权", code, begin, finish):
                 value = item.get("cum", item.get("factor"))
-                rows.append({"symbol": symbol, "date": item.get("date"), "adj_factor": value})
-        frame = pd.DataFrame(rows, columns=["symbol", "date", "adj_factor"])
+                http_rows.append(
+                    {"symbol": symbol, "date": item.get("date"), "adj_factor": value}
+                )
+        frame = pd.DataFrame(http_rows, columns=["symbol", "date", "adj_factor"])
         if not frame.empty:
             frame["date"] = pd.to_datetime(frame["date"].astype(str).str[:8], errors="coerce")
             frame["adj_factor"] = pd.to_numeric(frame["adj_factor"], errors="coerce")

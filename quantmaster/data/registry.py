@@ -333,7 +333,7 @@ def data_source_capabilities() -> dict[str, object]:
                 # runtime routing uses factory.capabilities and will not select it.
                 declared.append(DataCapability.SPOT.value)
                 declared.sort()
-            capability_status = {
+            capability_status: dict[str, dict[str, object]] = {
                 value: {
                     "state": "declared",
                     "installed": None,

@@ -164,9 +164,9 @@ def _full_security_master(tmp_path_factory) -> Path:
 def isolated_config(tmp_path, request, _minimal_security_master):
     """每个测试用独立数据目录，避免污染真实数据。"""
     from quantmaster.data.repair import reset_data_repair_manager_for_tests
-    from quantmaster.rotation.service import reset_rotation_runtime_for_tests
     from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
     from quantmaster.rotation.etf_research import reset_etf_research_service
+    from quantmaster.rotation.service import reset_rotation_runtime_for_tests
     from quantmaster.runtime.sqlite import reset_sqlite_runtime_for_tests
 
     reset_data_repair_manager_for_tests()

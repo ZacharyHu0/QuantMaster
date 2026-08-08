@@ -230,7 +230,9 @@ class AfterCloseStore:
             for left, right in zip(actual_bins, expected_bins, strict=True)
         )
 
-    def health(self, limit: int = 100) -> dict[str, Any]:
+    def _health_rows(
+        self, limit: int,
+    ) -> tuple[list[dict[str, Any]], list[AfterCloseSnapshot]]:
         snapshots = self.history(limit)
         rows: list[dict[str, Any]] = []
         loaded: list[AfterCloseSnapshot] = []
@@ -266,6 +268,12 @@ class AfterCloseStore:
                                 "primary_l1": str(primary_l1),
                             }
                         )
+        return rows, loaded
+
+    @staticmethod
+    def _group_health_rows(
+        rows: list[dict[str, Any]],
+    ) -> dict[tuple[str, int, str, str, str], dict[str, Any]]:
         grouped: dict[tuple[str, int, str, str, str], dict[str, Any]] = {}
         for row in rows:
             key = (
@@ -307,79 +315,95 @@ class AfterCloseStore:
             ):
                 if row.get(source) is not None:
                     bucket[target].append(float(row[source]))
-        summaries = []
-        for bucket in grouped.values():
-            summary = {key: value for key, value in bucket.items() if not isinstance(value, list)}
-            summary.update(
-                {
-                    key: (sum(values) / len(values) if values else None)
-                    for key, values in bucket.items()
-                    if isinstance(values, list)
-                }
-            )
-            summary["conclusion"] = "样本不足" if bucket["observations"] < 20 else "仅供研究观察"
-            summaries.append(summary)
+        return grouped
 
-        drift: dict[str, Any] = {"status": "insufficient", "features": {}}
-        if loaded:
-            latest_distributions = loaded[0].validation.get("feature_distributions") or {}
-            historical: dict[str, list[float]] = {}
-            for snapshot in loaded[1:61]:
-                for feature, values in (snapshot.validation.get("feature_distributions") or {}).items():
-                    historical.setdefault(str(feature), []).extend(
-                        float(value) for value in values if value is not None
-                    )
-            severities = []
-            for feature in ("coverage", "returns", "amount", "turnover", "volatility", "float_mv"):
-                actual = [
-                    float(value) for value in latest_distributions.get(feature, []) if value is not None
-                ]
-                psi = self._psi(actual, historical.get(feature, []))
-                status = (
-                    "unavailable"
-                    if psi is None
-                    else "degraded"
-                    if psi >= 0.25
-                    else "warning"
-                    if psi >= 0.10
-                    else "stable"
+    @staticmethod
+    def _health_summary(bucket: dict[str, Any]) -> dict[str, Any]:
+        summary = {key: value for key, value in bucket.items() if not isinstance(value, list)}
+        summary.update(
+            {
+                key: (sum(values) / len(values) if values else None)
+                for key, values in bucket.items()
+                if isinstance(values, list)
+            }
+        )
+        summary["conclusion"] = "样本不足" if bucket["observations"] < 20 else "仅供研究观察"
+        return summary
+
+    @staticmethod
+    def _historical_features(loaded: list[AfterCloseSnapshot]) -> dict[str, list[float]]:
+        historical: dict[str, list[float]] = {}
+        for snapshot in loaded[1:61]:
+            for feature, values in (snapshot.validation.get("feature_distributions") or {}).items():
+                historical.setdefault(str(feature), []).extend(
+                    float(value) for value in values if value is not None
                 )
-                drift["features"][feature] = {"psi": psi, "status": status}
-                severities.append(status)
-            drift["status"] = (
-                "degraded"
-                if "degraded" in severities
-                else "warning"
-                if "warning" in severities
-                else "stable"
-                if "stable" in severities
-                else "insufficient"
-            )
+        return historical
 
-        five_day_v2 = [
+    @staticmethod
+    def _feature_drift_status(psi: float | None) -> str:
+        if psi is None:
+            return "unavailable"
+        if psi >= 0.25:
+            return "degraded"
+        if psi >= 0.10:
+            return "warning"
+        return "stable"
+
+    @staticmethod
+    def _overall_drift_status(severities: list[str]) -> str:
+        for status in ("degraded", "warning", "stable"):
+            if status in severities:
+                return status
+        return "insufficient"
+
+    def _health_drift(self, loaded: list[AfterCloseSnapshot]) -> dict[str, Any]:
+        drift: dict[str, Any] = {"status": "insufficient", "features": {}}
+        if not loaded:
+            return drift
+        latest_distributions = loaded[0].validation.get("feature_distributions") or {}
+        historical = self._historical_features(loaded)
+        severities = []
+        for feature in ("coverage", "returns", "amount", "turnover", "volatility", "float_mv"):
+            actual = [
+                float(value) for value in latest_distributions.get(feature, []) if value is not None
+            ]
+            psi = self._psi(actual, historical.get(feature, []))
+            status = self._feature_drift_status(psi)
+            drift["features"][feature] = {"psi": psi, "status": status}
+            severities.append(status)
+        drift["status"] = self._overall_drift_status(severities)
+        return drift
+
+    @staticmethod
+    def _five_day_rows(rows: list[dict[str, Any]], version: str) -> list[dict[str, Any]]:
+        return [
             row
             for row in rows
-            if row["score_version"] == SHADOW_SCORE_VERSION
+            if row["score_version"] == version
             and row["horizon"] == 5
             and row["primary_l1"] == "all"
         ]
-        five_day_v1 = [
-            row
-            for row in rows
-            if row["score_version"] == SCORE_VERSION and row["horizon"] == 5 and row["primary_l1"] == "all"
-        ]
 
-        def average(values: list[dict[str, Any]], field: str) -> float | None:
-            numbers = [float(item[field]) for item in values if item.get(field) is not None]
-            return sum(numbers) / len(numbers) if numbers else None
+    @staticmethod
+    def _health_average(values: list[dict[str, Any]], field: str) -> float | None:
+        numbers = [float(item[field]) for item in values if item.get(field) is not None]
+        return sum(numbers) / len(numbers) if numbers else None
 
+    @staticmethod
+    def _not_degraded(left: float | None, right: float | None, tolerance: float) -> bool:
+        return left is not None and right is not None and right >= left - tolerance
+
+    def _promotion_checks(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        five_day_v2 = self._five_day_rows(rows, SHADOW_SCORE_VERSION)
+        five_day_v1 = self._five_day_rows(rows, SCORE_VERSION)
         v2_excess, v1_excess = (
-            average(five_day_v2, "excess_mean_return"),
-            average(five_day_v1, "excess_mean_return"),
+            self._health_average(five_day_v2, "excess_mean_return"),
+            self._health_average(five_day_v1, "excess_mean_return"),
         )
         v2_drawdown, v1_drawdown = (
-            average(five_day_v2, "mean_max_drawdown"),
-            average(five_day_v1, "mean_max_drawdown"),
+            self._health_average(five_day_v2, "mean_max_drawdown"),
+            self._health_average(five_day_v1, "mean_max_drawdown"),
         )
         anomaly_ratio = (
             sum(bool(item["coverage_anomaly"]) for item in five_day_v2) / len(five_day_v2)
@@ -400,16 +424,24 @@ class AfterCloseStore:
             "excess_not_degraded": {
                 "v1": v1_excess,
                 "v2": v2_excess,
-                "passed": v1_excess is not None and v2_excess is not None and v2_excess >= v1_excess - 0.002,
+                "passed": self._not_degraded(v1_excess, v2_excess, 0.002),
             },
             "drawdown_not_degraded": {
                 "v1": v1_drawdown,
                 "v2": v2_drawdown,
-                "passed": v1_drawdown is not None
-                and v2_drawdown is not None
-                and v2_drawdown >= v1_drawdown - 0.005,
+                "passed": self._not_degraded(v1_drawdown, v2_drawdown, 0.005),
             },
         }
+        return promotion_checks
+
+    def health(self, limit: int = 100) -> dict[str, Any]:
+        rows, loaded = self._health_rows(limit)
+        summaries = [
+            self._health_summary(bucket)
+            for bucket in self._group_health_rows(rows).values()
+        ]
+        drift = self._health_drift(loaded)
+        promotion_checks = self._promotion_checks(rows)
         manual_review_eligible = all(item["passed"] for item in promotion_checks.values())
         latest = self.public_latest()
         latest_value = latest or {}

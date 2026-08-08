@@ -54,6 +54,110 @@ def price_frames_from_panel(
     return frames
 
 
+def _holding_horizon(snapshot: Mapping[str, Any]) -> int:
+    try:
+        return max(1, int(snapshot.get("holding_horizon_days") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _signal_date(snapshot: Mapping[str, Any]) -> pd.Timestamp | None:
+    try:
+        value = pd.Timestamp(str(snapshot.get("signal_date") or "")).normalize()
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(value) else value
+
+
+def _follow_up_timeline(
+    normalized: Mapping[str, pd.DataFrame],
+    signal_date: pd.Timestamp | None,
+    horizon: int,
+) -> tuple[int, pd.Timestamp | None, pd.Timestamp | None, set[pd.Timestamp]]:
+    calendar: set[pd.Timestamp] = set()
+    all_close_dates: set[pd.Timestamp] = set()
+    if signal_date is not None:
+        for frame in normalized.values():
+            close_dates = frame.index[frame["close"].notna()]
+            all_close_dates.update(close_dates)
+            calendar.update(date for date in close_dates if date > signal_date)
+    sessions = sorted(calendar)
+    completed_sessions = min(len(sessions), horizon)
+    entry_date = sessions[0] if sessions else None
+    evaluation_date = sessions[completed_sessions - 1] if completed_sessions else None
+    return completed_sessions, entry_date, evaluation_date, all_close_dates
+
+
+def _follow_up_status(
+    *,
+    has_picks: bool,
+    signal_date: pd.Timestamp | None,
+    completed_sessions: int,
+    horizon: int,
+    has_price_data: bool,
+) -> str:
+    if not has_picks or signal_date is None:
+        return "unavailable"
+    if completed_sessions >= horizon:
+        return "completed"
+    if completed_sessions:
+        return "in_progress"
+    if has_price_data:
+        return "pending"
+    return "unavailable"
+
+
+def _pick_outcome(
+    pick: Mapping[str, Any],
+    position: int,
+    status: str,
+    frame: pd.DataFrame | None,
+    entry_date: pd.Timestamp | None,
+    evaluation_date: pd.Timestamp | None,
+) -> tuple[dict[str, Any], float | None]:
+    symbol = str(pick.get("symbol") or "")
+    outcome: dict[str, Any] = {
+        "rank": int(pick.get("rank") or position),
+        "symbol": symbol,
+        "name": str(pick.get("name") or ""),
+        "status": "pending" if status == "pending" else "unavailable",
+        "entry_date": entry_date.date().isoformat() if entry_date is not None else None,
+        "entry_price": None,
+        "price_date": None,
+        "price": None,
+        "price_change": None,
+        "return": None,
+    }
+    if frame is None or frame.empty or entry_date is None or evaluation_date is None:
+        return outcome, None
+    entry_value = frame.at[entry_date, "open"] if entry_date in frame.index else None
+    entry_price = _finite_price(entry_value)
+    if entry_price is None:
+        outcome["status"] = "missing_entry"
+        return outcome, None
+    marks = frame.loc[
+        (frame.index >= entry_date) & (frame.index <= evaluation_date), "close"
+    ].dropna()
+    if marks.empty:
+        outcome.update({"status": "missing_price", "entry_price": round(entry_price, 4)})
+        return outcome, None
+    price = _finite_price(marks.iloc[-1])
+    if price is None:
+        outcome.update({"status": "missing_price", "entry_price": round(entry_price, 4)})
+        return outcome, None
+    price_date = pd.Timestamp(marks.index[-1])
+    price_return = price / entry_price - 1
+    outcome.update({
+        "status": "ready",
+        "entry_price": round(entry_price, 4),
+        "price_date": price_date.date().isoformat(),
+        "price": round(price, 4),
+        "price_change": round(price - entry_price, 4),
+        "return": round(price_return, 6),
+    })
+    return outcome, price_return
+
+
 def decision_follow_up(
     snapshot: Mapping[str, Any], price_frames: Mapping[str, pd.DataFrame],
 ) -> dict[str, Any]:
@@ -65,15 +169,8 @@ def decision_follow_up(
     """
     raw_picks = snapshot.get("picks") or []
     picks = [pick for pick in raw_picks[:3] if isinstance(pick, Mapping)]
-    try:
-        horizon = max(1, int(snapshot.get("holding_horizon_days") or 1))
-    except (TypeError, ValueError):
-        horizon = 1
-    try:
-        signal_date = pd.Timestamp(str(snapshot.get("signal_date") or "")).normalize()
-    except (TypeError, ValueError):
-        signal_date = pd.NaT
-
+    horizon = _holding_horizon(snapshot)
+    signal_date = _signal_date(snapshot)
     normalized = {
         str(pick.get("symbol") or ""): _normalize_bars(
             price_frames.get(str(pick.get("symbol") or ""))
@@ -81,80 +178,28 @@ def decision_follow_up(
         for pick in picks
         if pick.get("symbol")
     }
-    calendar: set[pd.Timestamp] = set()
-    all_close_dates: set[pd.Timestamp] = set()
-    if not pd.isna(signal_date):
-        for frame in normalized.values():
-            close_dates = frame.index[frame["close"].notna()]
-            all_close_dates.update(close_dates)
-            calendar.update(date for date in close_dates if date > signal_date)
-    sessions = sorted(calendar)
-    completed_sessions = min(len(sessions), horizon)
-    entry_date = sessions[0] if sessions else None
-    evaluation_date = sessions[completed_sessions - 1] if completed_sessions else None
-
+    completed_sessions, entry_date, evaluation_date, all_close_dates = _follow_up_timeline(
+        normalized, signal_date, horizon,
+    )
     has_price_data = any(not frame.empty for frame in normalized.values())
-    if not picks or pd.isna(signal_date):
-        status = "unavailable"
-    elif completed_sessions >= horizon:
-        status = "completed"
-    elif completed_sessions:
-        status = "in_progress"
-    elif has_price_data:
-        status = "pending"
-    else:
-        status = "unavailable"
+    status = _follow_up_status(
+        has_picks=bool(picks),
+        signal_date=signal_date,
+        completed_sessions=completed_sessions,
+        horizon=horizon,
+        has_price_data=has_price_data,
+    )
 
     outcomes: list[dict[str, Any]] = []
     returns: list[float] = []
     for position, pick in enumerate(picks, start=1):
         symbol = str(pick.get("symbol") or "")
-        outcome: dict[str, Any] = {
-            "rank": int(pick.get("rank") or position),
-            "symbol": symbol,
-            "name": str(pick.get("name") or ""),
-            "status": "pending" if status == "pending" else "unavailable",
-            "entry_date": entry_date.date().isoformat() if entry_date is not None else None,
-            "entry_price": None,
-            "price_date": None,
-            "price": None,
-            "price_change": None,
-            "return": None,
-        }
         frame = normalized.get(symbol)
-        if frame is None or frame.empty or entry_date is None or evaluation_date is None:
-            outcomes.append(outcome)
-            continue
-        entry_price = _finite_price(frame.at[entry_date, "open"] if entry_date in frame.index else None)
-        if entry_price is None:
-            outcome["status"] = "missing_entry"
-            outcomes.append(outcome)
-            continue
-        marks = frame.loc[
-            (frame.index >= entry_date) & (frame.index <= evaluation_date), "close"
-        ].dropna()
-        if marks.empty:
-            outcome["status"] = "missing_price"
-            outcome["entry_price"] = round(entry_price, 4)
-            outcomes.append(outcome)
-            continue
-        price = _finite_price(marks.iloc[-1])
-        if price is None:
-            outcome["status"] = "missing_price"
-            outcome["entry_price"] = round(entry_price, 4)
-            outcomes.append(outcome)
-            continue
-        price_date = pd.Timestamp(marks.index[-1])
-        price_return = price / entry_price - 1
-        outcome.update({
-            "status": "ready",
-            "entry_price": round(entry_price, 4),
-            "price_date": price_date.date().isoformat(),
-            "price": round(price, 4),
-            "price_change": round(price - entry_price, 4),
-            "return": round(price_return, 6),
-        })
-        returns.append(price_return)
+        outcome, price_return = _pick_outcome(
+            pick, position, status, frame, entry_date, evaluation_date,
+        )
+        if price_return is not None:
+            returns.append(price_return)
         outcomes.append(outcome)
 
     average_return = sum(returns) / len(returns) if returns else None

@@ -111,7 +111,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "观察", "选股", "研究", "交易", "自动化",
         ]
         assert page.locator('[data-workspace-pages="observe"] button').all_inner_texts() == [
-            "行情", "市场温度", "市场风格", "轮动总览", "行业周期", "细分题材", "宽基资金", "资讯",
+            "行情", "市场温度", "市场风格", "轮动总览", "行业周期", "细分题材", "ETF 研究", "资讯",
         ]
         page.get_by_role("button", name="自动化", exact=True).click()
         assert page.locator(".workspace-context").is_hidden()
@@ -320,7 +320,7 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         )
         page.goto(url)
 
-        help_button = page.get_by_role("button", name="帮助", exact=True)
+        help_button = page.get_by_role("button", name="手册", exact=True)
         settings_button = page.get_by_role("button", name="设置", exact=True)
         assert help_button.bounding_box()["x"] < settings_button.bounding_box()["x"]
         help_button.click()
@@ -798,7 +798,8 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route("**/api/v1/research/factors", lambda route: route.fulfill(json={"factors": factors}))
         page.goto(url)
-        page.get_by_role("button", name="回测", exact=True).click()
+        page.get_by_role("button", name="研究", exact=True).click()
+        page.get_by_role("tab", name="回测", exact=True).click()
         page.locator('#bt-form [name="strategy"]').select_option("factor")
         factor_input = page.locator("#bt-factor-input")
         factor_input.fill("mom_20d,")
@@ -1447,6 +1448,11 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text(
             "周期坐标暂不可用"
         )
+        unexpected_page_errors = [
+            error for error in page_errors if error != "synthetic init failure"
+        ]
+        assert unexpected_page_errors == []
+        page_errors.clear()
         page.evaluate(
             """() => {
               window.echarts.init = window.__industryOriginalEchartsInit;
@@ -1798,7 +1804,8 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         page = context.new_page()
         page.route("**/api/v1/**", route_api)
         page.goto(url)
-        page.locator('[data-tab="stock-analysis"]').click()
+        page.get_by_role("button", name="选股", exact=True).click()
+        page.get_by_role("tab", name="个股分析", exact=True).click()
         page.locator("#stock-analysis-query").fill("600519.SH")
         assert page.locator('input[name="mode"][value="deep"]').is_checked()
         page.locator("#stock-analysis-form button.primary").click()
@@ -1813,7 +1820,7 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         assert page.evaluate("getComputedStyle(document.querySelector('.sa-report')).animationName") == "none"
 
         page.reload()
-        page.locator('[data-tab="stock-analysis"]').click()
+        page.locator("#stock-analysis-query").wait_for(state="visible")
         page.get_by_text("六维证据总体偏强，但仍需等待新披露。").wait_for()
         restored = page.evaluate("JSON.parse(localStorage.getItem('qm.stock-analysis.active.v2'))")
         assert restored["jobId"] == "job-stock"
