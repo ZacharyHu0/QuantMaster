@@ -75,9 +75,16 @@ def live_server(tmp_path_factory):
     else:
         process.terminate()
         raise RuntimeError("测试服务启动失败")
-    yield url, root
-    process.terminate()
-    process.wait(timeout=10)
+    try:
+        yield url, root
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
 
 
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
@@ -830,7 +837,10 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         menu.locator('[role="option"]', has_text="GP 候选 2").click()
         assert factor_input.input_value() == "mom_20d, 人工反转, GP 候选 2"
 
+        factor_input.click()
+        menu.wait_for(state="visible")
         factor_input.press("Escape")
+        menu.wait_for(state="hidden")
         page.locator(".factor-completion-trigger").click()
         menu.wait_for(state="visible")
         assert factor_input.get_attribute("aria-expanded") == "true"

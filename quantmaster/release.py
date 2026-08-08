@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.88"
+VERSION = "1.3.89"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Linux 质量门与浏览器稳定性",
+                "items": (
+                    (
+                        "Windows 专用 WinDLL 调用补充跨平台类型说明，"
+                        "Linux mypy 不再把受系统分支保护的接口误判为缺失。"
+                    ),
+                    (
+                        "浏览器回归在重开因子候选前等待弹层完整关闭，并为测试服务增加"
+                        "超时强制回收兜底，消除 Linux 焦点时序与进程退出竞态。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.88",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -180,25 +199,6 @@ RELEASES = (
                     (
                         "订阅复选框显式覆盖全局输入框最小宽度，恢复 14 像素控件和横排"
                         "标签；桌面与窄屏展开策略时均不再出现逐字竖排。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.79",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "市场风格语义配色增强",
-                "items": (
-                    (
-                        "市场风格页以红色表示强势占优和正强弱差、绿色表示低位修复和"
-                        "负强弱差、蓝色表示均衡与判断死区、黄色表示待确认。"
-                    ),
-                    (
-                        "强弱收益图增加方向着色柱、蓝色死区带和实虚线区分；最近 10 日"
-                        "确认路径增加三档淡色背景与彩色轴标签，布局和数据口径保持不变。"
                     ),
                 ),
             },

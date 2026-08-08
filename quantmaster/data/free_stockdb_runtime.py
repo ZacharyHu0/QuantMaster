@@ -288,7 +288,7 @@ class FreeStockDBRuntime:
         query_limited = 0x1000
         synchronize = 0x00100000
         wait_timeout = 0x00000102
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
@@ -345,7 +345,7 @@ class FreeStockDBRuntime:
         terminate = 0x0001
         synchronize = 0x00100000
         wait_object_0 = 0
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
