@@ -75,7 +75,7 @@ class CredentialStore:
         keyring, errors = self._backend()
         try:
             return keyring.get_password(self.SERVICE, target)
-        except errors as exc:
+        except (OSError, RuntimeError, errors.KeyringError) as exc:
             raise CredentialError("读取系统凭据失败") from exc
 
     def set(self, target: str, value: str) -> None:
@@ -84,7 +84,7 @@ class CredentialStore:
         keyring, errors = self._backend()
         try:
             keyring.set_password(self.SERVICE, target, value)
-        except errors as exc:
+        except (OSError, RuntimeError, errors.KeyringError) as exc:
             raise CredentialError("写入系统凭据失败") from exc
 
     def delete(self, target: str) -> None:
@@ -93,5 +93,5 @@ class CredentialStore:
             keyring.delete_password(self.SERVICE, target)
         except errors.PasswordDeleteError:
             return
-        except errors as exc:
+        except (OSError, RuntimeError, errors.KeyringError) as exc:
             raise CredentialError("删除系统凭据失败") from exc

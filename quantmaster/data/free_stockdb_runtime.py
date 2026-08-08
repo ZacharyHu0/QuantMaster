@@ -1091,8 +1091,9 @@ class FreeStockDBRuntime:
             command_id, _created = self._ensure_control().enqueue(
                 "apply_config", "settings", {"changed_fields": changed_fields},
             )
-        except (OSError, sqlite3.Error) as exc:
-            return {"status": "degraded", "message": f"控制命令入队失败：{exc}"}
+        except (OSError, sqlite3.Error):
+            logger.warning("free-stockdb 控制命令入队失败", exc_info=True)
+            return {"status": "degraded", "message": "控制命令入队失败；详细信息已写入本机日志"}
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             command = self._ensure_control().command(command_id)

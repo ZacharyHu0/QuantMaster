@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -367,28 +366,37 @@ def document_from_config(cfg: Config) -> SettingsDocument:
     )
 
 
+def _setting_secret_fingerprints(
+    secrets: dict[str, str],
+    fingerprint_key: bytes,
+) -> dict[str, str]:
+    """Derive expensive, installation-bound fingerprints for credentials."""
+    return {
+        name: hashlib.scrypt(
+            value.encode("utf-8"),
+            salt=fingerprint_key + b"\0" + name.encode("utf-8"),
+            n=2**14,
+            r=8,
+            p=1,
+            dklen=32,
+        ).hex() if value else ""
+        for name, value in secrets.items()
+    }
+
+
 def _setting_check_fingerprint(
     kind: str,
     document: SettingsDocument,
-    secrets: dict[str, str],
-    fingerprint_key: bytes,
+    secret_fingerprints: dict[str, str],
 ) -> str:
-    """Authenticate settings that affect one check without persisting guessable secret hashes."""
-    secret_hashes = {
-        name: hmac.new(
-            fingerprint_key,
-            f"quantmaster:{name}\0{value}".encode(),
-            hashlib.sha256,
-        ).hexdigest() if value else ""
-        for name, value in secrets.items()
-    }
+    """Hash only non-secret settings plus pre-derived credential fingerprints."""
     if kind in {"llm-models", "llm-web-search"}:
         subject: dict[str, Any] = {
             "llm": document.llm.model_dump(),
-            "credential": secret_hashes.get("llm", ""),
+            "credential": secret_fingerprints.get("llm", ""),
         }
     elif kind == "tushare":
-        subject = {"credential": secret_hashes.get("tushare", "")}
+        subject = {"credential": secret_fingerprints.get("tushare", "")}
     elif kind == "storage":
         subject = {"root": document.data.root}
     elif kind == "data-sources":
@@ -410,7 +418,7 @@ def _setting_check_fingerprint(
                 "device": document.lab.device,
             },
             "data_root": document.data.root,
-            "credential": secret_hashes.get("tushare", ""),
+            "credential": secret_fingerprints.get("tushare", ""),
         }
     else:
         raise ValueError(f"未知设置检测项目: {kind}")
@@ -573,6 +581,12 @@ class ConfigManager:
         """Return persisted safe results with staleness computed from current settings."""
         with self._lock:
             stored = self._read_check_state()["checks"]
+        if not stored:
+            return {}
+        secret_fingerprints = _setting_secret_fingerprints(
+            secrets,
+            self._settings_check_fingerprint_key(),
+        )
         public: dict[str, dict[str, Any]] = {}
         for kind, item in stored.items():
             if kind not in SETTINGS_CHECK_KINDS or not isinstance(item, dict):
@@ -584,8 +598,7 @@ class ConfigManager:
             value["stale"] = item.get("fingerprint") != _setting_check_fingerprint(
                 kind,
                 document,
-                secrets,
-                self._settings_check_fingerprint_key(),
+                secret_fingerprints,
             )
             public[kind] = value
         return public
@@ -613,8 +626,10 @@ class ConfigManager:
                 "fingerprint": _setting_check_fingerprint(
                     kind,
                     document,
-                    secrets,
-                    self._settings_check_fingerprint_key(),
+                    _setting_secret_fingerprints(
+                        secrets,
+                        self._settings_check_fingerprint_key(),
+                    ),
                 ),
                 "result": safe,
             }

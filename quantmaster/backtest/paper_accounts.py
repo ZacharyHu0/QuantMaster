@@ -936,8 +936,9 @@ class PaperService:
         )
         try:
             transition = self.propose(account_id)
-        except (KeyError, OSError, RuntimeError, ValueError) as exc:
-            message = f"策略已保存，等待行情就绪后按 {effective_after} 信号日生成强制调仓：{str(exc)[:240]}"
+        except (KeyError, OSError, RuntimeError, ValueError):
+            logger.warning("模拟账户策略已保存，但强制调仓提案生成失败", exc_info=True)
+            message = f"策略已保存，等待行情就绪后按 {effective_after} 信号日生成强制调仓"
             self.store.set_runtime_warning(account_id, message)
             updated = self.store.account(account_id) or updated
             updated["transition"] = {

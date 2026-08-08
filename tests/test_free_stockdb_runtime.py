@@ -11,6 +11,27 @@ from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
 from quantmaster.settings import DataSettings
 
 
+def test_apply_config_control_error_is_redacted(monkeypatch):
+    internal = r"C:\private\control.sqlite Bearer secret-value"
+
+    class BrokenControl:
+        @staticmethod
+        def enqueue(*_args, **_kwargs):
+            raise OSError(internal)
+
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(runtime, "_ensure_control", lambda: BrokenControl())
+
+    result = runtime.request_apply_config(["data.free_stockdb_url"])
+
+    assert result == {
+        "status": "degraded",
+        "message": "控制命令入队失败；详细信息已写入本机日志",
+    }
+    assert "private" not in str(result)
+    assert "secret-value" not in str(result)
+
+
 def test_free_stockdb_settings_validate_schedule_and_root() -> None:
     settings = DataSettings(
         free_stockdb_root="runtime/free-stockdb",

@@ -4,13 +4,32 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.3.92"
+VERSION = "1.3.93"
 RELEASE_DATE = "2026-08-08"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "CodeQL 数据流深度脱敏",
+                "items": (
+                    (
+                        "设置检测凭据改用 scrypt 慢速派生并绑定本机凭据库随机盐，"
+                        "兼顾跨重启过期判断与离线猜测防护。"
+                    ),
+                    (
+                        "free-stockdb 热应用与模拟盘策略切换不再把底层异常写入返回对象；"
+                        "同时修正 Windows 凭据库首次写入失败的降级处理。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.3.92",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -180,25 +199,6 @@ RELEASES = (
                     (
                         "未到期快照显示最新价格变动、Top 3 等权表现和已完成交易日进度；"
                         "验证仅读取本地行情缓存，不联网刷新也不改写原始决策快照。"
-                    ),
-                ),
-            },
-        ),
-    },
-    {
-        "version": "1.3.83",
-        "date": RELEASE_DATE,
-        "sections": (
-            {
-                "title": "市场风格强弱收益图重构",
-                "items": (
-                    (
-                        "强势样本改为零线上方红色镜像柱，低位样本改为零线下方绿色"
-                        "镜像柱；柱长展示收益绝对幅度，悬停保留原始收益正负。"
-                    ),
-                    (
-                        "强弱差改为蓝色折线，±0.25 pp 判断死区改用淡黄色背景带；"
-                        "图表尺寸、数据口径、当前分布和确认路径布局保持不变。"
                     ),
                 ),
             },

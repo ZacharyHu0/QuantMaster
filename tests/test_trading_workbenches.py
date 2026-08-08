@@ -447,6 +447,29 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
     assert PaperService._strategy_change_signal_date(after_close) == "2026-08-07"
 
 
+def test_paper_strategy_transition_error_is_redacted(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path, "异常脱敏账户")
+    strategy = account_spec("任意名称").strategy.model_copy(update={"top_n": 2})
+    monkeypatch.setattr(
+        service,
+        "_resolve_universe",
+        lambda _name, _as_of: (["600000.SH", "000001.SZ"], {"quality": "fixture"}),
+    )
+    monkeypatch.setattr(service, "_strategy_change_signal_date", lambda: "2026-08-07")
+
+    def fail_proposal(_account_id):
+        raise RuntimeError(r"C:\private\quotes.sqlite Bearer secret-value")
+
+    monkeypatch.setattr(service, "propose", fail_proposal)
+    updated = service.update_account(account["id"], strategy=strategy)
+
+    message = updated["transition"]["message"]
+    assert updated["transition"]["status"] == "waiting_data"
+    assert message == "策略已保存，等待行情就绪后按 2026-08-07 信号日生成强制调仓"
+    assert "private" not in message
+    assert "secret-value" not in message
+
+
 def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
     service, account = make_paper_service(tmp_path, "可恢复账户")
     cycle, _created = service.store.create_cycle(
