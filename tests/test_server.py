@@ -671,6 +671,41 @@ class TestBasics:
         assert "sk-live-secret123" not in message
         assert message.count("***") == 3
 
+    def test_research_failures_do_not_expose_exception_details(self, monkeypatch):
+        secret = "token=server-secret-value"
+
+        def fail_with_secret(*_args, **_kwargs):
+            raise RuntimeError(secret)
+
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe_analysis_snapshot",
+            fail_with_secret,
+        )
+        cases = (
+            ("/api/v1/market/regime", {}, "市场状态分析失败，请检查请求参数后重试。"),
+            (
+                "/api/v1/research/selection/daily",
+                {},
+                "每日选股分析失败，请检查请求参数后重试。",
+            ),
+            (
+                "/api/v1/research/decision/dashboard",
+                {},
+                "决策工作台计算失败，请检查请求参数后重试。",
+            ),
+            (
+                "/api/v1/research/factors/test",
+                {"expression": "mom_20d"},
+                "因子检验失败，请检查请求参数后重试。",
+            ),
+        )
+
+        for path, payload, public_detail in cases:
+            response = client.post(path, json=payload)
+            assert response.status_code == 400
+            assert response.json()["detail"] == public_detail
+            assert secret not in response.text
+
     def test_factors_list(self):
         resp = client.get("/api/v1/research/factors")
         assert resp.status_code == 200

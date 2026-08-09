@@ -940,6 +940,11 @@ def test_etf_sandbox_rejects_future_as_of_without_crossing_time(
     )
     intraday = service.intraday("510300.SH", as_of_date="2026-08-08")
     assert [item["time"] for item in intraday["series"]] == ["2026-08-08T10:00"]
+    assert (
+        service.store.root / "evidence" / "intraday" / "510300_SH_2026-08-08.parquet"
+    ).is_file()
+    with pytest.raises(ValueError, match="ETF 代码格式无效"):
+        service.intraday("../../outside", as_of_date="2026-08-08")
 
 
 def test_etf_metadata_only_change_reuses_compatible_local_daily_ingest(

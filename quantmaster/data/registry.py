@@ -47,6 +47,13 @@ _QUALITY_RANK: dict[QualityStatus, int] = {
     "degraded": 1,
     "unavailable": 2,
 }
+_MINUTE_FREQUENCY_MINUTES = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "60m": 60,
+}
 
 # 各市场按优先级排列的数据源工厂
 _SOURCE_FACTORIES: dict[str, list] = {}
@@ -410,8 +417,7 @@ def _assess_intraday_frame(
     stale: bool = False,
 ) -> BarDataQuality:
     issues: list[str] = []
-    frequency_match = re.fullmatch(r"(\d+)m", frequency)
-    frequency_minutes = int(frequency_match.group(1)) if frequency_match else 0
+    frequency_minutes = _MINUTE_FREQUENCY_MINUTES.get(frequency, 0)
     if frequency_minutes <= 0:
         issues.append(f"无法验证分钟频率：{frequency}")
     units, unit_issue = _unit_contract(symbol)
@@ -688,8 +694,9 @@ def _bar_envelope(
             if frequency == "1d":
                 contiguous = interval_start <= merged_end + pd.offsets.BDay(1)
             elif interval_start.normalize() == merged_end.normalize():
-                match = re.fullmatch(r"(\d+)m", frequency)
-                tolerance = pd.Timedelta(minutes=int(match.group(1))) if match else pd.Timedelta(0)
+                tolerance = pd.Timedelta(
+                    minutes=_MINUTE_FREQUENCY_MINUTES.get(frequency, 0),
+                )
                 contiguous = interval_start <= merged_end + tolerance
             else:
                 contiguous = (

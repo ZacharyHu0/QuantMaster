@@ -1034,6 +1034,24 @@ def test_snapshot_history_omits_obsolete_research_models(tmp_path):
     assert store.history() == []
 
 
+def test_snapshot_paths_require_content_addressed_ids_below_store_root(tmp_path):
+    store = EtfResearchStore(tmp_path / "research")
+    snapshot_id = "etf_" + "a" * 24
+
+    assert store._snapshot_path(snapshot_id) == (
+        store.root / "snapshots" / f"{snapshot_id}.json"
+    ).resolve()
+    for malicious in (
+        f"../{snapshot_id}",
+        f"..\\{snapshot_id}",
+        f"C:\\outside\\{snapshot_id}",
+        "etf_preview_" + "a" * 24,
+    ):
+        with pytest.raises(ValueError, match="快照标识无效"):
+            store._snapshot_path(malicious)
+        assert store.get(malicious) is None
+
+
 def test_product_history_replays_frozen_ingest_and_factors_after_restart(tmp_path):
     store, ingest_store, snapshot, daily, factors = _published_replay_snapshot(tmp_path)
     changing_source = _MutableReplaySource(daily.assign(close=999.0))

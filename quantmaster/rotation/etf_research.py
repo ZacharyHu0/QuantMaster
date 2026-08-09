@@ -42,6 +42,7 @@ from quantmaster.rotation.etf_v2 import (
     classify_etf_profile,
     fund_evidence,
 )
+from quantmaster.runtime.paths import confined_path
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
 Progress = Callable[[int, str, str], None]
@@ -50,6 +51,8 @@ EtfResearchTier = Literal["production", "sandbox"]
 _ADJUSTMENT_COLUMNS = ("symbol", "date", "adj_factor", "source", "acquired_at")
 ETF_DIRECTORY_ATTESTATION_VERSION = "1.0"
 ETF_DIRECTORY_TRUSTED_SOURCE = "tushare:catalog"
+_PRODUCTION_SNAPSHOT_ID = re.compile(r"etf_[0-9a-f]{24}")
+_EXCHANGE_ETF_SYMBOL = re.compile(r"[0-9]{6}\.(?:SH|SZ)")
 
 
 def _clean_scalar_text(*candidates: Any) -> str:
@@ -242,6 +245,16 @@ class EtfResearchStore:
     def frozen_adjustments(self) -> Path:
         return self.root / "evidence" / "frozen-adjustments"
 
+    def _snapshot_path(self, snapshot_id: str) -> Path:
+        value = str(snapshot_id or "")
+        if _PRODUCTION_SNAPSHOT_ID.fullmatch(value) is None:
+            raise ValueError("ETF 研究快照标识无效")
+        return confined_path(
+            self.root / "snapshots",
+            f"{value}.json",
+            label="ETF 研究快照",
+        )
+
     @staticmethod
     def _require_evidence_hash(value: str) -> str:
         digest = str(value or "").casefold()
@@ -307,13 +320,14 @@ class EtfResearchStore:
         if (
             snapshot.tier != "production"
             or not snapshot.formal_eligible
-            or not snapshot.snapshot_id.startswith("etf_")
-            or snapshot.snapshot_id.startswith("etf_preview_")
         ):
             raise RuntimeError("EtfResearchStore 仅接受正式 production 快照")
+        try:
+            target = self._snapshot_path(snapshot.snapshot_id)
+        except ValueError as exc:
+            raise RuntimeError("EtfResearchStore 仅接受内容寻址的 production 快照") from exc
         encoded = json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True, indent=2, default=str)
         with self._lock:
-            target = self.root / "snapshots" / f"{snapshot.snapshot_id}.json"
             if target.exists():
                 existing = EtfResearchSnapshot.from_dict(json.loads(target.read_text(encoding="utf-8")))
                 identity = (
@@ -360,8 +374,8 @@ class EtfResearchStore:
             return snapshot
 
     def get(self, snapshot_id: str) -> EtfResearchSnapshot | None:
-        path = self.root / "snapshots" / f"{snapshot_id}.json"
         try:
+            path = self._snapshot_path(snapshot_id)
             stat = path.stat()
             signature = (stat.st_mtime_ns, stat.st_size)
             with self._lock:
@@ -1856,7 +1870,9 @@ class EtfResearchService:
     def intraday(self, symbol: str, *, as_of_date: str) -> dict[str, Any]:
         """Read and cache one ETF minute series only when its trend view requests it."""
 
-        canonical = str(symbol or "").upper()
+        canonical = str(symbol or "").strip().upper()
+        if _EXCHANGE_ETF_SYMBOL.fullmatch(canonical) is None:
+            raise ValueError("ETF 代码格式无效")
         session = pd.Timestamp(as_of_date).date().isoformat()
         session_start = pd.Timestamp(f"{session} 09:30:00")
         session_end = pd.Timestamp(f"{session} 15:00:00")
@@ -1883,8 +1899,13 @@ class EtfResearchService:
                 & result["date"].between(session_start, session_end)
             ].copy()
 
-        safe_symbol = re.sub(r"[^A-Z0-9._-]", "", canonical).replace(".", "_")
-        target = self.store.root / "evidence" / "intraday" / f"{safe_symbol}_{session}.parquet"
+        evidence_root = (self.store.root / "evidence" / "intraday").resolve()
+        safe_symbol = canonical.replace(".", "_")
+        target = confined_path(
+            evidence_root,
+            f"{safe_symbol}_{session}.parquet",
+            label="ETF 分钟证据",
+        )
         frame = pd.DataFrame()
         cache_hit = False
         if target.is_file():
@@ -1900,11 +1921,11 @@ class EtfResearchService:
                 self.source.intraday_many([canonical], start, end, "1m")
             )
             if not frame.empty:
-                target.parent.mkdir(parents=True, exist_ok=True)
+                evidence_root.mkdir(parents=True, exist_ok=True)
                 fd, temp_name = tempfile.mkstemp(
-                    prefix=f".{safe_symbol}.",
+                    prefix=".intraday.",
                     suffix=".parquet.tmp",
-                    dir=target.parent,
+                    dir=evidence_root,
                 )
                 os.close(fd)
                 temp = Path(temp_name)

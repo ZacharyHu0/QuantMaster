@@ -765,6 +765,33 @@ def test_intraday_rows_concentrated_in_one_bucket_are_unavailable(monkeypatch):
     assert any("交易时段桶覆盖率" in issue for issue in quality.issues)
 
 
+def test_intraday_frequency_contract_rejects_unbounded_values(monkeypatch):
+    day = pd.Timestamp("2026-08-07")
+    frame = _bars(pd.DatetimeIndex([day + pd.Timedelta(hours=10)]))
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda _start, _end: (pd.DatetimeIndex([day]), "fixture-calendar"),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_unit_contract",
+        lambda _symbol: (registry.BarDataQuality("degraded", "", "").units, ""),
+    )
+
+    quality = registry._assess_intraday_frame(
+        frame,
+        "2026-08-07 09:30:00",
+        "2026-08-07 15:00:00",
+        symbol="600000.SH",
+        frequency=f"{'9' * 10_000}m",
+        source="fixture",
+    )
+
+    assert quality.status == "unavailable"
+    assert any("无法验证分钟频率" in issue for issue in quality.issues)
+
+
 def test_finite_but_impossible_daily_ohlcv_is_unavailable(monkeypatch):
     frame = pd.DataFrame({
         "open": [-1.0], "high": [1.0], "low": [99.0], "close": [50.0],

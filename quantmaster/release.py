@@ -4,14 +4,37 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.6.0"
-RELEASE_DATE = "2026-08-09"
+VERSION = "1.6.1"
+RELEASE_DATE = "2026-08-10"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "代码扫描安全加固",
+                "items": (
+                    (
+                        "分钟频率只接受系统支持的固定档位，不再对任意长度的外部文本执行正则"
+                        "匹配；非法频率继续明确标记为不可用。"
+                    ),
+                    (
+                        "ETF 正式快照只接受内容寻址标识，快照与分钟证据路径统一限制在可信"
+                        "数据目录内，临时文件名不再继承请求参数。"
+                    ),
+                    (
+                        "市场状态、每日选股、决策工作台与因子检验失败时仅返回稳定公开说明；"
+                        "底层异常与可能包含的路径、凭据继续只写入本机日志。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.6.0",
+        "date": "2026-08-09",
         "sections": (
             {
                 "title": "行情真实性与 StockDB 主链",
@@ -85,7 +108,7 @@ RELEASES = (
     },
     {
         "version": "1.5.2",
-        "date": RELEASE_DATE,
+        "date": "2026-08-09",
         "sections": (
             {
                 "title": "Tushare 无权限端点清理",
@@ -108,7 +131,7 @@ RELEASES = (
     },
     {
         "version": "1.5.1",
-        "date": RELEASE_DATE,
+        "date": "2026-08-09",
         "sections": (
             {
                 "title": "ETF 真实数据链路修复",
@@ -131,7 +154,7 @@ RELEASES = (
     },
     {
         "version": "1.5.0",
-        "date": RELEASE_DATE,
+        "date": "2026-08-09",
         "sections": (
             {
                 "title": "ETF 板块热度与位置雷达",
@@ -292,7 +315,7 @@ RELEASES = (
     },
     {
         "version": "1.3.98",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "Quant Lab 复杂度审计同步",
@@ -311,7 +334,7 @@ RELEASES = (
     },
     {
         "version": "1.3.97",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "Quant Lab 发布门禁修复",
@@ -334,7 +357,7 @@ RELEASES = (
     },
     {
         "version": "1.3.96",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "Quant Lab 本地快照与 CUDA 研究工作台",
@@ -365,7 +388,7 @@ RELEASES = (
     },
     {
         "version": "1.3.95",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "K 线关键路径提速与历史减负",
@@ -396,7 +419,7 @@ RELEASES = (
     },
     {
         "version": "1.3.94",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "Hybrid 自动仓控与现金期",
@@ -419,7 +442,7 @@ RELEASES = (
     },
     {
         "version": "1.3.93",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "CodeQL 数据流深度脱敏",
@@ -438,7 +461,7 @@ RELEASES = (
     },
     {
         "version": "1.3.92",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "市场温度加入多窗口变化",
@@ -461,7 +484,7 @@ RELEASES = (
     },
     {
         "version": "1.3.91",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "设置密钥指纹与 API 异常脱敏",
@@ -480,7 +503,7 @@ RELEASES = (
     },
     {
         "version": "1.3.90",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "浏览器候选弹层回归去竞态",
@@ -499,7 +522,7 @@ RELEASES = (
     },
     {
         "version": "1.3.89",
-        "date": RELEASE_DATE,
+        "date": "2026-08-08",
         "sections": (
             {
                 "title": "Linux 质量门与浏览器稳定性",

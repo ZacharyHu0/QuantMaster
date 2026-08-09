@@ -220,6 +220,12 @@ def _safe_client_error(exc: Exception) -> str:
     return message[:297] + "…" if len(message) > 300 else message
 
 
+def _logged_bad_request(operation: str) -> HTTPException:
+    """记录完整内部异常，但只向客户端返回稳定的操作级错误。"""
+    logger.exception("%s失败", operation)
+    return HTTPException(400, f"{operation}失败，请检查请求参数后重试。")
+
+
 @app.exception_handler(RequestValidationError)
 async def safe_validation_error(request: Request, exc: RequestValidationError):
     """设置请求的校验错误不回显输入值，防止替换中的密钥进入响应。"""
@@ -1280,8 +1286,8 @@ def market_regime(req: RegimeRequest) -> dict:
         return report
     except MarketDataUnavailable:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
+    except Exception:
+        raise _logged_bad_request("市场状态分析") from None
 
 
 class SelectionRequest(ContractModel):
@@ -1386,8 +1392,8 @@ def selection_daily(req: SelectionRequest) -> dict:
         return report
     except MarketDataUnavailable:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
+    except Exception:
+        raise _logged_bad_request("每日选股分析") from None
 
 
 def _decision_history_symbols(snapshots: list[dict]) -> list[str]:
@@ -1480,8 +1486,8 @@ def decision_dashboard(req: DecisionDashboardRequest) -> dict:
         return _decision_dashboard_data(req)
     except MarketDataUnavailable:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
+    except Exception:
+        raise _logged_bad_request("决策工作台计算") from None
 
 
 def _decision_dashboard_data(
@@ -1754,8 +1760,8 @@ def factors_test(req: FactorTestRequest) -> dict:
         report = analyze_factor(values, panel["close"], name=factor.name, quantiles=req.quantiles)
     except MarketDataUnavailable:
         raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
+    except Exception:
+        raise _logged_bad_request("因子检验") from None
     return {
         "summary": report.summary(),
         "neutralized": neutralized,
