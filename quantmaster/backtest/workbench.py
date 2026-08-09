@@ -24,6 +24,7 @@ from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +410,7 @@ class BacktestService:
         from quantmaster.runtime.problems import OperationProblem, make_problem
 
         spec = BacktestSpec.model_validate(run["config"])
-        end = spec.end or str(pd.Timestamp.now().date())
+        end = spec.end or market_date().isoformat()
         warnings: list[dict[str, str]] = []
         resolved_tier = (
             "production" if spec.research_tier == "auto" and spec.universe.lower() == "csi800"
@@ -429,7 +430,7 @@ class BacktestService:
             symbols = sorted(symbol for symbol in membership if membership[symbol].any())
             universe_quality = "production"
         else:
-            symbols = load_universe(spec.universe)
+            symbols = load_universe(spec.universe, as_of=end)
             universe_quality = "sandbox"
             warnings.append({
                 "code": "fixed_universe",
@@ -441,6 +442,7 @@ class BacktestService:
 
         checkpoint(18, "加载行情", f"读取 {len(symbols)} 只标的的历史行情")
         provided_panel = panel is not None
+        market_quality = None
         if panel is None:
             if resolved_tier == "production":
                 from quantmaster.data.research import load_research_bundle
@@ -467,7 +469,9 @@ class BacktestService:
                     "manifest_hash": research_bundle.manifest_hash,
                 }
             else:
-                panel = load_panel(symbols, spec.start, end)
+                market_envelope = load_panel(symbols, spec.start, end)
+                panel = market_envelope.require_data()
+                market_quality = market_envelope.quality
                 warnings.append({
                     "code": "sandbox_execution_approximation", "level": "warning",
                     "message": "Sandbox 使用旧前复权缓存与代码板涨跌停近似，不能作为生产晋升证据。",
@@ -487,6 +491,14 @@ class BacktestService:
             minimum_symbols=spec.strategy.top_n,
             allow_partial=spec.allow_partial,
         )
+        if market_quality is not None:
+            data_quality["market_contract"] = market_quality.to_dict()
+            if market_quality.status == "degraded":
+                data_quality["status"] = "partial"
+                warnings.append({
+                    "code": "market_data_degraded", "level": "warning",
+                    "message": "行情证据已降级：" + "；".join(market_quality.issues),
+                })
         warnings.extend(panel_warnings)
         close = panel["close"]
         symbols = list(close.columns)
@@ -518,10 +530,12 @@ class BacktestService:
 
         if benchmark_close is None and spec.benchmark:
             try:
-                benchmark_close = load_history(spec.benchmark, spec.start, end)["close"]
+                benchmark_envelope = load_history(spec.benchmark, spec.start, end)
+                benchmark_close = benchmark_envelope.require_data()["close"]
                 if benchmark_close.empty:
                     raise ValueError("基准没有可用收盘价")
-                data_quality["benchmark_status"] = "complete"
+                data_quality["benchmark_status"] = benchmark_envelope.quality.status
+                data_quality["benchmark_contract"] = benchmark_envelope.quality.to_dict()
             except Exception as exc:
                 data_quality["benchmark_status"] = "unavailable"
                 data_quality["status"] = "partial"

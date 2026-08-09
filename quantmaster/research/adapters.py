@@ -7,11 +7,16 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.research.catalog import ResearchCatalog
-from quantmaster.research.contracts import AssetClass, CapabilityState, Frequency
+from quantmaster.research.contracts import (
+    AssetClass,
+    CapabilityState,
+    Frequency,
+)
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,39 @@ DATASETS: tuple[DatasetDefinition, ...] = (
 )
 
 DATASET_BY_ID = {item.id: item for item in DATASETS}
+
+# These endpoints are market-wide date partitions.  A non-empty response is not
+# sufficient evidence that the partition represents the requested cross-section.
+COMPLETE_CROSS_SECTION_DATASETS = frozenset({
+    "stock_bars", "stock_adj_factor", "stock_daily_basic", "etf_bars",
+})
+
+
+class ResearchCrossSectionIncomplete(RuntimeError):
+    """Raised when a market-wide research partition cannot be proved complete."""
+
+    def __init__(
+        self,
+        dataset_id: str,
+        trade_date: str,
+        *,
+        expected_count: int | None,
+        observed_count: int,
+        missing: tuple[str, ...] = (),
+        reason: str,
+    ):
+        self.dataset_id = dataset_id
+        self.trade_date = trade_date
+        self.expected_count = expected_count
+        self.observed_count = observed_count
+        self.missing = missing
+        self.reason = reason
+        expected = "不可证明" if expected_count is None else str(expected_count)
+        sample = f"；缺失示例={','.join(missing[:10])}" if missing else ""
+        super().__init__(
+            f"{dataset_id} {trade_date} 横截面不可发布：{reason}；"
+            f"expected={expected}，observed={observed_count}{sample}"
+        )
 DEFAULT_DATASETS = {
     AssetClass.STOCK: ("stock_bars", "stock_adj_factor", "stock_daily_basic"),
     AssetClass.ETF: ("etf_basic", "etf_bars"),
@@ -288,7 +326,7 @@ class TushareResearchAdapter:
 
 
 class StockDBResearchAdapter:
-    """Local date-partition adapter; the upstream data remains Tushare."""
+    """Local date partitions whose vendor upstream is not independently evidenced."""
 
     LOCAL_DATASETS = frozenset({
         "stock_bars", "stock_adj_factor", "stock_daily_basic", "etf_bars",
@@ -338,10 +376,12 @@ class StockDBResearchAdapter:
             ),
             "min_points": 0, "premium": False,
             "detail": (
-                "Tushare 上游经 free-stockdb 本地分发；首次读取后升级为 data_ready"
+                "free-stockdb 本地分发；制品未提供可哈希的上游声明"
                 if definition.id in self.LOCAL_DATASETS else "该数据集仍由 Tushare 直连接口提供"
             ),
-            "upstream": "tushare", "distribution": "free-stockdb",
+            "upstream": "vendor-declared-unverified",
+            "upstream_evidence": "not_provided",
+            "distribution": "free-stockdb",
             "independent_cross_validation": False, "checked_at": "",
         } for definition in DATASETS]
 
@@ -405,11 +445,11 @@ class StockDBResearchAdapter:
                 value = raw.sort_values("date").groupby("symbol", as_index=False).tail(1)
                 value = value.rename(columns={"date": "factor_observed_date"})
                 value["trade_date"] = target_date
-                value["upstream"] = "tushare"
+                value["upstream"] = "vendor-declared-unverified"
                 value["distribution"] = "free-stockdb"
                 value["ingest_id"] = snapshot.ingest_id
                 value["field_provenance"] = json.dumps({
-                    "adj_factor": "tushare:via-free-stockdb",
+                    "adj_factor": "free-stockdb:vendor-upstream-unverified",
                 }, ensure_ascii=False, sort_keys=True)
                 return value[[
                     "symbol", "trade_date", "adj_factor", "factor_observed_date",
@@ -422,7 +462,7 @@ class StockDBResearchAdapter:
             return pd.DataFrame(columns=definition.columns)
         value = raw.rename(columns={"date": "trade_date"}).copy()
         value["trade_date"] = pd.Timestamp(trade_date).normalize()
-        value["upstream"] = "tushare"
+        value["upstream"] = "vendor-declared-unverified"
         value["distribution"] = "free-stockdb"
         if dataset_id in {"stock_bars", "etf_bars"}:
             keep = [*definition.columns, "pre_close", "pct_chg", "amplitude",
@@ -433,7 +473,8 @@ class StockDBResearchAdapter:
             value = value.rename(columns={"turnover": "turnover_rate"})
             keep = [*definition.columns, "float_mv", "total_share", "float_share", "vol_ratio"]
         value["field_provenance"] = json.dumps({
-            column: "tushare:via-free-stockdb" for column in keep if column in value
+            column: "free-stockdb:vendor-upstream-unverified"
+            for column in keep if column in value
         }, ensure_ascii=False, sort_keys=True)
         keep = [column for column in (*keep, "research_price", "adjustment", "upstream",
                                       "distribution", "ingest_id", "field_provenance")
@@ -461,7 +502,8 @@ class CompositeResearchAdapter:
                 **direct[definition.id],
                 "routes": [local[definition.id], direct[definition.id]],
                 "preferred_route": (
-                    "tushare:via-free-stockdb" if definition.id in self.local.LOCAL_DATASETS
+                    "free-stockdb:vendor-upstream-unverified"
+                    if definition.id in self.local.LOCAL_DATASETS
                     else "tushare:direct"
                 ),
                 "independent_cross_validation": False,
@@ -472,6 +514,214 @@ class CompositeResearchAdapter:
         self, asset_class: AssetClass, start: str, end: str,
     ) -> tuple[pd.DatetimeIndex, str]:
         return self.direct.official_calendar(asset_class, start, end)
+
+    def _expected_symbols(
+        self, dataset_id: str, trade_date: str,
+    ) -> tuple[set[str], dict[str, Any]]:
+        """Resolve the denominator only from an immutable provider response."""
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_instrument_catalog_snapshot,
+        )
+
+        expected_asset = "etf" if dataset_id == "etf_bars" else "stock"
+        try:
+            _snapshot, expected, evidence = load_instrument_catalog_snapshot(
+                as_of=trade_date,
+                market="CN",
+                asset_type=expected_asset,
+            )
+            if expected_asset == "stock":
+                from quantmaster.data.instrument_snapshots import (
+                    load_or_fetch_suspension_snapshot,
+                )
+
+                suspension = load_or_fetch_suspension_snapshot(
+                    getattr(self.direct, "source", None), trade_date,
+                )
+                suspended = set(str(item).upper() for item in suspension["symbols"])
+                unexpected_suspensions = suspended - expected
+                if unexpected_suspensions:
+                    raise InstrumentCatalogEvidenceError(
+                        "suspend_d 包含证券目录目标日宇宙之外的代码"
+                    )
+                catalog_count = len(expected)
+                expected = expected - suspended
+                if not expected:
+                    raise InstrumentCatalogEvidenceError("扣除停牌后 expected_trading 为空")
+                evidence = {
+                    **evidence,
+                    "catalog_expected_count": catalog_count,
+                    "expected_count": len(expected),
+                    "suspended_count": len(suspended),
+                    "suspension_evidence": suspension,
+                }
+            return expected, evidence
+        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError) as exc:
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=None,
+                observed_count=0,
+                reason=f"不可变证券目录证据不可用（{exc}）",
+            ) from exc
+
+    @staticmethod
+    def _verified_cross_section(
+        frame: pd.DataFrame,
+        *,
+        expected: set[str],
+        local_count: int,
+        universe_evidence: dict[str, Any],
+    ) -> pd.DataFrame:
+        value = frame.copy()
+        value["universe_snapshot_sha256"] = universe_evidence["snapshot_sha256"]
+        value["universe_acquired_at"] = universe_evidence["acquired_at"]
+        value["universe_expected_count"] = universe_evidence["expected_count"]
+        value["universe_source"] = universe_evidence["source"]
+        value["universe_file_sha256"] = universe_evidence.get("file_sha256", "")
+        value["universe_records_sha256"] = universe_evidence.get("records_sha256", "")
+        suspension = universe_evidence.get("suspension_evidence") or {}
+        value["suspension_snapshot_sha256"] = suspension.get("content_hash", "")
+        value["suspended_count"] = int(universe_evidence.get("suspended_count") or 0)
+        value["catalog_expected_count"] = int(
+            universe_evidence.get("catalog_expected_count") or len(expected)
+        )
+        value.attrs["research_partition_quality"] = {
+            "status": "verified_complete",
+            "expected_count": len(expected),
+            "observed_count": len(set(value["symbol"].astype(str).str.upper())),
+            "local_count": local_count,
+            "expected_universe_evidence": universe_evidence,
+        }
+        return value
+
+    @staticmethod
+    def _preview_candidates(
+        frame: pd.DataFrame,
+        *,
+        expected: set[str],
+        provenance_source: str,
+    ) -> tuple[pd.DataFrame, set[str], set[str]]:
+        """Quarantine ambiguous rows before they enter an explicitly informal preview."""
+        if frame is None or frame.empty or "symbol" not in frame:
+            columns = list(frame.columns) if isinstance(frame, pd.DataFrame) else []
+            return pd.DataFrame(columns=columns), set(), set()
+        value = frame.copy()
+        value["symbol"] = value["symbol"].astype(str).str.strip().str.upper()
+        duplicated = set(
+            value.loc[value["symbol"].duplicated(keep=False), "symbol"]
+        )
+        unexpected = set(value["symbol"]) - expected
+        value = value.loc[
+            value["symbol"].isin(expected - duplicated)
+        ].copy()
+        if value.empty:
+            return value, unexpected, duplicated
+        provenance = json.dumps(
+            {
+                column: provenance_source
+                for column in value.columns
+                if column != "field_provenance"
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if "field_provenance" not in value:
+            value["field_provenance"] = provenance
+        else:
+            missing = value["field_provenance"].isna() | value[
+                "field_provenance"
+            ].astype(str).str.strip().eq("")
+            value.loc[missing, "field_provenance"] = provenance
+        return value, unexpected, duplicated
+
+    @staticmethod
+    def _preview_field_provenance(frame: pd.DataFrame) -> dict[str, list[str]]:
+        sources: dict[str, set[str]] = {}
+        if "field_provenance" not in frame:
+            return {}
+        for raw in frame["field_provenance"].dropna():
+            try:
+                value = json.loads(str(raw))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            for field, source in value.items():
+                sources.setdefault(str(field), set()).add(str(source))
+        return {
+            field: sorted(values) for field, values in sorted(sources.items())
+        }
+
+    def preview_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
+        """Return a truthful partial preview that is never eligible for formal publication."""
+        if dataset_id not in COMPLETE_CROSS_SECTION_DATASETS:
+            raise ValueError("degraded preview 仅适用于全市场日期横截面")
+        expected, universe_evidence = self._expected_symbols(dataset_id, trade_date)
+        try:
+            local_raw = self.local.fetch_date(dataset_id, trade_date)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            local_raw = pd.DataFrame()
+        local, local_unexpected, local_duplicates = self._preview_candidates(
+            local_raw,
+            expected=expected,
+            provenance_source="free-stockdb:vendor-upstream-unverified",
+        )
+        local_symbols = set(local["symbol"]) if "symbol" in local else set()
+        missing_after_local = expected - local_symbols
+        try:
+            direct_raw = (
+                self.direct.fetch_date(dataset_id, trade_date)
+                if missing_after_local else pd.DataFrame()
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            direct_raw = pd.DataFrame()
+        direct, direct_unexpected, direct_duplicates = self._preview_candidates(
+            direct_raw,
+            expected=expected,
+            provenance_source="tushare:direct",
+        )
+        if "symbol" in direct:
+            direct = direct.loc[direct["symbol"].isin(missing_after_local)].copy()
+        value = (
+            pd.concat((local, direct), ignore_index=True, sort=False)
+            if not local.empty and not direct.empty
+            else direct if local.empty else local
+        ).copy()
+        if "symbol" in value:
+            value = value.sort_values("symbol", kind="mergesort").reset_index(drop=True)
+        observed = set(value["symbol"]) if "symbol" in value else set()
+        missing = expected - observed
+        duplicate_symbols = local_duplicates | direct_duplicates
+        unexpected_symbols = local_unexpected | direct_unexpected
+        quality = {
+            "status": "degraded_preview",
+            "formal_eligible": False,
+            "denominator_status": (
+                "verified_catalog_and_suspension"
+                if universe_evidence.get("suspension_evidence")
+                else "verified_catalog"
+            ),
+            "expected_count": len(expected),
+            "observed_count": len(observed),
+            "coverage_ratio": round(len(observed) / len(expected), 6) if expected else 0.0,
+            "expected_symbols": sorted(expected),
+            "observed_symbols": sorted(observed),
+            "missing_symbols": sorted(missing),
+            "unexpected_symbols": sorted(unexpected_symbols),
+            "duplicate_symbols": sorted(duplicate_symbols),
+            "field_provenance": self._preview_field_provenance(value),
+            "expected_universe_evidence": universe_evidence,
+        }
+        value.attrs["research_partition_quality"] = quality
+        value.attrs["formal_eligible"] = False
+        value.attrs["denominator_status"] = quality["denominator_status"]
+        value.attrs["expected"] = quality["expected_symbols"]
+        value.attrs["observed"] = quality["observed_symbols"]
+        value.attrs["missing"] = quality["missing_symbols"]
+        value.attrs["field_provenance"] = quality["field_provenance"]
+        return value
 
     def fetch_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
         if dataset_id not in self.local.LOCAL_DATASETS:
@@ -484,7 +734,9 @@ class CompositeResearchAdapter:
             local = self.local.fetch_date(dataset_id, trade_date)
         except (OSError, RuntimeError, TypeError, ValueError):
             local = pd.DataFrame()
-        if local.empty:
+        if dataset_id not in COMPLETE_CROSS_SECTION_DATASETS:
+            if not local.empty:
+                return local
             direct = self.direct.fetch_date(dataset_id, trade_date)
             if not direct.empty:
                 direct["upstream"] = "tushare"
@@ -493,30 +745,144 @@ class CompositeResearchAdapter:
                     column: "tushare:direct" for column in direct.columns
                 }, ensure_ascii=False, sort_keys=True)
             return direct
-        # A local partial partition is publishable only after explicit direct
-        # completion. Rows retain their distribution route, so mixing is visible.
-        expected_asset = "etf" if dataset_id == "etf_bars" else "stock"
-        try:
-            from quantmaster.rotation.etf_research import is_exchange_etf
 
-            universe = self.local.instruments.list(market="CN")
-            expected = {
-                item.symbol for item in universe
-                if (is_exchange_etf(item) if expected_asset == "etf" else item.asset_type == "stock")
-                and item.status.casefold() in {"listed", "active", "l"}
-            }
-        except (AttributeError, OSError, RuntimeError):
-            expected = set(local["symbol"].astype(str))
-        observed = set(local["symbol"].astype(str))
-        if not expected or len(observed) / len(expected) >= 0.98:
-            return local
+        expected, universe_evidence = self._expected_symbols(dataset_id, trade_date)
+        if not local.empty and "symbol" not in local:
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=0,
+                reason="StockDB 横截面缺少 symbol 主键",
+            )
+        observed = (
+            set(local["symbol"].astype(str).str.upper()) if not local.empty else set()
+        )
+        if not local.empty and local["symbol"].astype(str).str.upper().duplicated().any():
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=len(observed & expected),
+                reason="StockDB 横截面 symbol 重复",
+            )
+        unexpected = tuple(sorted(observed - expected))
+        if unexpected:
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=len(observed & expected),
+                missing=unexpected,
+                reason="StockDB 返回点时宇宙之外的标的，可能存在未来成员穿越",
+            )
+        if expected == observed:
+            if dataset_id == "stock_adj_factor":
+                if "adj_factor" not in local:
+                    raise ResearchCrossSectionIncomplete(
+                        dataset_id,
+                        trade_date,
+                        expected_count=len(expected),
+                        observed_count=0,
+                        reason="复权因子横截面缺少 adj_factor",
+                    )
+                factors = pd.to_numeric(local["adj_factor"], errors="coerce")
+                valid = factors.notna() & np.isfinite(factors) & factors.gt(0)
+                if not valid.all():
+                    invalid = tuple(sorted(local.loc[~valid, "symbol"].astype(str)))
+                    raise ResearchCrossSectionIncomplete(
+                        dataset_id,
+                        trade_date,
+                        expected_count=len(expected),
+                        observed_count=int(valid.sum()),
+                        missing=invalid,
+                        reason="复权因子必须 finite 且大于 0",
+                    )
+            return self._verified_cross_section(
+                local,
+                expected=expected,
+                local_count=len(observed),
+                universe_evidence=universe_evidence,
+            )
+
         direct = self.direct.fetch_date(dataset_id, trade_date)
-        missing = direct[~direct["symbol"].astype(str).isin(observed)].copy() if not direct.empty else direct
-        if missing.empty:
-            return local
-        missing["upstream"] = "tushare"
-        missing["distribution"] = "direct-fallback"
-        missing["field_provenance"] = json.dumps({
-            column: "tushare:direct" for column in missing.columns
-        }, ensure_ascii=False, sort_keys=True)
-        return pd.concat((local, missing), ignore_index=True, sort=False)
+        direct_observed = (
+            set(direct["symbol"].astype(str).str.upper())
+            if not direct.empty and "symbol" in direct
+            else set()
+        )
+        direct_unexpected = tuple(sorted(direct_observed - expected))
+        if direct_unexpected:
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=len(observed & expected),
+                missing=direct_unexpected,
+                reason="远端补齐返回点时宇宙之外的标的，可能存在未来成员穿越",
+            )
+        missing_symbols = expected - observed
+        missing = (
+            direct[direct["symbol"].astype(str).str.upper().isin(missing_symbols)].copy()
+            if not direct.empty and "symbol" in direct
+            else pd.DataFrame()
+        )
+        if not missing.empty:
+            missing["upstream"] = "tushare"
+            missing["distribution"] = "direct-fallback"
+            missing["field_provenance"] = json.dumps({
+                column: "tushare:direct" for column in missing.columns
+            }, ensure_ascii=False, sort_keys=True)
+        combined = (
+            pd.concat((local, missing), ignore_index=True, sort=False)
+            if not local.empty and not missing.empty
+            else missing if local.empty else local
+        )
+        final_observed = (
+            set(combined["symbol"].astype(str).str.upper()) if not combined.empty else set()
+        )
+        unresolved = tuple(sorted(expected - final_observed))
+        if unresolved:
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=len(final_observed & expected),
+                missing=unresolved,
+                reason="StockDB 本地证据覆盖不足且远端补齐后仍缺标的",
+            )
+        if combined["symbol"].astype(str).str.upper().duplicated().any():
+            raise ResearchCrossSectionIncomplete(
+                dataset_id,
+                trade_date,
+                expected_count=len(expected),
+                observed_count=len(final_observed & expected),
+                reason="补齐后的横截面 symbol 重复",
+            )
+        if dataset_id == "stock_adj_factor":
+            if "adj_factor" not in combined:
+                raise ResearchCrossSectionIncomplete(
+                    dataset_id,
+                    trade_date,
+                    expected_count=len(expected),
+                    observed_count=0,
+                    reason="补齐后的横截面缺少 adj_factor",
+                )
+            factors = pd.to_numeric(combined["adj_factor"], errors="coerce")
+            valid = factors.notna() & np.isfinite(factors) & factors.gt(0)
+            if not valid.all():
+                invalid = tuple(sorted(combined.loc[~valid, "symbol"].astype(str)))
+                raise ResearchCrossSectionIncomplete(
+                    dataset_id,
+                    trade_date,
+                    expected_count=len(expected),
+                    observed_count=int(valid.sum()),
+                    missing=invalid,
+                    reason="复权因子必须 finite 且大于 0",
+                )
+        return self._verified_cross_section(
+            combined,
+            expected=expected,
+            local_count=len(observed & expected),
+            universe_evidence=universe_evidence,
+        )

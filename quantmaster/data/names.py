@@ -18,7 +18,8 @@ def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover
 
     store = InstrumentStore()
     requested = {str(symbol).upper() for symbol in symbols}
-    snapshot = load_spot(list(requested))
+    market_envelope = load_spot(list(requested))
+    snapshot = market_envelope.require_data()
     records = []
     for _, row in snapshot.iterrows():
         code = str(row.get("code", "")).zfill(6)
@@ -32,7 +33,17 @@ def fetch_stock_names(symbols: list[str]) -> dict[str, str]:  # pragma: no cover
                 value.update({"name": name, "source": source, "source_priority": 40})
                 records.append(value)
     store.upsert(records, source="market:spot", source_priority=40)
-    store.update_sync_state("market:spot", status="success", record_count=len(records))
+    verified = (
+        market_envelope.quality.status == "verified"
+        and not market_envelope.quality.partial
+        and not market_envelope.quality.stale
+    )
+    store.update_sync_state(
+        "market:spot",
+        status="success" if verified else "degraded",
+        record_count=len(records),
+        error="；".join(market_envelope.quality.issues),
+    )
     return store.names(requested)
 
 

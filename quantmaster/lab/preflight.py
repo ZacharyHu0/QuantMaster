@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
-from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -13,6 +12,7 @@ from quantmaster.config import get_config
 from quantmaster.lab.dataset import inspect_local_dataset
 from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import DataPolicy, ResourceClass
+from quantmaster.trading_sessions import market_date
 
 _DEEP_MODELS = {
     "mlp", "tcn", "gru", "transformer", "dae",
@@ -136,7 +136,7 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
 
     universe = str(values.get("universe") or cfg.lab.universe)
     start = str(values.get("start") or cfg.lab.start)
-    end = str(values.get("end") or date.today().isoformat())
+    end = str(values.get("end") or market_date().isoformat())
     policy_value = str(values.get("data_policy") or cfg.lab.data_policy)
     try:
         policy = DataPolicy(policy_value)
@@ -160,31 +160,29 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
             ))
         if operation == "prepare_data":
             provider = str(values.get("provider") or "").strip().lower()
-            if provider and provider not in {"tushare", "free-stockdb-online"}:
+            if provider and provider not in {"tushare", "free-stockdb"}:
                 blockers.append(_blocker(
                     "INVALID_REQUEST", f"不支持的数据补齐来源: {provider}",
-                    "选择 Tushare 或 stockdb-online",
+                    "选择本机 StockDB 或 Tushare",
                 ))
             if provider == "tushare" and not cfg.data.tushare_token:
                 blockers.append(_blocker(
                     "DEPENDENCY_MISSING", "Tushare 补齐需要先配置 token",
                     "在设置中心配置 Tushare token 后重新预检", dependency="tushare",
                 ))
-            if provider == "free-stockdb-online" and not (
-                cfg.data.free_stockdb_online_enabled and cfg.data.free_stockdb_online_url
-            ):
+            if provider == "free-stockdb" and not cfg.data.free_stockdb_url:
                 blockers.append(_blocker(
-                    "DEPENDENCY_MISSING", "stockdb-online 当前未启用",
-                    "在设置中心启用并配置 stockdb-online 地址",
-                    dependency="free-stockdb-online",
+                    "DEPENDENCY_MISSING", "本机 StockDB 当前未配置",
+                    "在设置中心配置本机回环 StockDB 地址",
+                    dependency="free-stockdb",
                 ))
             membership = dataset.get("membership_records")
             membership_missing = bool(
                 universe.lower() == "csi800" and getattr(membership, "empty", True)
             )
-            if provider == "free-stockdb-online" and membership_missing:
+            if provider == "free-stockdb" and membership_missing:
                 blockers.append(_blocker(
-                    "DATASET_MISSING", "stockdb-online 不能补齐 CSI800 点时成分",
+                    "DATASET_MISSING", "本机 StockDB 不能补齐 CSI800 点时成分",
                     "改用 Tushare 补齐成分与行情，或先导入 PIT 成分缓存",
                 ))
             if (

@@ -18,12 +18,14 @@ import unicodedata
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -803,14 +805,70 @@ def refresh_instrument_master(*, force: bool = False) -> dict[str, Any]:
         "nasdaq:symbol_directory": _nasdaq_directory_records,
     }
     for source, fetch in jobs.items():
-        if not force and not store.sync_due(source, 7 * 86400):
+        max_age = 86400 if source == "tushare:catalog" else 7 * 86400
+        due = store.sync_due(source, max_age)
+        if source == "tushare:catalog":
+            from quantmaster.trading_sessions import daily_signal_cutoff, market_now
+
+            current = market_now()
+            if current >= daily_signal_cutoff(current.date()):
+                try:
+                    from quantmaster.data.instrument_snapshots import (
+                        load_instrument_catalog_snapshot,
+                    )
+
+                    load_instrument_catalog_snapshot(
+                        as_of=current.date().isoformat(), market="CN", asset_type="stock",
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    due = True
+        if not force and not due:
             states[source] = {"status": "fresh"}
             continue
         try:
-            records = fetch()
-            count = store.upsert(records, source=source, source_priority=40)
+            if source == "tushare:catalog":
+                from quantmaster.data.resilience import bypass_endpoint_cache
+
+                with bypass_endpoint_cache():
+                    fetched = fetch()
+            else:
+                fetched = fetch()
+            request_outcomes = []
+            if source == "tushare:catalog":
+                try:
+                    records, request_outcomes = fetched
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "Tushare 证券目录缺少逐子请求完整性证据"
+                    ) from exc
+            else:
+                records = fetched
+            snapshot = None
+            observed_records = records
+            if source == "tushare:catalog":
+                from quantmaster.data.instrument_snapshots import (
+                    TUSHARE_CATALOG_QUERY,
+                    freeze_instrument_catalog,
+                )
+
+                snapshot = freeze_instrument_catalog(
+                    records,
+                    source=source,
+                    query=TUSHARE_CATALOG_QUERY,
+                    request_outcomes=request_outcomes,
+                )
+                observed_at = datetime.fromisoformat(snapshot.acquired_at).timestamp()
+                observed_records = [
+                    {**dict(item), "source": source, "observed_at": observed_at}
+                    for item in records
+                ]
+            count = store.upsert(observed_records, source=source, source_priority=40)
             store.update_sync_state(source, status="success", record_count=count)
-            states[source] = {"status": "success", "record_count": count}
+            states[source] = {
+                "status": "success",
+                "record_count": count,
+                **({"snapshot_id": snapshot.snapshot_id} if snapshot is not None else {}),
+            }
         except Exception as exc:
             store.update_sync_state(source, status="error", error=str(exc))
             states[source] = {"status": "error", "message": str(exc)}
@@ -833,17 +891,24 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
         raise ValueError(f"{symbol} 暂无可用日线数据路由")
     if not verify_foreign or instrument.bars_verified_at > time.time() - 30 * 86400:
         return instrument
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from quantmaster.data.registry import load_history
 
-    end = date.today()
+    end = market_date()
     start = end - timedelta(days=21)
     try:
-        bars = load_history(instrument.symbol, start.isoformat(), end.isoformat())
+        market_envelope = load_history(
+            instrument.symbol, start.isoformat(), end.isoformat(),
+        )
+        bars = market_envelope.require_data()
     except Exception as exc:
         raise ValueError(f"{symbol} 尚未验证到可用日线: {exc}") from None
     if bars is None or bars.empty:
         raise ValueError(f"{symbol} 尚未验证到可用日线")
+    if market_envelope.quality.status != "verified":
+        raise ValueError(
+            f"{symbol} 日线证据未验证：" + "；".join(market_envelope.quality.issues)
+        )
     store.mark_bars_verified(symbol)
     return store.get(symbol) or instrument

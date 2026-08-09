@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from datetime import time as datetime_time
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -27,9 +28,11 @@ from quantmaster.data.base import DataCapability, DataSource, Market, normalize_
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
     EndpointFrameCache,
+    bypass_endpoint_cache,
     endpoint_cache_bypassed,
     provider_call,
 )
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -77,7 +80,7 @@ def _cache_ttl(end: str | None, default_days: int) -> int:
     if end:
         try:
             end_date = pd.Timestamp(end).date()
-            if end_date < date.today() - timedelta(days=3):
+            if end_date < market_date() - timedelta(days=3):
                 return 3650
         except (TypeError, ValueError):
             pass
@@ -134,7 +137,7 @@ class TushareSource(DataSource):
         provider_lane: str = "",
         required_nonempty: bool = False,
         required_columns: tuple[str, ...] = (),
-        **params,
+        **params: Any,
     ) -> pd.DataFrame:
         clean = {key: value for key, value in params.items() if value not in (None, "")}
         provider_lane = provider_lane or f"tushare:{endpoint}"
@@ -361,12 +364,58 @@ class TushareSource(DataSource):
         enabled = frame.loc[pd.to_numeric(frame.get("is_open"), errors="coerce") == 1]
         return pd.DatetimeIndex(pd.to_datetime(enabled["cal_date"])).normalize().sort_values()
 
+    def suspension_snapshot(self, trade_date: str) -> dict[str, object]:
+        """Return an official full-day suspension set for one exact session."""
+        from quantmaster.data.instrument_snapshots import (
+            SUSPENSION_CONTRACT,
+            SUSPENSION_SCHEMA_VERSION,
+            SUSPENSION_SOURCE,
+            content_hash,
+            tushare_suspension_request_evidence,
+        )
+
+        target = pd.Timestamp(trade_date).normalize()
+        if pd.isna(target):
+            raise ValueError("停牌证据日期无效")
+        compact = target.strftime("%Y%m%d")
+        # A pre-close empty/partial endpoint cache must never be relabelled with the
+        # post-close acquisition time of this authoritative full-day observation.
+        # Immutable suspension artifacts are the cache for accepted evidence.
+        with bypass_endpoint_cache():
+            raw = self._call(
+                "suspend_d",
+                _cache_ttl(target.date().isoformat(), get_config().data.tushare_cache_days),
+                trade_date=compact,
+                fields="ts_code,trade_date,suspend_timing,suspend_type",
+            )
+        frame = raw.astype(object).where(pd.notna(raw), None)
+        rows, request_evidence = tushare_suspension_request_evidence(
+            target.date().isoformat(),
+            raw_records=frame.to_dict("records"),
+            raw_columns=[str(column) for column in frame.columns],
+        )
+        acquired_at = datetime.now(_CHINA_TZ).isoformat()
+        contract = {
+            "schema_version": SUSPENSION_SCHEMA_VERSION,
+            "contract": SUSPENSION_CONTRACT,
+            "source": SUSPENSION_SOURCE,
+            "trade_date": target.date().isoformat(),
+            "acquired_at": acquired_at,
+            "rows": rows,
+            "request_evidence": request_evidence,
+        }
+        return {
+            **contract,
+            "content_hash": content_hash(contract),
+            "symbols": sorted({item["symbol"] for item in rows}),
+        }
+
     def daily_indicators(
         self, symbol: str, start: str | None = None, end: str | None = None,
     ) -> pd.DataFrame:
         """2000 积分 ``daily_basic``：估值、股息率和市值。"""
         ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
-        params = self._daily_indicator_params(symbol, start, end)
+        params: dict[str, Any] = self._daily_indicator_params(symbol, start, end)
         raw = self._call("daily_basic", ttl, **params)
         return self._normalize_daily_indicators(raw)
 
@@ -405,77 +454,83 @@ class TushareSource(DataSource):
         raw = self.cache.get("daily_basic", params, ttl)
         return None if raw is None else self._normalize_daily_indicators(raw)
 
-    def instrument_catalog(self) -> list[dict]:
+    def instrument_catalog(self) -> tuple[list[dict], list[dict]]:
         """读取内地股票/场内基金/指数及港股目录，供证券主数据增量更新。"""
-        records: list[dict] = []
-
-        def text(value) -> str:
-            return "" if pd.isna(value) else str(value).strip()
-
-        stocks = self._call(
-            "stock_basic", 7, exchange="", list_status="L",
-            fields=("ts_code,symbol,name,fullname,enname,exchange,curr_type,"
-                    "list_status,list_date,delist_date"),
+        from quantmaster.data.instrument_snapshots import (
+            tushare_catalog_partition_evidence,
         )
-        for row in stocks.to_dict("records"):
-            symbol = text(row.get("ts_code")).upper()
-            if symbol:
-                records.append({
-                    "symbol": symbol, "provider_symbol": symbol,
-                    "name": text(row.get("name")), "full_name": text(row.get("fullname")),
-                    "en_name": text(row.get("enname")), "market": "CN",
-                    "exchange": symbol.rsplit(".", 1)[-1], "asset_type": "stock",
-                    "currency": text(row.get("curr_type")) or "CNY",
-                    "status": text(row.get("list_status")) or "L",
-                    "list_date": text(row.get("list_date")),
-                    "delist_date": text(row.get("delist_date")),
-                })
-        funds = self._call("fund_basic", 7, market="E", status="L")
-        for row in funds.to_dict("records"):
-            symbol = text(row.get("ts_code")).upper()
-            name, fund_type = text(row.get("name")), text(row.get("fund_type")).upper()
-            if symbol and name:
-                records.append({
-                    "symbol": symbol, "name": name, "market": "CN",
-                    "exchange": symbol.rsplit(".", 1)[-1],
-                    "asset_type": (
-                        "etf" if "ETF" in fund_type or "ETF" in name.upper()
-                        or "交易型" in fund_type else "fund"
-                    ),
-                    "currency": "CNY", "status": "L",
-                    "list_date": text(row.get("list_date")),
-                })
+
+        records: list[dict] = []
+        outcomes: list[dict] = []
+
+        def fetch_partition(
+            endpoint: str,
+            partition_key: str,
+            partition_value: str,
+            *,
+            required_columns: tuple[str, ...],
+            **params: Any,
+        ) -> pd.DataFrame:
+            frame = self._call(endpoint, 7, **params)
+            missing = sorted(set(required_columns) - set(frame.columns))
+            if missing:
+                raise RuntimeError(
+                    f"{endpoint} {partition_key}={partition_value} 缺少字段: {missing}"
+                )
+            raw = frame.astype(object).where(pd.notna(frame), None).to_dict("records")
+            normalized, evidence = tushare_catalog_partition_evidence(
+                endpoint,
+                partition_key,
+                partition_value,
+                params=params,
+                raw_records=raw,
+                raw_columns=[str(column) for column in frame.columns],
+            )
+            records.extend(normalized)
+            outcomes.append(evidence)
+            return frame
+
+        for status in ("L", "D", "P"):
+            fetch_partition(
+                "stock_basic", "list_status", status,
+                required_columns=("ts_code", "list_status", "list_date", "delist_date"),
+                exchange="", list_status=status,
+                fields=("ts_code,symbol,name,fullname,enname,exchange,curr_type,"
+                        "list_status,list_date,delist_date"),
+            )
+        for status in ("L", "D"):
+            fetch_partition(
+                "fund_basic", "status", status,
+                required_columns=(
+                    "ts_code", "name", "fund_type", "status", "list_date", "delist_date",
+                ),
+                market="E", status=status,
+                fields="ts_code,name,fund_type,status,list_date,delist_date",
+            )
         for market in ("CSI", "SSE", "SZSE"):
-            indexes = self._call("index_basic", 7, market=market)
-            for row in indexes.to_dict("records"):
-                symbol, name = text(row.get("ts_code")).upper(), text(row.get("name"))
-                if symbol and name:
-                    records.append({
-                        "symbol": symbol, "name": name,
-                        "full_name": text(row.get("fullname")), "market": "CN",
-                        "exchange": symbol.rsplit(".", 1)[-1], "asset_type": "index",
-                        "currency": "CNY", "status": "listed",
-                    })
-        hong_kong = self._call("hk_basic", 7, list_status="L")
-        for row in hong_kong.to_dict("records"):
-            provider = text(row.get("ts_code")).upper()
-            code = (text(row.get("symbol")) or provider.partition(".")[0]).zfill(5)
-            name = text(row.get("name"))
-            if code and name:
-                records.append({
-                    "symbol": f"{code}.HK", "provider_symbol": provider,
-                    "name": name, "full_name": text(row.get("fullname")),
-                    "en_name": text(row.get("enname")), "market": "HK",
-                    "exchange": "HKEX", "asset_type": "stock", "currency": "HKD",
-                    "status": "L", "list_date": text(row.get("list_date")),
-                    "delist_date": text(row.get("delist_date")),
-                })
-        return records
+            fetch_partition(
+                "index_basic", "market", market,
+                required_columns=("ts_code", "name", "market"),
+                market=market,
+                fields="ts_code,name,fullname,market",
+            )
+        for status in ("L", "D", "P"):
+            fetch_partition(
+                "hk_basic", "list_status", status,
+                required_columns=(
+                    "ts_code", "symbol", "name", "list_status", "list_date", "delist_date",
+                ),
+                list_status=status,
+                fields=(
+                    "ts_code,symbol,name,fullname,enname,list_status,list_date,delist_date"
+                ),
+            )
+        return records, outcomes
 
     def quarterly_roe(self, symbol: str, start_year: str = "2018") -> pd.DataFrame:
         """2000 积分 ``fina_indicator``：保留公告日与修订序列的 PIT ROE。"""
         ttl = max(1, int(get_config().data.fundamental_cache_days))
-        params = self._quarterly_roe_params(symbol, start_year)
+        params: dict[str, Any] = self._quarterly_roe_params(symbol, start_year)
         raw = self._call("fina_indicator", ttl, **params)
         return self._normalize_quarterly_roe(raw)
 

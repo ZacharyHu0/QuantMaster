@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quantmaster.decision import (
     HybridDecisionStrategy,
@@ -108,10 +109,134 @@ def test_hybrid_profiles_snapshot_and_storage_are_reproducible(panel, tmp_path):
     assert all("component_scores" in item for item in risk["picks"])
 
     store = DecisionStore(tmp_path / "hybrid.sqlite")
-    store.save(risk, "demo")
-    store.save(stable, "demo")
+    store.save(risk, "demo", panel=panel)
+    store.save(stable, "demo", panel=panel)
     assert len(store.history("demo")) == 2
     assert len(store.history("demo", profile="stable")) == 1
+
+
+def test_decision_store_refuses_conflicting_same_identity_rerun(tmp_path):
+    market_panel = {
+        "close": pd.DataFrame(
+            [[10.0]], index=pd.to_datetime(["2026-08-07"]), columns=["600000.SH"],
+        ),
+    }
+    report = {
+        "signal_date": "2026-08-07",
+        "holding_horizon_days": 3,
+        "profile": "risk_adjusted",
+        "policy_hash": "policy-v1",
+        "model_version": "hybrid-v3:test",
+        "position_state": "invested",
+        "picks": [{"symbol": "600000.SH", "rank": 1}],
+        "universe_evidence": {"content_hash": "universe-a"},
+        "industry_evidence": {"content_hash": "industry-a"},
+        "data_quality": {"status": "verified"},
+        "market_provenance": [{"content_hash": "bars-a"}],
+    }
+    store = DecisionStore(tmp_path / "append-only.sqlite")
+    store.save(report, "demo", panel=market_panel)
+
+    revised = {**report, "picks": [{"symbol": "000001.SZ", "rank": 1}]}
+    with pytest.raises(RuntimeError, match="拒绝覆盖"):
+        store.save(revised, "demo", panel=market_panel)
+
+    assert store.history("demo")[0]["picks"] == report["picks"]
+
+
+def test_decision_market_input_is_frozen_and_tamper_evident(panel, tmp_path):
+    store = DecisionStore(tmp_path / "decisions.sqlite")
+    original = {name: frame.copy() for name, frame in panel.items()}
+    report = {
+        "signal_date": "2026-08-07",
+        "holding_horizon_days": 3,
+        "profile": "risk_adjusted",
+        "policy_hash": "frozen-input-v1",
+        "model_version": "hybrid-v3:test",
+        "position_state": "flat",
+        "picks": [],
+    }
+    store.save(report, "demo", panel=panel)
+    evidence = report["market_input_evidence"]
+
+    for frame in panel.values():
+        frame.iloc[:, :] = -999.0
+    restored = store.load_market_input(evidence)
+    for name, frame in original.items():
+        pd.testing.assert_frame_equal(restored[name], frame, check_freq=False)
+
+    artifact = store.evidence_root / evidence["content_hash"] / "00.parquet"
+    artifact.write_bytes(artifact.read_bytes() + b"tampered")
+    with pytest.raises(RuntimeError, match="已改写"):
+        store.load_market_input(evidence)
+    with pytest.raises(RuntimeError, match="已改写"):
+        store.history("demo")
+
+
+def test_decision_history_rejects_payload_tamper_and_legacy_unhashed_rows(tmp_path):
+    panel = {
+        "close": pd.DataFrame(
+            [[10.0]],
+            index=pd.to_datetime(["2026-08-07"]),
+            columns=["600000.SH"],
+        ),
+    }
+    report = {
+        "signal_date": "2026-08-07",
+        "holding_horizon_days": 3,
+        "profile": "risk_adjusted",
+        "policy_hash": "policy-v1",
+        "model_version": "hybrid-v3:test",
+        "position_state": "flat",
+        "picks": [],
+    }
+    store = DecisionStore(tmp_path / "decision-payload.sqlite")
+    store.save(report, "demo", panel=panel)
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE selection_snapshots SET payload=REPLACE(payload,'flat','invested')"
+        )
+
+    with pytest.raises(RuntimeError, match=r"payload.*改写"):
+        store.history("demo")
+
+    with store._conn() as connection:
+        connection.execute("UPDATE selection_snapshots SET payload_sha256='' ")
+    with pytest.raises(RuntimeError, match="缺少可信哈希"):
+        store.history("demo")
+
+
+def test_python_component_exposes_external_feature_input_for_freezing(panel, monkeypatch):
+    from quantmaster.decision.hybrid import _python_component
+
+    sentiment = pd.DataFrame(
+        0.25,
+        index=panel["close"].index,
+        columns=panel["close"].columns,
+    )
+    monkeypatch.setattr(
+        "quantmaster.ai.sentiment.quality_sentiment_panel",
+        lambda *_args, **_kwargs: sentiment.copy(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.factors.python_artifact.execute_python_factor_artifact",
+        lambda _root, _artifact, features: features["news_sentiment"],
+    )
+    evidence: dict[str, pd.DataFrame] = {}
+
+    _python_component(
+        panel,
+        {
+            "spec": {
+                "kind": "python",
+                "required_features": ["news_sentiment"],
+                "artifact": {"content_hash": "test"},
+            },
+        },
+        evidence_sink=evidence,
+    )
+
+    pd.testing.assert_frame_equal(evidence["feature::news_sentiment"], sentiment)
 
 
 def test_hybrid_strategy_uses_profile_risk_limits(panel, tmp_path):

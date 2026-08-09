@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
+from datetime import UTC, datetime
 
 import httpx
 import pandas as pd
@@ -13,13 +15,15 @@ from fastapi.testclient import TestClient
 
 from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
 from quantmaster.ai.llm import LLMError
+from quantmaster.ai.news_contracts import FetchBatch
 from quantmaster.ai.news_sources import (
     NewsSourceStore,
     _request_headers,
     _without_auth,
     fetch_declarative_source,
 )
-from quantmaster.ai.sentiment import quality_sentiment_panel
+from quantmaster.ai.sentiment import news_sentiment_readiness, quality_sentiment_panel
+from quantmaster.automation.news import importance_score as alert_importance_score
 from quantmaster.automation.service import ALLOWED_TASKS
 from quantmaster.automation.store import DEFAULT_JOBS
 from quantmaster.credentials import CredentialError, CredentialStore
@@ -46,10 +50,49 @@ def source_value(**overrides) -> dict:
         "name": "研究 RSS", "kind": "rss", "enabled": True,
         "group_name": "periodic", "url": "https://example.com/feed.xml",
         "item_limit": 20, "factor_weight": 1.2, "is_official": False,
+        "max_age_hours": 1080,
         "parser": {}, "auth_type": "none", "auth_header": "",
     }
     value.update(overrides)
     return value
+
+
+def official_news(store: NewsStore, **values) -> NewsItem:
+    values.setdefault("source", "sse")
+    values.setdefault("is_official", True)
+    values.setdefault("content_scope", "full_article")
+    hosts = {
+        "sse": "www.sse.com.cn",
+        "pboc": "www.pbc.gov.cn",
+        "nbs_release": "www.stats.gov.cn",
+        "nbs_interpretation": "www.stats.gov.cn",
+        "ndrc": "www.ndrc.gov.cn",
+    }
+    identity = uuid.uuid4().hex
+    values.setdefault("url", f"https://{hosts[str(values['source'])]}/evidence/{identity}")
+    values.setdefault("provider_item_id", str(values["url"]))
+    published_at_epoch = float(values.setdefault("published_at_epoch", time.time()))
+    values.setdefault(
+        "published_at", datetime.fromtimestamp(published_at_epoch, UTC).isoformat(),
+    )
+    if not values.get("raw_cache_key"):
+        payload = str(values.get("content") or values.get("title") or "").encode("utf-8")
+        values["raw_cache_key"] = store.sources.save_response(
+            str(values["source"]), str(values["url"]),
+            payload, httpx.Headers(), 200, official=True,
+        )
+    item = NewsItem(**values)
+    store.sources.bind_articles([item])
+    store.sources.register_ingest_batch(
+        FetchBatch(
+            source_id=item.source,
+            articles=[item],
+            watermark=item.provider_item_id,
+            complete=True,
+        ),
+        f"test-{identity}",
+    )
+    return item
 
 
 class _RouteNewsSources:
@@ -141,8 +184,10 @@ def test_source_crud_and_dynamic_credentials(tmp_path):
     credentials = FakeCredentials()
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=credentials)
     assert {item["id"] for item in store.list()} >= {
-        "sina_live", "eastmoney_fast", "csrc", "sse", "szse",
+        "sina_live", "sse", "pboc",
+        "nbs_release", "nbs_interpretation", "ndrc",
     }
+    assert "eastmoney_fast" not in {item["id"] for item in store.list(enabled=True)}
 
     created = store.create(source_value(
         name="鉴权 JSON", kind="json", auth_type="bearer",
@@ -165,25 +210,35 @@ def test_declarative_parsers(monkeypatch, tmp_path):
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
     payloads = {
         "rss": b"<rss><channel><item><title>RSS title</title><description>RSS body</description>"
-               b"<link>https://example.com/a</link></item></channel></rss>",
-        "json": json.dumps({"data": {"items": [{"title": "JSON title", "body": "JSON body"}]}}).encode(),
-        "html": b'<ul><li class="news"><a href="/a">HTML title</a><p>HTML body</p></li></ul>',
+               b"<link>https://example.com/a</link>"
+               b"<pubDate>Sun, 09 Aug 2026 10:00:00 +0800</pubDate></item></channel></rss>",
+        "json": json.dumps({"data": {"items": [{
+            "title": "JSON title", "body": "JSON body", "published": "2026-08-09 10:00:00",
+        }]}}).encode(),
+        "html": (
+            b'<ul><li class="news"><a href="/a">HTML title</a><p>HTML body</p>'
+            b'<time>2026-08-09 10:00:00</time></li></ul>'
+        ),
     }
 
     def fake_fetch(source, url, store_value, preview=False):
         return payloads[source["kind"]], url, "news_raw/test/raw.gz"
 
     monkeypatch.setattr("quantmaster.ai.news_sources._fetch_bytes", fake_fetch)
-    rss = fetch_declarative_source(source_value(id="test_rss"), store)
+    rss = fetch_declarative_source(source_value(id="test_rss"), store).articles
     json_items = fetch_declarative_source(source_value(
         id="test_json", kind="json", url="https://example.com/api",
-        parser={"items_path": "data.items", "title_path": "title", "content_path": "body"},
-    ), store)
+        parser={
+            "items_path": "data.items", "title_path": "title", "content_path": "body",
+            "published_at_path": "published",
+        },
+    ), store).articles
     html_items = fetch_declarative_source(source_value(
         id="test_html", kind="html", url="https://example.com/news",
         parser={"item_selector": "li.news", "title_selector": "a",
-                "content_selector": "p", "url_selector": "a"},
-    ), store)
+                "content_selector": "p", "url_selector": "a",
+                "published_at_selector": "time"},
+    ), store).articles
     assert [rss[0].title, json_items[0].title, html_items[0].title] == [
         "RSS title", "JSON title", "HTML title",
     ]
@@ -206,34 +261,284 @@ def test_source_rejects_credentials_in_url(tmp_path):
 def test_raw_response_cleanup(tmp_path):
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
     key = store.save_response(
-        "sina_live", "https://example.com/feed", b"cached response",
-        httpx.Headers({"etag": "v1"}), 200,
+        "pboc", "https://www.pbc.gov.cn/evidence/feed", b"cached response",
+        httpx.Headers({"etag": "v1"}), 200, official=True,
     )
     path = tmp_path / key
     old = time.time() - 10 * 86400
     os.utime(path, (old, old))
-    assert store.cleanup_raw(7) == 1
-    assert not path.exists()
+    assert key in store.raw_gc_candidates(7)
+    assert store.cleanup_raw(7) == 0
+    assert path.exists()
 
 
 def test_quality_factor_uses_first_seen_and_defers_after_close(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
-    store.save([NewsItem(
-        source="test", title="盘后利空", content="盘后利空",
+    first_seen = pd.Timestamp("2024-05-06 16:00", tz="Asia/Shanghai").timestamp()
+    store.save([official_news(store,
+        title="盘后利空", content="盘后利空",
         symbols=["600519.SH"], sentiment=-0.8, confidence=1,
         importance_score=100, analysis_status="complete",
+        published_at_epoch=first_seen,
     )])
-    first_seen = pd.Timestamp("2024-05-06 16:00", tz="Asia/Shanghai").timestamp()
     with store._conn() as conn:
         conn.execute(
-            "UPDATE news SET first_seen_at=?,analysis_status='complete'",
-            (first_seen,),
+            "UPDATE news SET first_seen_at=?,content_version_at=?,analysis_updated_at=?,"
+            "analysis_status='complete'",
+            (first_seen, first_seen, first_seen),
         )
     index = pd.bdate_range("2024-05-06", "2024-05-08")
     factor = quality_sentiment_panel(index, ["600519.SH"], store=store)
     assert pd.isna(factor.loc["2024-05-06", "600519.SH"])
     assert factor.loc["2024-05-07", "600519.SH"] == -0.8
     assert -0.8 < factor.loc["2024-05-08", "600519.SH"] < 0
+
+
+def test_quality_factor_waits_for_analysis_availability_within_same_panel(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    published = pd.Timestamp("2024-01-02 09:00", tz="Asia/Shanghai").timestamp()
+    analyzed = pd.Timestamp("2024-01-10 10:00", tz="Asia/Shanghai").timestamp()
+    store.save([official_news(
+        store,
+        title="延迟完成分析",
+        content="延迟完成分析",
+        symbols=["600519.SH"],
+        sentiment=0.8,
+        confidence=1,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=published,
+    )])
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE news SET first_seen_at=?,content_version_at=?,"
+            "analysis_updated_at=?,analysis_status='complete'",
+            (published, published, analyzed),
+        )
+
+    index = pd.bdate_range("2024-01-02", "2024-01-12")
+    factor = quality_sentiment_panel(index, ["600519.SH"], store=store)
+
+    assert factor.loc[:"2024-01-09", "600519.SH"].isna().all()
+    assert factor.loc["2024-01-10", "600519.SH"] > 0
+
+
+def test_quality_factor_treats_seconds_after_close_as_next_session(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    available = pd.Timestamp("2024-05-06 15:00:59", tz="Asia/Shanghai").timestamp()
+    store.save([official_news(
+        store,
+        title="收盘后五十九秒",
+        content="收盘后五十九秒",
+        symbols=["600519.SH"],
+        sentiment=0.6,
+        confidence=1,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=available,
+    )])
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE news SET first_seen_at=?,content_version_at=?,"
+            "analysis_updated_at=?,analysis_status='complete'",
+            (available, available, available),
+        )
+
+    index = pd.bdate_range("2024-05-06", "2024-05-07")
+    factor = quality_sentiment_panel(index, ["600519.SH"], store=store)
+
+    assert pd.isna(factor.loc["2024-05-06", "600519.SH"])
+    assert factor.loc["2024-05-07", "600519.SH"] == pytest.approx(0.6)
+
+
+def test_sandbox_factor_previews_short_incomplete_sina_without_future_analysis(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    sessions = pd.bdate_range("2026-07-27", periods=10)
+    articles = []
+    for number, day in enumerate(sessions, start=1):
+        published = day.tz_localize("Asia/Shanghai") + pd.Timedelta(hours=10)
+        articles.append(NewsItem(
+            source="sina_live",
+            title=f"新浪快讯 {number}",
+            content=f"新浪快讯正文 {number}",
+            url=f"https://zhibo.sina.com.cn/?id={number}",
+            provider_item_id=f"sina-{number}",
+            published_at=published.isoformat(),
+            published_at_epoch=published.timestamp(),
+            symbols=["600519.SH"],
+            sentiment=-1.0 if number == len(sessions) else 0.6,
+            confidence=1.0,
+            importance_score=100,
+            is_official=False,
+            content_scope="provider_excerpt",
+            analysis_status="complete",
+        ))
+    store.sources.register_ingest_batch(
+        FetchBatch(
+            source_id="sina_live",
+            articles=articles,
+            previous_watermark="sina-old",
+            pending_watermark="sina-new",
+            health="degraded",
+            complete=False,
+            error_code="snapshot_window_exhausted",
+        ),
+        "sina-incomplete",
+    )
+    assert store.save(articles) == len(articles)
+    with store._conn() as conn:
+        for number, article in enumerate(articles, start=1):
+            available = article.published_at_epoch + 60
+            if number == len(articles):
+                available = (sessions[-1] + pd.Timedelta(days=5)).tz_localize(
+                    "Asia/Shanghai",
+                ).timestamp()
+            conn.execute(
+                "UPDATE news SET first_seen_at=?,content_version_at=?,"
+                "analysis_updated_at=? WHERE provider_item_id=?",
+                (available, available, available, article.provider_item_id),
+            )
+
+    production = quality_sentiment_panel(
+        sessions, ["600519.SH"], store=store, tier="production",
+    )
+    preview = quality_sentiment_panel(
+        sessions, ["600519.SH"], store=store, tier="sandbox",
+    )
+
+    assert production["600519.SH"].isna().all()
+    assert preview["600519.SH"].notna().any()
+    assert preview.loc[sessions[-1], "600519.SH"] > 0
+    metadata = preview.attrs["news_factor"]
+    assert metadata["tier"] == "sandbox"
+    assert metadata["sample_start"] == sessions[0].strftime("%Y-%m-%d")
+    assert metadata["sample_end"] == sessions[-2].strftime("%Y-%m-%d")
+    assert metadata["sessions"] == 9
+    assert metadata["coverage"] == pytest.approx(0.9)
+    assert metadata["event_count"] == 9
+    assert metadata["formal_eligible"] is False
+    assert "history_sessions_below_1038" in metadata["reasons"]
+    assert metadata["sources"] == [{
+        "source_id": "sina_live",
+        "source_name": "新浪财经 7×24",
+        "source_group": "fast",
+        "event_count": 9,
+        "weight_multiplier": 0.25,
+        "formal_row_count": 0,
+        "formal_eligible": False,
+        "reasons": [
+            "formal_raw_evidence_missing",
+            "history_sessions_below_1038",
+            "ingest_window_incomplete",
+            "non_official_source",
+            "provider_excerpt_only",
+            "sandbox_tier",
+        ],
+    }]
+    readiness = news_sentiment_readiness(
+        str(sessions[0].date()), str(sessions[-1].date()), store=store,
+    )
+    assert readiness["ready"] is False
+    assert readiness["event_count"] == 0
+
+
+def test_sandbox_factor_downweights_sina_fast_against_official_evidence(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    available = pd.Timestamp("2026-08-03 10:00", tz="Asia/Shanghai").timestamp()
+    official = official_news(
+        store,
+        title="官方正面公告",
+        content="官方正面公告正文",
+        symbols=["600519.SH"],
+        sentiment=0.6,
+        confidence=1.0,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=available,
+    )
+    fast = NewsItem(
+        source="sina_live",
+        title="新浪负面快讯",
+        content="新浪负面快讯正文",
+        url="https://zhibo.sina.com.cn/?id=downweight",
+        provider_item_id="sina-downweight",
+        published_at=pd.Timestamp(available, unit="s", tz="UTC").isoformat(),
+        published_at_epoch=available,
+        symbols=["600519.SH"],
+        sentiment=-1.0,
+        confidence=1.0,
+        importance_score=100,
+        content_scope="provider_excerpt",
+        analysis_status="complete",
+    )
+    store.sources.register_ingest_batch(
+        FetchBatch(
+            source_id="sina_live",
+            articles=[fast],
+            pending_watermark=fast.provider_item_id,
+            complete=False,
+        ),
+        "sina-downweight-batch",
+    )
+    assert store.save([official, fast]) == 2
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE news SET first_seen_at=?,content_version_at=?,analysis_updated_at=?",
+            (available, available, available),
+        )
+
+    preview = quality_sentiment_panel(
+        pd.DatetimeIndex(["2026-08-03"]),
+        ["600519.SH"],
+        store=store,
+        tier="sandbox",
+    )
+
+    assert preview.iloc[0, 0] == pytest.approx((0.6 - 0.25) / 1.25)
+
+
+def test_sandbox_factor_can_use_legacy_analyzed_rows_without_promoting_them(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    published = pd.Timestamp("2026-08-03 10:00", tz="Asia/Shanghai")
+    item = NewsItem(
+        source="sina_live",
+        title="旧库可分析快讯",
+        content="旧库可分析快讯正文",
+        url="https://zhibo.sina.com.cn/?id=legacy-preview",
+        provider_item_id="legacy-preview",
+        published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
+        published_at_epoch=published.timestamp(),
+        symbols=["600519.SH"],
+        sentiment=0.8,
+        confidence=1.0,
+        importance_score=80,
+        content_scope="provider_excerpt",
+        analysis_status="complete",
+    )
+    assert store.save([item]) == 1
+    available = published.timestamp() + 60
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE news SET content_scope='unknown',published_at_epoch=0,"
+            "factor_importance_score=NULL,factor_weight_at_analysis=NULL,"
+            "first_seen_at=?,content_version_at=?,analysis_updated_at=?",
+            (available, available, available),
+        )
+
+    sessions = pd.DatetimeIndex(["2026-08-03"])
+    production = quality_sentiment_panel(
+        sessions, ["600519.SH"], store=store, tier="production",
+    )
+    preview = quality_sentiment_panel(
+        sessions, ["600519.SH"], store=store, tier="sandbox",
+    )
+
+    assert production.iloc[0, 0] is pd.NA or pd.isna(production.iloc[0, 0])
+    assert preview.iloc[0, 0] == pytest.approx(0.8)
+    metadata = preview.attrs["news_factor"]
+    assert metadata["formal_eligible"] is False
+    assert "legacy_unfrozen_analysis_contract" in metadata["reasons"]
+    assert "legacy_unknown_content_scope" in metadata["reasons"]
 
 
 def test_news_list_truncates_body_but_detail_is_complete(tmp_path):
@@ -269,20 +574,20 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     store._industry_map = {}
     store.save([
-        NewsItem(
-            source="test", title="电子需求回暖", content="电子需求回暖", sectors=["电子"],
+            official_news(store,
+                title="电子需求回暖", content="电子需求回暖", sectors=["电子"],
             sentiment=0.8, confidence=1, importance_score=100, analysis_status="complete",
         ),
-        NewsItem(
-            source="test", title="电子成本上升", content="电子成本上升", sectors=["电子"],
+            official_news(store,
+                title="电子成本上升", content="电子成本上升", sectors=["电子"],
             sentiment=-0.2, confidence=1, importance_score=100, analysis_status="complete",
         ),
-        NewsItem(
-            source="test", title="银行息差承压", content="银行息差承压", sectors=["银行"],
+            official_news(store,
+                title="银行息差承压", content="银行息差承压", sectors=["银行"],
             sentiment=-0.5, confidence=1, importance_score=100, analysis_status="complete",
         ),
-        NewsItem(
-            source="mirror", title="电子需求回暖转载", content="电子需求回暖", sectors=["电子"],
+            official_news(store,
+                source="pboc", title="电子需求回暖转载", content="电子需求回暖", sectors=["电子"],
             sentiment=-1, confidence=0.9, importance_score=100, analysis_status="complete",
         ),
     ])
@@ -345,8 +650,8 @@ def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkey
         lambda values: {symbol: f"标的{index:02d}" for index, symbol in enumerate(values, 1)},
     )
     store.save([
-        NewsItem(
-            source="test", title=f"事件 {index}", content=f"事件正文 {index}",
+            official_news(store,
+                title=f"事件 {index}", content=f"事件正文 {index}",
             symbols=[symbol], sentiment=0.1, confidence=1,
             importance_score=100, analysis_status="complete",
         )
@@ -360,6 +665,39 @@ def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkey
     assert focused[-1] == {"symbol": "000020.SZ", "name": "标的20", "count": 1}
 
 
+def test_live_industry_map_change_cannot_rewrite_historical_sector_factor(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "news.sqlite"
+    store = NewsStore(path)
+    now = time.time()
+    item = official_news(
+        store,
+        title="分析时冻结行业",
+        content="分析时确认属于银行的正式正文",
+        symbols=["600001.SH"],
+        sectors=["银行"],
+        sentiment=0.6,
+        confidence=1,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=now - 60,
+    )
+    assert store.save([item]) == 1
+    before = store.stats(30)["sector_scores"]
+
+    monkeypatch.setattr(
+        "quantmaster.data.industry.load_cached_industry_map",
+        lambda: {"600001.SH": "电子"},
+    )
+    reopened = NewsStore(path)
+    after = reopened.stats(30)["sector_scores"]
+
+    assert before == after
+    assert [row["sector"] for row in after] == ["银行"]
+    assert reopened.recent(1)[0]["sectors"] == ["银行", "电子"]
+
+
 def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkeypatch):
     now = 2_000_000_000.0
     monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
@@ -369,42 +707,6 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
     )
     store = NewsStore(tmp_path / "news.sqlite")
     store._industry_map = {}
-    items = [
-        NewsItem(
-            source="unit", title="窗口内", content="窗口内正文", symbols=["600001.SH"],
-            confidence=1, importance_score=100, analysis_status="complete",
-        ),
-        NewsItem(
-            source="mirror", title="窗口内转载", content="窗口内正文",
-            symbols=["600001.SH"], confidence=.9, importance_score=100,
-            analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="精确边界", content="精确边界正文", symbols=["000001.SZ"],
-            confidence=1, importance_score=100, analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="三日窗口", content="三日窗口正文", symbols=["000002.SZ"],
-            confidence=1, importance_score=100, analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="窗口外", content="窗口外正文", symbols=["000003.SZ"],
-            confidence=1, importance_score=100, analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="低置信度", content="低置信度正文", symbols=["000004.SZ"],
-            confidence=0, importance_score=100, analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="零质量", content="零质量正文", symbols=["000005.SZ"],
-            confidence=1, importance_score=0, analysis_status="complete",
-        ),
-        NewsItem(
-            source="unit", title="未完成", content="未完成正文", symbols=["000006.SZ"],
-            confidence=1, importance_score=100, analysis_status="pending",
-        ),
-    ]
-    assert store.save(items) == len(items)
     seen_at = {
         "窗口内": now - 60,
         "窗口内转载": now - 30,
@@ -412,10 +714,55 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
         "三日窗口": now - 2 * 86400,
         "窗口外": now - 3 * 86400 - 1,
     }
+    items = [
+        official_news(store,
+            title="窗口内", content="窗口内正文", symbols=["600001.SH"],
+            confidence=1, importance_score=100, analysis_status="complete",
+            published_at_epoch=seen_at["窗口内"],
+        ),
+        official_news(store,
+            source="pboc", title="窗口内转载", content="窗口内正文",
+            symbols=["600001.SH"], confidence=.9, importance_score=100,
+            analysis_status="complete",
+            published_at_epoch=seen_at["窗口内转载"],
+        ),
+        official_news(store,
+            title="精确边界", content="精确边界正文", symbols=["000001.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+            published_at_epoch=seen_at["精确边界"],
+        ),
+        official_news(store,
+            title="三日窗口", content="三日窗口正文", symbols=["000002.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+            published_at_epoch=seen_at["三日窗口"],
+        ),
+        official_news(store,
+            title="窗口外", content="窗口外正文", symbols=["000003.SZ"],
+            confidence=1, importance_score=100, analysis_status="complete",
+            published_at_epoch=seen_at["窗口外"],
+        ),
+        official_news(store,
+            title="低置信度", content="低置信度正文", symbols=["000004.SZ"],
+            confidence=0, importance_score=100, analysis_status="complete",
+            published_at_epoch=now - 60,
+        ),
+        official_news(store,
+            title="零质量", content="零质量正文", symbols=["000005.SZ"],
+            confidence=1, importance_score=0, analysis_status="complete",
+            published_at_epoch=now - 60,
+        ),
+        official_news(store,
+            title="未完成", content="未完成正文", symbols=["000006.SZ"],
+            confidence=1, importance_score=100, analysis_status="pending",
+            published_at_epoch=now - 60,
+        ),
+    ]
+    assert store.save(items) == len(items)
     with store._conn() as connection:
         for title, timestamp in seen_at.items():
             connection.execute(
-                "UPDATE news SET first_seen_at=? WHERE title=?", (timestamp, title),
+                "UPDATE news SET first_seen_at=? WHERE title=?",
+                (timestamp, title),
             )
 
     one_day = store.event_focus(1)
@@ -441,40 +788,41 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
 
 def test_market_sentiment_respects_requested_cutoff_and_quality_deduplication(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
+    cutoff = 1_800_000_000.0
     items = [
-        NewsItem(
-            source="test",
+            official_news(store,
             title=f"盘中利好 {index}",
             content=f"独立内容 {index}",
             sentiment=1,
             confidence=1,
             importance_score=100,
             analysis_status="complete",
+            published_at_epoch=cutoff - 60,
         )
         for index in range(21)
     ]
     items.extend([
-        NewsItem(
-            source="mirror",
+        official_news(store,
+            source="pboc",
             title="盘中利好转载",
             content="独立内容 0",
             sentiment=-1,
             confidence=1,
             importance_score=100,
             analysis_status="complete",
+            published_at_epoch=cutoff - 60,
         ),
-        NewsItem(
-            source="test",
+        official_news(store,
             title="盘后利空",
             content="盘后独立内容",
             sentiment=-1,
             confidence=1,
             importance_score=100,
             analysis_status="complete",
+            published_at_epoch=cutoff + 60,
         ),
     ])
     store.save(items)
-    cutoff = 1_800_000_000.0
     with store._conn() as connection:
         connection.execute(
             "UPDATE news SET first_seen_at=? WHERE title LIKE '盘中%'",
@@ -495,6 +843,124 @@ def test_market_sentiment_respects_requested_cutoff_and_quality_deduplication(tm
     assert after_close["score"] < at_close["score"]
 
 
+def test_holdings_context_update_cannot_rewrite_same_as_of_market_sentiment(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    now = time.time()
+    contextual = official_news(
+        store,
+        source="sse",
+        title="公司经营信息",
+        content="公司经营信息正文",
+        symbols=["600519.SH"],
+        sentiment=0.8,
+        confidence=1,
+        importance_score=40,
+        analysis_status="complete",
+        published_at_epoch=now - 120,
+    )
+    market = official_news(
+        store,
+        source="pboc",
+        title="市场流动性信息",
+        content="市场流动性信息正文",
+        sentiment=-0.2,
+        confidence=1,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=now - 60,
+    )
+    assert store.save([contextual, market]) == 2
+    as_of = now + 10
+    before = store.market_sentiment(as_of=as_of, days=1)
+    score, scope, _reasons = alert_importance_score(
+        contextual, {"600519.SH"}, set(),
+    )
+    assert score != contextual.importance_score
+    store.update_context(1, importance_score=score, scope=scope, urgency="high")
+
+    assert store.market_sentiment(as_of=as_of, days=1) == before
+    with store._conn() as connection:
+        row = connection.execute(
+            "SELECT factor_importance_score,alert_importance_score "
+            "FROM news WHERE id=1"
+        ).fetchone()
+    assert tuple(row) == (40, score)
+
+
+def test_source_weight_change_cannot_rewrite_prior_as_of_market_sentiment(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    now = time.time()
+    assert store.save([
+        official_news(
+            store,
+            source="sse",
+            title="交易所正面信息",
+            content="交易所正面信息正文",
+            sentiment=0.8,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+            published_at_epoch=now - 120,
+        ),
+        official_news(
+            store,
+            source="pboc",
+            title="央行负面信息",
+            content="央行负面信息正文",
+            sentiment=-0.4,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+            published_at_epoch=now - 60,
+        ),
+    ]) == 2
+    as_of = now + 10
+    before = store.market_sentiment(as_of=as_of, days=1)
+
+    store.sources.update("sse", {"factor_weight": 3})
+
+    assert store.market_sentiment(as_of=as_of, days=1) == before
+    rows = store.factor_rows(end_epoch=as_of)
+    assert [row["source_weight"] for row in rows] == [1, 1]
+
+
+def test_v4_importance_and_live_source_weight_are_not_promoted_to_pit_factor(tmp_path):
+    path = tmp_path / "news.sqlite"
+    store = NewsStore(path)
+    now = time.time()
+    assert store.save([
+        official_news(
+            store,
+            source="sse",
+            title="旧版已分析消息",
+            content="旧版已分析消息正文",
+            sentiment=0.7,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+            published_at_epoch=now - 60,
+        )
+    ]) == 1
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE news_store_meta SET value='4' WHERE key='schema_version'"
+        )
+        connection.execute("ALTER TABLE news DROP COLUMN alert_importance_score")
+        connection.execute("ALTER TABLE news DROP COLUMN factor_weight_at_analysis")
+        connection.execute("ALTER TABLE news DROP COLUMN factor_importance_score")
+
+    migrated = NewsStore(path)
+
+    assert migrated.factor_rows(end_epoch=now + 10) == []
+    assert migrated.market_sentiment(as_of=now + 10, days=1)["event_count"] == 0
+    with migrated._conn() as connection:
+        row = connection.execute(
+            "SELECT importance_score,factor_importance_score,"
+            "factor_weight_at_analysis,alert_importance_score FROM news"
+        ).fetchone()
+    assert tuple(row) == (100, None, None, 100)
+
+
 def test_news_event_focus_is_sorted_and_limited_to_24(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "quantmaster.data.load_stock_names", lambda values: dict.fromkeys(values, "测试标的"),
@@ -503,8 +969,8 @@ def test_news_event_focus_is_sorted_and_limited_to_24(tmp_path, monkeypatch):
     store._industry_map = {}
     symbols = [f"{index:06d}.SZ" for index in range(1, 27)]
     store.save([
-        NewsItem(
-            source="unit", title=f"事件 {symbol}", content=f"正文 {symbol}",
+            official_news(store,
+                title=f"事件 {symbol}", content=f"正文 {symbol}",
             symbols=[symbol], confidence=1, importance_score=100,
             analysis_status="complete",
         )
@@ -842,9 +1308,10 @@ def test_news_api_csrf_and_ui_contract():
 
 
 def test_periodic_news_job_is_registered():
-    assert DEFAULT_JOBS["fast_news_scan"][1]["minutes"] == 10
+    assert DEFAULT_JOBS["fast_news_scan"][1]["minutes"] == 5
     assert DEFAULT_JOBS["official_news_scan"][1]["minutes"] == 15
-    assert DEFAULT_JOBS["periodic_news_scan"][1]["minutes"] == 60
+    assert DEFAULT_JOBS["periodic_news_scan"][1]["minutes"] == 30
+    assert "window" not in DEFAULT_JOBS["fast_news_scan"][1]
     assert "periodic_news_scan" in ALLOWED_TASKS
 
 
@@ -1035,8 +1502,8 @@ def test_unbounded_failed_retry_processes_more_than_sqlite_parameter_limit(tmp_p
 def test_news_stats_deduplicates_in_sql_and_uses_stats_index(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     store.save([
-        NewsItem(source="unit", title="重复一", content="相同正文"),
-        NewsItem(source="unit", title="重复二", content="相同正文"),
+        official_news(store, title="重复一", content="相同正文"),
+        official_news(store, title="重复二", content="相同正文"),
     ])
     ids = list(range(1, store.max_id() + 1))
     for item_id in ids:

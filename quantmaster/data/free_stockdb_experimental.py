@@ -56,7 +56,9 @@ class StockDBExperimentalOnline:
             "at": datetime.now(UTC).isoformat(timespec="seconds"), "kind": kind,
             "symbol": symbol, "params": params, "outcome": outcome,
             "cached": cached, "error": error[:500], "remote": True,
-            "upstream": "tushare", "distribution": "free-stockdb-online",
+            "upstream": "vendor-declared-unverified",
+            "upstream_evidence": "not_provided",
+            "distribution": "free-stockdb-online",
         }
         with self._lock:
             path = self.root / "audit.jsonl"

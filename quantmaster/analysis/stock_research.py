@@ -46,6 +46,7 @@ from quantmaster.analysis.stock_evidence import (
     content_hash,
 )
 from quantmaster.analysis.stock_evidence import validate_evidence as validate_evidence
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +335,7 @@ def _filter_symbol(frame: pd.DataFrame, code: str) -> pd.DataFrame:
 
 
 def _latest_report_period(now: pd.Timestamp | None = None) -> str:
-    value = (pd.Timestamp(now) if now is not None else pd.Timestamp.now()).normalize()
+    value = (pd.Timestamp(now) if now is not None else pd.Timestamp(market_date())).normalize()
     candidates = [
         pd.Timestamp(value.year, month, day) for month, day in ((3, 31), (6, 30), (9, 30), (12, 31))
     ]
@@ -475,19 +476,20 @@ class DefaultDeepEvidenceLoader:
     def capital(self, symbol: str) -> tuple[list[dict[str, Any]], list[str]]:
         code, _, suffix = symbol.partition(".")
         warnings: list[str] = []
+        today = pd.Timestamp(market_date())
         specs: list[tuple[str, str, dict[str, Any], str]] = [
             (
                 "融资融券",
                 "stock_margin_detail_szse",
-                {"date": pd.Timestamp.now().strftime("%Y%m%d")},
+                {"date": today.strftime("%Y%m%d")},
                 "https://www.szse.cn/market/stock/finance/",
             ),
             (
                 "龙虎榜",
                 "stock_lhb_detail_em",
                 {
-                    "start_date": (pd.Timestamp.now() - pd.Timedelta(days=30)).strftime("%Y%m%d"),
-                    "end_date": pd.Timestamp.now().strftime("%Y%m%d"),
+                    "start_date": (today - pd.Timedelta(days=30)).strftime("%Y%m%d"),
+                    "end_date": today.strftime("%Y%m%d"),
                 },
                 "https://data.eastmoney.com/stock/lhb.html",
             ),
@@ -503,7 +505,7 @@ class DefaultDeepEvidenceLoader:
                 "融资融券",
                 "stock_margin_detail_sse",
                 {
-                    "date": pd.Timestamp.now().strftime("%Y%m%d"),
+                    "date": today.strftime("%Y%m%d"),
                 },
                 "https://www.sse.com.cn/market/othersdata/margin/",
             )
@@ -534,12 +536,13 @@ class DefaultDeepEvidenceLoader:
         warnings: list[str] = []
         if not industry:
             return pd.DataFrame(), ["行业相对强弱缺少行业映射"]
+        today = pd.Timestamp(market_date())
         frame = self._call(
             "stock_board_industry_hist_em",
             warnings,
             symbol=industry,
-            start_date=(pd.Timestamp.now() - pd.Timedelta(days=800)).strftime("%Y%m%d"),
-            end_date=pd.Timestamp.now().strftime("%Y%m%d"),
+            start_date=(today - pd.Timedelta(days=800)).strftime("%Y%m%d"),
+            end_date=today.strftime("%Y%m%d"),
             adjust="qfq",
         )
         if not frame.empty:
@@ -553,6 +556,7 @@ class DefaultDeepEvidenceLoader:
     def sentiment(self, _: str) -> tuple[list[dict[str, Any]], list[str]]:
         warnings: list[str] = []
         rows = []
+        today = pd.Timestamp(market_date())
         endpoints = (
             (
                 "A股市场宽度与活跃度",
@@ -563,13 +567,13 @@ class DefaultDeepEvidenceLoader:
             (
                 "涨停池",
                 "stock_zt_pool_em",
-                {"date": pd.Timestamp.now().strftime("%Y%m%d")},
+                {"date": today.strftime("%Y%m%d")},
                 "https://quote.eastmoney.com/ztb/detail",
             ),
             (
                 "跌停池",
                 "stock_zt_pool_dtgc_em",
-                {"date": pd.Timestamp.now().strftime("%Y%m%d")},
+                {"date": today.strftime("%Y%m%d")},
                 "https://quote.eastmoney.com/ztb/detail",
             ),
             (
@@ -1664,7 +1668,7 @@ class StockResearchEngine:
                         provider="LLM native web search",
                         url=result.get("url") or "",
                         published_at=result.get("published_at") or "",
-                        data_as_of=pd.Timestamp.now().date().isoformat(),
+                        data_as_of=market_date().isoformat(),
                         evidence_type="web_search",
                     )
                 _emit(
@@ -1758,15 +1762,21 @@ class StockResearchEngine:
         instrument = self.service.resolve(spec.query)
         symbol = str(instrument["symbol"])
         name = str(instrument.get("name") or instrument.get("en_name") or symbol)
-        end_ts = pd.Timestamp.now().normalize()
+        end_ts = pd.Timestamp(market_date())
         start_ts = end_ts - pd.Timedelta(days=800)
         fundamental_start = end_ts - pd.Timedelta(days=5 * 365)
-        bars = self.service.history_loader(
+        market_envelope = self.service.history_loader(
             symbol,
             str(start_ts.date()),
             str(end_ts.date()),
             priority="interactive",
         )
+        bars = market_envelope.require_data()
+        market_contracts = {symbol: market_envelope.quality.to_dict()}
+        if market_envelope.quality.status == "degraded":
+            warnings.append(
+                "行情证据已降级：" + "；".join(market_envelope.quality.issues)
+            )
         if bars is None or bars.empty or len(bars.dropna(subset=["close"])) < 20:
             raise ValueError(f"{name} 的有效日线不足，暂时无法生成六维分析")
         quote = _quote(bars, str(instrument.get("currency") or "CNY"))
@@ -1808,12 +1818,19 @@ class StockResearchEngine:
         def collect_technical() -> tuple[dict[str, float | None], list[str]]:
             local_warnings: list[str] = []
             try:
-                benchmark = self.service.history_loader(
+                benchmark_envelope = self.service.history_loader(
                     "000300.SH",
                     str(start_ts.date()),
                     str(end_ts.date()),
                     priority="interactive",
                 )
+                benchmark = benchmark_envelope.require_data()
+                market_contracts["000300.SH"] = benchmark_envelope.quality.to_dict()
+                if benchmark_envelope.quality.status == "degraded":
+                    local_warnings.append(
+                        "沪深300行情证据已降级："
+                        + "；".join(benchmark_envelope.quality.issues)
+                    )
             except RECOVERABLE_RESEARCH_ERRORS as exc:
                 benchmark = pd.DataFrame()
                 local_warnings.append(f"沪深300相对强弱不可用：{_public_error_text(exc, limit=160)}")
@@ -2006,6 +2023,7 @@ class StockResearchEngine:
                 "spec_hash": spec.hash,
                 "items": ledger.all(),
                 "sources": ledger.sources(),
+                "market_data_contracts": market_contracts,
             },
             {"spec_hash": spec.hash, "symbol": symbol, "data_as_of": quote["as_of"]},
         )
@@ -2247,6 +2265,9 @@ class StockResearchEngine:
             },
             "generation_mode": "rules_only",
             "warnings": list(dict.fromkeys(warnings)),
+            "data_quality": market_envelope.quality.to_dict(),
+            "market_data_contracts": market_contracts,
+            "provenance": list(market_envelope.provenance),
             "disclaimer": "仅作量化研究与记录，不构成投资建议；市场有风险，结论需随新数据更新。",
         }
         fallback = _rule_conclusion(dimensions, quote)

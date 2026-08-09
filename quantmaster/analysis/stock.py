@@ -13,6 +13,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantmaster.data.base import BarDataEnvelope
+from quantmaster.trading_sessions import market_date
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LLM = object()
@@ -664,7 +667,7 @@ class StockAnalysisService:
         self,
         *,
         resolver: Callable[[str], dict[str, Any]] | None = None,
-        history_loader: Callable[..., pd.DataFrame] | None = None,
+        history_loader: Callable[..., BarDataEnvelope[pd.DataFrame]] | None = None,
         fundamental_loader: Callable[[str, str, str], dict[str, pd.DataFrame]] | None = None,
         news_loader: Callable[[str, str], list[dict[str, Any]]] | None = None,
         capital_loader: Callable[[str], dict[str, Any]] | None = None,
@@ -715,14 +718,15 @@ class StockAnalysisService:
         instrument = self.resolve(query)
         symbol = str(instrument["symbol"])
         name = str(instrument.get("name") or instrument.get("en_name") or symbol)
-        end_ts = pd.Timestamp.now().normalize()
+        end_ts = pd.Timestamp(market_date())
         start_ts = end_ts - pd.Timedelta(days=500)
         fundamental_start = end_ts - pd.Timedelta(days=3 * 365)
 
         _emit(progress, 22, "读取行情", f"读取 {name}（{symbol}）近 500 天日线")
-        bars = self.history_loader(
+        market_envelope = self.history_loader(
             symbol, str(start_ts.date()), str(end_ts.date()), priority="normal",
         )
+        bars = market_envelope.require_data()
         if bars is None or bars.empty or len(bars.dropna(subset=["close"])) < 20:
             raise ValueError(f"{name} 的有效日线不足，暂时无法生成六维分析")
         quote = _quote(bars, str(instrument.get("currency") or "CNY"))
@@ -731,6 +735,10 @@ class StockAnalysisService:
         technical = analyze_technical(bars)
 
         warnings: list[str] = []
+        if market_envelope.quality.status == "degraded":
+            warnings.append(
+                "行情证据已降级：" + "；".join(market_envelope.quality.issues)
+            )
         _emit(progress, 54, "核查基本面", "读取估值、股息率、市值与已披露 ROE")
         try:
             fundamental_panel = self.fundamental_loader(
@@ -794,6 +802,8 @@ class StockAnalysisService:
                 "weights": DIMENSION_WEIGHTS,
             },
             "warnings": warnings,
+            "data_quality": market_envelope.quality.to_dict(),
+            "provenance": list(market_envelope.provenance),
             "disclaimer": "仅作量化研究与记录，不构成投资建议；市场有风险，结论需随新数据更新。",
         }
         conclusion = _rule_conclusion(dimensions, quote)

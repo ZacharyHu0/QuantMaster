@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from quantmaster.config import DEFAULT_CONFIG_PATHS, Config, load_config, set_config
 from quantmaster.credentials import CredentialError, CredentialStore
+from quantmaster.trading_sessions import market_date
 
 CONFIG_VERSION = 1
 AUTO_SNAPSHOT_LIMIT = 20
@@ -99,7 +100,7 @@ class DataSettings(StrictModel):
     free_stockdb_managed: bool = True
     free_stockdb_auto_update: bool = True
     free_stockdb_update_time: str = Field(default="18:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
-    free_stockdb_online_enabled: bool = True
+    free_stockdb_online_enabled: bool = False
     free_stockdb_online_url: str = Field(
         default="http://8.138.149.215:7899",
         max_length=2048,
@@ -287,7 +288,7 @@ class LabSettings(StrictModel):
             parsed = date.fromisoformat(value)
         except ValueError:
             raise ValueError("研究起点必须是有效的 YYYY-MM-DD 日期") from None
-        if parsed > date.today():
+        if parsed > market_date():
             raise ValueError("研究起点不能晚于今天")
         return parsed.isoformat()
 
@@ -660,16 +661,34 @@ class ConfigManager:
         ):
             if universe.lower() in {"demo", "csi800"}:
                 continue
-            from quantmaster.data.universe import normalize_symbols
+            from quantmaster.data.universe import (
+                normalize_symbols,
+                universe_snapshot_from_payload,
+            )
 
             universe_path = Path(doc.data.root).expanduser().resolve() / "universe" / f"{universe}.json"
             try:
-                raw_symbols = json.loads(universe_path.read_text(encoding="utf-8"))
-                symbols = normalize_symbols([str(item) for item in raw_symbols])
+                payload = json.loads(universe_path.read_text(encoding="utf-8"))
             except FileNotFoundError:
                 raise ValueError(f"{label}不存在：{universe}") from None
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            except (OSError, TypeError, json.JSONDecodeError):
                 raise ValueError(f"{label}文件无效：{universe}") from None
+            try:
+                snapshot = universe_snapshot_from_payload(
+                    payload, expected_name=universe,
+                )
+                symbols = list(snapshot.symbols)
+            except ValueError:
+                if not isinstance(payload, list):
+                    raise ValueError(f"{label}文件无效：{universe}") from None
+                try:
+                    symbols = normalize_symbols([str(item) for item in payload])
+                except ValueError:
+                    raise ValueError(f"{label}文件无效：{universe}") from None
+                warnings.append(
+                    f"{label}“{universe}”是旧候选：可用于当前 sandbox 分析，"
+                    "但不能保存正式决策或历史回放；在候选管理中重新保存即可升级"
+                )
             if not symbols:
                 raise ValueError(f"{label}为空：{universe}")
         if doc.lab.device != "auto":

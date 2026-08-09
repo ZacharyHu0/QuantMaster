@@ -466,7 +466,7 @@
       renderTaskTray();
       renderJobTable();
       setView('automation');
-      announce(`${provider === 'tushare' ? 'Tushare' : 'stockdb-online'} 数据补齐任务已加入队列`);
+      announce(`${provider === 'tushare' ? 'Tushare' : '本机 StockDB'} 数据补齐任务已加入队列`);
       schedulePolling(true);
     } catch (error) {
       button.disabled = false;

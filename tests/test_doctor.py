@@ -24,7 +24,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     free_stockdb = next(
         item for item in capabilities["providers"] if item["name"] == "free-stockdb"
     )
-    assert {"daily", "intraday", "spot", "industry", "themes"} <= set(
+    assert {"daily", "intraday", "eod_snapshot", "industry", "themes"} <= set(
         free_stockdb["capabilities"]
     )
     assert operations["free_stockdb_runtime"]["state"] in {
@@ -33,7 +33,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
     assert operations["database_schemas"]["news"] == {
-        "status": "ok", "current": 1, "expected": 1,
+        "status": "ok", "current": 7, "expected": 7,
     }
     assert operations["database_schemas"]["paper"] == {
         "status": "ok", "current": 3, "expected": 3,

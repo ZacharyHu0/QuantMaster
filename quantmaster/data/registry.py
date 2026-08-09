@@ -2,35 +2,51 @@
 
 用法：
     from quantmaster.data import load_history, load_panel
-    df = load_history("600519.SH", "2022-01-01", "2024-12-31")
-    panel = load_panel(["600519.SH", "000858.SZ"], "2022-01-01", "2024-12-31")
+    df = load_history("600519.SH", "2022-01-01", "2024-12-31").require_data()
+    panel = load_panel(["600519.SH", "000858.SZ"], "2022-01-01", "2024-12-31").require_data()
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import re
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
+from typing import Any, Literal, cast
 
 import httpx
 import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.base import (
+    OHLCV_COLUMNS,
+    BarDataEnvelope,
+    BarDataQuality,
     DataCapability,
     DataSource,
     Market,
+    MarketDataUnavailable,
     guess_market,
     validate_frequency,
 )
 from quantmaster.data.resilience import bypass_endpoint_cache, data_priority
 from quantmaster.data.storage import BarStore, IntradayBarStore
+from quantmaster.trading_sessions import market_date, market_now
 
 logger = logging.getLogger(__name__)
+
+QualityStatus = Literal["verified", "degraded", "unavailable"]
+_QUALITY_RANK: dict[QualityStatus, int] = {
+    "verified": 0,
+    "degraded": 1,
+    "unavailable": 2,
+}
 
 # 各市场按优先级排列的数据源工厂
 _SOURCE_FACTORIES: dict[str, list] = {}
@@ -60,20 +76,247 @@ class AdjustmentMismatch(RuntimeError):
     pass
 
 
-def _covers_requested_range(df: pd.DataFrame, start: str, end: str) -> bool:
-    """判断响应自身是否连续；上市前和退市后的自然空白不算缺行。"""
+def _instrument_range(
+    symbol: str, start: pd.Timestamp, end: pd.Timestamp,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Narrow a request only with explicit listing evidence, never weekday guesses."""
+    if not symbol:
+        return start, end
+    try:
+        from quantmaster.data.instruments import InstrumentStore
+
+        instrument = InstrumentStore().get(symbol)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        instrument = None
+    if instrument is None:
+        return start, end
+    try:
+        listed = pd.Timestamp(instrument.list_date).normalize() if instrument.list_date else None
+    except (TypeError, ValueError):
+        listed = None
+    try:
+        delisted = pd.Timestamp(instrument.delist_date).normalize() if instrument.delist_date else None
+    except (TypeError, ValueError):
+        delisted = None
+    if listed is not None:
+        start = max(start, listed)
+    if delisted is not None:
+        end = min(end, delisted)
+    return start, end
+
+
+def _unit_contract(symbol: str) -> tuple[tuple[tuple[str, str], ...], str]:
+    """Resolve units from local instrument evidence; never infer asset type."""
+    unknown = tuple((field, "unknown") for field in (*OHLCV_COLUMNS[:-1], "volume", "amount"))
+    if not symbol:
+        return unknown, "缺少标的，无法确认行情单位"
+    try:
+        from quantmaster.data.instruments import InstrumentStore
+
+        instrument = InstrumentStore().get(symbol)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        instrument = None
+    if instrument is None:
+        return unknown, f"{symbol} 缺少证券主数据，单位未知"
+    asset_type = str(instrument.asset_type or "").lower()
+    currency = str(instrument.currency or "").upper()
+    if asset_type == "index":
+        return (
+            (*((field, "point") for field in OHLCV_COLUMNS[:-1]),
+             ("volume", "unknown"), ("amount", "unknown")),
+            "指数成交量/成交额单位缺少版本化证明",
+        )
+    if asset_type in {"stock", "etf", "fund"} and currency:
+        return (
+            (*((field, f"{currency}/share") for field in OHLCV_COLUMNS[:-1]),
+             ("volume", "share"), ("amount", currency)),
+            "",
+        )
+    return unknown, f"{symbol} 的 {asset_type or 'unknown'} 品种缺少可验证单位契约"
+
+
+def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DatetimeIndex, str]:
+    """Return only locally published trading-session evidence."""
+    try:
+        from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+        for snapshot in StockDBIngestStore().history(limit=20):
+            if not str(snapshot.session_source).startswith("tushare:"):
+                continue
+            values = pd.DatetimeIndex(
+                pd.to_datetime(snapshot.session_dates, errors="coerce")
+            ).dropna().normalize()
+            selected = values[(values >= start) & (values <= end)]
+            tolerance = pd.Timedelta(days=14)
+            if (
+                len(selected)
+                and selected.min() - start <= tolerance
+                and end - selected.max() <= tolerance
+            ):
+                source = snapshot.session_source or "published_sessions"
+                return selected.unique().sort_values(), f"stockdb-ingest:{source}"
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        logger.debug("本地 StockDB 交易日证据不可用", exc_info=True)
+    try:
+        from quantmaster.research.catalog import ResearchCatalog
+        from quantmaster.research.contracts import AssetClass, Frequency
+
+        path = get_config().data_root / "research_lake" / "_meta" / "catalog.sqlite"
+        if path.is_file():
+            values = ResearchCatalog(path).trading_dates(
+                AssetClass.STOCK,
+                Frequency.DAILY,
+                start.date().isoformat(),
+                end.date().isoformat(),
+            )
+            sessions = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce")).dropna().normalize()
+            if len(sessions):
+                return sessions.unique().sort_values(), "research_lake"
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        logger.debug("本地交易日证据不可用", exc_info=True)
+    return pd.DatetimeIndex([]), "unavailable"
+
+
+def _assess_daily_frame(
+    df: pd.DataFrame | None,
+    start: str,
+    end: str,
+    *,
+    symbol: str = "",
+    source: str = "",
+    stale: bool = False,
+    extra_issues: tuple[str, ...] = (),
+) -> BarDataQuality:
+    requested_start = pd.Timestamp(start).normalize()
+    requested_end = min(pd.Timestamp(end).normalize(), pd.Timestamp(market_date()))
+    effective_start, effective_end = _instrument_range(
+        symbol, requested_start, requested_end,
+    )
+    issues = list(extra_issues)
+    units, unit_issue = _unit_contract(symbol)
+    if unit_issue:
+        issues.append(unit_issue)
     if df is None or df.empty:
-        return False
-    first = pd.Timestamp(df.index.min()).normalize()
-    last = pd.Timestamp(df.index.max()).normalize()
-    # 只在实际有数据的边界内判断密度。请求起点早于上市日、终点晚于退市日
-    # 都是合法情况；已有缓存日期是否丢失由 _is_complete_refresh 单独校验。
-    expected = len(pd.bdate_range(first, last))
-    if expected < 10:
-        return True
-    index = pd.DatetimeIndex(df.index).normalize()
-    actual = index[(index >= first) & (index <= last)].nunique()
-    return actual / expected >= 0.8
+        issues.append("行情为空")
+        return BarDataQuality(
+            "unavailable", start, end, sources=(source,) if source else (),
+            issues=tuple(issues), stale=stale, partial=True,
+            timezone="exchange-date", adjustment="qfq",
+            units=units,
+            requested_symbols=(symbol,) if symbol else (),
+            missing_symbols=(symbol,) if symbol else (),
+        )
+    index = pd.DatetimeIndex(pd.to_datetime(df.index, errors="coerce"))
+    if index.tz is not None:
+        index = index.tz_localize(None)
+    index = index.normalize()
+    valid_index = index[~index.isna()]
+    observed_start = valid_index.min() if len(valid_index) else pd.NaT
+    observed_end = valid_index.max() if len(valid_index) else pd.NaT
+    duplicate_rows = int(index.duplicated(keep=False).sum())
+    if duplicate_rows:
+        issues.append(f"存在 {duplicate_rows} 行重复交易日")
+    sparse_cadence = False
+    unique_index = valid_index.unique().sort_values()
+    if len(unique_index) >= 10:
+        median_gap_days = float(pd.Series(unique_index).diff().dropna().dt.days.median())
+        sparse_cadence = median_gap_days > 2
+        if sparse_cadence:
+            issues.append(f"日频观测间隔中位数异常：{median_gap_days:.1f} 天")
+    missing_columns = [column for column in OHLCV_COLUMNS if column not in df]
+    if missing_columns:
+        issues.append("缺少必需列：" + "、".join(missing_columns))
+    invalid_numeric = 0
+    invalid_semantics = 0
+    if not missing_columns:
+        numeric = df[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
+        finite = numeric.map(math.isfinite).all(axis=1)
+        invalid_numeric = int((~finite).sum())
+        if invalid_numeric:
+            issues.append(f"存在 {invalid_numeric} 行非有限 OHLCV")
+        prices = numeric[["open", "high", "low", "close"]]
+        semantic = (
+            prices.gt(0).all(axis=1)
+            & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
+            & numeric["low"].le(prices[["open", "close"]].min(axis=1))
+            & numeric["high"].ge(numeric["low"])
+            & numeric["volume"].ge(0)
+        )
+        invalid_semantics = int((finite & ~semantic).sum())
+        if invalid_semantics:
+            issues.append(f"存在 {invalid_semantics} 行价格/OHLC 关系或成交量语义无效")
+    if source.startswith("free-stockdb") and df.attrs.get("unit_status") != "verified":
+        issues.append("free-stockdb 未提供版本化单位证明，按股/元契约降级使用")
+    adjustment = "qfq"
+    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
+        adjustment = "qfq_requested_unverified"
+        issues.append("free-stockdb 日线请求了前复权，但未随行情返回可验证因子链")
+    boundary_tolerance = pd.Timedelta(days=14)
+    if pd.isna(observed_start) or pd.isna(observed_end):
+        issues.append("没有有效交易日期")
+    else:
+        if observed_start - effective_start > boundary_tolerance:
+            issues.append(
+                f"响应起点 {observed_start.date()} 晚于有证据的请求起点 {effective_start.date()}"
+            )
+        if effective_end - observed_end > boundary_tolerance:
+            issues.append(
+                f"响应终点 {observed_end.date()} 早于有证据的请求终点 {effective_end.date()}"
+            )
+    if symbol and guess_market(symbol) != Market.CN:
+        sessions = pd.DatetimeIndex([])
+        calendar_source = f"{guess_market(symbol).value}:calendar-unavailable"
+    else:
+        sessions, calendar_source = _local_sessions(effective_start, effective_end)
+    coverage_ratio: float | None = None
+    partial = False
+    if len(sessions):
+        expected = sessions[(sessions >= effective_start) & (sessions <= effective_end)]
+        if len(expected):
+            coverage_ratio = len(expected.intersection(valid_index.unique())) / len(expected)
+            partial = coverage_ratio < 1.0
+            if coverage_ratio < 0.95:
+                issues.append(f"有证据交易日覆盖率仅 {coverage_ratio:.1%}")
+    else:
+        partial = True
+        issues.append("缺少权威交易日历，仅完成边界与结构校验")
+    blocking = bool(
+        duplicate_rows or sparse_cadence or missing_columns or invalid_numeric or invalid_semantics
+        or any("响应起点" in item or "响应终点" in item or "覆盖率仅" in item for item in issues)
+    )
+    status: QualityStatus
+    if blocking:
+        status = "unavailable"
+    elif stale or partial or issues:
+        status = "degraded"
+    else:
+        status = "verified"
+    return BarDataQuality(
+        status,
+        start,
+        end,
+        observed_start="" if pd.isna(observed_start) else observed_start.date().isoformat(),
+        observed_end="" if pd.isna(observed_end) else observed_end.date().isoformat(),
+        coverage_ratio=round(coverage_ratio, 6) if coverage_ratio is not None else None,
+        calendar_source=calendar_source,
+        sources=(source,) if source else (),
+        issues=tuple(dict.fromkeys(issues)),
+        stale=stale,
+        partial=partial,
+        timezone="exchange-date",
+        adjustment=adjustment,
+        units=units,
+        duplicate_rows=duplicate_rows,
+        requested_symbols=(symbol,) if symbol else (),
+        observed_symbols=(symbol,) if symbol else (),
+    )
+
+
+def _covers_requested_range(
+    df: pd.DataFrame, start: str, end: str, *, symbol: str = "",
+) -> bool:
+    """Compatibility for internal validators: true only without blocking issues."""
+    return _assess_daily_frame(df, start, end, symbol=symbol).status != "unavailable"
 
 
 def _is_complete_refresh(
@@ -81,13 +324,15 @@ def _is_complete_refresh(
     cached: pd.DataFrame | None,
     start: str,
     end: str,
+    *,
+    symbol: str = "",
 ) -> bool:
     """只有确认新响应完整时，才允许覆盖前复权日线缓存。
 
     AKShare 偶尔会返回有数据但缺头、缺尾或缺中间分块的响应。边界覆盖之外，
     还要确保旧缓存中已经确认存在的交易日没有在新响应里消失。
     """
-    if not _covers_requested_range(fresh, start, end):
+    if not _covers_requested_range(fresh, start, end, symbol=symbol):
         return False
     if cached is None or cached.empty:
         return True
@@ -105,11 +350,451 @@ def _mode(use_cache: bool, refresh: RefreshMode | str | None) -> RefreshMode:
     return refresh if isinstance(refresh, RefreshMode) else RefreshMode(refresh)
 
 
+def _unavailable_error(
+    symbols: tuple[str, ...],
+    start: str,
+    end: str,
+    issues: list[str] | tuple[str, ...],
+    *,
+    frequency: str = "1d",
+) -> MarketDataUnavailable:
+    clean_issues = tuple(dict.fromkeys(str(value) for value in issues if str(value)))
+    sources = tuple(dict.fromkeys(
+        value.split(":", 1)[0]
+        for value in clean_issues
+        if ":" in value and value.split(":", 1)[0]
+    ))
+    quality = BarDataQuality(
+        "unavailable",
+        start,
+        end,
+        sources=sources,
+        issues=clean_issues or ("所有候选行情源均未返回可验证数据",),
+        stale=False,
+        partial=True,
+        timezone="exchange-date" if frequency == "1d" else "Asia/Shanghai",
+        adjustment="qfq" if frequency == "1d" else "none",
+        requested_symbols=symbols,
+        observed_symbols=(),
+        missing_symbols=symbols,
+    )
+    provenance = tuple(
+        {"attempt": value, "status": "failed"}
+        for value in clean_issues
+    )
+    return MarketDataUnavailable(quality, provenance)
+
+
 def _cached_slice(cached: pd.DataFrame | None, start: str, end: str) -> pd.DataFrame | None:
     if cached is None or cached.empty:
         return None
     result = cached.loc[start:end]
     return result if not result.empty else None
+
+
+def _shanghai_wall_time(value: object) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert("Asia/Shanghai").tz_localize(None)
+    return stamp
+
+
+def _assess_intraday_frame(
+    frame: pd.DataFrame | None,
+    start: str,
+    end: str,
+    *,
+    symbol: str,
+    frequency: str,
+    source: str = "",
+    stale: bool = False,
+) -> BarDataQuality:
+    issues: list[str] = []
+    frequency_match = re.fullmatch(r"(\d+)m", frequency)
+    frequency_minutes = int(frequency_match.group(1)) if frequency_match else 0
+    if frequency_minutes <= 0:
+        issues.append(f"无法验证分钟频率：{frequency}")
+    units, unit_issue = _unit_contract(symbol)
+    if unit_issue:
+        issues.append(unit_issue)
+    if frame is None or frame.empty:
+        return BarDataQuality(
+            "unavailable", start, end, sources=(source,) if source else (),
+            issues=tuple((*issues, "分钟行情为空")), stale=stale, partial=True,
+            timezone="unknown", adjustment="none", units=units,
+            requested_symbols=(symbol,), missing_symbols=(symbol,),
+        )
+    raw_index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
+    timezone = str(raw_index.tz or "Asia/Shanghai")
+    if raw_index.tz is None:
+        issues.append("分钟时间戳为 naive，按 Asia/Shanghai 解释")
+        wall_index = raw_index
+    else:
+        wall_index = raw_index.tz_convert("Asia/Shanghai").tz_localize(None)
+    valid_index = wall_index[~wall_index.isna()]
+    duplicate_rows = int(valid_index.duplicated(keep=False).sum())
+    if duplicate_rows:
+        issues.append(f"存在 {duplicate_rows} 行重复分钟时间戳")
+    missing_columns = [column for column in OHLCV_COLUMNS if column not in frame]
+    if missing_columns:
+        issues.append("缺少必需列：" + "、".join(missing_columns))
+    invalid_numeric = 0
+    invalid_semantics = 0
+    if not missing_columns:
+        numeric = frame[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
+        finite = numeric.map(math.isfinite).all(axis=1)
+        invalid_numeric = int((~finite).sum())
+        if invalid_numeric:
+            issues.append(f"存在 {invalid_numeric} 行非有限 OHLCV")
+        prices = numeric[["open", "high", "low", "close"]]
+        semantic = (
+            prices.gt(0).all(axis=1)
+            & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
+            & numeric["low"].le(prices[["open", "close"]].min(axis=1))
+            & numeric["high"].ge(numeric["low"])
+            & numeric["volume"].ge(0)
+        )
+        invalid_semantics = int((finite & ~semantic).sum())
+        if invalid_semantics:
+            issues.append(f"存在 {invalid_semantics} 行价格/OHLC 关系或成交量语义无效")
+    requested_start = _shanghai_wall_time(start)
+    requested_end = _shanghai_wall_time(end)
+    if frequency == "1d":
+        requested_end = min(requested_end.normalize(), pd.Timestamp(market_date()))
+        requested_start, requested_end = _instrument_range(
+            symbol, requested_start.normalize(), requested_end,
+        )
+    if len(str(end).strip()) <= 10:
+        requested_end += pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    requested_end = min(requested_end, _shanghai_wall_time(market_now()))
+    observed_start = valid_index.min() if len(valid_index) else pd.NaT
+    observed_end = valid_index.max() if len(valid_index) else pd.NaT
+    boundary_failure = False
+    if pd.isna(observed_start) or pd.isna(observed_end):
+        issues.append("分钟行情没有有效时间戳")
+        boundary_failure = True
+    else:
+        span = requested_end - requested_start
+        start_tolerance = pd.Timedelta(days=4 if span >= pd.Timedelta(days=4) else 1)
+        if observed_start - requested_start > start_tolerance:
+            issues.append(
+                f"响应起点 {observed_start.isoformat()} 严重晚于请求起点 {requested_start.isoformat()}"
+            )
+            boundary_failure = True
+        if requested_end - observed_end > pd.Timedelta(days=4):
+            issues.append(
+                f"响应终点 {observed_end.isoformat()} 严重早于请求终点 {requested_end.isoformat()}"
+            )
+            boundary_failure = True
+    coverage_ratio: float | None = None
+    bucket_coverage: float | None = None
+    partial = boundary_failure or stale
+    if guess_market(symbol) == Market.CN:
+        sessions, calendar_source = _local_sessions(
+            requested_start.normalize(), requested_end.normalize(),
+        )
+    else:
+        sessions = pd.DatetimeIndex([])
+        calendar_source = f"{guess_market(symbol).value}:calendar-unavailable"
+    if len(sessions) and len(valid_index):
+        observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
+        session_coverage = len(sessions.intersection(observed_dates)) / len(sessions)
+        coverage_ratio = session_coverage
+        if session_coverage < 1.0:
+            partial = True
+            issues.append(f"有证据交易日覆盖率仅 {session_coverage:.1%}")
+        if frequency_minutes > 0:
+            unique_index = pd.DatetimeIndex(valid_index.unique()).sort_values()
+            expected_buckets: set[pd.Timestamp] = set()
+            observed_buckets: set[pd.Timestamp] = set()
+            off_grid_rows = 0
+            for session in sessions:
+                day = pd.Timestamp(session).normalize()
+                for start_offset, end_offset in (
+                    (pd.Timedelta(hours=9, minutes=30), pd.Timedelta(hours=11, minutes=30)),
+                    (pd.Timedelta(hours=13), pd.Timedelta(hours=15)),
+                ):
+                    window_start = max(day + start_offset, requested_start)
+                    window_end = min(day + end_offset, requested_end)
+                    if window_end <= window_start:
+                        continue
+                    session_start = day + start_offset
+                    session_end = day + end_offset
+                    expected_grid = pd.date_range(
+                        session_start + pd.Timedelta(minutes=frequency_minutes),
+                        session_end,
+                        freq=f"{frequency_minutes}min",
+                    )
+                    expected_buckets.update(
+                        pd.Timestamp(value)
+                        for value in expected_grid[
+                            (expected_grid > window_start) & (expected_grid <= window_end)
+                        ]
+                    )
+                    window_values = unique_index[
+                        (unique_index >= session_start) & (unique_index <= session_end)
+                    ]
+                    start_labeled = (
+                        session_start in window_values and session_end not in window_values
+                    )
+                    for stamp in window_values:
+                        offset_minutes = (stamp - session_start).total_seconds() / 60
+                        aligned = (
+                            stamp.second == 0
+                            and stamp.microsecond == 0
+                            and offset_minutes % frequency_minutes == 0
+                        )
+                        if not aligned:
+                            off_grid_rows += 1
+                        if start_labeled:
+                            bucket = stamp + pd.Timedelta(minutes=frequency_minutes)
+                        else:
+                            steps = max(1, math.ceil(offset_minutes / frequency_minutes))
+                            bucket = session_start + pd.Timedelta(
+                                minutes=steps * frequency_minutes,
+                            )
+                        if bucket in expected_buckets:
+                            observed_buckets.add(bucket)
+            if expected_buckets:
+                bucket_coverage = min(1.0, len(observed_buckets) / len(expected_buckets))
+                coverage_ratio = min(coverage_ratio, bucket_coverage)
+                if bucket_coverage < 1.0:
+                    partial = True
+                    issues.append(
+                        f"{frequency} 交易时段桶覆盖率仅 {bucket_coverage:.1%}"
+                        f"（{len(observed_buckets)}/{len(expected_buckets)}）"
+                    )
+            if off_grid_rows:
+                issues.append(f"存在 {off_grid_rows} 行未对齐 {frequency} 桶边界的时间戳")
+    else:
+        partial = True
+        issues.append("缺少独立交易日历，无法验证分钟历史覆盖")
+    if stale:
+        issues.append("行情刷新失败，正在使用旧分钟缓存")
+    blocking = bool(
+        duplicate_rows or missing_columns or invalid_numeric or invalid_semantics or boundary_failure
+        or (coverage_ratio is not None and coverage_ratio < 0.80)
+        or frequency_minutes <= 0
+        or any("未对齐" in item for item in issues)
+    )
+    status: QualityStatus = (
+        "unavailable" if blocking else "degraded" if issues or partial else "verified"
+    )
+    return BarDataQuality(
+        status,
+        start,
+        end,
+        observed_start="" if pd.isna(observed_start) else observed_start.isoformat(),
+        observed_end="" if pd.isna(observed_end) else observed_end.isoformat(),
+        coverage_ratio=round(coverage_ratio, 6) if coverage_ratio is not None else None,
+        calendar_source=calendar_source,
+        sources=(source,) if source else (),
+        issues=tuple(dict.fromkeys(issues)),
+        stale=stale,
+        partial=partial,
+        timezone=timezone,
+        adjustment="none",
+        units=units,
+        duplicate_rows=duplicate_rows,
+        requested_symbols=(symbol,),
+        observed_symbols=(symbol,),
+    )
+
+
+def _bar_envelope(
+    frame: pd.DataFrame,
+    *,
+    symbol: str,
+    start: str,
+    end: str,
+    store: BarStore,
+    frequency: str,
+) -> BarDataEnvelope[pd.DataFrame]:
+    metadata = store.metadata(symbol) or {}
+    source = str(metadata.get("last_source") or "local-cache")
+    stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
+    if frequency == "1d":
+        quality = _assess_daily_frame(
+            frame, start, end, symbol=symbol, source=source, stale=stale,
+        )
+    else:
+        quality = _assess_intraday_frame(
+            frame, start, end, symbol=symbol, frequency=frequency,
+            source=source, stale=stale,
+        )
+    try:
+        raw_provenance = json.loads(str(metadata.get("source_chain_json") or "[]"))
+        if not isinstance(raw_provenance, list):
+            raw_provenance = []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw_provenance = []
+
+    requested_start = _shanghai_wall_time(start)
+    requested_end = _shanghai_wall_time(end)
+
+    def overlaps(event: dict[str, object]) -> bool:
+        for prefix in ("requested", "affected"):
+            event_start = str(event.get(f"{prefix}_start") or "")
+            event_end = str(event.get(f"{prefix}_end") or "")
+            if not event_start or not event_end:
+                continue
+            try:
+                normalized_start = _shanghai_wall_time(event_start)
+                normalized_end = _shanghai_wall_time(event_end)
+            except (TypeError, ValueError):
+                return True
+            return normalized_start <= requested_end and normalized_end >= requested_start
+        return True
+
+    provenance = [
+        dict(item)
+        for item in raw_provenance
+        if isinstance(item, dict) and overlaps(item)
+    ]
+    rank = _QUALITY_RANK
+
+    def event_interval(event: dict[str, object]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        for prefix in ("requested", "affected"):
+            event_start = str(event.get(f"{prefix}_start") or "")
+            event_end = str(event.get(f"{prefix}_end") or "")
+            if not event_start or not event_end:
+                continue
+            try:
+                return _shanghai_wall_time(event_start), _shanghai_wall_time(event_end)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def event_status(event: dict[str, object]) -> str:
+        contract = event.get("quality")
+        if isinstance(contract, dict):
+            status = str(contract.get("status") or "")
+            if status:
+                return status
+        return str(event.get("status") or "")
+
+    def lineage_covers(events: list[dict[str, object]]) -> bool:
+        intervals = sorted(
+            interval
+            for event in events
+            if event_status(event) in rank
+            for interval in (event_interval(event),)
+            if interval is not None
+        )
+        if not intervals or intervals[0][0] > requested_start:
+            return False
+        merged_end = intervals[0][1]
+        for interval_start, interval_end in intervals[1:]:
+            if frequency == "1d":
+                contiguous = interval_start <= merged_end + pd.offsets.BDay(1)
+            elif interval_start.normalize() == merged_end.normalize():
+                match = re.fullmatch(r"(\d+)m", frequency)
+                tolerance = pd.Timedelta(minutes=int(match.group(1))) if match else pd.Timedelta(0)
+                contiguous = interval_start <= merged_end + tolerance
+            else:
+                contiguous = (
+                    interval_start.normalize()
+                    <= merged_end.normalize() + pd.offsets.BDay(1)
+                )
+            if not contiguous:
+                return False
+            merged_end = max(merged_end, interval_end)
+        return merged_end >= requested_end
+
+    lineage_complete = lineage_covers(provenance)
+    # Persisted quality is decoded JSON and therefore intentionally schema-dynamic.
+    persisted_contracts: list[dict[str, Any]] = []
+    for event in provenance:
+        contract = event.get("quality")
+        if isinstance(contract, dict) and contract:
+            value = dict(contract)
+            event_source = str(event.get("source") or "")
+            value["sources"] = list(dict.fromkeys((
+                *(str(item) for item in value.get("sources") or () if item),
+                *(item for item in (event_source,) if item),
+            )))
+            persisted_contracts.append(value)
+    if not persisted_contracts:
+        try:
+            persisted = json.loads(str(metadata.get("quality_json") or "{}"))
+            if isinstance(persisted, dict) and persisted:
+                persisted_contracts.append(persisted)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    witness_events = [
+        event for event in provenance
+        if isinstance(event.get("quality"), dict)
+        and str(event["quality"].get("status") or "") == "verified"
+        and "tushare:daily+adj_factor-contract-v1" in {
+            str(value) for value in event["quality"].get("sources") or ()
+        }
+    ]
+    if frequency == "1d" and lineage_covers(witness_events):
+        # Parquet does not preserve DataFrame.attrs. A persisted, range-overlapping
+        # StockDB/Tushare witness is the explicit proof that may restore only the
+        # unit/adjustment dimensions; generic degraded contracts can never upgrade.
+        quality = _apply_stockdb_contract_quality(quality)
+
+    for persisted in persisted_contracts:
+        persisted_status_raw = str(persisted.get("status") or "")
+        if persisted_status_raw not in rank:
+            continue
+        persisted_status = cast(QualityStatus, persisted_status_raw)
+        status = max((quality.status, persisted_status), key=lambda value: rank[value])
+        ratios = [
+            float(value) for value in (quality.coverage_ratio, persisted.get("coverage_ratio"))
+            if value is not None
+        ]
+        persisted_sources = tuple(str(value) for value in persisted.get("sources") or () if value)
+        quality = replace(
+            quality,
+            status=status,
+            coverage_ratio=min(ratios) if ratios else None,
+            sources=tuple(dict.fromkeys((*quality.sources, *persisted_sources))),
+            issues=tuple(dict.fromkeys((
+                *quality.issues,
+                *(str(value) for value in persisted.get("issues") or () if value),
+            ))),
+            stale=quality.stale or bool(persisted.get("stale")),
+            partial=quality.partial or bool(persisted.get("partial")),
+            duplicate_rows=max(quality.duplicate_rows, int(persisted.get("duplicate_rows") or 0)),
+            adjustment=(
+                str(persisted.get("adjustment"))
+                if str(persisted.get("adjustment") or "") not in {"", "qfq"}
+                else quality.adjustment
+            ),
+        )
+    if not provenance:
+        provenance = [{
+            "source": source,
+            "status": "legacy_unverified",
+            "observed_start": quality.observed_start,
+            "observed_end": quality.observed_end,
+        }]
+        quality = replace(
+            quality,
+            status="degraded" if quality.status == "verified" else quality.status,
+            partial=True,
+            issues=tuple(dict.fromkeys((*quality.issues, "缓存缺少版本化来源链"))),
+        )
+    elif not lineage_complete:
+        provenance.append({
+            "source": "local-cache",
+            "status": "lineage_gap",
+            "requested_start": requested_start.isoformat(),
+            "requested_end": requested_end.isoformat(),
+        })
+        quality = replace(
+            quality,
+            status="degraded" if quality.status == "verified" else quality.status,
+            partial=True,
+            issues=tuple(dict.fromkeys((
+                *quality.issues,
+                "版本化来源链没有覆盖完整请求区间",
+            ))),
+        )
+    return BarDataEnvelope(frame, quality, tuple(provenance))
 
 
 def _align_increment(
@@ -155,6 +840,128 @@ def _align_increment(
     return merged[~merged.index.duplicated(keep="last")].sort_index()
 
 
+def _supplement_stockdb_contract(
+    symbol: str,
+    start: str,
+    end: str,
+    frame: pd.DataFrame,
+    *,
+    priority: str,
+    refresh_provider_cache: bool = False,
+) -> tuple[pd.DataFrame, dict[str, object] | None]:
+    """Verify StockDB prices with remote contract evidence without replacing them."""
+    if not get_config().data.tushare_token or guess_market(symbol) != Market.CN:
+        return frame, None
+    try:
+        from quantmaster.data.instruments import InstrumentStore
+        from quantmaster.data.tushare_source import TushareSource
+
+        instrument = InstrumentStore().get(symbol)
+        if instrument is None or str(instrument.asset_type).lower() != "stock":
+            return frame, None
+        with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
+            witness = TushareSource().daily(symbol, start, end)
+        if witness is None or witness.empty:
+            raise RuntimeError("Tushare daily+adj_factor 证据为空")
+        local = frame.sort_index()
+        remote = witness.sort_index()
+        local_dates = pd.DatetimeIndex(local.index).normalize().tz_localize(None)
+        remote_dates = pd.DatetimeIndex(remote.index).normalize().tz_localize(None)
+        if (
+            not local_dates.is_unique
+            or not remote_dates.is_unique
+            or not local_dates.equals(remote_dates)
+        ):
+            missing = local_dates.difference(remote_dates)
+            extra = remote_dates.difference(local_dates)
+            raise RuntimeError(
+                "Tushare 证据日期必须与 StockDB 逐日完全一致："
+                f"缺 {len(missing)} 日，多 {len(extra)} 日"
+            )
+        local = local.copy()
+        remote = remote.copy()
+        local.index = local_dates
+        remote.index = remote_dates
+        common = local.index
+        checks: dict[str, dict[str, object]] = {}
+        contract_columns = [*OHLCV_COLUMNS]
+        if "amount" not in remote:
+            raise RuntimeError("Tushare 证据缺少 StockDB amount 单位核对字段")
+        filled_fields: list[str] = []
+        if "amount" not in local:
+            # amount is optional in StockDB's price payload.  Preserve StockDB as
+            # the OHLCV source and use the remote contract only for this missing
+            # field instead of discarding an otherwise useful local frame.
+            local["amount"] = pd.to_numeric(remote["amount"], errors="coerce")
+            filled_fields.append("amount")
+        contract_columns.append("amount")
+        for column in contract_columns:
+            left = pd.to_numeric(local.loc[common, column], errors="coerce")
+            right = pd.to_numeric(remote.loc[common, column], errors="coerce")
+            finite = left.map(math.isfinite) & right.map(math.isfinite)
+            if not bool(finite.all()):
+                raise RuntimeError(f"Tushare {column} 不是逐日有限可比观测")
+            tolerance = 0.01 if column in {"volume", "amount"} else 0.005
+            matching_rows = (left - right).abs().le(right.abs() * tolerance)
+            matching = float(matching_rows.mean())
+            if not bool(matching_rows.all()):
+                raise RuntimeError(
+                    f"StockDB/Tushare {column} 逐日单位或复权交叉核对仅 "
+                    f"{matching:.1%} 一致"
+                )
+            checks[column] = {
+                "rows": int(finite.sum()),
+                "matching_ratio": round(matching, 6),
+                "mode": "filled_missing_field" if column in filled_fields else "cross_checked",
+            }
+        verified = local.copy()
+        verified.attrs.update(frame.attrs)
+        verified.attrs.update({
+            "unit_status": "verified:tushare-daily-contract-v1",
+            "adjustment_status": "verified:tushare-adj-factor-v1",
+            "contract_evidence": {
+                "price_source": "free-stockdb",
+                "contract_source": "tushare:daily+adj_factor",
+                "requested_start": start,
+                "requested_end": end,
+                "checks": checks,
+                "filled_fields": filled_fields,
+                "field_sources": {
+                    **{column: "free-stockdb" for column in OHLCV_COLUMNS},
+                    "amount": (
+                        "tushare:daily" if "amount" in filled_fields else "free-stockdb"
+                    ),
+                },
+            },
+        })
+        return verified, verified.attrs["contract_evidence"]
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning("%s StockDB 单位/复权证据补全失败，保留降级：%s", symbol, exc)
+        return frame, None
+
+
+def _apply_stockdb_contract_quality(quality: BarDataQuality) -> BarDataQuality:
+    issues = tuple(
+        issue for issue in quality.issues
+        if "单位" not in issue and "复权" not in issue
+    )
+    status = quality.status
+    if status != "unavailable":
+        status = "degraded" if issues or quality.stale or quality.partial else "verified"
+    return replace(
+        quality,
+        status=status,
+        sources=("free-stockdb", "tushare:daily+adj_factor-contract-v1"),
+        issues=issues,
+        adjustment="qfq_verified:tushare-adj-factor-v1",
+        units=(
+            ("open", "CNY/share"), ("high", "CNY/share"),
+            ("low", "CNY/share"), ("close", "CNY/share"),
+            ("volume", "share"), ("amount", "CNY"),
+        ),
+    )
+
+
 def _full_refresh(
     symbol: str,
     start: str,
@@ -166,6 +973,28 @@ def _full_refresh(
 ) -> pd.DataFrame:
     market = guess_market(symbol)
     errors: list[str] = []
+    degraded_candidate: tuple[pd.DataFrame, BarDataQuality, str] | None = None
+
+    def persist(
+        frame: pd.DataFrame,
+        quality: BarDataQuality,
+        storage_source: str,
+    ) -> pd.DataFrame:
+        store.put(
+            symbol,
+            frame,
+            replace=True,
+            request_start=start,
+            request_end=end,
+            source=storage_source,
+            quality=quality.to_dict(),
+            replace_coverage=True,
+        )
+        stored = store.get(symbol)
+        if stored is None:
+            raise RuntimeError(f"{storage_source} 日线写入后无法读取")
+        return stored.loc[start:end]
+
     for factory in _request_factories(
         priority=priority, allow_online=False, provider=provider,
     ).get(market, []):
@@ -176,15 +1005,28 @@ def _full_refresh(
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
                 continue
-            if not _is_complete_refresh(frame, cached, start, end):
+            if not _is_complete_refresh(frame, cached, start, end, symbol=symbol):
                 errors.append(f"{factory.__name__}: 响应缺失已有交易日或内部过于稀疏")
                 continue
-            store.put(symbol, frame, replace=True)
-            store.mark_checked(symbol, start, end, source=source.name, replace_coverage=True)
-            stored = store.get(symbol)
-            if stored is None:
-                raise RuntimeError(f"{source.name} 日线写入后无法读取")
-            return stored.loc[start:end]
+            contract_evidence = None
+            if source.name.startswith("free-stockdb"):
+                frame, contract_evidence = _supplement_stockdb_contract(
+                    symbol, start, end, frame, priority=priority,
+                )
+            quality = _assess_daily_frame(
+                frame, start, end, symbol=symbol, source=source.name,
+            )
+            storage_source = source.name
+            if contract_evidence is not None:
+                storage_source = "stockdb-price+tushare-contract-v1"
+                quality = _apply_stockdb_contract_quality(quality)
+            if quality.status == "verified":
+                return persist(frame, quality, storage_source)
+            errors.append(
+                f"{factory.__name__}: 数据完整但真实性契约为 {quality.status}，继续后备源"
+            )
+            if quality.status == "degraded" and degraded_candidate is None:
+                degraded_candidate = (frame, quality, storage_source)
         except (
             httpx.HTTPError,
             ImportError,
@@ -195,11 +1037,13 @@ def _full_refresh(
         ) as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 全量获取 %s 失败: %s", factory.__name__, symbol, exc)
+    if degraded_candidate is not None:
+        return persist(*degraded_candidate)
     if cached is not None and not cached.empty:
         store.mark_status(symbol, "refresh_failed")
         logger.debug("全量刷新失败，保留本地缓存: %s", symbol)
         return cached.loc[start:end]
-    raise RuntimeError(f"获取 {symbol} 日线失败: {errors}")
+    raise _unavailable_error((symbol,), start, end, errors, frequency="1d")
 
 
 def _fetch_segment(
@@ -221,11 +1065,54 @@ def _fetch_segment(
     prefer_extension = (
         direction == "right" and cached_latest is not None and cached_latest < pd.Timestamp(end).normalize()
     )
-    best: tuple[DataSource, pd.DataFrame, pd.Timestamp] | None = None
+    best: tuple[DataSource, pd.DataFrame, pd.DataFrame, pd.Timestamp] | None = None
+    degraded_best: tuple[
+        DataSource,
+        pd.DataFrame,
+        pd.DataFrame,
+        pd.Timestamp,
+        tuple[pd.DataFrame, BarDataQuality, str],
+    ] | None = None
 
-    def save(source: DataSource, merged: pd.DataFrame) -> tuple[pd.DataFrame, list[str], bool]:
-        store.put(symbol, merged, replace=True)
-        store.mark_checked(symbol, start, end, source=source.name)
+    def evaluate(
+        source: DataSource,
+        evidence: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, BarDataQuality, str]:
+        contract_evidence = None
+        if source.name.startswith("free-stockdb"):
+            evidence, contract_evidence = _supplement_stockdb_contract(
+                symbol, start, end, evidence, priority=priority,
+                refresh_provider_cache=refresh_provider_cache,
+            )
+        quality = _assess_daily_frame(
+            evidence,
+            start,
+            end,
+            symbol=symbol,
+            source=source.name,
+        )
+        storage_source = source.name
+        if contract_evidence is not None:
+            storage_source = "stockdb-price+tushare-contract-v1"
+            quality = _apply_stockdb_contract_quality(quality)
+        return evidence, quality, storage_source
+
+    def save(
+        source: DataSource,
+        merged: pd.DataFrame,
+        evidence: pd.DataFrame,
+        evaluated: tuple[pd.DataFrame, BarDataQuality, str] | None = None,
+    ) -> tuple[pd.DataFrame, list[str], bool]:
+        _, quality, storage_source = evaluated or evaluate(source, evidence)
+        store.put(
+            symbol,
+            merged,
+            replace=True,
+            request_start=start,
+            request_end=end,
+            source=storage_source,
+            quality=quality.to_dict(),
+        )
         return store.get(symbol), errors, True
 
     for factory in _request_factories(
@@ -238,25 +1125,42 @@ def _fetch_segment(
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
                 continue
-            if not _covers_requested_range(frame, start, end):
+            if not _covers_requested_range(frame, start, end, symbol=symbol):
                 errors.append(f"{factory.__name__}: 响应内部过于稀疏")
                 continue
             merged = frame if cached is None or cached.empty else _align_increment(cached, frame, direction)
             fresh_latest = pd.Timestamp(frame.index.max()).normalize()
+            evaluated = evaluate(source, frame)
             if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
                 errors.append(f"{factory.__name__}: 未返回 {cached_latest.date()} 之后的新行情")
-                if best is None or fresh_latest > best[2]:
-                    best = (source, merged, fresh_latest)
+                if (
+                    evaluated[1].status != "unavailable"
+                    and (best is None or fresh_latest > best[3])
+                ):
+                    best = (source, merged, frame, fresh_latest)
                 continue
-            return save(source, merged)
+            if evaluated[1].status == "verified":
+                return save(source, merged, frame, evaluated)
+            errors.append(
+                f"{factory.__name__}: 增量真实性契约为 {evaluated[1].status}，继续后备源"
+            )
+            if evaluated[1].status == "degraded" and degraded_best is None:
+                degraded_best = (source, merged, frame, fresh_latest, evaluated)
         except AdjustmentMismatch as exc:
             errors.append(f"{factory.__name__}: {exc}")
         except Exception as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("数据源 %s 增量获取 %s 失败: %s", factory.__name__, symbol, exc)
+    if degraded_best is not None:
+        return save(
+            degraded_best[0],
+            degraded_best[1],
+            degraded_best[2],
+            degraded_best[4],
+        )
     if best is not None:
         # 周末、休市或所有上游尚未发布时，保留最新的有效响应。
-        saved, collected_errors, _ = save(best[0], best[1])
+        saved, collected_errors, _ = save(best[0], best[1], best[2])
         store.mark_status(symbol, "stale", source=best[0].name)
         return saved, collected_errors, False
     return cached, errors, False
@@ -294,27 +1198,32 @@ def _session_refresh_due(
 def _factories() -> dict[Market, list]:
     from quantmaster.data.akshare_source import AkshareSource
     from quantmaster.data.free_stockdb_source import (
-        FreeStockDBOnlineSource,
         FreeStockDBSource,
     )
     from quantmaster.data.tushare_source import TushareSource
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    ak, free, online, yf, tu = (
+    ak, free, yf, tu = (
         AkshareSource,
         FreeStockDBSource,
-        FreeStockDBOnlineSource,
         YFinanceSource,
         TushareSource,
     )
-    local_first = [free, online, ak, tu] if get_config().data.free_stockdb_online_enabled else [free, ak, tu]
+    # The public trial HTTP service is not an authoritative trading-data source.
+    # It remains available only to explicitly experimental modules and can never
+    # enter the trusted market-data fallback chain.
+    local_first = [free, tu, ak]
     orders = {
         "free-stockdb": local_first,
         "akshare": [ak, tu, free],
         "tushare": [tu, ak, free],
     }
     selected = str(get_config().data.primary_provider).strip().lower()
-    cn = orders.get(selected, orders["free-stockdb"])
+    if selected not in orders:
+        raise ValueError(
+            f"未知主数据源 {selected!r}；可选 free-stockdb/akshare/tushare"
+        )
+    cn = orders[selected]
     return {
         Market.CN: cn,
         Market.HK: [ak, yf],
@@ -334,11 +1243,11 @@ def _request_factories(
 ) -> dict[Market, list]:
     selected_provider = str(provider or "").strip().lower()
     if selected_provider:
-        from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource
+        from quantmaster.data.free_stockdb_source import FreeStockDBSource
         from quantmaster.data.tushare_source import TushareSource
 
         selected = {
-            "free-stockdb-online": FreeStockDBOnlineSource,
+            "free-stockdb": FreeStockDBSource,
             "tushare": TushareSource,
         }.get(selected_provider)
         if selected is None:
@@ -366,11 +1275,6 @@ def data_source_capabilities() -> dict[str, object]:
         for factory in ordered:
             name = str(factory.name)
             declared = sorted(value.value for value in factory.capabilities)
-            if name == "free-stockdb" and DataCapability.SPOT.value not in declared:
-                # Response-shape compatibility for older diagnostics clients;
-                # runtime routing uses factory.capabilities and will not select it.
-                declared.append(DataCapability.SPOT.value)
-                declared.sort()
             capability_status: dict[str, dict[str, object]] = {
                 value: {
                     "state": "declared",
@@ -432,19 +1336,6 @@ def data_source_capabilities() -> dict[str, object]:
                         "coverage": latest_ingest.coverage if latest_ingest else None,
                         "as_of_date": latest_ingest.as_of_date if latest_ingest else "",
                     }
-                if name == "free-stockdb":
-                    capability_status[DataCapability.SPOT.value] = {
-                        "state": "deprecated_unavailable",
-                        "installed": sdk_available,
-                        "connected": None,
-                        "data_ready": None,
-                        "verified": False,
-                        "replacement": DataCapability.EOD_SNAPSHOT.value,
-                        "asset_classes": [],
-                        "frequencies": [],
-                        "coverage": None,
-                        "as_of_date": "",
-                    }
             providers.setdefault(
                 name,
                 {
@@ -478,12 +1369,15 @@ def get_source(
     raise RuntimeError(f"市场 {market.value} 没有支持 {required.value} 的可用数据源: {errors}")
 
 
-def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
-    """加载 A 股快照；按设置主源优先，并用后续来源补齐缺失标的。"""
+def _load_spot_frame(
+    symbols: list[str], *, priority: str = "normal",
+) -> tuple[pd.DataFrame, tuple[dict[str, object], ...], tuple[str, ...]]:
+    """Internal spot loader with per-source evidence for the public envelope."""
     requested = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     by_code = {symbol.partition(".")[0].zfill(6): symbol for symbol in requested}
     rows: dict[str, dict] = {}
     errors: list[str] = []
+    provenance: list[dict[str, object]] = []
     allow_online = priority == "interactive" and len(requested) <= 20
     for factory in _request_factories(
         priority=priority,
@@ -497,6 +1391,12 @@ def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
             if not source.supports_capability(DataCapability.SPOT):
                 continue
             snapshot = source.spot(missing)
+            snapshot_codes = snapshot.get("code", pd.Series(dtype=str)).astype(str).str.zfill(6)
+            duplicates = int(snapshot_codes.duplicated(keep=False).sum())
+            if duplicates:
+                errors.append(f"{source.name}: 存在 {duplicates} 行重复快照代码")
+                continue
+            accepted: list[str] = []
             for _, value in snapshot.iterrows():
                 code = str(value.get("code") or "").zfill(6)
                 if code in by_code and code not in rows:
@@ -504,12 +1404,163 @@ def load_spot(symbols: list[str], *, priority: str = "normal") -> pd.DataFrame:
                     item["code"] = code
                     item["source"] = source.name
                     rows[code] = item
+                    accepted.append(by_code[code])
+            provenance.append({
+                "source": source.name,
+                "fetched_at": market_now().isoformat(),
+                "requested_symbols": missing,
+                "observed_symbols": accepted,
+            })
         except Exception as exc:
             errors.append(f"{factory.__name__}: {exc}")
             logger.debug("快照数据源 %s 失败: %s", factory.__name__, exc)
     if not rows:
-        raise RuntimeError(f"实时快照不可用: {errors or ['没有可用数据']}")
-    return pd.DataFrame(rows.values()).reset_index(drop=True)
+        today = market_date().isoformat()
+        raise _unavailable_error(
+            tuple(requested), today, today,
+            errors or ["没有可用快照数据"], frequency="spot",
+        )
+    return (
+        pd.DataFrame(rows.values()).reset_index(drop=True),
+        tuple(provenance),
+        tuple(errors),
+    )
+
+
+def _parse_spot_timestamp(value: object) -> pd.Timestamp | None:
+    """Parse only timestamps that carry an explicit date; never attach today's date to a time."""
+    if value is None or (not isinstance(value, (str, bytes)) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.isdigit() and len(text) in {10, 13, 16, 19}:
+            unit = {10: "s", 13: "ms", 16: "us", 19: "ns"}[len(text)]
+            return pd.to_datetime(int(text), unit=unit, utc=True).tz_convert("Asia/Shanghai")
+        if not re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", text):
+            return None
+        stamp = pd.Timestamp(value)
+        if stamp.tzinfo is None:
+            return stamp.tz_localize("Asia/Shanghai")
+        return stamp.tz_convert("Asia/Shanghai")
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def load_spot(
+    symbols: list[str], *, priority: str = "normal",
+) -> BarDataEnvelope[pd.DataFrame]:
+    """加载 A 股快照，并公开标的覆盖、来源、单位与观测时点。"""
+    requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    frame, provenance, errors = _load_spot_frame(list(requested), priority=priority)
+    by_code = {symbol.partition(".")[0].zfill(6): symbol for symbol in requested}
+    observed = tuple(
+        by_code[code]
+        for code in frame.get("code", pd.Series(dtype=str)).astype(str).str.zfill(6)
+        if code in by_code
+    )
+    missing = tuple(symbol for symbol in requested if symbol not in observed)
+    issues = list(errors)
+    sources = tuple(dict.fromkeys(str(value) for value in frame.get("source", []) if value))
+    time_column = next(
+        (column for column in ("datetime", "trade_time", "updated_at", "time") if column in frame),
+        "",
+    )
+    observed_start = ""
+    observed_end = ""
+    oldest_stamp: pd.Timestamp | None = None
+    newest_stamp: pd.Timestamp | None = None
+    missing_timestamp_rows = len(frame)
+    future_timestamp = False
+    if time_column:
+        parsed_values = [
+            stamp
+            for stamp in (_parse_spot_timestamp(value) for value in frame[time_column])
+            if stamp is not None
+        ]
+        missing_timestamp_rows = len(frame) - len(parsed_values)
+        if parsed_values:
+            oldest_stamp = min(parsed_values)
+            newest_stamp = max(parsed_values)
+            observed_start = oldest_stamp.isoformat()
+            observed_end = newest_stamp.isoformat()
+    if newest_stamp is None:
+        issues.append("快照响应缺少可验证的上游观测时点")
+    elif missing_timestamp_rows:
+        issues.append(f"有 {missing_timestamp_rows} 行快照缺少可验证观测时点")
+    now = pd.Timestamp(market_now())
+    stale = False
+    timestamp_span_failure = False
+    if oldest_stamp is not None and newest_stamp is not None:
+        if newest_stamp > now + pd.Timedelta(minutes=5):
+            future_timestamp = True
+            issues.append("快照观测时点晚于上海市场当前时间")
+        if now - oldest_stamp > pd.Timedelta(minutes=15):
+            stale = True
+            issues.append(
+                f"最旧快照观测时点已滞后 {(now - oldest_stamp).total_seconds() / 60:.0f} 分钟"
+            )
+        if newest_stamp - oldest_stamp > pd.Timedelta(minutes=5):
+            timestamp_span_failure = True
+            issues.append(
+                "同批快照观测时点跨度超过 5 分钟，不能用最新一行代表整批新鲜度"
+            )
+    missing_numeric_columns = [
+        column for column in ("price", "change_pct") if column not in frame
+    ]
+    invalid_numeric_rows = 0
+    if missing_numeric_columns:
+        issues.append("快照缺少必需列：" + "、".join(missing_numeric_columns))
+    else:
+        numeric = frame[["price", "change_pct"]].apply(pd.to_numeric, errors="coerce")
+        invalid_numeric_rows = int((~numeric.map(math.isfinite)).any(axis=1).sum())
+        if invalid_numeric_rows:
+            issues.append(f"有 {invalid_numeric_rows} 行快照价格或涨跌幅非有限")
+    unit_contracts = [_unit_contract(symbol) for symbol in observed]
+    for _, issue in unit_contracts:
+        if issue:
+            issues.append(issue)
+    unit_values = tuple(dict.fromkeys(contract for contract, _ in unit_contracts))
+    units = unit_values[0] if len(unit_values) == 1 else BarDataQuality(
+        "degraded", "", "",
+    ).units
+    if len(unit_values) > 1:
+        issues.append("快照包含多种或未知单位")
+    if missing:
+        issues.append("缺少请求标的：" + "、".join(missing[:20]))
+    timestamp_rows_unverified = bool(time_column and missing_timestamp_rows)
+    blocking = bool(
+        future_timestamp
+        or timestamp_span_failure
+        or timestamp_rows_unverified
+        or missing_numeric_columns
+        or invalid_numeric_rows
+    )
+    status: QualityStatus = "unavailable" if blocking else (
+        "verified" if not issues and not missing else "degraded"
+    )
+    today = market_date().isoformat()
+    quality = BarDataQuality(
+        status,
+        today,
+        today,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        coverage_ratio=round(len(observed) / len(requested), 6) if requested else 1.0,
+        calendar_source="realtime-snapshot",
+        sources=sources,
+        issues=tuple(dict.fromkeys(issues)),
+        stale=stale,
+        partial=bool(missing or timestamp_rows_unverified or invalid_numeric_rows),
+        timezone="Asia/Shanghai",
+        adjustment="none",
+        units=units,
+        requested_symbols=requested,
+        observed_symbols=observed,
+        missing_symbols=missing,
+    )
+    return BarDataEnvelope(frame, quality, provenance)
 
 
 def _load_history_locked(
@@ -539,7 +1590,7 @@ def _load_history_locked(
 
     meta = store.metadata(symbol) or {}
     requested_end = pd.Timestamp(end).normalize()
-    near_current = requested_end >= pd.Timestamp.now().normalize() - pd.Timedelta(days=7)
+    near_current = requested_end >= pd.Timestamp(market_date()) - pd.Timedelta(days=7)
     coverage_start = str(meta.get("coverage_start") or meta.get("start") or "")
     coverage_end = str(meta.get("coverage_end") or meta.get("end") or "")
     covers_start = bool(coverage_start and coverage_start <= start)
@@ -593,10 +1644,12 @@ def _load_history_locked(
         if segments and not all_segments_succeeded:
             store.mark_status(symbol, "stale")
         return sliced
-    raise RuntimeError(f"获取 {symbol} 日线失败: {errors or ['没有可用数据']}")
+    raise _unavailable_error(
+        (symbol,), start, end, errors or ["没有可用日线数据"], frequency="1d",
+    )
 
 
-def load_history(
+def _load_history_frame(
     symbol: str,
     start: str,
     end: str,
@@ -607,7 +1660,7 @@ def load_history(
     priority: str = "normal",
     provider: str = "",
 ) -> pd.DataFrame:
-    """加载标准化日线；普通请求只补边界增量，全量重拉必须显式指定。"""
+    """Internal daily-bar loader; public callers must consume the envelope."""
     store = store or _default_bar_store()
     with store.lock(symbol):
         return _load_history_locked(
@@ -622,7 +1675,35 @@ def load_history(
         )
 
 
-def load_intraday(
+def load_history(
+    symbol: str,
+    start: str,
+    end: str,
+    use_cache: bool = True,
+    store: BarStore | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
+    provider: str = "",
+) -> BarDataEnvelope[pd.DataFrame]:
+    """Load daily bars with mandatory quality and provenance evidence."""
+    resolved_store = store or _default_bar_store()
+    frame = _load_history_frame(
+        symbol,
+        start,
+        end,
+        use_cache=use_cache,
+        store=resolved_store,
+        refresh=refresh,
+        priority=priority,
+        provider=provider,
+    )
+    return _bar_envelope(
+        frame, symbol=symbol, start=start, end=end, store=resolved_store, frequency="1d",
+    )
+
+
+def _load_intraday_frame(
     symbol: str,
     start: str,
     end: str,
@@ -639,8 +1720,12 @@ def load_intraday(
     """
     frequency = validate_frequency(frequency)
     if frequency == "1d":
-        return load_history(symbol, start, end, use_cache=use_cache, priority=priority)
+        return _load_history_frame(symbol, start, end, use_cache=use_cache, priority=priority)
     store = store or IntradayBarStore(frequency)
+
+    def finish(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame
+
     start_is_date = len(str(start).strip()) <= 10
     end_is_date = len(str(end).strip()) <= 10
     start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
@@ -663,12 +1748,12 @@ def load_intraday(
         )
         covers = covers_start and covers_end
         fresh = store.freshness(symbol)
-        if end_is_date and requested_end_date >= pd.Timestamp.now().normalize():
+        if end_is_date and requested_end_date >= pd.Timestamp(market_date()):
             covers = covers and fresh is not None and (fresh < get_config().data.intraday_cache_minutes * 60)
         if covers:
             sliced = cached.loc[start_ts:end_ts]
             if not sliced.empty:
-                return sliced
+                return finish(sliced)
 
     market = guess_market(symbol)
     errors = []
@@ -680,21 +1765,103 @@ def load_intraday(
             with data_priority(priority):
                 df = source.intraday(symbol, fetch_start, fetch_end, frequency)
             if df is not None and not df.empty:
+                duplicate_rows = int(pd.DatetimeIndex(df.index).duplicated(keep=False).sum())
+                if duplicate_rows:
+                    errors.append(
+                        f"{factory.__name__}: 存在 {duplicate_rows} 行重复分钟时间戳"
+                    )
+                    continue
+                missing_columns = [column for column in OHLCV_COLUMNS if column not in df]
+                if missing_columns:
+                    errors.append(
+                        f"{factory.__name__}: 缺少必需列 {','.join(missing_columns)}"
+                    )
+                    continue
+                numeric = df[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
+                if int((~numeric.map(math.isfinite)).any(axis=1).sum()):
+                    errors.append(f"{factory.__name__}: 存在非有限 OHLCV")
+                    continue
                 # 分钟线不采用日线的整段前复权替换语义：免费接口回溯有限，
                 # 每日归档必须合并才能形成可长期复用的本地历史。
-                store.put(symbol, df, replace=False)
+                candidate = (
+                    df if cached is None or cached.empty
+                    else pd.concat((cached, df)).sort_index()
+                )
+                candidate = candidate[~candidate.index.duplicated(keep="last")]
+                quality = _assess_intraday_frame(
+                    df,
+                    fetch_start,
+                    fetch_end,
+                    symbol=symbol,
+                    frequency=frequency,
+                    source=source.name,
+                )
+                if quality.status == "unavailable":
+                    errors.append(
+                        f"{factory.__name__}: " + "；".join(quality.issues)
+                    )
+                    continue
+                store.put(
+                    symbol,
+                    candidate,
+                    replace=True,
+                    request_start=fetch_start,
+                    request_end=fetch_end,
+                    source=source.name,
+                    quality=quality.to_dict(),
+                )
                 stored = store.get(symbol)
                 if stored is None:
                     raise RuntimeError(f"{source.name} 分钟线写入后无法读取")
-                return stored.loc[start_ts:end_ts]
+                return finish(stored.loc[start_ts:end_ts])
             errors.append(f"{factory.__name__}: 返回空数据")
         except Exception as e:
             errors.append(f"{factory.__name__}: {e}")
             logger.debug("数据源 %s 获取 %s %s 失败: %s", factory.__name__, symbol, frequency, e)
     if cached is not None and not cached.empty:
         logger.debug("全部分钟数据源失败，使用本地缓存: %s %s", symbol, frequency)
-        return cached.loc[start_ts:end_ts]
-    raise RuntimeError(f"获取 {symbol} {frequency} 分钟线失败: {errors}")
+        store.mark_status(symbol, "stale")
+        return finish(cached.loc[start_ts:end_ts])
+    raise _unavailable_error(
+        (symbol,), start, end, errors or ["没有可用分钟数据"], frequency=frequency,
+    )
+
+
+def load_intraday(
+    symbol: str,
+    start: str,
+    end: str,
+    frequency: str = "5m",
+    use_cache: bool = True,
+    store: IntradayBarStore | None = None,
+    *,
+    priority: str = "normal",
+) -> BarDataEnvelope[pd.DataFrame]:
+    """Explicit unadjusted minute-bar contract."""
+    normalized = validate_frequency(frequency)
+    if normalized == "1d":
+        return load_history(
+            symbol, start, end, use_cache=use_cache, priority=priority,
+        )
+    resolved_store = store or IntradayBarStore(normalized)
+    frame = _load_intraday_frame(
+        symbol,
+        start,
+        end,
+        normalized,
+        use_cache=use_cache,
+        store=resolved_store,
+        priority=priority,
+    )
+    envelope = _bar_envelope(
+        frame,
+        symbol=symbol,
+        start=start,
+        end=end,
+        store=resolved_store,
+        frequency=normalized,
+    )
+    return envelope
 
 
 def load_bars(
@@ -706,15 +1873,15 @@ def load_bars(
     *,
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
-) -> pd.DataFrame:
-    """日线/分钟线统一入口。"""
+) -> BarDataEnvelope[pd.DataFrame]:
+    """日线/分钟线统一入口，始终返回显式质量契约。"""
     frequency = validate_frequency(frequency)
     if frequency == "1d":
         return load_history(symbol, start, end, use_cache=use_cache, refresh=refresh, priority=priority)
     return load_intraday(symbol, start, end, frequency, use_cache=use_cache, priority=priority)
 
 
-def load_bar_panel(
+def _load_bar_panel_frame(
     symbols: list[str],
     start: str,
     end: str,
@@ -751,7 +1918,13 @@ def load_bar_panel(
     # A fresh local database can satisfy an uncached A-share universe in one SDK
     # round trip. Existing/partial caches still use the normal per-symbol merge
     # path so adjustment alignment and coverage checks remain authoritative.
-    if frequency == "1d" and daily_store is not None and symbols and not provider:
+    if (
+        frequency == "1d"
+        and daily_store is not None
+        and symbols
+        and not provider
+        and get_config().data.primary_provider == "free-stockdb"
+    ):
         batch_symbols = [
             symbol
             for symbol in symbols
@@ -766,7 +1939,10 @@ def load_bar_panel(
                 if source.native_batch_available():
                     with data_priority(priority):
                         batch = source.daily_many(batch_symbols, start, end)
-                    for symbol in batch_symbols:
+
+                    def prepare_stockdb_batch(
+                        symbol: str,
+                    ) -> tuple[str, pd.DataFrame] | None:
                         frame = batch.get(symbol)
                         if (
                             frame is None
@@ -776,27 +1952,83 @@ def load_bar_panel(
                                 None,
                                 start,
                                 end,
+                                symbol=symbol,
                             )
                         ):
-                            continue
+                            return None
+                        frame, contract_evidence = _supplement_stockdb_contract(
+                            symbol,
+                            start,
+                            end,
+                            frame,
+                            priority=priority,
+                        )
+                        source_name = source.name
+                        quality = _assess_daily_frame(
+                            frame,
+                            start,
+                            end,
+                            symbol=symbol,
+                            source=source.name,
+                        )
+                        if contract_evidence is not None:
+                            quality = _apply_stockdb_contract_quality(quality)
+                            source_name = "stockdb-price+tushare-contract-v1"
+                        if quality.status != "verified":
+                            return None
                         with daily_store.lock(symbol):
-                            daily_store.put(symbol, frame, replace=True)
-                            daily_store.mark_checked(
+                            daily_store.put(
                                 symbol,
-                                start,
-                                end,
-                                source=source.name,
+                                frame,
+                                replace=True,
+                                request_start=start,
+                                request_end=end,
+                                source=source_name,
+                                quality=quality.to_dict(),
                                 replace_coverage=True,
                             )
-                        frames[symbol] = frame.loc[start:end]
-                        notify_progress(len(frames), symbol, True)
+                        return symbol, frame.loc[start:end]
+
+                    batch_workers = min(8, max(1, len(batch_symbols)))
+                    with ThreadPoolExecutor(
+                        max_workers=batch_workers,
+                        thread_name_prefix="stockdb-contract",
+                    ) as batch_executor:
+                        batch_futures = {
+                            batch_executor.submit(prepare_stockdb_batch, symbol): symbol
+                            for symbol in batch_symbols
+                        }
+                        for batch_future in as_completed(batch_futures):
+                            symbol = batch_futures[batch_future]
+                            try:
+                                result = batch_future.result()
+                            except (
+                                AdjustmentMismatch,
+                                httpx.HTTPError,
+                                ImportError,
+                                OSError,
+                                RuntimeError,
+                                TypeError,
+                                ValueError,
+                            ):
+                                logger.debug(
+                                    "%s free-stockdb 批量行情验收失败，回退逐标的加载",
+                                    symbol,
+                                    exc_info=True,
+                                )
+                                continue
+                            if result is None:
+                                continue
+                            accepted_symbol, accepted_frame = result
+                            frames[accepted_symbol] = accepted_frame
+                            notify_progress(len(frames), accepted_symbol, True)
             except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError):
                 logger.debug("free-stockdb 批量预取失败，回退逐标的加载", exc_info=True)
 
     def one(symbol: str) -> pd.DataFrame:
         if frequency == "1d":
             assert daily_store is not None
-            return load_history(
+            return _load_history_frame(
                 symbol,
                 start,
                 end,
@@ -807,7 +2039,7 @@ def load_bar_panel(
                 provider=provider,
             )
         assert intraday_store is not None
-        return load_intraday(
+        return _load_intraday_frame(
             symbol,
             start,
             end,
@@ -821,11 +2053,14 @@ def load_bar_panel(
     workers = min(max(1, int(max_workers)), 8, max(1, len(pending)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-panel") as executor:
         futures = {executor.submit(one, symbol): symbol for symbol in pending}
-        for completed, future in enumerate(as_completed(futures), start=len(frames) + 1):
-            symbol = futures[future]
+        for completed, panel_future in enumerate(
+            as_completed(futures),
+            start=len(frames) + 1,
+        ):
+            symbol = futures[panel_future]
             success = False
             try:
-                frame = future.result()
+                frame = panel_future.result()
                 if frame is not None and not frame.empty:
                     frames[symbol] = frame
                     success = True
@@ -841,7 +2076,14 @@ def load_bar_panel(
             samples,
         )
     if not frames:
-        raise RuntimeError("没有任何标的成功加载数据")
+        raise _unavailable_error(
+            tuple(symbols), start, end,
+            [
+                *(f"{symbol}: {error}" for symbol, error in failures),
+                *(() if failures else ("没有任何标的成功加载数据",)),
+            ],
+            frequency=frequency,
+        )
 
     frames = {symbol: frames[symbol] for symbol in symbols if symbol in frames}
     fields = sorted({c for df in frames.values() for c in df.columns})
@@ -852,6 +2094,129 @@ def load_bar_panel(
     if field is not None:
         return panel[field]
     return panel
+
+
+def load_bar_panel(
+    symbols: list[str],
+    start: str,
+    end: str,
+    frequency: str = "1d",
+    field: str | None = None,
+    use_cache: bool = True,
+    progress: Callable[[int, int, str, bool], None] | None = None,
+    *,
+    refresh: RefreshMode | str | None = None,
+    priority: str = "normal",
+    max_workers: int = 8,
+    provider: str = "",
+) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
+    """Load a panel without silently shrinking the requested universe."""
+    normalized = validate_frequency(frequency)
+    requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+    data = _load_bar_panel_frame(
+        list(requested),
+        start,
+        end,
+        frequency=normalized,
+        field=field,
+        use_cache=use_cache,
+        progress=progress,
+        refresh=refresh,
+        priority=priority,
+        max_workers=max_workers,
+        provider=provider,
+    )
+    if isinstance(data, pd.DataFrame):
+        observed = tuple(str(value) for value in data.columns)
+    else:
+        observed_set = {
+            str(value)
+            for frame in data.values()
+            for value in frame.columns
+        }
+        observed = tuple(symbol for symbol in requested if symbol in observed_set)
+    missing = tuple(symbol for symbol in requested if symbol not in observed)
+    store: BarStore = _default_bar_store() if normalized == "1d" else IntradayBarStore(normalized)
+    sources = tuple(dict.fromkeys(
+        str((store.metadata(symbol) or {}).get("last_source") or "local-cache")
+        for symbol in observed
+    ))
+    issues: list[str] = []
+    provenance: list[dict[str, object]] = []
+    per_symbol: list[BarDataQuality] = []
+    for symbol in observed:
+        cached = store.get(symbol)
+        sliced = pd.DataFrame() if cached is None else cached.loc[start:end]
+        envelope = _bar_envelope(
+            sliced,
+            symbol=symbol,
+            start=start,
+            end=end,
+            store=store,
+            frequency=normalized,
+        )
+        per_symbol.append(envelope.quality)
+        issues.extend(f"{symbol}: {item}" for item in envelope.quality.issues)
+        provenance.append({"symbol": symbol, "quality": envelope.quality.to_dict()})
+        provenance.extend({"symbol": symbol, **item} for item in envelope.provenance)
+    if missing:
+        issues.append("缺少请求标的：" + "、".join(missing[:20]))
+    stale = any(item.stale for item in per_symbol)
+    observed_start = ""
+    observed_end = ""
+    starts = [pd.Timestamp(item.observed_start) for item in per_symbol if item.observed_start]
+    ends = [pd.Timestamp(item.observed_end) for item in per_symbol if item.observed_end]
+    if starts:
+        observed_start = max(starts).isoformat()
+    if ends:
+        observed_end = min(ends).isoformat()
+    symbol_ratio = len(observed) / len(requested) if requested else 1.0
+    date_ratios = [item.coverage_ratio for item in per_symbol if item.coverage_ratio is not None]
+    ratio = min([symbol_ratio, *date_ratios]) if date_ratios else symbol_ratio
+    rank = _QUALITY_RANK
+    worst: QualityStatus = max(
+        (item.status for item in per_symbol),
+        key=lambda value: rank[value],
+        default="verified",
+    )
+    status: QualityStatus
+    if symbol_ratio < 0.90:
+        status = "unavailable"
+        issues.append(f"请求标的覆盖率仅 {symbol_ratio:.1%}，低于 90% 计算门禁")
+    else:
+        status = "degraded" if missing and worst == "verified" else worst
+    calendars = tuple(dict.fromkeys(item.calendar_source for item in per_symbol))
+    unit_values = tuple(dict.fromkeys(item.units for item in per_symbol))
+    units = unit_values[0] if len(unit_values) == 1 else BarDataQuality(
+        "degraded", start, end,
+    ).units
+    if len(unit_values) > 1:
+        issues.append("面板包含多种单位；逐标的契约见 provenance.quality")
+        if status == "verified":
+            status = "degraded"
+    timezones = tuple(dict.fromkeys(item.timezone for item in per_symbol))
+    adjustments = tuple(dict.fromkeys(item.adjustment for item in per_symbol))
+    quality = BarDataQuality(
+        status,
+        start,
+        end,
+        observed_start=observed_start,
+        observed_end=observed_end,
+        coverage_ratio=round(ratio, 6),
+        calendar_source=calendars[0] if len(calendars) == 1 else "mixed:per-symbol-quality",
+        sources=sources,
+        issues=tuple(issues),
+        stale=stale,
+        partial=bool(missing) or any(item.partial for item in per_symbol),
+        timezone=timezones[0] if len(timezones) == 1 else "mixed",
+        adjustment=adjustments[0] if len(adjustments) == 1 else "mixed",
+        units=units,
+        duplicate_rows=sum(item.duplicate_rows for item in per_symbol),
+        requested_symbols=requested,
+        observed_symbols=observed,
+        missing_symbols=missing,
+    )
+    return BarDataEnvelope(data, quality, tuple(provenance))
 
 
 def load_panel(
@@ -866,8 +2231,8 @@ def load_panel(
     priority: str = "normal",
     max_workers: int = 8,
     provider: str = "",
-) -> pd.DataFrame | dict[str, pd.DataFrame]:
-    """向后兼容的日线面板入口。"""
+) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
+    """日线面板入口，始终返回显式质量契约。"""
     return load_bar_panel(
         symbols,
         start,

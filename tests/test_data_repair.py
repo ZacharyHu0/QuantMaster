@@ -58,7 +58,10 @@ def test_corrupt_bar_is_quarantined_refetched_and_audited(
     monkeypatch.setattr(repair, "_MANAGER", manager)
     store = BarStore(root=tmp_path / "bars")
     dates = pd.bdate_range("2024-01-02", "2024-01-12")
-    original = pd.DataFrame({"close": 10.0, "volume": 100.0}, index=dates)
+    original = pd.DataFrame({
+        "open": 10.0, "high": 10.0, "low": 10.0,
+        "close": 10.0, "volume": 100.0,
+    }, index=dates)
     store.put("600000.SH", original)
     original.assign(close=99.0).to_parquet(store.path_for_repair("600000.SH"))
 
@@ -77,6 +80,23 @@ def test_corrupt_bar_is_quarantined_refetched_and_audited(
             return original.copy()
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [HealthySource]})
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda _start, _end: (pd.DatetimeIndex(dates), "test-calendar"),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_unit_contract",
+        lambda _symbol: (
+            (
+                ("open", "CNY/share"), ("high", "CNY/share"),
+                ("low", "CNY/share"), ("close", "CNY/share"),
+                ("volume", "share"), ("amount", "CNY"),
+            ),
+            "",
+        ),
+    )
     completed = manager.run_one()
 
     assert completed is not None

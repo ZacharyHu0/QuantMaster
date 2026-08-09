@@ -39,7 +39,8 @@ _INTEGRITY_LOGGED_AT: dict[tuple[str, str, str], float] = {}
 _META_COLUMNS = (
     "symbol", "start", "end", "updated_at", "coverage_start", "coverage_end",
     "checked_at", "last_source", "last_status", "content_sha256", "row_count",
-    "file_size", "file_mtime_ns",
+    "file_size", "file_mtime_ns", "quality_json", "source_chain_json",
+    "observed_start", "observed_end",
 )
 
 
@@ -216,6 +217,10 @@ class BarStore:
                 "row_count": "INTEGER NOT NULL DEFAULT 0",
                 "file_size": "INTEGER NOT NULL DEFAULT 0",
                 "file_mtime_ns": "INTEGER NOT NULL DEFAULT 0",
+                "quality_json": "TEXT NOT NULL DEFAULT ''",
+                "source_chain_json": "TEXT NOT NULL DEFAULT '[]'",
+                "observed_start": "TEXT NOT NULL DEFAULT ''",
+                "observed_end": "TEXT NOT NULL DEFAULT ''",
             }
             for name, kind in additions.items():
                 if name not in columns:
@@ -590,7 +595,13 @@ class BarStore:
 
     @staticmethod
     def _metadata_values(metadata: dict) -> tuple:
-        return tuple(metadata.get(column) for column in _META_COLUMNS)
+        defaults: dict[str, Any] = {
+            "quality_json": "",
+            "source_chain_json": "[]",
+            "observed_start": "",
+            "observed_end": "",
+        }
+        return tuple(metadata.get(column, defaults.get(column)) for column in _META_COLUMNS)
 
     def _commit_metadata(
         self, connection: sqlite3.Connection, metadata: dict, *, clear_intent: bool,
@@ -670,7 +681,18 @@ class BarStore:
                     # Leave the intent intact; a later startup can retry without guessing.
                     continue
 
-    def put(self, symbol: str, df: pd.DataFrame, replace: bool = False) -> None:
+    def put(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        replace: bool = False,
+        *,
+        request_start: str = "",
+        request_end: str = "",
+        source: str = "",
+        quality: dict[str, Any] | None = None,
+        replace_coverage: bool = False,
+    ) -> None:
         """写入缓存。
 
         ``replace=True`` 只用于已确认完整的前复权响应；来源只返回部分区间时
@@ -702,15 +724,120 @@ class BarStore:
                 content_hash = _file_sha256(temp_path)
                 now = time.time()
                 start, end = str(df.index.min().date()), str(df.index.max().date())
-                coverage_start = (old_meta or {}).get("coverage_start") or start
-                coverage_end = (old_meta or {}).get("coverage_end") or end
+                checked_start = request_start or start
+                checked_end = request_end or end
+                if replace_coverage:
+                    coverage_start, coverage_end = checked_start, checked_end
+                else:
+                    coverage_start = min(filter(None, (
+                        (old_meta or {}).get("coverage_start"), checked_start,
+                    )))
+                    coverage_end = max(filter(None, (
+                        (old_meta or {}).get("coverage_end"), checked_end,
+                    )))
+                try:
+                    chain = json.loads(str((old_meta or {}).get("source_chain_json") or "[]"))
+                    if not isinstance(chain, list):
+                        chain = []
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    chain = []
+                if replace_coverage:
+                    chain = []
+                event_quality = dict(quality or {})
+                if quality is None:
+                    event_quality = {
+                        "status": "degraded",
+                        "requested_start": checked_start,
+                        "requested_end": checked_end,
+                        "observed_start": start,
+                        "observed_end": end,
+                        "sources": [],
+                        "issues": ["缓存写入尚未绑定版本化来源证据"],
+                        "stale": False,
+                        "partial": True,
+                    }
+                quality_value = dict(event_quality)
+                if not replace_coverage:
+                    try:
+                        previous_quality = json.loads(
+                            str((old_meta or {}).get("quality_json") or "{}")
+                        )
+                        if not isinstance(previous_quality, dict):
+                            previous_quality = {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        previous_quality = {}
+                    rank = {"verified": 0, "degraded": 1, "unavailable": 2}
+                    previous_status = str(previous_quality.get("status") or "")
+                    event_status = str(event_quality.get("status") or "")
+                    if previous_status in rank and event_status in rank:
+                        quality_value["status"] = max(
+                            (previous_status, event_status), key=lambda value: rank[value],
+                        )
+                        quality_value["issues"] = list(dict.fromkeys((
+                            *(str(value) for value in previous_quality.get("issues") or ()),
+                            *(str(value) for value in event_quality.get("issues") or ()),
+                        )))
+                        quality_value["sources"] = list(dict.fromkeys((
+                            *(str(value) for value in previous_quality.get("sources") or ()),
+                            *(str(value) for value in event_quality.get("sources") or ()),
+                        )))
+                        quality_value["stale"] = bool(
+                            previous_quality.get("stale") or event_quality.get("stale")
+                        )
+                        quality_value["partial"] = bool(
+                            previous_quality.get("partial") or event_quality.get("partial")
+                        )
+                        ratios = [
+                            float(value)
+                            for value in (
+                                previous_quality.get("coverage_ratio"),
+                                event_quality.get("coverage_ratio"),
+                            )
+                            if value is not None
+                        ]
+                        quality_value["coverage_ratio"] = min(ratios) if ratios else None
+                observed_start = str(event_quality.get("observed_start") or start)
+                observed_end = str(event_quality.get("observed_end") or end)
+                event_status = str(
+                    event_quality.get("status")
+                    or ("ready" if quality is not None else "lineage_pending")
+                )
+                chain.append({
+                    "source": source,
+                    "requested_start": checked_start,
+                    "requested_end": checked_end,
+                    "affected_start": start if replace and not replace_coverage else checked_start,
+                    "affected_end": end if replace and not replace_coverage else checked_end,
+                    "observed_start": observed_start,
+                    "observed_end": observed_end,
+                    "status": event_status,
+                    "operation": (
+                        "full_replace" if replace_coverage
+                        else "incremental_replace" if replace else "merge"
+                    ),
+                    "quality": event_quality,
+                    "checked_at": now,
+                })
                 metadata = {
                     "symbol": symbol, "start": start, "end": end, "updated_at": now,
                     "coverage_start": coverage_start, "coverage_end": coverage_end,
-                    "checked_at": now, "last_source": (old_meta or {}).get("last_source", ""),
-                    "last_status": "ready", "content_sha256": content_hash,
+                    "checked_at": now, "last_source": source,
+                    "last_status": (
+                        "ready" if event_status == "verified"
+                        else event_status if quality is not None
+                        else "lineage_pending"
+                    ),
+                    "content_sha256": content_hash,
                     "row_count": len(df), "file_size": temp_path.stat().st_size,
                     "file_mtime_ns": 0,
+                    "quality_json": json.dumps(
+                        quality_value, ensure_ascii=False, sort_keys=True,
+                    ),
+                    "source_chain_json": json.dumps(
+                        chain, ensure_ascii=False, sort_keys=True,
+                    ),
+                    "observed_start": observed_start,
+                    "observed_end": observed_end,
                 }
                 backup = self.root / f".{target.stem}.{uuid.uuid4().hex}.parquet.bak"
                 with self._conn() as conn:
@@ -771,11 +898,13 @@ class BarStore:
         source: str = "",
         status: str = "ready",
         replace_coverage: bool = False,
+        quality: dict[str, Any] | None = None,
     ) -> None:
         """记录已经成功检查的请求范围；没有新 K 线时也必须调用。"""
         with self.lock(symbol), self._conn() as conn:
             row = conn.execute(
-                "SELECT coverage_start,coverage_end FROM bar_meta WHERE symbol=?", (symbol,)
+                "SELECT coverage_start,coverage_end,source_chain_json FROM bar_meta WHERE symbol=?",
+                (symbol,),
             ).fetchone()
             if row is None:
                 return
@@ -784,18 +913,104 @@ class BarStore:
             else:
                 coverage_start = min(filter(None, (row[0], start)))
                 coverage_end = max(filter(None, (row[1], end)))
+            try:
+                chain = json.loads(str(row[2] or "[]"))
+                if not isinstance(chain, list):
+                    chain = []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                chain = []
+            quality_value = dict(quality or {})
+            observed_start = str(quality_value.get("observed_start") or "")
+            observed_end = str(quality_value.get("observed_end") or "")
+            chain.append({
+                "source": source,
+                "requested_start": start,
+                "requested_end": end,
+                "observed_start": observed_start,
+                "observed_end": observed_end,
+                "status": str(quality_value.get("status") or status),
+                "affected_start": start,
+                "affected_end": end,
+                "operation": "checked_no_write",
+                "quality": quality_value,
+                "checked_at": time.time(),
+            })
             conn.execute(
                 "UPDATE bar_meta SET coverage_start=?,coverage_end=?,checked_at=?,"
-                "last_source=?,last_status=? WHERE symbol=?",
-                (coverage_start, coverage_end, time.time(), source, status, symbol),
+                "last_source=?,last_status=?,quality_json=?,source_chain_json=?,"
+                "observed_start=?,observed_end=? WHERE symbol=?",
+                (
+                    coverage_start,
+                    coverage_end,
+                    time.time(),
+                    source,
+                    status,
+                    json.dumps(quality_value, ensure_ascii=False, sort_keys=True),
+                    json.dumps(chain, ensure_ascii=False, sort_keys=True),
+                    observed_start,
+                    observed_end,
+                    symbol,
+                ),
             )
 
     def mark_status(self, symbol: str, status: str, source: str = "") -> None:
         with self._conn() as conn:
+            row = conn.execute(
+                "SELECT quality_json,last_source,source_chain_json FROM bar_meta WHERE symbol=?",
+                (symbol,),
+            ).fetchone()
+            try:
+                quality = json.loads(str(row[0] or "{}")) if row else {}
+                if not isinstance(quality, dict):
+                    quality = {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                quality = {}
+            if status in {"stale", "refresh_failed"}:
+                quality.update({"status": "degraded", "stale": True})
+                issues = list(quality.get("issues") or [])
+                message = "行情刷新失败，正在使用可计算的旧缓存"
+                if message not in issues:
+                    issues.append(message)
+                quality["issues"] = issues
+            effective_source = source or (str(row[1] or "") if row else "")
+            try:
+                chain = json.loads(str(row[2] or "[]")) if row else []
+                if not isinstance(chain, list):
+                    chain = []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                chain = []
+            chain.append({
+                "source": effective_source,
+                "requested_start": str(quality.get("requested_start") or ""),
+                "requested_end": str(quality.get("requested_end") or ""),
+                "observed_start": str(quality.get("observed_start") or ""),
+                "observed_end": str(quality.get("observed_end") or ""),
+                "status": status,
+                "affected_start": str(quality.get("requested_start") or ""),
+                "affected_end": str(quality.get("requested_end") or ""),
+                "operation": "status_change",
+                "quality": quality,
+                "checked_at": time.time(),
+            })
             conn.execute(
-                "UPDATE bar_meta SET last_status=?,last_source=? WHERE symbol=?",
-                (status, source, symbol),
+                "UPDATE bar_meta SET last_status=?,last_source=?,quality_json=?,source_chain_json=? "
+                "WHERE symbol=?",
+                (
+                    status,
+                    effective_source,
+                    json.dumps(quality, ensure_ascii=False, sort_keys=True),
+                    json.dumps(chain, ensure_ascii=False, sort_keys=True),
+                    symbol,
+                ),
             )
+
+    def quality(self, symbol: str) -> dict[str, Any]:
+        metadata = self.metadata(symbol) or {}
+        try:
+            value = json.loads(str(metadata.get("quality_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     def freshness(self, symbol: str) -> float | None:
         """距上次更新的秒数；无记录返回 None。"""

@@ -21,7 +21,12 @@ from quantmaster.research import (
     PlanTask,
     ResearchSpec,
 )
-from quantmaster.research.adapters import DATASETS, TushareResearchAdapter
+from quantmaster.research.adapters import (
+    DATASETS,
+    CompositeResearchAdapter,
+    ResearchCrossSectionIncomplete,
+    TushareResearchAdapter,
+)
 from quantmaster.research.diagnostics import factor_diagnostics
 from quantmaster.research.engine import ResearchEngine
 from quantmaster.research.jobs import ResearchJobManager
@@ -39,6 +44,21 @@ from quantmaster.research.providers import (
 )
 from quantmaster.research.registry import built_in_registry
 from quantmaster.server.app import app
+
+
+@pytest.fixture(autouse=True)
+def _verified_empty_suspension_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+        lambda _source, trade_date: {
+            "trade_date": trade_date,
+            "acquired_at": f"{trade_date}T07:00:00+00:00",
+            "content_hash": "s" * 64,
+            "symbols": [],
+            "source": "tushare:suspend_d",
+            "file_sha256": "f" * 64,
+        },
+    )
 
 
 def synthetic_bars(days: int = 80, symbols: int = 4) -> pd.DataFrame:
@@ -71,6 +91,773 @@ def test_contracts_are_versioned_and_reject_lookahead_factor():
         ResearchSpec(
             id="bad_factor", version="1.0.0", kind=ArtifactKind.FACTOR,
             asset_classes=(AssetClass.STOCK,), lookahead_sessions=1,
+        )
+
+
+def test_partial_stockdb_cross_section_with_empty_remote_is_not_published(
+    tmp_path, monkeypatch,
+):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired_at = (target + pd.Timedelta(hours=15, minutes=1)).timestamp()
+    trade_date = str(target.date())
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return [
+                type("Instrument", (), {
+                    "symbol": f"600{index:03d}.SH",
+                    "asset_type": "stock",
+                    "list_date": "20200101",
+                    "delist_date": "",
+                    "status": "L",
+                    "source": "tushare:catalog",
+                    "observed_at": acquired_at,
+                })()
+                for index in range(100)
+            ]
+
+        def diagnostics(self):
+            return {
+                "coverage": [{"market": "CN", "asset_type": "stock", "count": 100}],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "success",
+                    "last_success": acquired_at,
+                    "record_count": 100,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, trade_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(trade_date)],
+                "symbol": ["600000.SH"],
+                "close": [10.0],
+            })
+
+        def capabilities(self):
+            return []
+
+    class Direct:
+        def fetch_date(self, _dataset_id, _trade_date):
+            return pd.DataFrame()
+
+        def capabilities(self):
+            return []
+
+    expected = {f"600{index:03d}.SH" for index in range(100)}
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, expected, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": pd.Timestamp(acquired_at, unit="s", tz="UTC").isoformat(),
+            "expected_count": 100,
+            "source": "tushare:catalog",
+        }),
+    )
+
+    lake = ResearchLake(tmp_path / "lake")
+    adapter = CompositeResearchAdapter(lake.catalog, local=Local(), direct=Direct())
+    engine = ResearchEngine(lake=lake, adapter=adapter)
+    task = PlanTask(
+        "sync", "stock_bars", AssetClass.STOCK, Frequency.DAILY, trade_date,
+    )
+    plan = ExecutionPlan(
+        id="partial-cross-section",
+        start=trade_date,
+        end=trade_date,
+        target_dates=(trade_date,),
+        asset_classes=(AssetClass.STOCK,),
+        frequency=Frequency.DAILY,
+        datasets=("stock_bars",),
+        selected_specs=(),
+        tasks=(task,),
+    )
+
+    with pytest.raises(ResearchCrossSectionIncomplete, match="expected=100，observed=1"):
+        engine.execute_task(plan, task, run_id="partial")
+    assert lake.catalog.partition(
+        ArtifactKind.RAW,
+        AssetClass.STOCK,
+        Frequency.DAILY,
+        "stock_bars",
+        trade_date,
+    ) is None
+
+
+def _degraded_preview_adapter(tmp_path, monkeypatch, local, direct=None):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired_at = (target + pd.Timedelta(hours=15, minutes=1)).timestamp()
+    trade_date = str(target.date())
+    expected = {f"600{index:03d}.SH" for index in range(100)}
+    local_frame = local.copy()
+    direct_frame = direct.copy() if direct is not None else pd.DataFrame()
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def fetch_date(self, _dataset_id, _trade_date):
+            return local_frame.copy()
+
+    class Direct:
+        def fetch_date(self, _dataset_id, _trade_date):
+            return direct_frame.copy()
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, expected, {
+            "snapshot_sha256": "catalog-preview",
+            "snapshot_id": "catalog-preview",
+            "acquired_at": pd.Timestamp(acquired_at, unit="s", tz="UTC").isoformat(),
+            "expected_count": len(expected),
+            "source": "tushare:catalog",
+        }),
+    )
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=Local(),
+        direct=Direct(),
+    )
+    return adapter, expected, trade_date
+
+
+@pytest.mark.parametrize("observed_count", [1, 99])
+def test_degraded_preview_discloses_partial_cross_section_without_formal_publishability(
+    tmp_path, monkeypatch, observed_count,
+):
+    trade_date = str(
+        (pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)).date()
+    )
+    local = pd.DataFrame({
+        "trade_date": [pd.Timestamp(trade_date)] * observed_count,
+        "symbol": [f"600{index:03d}.SH" for index in range(observed_count)],
+        "close": [10.0 + index for index in range(observed_count)],
+    })
+    adapter, expected, trade_date = _degraded_preview_adapter(
+        tmp_path,
+        monkeypatch,
+        local,
+    )
+
+    preview = adapter.preview_date("stock_bars", trade_date)
+    quality = preview.attrs["research_partition_quality"]
+    observed = sorted(local["symbol"])
+    missing = sorted(expected - set(observed))
+
+    assert list(preview["symbol"]) == observed
+    assert quality["status"] == "degraded_preview"
+    assert quality["formal_eligible"] is False
+    assert quality["expected_count"] == 100
+    assert quality["observed_count"] == observed_count
+    assert quality["missing_symbols"] == missing
+    assert quality["coverage_ratio"] == observed_count / 100
+    assert preview.attrs["formal_eligible"] is False
+    assert preview.attrs["denominator_status"] == "verified_catalog_and_suspension"
+    assert preview.attrs["expected"] == sorted(expected)
+    assert preview.attrs["observed"] == observed
+    assert preview.attrs["missing"] == missing
+    assert preview.attrs["field_provenance"]["close"] == [
+        "free-stockdb:vendor-upstream-unverified"
+    ]
+    with pytest.raises(
+        ResearchCrossSectionIncomplete,
+        match=rf"expected=100，observed={observed_count}",
+    ):
+        adapter.fetch_date("stock_bars", trade_date)
+
+
+def test_degraded_preview_quarantines_unexpected_and_every_duplicate_symbol(
+    tmp_path, monkeypatch,
+):
+    trade_date = str(
+        (pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)).date()
+    )
+    local = pd.DataFrame({
+        "trade_date": [pd.Timestamp(trade_date)] * 4,
+        "symbol": ["600000.SH", "600001.SH", "600001.SH", "999999.SH"],
+        "close": [10.0, 11.0, 12.0, 99.0],
+    })
+    direct = pd.DataFrame({
+        "trade_date": [pd.Timestamp(trade_date)] * 5,
+        "symbol": [
+            "600000.SH", "600002.SH", "600003.SH", "600003.SH", "888888.SH",
+        ],
+        "close": [10.5, 12.0, 13.0, 14.0, 88.0],
+    })
+    adapter, expected, trade_date = _degraded_preview_adapter(
+        tmp_path,
+        monkeypatch,
+        local,
+        direct,
+    )
+
+    preview = adapter.preview_date("stock_bars", trade_date)
+    quality = preview.attrs["research_partition_quality"]
+
+    assert list(preview["symbol"]) == ["600000.SH", "600002.SH"]
+    assert quality["observed_count"] == 2
+    assert quality["duplicate_symbols"] == ["600001.SH", "600003.SH"]
+    assert quality["unexpected_symbols"] == ["888888.SH", "999999.SH"]
+    assert "600000.SH" not in quality["unexpected_symbols"]
+    assert quality["missing_symbols"] == sorted(
+        expected - {"600000.SH", "600002.SH"}
+    )
+    assert preview.attrs["field_provenance"]["close"] == [
+        "free-stockdb:vendor-upstream-unverified",
+        "tushare:direct",
+    ]
+
+
+def test_stale_or_unproven_master_snapshot_never_verifies_local_cross_section(tmp_path):
+    acquired_at = (pd.Timestamp.now(tz="Asia/Shanghai") - pd.Timedelta(days=8)).timestamp()
+    trade_date = str(pd.Timestamp.now(tz="Asia/Shanghai").date())
+    instrument = type("Instrument", (), {
+        "symbol": "600000.SH",
+        "asset_type": "stock",
+        "list_date": "20200101",
+        "delist_date": "",
+        "status": "L",
+        "source": "bundled",
+        "observed_at": acquired_at,
+    })()
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+        instruments = None
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return [instrument]
+
+        def diagnostics(self):
+            return {
+                "coverage": [{"market": "CN", "asset_type": "stock", "count": 1}],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "bundled",
+                    "last_success": acquired_at,
+                    "record_count": 1,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": [instrument.symbol],
+                "close": [10.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=Local(),
+        direct=type("Direct", (), {"fetch_date": lambda *_args: pd.DataFrame()})(),
+    )
+    with pytest.raises(ResearchCrossSectionIncomplete, match="不可变证券目录"):
+        adapter.fetch_date("stock_bars", trade_date)
+
+
+def test_future_listing_in_historical_cross_section_is_rejected(tmp_path, monkeypatch):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired_at = (target + pd.Timedelta(hours=15, minutes=1)).timestamp()
+    trade_date = str(target.date())
+    instruments = [
+        type("Instrument", (), {
+            "symbol": symbol,
+            "asset_type": "stock",
+            "list_date": list_date,
+            "delist_date": "",
+            "status": "L",
+            "source": "tushare:catalog",
+            "observed_at": acquired_at,
+        })()
+        for symbol, list_date in (
+            ("600000.SH", "20200101"),
+            ("600001.SH", str((target + pd.Timedelta(days=1)).date())),
+        )
+    ]
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return instruments
+
+        def diagnostics(self):
+            return {
+                "coverage": [{"market": "CN", "asset_type": "stock", "count": 2}],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "success",
+                    "last_success": acquired_at,
+                    "record_count": 2,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)] * 2,
+                "symbol": [item.symbol for item in instruments],
+                "close": [10.0, 20.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=Local(),
+        direct=type("Direct", (), {"fetch_date": lambda *_args: pd.DataFrame()})(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, {"600000.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": pd.Timestamp(acquired_at, unit="s", tz="UTC").isoformat(),
+            "expected_count": 1,
+            "source": "tushare:catalog",
+        }),
+    )
+    with pytest.raises(ResearchCrossSectionIncomplete, match="未来成员穿越"):
+        adapter.fetch_date("stock_bars", trade_date)
+
+
+def test_latest_partial_catalog_cannot_relabel_old_stock_row_as_same_snapshot(
+    tmp_path, monkeypatch,
+):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired_at = (target + pd.Timedelta(hours=15, minutes=1)).timestamp()
+    old_observed_at = (target - pd.Timedelta(days=1) + pd.Timedelta(hours=15)).timestamp()
+    rows = [
+        type("Instrument", (), {
+            "symbol": "600000.SH",
+            "asset_type": "stock",
+            "list_date": "20200101",
+            "delist_date": "",
+            "status": "L",
+            "source": "tushare:catalog",
+            "observed_at": acquired_at,
+        })(),
+        type("Instrument", (), {
+            "symbol": "600001.SH",
+            "asset_type": "stock",
+            "list_date": "20200101",
+            "delist_date": "",
+            "status": "L",
+            "source": "tushare:catalog",
+            "observed_at": old_observed_at,
+        })(),
+        type("Instrument", (), {
+            "symbol": "510300.SH",
+            "asset_type": "fund",
+            "list_date": "20200101",
+            "delist_date": "",
+            "status": "L",
+            "source": "tushare:catalog",
+            "observed_at": acquired_at,
+        })(),
+    ]
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return rows
+
+        def diagnostics(self):
+            return {
+                "coverage": [
+                    {"market": "CN", "asset_type": "stock", "count": 2},
+                    {"market": "CN", "asset_type": "fund", "count": 1},
+                ],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "success",
+                    "last_success": acquired_at,
+                    # Today's partial response was A + one fund. B is yesterday's residue.
+                    "record_count": 2,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)] * 2,
+                "symbol": ["600000.SH", "600001.SH"],
+                "close": [10.0, 20.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=Local(),
+        direct=type("Direct", (), {"fetch_date": lambda *_args: pd.DataFrame()})(),
+    )
+    from quantmaster.data.instrument_snapshots import InstrumentCatalogEvidenceError
+
+    def reject_partial(**_kwargs):
+        raise InstrumentCatalogEvidenceError("partial catalog snapshot")
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        reject_partial,
+    )
+    with pytest.raises(ResearchCrossSectionIncomplete, match="partial catalog"):
+        adapter.fetch_date("stock_bars", str(target.date()))
+
+
+def test_old_delisted_bundled_row_does_not_block_current_catalog_snapshot(
+    tmp_path, monkeypatch,
+):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired_at = (target + pd.Timedelta(hours=15, minutes=1)).timestamp()
+    instruments = [
+        type("Instrument", (), {
+            "symbol": "600000.SH",
+            "asset_type": "stock",
+            "list_date": "20200101",
+            "delist_date": "",
+            "status": "L",
+            "source": "tushare:catalog",
+            "observed_at": acquired_at,
+        })(),
+        type("Instrument", (), {
+            "symbol": "600001.SH",
+            "asset_type": "stock",
+            "list_date": "20200101",
+            "delist_date": str((target - pd.Timedelta(days=1)).date()),
+            "status": "D",
+            "source": "bundled",
+            "observed_at": (target - pd.Timedelta(days=10)).timestamp(),
+        })(),
+    ]
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return instruments
+
+        def diagnostics(self):
+            return {
+                "coverage": [{"market": "CN", "asset_type": "stock", "count": 2}],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "success",
+                    "last_success": acquired_at,
+                    "record_count": 1,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": ["600000.SH"],
+                "close": [10.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=Local(),
+        direct=type("Direct", (), {"fetch_date": lambda *_args: pd.DataFrame()})(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, {"600000.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": pd.Timestamp(acquired_at, unit="s", tz="UTC").isoformat(),
+            "expected_count": 1,
+            "source": "tushare:catalog",
+        }),
+    )
+    value = adapter.fetch_date("stock_bars", str(target.date()))
+    assert value["symbol"].tolist() == ["600000.SH"]
+    assert value.loc[0, "universe_expected_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("acquired_hour", "accepted"),
+    [(9, False), (15, True)],
+)
+def test_daily_cross_section_requires_post_close_catalog_snapshot(
+    tmp_path, acquired_hour, accepted, monkeypatch,
+):
+    target = pd.Timestamp.now(tz="Asia/Shanghai").normalize() - pd.Timedelta(days=1)
+    acquired = target + pd.Timedelta(hours=acquired_hour, minutes=1)
+    instrument = type("Instrument", (), {
+        "symbol": "600000.SH",
+        "asset_type": "stock",
+        "list_date": "20200101",
+        "delist_date": "",
+        "status": "L",
+        "source": "tushare:catalog",
+        "observed_at": acquired.timestamp(),
+    })()
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def __init__(self):
+            self.instruments = self
+
+        def list(self, **_kwargs):
+            return [instrument]
+
+        def diagnostics(self):
+            return {
+                "coverage": [{"market": "CN", "asset_type": "stock", "count": 1}],
+                "sources": [{
+                    "source": "tushare:catalog",
+                    "status": "success",
+                    "last_success": acquired.timestamp(),
+                    "record_count": 1,
+                }],
+            }
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": [instrument.symbol],
+                "close": [10.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / f"lake-{acquired_hour}").catalog,
+        local=Local(),
+        direct=type("Direct", (), {"fetch_date": lambda *_args: pd.DataFrame()})(),
+    )
+    from quantmaster.data.instrument_snapshots import InstrumentCatalogEvidenceError
+
+    def load_catalog(**_kwargs):
+        if not accepted:
+            raise InstrumentCatalogEvidenceError("早于上海 15:00")
+        return None, {"600000.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": acquired.isoformat(),
+            "expected_count": 1,
+            "source": "tushare:catalog",
+        }
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        load_catalog,
+    )
+    if not accepted:
+        with pytest.raises(ResearchCrossSectionIncomplete, match="上海 15:00"):
+            adapter.fetch_date("stock_bars", str(target.date()))
+        return
+    value = adapter.fetch_date("stock_bars", str(target.date()))
+    assert value.attrs["research_partition_quality"]["status"] == "verified_complete"
+    assert value.loc[0, "universe_expected_count"] == 1
+
+
+def test_engine_rejects_nonempty_cross_section_without_quality_evidence(tmp_path):
+    class UnverifiedAdapter:
+        def fetch_date(self, _dataset_id, trade_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(trade_date)],
+                "symbol": ["600000.SH"],
+                "close": [10.0],
+            })
+
+    lake = ResearchLake(tmp_path / "lake")
+    engine = ResearchEngine(lake=lake, adapter=UnverifiedAdapter())
+    task = PlanTask(
+        "sync", "stock_bars", AssetClass.STOCK, Frequency.DAILY, "2024-01-02",
+    )
+    plan = ExecutionPlan(
+        id="unverified-cross-section",
+        start="2024-01-02",
+        end="2024-01-02",
+        target_dates=("2024-01-02",),
+        asset_classes=(AssetClass.STOCK,),
+        frequency=Frequency.DAILY,
+        datasets=("stock_bars",),
+        selected_specs=(),
+        tasks=(task,),
+    )
+
+    with pytest.raises(RuntimeError, match="缺少完整横截面质量证明"):
+        engine.execute_task(plan, task, run_id="unverified")
+    assert lake.catalog.partition(
+        ArtifactKind.RAW,
+        AssetClass.STOCK,
+        Frequency.DAILY,
+        "stock_bars",
+        "2024-01-02",
+    ) is None
+
+
+def test_official_suspension_evidence_reduces_daily_trading_denominator(
+    tmp_path, monkeypatch,
+):
+    trade_date = "2026-08-08"
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_bars"})
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": ["600000.SH"],
+                "close": [10.0],
+            })
+
+    class Direct:
+        source = object()
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, {"600000.SH", "600001.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": "2026-08-08T07:00:00+00:00",
+            "expected_count": 2,
+            "source": "tushare:catalog",
+        }),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+        lambda _source, _date: {
+            "trade_date": trade_date,
+            "acquired_at": "2026-08-08T07:00:00+00:00",
+            "content_hash": "s" * 64,
+            "symbols": ["600001.SH"],
+            "source": "tushare:suspend_d",
+            "file_sha256": "f" * 64,
+        },
+    )
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog, local=Local(), direct=Direct(),
+    )
+    value = adapter.fetch_date("stock_bars", trade_date)
+    quality = value.attrs["research_partition_quality"]
+    assert quality["status"] == "verified_complete"
+    assert quality["expected_universe_evidence"]["catalog_expected_count"] == 2
+    assert quality["expected_universe_evidence"]["suspended_count"] == 1
+    assert value.loc[0, "suspension_snapshot_sha256"] == "s" * 64
+
+
+def test_missing_suspension_evidence_rejects_daily_cross_section(tmp_path, monkeypatch):
+    from quantmaster.data.instrument_snapshots import InstrumentCatalogEvidenceError
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, {"600000.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": "2026-08-08T07:00:00+00:00",
+            "expected_count": 1,
+            "source": "tushare:catalog",
+        }),
+    )
+
+    def unavailable(_source, _date):
+        raise InstrumentCatalogEvidenceError("missing suspend_d")
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+        unavailable,
+    )
+    local = type("Local", (), {
+        "LOCAL_DATASETS": frozenset({"stock_bars"}),
+        "fetch_date": lambda *_args: pd.DataFrame({
+            "trade_date": [pd.Timestamp("2026-08-08")],
+            "symbol": ["600000.SH"],
+            "close": [10.0],
+        }),
+    })()
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog,
+        local=local,
+        direct=type("Direct", (), {"source": object()})(),
+    )
+    with pytest.raises(ResearchCrossSectionIncomplete, match="missing suspend_d"):
+        adapter.fetch_date("stock_bars", "2026-08-08")
+
+
+def test_adj_factor_local_first_remote_missing_completion_is_exact(tmp_path, monkeypatch):
+    trade_date = "2026-08-08"
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (None, {"600000.SH", "600001.SH"}, {
+            "snapshot_sha256": "catalog-a",
+            "snapshot_id": "catalog-a",
+            "acquired_at": "2026-08-08T07:00:00+00:00",
+            "expected_count": 2,
+            "source": "tushare:catalog",
+        }),
+    )
+
+    class Local:
+        LOCAL_DATASETS = frozenset({"stock_adj_factor"})
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": ["600000.SH"],
+                "adj_factor": [1.5],
+            })
+
+    class Direct:
+        source = object()
+
+        def fetch_date(self, _dataset_id, value_date):
+            return pd.DataFrame({
+                "trade_date": [pd.Timestamp(value_date)],
+                "symbol": ["600001.SH"],
+                "adj_factor": [2.0],
+            })
+
+    adapter = CompositeResearchAdapter(
+        ResearchLake(tmp_path / "lake").catalog, local=Local(), direct=Direct(),
+    )
+    value = adapter.fetch_date("stock_adj_factor", trade_date)
+    assert value.set_index("symbol")["adj_factor"].to_dict() == {
+        "600000.SH": 1.5,
+        "600001.SH": 2.0,
+    }
+    assert value.attrs["research_partition_quality"]["status"] == "verified_complete"
+
+
+def test_provider_inputs_reject_partial_adj_factor_before_research_price(tmp_path):
+    lake = ResearchLake(tmp_path / "lake")
+    trade_date = "2024-01-02"
+    bars = pd.DataFrame({
+        "trade_date": [trade_date, trade_date],
+        "symbol": ["600000.SH", "600001.SH"],
+        "close": [10.0, 20.0],
+    })
+    lake.write_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_bars", trade_date, bars,
+    )
+    lake.write_partition(
+        ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+        "stock_adj_factor", trade_date,
+        pd.DataFrame({
+            "trade_date": [trade_date],
+            "symbol": ["600000.SH"],
+            "adj_factor": [1.0],
+        }),
+    )
+    engine = ResearchEngine(lake=lake, adapter=FakePlanningAdapter())
+    with pytest.raises(RuntimeError, match="不是一对一完整集合"):
+        engine._provider_inputs(
+            AssetClass.STOCK, "cross_asset_core", trade_date, trade_date,
         )
 
 
@@ -343,6 +1130,12 @@ def test_engine_executes_offline_from_local_trading_dates_and_publishes_diagnost
             ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
             "stock_bars", str(trade_date), group, run_id="raw-fixture",
         )
+        lake.write_partition(
+            ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
+            "stock_adj_factor", str(trade_date),
+            group[["trade_date", "symbol"]].assign(adj_factor=1.0),
+            run_id="raw-fixture",
+        )
 
     class OfflineAdapter(FakePlanningAdapter):
         def official_calendar(self, asset_class, start, end):
@@ -587,6 +1380,30 @@ def test_research_management_api_is_local_and_csrf_protected(monkeypatch):
     catalog = client.get("/api/v1/research/data/catalog")
     assert catalog.status_code == 200
     assert len(catalog.json()["specs"]) == 66
+    preview_frame = pd.DataFrame({
+        "symbol": ["600519.SH"], "trade_date": [pd.Timestamp("2024-01-02")],
+        "close": [1.0],
+    })
+    preview_frame.attrs["research_partition_quality"] = {
+        "status": "degraded_preview", "formal_eligible": False,
+        "expected_count": 2, "observed_count": 1, "coverage_ratio": 0.5,
+        "missing_symbols": ["000001.SZ"],
+    }
+    monkeypatch.setattr(
+        ResearchEngine,
+        "preview_date",
+        lambda _self, _dataset, _date: preview_frame,
+    )
+    assert client.post("/api/v1/research/data/preview", json={}).status_code == 403
+    preview = client.post(
+        "/api/v1/research/data/preview",
+        headers={"X-CSRF-Token": token},
+        json={"dataset_id": "stock_bars", "trade_date": "2024-01-02"},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["tier"] == "sandbox"
+    assert preview.json()["quality"]["formal_eligible"] is False
+    assert preview.json()["rows"][0]["symbol"] == "600519.SH"
     assert client.post("/api/v1/research/data/plans", json={}).status_code == 403
     planned = client.post(
         "/api/v1/research/data/plans",

@@ -313,7 +313,7 @@ def test_incremental_refresh_bypasses_cached_tushare_tail(
         refresh="incremental",
     )
 
-    assert str(refreshed.index.max().date()) == "2024-01-03"
+    assert str(refreshed.data.index.max().date()) == "2024-01-03"
     assert len(api.calls) == 2
     assert api.calls[-1]["start_date"] == "20240102"
     assert api.calls[-1]["end_date"] == "20240103"
@@ -356,7 +356,7 @@ def test_incremental_tail_tries_fallback_when_primary_has_no_new_date(
         refresh="incremental",
     )
 
-    assert str(refreshed.index.max().date()) == "2024-01-03"
+    assert str(refreshed.data.index.max().date()) == "2024-01-03"
     assert Lagging.calls == Current.calls == 1
     assert store.metadata("600000.SH")["last_source"] == "current"
 
@@ -497,7 +497,7 @@ def test_fresh_cache_does_not_hide_missing_end(tmp_path, isolated_config, monkey
     result = registry.load_history(
         "600000.SH", "2024-01-02", "2024-06-28", store=store)
     assert FakeSource.calls == 1
-    assert str(result.index.max().date()) == "2024-06-28"
+    assert str(result.data.index.max().date()) == "2024-06-28"
 
 
 def test_bar_store_recovers_file_after_metadata_commit_failure(tmp_path, monkeypatch):
@@ -575,7 +575,7 @@ def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkey
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [MustNotRun]})
     result = registry.load_history("600000.SH", "2024-01-02", "2024-03-29", store=store)
-    pd.testing.assert_frame_equal(result, frame, check_freq=False)
+    pd.testing.assert_frame_equal(result.data, frame, check_freq=False)
 
 
 def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
@@ -643,7 +643,7 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(load, range(2)))
     assert SlowSource.calls == 1
-    pd.testing.assert_frame_equal(results[0], results[1])
+    pd.testing.assert_frame_equal(results[0].data, results[1].data)
 
 
 def test_same_symbol_lock_serializes_spawned_processes(tmp_path):
@@ -693,7 +693,7 @@ def test_failed_full_refresh_keeps_previous_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Broken]})
     result = registry.load_history(
         "600000.SH", "2024-01-02", "2024-03-29", store=store, refresh="full")
-    pd.testing.assert_frame_equal(result, cached, check_freq=False)
+    pd.testing.assert_frame_equal(result.data, cached, check_freq=False)
     pd.testing.assert_frame_equal(store.get("600000.SH"), cached, check_freq=False)
     assert store.metadata("600000.SH")["last_status"] == "refresh_failed"
 
@@ -741,7 +741,7 @@ def test_full_refresh_httpx_failures_continue_to_fallback(
         store=store, refresh="full",
     )
 
-    assert not result.empty
+    assert not result.data.empty
     assert store.metadata("600000.SH")["last_source"] == "fallback"
 
 
@@ -768,6 +768,22 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
         return {symbols[0]: bars(start, end)}
 
     monkeypatch.setattr(FreeStockDBSource, "daily_many", daily_many)
+    monkeypatch.setattr(
+        registry,
+        "_supplement_stockdb_contract",
+        lambda _symbol, _start, _end, frame, **_kwargs: (
+            frame,
+            {
+                "price_source": "free-stockdb",
+                "contract_source": "tushare:daily+adj_factor",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (pd.bdate_range(start, end), "tushare:SSE"),
+    )
 
     class Fallback(DataSource):
         name = "fallback"
@@ -783,12 +799,16 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
     )
 
     assert calls == [["600000.SH", "000001.SZ"]]
-    assert list(panel.columns) == ["600000.SH", "000001.SZ"]
-    assert store.metadata("600000.SH")["last_source"] == "free-stockdb"
+    assert list(panel.data.columns) == ["600000.SH", "000001.SZ"]
+    assert store.metadata("600000.SH")["last_source"] == (
+        "stockdb-price+tushare-contract-v1"
+    )
     assert store.metadata("000001.SZ")["last_source"] == "fallback"
 
 
-def test_successful_fallback_is_recorded_as_ready(tmp_path, monkeypatch):
+def test_successful_fallback_without_truth_contract_is_recorded_as_degraded(
+    tmp_path, monkeypatch,
+):
     store = BarStore(root=tmp_path / "bars")
 
     class Broken(DataSource):
@@ -813,9 +833,10 @@ def test_successful_fallback_is_recorded_as_ready(tmp_path, monkeypatch):
         registry, "_factories", lambda: {Market.CN: [Broken, Fallback]})
     result = registry.load_history(
         "600000.SH", "2024-01-02", "2024-03-29", store=store)
-    assert not result.empty
+    assert not result.data.empty
     meta = store.metadata("600000.SH")
-    assert meta["last_status"] == "ready"
+    assert result.quality.status == "degraded"
+    assert meta["last_status"] == "degraded"
     assert meta["last_source"] == "fallback"
 
 

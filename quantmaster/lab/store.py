@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +23,12 @@ from quantmaster.lab.models import (
     utc_now,
 )
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.trading_sessions import daily_signal_cutoff
 
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
-LAB_SCHEMA_VERSION = 9
+LAB_SCHEMA_VERSION = 10
 
 
 def _collision_safe_factor_name(
@@ -126,6 +128,10 @@ class LabStore:
                     version_id TEXT NOT NULL, status TEXT NOT NULL,
                     created_at TEXT NOT NULL, retired_at TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(version_id) REFERENCES factor_versions(id));
+                CREATE TABLE IF NOT EXISTS deployment_evidence (
+                    deployment_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(deployment_id) REFERENCES deployments(id));
                 CREATE TABLE IF NOT EXISTS dataset_snapshots (
                     id TEXT PRIMARY KEY, snapshot_hash TEXT NOT NULL UNIQUE,
                     payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -527,21 +533,26 @@ class LabStore:
             })
         return result
 
-    def version(self, version_id: str) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT v.*,d.slug,d.name,d.kind,d.category FROM factor_versions v "
-                "JOIN factor_definitions d ON d.id=v.factor_id WHERE v.id=?", (version_id,),
-            ).fetchone()
-            report = conn.execute(
-                "SELECT report_json,created_at FROM validation_reports WHERE version_id=? "
-                "ORDER BY created_at DESC LIMIT 1", (version_id,),
-            ).fetchone()
-        value = self._decode(row, ("spec_json",))
+    @staticmethod
+    def _version_from_conn(conn: sqlite3.Connection, version_id: str) -> dict | None:
+        row = conn.execute(
+            "SELECT v.*,d.slug,d.name,d.kind,d.category FROM factor_versions v "
+            "JOIN factor_definitions d ON d.id=v.factor_id WHERE v.id=?", (version_id,),
+        ).fetchone()
+        report = conn.execute(
+            "SELECT report_json,created_at FROM validation_reports WHERE version_id=? "
+            "ORDER BY created_at DESC,id DESC LIMIT 1", (version_id,),
+        ).fetchone()
+        value = LabStore._decode(row, ("spec_json",))
         if value is not None:
             value["spec"] = value.pop("spec_json")
             value["validation"] = json.loads(report[0]) if report else None
+            value["validation_created_at"] = str(report[1]) if report else ""
         return value
+
+    def version(self, version_id: str) -> dict | None:
+        with self._conn() as conn:
+            return self._version_from_conn(conn, version_id)
 
     def save_validation(self, version_id: str, dataset_hash: str, report: dict) -> dict:
         current = self.version(version_id)
@@ -672,6 +683,22 @@ class LabStore:
                 "UPDATE factor_versions SET status='production',updated_at=? WHERE id=?",
                 (now, version_id),
             )
+            frozen_version = self._version_from_conn(conn, version_id)
+            if frozen_version is None:
+                raise RuntimeError("部署时无法冻结因子版本证据")
+            frozen_payload = {
+                "schema_version": 1,
+                "deployment": {
+                    "id": deployment_id, "universe": universe, "horizon": horizon,
+                    "role": role, "profile": profile, "scope": scope,
+                    "version_id": version_id, "created_at": now,
+                },
+                "version": frozen_version,
+            }
+            conn.execute(
+                "INSERT INTO deployment_evidence VALUES (?,?,?,?)",
+                (deployment_id, content_hash(frozen_payload), canonical_json(frozen_payload), now),
+            )
             conn.execute(
                 "INSERT INTO approvals VALUES (?,?,?,?,?,?)",
                 (uuid.uuid4().hex, version_id, "deploy", actor,
@@ -693,6 +720,10 @@ class LabStore:
         }
 
     def save_snapshot(self, payload: dict) -> dict:
+        if payload.get("manifest"):
+            from quantmaster.lab.dataset import verify_snapshot_evidence
+
+            verify_snapshot_evidence(payload)
         digest = payload.get("snapshot_hash") or content_hash(payload)
         with self._conn() as conn:
             conn.execute(
@@ -1295,6 +1326,162 @@ class LabStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def deployments_as_of(
+        self,
+        as_of: str,
+        *,
+        universe: str | None = None,
+        horizon: int | None = None,
+        profile: str | None = None,
+        role: str | None = None,
+    ) -> list[dict]:
+        """Return deployments that were active at the end of a Shanghai day."""
+        try:
+            target = date.fromisoformat(as_of)
+        except ValueError as exc:
+            raise ValueError("部署查看日期需要使用 YYYY-MM-DD 格式") from exc
+        cutoff = daily_signal_cutoff(target).astimezone(UTC)
+        filters, params = [], []
+        for column, value in (
+            ("universe", universe), ("horizon", horizon),
+            ("profile", profile), ("role", role),
+        ):
+            if value is not None:
+                filters.append(f"{column}=?")
+                params.append(value)
+        query = (
+            "SELECT d.*,e.payload_hash AS evidence_hash,e.payload_json AS evidence_json "
+            "FROM deployments d LEFT JOIN deployment_evidence e ON e.deployment_id=d.id"
+        )
+        if filters:
+            query += " WHERE " + " AND ".join(f"d.{item}" for item in filters)
+        query += " ORDER BY d.created_at DESC"
+        with self._conn() as conn:
+            rows = [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
+
+        def parse(value: str) -> datetime | None:
+            if not value:
+                return None
+            parsed = datetime.fromisoformat(value)
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+        result = []
+        for row in rows:
+            created = parse(str(row.get("created_at") or ""))
+            retired = parse(str(row.get("retired_at") or ""))
+            if created is not None and created <= cutoff and (retired is None or retired > cutoff):
+                raw_evidence = str(row.pop("evidence_json", "") or "")
+                expected_hash = str(row.pop("evidence_hash", "") or "")
+                row["version_snapshot"] = None
+                row["evidence_status"] = "missing"
+                if raw_evidence:
+                    try:
+                        evidence = json.loads(raw_evidence)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"部署 {row['id']} 的冻结证据无法解析"
+                        ) from exc
+                    if not expected_hash or content_hash(evidence) != expected_hash:
+                        raise RuntimeError(f"部署 {row['id']} 的冻结证据哈希不一致")
+                    descriptor = evidence.get("deployment") or {}
+                    if (
+                        str(descriptor.get("id") or "") != str(row["id"])
+                        or str(descriptor.get("version_id") or "") != str(row["version_id"])
+                        or str(descriptor.get("universe") or "") != str(row["universe"])
+                        or int(descriptor.get("horizon") or 0) != int(row["horizon"])
+                        or str(descriptor.get("role") or "") != str(row["role"])
+                        or str(descriptor.get("profile") or "") != str(row["profile"])
+                        or str(descriptor.get("scope") or "") != str(row["scope"])
+                        or str(descriptor.get("created_at") or "") != str(row["created_at"])
+                    ):
+                        raise RuntimeError(f"部署 {row['id']} 的冻结证据与部署记录不匹配")
+                    snapshot = evidence.get("version")
+                    if not isinstance(snapshot, dict):
+                        raise RuntimeError(f"部署 {row['id']} 缺少冻结版本快照")
+                    row["version_snapshot"] = snapshot
+                    row["evidence_status"] = "verified"
+                    row["evidence_hash"] = expected_hash
+                result.append(row)
+        result.sort(
+            key=lambda item: parse(str(item.get("created_at") or ""))
+            or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )
+        slots: dict[tuple[Any, ...], str] = {}
+        for row in result:
+            slot = tuple(row.get(field) for field in (
+                "universe", "horizon", "role", "profile", "scope",
+            ))
+            if slot in slots:
+                raise RuntimeError(
+                    f"{as_of} 的部署账本在同一运行槽存在多个 active 版本："
+                    f"{slots[slot]}、{row['id']}"
+                )
+            slots[slot] = str(row["id"])
+        return result
+
+    def champion_strategies_as_of(self, as_of: str, *, horizon: int) -> list[dict]:
+        """Rebuild champion state from promotion events at the signal cutoff."""
+        require_supported_horizon(horizon)
+        try:
+            target = date.fromisoformat(as_of)
+        except ValueError as exc:
+            raise ValueError("Champion 查看日期需要使用 YYYY-MM-DD 格式") from exc
+        cutoff = daily_signal_cutoff(target).astimezone(UTC)
+        with self._conn() as conn:
+            events = conn.execute(
+                "SELECT e.* FROM promotion_events e "
+                "JOIN strategy_candidates s ON s.id=e.strategy_id "
+                "WHERE s.horizon=? ORDER BY e.created_at,e.id",
+                (horizon,),
+            ).fetchall()
+
+        def parse(value: str) -> datetime | None:
+            if not value:
+                return None
+            parsed = datetime.fromisoformat(value)
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+        by_strategy: dict[str, list[dict]] = {}
+        for event_row in events:
+            event = self._decode(event_row, ("evidence_json",)) or {}
+            happened = parse(str(event.get("created_at") or ""))
+            if happened is not None and happened <= cutoff:
+                by_strategy.setdefault(str(event["strategy_id"]), []).append(event)
+        for history in by_strategy.values():
+            history.sort(key=lambda event: (
+                parse(str(event.get("created_at") or "")) or datetime.min.replace(tzinfo=UTC),
+                str(event.get("id") or ""),
+            ))
+        result: list[dict[str, Any]] = []
+        for strategy_id, history in by_strategy.items():
+            latest = history[-1]
+            if str(latest.get("to_status") or "") != "champion":
+                continue
+            evidence = latest.get("evidence_json") or {}
+            snapshot = evidence.get("strategy_snapshot")
+            expected_hash = str(evidence.get("strategy_snapshot_hash") or "")
+            if not isinstance(snapshot, dict) or not expected_hash:
+                raise RuntimeError(
+                    f"策略 {strategy_id} 的 Champion 事件缺少冻结证据"
+                )
+            if content_hash(snapshot) != expected_hash:
+                raise RuntimeError(f"策略 {strategy_id} 的 Champion 冻结证据哈希不一致")
+            if (
+                str(snapshot.get("id") or "") != strategy_id
+                or int(snapshot.get("horizon") or 0) != horizon
+                or str(snapshot.get("status") or "") != "champion"
+            ):
+                raise RuntimeError(f"策略 {strategy_id} 的 Champion 冻结证据与事件不匹配")
+            value = json.loads(canonical_json(snapshot))
+            value["promotion_events"] = history
+            value["promotion_evidence_hash"] = expected_hash
+            result.append(value)
+        if len(result) > 1:
+            ids = ", ".join(sorted(str(item.get("id") or "") for item in result))
+            raise RuntimeError(f"{as_of} 的事件账本重建出多个 Champion：{ids}")
+        return result
+
     def append_event(self, job_id: str, event: dict) -> int:
         with self._conn() as conn:
             cursor = conn.execute(
@@ -1658,6 +1845,55 @@ class LabStore:
             }[field])
         return value
 
+    def _strategy_snapshot_from_conn(
+        self, conn: sqlite3.Connection, strategy_id: str,
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM strategy_candidates WHERE id=?", (strategy_id,),
+        ).fetchone()
+        snapshot = self._decode_strategy(row)
+        if snapshot is None:
+            raise RuntimeError("策略事件无法冻结不存在的候选")
+        versions: dict[str, dict[str, Any]] = {}
+        missing: list[str] = []
+        for component in snapshot.get("components") or []:
+            version_id = str(component.get("version_id") or "")
+            if not version_id or version_id in versions or version_id in missing:
+                continue
+            version = self._version_from_conn(conn, version_id)
+            if version is None:
+                missing.append(version_id)
+            else:
+                versions[version_id] = version
+        snapshot["component_versions"] = versions
+        snapshot["missing_component_version_ids"] = missing
+        return snapshot
+
+    def _strategy_event_evidence(
+        self, conn: sqlite3.Connection, strategy_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshot = self._strategy_snapshot_from_conn(conn, strategy_id)
+        return {
+            **(details or {}),
+            "strategy_snapshot": snapshot,
+            "strategy_snapshot_hash": content_hash(snapshot),
+        }
+
+    def _insert_promotion_event(
+        self, conn: sqlite3.Connection, *, strategy_id: str,
+        from_status: str, to_status: str, actor: str, reason: str,
+        created_at: str, details: dict[str, Any] | None = None,
+    ) -> None:
+        evidence = self._strategy_event_evidence(conn, strategy_id, details)
+        conn.execute(
+            "INSERT INTO promotion_events VALUES (?,?,?,?,?,?,?,?)",
+            (
+                uuid.uuid4().hex, strategy_id, from_status, to_status,
+                actor, reason, canonical_json(evidence), created_at,
+            ),
+        )
+
     def save_strategy_candidate(
         self, *, cycle_id: str, horizon: int, name: str,
         components: list[dict[str, Any]], development: dict[str, Any],
@@ -1680,6 +1916,7 @@ class LabStore:
                 (cycle_id, horizon),
             ).fetchone()
             strategy_id = existing["id"] if existing else uuid.uuid4().hex
+            previous_status = str(existing["status"]) if existing else "created"
             if existing:
                 conn.execute(
                     "UPDATE strategy_candidates SET name=?,status=?,components_json=?,"
@@ -1696,12 +1933,22 @@ class LabStore:
                      canonical_json(sealed_evidence), canonical_json(return_curve or {}),
                      "{}", "{}", now, now),
                 )
-                if status == "shadow_challenger":
-                    conn.execute(
-                        "INSERT INTO promotion_events VALUES (?,?,?,?,?,?,?,?)",
-                        (uuid.uuid4().hex, strategy_id, "historical_candidate", status,
-                         "system", "密封样本门槛通过，自动进入影子", canonical_json(gate), now),
-                    )
+            self._insert_promotion_event(
+                conn,
+                strategy_id=strategy_id,
+                from_status=previous_status,
+                to_status=status,
+                actor="system",
+                reason=(
+                    "候选证据修订后重新判定生命周期"
+                    if existing
+                    else "密封样本门槛通过，自动进入影子"
+                    if status == "shadow_challenger"
+                    else "保存未通过密封门槛的历史候选"
+                ),
+                created_at=now,
+                details={"sealed_gate": gate, "revision": bool(existing)},
+            )
         return self.strategy(strategy_id) or {}
 
     def strategy(self, strategy_id: str) -> dict | None:
@@ -1837,11 +2084,14 @@ class LabStore:
         now = utc_now()
         with self._conn() as conn:
             if target_status == "champion":
-                champion = conn.execute(
+                champion_rows = conn.execute(
                     "SELECT * FROM strategy_candidates WHERE horizon=? AND status='champion' "
-                    "AND id<>? ORDER BY updated_at DESC LIMIT 1",
+                    "AND id<>? ORDER BY updated_at DESC",
                     (current["horizon"], strategy_id),
-                ).fetchone()
+                ).fetchall()
+                if len(champion_rows) > 1:
+                    raise RuntimeError("当前账本存在多个 Champion，拒绝继续替换")
+                champion = champion_rows[0] if champion_rows else None
                 if champion is not None:
                     old = self._decode_strategy(champion) or {}
                     new_metrics = (current.get("sealed_evidence") or {}).get("metrics") or {}
@@ -1862,14 +2112,31 @@ class LabStore:
                         "UPDATE strategy_candidates SET status='degraded',updated_at=? WHERE id=?",
                         (now, old["id"]),
                     )
-            conn.execute(
-                "UPDATE strategy_candidates SET status=?,updated_at=? WHERE id=?",
-                (target_status, now, strategy_id),
-            )
-            conn.execute(
-                "INSERT INTO promotion_events VALUES (?,?,?,?,?,?,?,?)",
-                (uuid.uuid4().hex, strategy_id, source, target_status, actor.strip(),
-                 reason.strip(), canonical_json({"sealed_gate": sealed_gate}), now),
+                    self._insert_promotion_event(
+                        conn,
+                        strategy_id=str(old["id"]),
+                        from_status="champion",
+                        to_status="degraded",
+                        actor=actor.strip(),
+                        reason=f"被更优 Champion 替换：{reason.strip()}",
+                        created_at=now,
+                        details={"replacement_strategy_id": strategy_id},
+                    )
+            changed = conn.execute(
+                "UPDATE strategy_candidates SET status=?,updated_at=? WHERE id=? AND status=?",
+                (target_status, now, strategy_id, source),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("策略生命周期已并发变化，拒绝写入过期晋级事件")
+            self._insert_promotion_event(
+                conn,
+                strategy_id=strategy_id,
+                from_status=source,
+                to_status=target_status,
+                actor=actor.strip(),
+                reason=reason.strip(),
+                created_at=now,
+                details={"sealed_gate": sealed_gate},
             )
         return self.strategy(strategy_id) or {}
 

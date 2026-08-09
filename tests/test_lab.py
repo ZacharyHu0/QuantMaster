@@ -102,6 +102,57 @@ def test_curated_catalog_has_48_unique_specs():
     assert any(spec.slug == "news_sentiment" for spec in specs)
 
 
+def test_lab_sandbox_feature_entry_preserves_news_preview_eligibility(tmp_path, monkeypatch):
+    _config(tmp_path)
+    panel = _panel(days=10, symbols=2)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    snapshot = {
+        "snapshot_hash": "sandbox-news-snapshot",
+        "payload": {"research_quality": "sandbox"},
+    }
+    monkeypatch.setattr(
+        service,
+        "_context",
+        lambda universe, start, end, progress=None: (panel, None, snapshot),
+    )
+    monkeypatch.setattr(service, "_pit_fundamentals", lambda *args, **kwargs: {})
+    observed = {}
+
+    def preview(index, symbols, *, tier):
+        observed["tier"] = tier
+        result = pd.DataFrame(0.1, index=index, columns=symbols)
+        result.attrs["news_factor"] = {
+            "tier": "sandbox",
+            "sample_start": "2023-01-02",
+            "sample_end": "2023-01-13",
+            "sessions": 10,
+            "coverage": 1.0,
+            "event_count": 12,
+            "sources": [{
+                "source_id": "sina_live",
+                "formal_eligible": False,
+                "reasons": ["non_official_source"],
+            }],
+            "formal_eligible": False,
+            "reasons": ["sandbox_tier", "history_sessions_below_1038"],
+        }
+        return result
+
+    monkeypatch.setattr("quantmaster.ai.sentiment.quality_sentiment_panel", preview)
+    features, catalog, _snapshot, _bundle_hash = service._python_mining_context(
+        "demo", "2023-01-02", "2023-01-13",
+    )
+
+    assert observed["tier"] == "sandbox"
+    assert features["news_sentiment"].attrs["news_factor"]["formal_eligible"] is False
+    news = next(item for item in catalog if item["name"] == "news_sentiment")
+    assert news["tier"] == "sandbox"
+    assert news["pit_grade"] == "research_only"
+    assert news["formal_eligible"] is False
+    assert news["evidence"]["sources"][0]["source_id"] == "sina_live"
+
+
 def test_point_in_time_membership_updates_indexes_independently():
     records = pd.DataFrame([
         {"trade_date": "2024-01-02", "index_code": "A", "symbol": "AAA"},
@@ -118,16 +169,35 @@ def test_point_in_time_membership_updates_indexes_independently():
 def test_csi800_as_of_uses_latest_known_snapshot_without_lookahead():
     class Source:
         def index_weights(self, index_code, start, end):
-            symbol = "600000.SH" if index_code == "000300.SH" else "000001.SZ"
+            count = 300 if index_code == "000300.SH" else 500
+            current = [
+                f"6{position:05d}.SH" if count == 300 else f"0{position:05d}.SZ"
+                for position in range(count)
+            ]
+            future = [
+                f"7{position:05d}.SH" if count == 300 else f"2{position:05d}.SZ"
+                for position in range(count)
+            ]
             return pd.DataFrame([
-                {"index_code": index_code, "symbol": symbol,
-                 "trade_date": "2024-01-31", "weight": 1},
-                {"index_code": index_code, "symbol": "999999.SH",
-                 "trade_date": "2024-03-01", "weight": 1},
+                {
+                    "index_code": index_code,
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "weight": 1,
+                    "acquired_at": "2024-02-15T06:59:00+00:00",
+                    "snapshot_expected_count": count,
+                }
+                for trade_date, symbols in (
+                    ("2024-01-31", current), ("2024-03-01", future),
+                )
+                for symbol in symbols
             ])
 
     result = load_csi800_members_as_of("2024-02-15", source=Source())
-    assert result["symbols"] == ["000001.SZ", "600000.SH"]
+    assert len(result["symbols"]) == 800
+    assert "600000.SH" in result["symbols"]
+    assert "000000.SZ" in result["symbols"]
+    assert "700000.SH" not in result["symbols"]
     assert set(result["snapshot_dates"].values()) == {"2024-01-31"}
 
 
@@ -166,8 +236,15 @@ def test_snapshot_membership_hash_is_stable_and_serializable(tmp_path):
         index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
         columns=["A", "B"],
     )
-    first = create_snapshot("csi800", "2024-01-01", "2024-01-31", membership=membership)
-    second = create_snapshot("csi800", "2024-01-01", "2024-01-31", membership=membership)
+    panel = {"close": pd.DataFrame(
+        [[1.0, 2.0], [1.1, 2.1]], index=membership.index, columns=membership.columns,
+    )}
+    first = create_snapshot(
+        "csi800", "2024-01-01", "2024-01-31", panel=panel, membership=membership,
+    )
+    second = create_snapshot(
+        "csi800", "2024-01-01", "2024-01-31", panel=panel, membership=membership,
+    )
     assert first.manifest["membership_hash"] == second.manifest["membership_hash"]
     json.dumps(first.to_dict())
 
@@ -405,8 +482,15 @@ def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path,
         }, index=index)
 
     store = BarStore()
-    store.put("A.SH", bars(dates))
-    store.put("B.SH", bars(dates[dates <= "2023-06-30"]))
+    verified = {
+        "status": "verified", "stale": False, "partial": False,
+        "issues": [], "sources": ["test:bars"],
+    }
+    store.put("A.SH", bars(dates), source="test:bars", quality=verified)
+    store.put(
+        "B.SH", bars(dates[dates <= "2023-06-30"]),
+        source="test:bars", quality=verified,
+    )
 
     inspected = inspect_local_dataset("csi800", "2023-01-02", "2023-12-29")
     assert inspected["state"] == "ready"
@@ -425,12 +509,92 @@ def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path,
     assert repeated["cache_hit"] is True
     changed = bars(dates)
     changed.iloc[-1, changed.columns.get_loc("close")] += 1
-    store.put("A.SH", changed, replace=True)
+    store.put("A.SH", changed, replace=True, source="test:bars", quality=verified)
     _panel3, _membership3, refreshed = load_local_dataset(
         "csi800", "2023-01-02", "2023-12-29",
     )
     assert refreshed["cache_hit"] is False
     assert refreshed["snapshot_hash"] != snapshot["snapshot_hash"]
+
+
+def test_local_snapshot_blocks_production_when_bar_quality_is_degraded(
+    tmp_path, monkeypatch,
+) -> None:
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+
+    records = pd.DataFrame([{
+        "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH",
+    }])
+    monkeypatch.setattr(
+        "quantmaster.lab.dataset._cached_membership_records",
+        lambda _start, _end: records.copy(),
+    )
+    dates = pd.bdate_range("2022-06-01", "2023-12-29")
+    base = np.linspace(10.0, 20.0, len(dates))
+    frame = pd.DataFrame({
+        "open": base, "high": base + 0.2, "low": base - 0.2,
+        "close": base + 0.1, "volume": 1_000.0, "amount": 10_000.0,
+    }, index=dates)
+    BarStore().put(
+        "A.SH",
+        frame,
+        source="free-stockdb",
+        quality={
+            "status": "degraded", "stale": False, "partial": False,
+            "issues": ["前复权因子链未验证"], "sources": ["free-stockdb"],
+        },
+    )
+
+    inspected = inspect_local_dataset("csi800", "2023-01-02", "2023-12-29")
+    _panel_value, _membership, snapshot = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+
+    assert inspected["production_eligible"] is False
+    assert inspected["quality_gaps"][0]["status"] == "degraded"
+    assert snapshot["production_eligible"] is False
+    assert snapshot["research_quality"] == "sandbox"
+    assert snapshot["manifest"]["bar_quality"][0]["quality"]["status"] == "degraded"
+
+
+def test_verified_tail_does_not_upgrade_unverified_legacy_history(
+    tmp_path, monkeypatch,
+) -> None:
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+
+    records = pd.DataFrame([{
+        "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH",
+    }])
+    monkeypatch.setattr(
+        "quantmaster.lab.dataset._cached_membership_records",
+        lambda _start, _end: records.copy(),
+    )
+    dates = pd.bdate_range("2022-06-01", "2023-12-29")
+    base = np.linspace(10.0, 20.0, len(dates))
+    store = BarStore()
+    store.put("A.SH", pd.DataFrame({
+        "open": base, "high": base + 0.2, "low": base - 0.2,
+        "close": base + 0.1, "volume": 1_000.0, "amount": 10_000.0,
+    }, index=dates))
+    store.mark_checked(
+        "A.SH",
+        "2023-12-29",
+        "2023-12-29",
+        source="tushare",
+        quality={
+            "status": "verified", "stale": False, "partial": False,
+            "issues": [], "sources": ["tushare"],
+        },
+    )
+
+    inspected = inspect_local_dataset("csi800", "2023-01-02", "2023-12-29")
+
+    assert inspected["production_eligible"] is False
+    evidence = inspected["bars"][0]["quality"]
+    assert evidence["lineage_complete"] is False
+    assert "已验证来源链没有覆盖完整请求区间" in evidence["issues"]
 
 
 def test_indexed_samples_match_legacy_ridge_and_reuse_cube(tmp_path):

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from datetime import date
 
 from quantmaster.automation.models import ActorContext
 from quantmaster.automation.service import AutomationService
+from quantmaster.trading_sessions import market_date
 
 PRESET_NAMES = {"保守": "conservative", "均衡": "balanced", "敏感": "sensitive"}
 PRESET_LABELS = {value: label for label, value in PRESET_NAMES.items()}
@@ -215,7 +215,7 @@ class BotCommandRouter:
             r"([\d.]+)\s*股?\s+(?:价格|@)\s*([\d.]+)(?:\s+费用\s*([\d.]+))?", text, re.I)
         if trade:
             intent = self.service.prepare_ledger(actor, "trade", {
-                "date": str(date.today()), "symbol": trade.group(2),
+                "date": market_date().isoformat(), "symbol": trade.group(2),
                 "side": "buy" if trade.group(1) == "买入" else "sell",
                 "shares": float(trade.group(3)), "price": float(trade.group(4)),
                 "fee": float(trade.group(5) or 0),
@@ -228,7 +228,7 @@ class BotCommandRouter:
         if cash:
             kind = {"入金": "deposit", "出金": "withdraw", "分红": "dividend"}[cash.group(1)]
             intent = self.service.prepare_ledger(actor, "cashflow", {
-                "date": str(date.today()), "amount": float(cash.group(2)), "kind": kind,
+                "date": market_date().isoformat(), "amount": float(cash.group(2)), "kind": kind,
             })
             return (
                 f"现金流预览：{cash.group(1)} {cash.group(2)} 元。\n"

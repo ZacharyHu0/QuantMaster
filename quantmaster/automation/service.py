@@ -27,6 +27,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -968,32 +969,43 @@ class AutomationService:
 
     def _task_intraday_monitor(self) -> dict:
         from quantmaster.data import load_intraday, load_spot
-        from quantmaster.data.universe import load_universe
+        from quantmaster.data.universe import load_universe_analysis
 
         now = pd.Timestamp.now(tz=get_config().automation.timezone).tz_localize(None)
         cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
         start = cutoff - pd.Timedelta(days=35)
-        bars = {
+        bar_envelopes = {
             symbol: load_intraday(symbol, str(start), str(now), "5m")
             for symbol in get_config().automation.sentinel_indices
+        }
+        bars = {
+            symbol: envelope.require_data()
+            for symbol, envelope in bar_envelopes.items()
         }
         latest = [pd.Timestamp(frame.index[-1]) for frame in bars.values() if not frame.empty]
         if not latest or cutoff - min(latest) > pd.Timedelta(minutes=10):
             return {"status": "skipped", "reason": "分钟行情超过 10 分钟未更新"}
-        symbols = load_universe(get_config().automation.primary_universe)
+        symbols = load_universe_analysis(get_config().automation.primary_universe)
         breadth_source = "live"
         warning = ""
         try:
-            spot = load_spot(symbols)
+            spot_envelope = load_spot(symbols)
+            spot = spot_envelope.require_data()
+            if (
+                spot_envelope.quality.status != "verified"
+                or spot_envelope.quality.partial
+                or spot_envelope.quality.stale
+            ):
+                raise RuntimeError(
+                    "实时宽度快照未完整验证："
+                    + "；".join(spot_envelope.quality.issues)
+                )
             changes = pd.to_numeric(spot.get("change_pct"), errors="coerce").dropna()
-            previous = self.store.latest_breadth()
             expected = len(symbols)
-            minimum = max(1, int(expected * 0.6))
-            if previous:
-                minimum = max(minimum, int(previous["sample_size"] * 0.6))
+            minimum = expected
             if len(changes) < minimum:
                 raise RuntimeError(
-                    f"实时宽度样本不完整：{len(changes)}/{expected}，最低要求 {minimum}"
+                    f"实时宽度样本不完整：{len(changes)}/{expected}，要求全量覆盖"
                 )
             ratio = float((changes > 0).mean())
             sample_size = len(changes)
@@ -1020,24 +1032,36 @@ class AutomationService:
             index=pd.to_datetime([row["observed_at"] for row in breadth_rows]),
         )
         event = self.detector.evaluate(bars, breadth, cutoff=cutoff)
+        quality_degraded = any(
+            envelope.quality.status == "degraded" for envelope in bar_envelopes.values()
+        )
+        quality_issues = list(dict.fromkeys(
+            issue
+            for envelope in bar_envelopes.values()
+            for issue in envelope.quality.issues
+        ))
         return {
-            "status": "ok" if breadth_source == "live" else "degraded",
+            "status": "ok" if breadth_source == "live" and not quality_degraded else "degraded",
             "event": self.process_event(event) if event else None,
             "breadth": ratio,
             "sample_size": sample_size,
             "breadth_source": breadth_source,
-            "warning": warning,
+            "warning": warning or ("；".join(quality_issues) if quality_degraded else ""),
+            "data_quality": {
+                symbol: envelope.quality.to_dict()
+                for symbol, envelope in bar_envelopes.items()
+            },
         }
 
     def _news_context(self) -> tuple[set[str], set[str]]:
-        from quantmaster.data.universe import load_universe
+        from quantmaster.data.universe import load_universe_analysis
         from quantmaster.portfolio import AssetListStore, Ledger
 
         holdings = {p.symbol for p in Ledger().positions() if p.shares > 0}
         lists = AssetListStore().all()
         watchlist = set(get_config().automation.watchlist)
         watchlist.update(item["symbol"] for values in lists.values() for item in values)
-        watchlist.update(load_universe(get_config().automation.primary_universe))
+        watchlist.update(load_universe_analysis(get_config().automation.primary_universe))
         return holdings, watchlist
 
     def _scan_news(self, group: str) -> dict:
@@ -1094,24 +1118,58 @@ class AutomationService:
         return AICrawler().recover_dead_letters(limit=20, batch_size=5)
 
     def _task_daily_close_pipeline(self) -> dict:
-        from quantmaster.data import load_panel
-        from quantmaster.data.universe import load_universe
+        from quantmaster.data import load_panel, load_stock_names
+        from quantmaster.data.industry import load_industry_analysis_context
+        from quantmaster.data.universe import load_universe_analysis_snapshot
         from quantmaster.decision import DecisionStore, hybrid_daily_selection
         from quantmaster.market.regime import analyze_market
 
         cfg = get_config().automation
-        end = pd.Timestamp.now().normalize()
+        end = pd.Timestamp(market_date())
         start = end - pd.Timedelta(days=500)
-        symbols = load_universe(cfg.primary_universe)
-        panel = load_panel(symbols, str(start.date()), str(end.date()))
+        universe_snapshot = load_universe_analysis_snapshot(cfg.primary_universe)
+        symbols = list(universe_snapshot.symbols)
+        market_envelope = load_panel(symbols, str(start.date()), str(end.date()))
+        panel = market_envelope.require_data()
+        market_formal = market_envelope.quality.formal_eligible
         latest = pd.Timestamp(panel["close"].dropna(how="all").index[-1]).normalize()
         if latest < end:
             return {"status": "skipped", "reason": "无新 K 线", "latest": str(latest.date())}
+        industry_map, industry_evidence = load_industry_analysis_context()
+        formal_eligible = (
+            market_formal
+            and universe_snapshot.formal_eligible
+            and bool(industry_evidence.get("formal_eligible"))
+        )
+        decision_feature_inputs: dict[str, pd.DataFrame] = {}
         selection = hybrid_daily_selection(
             panel, top_n=10, horizon=3, profile="risk_adjusted",
             universe=cfg.primary_universe,
+            industry_map=industry_map,
+            name_map=load_stock_names(symbols),
+            evidence_sink=decision_feature_inputs,
         )
-        DecisionStore().save(selection, cfg.primary_universe)
+        selection["calculation_quality"] = selection.get("data_quality")
+        selection["data_quality"] = market_envelope.quality.to_dict()
+        selection["market_provenance"] = list(market_envelope.provenance)
+        selection["universe_evidence"] = universe_snapshot.to_dict()
+        selection["industry_evidence"] = industry_evidence
+        persistence = {
+            "requested": True,
+            "saved": formal_eligible,
+            "status": "saved" if formal_eligible else "blocked",
+            "reason": (
+                "" if formal_eligible
+                else "行情、候选池或行业证据未通过正式门；已生成降级分析预览但未写入正式历史"
+            ),
+        }
+        selection["persistence"] = persistence
+        if formal_eligible:
+            DecisionStore().save(
+                selection,
+                cfg.primary_universe,
+                panel={**panel, **decision_feature_inputs},
+            )
         market = analyze_market(panel)
         current = market["current"]
         previous = None
@@ -1120,10 +1178,20 @@ class AutomationService:
                 previous = item["payload"].get("current")
                 break
         event = close_regime_event(current, previous, str(latest.date()))
-        if event:
+        if event and formal_eligible:
             self.process_event(event)
-        return {"status": "ok", "signal_date": selection["signal_date"],
-                "picks": len(selection["picks"]), "market": current}
+        return {
+            "status": "ok" if formal_eligible else "degraded",
+            "reason": persistence["reason"],
+            "signal_date": selection["signal_date"],
+            "picks": len(selection["picks"]),
+            "preview_picks": selection["picks"][:10],
+            "market": current,
+            "data_quality": market_envelope.quality.to_dict(),
+            "universe_evidence": universe_snapshot.to_dict(),
+            "industry_evidence": industry_evidence,
+            "persistence": persistence,
+        }
 
     def _task_news_digest(self) -> dict:
         items = [
@@ -1194,6 +1262,7 @@ class AutomationService:
 
     def prepare_ledger(self, actor: ActorContext, entry_type: str, payload: dict) -> dict:
         self.require_owner(actor, private=True)
+        value: dict[str, Any]
         if entry_type == "trade":
             from quantmaster.data.universe import normalize_symbol
             value = {

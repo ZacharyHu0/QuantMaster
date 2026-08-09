@@ -279,7 +279,8 @@ class StockDBIngestStore:
             (
                 item
                 for item in self.history(self.retain + 20)
-                if item.provenance.get("cache_key") == cache_key and item.status == "complete"
+                if item.provenance.get("cache_key") == cache_key
+                and item.status in {"complete", "degraded"}
             ),
             None,
         )
@@ -338,6 +339,8 @@ class StockDBIngestStore:
         catalog_snapshot: StockDBCatalogSnapshot | None = None,
         session_dates: list[str] | tuple[str, ...] = (),
         session_source: str = "",
+        status: str = "complete",
+        issues: list[str] | tuple[str, ...] = (),
     ) -> StockDBIngestSnapshot:
         with self._lock:
             hashes = {
@@ -364,6 +367,8 @@ class StockDBIngestStore:
                 "catalog_id": catalog_snapshot.snapshot_id if catalog_snapshot else "",
                 "session_dates": list(session_dates),
                 "session_source": session_source,
+                "status": status,
+                "issues": list(issues),
             }
             ingest_id = "sdi_" + content_hash(logical)[:24]
             snapshot = StockDBIngestSnapshot(
@@ -380,6 +385,8 @@ class StockDBIngestStore:
                 catalog_id=catalog_snapshot.snapshot_id if catalog_snapshot else "",
                 session_dates=tuple(session_dates),
                 session_source=session_source,
+                status=status,
+                issues=tuple(issues),
             )
             path = self.manifests / f"{ingest_id}.json"
             encoded = json.dumps(
@@ -601,7 +608,8 @@ class StockDBIngestService:
         )
         missing = sorted(set(master_by_symbol) - vendor_symbols) if catalog else []
         coverage = {
-            "upstream": "tushare",
+            "upstream": "vendor-declared-unverified",
+            "upstream_evidence": "not_provided",
             "distribution": "free-stockdb",
             "independent_cross_validation": False,
             "master_symbols": len(master),
@@ -887,28 +895,45 @@ class StockDBIngestService:
             end_stamp.date().isoformat(),
         )
         session_source = "tushare:SSE" if official_sessions else "stockdb_broad_coverage"
+        calendar_issues = [] if official_sessions else [
+            "缺少独立权威交易日历；StockDB 广泛覆盖日期不能证明全市场未漏整日"
+        ]
         available_dates = (
             set(pd.to_datetime(frame.get("date"), errors="coerce").dropna().dt.strftime("%Y-%m-%d"))
             if "date" in frame
             else set()
         )
-        session_dates = [
-            value for value in (official_sessions or broad_sessions) if value in available_dates
-        ][-history_sessions:]
-        if len(session_dates) < history_sessions:
+        expected_session_dates = list(official_sessions or broad_sessions)[-history_sessions:]
+        observed_session_dates = [
+            value for value in expected_session_dates if value in available_dates
+        ]
+        if (
+            len(expected_session_dates) < history_sessions
+            or len(observed_session_dates) < len(expected_session_dates)
+        ):
+            missing_sessions = [
+                value for value in expected_session_dates if value not in available_dates
+            ]
             coverage = {
                 "status": "rejected",
                 "required_history_sessions": history_sessions,
-                "observed_history_sessions": len(session_dates),
+                "expected_session_dates": expected_session_dates,
+                "observed_session_dates": observed_session_dates,
+                "missing_session_dates": missing_sessions,
+                "observed_history_sessions": len(observed_session_dates),
                 "history_window_start": requested_start.date().isoformat(),
                 "history_window_end": end_stamp.date().isoformat(),
                 "session_source": session_source,
             }
             raise StockDBIngestRejected(
-                [f"A 股广泛覆盖摄取只有 {len(session_dates)}/{history_sessions} 个已完成交易日"],
+                [
+                    "A 股广泛覆盖摄取只有 "
+                    f"{len(observed_session_dates)}/{history_sessions} 个权威预期交易日"
+                ],
                 coverage,
-                session_dates[-1] if session_dates else "",
+                observed_session_dates[-1] if observed_session_dates else "",
             )
+        session_dates = expected_session_dates
         frame_dates = pd.to_datetime(frame["date"], errors="coerce").dt.strftime("%Y-%m-%d")
         frame = frame.loc[frame_dates.isin(session_dates)].copy()
         as_of_date, coverage = validator(frame, boards, len(symbols))
@@ -917,7 +942,9 @@ class StockDBIngestService:
                 "required_history_sessions": history_sessions,
                 "observed_history_sessions": len(session_dates),
                 "session_dates": session_dates,
+                "observed_session_dates": observed_session_dates,
                 "session_source": session_source,
+                "calendar_status": "verified" if official_sessions else "degraded",
                 "history_window_start": session_dates[0],
                 "history_window_end": session_dates[-1],
             }
@@ -945,10 +972,22 @@ class StockDBIngestService:
         if callable(factor_reader):
             try:
                 adjustment = factor_reader(symbols, session_dates[0], end)
-                coverage["adjustment_factor_symbols"] = int(
-                    adjustment["symbol"].nunique() if not adjustment.empty else 0
+                covered_factor_symbols = (
+                    set(adjustment["symbol"].astype(str)) if not adjustment.empty else set()
                 )
+                missing_factor_symbols = sorted(set(symbols) - covered_factor_symbols)
+                coverage["adjustment_factor_symbols"] = len(covered_factor_symbols)
+                coverage["adjustment_factor_missing_symbols"] = missing_factor_symbols
+                if missing_factor_symbols:
+                    coverage["price_adjustment_status"] = "degraded"
+                    coverage.setdefault("issues_non_blocking", []).append(
+                        f"{len(missing_factor_symbols)} 只证券缺少可验证复权因子；研究价保留原价并显式降级"
+                    )
+                else:
+                    coverage["price_adjustment_status"] = "verified"
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                coverage["price_adjustment_status"] = "degraded"
+                coverage["adjustment_factor_missing_symbols"] = list(symbols)
                 coverage.setdefault("issues_non_blocking", []).append(f"复权因子未能归档：{str(exc)[:160]}")
         catalog_snapshot = self.catalog_snapshot(
             catalog=catalog,
@@ -975,7 +1014,8 @@ class StockDBIngestService:
                 "source": self.source.name,
                 "cache_key": cache_key,
                 "ingest_schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
-                "upstream": "tushare",
+                "upstream": "vendor-declared-unverified",
+                "upstream_evidence": "not_provided",
                 "distribution": "free-stockdb",
                 "artifact": artifact.to_dict(),
                 "sdk_version": (
@@ -988,20 +1028,40 @@ class StockDBIngestService:
             catalog_snapshot=catalog_snapshot,
             session_dates=session_dates,
             session_source=session_source,
+            status="degraded" if calendar_issues else "complete",
+            issues=calendar_issues,
         )
         return snapshot, self._research_prices(frame, adjustment), boards, False
 
     @staticmethod
     def _research_prices(frame: pd.DataFrame, adjustment: pd.DataFrame) -> pd.DataFrame:
         """Derive stable qfq research prices while leaving the archived frame raw."""
-        if frame.empty or adjustment.empty:
+        if frame.empty:
             return frame
+        if adjustment.empty:
+            value = frame.copy()
+            value["price_adjustment"] = "raw_missing_factor"
+            value["adjustment_status"] = "degraded"
+            return value
         factors = adjustment[["symbol", "date", "adj_factor"]].copy()
         factors["date"] = pd.to_datetime(factors["date"], errors="coerce")
         factors["adj_factor"] = pd.to_numeric(factors["adj_factor"], errors="coerce")
-        factors = factors.dropna().sort_values(["date", "symbol"])
+        factors = factors.dropna().sort_values(["date", "symbol"], kind="mergesort")
+        duplicate = factors.duplicated(["symbol", "date"], keep=False)
+        if duplicate.any():
+            conflicts = (
+                factors.loc[duplicate]
+                .groupby(["symbol", "date"])["adj_factor"]
+                .nunique()
+            )
+            if bool(conflicts.gt(1).any()):
+                raise ValueError("复权因子存在同证券同日冲突值")
+            factors = factors.drop_duplicates(["symbol", "date"], keep="last")
         if factors.empty:
-            return frame
+            value = frame.copy()
+            value["price_adjustment"] = "raw_missing_factor"
+            value["adjustment_status"] = "degraded"
+            return value
         value = frame.copy()
         value["date"] = pd.to_datetime(value["date"], errors="coerce")
         value = pd.merge_asof(
@@ -1013,10 +1073,19 @@ class StockDBIngestService:
         )
         latest = factors.groupby("symbol", sort=False)["adj_factor"].last()
         denominator = value["symbol"].map(latest)
-        scale = value["adj_factor"].fillna(1.0).div(denominator).replace([np.inf, -np.inf], np.nan)
-        scale = scale.fillna(1.0)
+        verified = (
+            value["adj_factor"].notna()
+            & value["adj_factor"].gt(0)
+            & denominator.notna()
+            & denominator.gt(0)
+        )
+        scale = value["adj_factor"].div(denominator).replace([np.inf, -np.inf], np.nan)
         for column in ("open", "high", "low", "close", "pre_close"):
             if column in value:
-                value[column] = pd.to_numeric(value[column], errors="coerce") * scale
-        value["price_adjustment"] = "qfq_from_frozen_factor_v1"
+                raw = pd.to_numeric(value[column], errors="coerce")
+                value[column] = raw.where(~verified, raw * scale)
+        value["price_adjustment"] = np.where(
+            verified, "qfq_from_frozen_factor_v1", "raw_missing_factor",
+        )
+        value["adjustment_status"] = np.where(verified, "verified", "degraded")
         return value.drop(columns=["adj_factor"]).sort_values(["symbol", "date"]).reset_index(drop=True)

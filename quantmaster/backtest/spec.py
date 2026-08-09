@@ -10,6 +10,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.trading_sessions import market_date
 
 
 def canonical_json(value: object) -> str:
@@ -136,7 +137,7 @@ class BacktestSpec(ContractModel):
     def validate_dates(self):
         try:
             start = date.fromisoformat(self.start)
-            end = date.fromisoformat(self.end) if self.end else date.today()
+            end = date.fromisoformat(self.end) if self.end else market_date()
         except ValueError as exc:
             raise ValueError("开始和结束日期必须使用 YYYY-MM-DD 格式") from exc
         if start >= end:
@@ -187,6 +188,7 @@ def pin_decision_strategy(
                 symbols = None
         snapshot = resolve_policy(
             universe, spec.holding_days, spec.profile, symbols=symbols,
+            mode="retrospective",
         )
         return spec.model_copy(update={"policy_snapshot": snapshot})
     snapshot = dict(spec.policy_snapshot)

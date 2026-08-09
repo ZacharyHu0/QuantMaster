@@ -6,15 +6,21 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quantmaster.data.instrument_snapshots import (
+    TUSHARE_CATALOG_QUERY,
+    freeze_instrument_catalog,
+)
 from quantmaster.data.instruments import Instrument
 from quantmaster.data.resilience import PROVIDER_HEALTH
 from quantmaster.rotation.analytics import estimate_etf_flows
+from quantmaster.rotation.etf_research import etf_directory_master_hash
 from quantmaster.rotation.provider import (
     RotationProvider,
     ThemeSourceUnavailable,
     _broad_etf_category,
 )
 from quantmaster.rotation.store import RotationStore
+from tests.catalog_evidence_helpers import bound_tushare_catalog
 
 
 class FakeTushare:
@@ -169,9 +175,14 @@ def test_broad_etf_classifier_rejects_sector_and_offshore_products():
 def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monkeypatch):
     store = RotationStore(tmp_path / "rotation")
     provider = RotationProvider(store, FakeTushare())
-    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
-        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
-    ))
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date",
+        lambda: pd.Timestamp("2026-07-30").date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_now",
+        lambda: pd.Timestamp("2026-07-30T15:10:00+08:00").to_pydatetime(),
+    )
     result = provider.sync_etf_observations(lambda *args: None, lambda: False)
     observations = store.etf_observations()
     metadata = store.etf_metadata()
@@ -201,9 +212,10 @@ def test_provider_directly_falls_back_from_known_denied_etf_endpoints(
         RuntimeError("etf_share_size permission denied"),
         immediate=True,
     )
-    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
-        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
-    ))
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date",
+        lambda: pd.Timestamp("2026-07-30").date(),
+    )
     source = FakeTushare()
     provider = RotationProvider(RotationStore(tmp_path / "rotation"), source)
 
@@ -234,9 +246,14 @@ def test_provider_marks_close_fallback_when_fund_nav_is_unavailable(tmp_path, mo
 
     store = RotationStore(tmp_path / "rotation")
     provider = RotationProvider(store, FakeNoNav())
-    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
-        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
-    ))
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date",
+        lambda: pd.Timestamp("2026-07-30").date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_now",
+        lambda: pd.Timestamp("2026-07-30T15:10:00+08:00").to_pydatetime(),
+    )
     provider.sync_etf_observations(lambda *args: None, lambda: False)
     result = estimate_etf_flows(store.etf_observations())
 
@@ -301,6 +318,17 @@ def test_provider_persists_stockdb_metadata_before_remote_sources(tmp_path):
                     asset_type="etf",
                     list_date="20111209",
                 ),
+                Instrument(
+                    symbol="510880.SH",
+                    code="510880",
+                    name="红利ETF",
+                    market="CN",
+                    exchange="SH",
+                    asset_type="etf",
+                    status="delisted",
+                    list_date="20070118",
+                    delist_date="20260831",
+                ),
             ]
 
     class OfflineSource:
@@ -322,18 +350,138 @@ def test_provider_persists_stockdb_metadata_before_remote_sources(tmp_path):
         provider.sync_etf_observations(lambda *_: None, lambda: False)
 
     metadata = store.etf_metadata()
-    assert metadata["symbol"].tolist() == ["159915.SZ", "510300.SH"]
+    assert metadata["symbol"].tolist() == ["159915.SZ", "510300.SH", "510880.SH"]
     assert metadata["metadata_source"].eq("free-stockdb:security-master").all()
     assert metadata["name"].notna().all()
     assert metadata["normalized_index"].notna().all()
+    assert not metadata["directory_complete"].any()
+    assert metadata["directory_expected_symbols"].eq(0).all()
+    assert metadata["directory_observed_symbols"].eq(0).all()
+    assert metadata["directory_snapshot_id"].nunique() == 1
+    assert metadata.loc[metadata["symbol"].eq("510880.SH"), "delist_date"].iloc[0] == "20260831"
+    assert metadata["directory_quality_reason"].str.contains("Tushare").all()
+
+
+def test_one_row_etf_master_cannot_self_attest_completeness(tmp_path, monkeypatch):
+    acquired = pd.Timestamp("2026-08-09T15:01:00+08:00")
+    instrument = Instrument(
+        symbol="510300.SH",
+        code="510300",
+        name="沪深300ETF",
+        market="CN",
+        exchange="SH",
+        asset_type="etf",
+        status="listed",
+        source="tushare:catalog",
+        list_date="20120528",
+        observed_at=acquired.timestamp(),
+    )
+
+    class PartialMaster:
+        @staticmethod
+        def list(*, market=""):
+            return [instrument]
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_now", lambda: acquired.to_pydatetime()
+    )
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(
+        store,
+        object(),
+        instrument_store=PartialMaster(),
+    )
+
+    metadata = provider._local_etf_metadata(pd.DataFrame(), pd.Timestamp("2026-08-09"))
+
+    assert len(metadata) == 1
+    assert metadata["directory_complete"].eq(False).all()
+    assert "不可变 Tushare" in metadata.iloc[0]["directory_quality_reason"]
+    assert metadata["directory_expected_symbols"].eq(0).all()
+
+
+def test_etf_directory_binds_trusted_same_cutoff_master_batch(tmp_path, monkeypatch):
+    acquired = pd.Timestamp("2026-08-09T15:01:00+08:00")
+    etfs = [
+        {
+            "symbol": f"{510000 + index:06d}.SH",
+            "name": f"样本{index}ETF",
+            "market": "CN",
+            "exchange": "SH",
+            "asset_type": "etf",
+            "status": "L",
+            "list_date": "20200101",
+            "delist_date": "",
+        }
+        for index in range(100)
+    ]
+    stocks = [
+        {
+            "symbol": f"{600000 + index:06d}.SH",
+            "name": f"样本股票{index}",
+            "market": "CN",
+            "exchange": "SH",
+            "asset_type": "stock",
+            "status": "L",
+            "list_date": "20200101",
+            "delist_date": "",
+        }
+        for index in range(3_000)
+    ]
+    catalog_records, catalog_outcomes = bound_tushare_catalog([*stocks, *etfs])
+    snapshot = freeze_instrument_catalog(
+        catalog_records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=catalog_outcomes,
+        acquired_at=acquired.to_pydatetime(),
+    )
+
+    class DeliberatelyPartialMutableMaster:
+        @staticmethod
+        def list(*, market=""):
+            return [
+                Instrument(
+                    "510000.SH", "510000", "可变主表仅一只", "CN", "SH", "etf"
+                )
+            ]
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_now", lambda: acquired.to_pydatetime()
+    )
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(
+        store,
+        object(),
+        instrument_store=DeliberatelyPartialMutableMaster(),
+    )
+
+    metadata = provider._local_etf_metadata(pd.DataFrame(), pd.Timestamp("2026-08-09"))
+
+    assert metadata["directory_complete"].all()
+    assert metadata["directory_source"].eq("tushare:catalog").all()
+    assert metadata["directory_freshness"].eq("fresh").all()
+    assert metadata["directory_master_record_count"].eq(
+        snapshot.manifest["record_count"]
+    ).all()
+    assert metadata["directory_master_batch_record_count"].eq(
+        snapshot.manifest["record_count"]
+    ).all()
+    assert metadata["directory_expected_symbols"].eq(100).all()
+    assert metadata["directory_master_snapshot_sha256"].eq(snapshot.snapshot_id).all()
+    assert metadata["directory_catalog_file_sha256"].eq(snapshot.file_sha256).all()
+    assert etf_directory_master_hash(metadata) == metadata.iloc[0][
+        "directory_attestation_sha256"
+    ]
 
 
 def test_provider_skips_missing_stockdb_calendar_and_continues_remote_sync(
     tmp_path, monkeypatch,
 ):
-    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
-        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
-    ))
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date",
+        lambda: pd.Timestamp("2026-07-30").date(),
+    )
     store = RotationStore(tmp_path / "rotation")
     provider = RotationProvider(store, FakeTushare(), local_source=object())
 
@@ -356,9 +504,10 @@ def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
         "code": "EM_OLD", "name": "东方财富旧目录", "members": ["600000.SH"],
         "aliases": [], "source": "eastmoney-concept",
     }])
-    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
-        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
-    ))
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date",
+        lambda: pd.Timestamp("2026-07-30").date(),
+    )
     provider = RotationProvider(store, FakeTushare())
     monkeypatch.setattr(
         "quantmaster.rotation.provider.akshare_call",

@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+from quantmaster.data.universe import UniverseSnapshot
 from quantmaster.release import RELEASE_DATE
 from quantmaster.runtime.process import run_process
 from quantmaster.server.app import app
@@ -19,6 +21,46 @@ from quantmaster.server.app import app
 client = TestClient(app)
 _csrf = client.get("/api/v1/session").json()["csrf_token"]
 client.headers["X-CSRF-Token"] = _csrf
+
+
+def _verified_market_data(data, *, start="2023-01-01", end="2026-08-08", symbols=()):
+    quality = BarDataQuality(
+        status="verified",
+        requested_start=start,
+        requested_end=end,
+        observed_start=start,
+        observed_end=end,
+        coverage_ratio=1.0,
+        calendar_source="test-calendar",
+        sources=("test-source",),
+        timezone="Asia/Shanghai",
+        adjustment="verified",
+        requested_symbols=tuple(symbols),
+        observed_symbols=tuple(symbols),
+    )
+    return BarDataEnvelope(
+        data=data,
+        quality=quality,
+        provenance=({"source": "test-source", "evidence": "fixture"},),
+    )
+
+
+def _unavailable_market_data(data, *, symbols=()):
+    return BarDataEnvelope(
+        data=data,
+        quality=BarDataQuality(
+            status="unavailable",
+            requested_start="2026-08-01",
+            requested_end="2026-08-08",
+            coverage_ratio=0.0,
+            sources=("test-source",),
+            issues=("all sources returned no rows",),
+            partial=True,
+            requested_symbols=tuple(symbols),
+            missing_symbols=tuple(symbols),
+        ),
+        provenance=({"source": "test-source", "outcome": "empty"},),
+    )
 
 
 class TestBasics:
@@ -54,7 +96,9 @@ class TestBasics:
 
         def fake_load(symbol, start, end, *, frequency):
             calls.append((symbol, start, end, frequency))
-            return frame
+            return _verified_market_data(
+                frame, start=start, end=end, symbols=(symbol,),
+            )
 
         monkeypatch.setattr("quantmaster.data.load_bars", fake_load)
         response = client.get(
@@ -63,11 +107,37 @@ class TestBasics:
 
         assert response.status_code == 200
         assert calls == [("600519.SH", "2023-08-08", "2026-08-08", "1d")]
-        assert response.json() == {
-            "symbol": "600519.SH",
-            "frequency": "1d",
-            "kline": [["2026-08-07", 10.123, 10.988, 9.877, 11.235, 1234.0]],
-        }
+        payload = response.json()
+        assert payload["symbol"] == "600519.SH"
+        assert payload["frequency"] == "1d"
+        assert payload["kline"] == [
+            ["2026-08-07", 10.123, 10.988, 9.877, 11.235, 1234.0]
+        ]
+        assert payload["data_quality"]["status"] == "verified"
+        assert payload["provenance"] == [
+            {"source": "test-source", "evidence": "fixture"}
+        ]
+
+    def test_market_history_unavailable_preserves_truth_contract(self, monkeypatch):
+        monkeypatch.setattr(
+            "quantmaster.data.load_bars",
+            lambda *_args, **_kwargs: _unavailable_market_data(
+                pd.DataFrame(), symbols=("600519.SH",),
+            ),
+        )
+
+        response = client.get(
+            "/api/v1/market/history/600519.SH?start=2026-08-01&end=2026-08-08",
+        )
+
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["problem"]["code"] == "market_data_unavailable"
+        assert payload["data_quality"]["status"] == "unavailable"
+        assert payload["data_quality"]["missing_symbols"] == ["600519.SH"]
+        assert payload["provenance"] == [
+            {"source": "test-source", "outcome": "empty"}
+        ]
 
     def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
         monkeypatch.setattr(
@@ -367,6 +437,14 @@ class TestBasics:
         assert "window.QuantMasterProblemDialog" in app_script
         assert "window.QuantMasterNDJSON" in app_script
         assert "runtimeInfo.sync('health'" in app_script
+        assert "function ingestDataQuality" in app_script
+        assert "function dataProvenanceSummary" in app_script
+        assert "Object.entries(quality.units)" in app_script
+        assert "if (data.data_quality) ingestDataQuality(data" in app_script
+        assert "数据来源与口径已验证" in app_script
+        assert "证据链" in app_script
+        assert "使用降级数据继续计算" in app_script
+        assert "effective_as_of || quality.observed_end" in app_script
         assert 'id="operation-problem-dialog"' in resp.text
         assert 'data-runtime-filter="problem"' in resp.text
         assert 'data-runtime-filter="running"' in resp.text
@@ -706,7 +784,17 @@ class TestBasics:
                 for rank, symbol in enumerate(symbols, start=1)
             ],
         }
-        DecisionStore().save(report, "demo")
+        DecisionStore().save(
+            report,
+            "demo",
+            panel={
+                "close": pd.DataFrame(
+                    [[10.0]],
+                    index=pd.to_datetime(["2026-08-03"]),
+                    columns=[symbols[0]],
+                ),
+            },
+        )
         dates = pd.to_datetime(["2026-08-03", "2026-08-04", "2026-08-05"])
         closes = ([9.8, 10.5, 12.0], [20.1, 19.0, 18.0], [30.0, 30.3, 30.0])
         opens = ([9.7, 10.0, 11.0], [20.2, 20.0, 19.0], [30.1, 30.0, 30.2])
@@ -737,7 +825,15 @@ class TestBasics:
 
         dates = pd.bdate_range("2026-07-20", periods=3)
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
-        monkeypatch.setattr("quantmaster.data.load_history", lambda *args, **kwargs: frame)
+        monkeypatch.setattr(
+            "quantmaster.data.load_history",
+            lambda *args, **kwargs: _verified_market_data(
+                frame,
+                start=str(dates[0].date()),
+                end=str(dates[-1].date()),
+                symbols=(str(args[0]),),
+            ),
+        )
         monkeypatch.setattr(
             app_module,
             "_sync_reference_market",
@@ -831,17 +927,39 @@ class TestBasics:
         mapping = {symbol: "行业A" if i < 4 else "行业B"
                    for i, symbol in enumerate(symbols)}
         names = {symbol: f"股票{i}" for i, symbol in enumerate(symbols)}
-        monkeypatch.setattr("quantmaster.data.universe.load_universe", lambda name: symbols)
+        universe_snapshot = UniverseSnapshot(
+            name="demo",
+            symbols=tuple(symbols),
+            observed_at="2023-01-01T00:00:00+00:00",
+            effective_as_of="2023-01-01",
+            content_hash="fixture-universe",
+            source="fixture",
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe_analysis_snapshot",
+            lambda _name, **_kwargs: universe_snapshot,
+        )
         def load_panel_with_progress(*args, **kwargs):
             callback = kwargs.get("progress")
             if callback:
                 for index, symbol in enumerate(symbols, start=1):
                     callback(index, len(symbols), symbol, True)
-            return panel
+            return _verified_market_data(
+                panel,
+                start=str(args[1]),
+                end=str(args[2]),
+                symbols=tuple(args[0]),
+            )
 
         monkeypatch.setattr("quantmaster.data.load_panel", load_panel_with_progress)
         monkeypatch.setattr("quantmaster.data.load_stock_names", lambda values: names)
-        monkeypatch.setattr("quantmaster.data.industry.load_industry_map", lambda: mapping)
+        monkeypatch.setattr(
+            "quantmaster.data.industry.load_industry_analysis_context",
+            lambda **_kwargs: (mapping, {
+                "status": "verified", "content_hash": "fixture-industry",
+                "formal_eligible": True, "issues": [],
+            }),
+        )
 
         resp = client.post("/api/v1/research/decision/dashboard", json={
             "universe": "demo", "start": "2023-01-01", "top_n": 4,
@@ -851,6 +969,8 @@ class TestBasics:
         data = resp.json()
         assert set(data) == {
             "market", "selection", "history", "model_snapshot", "data_quality",
+            "calculation_quality", "provenance", "persistence",
+            "universe_evidence", "industry_evidence",
         }
         assert data["market"]["current"]["state"] in {
             "strong_up", "up", "range", "down", "strong_down"}
@@ -903,6 +1023,41 @@ class TestBasics:
         ) < 100
         result = next(event["data"] for event in events if event["type"] == "result")
         assert len(result["selection"]["picks"]) == 4
+
+    def test_decision_stream_unavailable_preserves_truth_contract(self, monkeypatch):
+        symbols = ["600000.SH", "000001.SZ"]
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe_analysis_snapshot",
+            lambda _name, **_kwargs: UniverseSnapshot(
+                name="demo",
+                symbols=tuple(symbols),
+                observed_at="2026-08-01T00:00:00+00:00",
+                effective_as_of="2026-08-01",
+                content_hash="fixture-universe",
+                source="fixture",
+            ),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.load_panel",
+            lambda *_args, **_kwargs: _unavailable_market_data(
+                {}, symbols=tuple(symbols),
+            ),
+        )
+
+        response = client.post(
+            "/api/v1/research/decision/dashboard/stream",
+            json={"universe": "demo", "start": "2026-08-01", "save": True},
+        )
+
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        error = next(event for event in events if event["type"] == "error")
+        assert error["problem"]["code"] == "market_data_unavailable"
+        assert error["data_quality"]["status"] == "unavailable"
+        assert error["data_quality"]["missing_symbols"] == symbols
+        assert error["provenance"] == [
+            {"source": "test-source", "outcome": "empty"}
+        ]
 
 
 class TestLedgerAPI:

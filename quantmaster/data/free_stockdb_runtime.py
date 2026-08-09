@@ -24,6 +24,7 @@ import httpx
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -768,7 +769,7 @@ class FreeStockDBRuntime:
             parsed = date.fromisoformat(str(value or "")[:10])
         except ValueError:
             return ""
-        return parsed.isoformat() if parsed <= date.today() else ""
+        return parsed.isoformat() if parsed <= market_date() else ""
 
     def _target_session(self, *, force_notice: bool = False) -> tuple[str, str]:
         notice = self.check_vendor_notice(force=force_notice)
@@ -787,6 +788,7 @@ class FreeStockDBRuntime:
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:
         """Validate a target-date full-market slice without publishing research."""
+        import numpy as np
         import pandas as pd
 
         from quantmaster.data.free_stockdb_source import FreeStockDBSource
@@ -830,22 +832,72 @@ class FreeStockDBRuntime:
         actual = dates.max()
         result["actual_session"] = "" if pd.isna(actual) else actual.date().isoformat()
         latest = frame.loc[dates.dt.date == target]
-        observed = int(latest["symbol"].nunique()) if not latest.empty else 0
-        symbol_ratio = observed / len(symbols) if symbols else 0.0
+        observed_symbols = set(latest["symbol"].dropna().astype(str).str.upper())
+        missing_symbols = set(symbols) - observed_symbols
+        suspension_evidence: dict[str, Any] = {}
+        excused_suspensions: set[str] = set()
+        suspension_error = ""
+        if missing_symbols and get_config().data.tushare_token:
+            try:
+                from quantmaster.data.instrument_snapshots import (
+                    load_or_fetch_suspension_snapshot,
+                )
+                from quantmaster.data.tushare_source import TushareSource
+
+                suspension_evidence = load_or_fetch_suspension_snapshot(
+                    TushareSource(), target_session,
+                )
+                excused_suspensions = missing_symbols & {
+                    str(value).upper()
+                    for value in suspension_evidence.get("symbols") or ()
+                }
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                suspension_error = f"Tushare suspend_d 停牌证据不可用：{str(exc)[:240]}"
+        expected_trading = set(symbols) - excused_suspensions
+        observed = len(observed_symbols & expected_trading)
+        symbol_ratio = observed / len(expected_trading) if expected_trading else 1.0
         required = ["open", "high", "low", "close", "volume"]
-        required_ratio = (
-            float(latest[required].notna().all(axis=1).mean())
-            if not latest.empty and all(column in latest for column in required) else 0.0
-        )
+        valid_required = pd.Series(False, index=latest.index)
+        invalid_finite = invalid_ohlc = invalid_volume = len(latest)
+        if not latest.empty and all(column in latest for column in required):
+            numeric = latest[required].apply(pd.to_numeric, errors="coerce")
+            finite = numeric.map(np.isfinite).all(axis=1)
+            prices = numeric[["open", "high", "low", "close"]]
+            positive_prices = prices.gt(0).all(axis=1)
+            ohlc_consistent = (
+                numeric["high"].ge(prices[["open", "close"]].max(axis=1))
+                & numeric["low"].le(prices[["open", "close"]].min(axis=1))
+                & numeric["high"].ge(numeric["low"])
+            )
+            nonnegative_volume = numeric["volume"].ge(0)
+            valid_required = finite & positive_prices & ohlc_consistent & nonnegative_volume
+            invalid_finite = int((~finite).sum())
+            invalid_ohlc = int((~(positive_prices & ohlc_consistent)).sum())
+            invalid_volume = int((~nonnegative_volume).sum())
+        required_ratio = float(valid_required.mean()) if len(valid_required) else 0.0
         issues = []
-        if symbol_ratio < 0.80:
-            issues.append(f"目标日截面仅覆盖 {observed}/{len(symbols)} 只证券")
-        if required_ratio < 0.95:
+        if symbol_ratio < 1.0:
+            issues.append(
+                f"目标日截面仅覆盖 {observed}/{len(expected_trading)} 只应交易证券；"
+                "其余缺失标的没有停牌/退市证据"
+            )
+        if suspension_error:
+            issues.append(suspension_error)
+        if required_ratio < 1.0:
             issues.append(f"目标日完整 OHLCV 比例仅 {required_ratio:.1%}")
         result.update({
+            "catalog_symbols": len(symbols),
+            "expected_trading_symbols": len(expected_trading),
             "observed_symbols": observed,
             "symbol_ratio": round(symbol_ratio, 6),
+            "excused_suspended_symbols": sorted(excused_suspensions),
+            "suspension_evidence": suspension_evidence,
             "required_ohlcv_ratio": round(required_ratio, 6),
+            "invalid_ohlcv": {
+                "nonfinite_rows": invalid_finite,
+                "price_or_ohlc_rows": invalid_ohlc,
+                "negative_volume_rows": invalid_volume,
+            },
             "complete": not issues,
             "issues": issues,
         })
@@ -926,7 +978,7 @@ class FreeStockDBRuntime:
             next_retry_at="", validation=validation, managed=self._is_managed(),
         )
         if automatic:
-            self._emit_update_event("update_failed", target or date.today().isoformat(), {
+            self._emit_update_event("update_failed", target or market_date().isoformat(), {
                 "target_session": target, "validation": validation,
                 "attempt": attempt, "message": message,
             })

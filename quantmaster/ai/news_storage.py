@@ -15,21 +15,38 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-NEWS_SCHEMA_VERSION = 1
+from quantmaster.ai.news_contracts import (
+    article_evidence_binding_hash,
+    news_content_hash,
+    read_raw_evidence,
+)
+
+NEWS_SCHEMA_VERSION = 7
 
 _NEWS_COLUMNS = {
     "importance_score": "REAL DEFAULT 0",
+    # v5 separates immutable, point-in-time factor evidence from mutable
+    # portfolio/watchlist alert context.  Legacy importance cannot be promoted
+    # into either formal factor field because neither its analysis-time source
+    # weight nor its pre-context value can be proven.
+    "factor_importance_score": "REAL DEFAULT NULL",
+    "factor_weight_at_analysis": "REAL DEFAULT NULL",
+    "alert_importance_score": "REAL NOT NULL DEFAULT 0",
     "scope": "TEXT DEFAULT ''",
     "urgency": "TEXT DEFAULT ''",
     "confidence": "REAL DEFAULT 0",
     "sectors": "TEXT DEFAULT '[]'",
     "fingerprint": "TEXT DEFAULT ''",
     "is_official": "INTEGER DEFAULT 0",
+    "content_scope": "TEXT DEFAULT 'unknown'",
     "source_id": "TEXT DEFAULT ''",
     "content_hash": "TEXT DEFAULT ''",
     "first_seen_at": "REAL DEFAULT 0",
     "last_seen_at": "REAL DEFAULT 0",
     "raw_cache_key": "TEXT DEFAULT ''",
+    "evidence_binding_hash": "TEXT DEFAULT ''",
+    "ingest_window_id": "TEXT DEFAULT ''",
+    "ingest_batch_id": "TEXT DEFAULT ''",
     "analysis_status": "TEXT DEFAULT 'pending'",
     "analysis_attempts": "INTEGER DEFAULT 0",
     "analysis_error": "TEXT DEFAULT ''",
@@ -39,18 +56,21 @@ _NEWS_COLUMNS = {
     "analysis_recovery_count": "INTEGER DEFAULT 0",
     "last_failure_code": "TEXT DEFAULT ''",
     "analysis_updated_at": "REAL DEFAULT 0",
+    "content_version_at": "REAL DEFAULT 0",
+    "published_at_epoch": "REAL DEFAULT 0",
+    "fetched_at": "REAL DEFAULT 0",
+    "provider_item_id": "TEXT DEFAULT ''",
 }
 
 
-def news_fingerprint(source: str, title: str, url: str, published_at: str) -> str:
+def news_fingerprint(
+    source: str, title: str, url: str, published_at: str, provider_item_id: str = "",
+) -> str:
     normalized_title = re.sub(r"\W+", "", title.casefold())
-    identity = f"{url.strip().lower()}|{normalized_title}|{published_at.strip()}"
+    identity = provider_item_id.strip() or (
+        f"{url.strip().lower()}|{normalized_title}|{published_at.strip()}"
+    )
     return hashlib.sha256(f"{source}|{identity}".encode()).hexdigest()
-
-
-def news_content_hash(content: str, title: str) -> str:
-    text = re.sub(r"\s+", "", (content or title).casefold())
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _decode_list(value: Any) -> list[str]:
@@ -81,14 +101,19 @@ def replace_news_dimensions(
     industry_map: Mapping[str, str],
     normalize_sectors: Callable[[list[Any]], list[str]],
 ) -> None:
-    """Replace one news row's rebuildable symbol and sector projections."""
+    """Replace formal dimensions only from values frozen in the news row.
+
+    ``industry_map`` remains in the signature for migration-call compatibility,
+    but the live map must never rewrite a historical factor dimension.  The
+    crawler freezes any symbol-to-industry inference into ``news.sectors`` in
+    the analysis transaction; current display enrichment is a separate read
+    projection.
+    """
+    del industry_map
     normalized_symbols = list(dict.fromkeys(
         str(symbol).strip() for symbol in symbols if str(symbol).strip()
     ))
-    normalized_sectors = normalize_sectors([
-        *sectors,
-        *(industry_map.get(symbol, "") for symbol in normalized_symbols),
-    ])
+    normalized_sectors = normalize_sectors(list(sectors))
     connection.execute("DELETE FROM news_analysis_symbols WHERE news_id=?", (news_id,))
     connection.execute("DELETE FROM news_analysis_sectors WHERE news_id=?", (news_id,))
     connection.executemany(
@@ -101,23 +126,37 @@ def replace_news_dimensions(
     )
 
 
-def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None:
+def _create_news_table(connection: sqlite3.Connection, table_name: str) -> None:
+    if table_name != "news":
+        raise ValueError("无效的资讯表名")
     connection.execute(
-        "CREATE TABLE IF NOT EXISTS news ("
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,title TEXT,content TEXT,"
         "url TEXT,published_at TEXT,symbols TEXT,sectors TEXT,event_type TEXT,"
         "sentiment REAL,summary TEXT,"
-        "created_at REAL,importance_score REAL DEFAULT 0,scope TEXT DEFAULT '',"
+        "created_at REAL,importance_score REAL DEFAULT 0,"
+        "factor_importance_score REAL DEFAULT NULL,"
+        "factor_weight_at_analysis REAL DEFAULT NULL,"
+        "alert_importance_score REAL NOT NULL DEFAULT 0,scope TEXT DEFAULT '',"
         "urgency TEXT DEFAULT '',confidence REAL DEFAULT 0,fingerprint TEXT DEFAULT '',"
-        "is_official INTEGER DEFAULT 0,source_id TEXT DEFAULT '',"
+        "is_official INTEGER DEFAULT 0,content_scope TEXT DEFAULT 'unknown',"
+        "source_id TEXT DEFAULT '',"
         "content_hash TEXT DEFAULT '',first_seen_at REAL DEFAULT 0,last_seen_at REAL DEFAULT 0,"
         "raw_cache_key TEXT DEFAULT '',analysis_status TEXT DEFAULT 'pending',"
+        "evidence_binding_hash TEXT DEFAULT '',"
+        "ingest_window_id TEXT DEFAULT '',ingest_batch_id TEXT DEFAULT '',"
         "analysis_attempts INTEGER DEFAULT 0,analysis_error TEXT DEFAULT '',"
         "analysis_version INTEGER DEFAULT 1,next_retry_at REAL DEFAULT 0,"
         "parser_version TEXT DEFAULT '1',analysis_recovery_count INTEGER DEFAULT 0,"
         "last_failure_code TEXT DEFAULT '',analysis_updated_at REAL DEFAULT 0,"
-        "UNIQUE(source,title,published_at))"
+        "content_version_at REAL DEFAULT 0,"
+        "published_at_epoch REAL DEFAULT 0,fetched_at REAL DEFAULT 0,provider_item_id TEXT DEFAULT ''"
+        ")"
     )
+
+
+def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None:
+    _create_news_table(connection, "news")
     if legacy:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(news)")}
         for name, sql_type in _NEWS_COLUMNS.items():
@@ -133,19 +172,46 @@ def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None
         "news_id INTEGER NOT NULL REFERENCES news(id) ON DELETE CASCADE,"
         "sector TEXT NOT NULL,PRIMARY KEY(news_id,sector))"
     )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS news_revisions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,news_id INTEGER NOT NULL "
+        "REFERENCES news(id) ON DELETE CASCADE,revision_number INTEGER NOT NULL,"
+        "title TEXT NOT NULL,content TEXT NOT NULL,content_hash TEXT NOT NULL,"
+        "raw_cache_key TEXT NOT NULL DEFAULT '',fetched_at REAL NOT NULL DEFAULT 0,"
+        "evidence_binding_hash TEXT NOT NULL DEFAULT '',"
+        "recorded_at REAL NOT NULL,UNIQUE(news_id,revision_number))"
+    )
+    revision_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(news_revisions)")
+    }
+    if "evidence_binding_hash" not in revision_columns:
+        connection.execute(
+            "ALTER TABLE news_revisions ADD COLUMN "
+            "evidence_binding_hash TEXT NOT NULL DEFAULT ''"
+        )
+    if legacy:
+        return
     statements = (
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_fingerprint_unique "
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_fingerprint_unique_v4 "
         "ON news(fingerprint) WHERE fingerprint<>''",
-        "CREATE INDEX IF NOT EXISTS idx_news_recent ON news(id DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_news_source ON news(source_id,id DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_news_analysis "
+        "CREATE INDEX IF NOT EXISTS idx_news_recent_v4 ON news(id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_news_source_v4 ON news(source_id,id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_news_analysis_v4 "
         "ON news(analysis_status,next_retry_at,id)",
-        "CREATE INDEX IF NOT EXISTS idx_news_seen ON news(first_seen_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_news_stats "
-        "ON news(analysis_status,first_seen_at,confidence)",
-        "CREATE INDEX IF NOT EXISTS idx_news_symbol_value "
+        "CREATE INDEX IF NOT EXISTS idx_news_seen_v4 ON news(first_seen_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_news_published_v4 "
+        "ON news(published_at_epoch DESC,id DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_provider_item_unique_v4 "
+        "ON news(source_id,provider_item_id) WHERE provider_item_id<>''",
+        "CREATE INDEX IF NOT EXISTS idx_news_stats_v4 "
+        "ON news(analysis_status,first_seen_at,content_version_at,analysis_updated_at,confidence)",
+        "CREATE INDEX IF NOT EXISTS idx_news_ingest_window_v7 "
+        "ON news(ingest_window_id,ingest_batch_id)",
+        "CREATE INDEX IF NOT EXISTS idx_news_revisions_news_v4 "
+        "ON news_revisions(news_id,revision_number DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_news_symbol_value_v4 "
         "ON news_analysis_symbols(symbol,news_id)",
-        "CREATE INDEX IF NOT EXISTS idx_news_sector_value "
+        "CREATE INDEX IF NOT EXISTS idx_news_sector_value_v4 "
         "ON news_analysis_sectors(sector,news_id)",
     )
     for statement in statements:
@@ -156,13 +222,21 @@ def _backfill_news_core(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE news SET source_id=source WHERE source_id='' OR source_id IS NULL")
     connection.execute("UPDATE news SET first_seen_at=created_at WHERE first_seen_at=0")
     connection.execute("UPDATE news SET last_seen_at=created_at WHERE last_seen_at=0")
+    connection.execute("UPDATE news SET fetched_at=first_seen_at WHERE fetched_at=0")
+    connection.execute(
+        "UPDATE news SET content_version_at=first_seen_at WHERE content_version_at=0"
+    )
+    connection.execute(
+        "UPDATE news SET content_scope=CASE "
+        "WHEN source_id IN ('sse','pboc','ndrc') THEN 'listing_title_only' "
+        "WHEN source_id IN ('nbs_release','nbs_interpretation') "
+        "AND TRIM(COALESCE(content,''))<>TRIM(COALESCE(title,'')) THEN 'feed_summary' "
+        "WHEN source_id IN ('nbs_release','nbs_interpretation') THEN 'listing_title_only' "
+        "ELSE 'unknown' END WHERE content_scope='' OR content_scope='unknown'"
+    )
     connection.execute(
         "UPDATE news SET analysis_status='dead_letter' "
         "WHERE analysis_status='failed' AND analysis_attempts>=3"
-    )
-    connection.execute(
-        "UPDATE news SET analysis_updated_at=last_seen_at "
-        "WHERE analysis_status='complete' AND analysis_updated_at=0"
     )
     rows = connection.execute(
         "SELECT id,source,title,content,url,published_at,fingerprint,summary,confidence,"
@@ -186,6 +260,66 @@ def _backfill_news_core(connection: sqlite3.Connection) -> None:
     connection.executemany(
         "UPDATE news SET fingerprint=?,content_hash=?,analysis_status=? WHERE id=?",
         updates,
+    )
+
+
+def _archive_legacy_title_identity_table(connection: sqlite3.Connection) -> None:
+    """Preserve v3 tables, then copy into v4 without the lossy title identity."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='news'"
+    ).fetchone()
+    normalized = re.sub(r"\s+", "", str(row[0] if row else "").casefold())
+    if "unique(source,title,published_at)" not in normalized:
+        return
+    archive_names = (
+        "news_legacy_v3",
+        "news_analysis_symbols_legacy_v3",
+        "news_analysis_sectors_legacy_v3",
+        "news_revisions_legacy_v3",
+    )
+    placeholders = ",".join("?" for _ in archive_names)
+    conflicts = connection.execute(
+        f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+        archive_names,
+    ).fetchall()
+    if conflicts:
+        names = ", ".join(str(item[0]) for item in conflicts)
+        raise RuntimeError(f"资讯 v3 保留式迁移发现归档表冲突：{names}")
+
+    connection.execute("ALTER TABLE news RENAME TO news_legacy_v3")
+    connection.execute(
+        "ALTER TABLE news_analysis_symbols "
+        "RENAME TO news_analysis_symbols_legacy_v3"
+    )
+    connection.execute(
+        "ALTER TABLE news_analysis_sectors "
+        "RENAME TO news_analysis_sectors_legacy_v3"
+    )
+    connection.execute("ALTER TABLE news_revisions RENAME TO news_revisions_legacy_v3")
+    _create_news_schema(connection, legacy=False)
+    column_names = [
+        str(info[1]) for info in connection.execute("PRAGMA table_info(news)")
+    ]
+    columns_sql = ",".join(f'"{name}"' for name in column_names)
+    connection.execute(
+        f"INSERT INTO news({columns_sql}) "
+        f"SELECT {columns_sql} FROM news_legacy_v3"
+    )
+    connection.execute(
+        "INSERT INTO news_analysis_symbols(news_id,symbol) "
+        "SELECT news_id,symbol FROM news_analysis_symbols_legacy_v3"
+    )
+    connection.execute(
+        "INSERT INTO news_analysis_sectors(news_id,sector) "
+        "SELECT news_id,sector FROM news_analysis_sectors_legacy_v3"
+    )
+    connection.execute(
+        "INSERT INTO news_revisions("
+        "id,news_id,revision_number,title,content,content_hash,raw_cache_key,"
+        "fetched_at,evidence_binding_hash,recorded_at) "
+        "SELECT id,news_id,revision_number,title,content,"
+        "content_hash,raw_cache_key,fetched_at,'',recorded_at "
+        "FROM news_revisions_legacy_v3 ORDER BY id"
     )
 
 
@@ -236,6 +370,16 @@ def migrate_news_schema(
     ).fetchone()
     if current < NEWS_SCHEMA_VERSION:
         _backfill_news_core(connection)
+        # The old score may safely seed the mutable alert display, but it must
+        # never be treated as historical factor evidence.  The two new formal
+        # columns intentionally remain NULL until a real v5 analysis completes.
+        connection.execute(
+            "UPDATE news SET alert_importance_score="
+            "MAX(0,MIN(100,COALESCE(importance_score,0))) "
+            "WHERE alert_importance_score=0"
+        )
+        _archive_legacy_title_identity_table(connection)
+        _create_news_schema(connection, legacy=False)
         _rebuild_dimensions(
             connection,
             industry_map=industry_map,
@@ -259,36 +403,132 @@ def migrate_news_schema(
     )
 
 
-def _decay_weight(first_seen_at: Any, now: Any, halflife_days: Any) -> float:
+def _decay_weight(published_at_epoch: Any, now: Any, halflife_days: Any) -> float:
     try:
-        age_days = max(0.0, (float(now) - float(first_seen_at)) / 86400.0)
+        age_days = max(0.0, (float(now) - float(published_at_epoch)) / 86400.0)
         return math.pow(0.5, age_days / max(0.01, float(halflife_days)))
     except (TypeError, ValueError, OverflowError):
         return 0.0
 
 
+def register_news_raw_verifier(connection: sqlite3.Connection) -> None:
+    """Register the fail-closed raw-evidence verifier for formal factor SQL."""
+    database_path = ""
+    for row in connection.execute("PRAGMA database_list"):
+        if str(row[1]) == "main":
+            database_path = str(row[2] or "")
+            break
+
+    def valid(raw_cache_key: Any) -> int:
+        if not database_path:
+            return 0
+        return int(read_raw_evidence(database_path, str(raw_cache_key or "")) is not None)
+
+    def binding_valid(
+        source_id: Any,
+        raw_cache_key: Any,
+        url: Any,
+        provider_item_id: Any,
+        title: Any,
+        content: Any,
+        published_at: Any,
+        published_at_epoch: Any,
+        content_scope: Any,
+        parser_version: Any,
+        content_hash: Any,
+        binding_hash: Any,
+    ) -> int:
+        try:
+            expected_content_hash = news_content_hash(str(content or ""), str(title or ""))
+            if expected_content_hash != str(content_hash or ""):
+                return 0
+            expected_binding = article_evidence_binding_hash(
+                source_id=str(source_id or ""),
+                raw_cache_key=str(raw_cache_key or ""),
+                url=str(url or ""),
+                provider_item_id=str(provider_item_id or ""),
+                title=str(title or ""),
+                content=str(content or ""),
+                published_at=str(published_at or ""),
+                published_at_epoch=float(published_at_epoch or 0.0),
+                content_scope=str(content_scope or ""),
+                parser_version=str(parser_version or ""),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return int(expected_binding == str(binding_hash or ""))
+
+    connection.create_function("qm_news_raw_valid", 1, valid)
+    connection.create_function(
+        "qm_news_article_evidence_valid", 12, binding_valid, deterministic=True,
+    )
+
+
 _NEWS_STATS_SQL = """
 WITH base AS (
-    SELECT n.id,n.content_hash,n.first_seen_at,n.sentiment,
-           COALESCE(s.factor_weight,1) * n.confidence * n.importance_score / 100.0
+    SELECT n.id,n.content_hash,n.published_at_epoch,n.sentiment,
+           n.factor_weight_at_analysis * n.confidence
+               * n.factor_importance_score / 100.0
                AS quality_weight
       FROM news n
       LEFT JOIN news_sources s ON s.id=n.source_id
-     WHERE n.first_seen_at>=? AND n.first_seen_at<=?
+     WHERE n.published_at_epoch>=? AND n.published_at_epoch<=?
+       AND n.first_seen_at>0 AND n.first_seen_at<=?
+       AND n.content_version_at>0 AND n.content_version_at<=?
+       AND n.analysis_updated_at>0 AND n.analysis_updated_at<=?
        AND n.analysis_status='complete' AND n.confidence>=?
+       AND n.factor_importance_score>0 AND n.factor_importance_score<=100
+       AND n.factor_weight_at_analysis>0 AND n.factor_weight_at_analysis<=3
+       AND n.content_scope IN ('full_text','full_article','feed_summary')
+       AND n.is_official=1 AND COALESCE(s.is_official,0)=1
+       AND COALESCE(s.built_in,0)=1
+       AND n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1
+       AND n.evidence_binding_hash<>''
+       AND n.ingest_window_id<>'' AND n.ingest_batch_id<>''
+       AND qm_news_article_evidence_valid(
+           n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,
+           n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,
+           n.content_hash,n.evidence_binding_hash)=1
+       AND EXISTS (
+           SELECT 1 FROM news_raw_manifest h
+            WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key
+       )
+       AND EXISTS (
+           SELECT 1 FROM news_article_evidence_manifest e
+            WHERE e.binding_hash=n.evidence_binding_hash
+              AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key
+              AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id
+              AND e.content_hash=n.content_hash AND e.title=n.title
+              AND e.content=n.content AND e.published_at=n.published_at
+              AND e.published_at_epoch=n.published_at_epoch
+              AND e.content_scope=n.content_scope
+              AND e.parser_version=n.parser_version
+       )
+       AND EXISTS (
+           SELECT 1 FROM news_ingest_windows w
+           JOIN news_ingest_batches b ON b.window_id=w.window_id
+           JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id
+            WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id
+              AND w.status='complete' AND w.completed_batch_id<>''
+              AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id
+              AND ba.evidence_binding_hash=n.evidence_binding_hash
+              AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id
+              AND ba.raw_cache_key=n.raw_cache_key
+       )
 ), ranked AS (
     SELECT *,ROW_NUMBER() OVER (
-        PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id)
+        PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id),
+                     strftime('%Y-%m-%d',published_at_epoch,'unixepoch','+8 hours')
         ORDER BY quality_weight DESC,id
     ) AS duplicate_rank
       FROM base
 ), selected AS MATERIALIZED (
-    SELECT id,first_seen_at,sentiment,quality_weight,
-           quality_weight * qm_news_decay(first_seen_at,?,?) AS current_weight
+    SELECT id,published_at_epoch,sentiment,quality_weight,
+           quality_weight * qm_news_decay(published_at_epoch,?,?) AS current_weight
       FROM ranked
      WHERE duplicate_rank=1 AND quality_weight>0
 ), daily AS (
-    SELECT strftime('%Y-%m-%d',first_seen_at,'unixepoch','+8 hours') AS item_key,
+    SELECT strftime('%Y-%m-%d',published_at_epoch,'unixepoch','+8 hours') AS item_key,
            SUM(sentiment*quality_weight) AS weighted_score,
            SUM(quality_weight) AS total_weight,COUNT(*) AS event_count
       FROM selected GROUP BY item_key
@@ -329,24 +569,72 @@ def aggregate_news_stats(
     halflife_days: float,
 ) -> list[dict[str, Any]]:
     connection.create_function("qm_news_decay", 3, _decay_weight, deterministic=True)
+    register_news_raw_verifier(connection)
     rows = connection.execute(
         _NEWS_STATS_SQL,
-        (cutoff, until, minimum_confidence, now, halflife_days),
+        (
+            cutoff, until, until, until, until, minimum_confidence,
+            now, halflife_days,
+        ),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
 _NEWS_EVENT_FOCUS_SQL = """
 WITH base AS (
-    SELECT n.id,n.content_hash,
-           COALESCE(s.factor_weight,1) * n.confidence * n.importance_score / 100.0
+    SELECT n.id,n.content_hash,n.published_at_epoch,
+           n.factor_weight_at_analysis * n.confidence
+               * n.factor_importance_score / 100.0
                AS quality_weight
       FROM news n
       LEFT JOIN news_sources s ON s.id=n.source_id
-     WHERE n.first_seen_at>=? AND n.analysis_status='complete' AND n.confidence>=?
+     WHERE n.published_at_epoch>=? AND n.published_at_epoch<=?
+       AND n.first_seen_at>0 AND n.first_seen_at<=?
+       AND n.content_version_at>0 AND n.content_version_at<=?
+       AND n.analysis_updated_at>0 AND n.analysis_updated_at<=?
+       AND n.analysis_status='complete' AND n.confidence>=?
+       AND n.factor_importance_score>0 AND n.factor_importance_score<=100
+       AND n.factor_weight_at_analysis>0 AND n.factor_weight_at_analysis<=3
+       AND n.content_scope IN ('full_text','full_article','feed_summary')
+       AND n.is_official=1 AND COALESCE(s.is_official,0)=1
+       AND COALESCE(s.built_in,0)=1
+       AND n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1
+       AND n.evidence_binding_hash<>''
+       AND n.ingest_window_id<>'' AND n.ingest_batch_id<>''
+       AND qm_news_article_evidence_valid(
+           n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,
+           n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,
+           n.content_hash,n.evidence_binding_hash)=1
+       AND EXISTS (
+           SELECT 1 FROM news_raw_manifest h
+            WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key
+       )
+       AND EXISTS (
+           SELECT 1 FROM news_article_evidence_manifest e
+            WHERE e.binding_hash=n.evidence_binding_hash
+              AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key
+              AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id
+              AND e.content_hash=n.content_hash AND e.title=n.title
+              AND e.content=n.content AND e.published_at=n.published_at
+              AND e.published_at_epoch=n.published_at_epoch
+              AND e.content_scope=n.content_scope
+              AND e.parser_version=n.parser_version
+       )
+       AND EXISTS (
+           SELECT 1 FROM news_ingest_windows w
+           JOIN news_ingest_batches b ON b.window_id=w.window_id
+           JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id
+            WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id
+              AND w.status='complete' AND w.completed_batch_id<>''
+              AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id
+              AND ba.evidence_binding_hash=n.evidence_binding_hash
+              AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id
+              AND ba.raw_cache_key=n.raw_cache_key
+       )
 ), ranked AS (
     SELECT *,ROW_NUMBER() OVER (
-        PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id)
+        PARTITION BY COALESCE(NULLIF(content_hash,''),'id:' || id),
+                     strftime('%Y-%m-%d',published_at_epoch,'unixepoch','+8 hours')
         ORDER BY quality_weight DESC,id
     ) AS duplicate_rank
       FROM base
@@ -365,11 +653,13 @@ def aggregate_news_event_focus(
     connection: sqlite3.Connection,
     *,
     cutoff: float,
+    until: float,
     minimum_confidence: float,
 ) -> list[dict[str, Any]]:
     """Return the bounded, quality-filtered symbol focus without other analytics."""
+    register_news_raw_verifier(connection)
     rows = connection.execute(
         _NEWS_EVENT_FOCUS_SQL,
-        (cutoff, minimum_confidence),
+        (cutoff, until, until, until, until, minimum_confidence),
     ).fetchall()
     return [dict(row) for row in rows]

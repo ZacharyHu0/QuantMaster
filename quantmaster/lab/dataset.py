@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable
-from datetime import date as calendar_date
+from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -18,9 +21,9 @@ from quantmaster.config import get_config
 from quantmaster.data.index_membership import (
     load_cached_csi800_members_as_of,
     load_cached_csi800_records,
-    load_legacy_csi800_records,
 )
 from quantmaster.lab.models import DatasetSnapshot, content_hash
+from quantmaster.trading_sessions import daily_signal_cutoff, market_date
 
 _PANEL_CACHE_LOCK = threading.RLock()
 _PANEL_CACHE: OrderedDict[
@@ -49,6 +52,44 @@ def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataF
     frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
     if "index_code" not in frame:
         frame["index_code"] = "index"
+    if {"published_at", "acquired_at"} <= set(frame.columns):
+        frame["published_at"] = pd.to_datetime(frame["published_at"], utc=True, errors="coerce")
+        frame["acquired_at"] = pd.to_datetime(frame["acquired_at"], utc=True, errors="coerce")
+        frame = frame.dropna(subset=["published_at", "acquired_at"])
+        all_symbols = sorted(set(frame["symbol"].dropna().astype(str)))
+        events = []
+        for (code, effective, acquired, published), group in frame.groupby(
+            ["index_code", "trade_date", "acquired_at", "published_at"], sort=True,
+        ):
+            effective = pd.Timestamp(effective)
+            available = max(
+                pd.Timestamp(acquired),
+                pd.Timestamp(published),
+                pd.Timestamp(daily_signal_cutoff(effective.date())).tz_convert("UTC"),
+            )
+            events.append((
+                available, str(code), effective, pd.Timestamp(acquired),
+                tuple(group["symbol"].dropna().astype(str)),
+            ))
+        events.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        state: dict[str, dict[pd.Timestamp, tuple[pd.Timestamp, tuple[str, ...]]]] = {}
+        rows = []
+        position = 0
+        for current_date in dates:
+            cutoff = pd.Timestamp(daily_signal_cutoff(current_date.date())).tz_convert("UTC")
+            while position < len(events) and events[position][0] <= cutoff:
+                _available, code, effective, acquired, members = events[position]
+                previous = state.setdefault(code, {}).get(effective)
+                if previous is None or acquired >= previous[0]:
+                    state[code][effective] = (acquired, members)
+                position += 1
+            selected: set[str] = set()
+            for versions in state.values():
+                eligible_dates = [effective for effective in versions if effective <= current_date]
+                if eligible_dates:
+                    selected.update(versions[max(eligible_dates)][1])
+            rows.append([symbol in selected for symbol in all_symbols])
+        return pd.DataFrame(rows, index=dates, columns=all_symbols, dtype=bool)
     snapshots: dict[str, list[tuple[pd.Timestamp, tuple[str, ...]]]] = {}
     for (code, snapshot_date), group in frame.groupby(["index_code", "trade_date"], sort=True):
         snapshots.setdefault(str(code), []).append(
@@ -108,11 +149,9 @@ def _cached_membership_records(start: str, end: str) -> pd.DataFrame:
             return pd.read_parquet(cache_path)
         except (OSError, ValueError, ImportError):
             pass
-    lake = load_cached_csi800_records(beginning, end, pull=False)
-    legacy = load_legacy_csi800_records(beginning, end)
-    result = lake if legacy.empty else pd.concat((legacy, lake), ignore_index=True).drop_duplicates(
-        subset=["trade_date", "symbol", "index_code"], keep="last",
-    ).sort_values(["trade_date", "index_code", "symbol"], kind="stable")
+    # The shared loader merges research-lake and legacy local evidence while
+    # preserving multiple acquired-at versions of the same effective date.
+    result = load_cached_csi800_records(beginning, end, pull=False)
     try:
         cache_root.mkdir(parents=True, exist_ok=True)
         staged = cache_path.with_suffix(".partial.parquet")
@@ -162,6 +201,7 @@ def _fast_pool_identity() -> tuple[tuple[int, int], ...]:
 
 def _bar_storage_identity(symbols: list[str], store) -> str:
     digest = hashlib.sha256()
+    metadata = store.metadata_many(symbols)
     for symbol in symbols:
         path = store.path_for_repair(symbol)
         try:
@@ -170,7 +210,110 @@ def _bar_storage_identity(symbols: list[str], store) -> str:
         except OSError:
             identity = f"{symbol}\0missing\n"
         digest.update(identity.encode("utf-8"))
+        item = metadata.get(symbol) or {}
+        digest.update(json.dumps({
+            "content_sha256": item.get("content_sha256"),
+            "last_status": item.get("last_status"),
+            "quality_json": item.get("quality_json"),
+            "source_chain_json": item.get("source_chain_json"),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _bar_quality_for_range(
+    metadata: dict[str, Any], required: dict[str, str],
+) -> dict[str, Any]:
+    """Resolve persisted truth only from lineage overlapping the requested interval."""
+    try:
+        quality = json.loads(str(metadata.get("quality_json") or "{}"))
+        if not isinstance(quality, dict):
+            quality = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        quality = {}
+    try:
+        chain = json.loads(str(metadata.get("source_chain_json") or "[]"))
+        if not isinstance(chain, list):
+            chain = []
+    except (TypeError, ValueError, json.JSONDecodeError):
+        chain = []
+
+    requested_start = str(required.get("start") or required.get("active_start") or "")[:10]
+    requested_end = str(required.get("end") or required.get("active_end") or "")[:10]
+    overlapping: list[dict[str, Any]] = []
+    for raw in chain:
+        if not isinstance(raw, dict):
+            continue
+        event_start = str(raw.get("affected_start") or raw.get("requested_start") or "")[:10]
+        event_end = str(raw.get("affected_end") or raw.get("requested_end") or "")[:10]
+        if not event_start or not event_end:
+            continue
+        if event_end < requested_start or event_start > requested_end:
+            continue
+        raw_event_quality = raw.get("quality")
+        event_quality: dict[str, Any]
+        if isinstance(raw_event_quality, dict):
+            event_quality = raw_event_quality
+        else:
+            event_quality = {}
+        overlapping.append({
+            "source": str(raw.get("source") or ""),
+            "affected_start": event_start,
+            "affected_end": event_end,
+            "status": str(event_quality.get("status") or raw.get("status") or ""),
+            "stale": bool(event_quality.get("stale")),
+            "partial": bool(event_quality.get("partial")),
+            "issues": [str(value) for value in event_quality.get("issues") or ()],
+        })
+
+    rank = {"verified": 0, "degraded": 1, "unavailable": 2}
+    statuses = [item["status"] for item in overlapping if item["status"] in rank]
+    unknown_status = any(item["status"] not in rank for item in overlapping)
+    status = (
+        max(statuses, key=lambda value: rank[value])
+        if statuses else str(quality.get("status") or "")
+    )
+    stale = bool(quality.get("stale")) or any(item["stale"] for item in overlapping)
+    partial = bool(quality.get("partial")) or any(item["partial"] for item in overlapping)
+    issues = list(dict.fromkeys((
+        *(str(value) for value in quality.get("issues") or ()),
+        *(issue for item in overlapping for issue in item["issues"]),
+    )))
+    if not overlapping:
+        issues.append("请求区间没有可验证的分段来源链")
+    if status not in rank or unknown_status:
+        issues.append("请求区间缺少结构化行情质量状态")
+    verified_intervals = sorted(
+        (
+            pd.Timestamp(item["affected_start"]),
+            pd.Timestamp(item["affected_end"]),
+        )
+        for item in overlapping
+        if item["status"] == "verified" and not item["stale"] and not item["partial"]
+    )
+    lineage_complete = False
+    if verified_intervals:
+        merged_start, merged_end = verified_intervals[0]
+        if merged_start <= pd.Timestamp(requested_start):
+            for interval_start, interval_end in verified_intervals[1:]:
+                if interval_start > merged_end + pd.offsets.BDay(1):
+                    break
+                merged_end = max(merged_end, interval_end)
+            lineage_complete = merged_end >= pd.Timestamp(requested_end)
+    if not lineage_complete:
+        issues.append("已验证来源链没有覆盖完整请求区间")
+    verified = bool(
+        lineage_complete and status == "verified" and not unknown_status
+        and not stale and not partial
+    )
+    return {
+        "status": status or "unavailable",
+        "stale": stale,
+        "partial": partial,
+        "verified": verified,
+        "lineage_complete": lineage_complete,
+        "issues": list(dict.fromkeys(issues)),
+        "source_chain": overlapping,
+    }
 
 
 def _frame_hash(frame: pd.DataFrame) -> str:
@@ -286,7 +429,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         fixed_symbols: list[str] = []
         membership_source = "research_lake:tushare:index_weight"
     else:
-        fixed_symbols = sorted(load_universe(universe))
+        fixed_symbols = sorted(load_universe(universe, as_of=end_label))
         membership_source = "fixed"
     ranges = _cached_required_ranges(universe, start, end, records, fixed_symbols)
     symbols = sorted(ranges)
@@ -321,6 +464,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     missing: list[dict[str, Any]] = []
     coverage_gaps: list[dict[str, Any]] = []
     warmup_gaps: list[dict[str, Any]] = []
+    quality_gaps: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     for symbol in symbols:
         item = metadata.get(symbol) or {}
@@ -329,6 +473,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         available_start = str(item.get("coverage_start") or item.get("start") or "")
         available_end = str(item.get("coverage_end") or item.get("end") or "")
         required = ranges[symbol]
+        bar_quality = _bar_quality_for_range(item, required)
         reason = ""
         if stat is None:
             reason = "file_missing"
@@ -356,6 +501,15 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
                 "symbol": symbol, "reason": reason, "required": required,
                 "available": [available_start, available_end],
             })
+        if not bar_quality["verified"]:
+            quality_gaps.append({
+                "symbol": symbol,
+                "required": required,
+                "status": bar_quality["status"],
+                "stale": bar_quality["stale"],
+                "partial": bar_quality["partial"],
+                "issues": bar_quality["issues"],
+            })
         rows.append({
             "symbol": symbol,
             "required": required,
@@ -364,6 +518,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             "mtime_ns": int(stat.st_mtime_ns if stat is not None else 0),
             "content_sha256": str(item.get("content_sha256") or ""),
             "status": str(item.get("last_status") or "missing"),
+            "quality": bar_quality,
         })
     active_symbol_coverage = (
         (len(symbols) - len(missing) - len(coverage_gaps)) / max(1, len(symbols))
@@ -419,6 +574,13 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             "action": "可继续研究；如需覆盖最早日期，请显式补齐历史行情",
             "context": {"count": len(warmup_gaps), "sample": warmup_gaps[:20]},
         })
+    if quality_gaps:
+        warnings.append({
+            "code": "DATA_QUALITY_UNVERIFIED",
+            "message": f"{len(quality_gaps)} 只标的缺少请求区间内的已验证行情证据",
+            "action": "可继续沙盒研究；正式生产前需补齐单位、复权、来源与时效证据",
+            "context": {"count": len(quality_gaps), "sample": quality_gaps[:20]},
+        })
     membership_hash = (
         _frame_hash(records) if universe.lower() == "csi800" else content_hash(fixed_symbols)
     )
@@ -431,13 +593,14 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         "active_symbol_coverage": round(active_symbol_coverage, 6),
         "research_eligible": research_eligible,
         "production_eligible": bool(
-            state == "ready" and active_symbol_coverage >= 0.98
+            state == "ready" and active_symbol_coverage >= 0.98 and not quality_gaps
         ),
         "symbols": symbols,
         "symbol_count": len(symbols),
         "missing": missing,
         "coverage_gaps": coverage_gaps,
         "warmup_gaps": warmup_gaps,
+        "quality_gaps": quality_gaps,
         "blockers": blockers,
         "warnings": warnings,
         "membership_source": membership_source,
@@ -602,15 +765,17 @@ def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
         "gaps": gaps,
         "providers": [
             {
-                "id": "free-stockdb-online",
-                "label": "stockdb-online",
-                "available": bool(cfg.free_stockdb_online_enabled and cfg.free_stockdb_online_url),
+                "id": "free-stockdb",
+                "label": "本机 StockDB",
+                "available": urlparse(str(cfg.free_stockdb_url)).hostname in {
+                    "127.0.0.1", "localhost", "::1",
+                },
                 "can_fill_membership": False,
                 "estimated_requests": repair_symbols,
                 "estimated_critical_requests": critical_repair_symbols,
                 "reason": (
-                    "CSI800 点时成分只能由 Tushare 补齐"
-                    if membership_missing else "按缺口区间补齐前复权日线"
+                    "本机 StockDB 不提供 CSI800 点时成分"
+                    if membership_missing else "从本机回环 StockDB 按缺口区间补齐日线"
                 ),
             },
             {
@@ -713,6 +878,149 @@ def clear_local_dataset_caches() -> None:
         _PANEL_REQUEST_KEYS.clear()
         _INSPECTION_CACHE.clear()
         _PANEL_CACHE_BYTES = 0
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _freeze_dataset_evidence(
+    panel: dict[str, pd.DataFrame], membership: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Persist the exact matrices used by a Lab run as content-addressed files."""
+    from quantmaster.lab.errors import LabError
+
+    if not panel or not any(frame is not None and not frame.empty for frame in panel.values()):
+        raise LabError(
+            "DATASET_EVIDENCE_MISSING",
+            "数据快照没有可冻结的行情矩阵",
+            action="重新准备数据并保留不可变证据",
+            status_code=424,
+        )
+    evidence_root = get_config().data_root / "lab_evidence"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=".dataset-", dir=evidence_root))
+    files: list[dict[str, Any]] = []
+    try:
+        for field, frame in sorted(panel.items()):
+            if frame is None or frame.empty:
+                continue
+            path = staged / f"field-{field}.parquet"
+            frame.to_parquet(path)
+            files.append({
+                "kind": "field",
+                "name": field,
+                "file": path.name,
+                "content_sha256": _file_sha256(path),
+                "bytes": path.stat().st_size,
+            })
+        if membership is not None:
+            path = staged / "membership.parquet"
+            membership.astype(bool).to_parquet(path)
+            files.append({
+                "kind": "membership",
+                "name": "membership",
+                "file": path.name,
+                "content_sha256": _file_sha256(path),
+                "bytes": path.stat().st_size,
+            })
+        identity = content_hash({
+            "schema_version": 1,
+            "files": [
+                {key: item[key] for key in ("kind", "name", "content_sha256", "bytes")}
+                for item in files
+            ],
+        })
+        target = evidence_root / identity
+        manifest = {
+            "schema_version": 1,
+            "evidence_id": identity,
+            "relative_root": f"lab_evidence/{identity}",
+            "status": "ready",
+            "files": files,
+        }
+        manifest_path = staged / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        if target.is_dir():
+            shutil.rmtree(staged)
+        else:
+            try:
+                os.replace(staged, target)
+            except FileExistsError:
+                shutil.rmtree(staged)
+        manifest["manifest_sha256"] = _file_sha256(target / "manifest.json")
+        return manifest
+    except LabError:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise LabError(
+            "DATASET_EVIDENCE_MISSING",
+            f"不可变数据证据写入失败：{str(exc)[:200]}",
+            action="检查数据目录可写空间后重新准备数据",
+            retryable=True,
+            status_code=424,
+        ) from exc
+
+
+def verify_snapshot_evidence(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Verify that every byte referenced by a stored snapshot is recoverable."""
+    from quantmaster.lab.errors import LabError
+
+    raw_payload = snapshot.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else snapshot
+    raw_manifest = payload.get("manifest")
+    manifest = raw_manifest if isinstance(raw_manifest, dict) else {}
+    raw_evidence = manifest.get("evidence")
+    evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+    if evidence.get("status") != "ready" or not evidence.get("relative_root"):
+        raise LabError(
+            "DATASET_EVIDENCE_MISSING",
+            "数据快照没有可恢复的不可变证据",
+            action="重新准备数据；禁止用当前缓存替代旧快照",
+            status_code=424,
+        )
+    root = get_config().data_root / str(evidence["relative_root"])
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file() or _file_sha256(manifest_path) != evidence.get("manifest_sha256"):
+        raise LabError(
+            "DATASET_EVIDENCE_MISSING", "数据证据清单缺失或校验失败", status_code=424,
+        )
+    for item in evidence.get("files") or []:
+        path = root / str(item.get("file") or "")
+        if not path.is_file() or _file_sha256(path) != item.get("content_sha256"):
+            raise LabError(
+                "DATASET_EVIDENCE_MISSING",
+                f"数据证据文件缺失或损坏：{item.get('name') or item.get('file')}",
+                action="从受信备份恢复对应 evidence_id；不得静默改用当前行情",
+                status_code=424,
+            )
+    return evidence
+
+
+def load_snapshot_evidence(
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None]:
+    """Load the exact matrices pinned by ``_freeze_dataset_evidence``."""
+    evidence = verify_snapshot_evidence(snapshot)
+    root = get_config().data_root / str(evidence["relative_root"])
+    panel: dict[str, pd.DataFrame] = {}
+    membership = None
+    for item in evidence.get("files") or []:
+        frame = pd.read_parquet(root / str(item["file"]))
+        if item.get("kind") == "membership":
+            membership = frame.astype(bool)
+        else:
+            panel[str(item["name"])] = frame
+    return panel, membership
 
 
 def load_local_dataset(
@@ -829,13 +1137,18 @@ def load_local_dataset(
         "incomplete" if batch.failures or membership_coverage < 0.90
         else inspection["state"]
     )
+    evidence = _freeze_dataset_evidence(panel, membership)
     snapshot = DatasetSnapshot(
         universe=universe,
         start=start,
         end=end,
         symbols=tuple(batch.frames),
         membership_source=inspection["membership_source"],
-        research_quality="production" if universe.lower() == "csi800" else "sandbox",
+        research_quality=(
+            "production"
+            if universe.lower() == "csi800" and inspection.get("production_eligible")
+            else "sandbox"
+        ),
         as_of=inspection["as_of"] or pd.Timestamp(close.index.max()).strftime("%Y-%m-%d"),
         state=cast(Literal["ready", "stale", "incomplete", "corrupt"], state),
         data_policy=policy,
@@ -847,6 +1160,7 @@ def load_local_dataset(
         warnings=tuple(warnings),
         manifest={
             "bars": list(batch.manifest),
+            "bar_quality": inspection["bars"],
             "manifest_hash": inspection["manifest_hash"],
             "membership_hash": inspection["membership_hash"],
             "required_ranges": inspection["required_ranges"],
@@ -858,6 +1172,7 @@ def load_local_dataset(
             },
             "read_seconds": round(batch.elapsed_seconds, 6),
             "cache_key": key,
+            "evidence": evidence,
         },
     ).to_dict()
     snapshot["cache_hit"] = False
@@ -930,11 +1245,14 @@ def create_snapshot(
     *,
     panel: dict[str, pd.DataFrame] | None = None,
     membership: pd.DataFrame | None = None,
+    market_data_quality: dict[str, Any] | None = None,
 ) -> DatasetSnapshot:
-    """创建轻量快照；真实数据文件继续复用现有 Parquet 缓存。"""
+    """Create a recoverable snapshot pinned to immutable matrix evidence."""
     from quantmaster.data.universe import load_universe
 
-    fixed_symbols = load_universe(universe) if universe.lower() != "csi800" else []
+    fixed_symbols = (
+        load_universe(universe, as_of=end) if universe.lower() != "csi800" else []
+    )
     source = "fixed"
     quality: Literal["production", "sandbox"] = "sandbox"
     if universe.lower() == "csi800":
@@ -945,6 +1263,7 @@ def create_snapshot(
     else:
         symbols = sorted(fixed_symbols)
     close = panel.get("close") if panel else None
+    evidence = _freeze_dataset_evidence(panel or {}, membership)
     coverage = {}
     if close is not None and not close.empty:
         expected = max(1, len(close.index) * max(1, len(symbols)))
@@ -957,6 +1276,8 @@ def create_snapshot(
         **_bar_manifest(symbols),
         "coverage": coverage,
         "membership_hash": content_hash(_membership_manifest(membership, symbols)),
+        "evidence": evidence,
+        "market_data_quality": dict(market_data_quality or {}),
         "config": {
             "data_root": str(get_config().data_root.resolve()),
             "warmup_days": 120,
@@ -983,7 +1304,7 @@ def readiness() -> dict[str, Any]:
 
     cached_membership = False
     try:
-        load_cached_csi800_members_as_of(calendar_date.today().isoformat(), pull=False)
+        load_cached_csi800_members_as_of(market_date().isoformat(), pull=False)
         cached_membership = True
     except (OSError, RuntimeError, ValueError):
         cached_membership = False

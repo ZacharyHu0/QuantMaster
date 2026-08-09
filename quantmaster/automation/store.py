@@ -19,22 +19,32 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 6
+AUTOMATION_SCHEMA_VERSION = 7
 
 DEFAULT_JOBS = {
     "intraday_monitor": (True, {
         "type": "interval", "minutes": 5,
         "windows": ["09:35-11:30", "13:05-15:00"], "weekdays": True,
     }),
-    "fast_news_scan": (True, {"type": "interval", "minutes": 10, "window": "07:00-23:30"}),
-    "official_news_scan": (True, {"type": "interval", "minutes": 15, "window": "07:00-23:30"}),
-    "periodic_news_scan": (True, {"type": "interval", "minutes": 60, "window": "07:00-23:30"}),
+    "fast_news_scan": (True, {"type": "interval", "minutes": 5}),
+    "official_news_scan": (True, {"type": "interval", "minutes": 15}),
+    "periodic_news_scan": (True, {"type": "interval", "minutes": 30}),
     "daily_close_pipeline": (True, {"type": "daily", "times": ["15:20", "15:35", "15:50"], "weekdays": True}),
     "news_digest": (True, {"type": "daily", "times": ["11:35", "15:25", "21:00"]}),
     "news_dead_letter_recovery": (
         True, {"type": "daily", "times": ["03:45"]},
     ),
     "paper_rebalance_proposal": (False, {"type": "daily", "times": ["15:30"], "weekdays": True}),
+}
+
+_LEGACY_NEWS_SCHEDULES_V6 = {
+    "fast_news_scan": {"type": "interval", "minutes": 10, "window": "07:00-23:30"},
+    "official_news_scan": {
+        "type": "interval", "minutes": 15, "window": "07:00-23:30",
+    },
+    "periodic_news_scan": {
+        "type": "interval", "minutes": 60, "window": "07:00-23:30",
+    },
 }
 
 
@@ -164,8 +174,28 @@ class AutomationStore:
                 (utc_now(),),
             )
 
+        def schema_v7(conn: sqlite3.Connection) -> None:
+            now = utc_now()
+            for name in ("fast_news_scan", "official_news_scan", "periodic_news_scan"):
+                row = conn.execute(
+                    "SELECT schedule FROM job_templates WHERE name=?", (name,),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    current_schedule = json.loads(str(row[0] or "{}"))
+                except json.JSONDecodeError:
+                    continue
+                if current_schedule != _LEGACY_NEWS_SCHEDULES_V6[name]:
+                    continue
+                schedule = DEFAULT_JOBS[name][1]
+                conn.execute(
+                    "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
+                    (json.dumps(schedule), now, name),
+                )
+
         with self._conn() as conn:
-            migrate_schema(conn, ((AUTOMATION_SCHEMA_VERSION, schema_v6),))
+            migrate_schema(conn, ((6, schema_v6), (AUTOMATION_SCHEMA_VERSION, schema_v7)))
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:

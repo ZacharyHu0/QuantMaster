@@ -4,6 +4,7 @@ import threading
 from typing import Any
 
 from quantmaster.after_close.service import get_after_close_service
+from quantmaster.automation.runtime import get_runtime
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import (
     ACTIVE_STATUSES,
@@ -12,6 +13,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
+from quantmaster.trading_sessions import market_date
 
 TASK_TYPE = "after_close.scan"
 
@@ -58,7 +60,6 @@ class AfterCloseJobs:
         if not cfg.data.after_close_notify or not cfg.automation.enabled:
             return
         from quantmaster.automation.models import AlertEvent, stable_hash
-        from quantmaster.automation.runtime import get_runtime
 
         sectors = [item for item in snapshot.sectors if item.level == "L1"][:3]
         get_runtime().service.process_event(AlertEvent(
@@ -96,7 +97,7 @@ class AfterCloseJobs:
             ],
             dedupe_key=stable_hash({
                 "after_close_failure": True,
-                "day": datetime.now(UTC).strftime("%Y%m%d"), "message": message,
+                "day": market_date().strftime("%Y%m%d"), "message": message,
             }),
             payload={"title": "盘后研究未更新", "job_id": job_id},
         ))

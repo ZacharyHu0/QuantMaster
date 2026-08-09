@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 import quantmaster.data.free_stockdb_source as free_stockdb
 from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource, FreeStockDBSource
@@ -69,6 +70,44 @@ def test_free_stockdb_sdk_supplies_daily_and_minute_bars(monkeypatch) -> None:
     assert client.calls[0]["fq"] == "qfq"
     assert client.calls[1]["frequency"] == "5m"
     assert client.calls[1]["fq"] is None
+
+
+def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None:
+    source = FreeStockDBSource()
+    source._sdk_checked = True
+    source._client = None
+    calls: list[tuple[dict[str, str], bool]] = []
+
+    def request(params, *, probe=False):
+        calls.append((params, probe))
+        return [["日k:600519:20260807", {
+            "open": 1400.0,
+            "high": 1410.0,
+            "low": 1390.0,
+            "close": 1405.0,
+            "volume": 100.0,
+        }]]
+
+    monkeypatch.setattr(source, "_request", request)
+
+    result = source.probe()
+
+    assert result["status"] == "ok"
+    assert result["probe_contract"] == "stockdb-http-vals-daily-v1"
+    assert result["sample_latest"] == "20260807"
+    assert calls[0][0]["cmd"] == "vals"
+    assert calls[0][0]["t"] == "日k"
+    assert calls[0][1] is True
+
+
+def test_http_probe_rejects_connected_but_unverifiable_payload(monkeypatch) -> None:
+    source = FreeStockDBSource()
+    source._sdk_checked = True
+    source._client = None
+    monkeypatch.setattr(source, "_request", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(RuntimeError, match="没有返回可验证记录"):
+        source.probe()
 
 
 def test_free_stockdb_board_data_feeds_industry_and_concepts(monkeypatch) -> None:
@@ -144,7 +183,7 @@ def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> N
     assert calls == ["free-stockdb-online"]
 
 
-def test_cn_source_order_uses_online_only_after_local(monkeypatch) -> None:
+def test_cn_source_order_excludes_untrusted_public_http(monkeypatch) -> None:
     from quantmaster.config import get_config
     from quantmaster.data.base import Market
     from quantmaster.data.registry import _factories
@@ -152,9 +191,8 @@ def test_cn_source_order_uses_online_only_after_local(monkeypatch) -> None:
     monkeypatch.setattr(get_config().data, "free_stockdb_online_enabled", True)
     names = [source.name for source in _factories()[Market.CN]]
 
-    assert names[:4] == [
-        "free-stockdb", "free-stockdb-online", "akshare", "tushare",
-    ]
+    assert names[:3] == ["free-stockdb", "tushare", "akshare"]
+    assert "free-stockdb-online" not in names
 
 
 def test_sdk_path_auto_discovers_managed_pybao_and_explicit_path_wins(
@@ -225,7 +263,7 @@ def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None
     assert client.calls[0]["code"] == ["600519", "000858"]
 
 
-def test_online_source_is_filtered_outside_interactive_requests(monkeypatch) -> None:
+def test_online_source_is_never_in_trusted_request_factories(monkeypatch) -> None:
     from quantmaster.config import get_config
     from quantmaster.data.base import Market
     from quantmaster.data.registry import _request_factories
@@ -242,5 +280,5 @@ def test_online_source_is_filtered_outside_interactive_requests(monkeypatch) -> 
     )[Market.CN]]
 
     assert "free-stockdb-online" not in normal
-    assert "free-stockdb-online" in interactive
+    assert "free-stockdb-online" not in interactive
     assert "free-stockdb-online" not in full

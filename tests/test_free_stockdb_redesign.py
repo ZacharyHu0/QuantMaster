@@ -20,6 +20,10 @@ from quantmaster.data.free_stockdb_compatibility import (
 from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
 from quantmaster.data.free_stockdb_ingest import StockDBIngestService, StockDBIngestStore
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
+from quantmaster.data.instrument_snapshots import (
+    TUSHARE_CATALOG_QUERY,
+    freeze_instrument_catalog,
+)
 from quantmaster.data.instruments import Instrument
 from quantmaster.research.adapters import StockDBResearchAdapter
 from quantmaster.research.catalog import ResearchCatalog
@@ -27,9 +31,11 @@ from quantmaster.rotation.etf_research import (
     EtfResearchService,
     EtfResearchStore,
     classify_etf,
+    etf_directory_master_hash,
     is_exchange_etf,
 )
 from quantmaster.server.app import app
+from tests.catalog_evidence_helpers import bound_tushare_catalog
 
 
 def test_local_stockdb_advertises_eod_but_not_realtime_spot():
@@ -144,7 +150,12 @@ def test_ingest_store_is_immutable_content_addressed_and_reusable(tmp_path, isol
         start_date="2026-01-01",
         end_date="2026-08-08",
         coverage={"status": "complete"},
-        provenance={"cache_key": "same", "upstream": "tushare", "distribution": "free-stockdb"},
+        provenance={
+            "cache_key": "same",
+            "upstream": "vendor-declared-unverified",
+            "upstream_evidence": "not_provided",
+            "distribution": "free-stockdb",
+        },
     )
     first = store.publish(frame=frame, **kwargs)
     again = store.publish(frame=frame, **kwargs)
@@ -305,10 +316,22 @@ def test_lof_is_not_admitted_as_etf():
 
 class _EtfInstruments:
     items: ClassVar[list[Instrument]] = [
-        Instrument("510300.SH", "510300", "沪深300ETF", "CN", "SH", "fund", status="listed"),
-        Instrument("159920.SZ", "159920", "恒生ETF(QDII)", "CN", "SZ", "fund", status="listed"),
-        Instrument("511010.SH", "511010", "国债ETF", "CN", "SH", "etf", status="listed"),
-        Instrument("501001.SH", "501001", "测试LOF", "CN", "SH", "fund", status="listed"),
+        Instrument(
+            "510300.SH", "510300", "沪深300ETF", "CN", "SH", "fund",
+            status="listed", list_date="20120528",
+        ),
+        Instrument(
+            "159920.SZ", "159920", "恒生ETF(QDII)", "CN", "SZ", "fund",
+            status="listed", list_date="20121022",
+        ),
+        Instrument(
+            "511010.SH", "511010", "国债ETF", "CN", "SH", "etf",
+            status="listed", list_date="20130805",
+        ),
+        Instrument(
+            "501001.SH", "501001", "测试LOF", "CN", "SH", "fund",
+            status="listed", list_date="20200101",
+        ),
     ]
 
     def list(self, **_kwargs):
@@ -387,6 +410,113 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     monkeypatch.setattr(
         EtfResearchService, "_direct_share_observations", staticmethod(lambda: pd.DataFrame())
     )
+    instruments = [
+        item
+        for item in _EtfInstruments().list(market="CN")
+        if is_exchange_etf(item)
+    ]
+    etf_catalog = [
+        {
+            "symbol": instrument.symbol,
+            "name": instrument.name,
+            "market": "CN",
+            "exchange": instrument.exchange,
+            "asset_type": "etf",
+            "status": instrument.status,
+            "list_date": instrument.list_date,
+            "delist_date": instrument.delist_date,
+        }
+        for instrument in instruments
+    ]
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.TUSHARE_MINIMUM_ASSET_COUNTS",
+        {"CN:stock": 3000, "CN:etf": len(etf_catalog)},
+    )
+    stock_catalog = [
+        {
+            "symbol": f"{600000 + index:06d}.SH",
+            "name": f"目录股票{index}",
+            "market": "CN",
+            "exchange": "SH",
+            "asset_type": "stock",
+            "status": "L",
+            "list_date": "2020-01-01",
+            "delist_date": "",
+        }
+        for index in range(3_000)
+    ]
+    catalog_records, catalog_outcomes = bound_tushare_catalog(
+        [*stock_catalog, *etf_catalog],
+    )
+    catalog_snapshot = freeze_instrument_catalog(
+        catalog_records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=catalog_outcomes,
+        acquired_at=pd.Timestamp("2026-08-08T15:01:00+08:00").to_pydatetime(),
+    )
+    catalog_evidence = catalog_snapshot.evidence(
+        market="CN", asset_type="etf", as_of="2026-08-08"
+    )
+    directory_rows = []
+    for instrument in instruments:
+        directory_rows.append(
+            {
+                "symbol": instrument.symbol,
+                "name": instrument.name,
+                "exchange": instrument.exchange,
+                "asset_type": "etf",
+                "status": "L",
+                "list_date": pd.Timestamp(instrument.list_date).date().isoformat(),
+                "delist_date": instrument.delist_date,
+                "metadata_source": "free-stockdb:security-master",
+                "effective_date": "2026-08-08",
+                "updated_at": "2026-08-08",
+                "observed_at": "2026-08-08T07:02:00+00:00",
+                "directory_snapshot_id": "etf-directory-test",
+                "directory_complete": True,
+                "directory_expected_symbols": 3,
+                "directory_observed_symbols": 3,
+                "directory_member_source": "tushare:catalog",
+                "directory_member_observed_at": catalog_snapshot.acquired_at,
+                "directory_source": "tushare:catalog",
+                "directory_acquired_at": catalog_snapshot.acquired_at,
+                "directory_cutoff_at": "2026-08-08T15:00:00+08:00",
+                "directory_freshness": "fresh",
+                "directory_master_record_count": len(catalog_snapshot.records),
+                "directory_master_batch_record_count": len(catalog_snapshot.records),
+                "directory_master_snapshot_sha256": catalog_snapshot.snapshot_id,
+                "directory_catalog_snapshot_id": catalog_snapshot.snapshot_id,
+                "directory_catalog_records_sha256": catalog_evidence["records_sha256"],
+                "directory_catalog_file_sha256": catalog_snapshot.file_sha256,
+                "directory_catalog_file_size": str(catalog_snapshot.file_size),
+                "directory_catalog_file_mtime_ns": str(
+                    catalog_snapshot.file_mtime_ns
+                ),
+                "directory_catalog_relative_path": catalog_evidence["relative_path"],
+                "directory_catalog_as_of": "2026-08-08",
+                "directory_catalog_expected_count": 3,
+            }
+        )
+    directory = pd.DataFrame(directory_rows)
+    directory_hash = etf_directory_master_hash(directory)
+    directory["directory_attestation_sha256"] = directory_hash
+    directory["directory_snapshot_id"] = "etf_directory_" + directory_hash[:24]
+
+    class HistoricalRotationStore:
+        @staticmethod
+        def etf_metadata_history():
+            return directory.copy()
+
+        @staticmethod
+        def etf_metadata():
+            return directory.copy()
+
+        @staticmethod
+        def etf_observations():
+            return pd.DataFrame()
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", HistoricalRotationStore)
     source = _EtfSource()
     service = EtfResearchService(
         source=source,
@@ -408,7 +538,7 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     assert len(snapshot.items) == 3
     assert {item.category for item in snapshot.items} == {"境内宽基", "海外权益", "债券"}
     assert snapshot.schema_version == "3.0"
-    assert snapshot.research_model_version == "QM_ETF_SECTOR_RADAR_V3.4"
+    assert snapshot.research_model_version == "QM_ETF_SECTOR_RADAR_V3.5"
     assert len(snapshot.sectors) == 3
     assert all(item.funds["status"] == "missing" for item in snapshot.items)
     assert all("score" not in item.to_dict() for item in snapshot.items)
@@ -510,6 +640,307 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     assert cold.json()["meta"]["refresh"]["input_as_of"] == snapshot.as_of_date
     assert "本地证据已变化" in cold.json()["meta"]["refresh"]["reason"]
 
+    frozen_factor = (
+        service.store.frozen_adjustments / f"{snapshot.evidence_hashes['复权']}.parquet"
+    )
+    frozen_factor.unlink()
+    service._detail_history_cache.clear()
+    refused = client.get(
+        "/api/v1/rotation/etfs/510300.SH",
+        params={"snapshot_id": snapshot.snapshot_id},
+    )
+    assert refused.status_code == 409
+    assert "ETF 历史证据不可复现" in refused.json()["detail"]
+
+
+def test_etf_sandbox_preview_uses_local_pit_denominator_without_publishing(
+    tmp_path,
+    isolated_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-09").date(),
+    )
+    metadata = pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "name": "沪深300ETF截止前",
+                "benchmark": "沪深300指数",
+                "asset_type": "etf",
+                "list_date": "2012-05-28",
+                "effective_date": "2026-08-07",
+                "observed_at": "2026-08-07T06:30:00+00:00",
+                "metadata_source": "free-stockdb:security-master",
+            },
+            {
+                "symbol": "510300.SH",
+                "name": "收盘后才知道的未来名称ETF",
+                "benchmark": "未来指数",
+                "asset_type": "etf",
+                "list_date": "2012-05-28",
+                "effective_date": "2026-08-07",
+                "observed_at": "2026-08-07T08:00:00+00:00",
+                "metadata_source": "free-stockdb:security-master",
+            },
+            *[
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "asset_type": "etf",
+                    "list_date": listed,
+                    "effective_date": "2026-08-07",
+                    "observed_at": "2026-08-07T06:30:00+00:00",
+                    "metadata_source": "free-stockdb:security-master",
+                }
+                for symbol, name, listed in (
+                    ("159920.SZ", "恒生ETF(QDII)", "2012-10-22"),
+                    ("511010.SH", "国债ETF", "2013-08-05"),
+                )
+            ],
+            {
+                "symbol": "512999.SH",
+                "name": "已退市测试ETF",
+                "asset_type": "etf",
+                "status": "listed",
+                "list_date": "2020-01-01",
+                "effective_date": "2026-08-06",
+                "observed_at": "2026-08-06T06:00:00+00:00",
+                "metadata_source": "free-stockdb:security-master",
+            },
+            {
+                "symbol": "512999.SH",
+                "name": "已退市测试ETF",
+                "asset_type": "etf",
+                "status": "delisted",
+                "list_date": "2020-01-01",
+                "effective_date": "2026-08-07",
+                "observed_at": "2026-08-07T06:00:00+00:00",
+                "metadata_source": "free-stockdb:security-master",
+            },
+        ]
+    )
+    observations = pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "trade_date": "2026-08-07",
+                "shares": 1_000_000_000,
+                "share_source": "free-stockdb:etf-share",
+                "acquired_at": "2026-08-07T06:40:00+00:00",
+            }
+        ]
+    )
+
+    class LocalEvidenceStore:
+        @staticmethod
+        def etf_metadata_history():
+            return metadata.copy()
+
+        @staticmethod
+        def etf_metadata():
+            return metadata.copy()
+
+        @staticmethod
+        def etf_observations():
+            return observations.copy()
+
+    class LocalInstruments(_EtfInstruments):
+        items: ClassVar[list[Instrument]] = [
+            *[
+                Instrument(
+                    **{
+                        **item.to_dict(),
+                        "observed_at": pd.Timestamp(
+                            "2026-08-07T06:00:00+00:00"
+                        ).timestamp(),
+                    }
+                )
+                for item in _EtfInstruments.items
+            ],
+            Instrument(
+                "588999.SH",
+                "588999",
+                "未来上市ETF",
+                "CN",
+                "SH",
+                "etf",
+                status="listed",
+                list_date="2026-08-09",
+                observed_at=pd.Timestamp("2026-08-07T06:00:00+00:00").timestamp(),
+            ),
+        ]
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", LocalEvidenceStore)
+    source = _EtfSource()
+    source.frame = pd.concat(
+        [
+            source.frame,
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "510300.SH",
+                        "date": "2026-08-10",
+                        "open": 9.9,
+                        "high": 10.1,
+                        "low": 9.8,
+                        "close": 10.0,
+                        "volume": 1_000_000,
+                        "amount": 10_000_000,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    ingest_store = StockDBIngestStore(tmp_path / "ingest")
+    research_store = EtfResearchStore(tmp_path / "research")
+    service = EtfResearchService(
+        source=source,
+        instruments=LocalInstruments(),
+        ingest_store=ingest_store,
+        store=research_store,
+    )
+
+    with pytest.raises(RuntimeError, match="没有完整、可复验"):
+        service.profiles(as_of="2026-08-08")
+    with pytest.raises(RuntimeError, match="没有完整、可复验"):
+        service.scan(as_of="2026-08-08")
+
+    profiles = service.profiles(as_of="2026-08-08", tier="sandbox")
+    assert [item.symbol for item in profiles] == ["159920.SZ", "510300.SH", "511010.SH"]
+    assert (
+        next(item for item in profiles if item.symbol == "510300.SH").name
+        == "收盘后才知道的未来名称ETF"
+    )
+
+    preview = service.scan(as_of="2026-08-08", tier="sandbox")
+
+    assert preview.tier == "sandbox"
+    assert preview.formal_eligible is False
+    assert preview.snapshot_id.startswith("etf_preview_")
+    assert preview.as_of_date == "2026-08-07"
+    assert preview.coverage["status"] == "degraded"
+    assert preview.coverage["denominator"]["complete_market_denominator"] is False
+    assert preview.coverage["denominator"]["as_of"] == "2026-08-07"
+    assert preview.coverage["denominator"]["expected_symbols"] == 3
+    assert next(item for item in preview.items if item.symbol == "510300.SH").name == "沪深300ETF截止前"
+    assert all(
+        member["sources"] and member["observed_at"]
+        for member in preview.coverage["denominator"]["members"]
+    )
+    assert preview.capabilities["publication"] == {
+        "tier": "sandbox",
+        "formal_eligible": False,
+        "status": "blocked",
+        "reason": "sandbox 使用本地非完整母集，禁止发布为 production 快照",
+    }
+    assert research_store.latest() is None
+    assert research_store.history() == []
+    assert ingest_store.history() == []
+    with pytest.raises(RuntimeError, match="仅接受正式 production"):
+        research_store.publish(preview)
+    with pytest.raises(RuntimeError, match="不存在或契约已淘汰"):
+        service.product_history("510300.SH", snapshot_id=preview.snapshot_id)
+    history = service.product_history(
+        "510300.SH",
+        snapshot_id=preview.snapshot_id,
+        tier="sandbox",
+    )
+    assert history
+    assert max(pd.Timestamp(item["date"]) for item in history) <= pd.Timestamp(
+        preview.as_of_date
+    )
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.get_etf_research_service",
+        lambda: service,
+    )
+    client = TestClient(app)
+    default_listing = client.get("/api/v1/rotation/etfs")
+    production_detail = client.get(
+        f"/api/v1/rotation/etfs/510300.SH?snapshot_id={preview.snapshot_id}"
+    )
+    sandbox_listing = client.get(
+        f"/api/v1/rotation/etfs?tier=sandbox&snapshot_id={preview.snapshot_id}"
+    )
+    sandbox_overview = client.get(
+        f"/api/v1/rotation/etfs/overview?tier=sandbox&snapshot_id={preview.snapshot_id}"
+    )
+    sandbox_detail = client.get(
+        f"/api/v1/rotation/etfs/510300.SH?tier=sandbox&snapshot_id={preview.snapshot_id}"
+    )
+
+    assert default_listing.json()["data"]["items"] == []
+    assert production_detail.status_code == 404
+    assert sandbox_listing.status_code == 200
+    assert sandbox_listing.json()["meta"]["formal_eligible"] is False
+    assert len(sandbox_listing.json()["data"]["items"]) == 3
+    assert sandbox_overview.json()["meta"]["tier"] == "sandbox"
+    assert sandbox_detail.status_code == 200
+    assert sandbox_detail.json()["meta"]["formal_eligible"] is False
+
+
+def test_etf_sandbox_rejects_future_as_of_without_crossing_time(
+    tmp_path,
+    isolated_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-09").date(),
+    )
+    service = EtfResearchService(
+        source=_EtfSource(),
+        instruments=_EtfInstruments(),
+        ingest_store=StockDBIngestStore(tmp_path / "ingest"),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    with pytest.raises(RuntimeError, match="晚于当前市场日"):
+        service.profiles(as_of="2026-08-10", tier="sandbox")
+
+    class EmptyLocalEvidenceStore:
+        @staticmethod
+        def etf_metadata_history():
+            return pd.DataFrame()
+
+        @staticmethod
+        def etf_metadata():
+            return pd.DataFrame()
+
+        @staticmethod
+        def etf_observations():
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.store.RotationStore",
+        EmptyLocalEvidenceStore,
+    )
+    with pytest.raises(RuntimeError, match="没有可用的沪深场内 ETF"):
+        service.profiles(as_of="2026-08-08", tier="sandbox")
+
+    monkeypatch.setattr(
+        service.source,
+        "intraday_many",
+        lambda *_args: pd.DataFrame(
+            {
+                "symbol": ["510300.SH", "510300.SH", "510300.SH"],
+                "date": [
+                    "2026-08-08 09:29:00",
+                    "2026-08-08 10:00:00",
+                    "2026-08-09 10:00:00",
+                ],
+                "close": [1.0, 1.1, 9.9],
+                "volume": [100, 200, 999],
+                "amount": [100, 220, 9_890],
+            }
+        ),
+    )
+    intraday = service.intraday("510300.SH", as_of_date="2026-08-08")
+    assert [item["time"] for item in intraday["series"]] == ["2026-08-08T10:00"]
+
 
 def test_etf_metadata_only_change_reuses_compatible_local_daily_ingest(
     tmp_path,
@@ -528,29 +959,61 @@ def test_etf_metadata_only_change_reuses_compatible_local_daily_ingest(
         ingest_store=StockDBIngestStore(tmp_path / "ingest"),
         store=EtfResearchStore(tmp_path / "research"),
     )
-
-    first = service.scan(as_of="2026-08-08")
-    original = instruments.items[0]
-    instruments.items[0] = Instrument(
-        symbol=original.symbol,
-        code=original.code,
-        name="沪深300增强标注ETF",
-        market=original.market,
-        exchange=original.exchange,
-        asset_type=original.asset_type,
-        status=original.status,
+    profiles = service.profiles(tier="sandbox")
+    assert len(profiles) == 3
+    updated_profiles = list(profiles)
+    updated_profiles[0] = type(profiles[0])(
+        **{**profiles[0].to_dict(), "name": "沪深300增强标注ETF"}
     )
-    second = service.scan(as_of="2026-08-08")
+    monkeypatch.setattr(
+        service,
+        "profiles",
+        lambda as_of="", tier="production": updated_profiles,
+    )
+    service._profile_capabilities = {
+        "status": "ready",
+        "source": "test:immutable-catalog",
+        "covered_symbols": len(updated_profiles),
+    }
+    identity = StockDBArtifactIdentity(
+        artifact_id="test-etf-artifact",
+        sdk={"available": True, "sha256": "1" * 64},
+    )
+    monkeypatch.setattr(source, "artifact_identity", lambda **_kwargs: identity)
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-08").date(),
+    )
+    future = source.frame.groupby("symbol", as_index=False).tail(1).copy()
+    future["date"] = pd.Timestamp("2026-08-09")
+    cached_daily = pd.concat([source.frame, future], ignore_index=True)
+    first = service.ingest_store.publish_etf(
+        daily=cached_daily,
+        minutes=pd.DataFrame(),
+        profiles=[item.to_dict() for item in profiles],
+        as_of_date="2026-08-09",
+        artifact_id=identity.artifact_id,
+        master_snapshot_id="etf-master-before-metadata-refresh",
+        start_date="2023-01-01",
+        end_date="2026-08-09",
+        coverage={"status": "complete", "symbol_ratio": 1.0},
+        provenance={"source": "free-stockdb"},
+        session_dates=sorted(
+            cached_daily["date"].dt.strftime("%Y-%m-%d").unique().tolist()
+        ),
+    )
 
-    assert source.daily_calls == 1
-    assert second.snapshot_id != first.snapshot_id
+    second = service.scan()
+
+    assert source.daily_calls == 0
     assert second.ingest_id != first.ingest_id
     republished = service.ingest_store.get(second.ingest_id)
     assert republished is not None
     assert republished.provenance["profile_refresh_from"] == first.ingest_id
-    assert republished.content_hashes["etf_daily"] == service.ingest_store.get(
-        first.ingest_id
-    ).content_hashes["etf_daily"]
+    republished_daily = service.ingest_store.load_frame(republished, "etf_daily")
+    assert pd.to_datetime(republished_daily["date"]).max() <= pd.Timestamp("2026-08-08")
+    assert republished.end_date == second.as_of_date == "2026-08-07"
+    assert republished.content_hashes["etf_daily"] != first.content_hashes["etf_daily"]
 
 
 def test_etf_cli_contract_supports_cancel_and_resume():
@@ -610,6 +1073,104 @@ def test_etf_job_syncs_optional_evidence_before_research_and_keeps_warnings(monk
     assert calls == [("sync", None), ("scan", ["份额接口降级 fund_share"])]
     assert outcome.result_artifact_id == "artifact_test"
     assert "1 项证据已降级" in outcome.detail
+
+
+def test_etf_sandbox_job_skips_remote_sync_and_emits_preview_artifact(monkeypatch):
+    from quantmaster.rotation.etf_jobs import EtfResearchJobs
+
+    calls: list[tuple[str, object]] = []
+    writes: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    class FailProvider:
+        def __init__(self, _store):
+            raise AssertionError("sandbox 不得触发远端 ETF 证据同步")
+
+    snapshot = SimpleNamespace(
+        schema_version="3.0",
+        snapshot_id="etf_preview_test",
+        ingest_id="preview_sdi_test",
+        artifact_id="upstream_test",
+        input_hash="hash_test",
+        to_dict=lambda: {
+            "schema_version": "3.0",
+            "snapshot_id": "etf_preview_test",
+            "formal_eligible": False,
+        },
+    )
+
+    class FakeService:
+        store = SimpleNamespace(
+            record_failure=lambda _reason: calls.append(("record_failure", _reason))
+        )
+
+        @staticmethod
+        def scan(**kwargs):
+            calls.append(("scan", (kwargs.get("tier"), kwargs.get("refresh_warnings"))))
+            return snapshot
+
+    def write_artifact(kind, payload, metadata):
+        writes.append((kind, payload, metadata))
+        return {"id": "artifact_preview"}
+
+    context = SimpleNamespace(
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        write_artifact=write_artifact,
+    )
+    monkeypatch.setattr("quantmaster.rotation.provider.RotationProvider", FailProvider)
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_jobs.get_etf_research_service",
+        lambda: FakeService(),
+    )
+
+    outcome = EtfResearchJobs._handle(
+        context,
+        {"as_of": "2026-08-07", "tier": "sandbox"},
+    )
+
+    assert calls == [("scan", ("sandbox", []))]
+    assert writes[0][0] == "rotation.etf.preview"
+    assert writes[0][2]["lineage"]["formal_eligible"] is False
+    assert outcome.result_artifact_id == "artifact_preview"
+    assert "不可发布" in outcome.detail
+
+
+def test_etf_sandbox_job_public_result_exposes_preview_id():
+    from quantmaster.rotation.etf_jobs import EtfResearchJobs
+
+    jobs = object.__new__(EtfResearchJobs)
+    jobs.runtime = SimpleNamespace(
+        public=lambda value: {"id": value["id"], "status": value["status"]},
+        store=SimpleNamespace(
+            artifact=lambda artifact_id: {
+                "id": artifact_id,
+                "payload": {
+                    "snapshot_id": "etf_preview_public",
+                    "formal_eligible": False,
+                },
+            }
+        ),
+    )
+
+    result = jobs.public(
+        {
+            "id": "job_preview",
+            "status": "completed",
+            "detail": "ETF 本地降级预览已生成（不可发布）",
+            "spec": {"tier": "sandbox"},
+            "result_artifact_id": "artifact_preview",
+        }
+    )
+
+    assert result["tier"] == "sandbox"
+    assert result["formal_eligible"] is False
+    assert result["result"] == {
+        "snapshot_id": "etf_preview_public",
+        "preview_id": "etf_preview_public",
+        "tier": "sandbox",
+        "formal_eligible": False,
+        "artifact_id": "artifact_preview",
+    }
 
 
 def test_experimental_online_endpoints_are_disabled_by_default(isolated_config):
@@ -676,11 +1237,16 @@ def test_stockdb_audit_api_discloses_same_upstream_and_experimental_state(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["upstream"] == "tushare"
+    assert payload["upstream"] == "vendor-declared-unverified"
+    assert payload["upstream_evidence"] == "not_provided"
     assert payload["distribution"] == "free-stockdb"
     assert payload["independent_cross_validation"] is False
     assert payload["capabilities"]["realtime_tick"]["state"] == "disabled"
     assert payload["capabilities"]["daily_bars"]["asset_classes"] == ["stock", "etf"]
+    assert payload["capabilities"]["daily_bars"]["state"] == "unverified"
+    assert payload["capabilities"]["daily_bars"]["verified"] is False
+    assert payload["capabilities"]["security_catalog"]["state"] == "unverified"
+    assert payload["capabilities"]["security_catalog"]["verified"] is False
     assert payload["experimental_online"]["max_concurrency"] == 2
 
 

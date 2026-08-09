@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
 from quantmaster.lab.models import content_hash
+from quantmaster.trading_sessions import market_date
 
 REQUIRED_SIGNAL_FIELDS = ("open", "high", "low", "close", "volume")
 REQUIRED_EXECUTION_FIELDS = (
@@ -51,7 +51,7 @@ class PitDataStore:
     def reusable_for(end: str) -> bool:
         """Today's close may have changed; let the provider's 15:30 cache rule refresh it."""
         try:
-            return pd.Timestamp(end).date() < date.today()
+            return pd.Timestamp(end).date() < market_date()
         except (TypeError, ValueError):
             return False
 

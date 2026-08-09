@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,7 @@ from quantmaster.lab.strategy import (
     target_weights,
 )
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,11 @@ def _ledger_weight_context(
         values = close[position.symbol].replace([np.inf, -np.inf], np.nan).dropna()
         if len(values) and float(values.iloc[-1]) > 0:
             prices[position.symbol] = float(values.iloc[-1])
-    report = ledger_report(ledger, prices=prices)
+    report = ledger_report(
+        ledger,
+        prices=prices,
+        as_of=pd.Timestamp(as_of).strftime("%Y-%m-%d"),
+    )
     total_assets = float(report.get("total_assets") or 0.0)
     market_value = float(report.get("market_value") or 0.0)
     denominator = total_assets if total_assets > 1e-9 else market_value
@@ -183,7 +188,7 @@ class LabService:
         cfg = get_config().lab
         admission = self.preflight("validate", {
             "universe": cfg.universe, "start": cfg.start,
-            "end": pd.Timestamp.today().strftime("%Y-%m-%d"),
+            "end": market_date().isoformat(),
         })
         snapshot_record = self.store.latest_snapshot(cfg.universe) or {}
         snapshot_payload = dict(snapshot_record.get("payload") or {})
@@ -223,7 +228,7 @@ class LabService:
         cfg = get_config()
         admission = self.preflight("validate", {
             "universe": cfg.lab.universe, "start": cfg.lab.start,
-            "end": pd.Timestamp.today().strftime("%Y-%m-%d"),
+            "end": market_date().isoformat(),
         })
         capabilities = self.capabilities()
         models = capabilities["models"]
@@ -334,7 +339,7 @@ class LabService:
         report = run_preflight(operation, values)
         universe = str(values.get("universe") or get_config().lab.universe)
         start = str(values.get("start") or get_config().lab.start)
-        end = str(values.get("end") or pd.Timestamp.today().date().isoformat())
+        end = str(values.get("end") or market_date().isoformat())
         repair = dataset_repair_plan(universe, start, end)
         if repair["repair_symbol_count"] or repair["membership_missing"]:
             report["coverage"] = repair
@@ -548,13 +553,12 @@ class LabService:
 
     def create_study(self, payload: dict[str, Any]) -> dict:
         """校验配置、登记 Study，再把长任务放入统一可恢复队列。"""
-        from datetime import date
 
         from quantmaster.lab.research import OptimizationSpec
 
         config = dict(payload)
         scheduled = bool(config.pop("_scheduled", False))
-        config["end"] = config.get("end") or date.today().isoformat()
+        config["end"] = config.get("end") or market_date().isoformat()
         spec = OptimizationSpec.from_dict(config)
         require_runnable(self.preflight("optimize", spec.to_dict()))
         study = self.store.create_study(spec.to_dict())
@@ -605,9 +609,16 @@ class LabService:
                     f"行情 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
                 )
 
-        panel = load_panel(symbols, start, end, progress=on_symbol)
+        market_envelope = load_panel(symbols, start, end, progress=on_symbol)
+        panel = market_envelope.require_data()
         snapshot = create_snapshot(
-            universe, start, end, panel=panel, membership=membership).to_dict()
+            universe,
+            start,
+            end,
+            panel=panel,
+            membership=membership,
+            market_data_quality=market_envelope.quality.to_dict(),
+        ).to_dict()
         stored = self.store.save_snapshot(snapshot)
         if progress:
             progress(52, "数据快照已冻结")
@@ -635,22 +646,20 @@ class LabService:
         before = dataset_repair_plan(universe, start, end)
         selected = str(provider or "").strip().lower()
         if not selected:
-            stockdb = next(
-                item for item in before["providers"] if item["id"] == "free-stockdb-online"
-            )
+            stockdb = next(item for item in before["providers"] if item["id"] == "free-stockdb")
             selected = (
-                "free-stockdb-online"
+                "free-stockdb"
                 if stockdb["available"] and not before["membership_missing"] else "tushare"
             )
-        if selected not in {"free-stockdb-online", "tushare"}:
+        if selected not in {"free-stockdb", "tushare"}:
             raise LabError(
                 "INVALID_REQUEST", f"不支持的数据补齐来源: {selected}",
-                action="选择 Tushare 或 stockdb-online",
+                action="选择本机 StockDB 或 Tushare",
             )
         if before["membership_missing"]:
             if selected != "tushare":
                 raise LabError(
-                    "DATASET_MISSING", "stockdb-online 不能补齐 CSI800 点时成分",
+                    "DATASET_MISSING", "本机 StockDB 不能补齐 CSI800 点时成分",
                     action="改用 Tushare，或先导入 PIT 成分缓存",
                 )
             if progress:
@@ -673,17 +682,19 @@ class LabService:
                 "repair_end": max(str(segment["end"]) for segment in segments),
             })
         failures: dict[str, str] = {}
+        degraded: dict[str, dict[str, Any]] = {}
         completed = 0
 
-        def repair(item: dict[str, Any]) -> str:
+        def repair(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             if cancelled and cancelled():
                 raise InterruptedError("数据补齐已取消")
-            load_history(
+            market_envelope = load_history(
                 str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
                 refresh=RefreshMode.INCREMENTAL, priority="interactive",
                 provider=selected,
             )
-            return str(item["symbol"])
+            market_envelope.require_data()
+            return str(item["symbol"]), market_envelope.quality.to_dict()
 
         workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
@@ -691,7 +702,9 @@ class LabService:
             for future in as_completed(futures):
                 item = futures[future]
                 try:
-                    future.result()
+                    repaired_symbol, quality = future.result()
+                    if quality.get("status") != "verified":
+                        degraded[repaired_symbol] = quality
                 except InterruptedError:
                     raise
                 except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -732,6 +745,9 @@ class LabService:
             "remaining_critical_symbols": after["critical_repair_symbol_count"],
             "include_warmup": bool(include_warmup),
             "failures": failures,
+            "degraded": degraded,
+            "analysis_ready_symbols": max(0, len(targets) - len(failures)),
+            "formal_eligible": bool(after.get("research_eligible")),
             "before": before,
             "after": after,
             "snapshot": snapshot,
@@ -1088,9 +1104,26 @@ class LabService:
         try:
             from quantmaster.ai.sentiment import quality_sentiment_panel
 
-            bundle.signal["news_sentiment"] = quality_sentiment_panel(
-                close.index, symbols,
-            ).reindex(index=close.index, columns=close.columns)
+            news_tier: Literal["production", "sandbox"] = (
+                "production" if quality == "production" else "sandbox"
+            )
+            news_panel = quality_sentiment_panel(
+                close.index, symbols, tier=news_tier,
+            )
+            news_metadata = dict(news_panel.attrs.get("news_factor") or {})
+            aligned_news = news_panel.reindex(index=close.index, columns=close.columns)
+            aligned_news.attrs["news_factor"] = news_metadata
+            bundle.signal["news_sentiment"] = aligned_news
+            bundle.manifest["news_sentiment"] = news_metadata
+            if news_tier == "sandbox" and news_metadata.get("event_count"):
+                bundle.warnings.append({
+                    "code": "news_feature_sandbox",
+                    "level": "warning",
+                    "message": (
+                        "消息面使用 sandbox 预览；短历史、快讯或未完成抓取窗口"
+                        "不得晋级 production。"
+                    ),
+                })
         except Exception as exc:
             bundle.warnings.append({
                 "code": "news_feature_unavailable", "level": "warning",
@@ -1102,12 +1135,26 @@ class LabService:
         names = sorted({industry.get(symbol, "") for symbol in symbols} - {""})
         for number, name in enumerate(names, start=1):
             key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(number)
-            values = [1.0 if industry.get(symbol) == name else 0.0 for symbol in symbols]
+            industry_values = [
+                1.0 if industry.get(symbol) == name else 0.0 for symbol in symbols
+            ]
             bundle.context[f"industry_{key[:48]}"] = pd.DataFrame(
-                [values] * len(close.index), index=close.index, columns=symbols,
+                [industry_values] * len(close.index), index=close.index, columns=symbols,
             )
-        values, descriptors = registered_features(bundle)
-        return values, [item.to_dict() for item in descriptors], snapshot, bundle.manifest_hash
+        feature_values, descriptors = registered_features(bundle)
+        catalog = [item.to_dict() for item in descriptors]
+        news_metadata = dict(
+            bundle.signal.get("news_sentiment", pd.DataFrame()).attrs.get("news_factor") or {},
+        )
+        for descriptor in catalog:
+            if descriptor["name"] != "news_sentiment":
+                continue
+            descriptor["tier"] = str(news_metadata.get("tier") or "production")
+            descriptor["formal_eligible"] = bool(news_metadata.get("formal_eligible"))
+            descriptor["evidence"] = news_metadata
+            if not descriptor["formal_eligible"]:
+                descriptor["pit_grade"] = "research_only"
+        return feature_values, catalog, snapshot, bundle.manifest_hash
 
     def discover_python(
         self, *, run_id: str, universe: str, start: str, end: str, horizon: int = 3,
@@ -1967,7 +2014,7 @@ class LabService:
         )
         from quantmaster.lab.validation import validate_factor_values
 
-        end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+        end = end or market_date().isoformat()
         panel, membership, snapshot = self._context(
             universe, start, end, progress=progress, data_policy=DataPolicy.PREFER_LOCAL.value,
         )
@@ -2069,7 +2116,7 @@ class LabService:
         )
         from quantmaster.data.industry import load_industry_map
 
-        industry_map = load_industry_map()
+        industry_map = load_industry_map(as_of=str(pd.Timestamp(dates[-1]).date()))
         strategies: list[dict[str, Any]] = []
         horizon_outcomes: dict[str, dict[str, Any]] = {}
         for position, horizon in enumerate(SUPPORTED_HORIZONS, start=1):
@@ -2193,7 +2240,7 @@ class LabService:
         self, *, strategy_id: str = "", universe: str = "csi800",
         start: str = "2015-01-01", end: str = "", progress=None,
     ) -> dict[str, Any]:
-        end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+        end = end or market_date().isoformat()
         candidates = [self.store.strategy(strategy_id)] if strategy_id else [
             *self.store.strategies(status="shadow_challenger", limit=30),
             *self.store.strategies(status="paper", limit=30),
@@ -2232,7 +2279,7 @@ class LabService:
         dates = open_prices.index
         from quantmaster.data.industry import load_industry_map
 
-        industry_map = load_industry_map()
+        industry_map = load_industry_map(as_of=end)
         for candidate in candidates:
             components = candidate.get("components") or []
             values = {

@@ -17,6 +17,7 @@ from quantmaster.data.registry import RefreshMode, load_history
 from quantmaster.data.storage import BarStore
 from quantmaster.runtime.jobs import WorkerIdentity, lease_deadline
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import market_date
 
 RefreshScope = Literal["market", "universe", "all_cached"]
 logger = logging.getLogger(__name__)
@@ -146,16 +147,16 @@ class DataRefreshManager:
     def _plan(
         self, scope: RefreshScope, universe: str = "", start: str = "",
     ) -> tuple[dict, list[str]]:
-        end = str(date.today())
+        end = market_date().isoformat()
         if scope == "market":
-            start = str(date.today() - timedelta(days=365))
+            start = str(market_date() - timedelta(days=365))
         elif not start:
             start = get_config().lab.start
         try:
             start_date = date.fromisoformat(start)
         except ValueError:
             raise ValueError("刷新起始日期必须是 YYYY-MM-DD") from None
-        if start_date > date.today():
+        if start_date > market_date():
             raise ValueError("刷新起始日期不能晚于今天")
         symbols = self._resolve_symbols(scope, universe, start, end)
         from quantmaster.data.resilience import PROVIDER_HEALTH
@@ -371,13 +372,13 @@ class DataRefreshManager:
                 return
             error = ""
             try:
-                load_history(
+                market_envelope = load_history(
                     symbol, start, end, store=store, refresh=RefreshMode.INCREMENTAL,
                     priority="maintenance",
                 )
-                meta = store.metadata(symbol) or {}
-                if meta.get("last_status") in {"refresh_failed", "stale"}:
-                    error = "所有数据源失败，已保留原缓存"
+                market_envelope.require_data()
+                if market_envelope.quality.status != "verified":
+                    error = "；".join(market_envelope.quality.issues) or "行情证据仍为降级状态"
             except Exception as exc:
                 from quantmaster.logging_config import redact_sensitive_text
 

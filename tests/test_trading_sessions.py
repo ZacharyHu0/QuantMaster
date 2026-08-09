@@ -42,7 +42,7 @@ class ResearchFallbackResolver(FixtureResolver):
         return ["invalid", "2026-08-01", "2026-08-04"]
 
 
-class BarFallbackResolver(FixtureResolver):
+class UntrustedBarCatalogResolver(FixtureResolver):
     @staticmethod
     def _research_sessions(start, end):
         del start, end
@@ -96,9 +96,24 @@ def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_c
     research = ResearchFallbackResolver([]).resolve(naive)
     assert research.source == "research_lake"
     assert research.session == "2026-08-04"
-    bars = BarFallbackResolver([]).resolve(naive)
-    assert bars.source == "bar_catalog"
-    assert bars.session == "2026-08-04"
+    bars = UntrustedBarCatalogResolver([]).resolve(naive)
+    assert bars.source == "unavailable"
+    assert bars.session == ""
+    assert bars.ready is False
     assert SessionExpectationResolver._research_sessions(
         naive.date(), naive.date(),
     ) == []
+
+
+def test_unverified_bar_majority_cannot_invent_a_holiday_session():
+    resolver = UntrustedBarCatalogResolver([])
+
+    result = resolver.resolve(
+        datetime(2026, 10, 1, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert resolver._bar_sessions(result.session or datetime(2026, 10, 1).date()) == [
+        "2026-08-04",
+    ]
+    assert result.ready is False
+    assert result.session == ""

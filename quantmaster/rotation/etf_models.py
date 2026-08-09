@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 ETF_SCHEMA_VERSION = "3.0"
-ETF_RESEARCH_MODEL_VERSION = "QM_ETF_SECTOR_RADAR_V3.4"
+ETF_RESEARCH_MODEL_VERSION = "QM_ETF_SECTOR_RADAR_V3.5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,7 @@ class EtfProfile:
     classification_source: str = "quantmaster:explicit-rules"
     classification_confidence: float = 0.0
     list_date: str = ""
+    metadata_effective_as_of: str = ""
     status: str = "listed"
     classification_evidence: tuple[str, ...] = ()
 
@@ -84,6 +85,8 @@ class EtfResearchSnapshot:
     evidence_hashes: dict[str, str]
     categories: tuple[str, ...]
     input_hash: str
+    tier: str = "production"
+    formal_eligible: bool = True
     schema_version: str = ETF_SCHEMA_VERSION
     research_model_version: str = ETF_RESEARCH_MODEL_VERSION
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
@@ -117,4 +120,6 @@ class EtfResearchSnapshot:
             str(key): tuple(items) for key, items in (data.get("candidate_queues") or {}).items()
         }
         data["categories"] = tuple(data.get("categories") or ())
+        data.setdefault("tier", "production")
+        data.setdefault("formal_eligible", True)
         return cls(**data)

@@ -25,7 +25,7 @@ from quantmaster.data.free_stockdb_ingest import StockDBIngestRejected, StockDBI
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.research.contracts import content_hash
-from quantmaster.trading_sessions import expected_session
+from quantmaster.trading_sessions import expected_session, market_date
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
@@ -165,6 +165,8 @@ class AfterCloseService:
         frame: pd.DataFrame,
         boards: list[dict[str, Any]],
         expected_count: int,
+        *,
+        expected_symbols: list[str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         reasons: list[str] = []
         if frame.empty:
@@ -177,20 +179,70 @@ class AfterCloseService:
             )
         as_of = pd.Timestamp(frame["date"].max()).date().isoformat()
         latest = frame.loc[pd.to_datetime(frame["date"]).dt.date == date.fromisoformat(as_of)]
-        observed = int(latest["symbol"].nunique())
-        symbol_ratio = observed / expected_count if expected_count else 0.0
+        observed_set = set(latest["symbol"].dropna().astype(str).str.upper())
+        expected_set = {
+            str(symbol).upper() for symbol in (expected_symbols or ()) if str(symbol).strip()
+        }
+        missing_symbols = expected_set - observed_set
+        suspension_evidence: dict[str, Any] = {}
+        excused_suspensions: set[str] = set()
+        suspension_error = ""
+        if missing_symbols and get_config().data.tushare_token:
+            try:
+                from quantmaster.data.instrument_snapshots import (
+                    load_or_fetch_suspension_snapshot,
+                )
+                from quantmaster.data.tushare_source import TushareSource
+
+                suspension_evidence = load_or_fetch_suspension_snapshot(
+                    TushareSource(), as_of,
+                )
+                excused_suspensions = missing_symbols & {
+                    str(value).upper()
+                    for value in suspension_evidence.get("symbols") or ()
+                }
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                suspension_error = f"Tushare suspend_d 停牌证据不可用：{str(exc)[:240]}"
+        expected_trading = expected_set - excused_suspensions
+        if expected_set:
+            observed = len(observed_set & expected_trading)
+            denominator = len(expected_trading)
+        else:
+            observed = len(observed_set)
+            denominator = expected_count
+        symbol_ratio = observed / denominator if denominator else 1.0
         missing_required = [column for column in REQUIRED_FIELDS if column not in latest]
-        required_ratio = (
-            0.0 if missing_required else float(latest[list(REQUIRED_FIELDS)].notna().all(axis=1).mean())
-        )
+        valid_required = pd.Series(False, index=latest.index)
+        invalid_finite = invalid_ohlc = invalid_volume = len(latest)
+        if not missing_required:
+            required = latest[list(REQUIRED_FIELDS)].apply(pd.to_numeric, errors="coerce")
+            finite = required.map(np.isfinite).all(axis=1)
+            prices = required[["open", "high", "low", "close"]]
+            positive_prices = prices.gt(0).all(axis=1)
+            ohlc_consistent = (
+                required["high"].ge(prices[["open", "close"]].max(axis=1))
+                & required["low"].le(prices[["open", "close"]].min(axis=1))
+                & required["high"].ge(required["low"])
+            )
+            nonnegative_volume = required["volume"].ge(0)
+            valid_required = finite & positive_prices & ohlc_consistent & nonnegative_volume
+            invalid_finite = int((~finite).sum())
+            invalid_ohlc = int((~(positive_prices & ohlc_consistent)).sum())
+            invalid_volume = int((~nonnegative_volume).sum())
+        required_ratio = float(valid_required.mean()) if len(valid_required) else 0.0
         levels = Counter(str(item.get("level") or "") for item in boards)
         expectation = expected_session()
-        if symbol_ratio < 0.80:
-            reasons.append(f"最新截面仅覆盖 {observed}/{expected_count} 只证券")
+        if symbol_ratio < 1.0:
+            reasons.append(
+                f"最新截面仅覆盖 {observed}/{denominator} 只应交易证券；"
+                "缺失标的没有停牌/退市证据"
+            )
+        if suspension_error:
+            reasons.append(suspension_error)
         if missing_required:
             reasons.append("日线必需字段缺失：" + "、".join(missing_required))
-        if required_ratio < 0.95:
-            reasons.append(f"最新截面完整 OHLCV 比例仅 {required_ratio:.1%}")
+        if required_ratio < 1.0:
+            reasons.append(f"最新截面有效 OHLCV 比例仅 {required_ratio:.1%}")
         if not boards or levels.get("L1", 0) == 0:
             reasons.append("free-stockdb 板块目录为空或缺少申万一级")
         if expectation.ready and as_of < expectation.session:
@@ -209,10 +261,18 @@ class AfterCloseService:
             reasons.append("截面一致性校验异常：" + "、".join(severe))
         coverage = {
             "status": "complete" if not reasons else "rejected",
-            "expected_symbols": expected_count,
+            "catalog_symbols": len(expected_set) if expected_set else expected_count,
+            "expected_symbols": denominator,
             "observed_symbols": observed,
             "symbol_ratio": round(symbol_ratio, 6),
+            "excused_suspended_symbols": sorted(excused_suspensions),
+            "suspension_evidence": suspension_evidence,
             "required_ohlcv_ratio": round(required_ratio, 6),
+            "invalid_ohlcv": {
+                "nonfinite_rows": invalid_finite,
+                "price_or_ohlc_rows": invalid_ohlc,
+                "negative_volume_rows": invalid_volume,
+            },
             "field_coverage": self._field_coverage(frame, latest),
             "consistency": consistency,
             "board_counts": dict(sorted(levels.items())),
@@ -637,7 +697,7 @@ class AfterCloseService:
             raise RuntimeError("证券主数据中没有可扫描的 A 股普通股")
         symbols = [item.symbol for item in instruments]
         instrument_map = {item.symbol: item for item in instruments}
-        target = date.fromisoformat(as_of) if as_of else date.today()
+        target = date.fromisoformat(as_of) if as_of else market_date()
         start = target - timedelta(
             days=max(
                 cfg.free_stockdb_stock_initial_lookback_days,
@@ -650,7 +710,12 @@ class AfterCloseService:
                 instruments=instruments,
                 start=start.isoformat(),
                 end=target.isoformat(),
-                validator=self._gate,
+                validator=lambda value, taxonomy, _expected: self._gate(
+                    value,
+                    taxonomy,
+                    len(symbols),
+                    expected_symbols=symbols,
+                ),
                 progress=progress,
                 cancelled=cancelled,
             )
@@ -666,13 +731,46 @@ class AfterCloseService:
                 coverage=exc.coverage,
             )
             raise DataGateRejected(exc.reasons, exc.coverage, exc.as_of_date) from None
-        if as_of and not all(item.get("effective_date") or item.get("as_of_date") for item in boards):
-            reasons = ["板块目录没有点时生效日期，不能用当前分类强制重算历史选择；请直接重放已冻结快照"]
-            self.store.record_failure(reasons, as_of_date=actual_as_of, coverage=coverage)
-            raise DataGateRejected(reasons, coverage, actual_as_of)
+        if as_of:
+            invalid_dates: list[str] = []
+            future_dates: list[str] = []
+            for item in boards:
+                code = str(item.get("code") or "未知板块")
+                raw = str(item.get("effective_date") or item.get("as_of_date") or "")
+                if not raw:
+                    invalid_dates.append(f"{code}=缺失")
+                    continue
+                try:
+                    effective = date.fromisoformat(raw[:10])
+                except ValueError:
+                    invalid_dates.append(f"{code}={raw}")
+                    continue
+                if effective > target:
+                    future_dates.append(f"{code}={effective.isoformat()}")
+            reasons = []
+            if invalid_dates:
+                reasons.append(
+                    "板块目录缺少合法点时生效日期：" + "、".join(invalid_dates[:10])
+                )
+            if future_dates:
+                reasons.append(
+                    f"板块目录包含晚于历史目标日 {target.isoformat()} 的分类："
+                    + "、".join(future_dates[:10])
+                )
+            if reasons:
+                reasons.append(
+                    "不能用当前分类强制重算历史；请直接重放已冻结快照或提供目标日前已生效的板块目录"
+                )
+                self.store.record_failure(reasons, as_of_date=actual_as_of, coverage=coverage)
+                raise DataGateRejected(reasons, coverage, actual_as_of)
         if as_of and actual_as_of > as_of:
             frame = frame.loc[pd.to_datetime(frame["date"]).dt.date <= date.fromisoformat(as_of)]
-            actual_as_of, coverage = self._gate(frame, boards, len(symbols))
+            actual_as_of, coverage = self._gate(
+                frame,
+                boards,
+                len(symbols),
+                expected_symbols=symbols,
+            )
         progress(62, "计算板块优先级", "聚合申万层级与概念板块")
         try:
             sectors, candidates, shadow_candidates, excluded, score_diagnostics = self._score(
@@ -729,6 +827,7 @@ class AfterCloseService:
                 {
                     "code": item.get("code"),
                     "level": item.get("level"),
+                    "effective_date": item.get("effective_date") or item.get("as_of_date"),
                     "members": sorted(self._board_members(item)),
                 }
                 for item in sorted(boards, key=lambda value: str(value.get("code") or ""))
@@ -792,7 +891,8 @@ class AfterCloseService:
             coverage=coverage,
             provenance={
                 "source": self.source.name,
-                "upstream": "tushare",
+                "upstream": "vendor-declared-unverified",
+                "upstream_evidence": "not_provided",
                 "distribution": "free-stockdb",
                 "engine": ("stock_sdk" if self.source.native_batch_available() else "http-compatible"),
                 "sdk_path": self.source.sdk_path,

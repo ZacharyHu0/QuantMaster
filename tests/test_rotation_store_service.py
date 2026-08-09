@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -56,6 +57,93 @@ def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp
     assert store.themes()[0]["code"] == "BK1001"
     store.set_runtime_state("scheduled_close", "2026-07-30")
     assert store.runtime_state("scheduled_close") == "2026-07-30"
+
+
+def test_etf_metadata_history_is_idempotent_and_rejects_identity_conflicts(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "name": "沪深300ETF",
+                "observed_at": "2026-08-09T06:59:00+00:00",
+                "effective_date": "2026-08-09",
+            }
+        ]
+    )
+
+    store.save_etf_metadata(frame)
+    manifest_before = store.etf_metadata_history_manifest_path.read_bytes()
+    store.save_etf_metadata(frame.copy())
+
+    history = store.etf_metadata_history()
+    assert len(history) == 1
+    assert history["observation_id"].nunique() == 1
+    assert history["observation_integrity"].eq("verified").all()
+    assert store.etf_metadata_history_manifest_path.read_bytes() == manifest_before
+
+    conflict = frame.assign(name="被改写的名称")
+    with pytest.raises(RotationIntegrityError, match="观察身份出现冲突内容"):
+        store.save_etf_metadata(conflict)
+    assert store.etf_metadata_history().iloc[0]["name"] == "沪深300ETF"
+
+
+def test_etf_metadata_history_file_and_manifest_are_tamper_evident(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "name": "沪深300ETF",
+                "observed_at": "2026-08-09T06:59:00+00:00",
+            }
+        ]
+    )
+    store.save_etf_metadata(frame)
+    tampered = pd.read_parquet(store.etf_metadata_history_path).assign(name="篡改名称")
+    tampered.to_parquet(store.etf_metadata_history_path, index=False)
+
+    with pytest.raises(RotationIntegrityError, match="文件哈希与 manifest 不匹配"):
+        store.etf_metadata_history()
+
+    clean = RotationStore(tmp_path / "clean-rotation")
+    clean.save_etf_metadata(frame)
+    manifest = json.loads(clean.etf_metadata_history_manifest_path.read_text(encoding="utf-8"))
+    manifest["row_count"] = 999
+    clean.etf_metadata_history_manifest_path.write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(RotationIntegrityError, match="manifest 哈希不匹配"):
+        clean.etf_metadata_history()
+
+
+def test_legacy_etf_metadata_history_without_manifest_fails_closed(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "name": "旧历史",
+                "observed_at": "2026-08-09T06:59:00+00:00",
+            }
+        ]
+    ).to_parquet(store.etf_metadata_history_path, index=False)
+
+    with pytest.raises(RotationIntegrityError, match="缺少完整性 manifest"):
+        store.etf_metadata_history()
+    with pytest.raises(RotationIntegrityError, match="缺少完整性 manifest"):
+        store.save_etf_metadata(
+            pd.DataFrame(
+                [
+                    {
+                        "symbol": "510500.SH",
+                        "name": "新观察",
+                        "observed_at": "2026-08-10T06:59:00+00:00",
+                    }
+                ]
+            )
+        )
 
 
 def test_rotation_overview_cache_invalidates_on_snapshot_id(tmp_path, monkeypatch):

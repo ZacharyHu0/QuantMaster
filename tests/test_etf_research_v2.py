@@ -1,15 +1,33 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+from quantmaster.data.instrument_snapshots import (
+    TUSHARE_CATALOG_QUERY,
+    freeze_instrument_catalog,
+)
 from quantmaster.data.instruments import Instrument
 from quantmaster.data.resilience import PROVIDER_HEALTH
-from quantmaster.rotation.etf_models import EtfProfile, EtfResearchSnapshot
-from quantmaster.rotation.etf_research import EtfResearchService, EtfResearchStore
+from quantmaster.research.contracts import content_hash
+from quantmaster.rotation.etf_models import (
+    ETF_RESEARCH_MODEL_VERSION,
+    EtfProfile,
+    EtfResearchItem,
+    EtfResearchSnapshot,
+)
+from quantmaster.rotation.etf_research import (
+    _ADJUSTMENT_COLUMNS,
+    EtfResearchService,
+    EtfResearchStore,
+    _frame_hash,
+)
 from quantmaster.rotation.etf_v2 import (
     adjusted_daily_metrics,
     build_sector_research,
@@ -17,6 +35,7 @@ from quantmaster.rotation.etf_v2 import (
     fund_evidence,
     normalize_index_name,
 )
+from tests.catalog_evidence_helpers import bound_tushare_catalog
 
 
 def _profile(
@@ -84,6 +103,115 @@ def _row(profile: EtfProfile, **metric_updates) -> dict:
         },
         "total_size": None,
     }
+
+
+class _MutableReplaySource:
+    def __init__(self, frame: pd.DataFrame):
+        self.frame = frame
+        self.calls = 0
+
+    def daily_cross_section(self, *_args):
+        self.calls += 1
+        return self.frame.copy()
+
+
+def _published_replay_snapshot(tmp_path, *, freeze_factors: bool = True):
+    dates = pd.bdate_range(end="2026-08-07", periods=80)
+    daily = pd.DataFrame(
+        {
+            "symbol": "510300.SH",
+            "date": dates,
+            "open": np.linspace(3.5, 4.0, len(dates)),
+            "high": np.linspace(3.6, 4.1, len(dates)),
+            "low": np.linspace(3.4, 3.9, len(dates)),
+            "close": np.linspace(3.5, 4.0, len(dates)),
+            "volume": 1_000_000.0,
+            "amount": 4_000_000.0,
+            "pct_chg": 0.1,
+        }
+    )
+    factors = pd.DataFrame(
+        {
+            "symbol": "510300.SH",
+            "date": dates,
+            "adj_factor": np.where(np.arange(len(dates)) < 40, 1.0, 2.0),
+            "source": "tushare:fund_adj",
+            "acquired_at": pd.Timestamp("2026-08-07T15:30:00+08:00"),
+        }
+    )
+    ingest_store = StockDBIngestStore(tmp_path / "ingest")
+    ingest = ingest_store.publish_etf(
+        daily=daily,
+        minutes=pd.DataFrame(),
+        profiles=[{"symbol": "510300.SH"}],
+        as_of_date="2026-08-07",
+        artifact_id="stockdb-artifact-a",
+        master_snapshot_id="etf-master-a",
+        start_date=dates.min().date().isoformat(),
+        end_date="2026-08-07",
+        coverage={"symbol_ratio": 1.0},
+        provenance={"source": "test-stockdb"},
+    )
+    store = EtfResearchStore(tmp_path / "research")
+    adjustment_hash = _frame_hash(factors, _ADJUSTMENT_COLUMNS)
+    if freeze_factors:
+        store.freeze_adjustments(factors, adjustment_hash)
+    evidence_hashes = {
+        "行情": content_hash(ingest.content_hashes),
+        "复权": adjustment_hash,
+    }
+    input_hash = content_hash(
+        {
+            "ingest_id": ingest.ingest_id,
+            "research_model_version": ETF_RESEARCH_MODEL_VERSION,
+            "evidence_hashes": evidence_hashes,
+        }
+    )
+    snapshot_id = "etf_" + hashlib.sha256(
+        f"2026-08-07:{ETF_RESEARCH_MODEL_VERSION}:{input_hash}".encode()
+    ).hexdigest()[:24]
+    item = EtfResearchItem(
+        symbol="510300.SH",
+        name="沪深300ETF",
+        category="境内宽基",
+        asset_class="equity",
+        sector_id="equity:hs300",
+        sector_name="沪深300",
+        normalized_index="沪深300",
+        benchmark_code="000300.SH",
+        is_representative=True,
+        representative_symbol="510300.SH",
+        metrics={},
+        funds={},
+        metadata={},
+        coverage={},
+        provenance={},
+        as_of_date="2026-08-07",
+        snapshot_id=snapshot_id,
+        ingest_id=ingest.ingest_id,
+        artifact_id=ingest.artifact_id,
+    )
+    snapshot = store.publish(
+        EtfResearchSnapshot(
+            snapshot_id=snapshot_id,
+            ingest_id=ingest.ingest_id,
+            artifact_id=ingest.artifact_id,
+            as_of_date="2026-08-07",
+            coverage={},
+            provenance={},
+            items=(item,),
+            sectors=(),
+            queues={},
+            candidate_queues={},
+            summaries=(),
+            freshness={},
+            capabilities={},
+            evidence_hashes=evidence_hashes,
+            categories=("境内宽基",),
+            input_hash=input_hash,
+        )
+    )
+    return store, ingest_store, snapshot, daily, factors
 
 
 def test_industry_classification_precedes_broad_full_index_token():
@@ -280,6 +408,154 @@ def test_stockdb_sparse_adjustment_events_expand_to_verified_daily_factors(tmp_p
     assert 0 < metrics["return_20d"] < 0.05
 
 
+def test_stockdb_partial_adjustment_events_do_not_certify_other_products(
+    tmp_path, monkeypatch,
+):
+    dates = pd.bdate_range("2026-07-01", periods=20)
+    daily = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "symbol": symbol,
+                    "date": dates,
+                    "close": np.linspace(4.0, 4.2, len(dates)),
+                }
+            )
+            for symbol in ("510300.SH", "510500.SH")
+        ],
+        ignore_index=True,
+    )
+
+    class PartialEvents:
+        def adjustment_factors(self, *_args):
+            return pd.DataFrame(
+                {
+                    "symbol": ["510300.SH"],
+                    "date": [dates[5]],
+                    "adj_factor": [1.2],
+                }
+            )
+
+    class Config:
+        data = type("Data", (), {"tushare_token": ""})()
+
+    monkeypatch.setattr("quantmaster.rotation.etf_research.get_config", lambda: Config())
+    service = EtfResearchService(
+        source=PartialEvents(),
+        instruments=object(),
+        ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    factors, capability = service._adjustment_factors(
+        daily,
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+    )
+
+    assert set(factors["symbol"]) == {"510300.SH"}
+    assert capability["status"] != "ready"
+    assert capability["coverage"] == 0.5
+
+
+def test_stockdb_empty_adjustment_table_cannot_be_authoritative(tmp_path, monkeypatch):
+    dates = pd.bdate_range("2026-07-01", periods=20)
+    daily = pd.DataFrame(
+        {"symbol": "510300.SH", "date": dates, "close": np.linspace(4.0, 4.2, 20)}
+    )
+
+    class EmptyEvents:
+        def adjustment_factors(self, *_args):
+            result = pd.DataFrame(columns=["symbol", "date", "adj_factor"])
+            result.attrs["authoritative"] = True
+            return result
+
+    class Config:
+        data = type("Data", (), {"tushare_token": ""})()
+
+    monkeypatch.setattr("quantmaster.rotation.etf_research.get_config", lambda: Config())
+    service = EtfResearchService(
+        source=EmptyEvents(),
+        instruments=object(),
+        ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    factors, capability = service._adjustment_factors(
+        daily,
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+    )
+
+    assert factors.empty
+    assert capability["status"] == "unavailable"
+    assert capability["coverage"] == 0.0
+
+
+def test_historical_adjustment_rejects_late_or_invalid_factor_evidence(
+    tmp_path, monkeypatch,
+):
+    dates = pd.bdate_range("2026-07-01", periods=20)
+    daily = pd.DataFrame(
+        {
+            "symbol": "510300.SH",
+            "date": dates,
+            "close": np.linspace(4.0, 4.2, len(dates)),
+        }
+    )
+
+    class NoFactors:
+        def adjustment_factors(self, *_args):
+            raise RuntimeError("factor source offline")
+
+    class Config:
+        data = type("Data", (), {"tushare_token": ""})()
+
+    store = EtfResearchStore(tmp_path / "research")
+    target = store.root / "evidence" / "adjustment_factors.parquet"
+    target.parent.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "510300.SH",
+                "date": value,
+                "adj_factor": 1.0,
+                "source": "tushare:fund_adj",
+                "acquired_at": "2026-08-09T01:00:00+00:00",
+            }
+            for value in dates
+        ]
+        + [
+            {
+                "symbol": "510300.SH",
+                "date": value,
+                "adj_factor": -1.0,
+                "source": "tushare:fund_adj",
+                "acquired_at": "2026-08-08T06:00:00+00:00",
+            }
+            for value in dates
+        ]
+    ).to_parquet(target, index=False)
+    monkeypatch.setattr("quantmaster.rotation.etf_research.get_config", lambda: Config())
+    service = EtfResearchService(
+        source=NoFactors(),
+        instruments=object(),
+        ingest_store=object(),
+        store=store,
+    )
+
+    factors, capability = service._adjustment_factors(
+        daily,
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+        as_of="2026-08-08",
+    )
+
+    assert factors.empty
+    assert capability["status"] != "ready"
+    assert capability["coverage"] == 0.0
+
+
 def test_tushare_factor_source_remains_distinct_from_verified_local():
     dates = pd.bdate_range("2025-07-01", periods=260)
     daily = pd.DataFrame(
@@ -317,6 +593,61 @@ def test_official_metadata_skips_known_denied_etf_basic(isolated_config):
 def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement(
     tmp_path, monkeypatch,
 ):
+    catalog = [
+        {
+            "symbol": "510300.SH",
+            "name": "沪深300ETF",
+            "market": "CN",
+            "exchange": "SH",
+            "asset_type": "etf",
+            "status": "L",
+            "list_date": "2012-05-28",
+            "delist_date": "",
+        },
+        *[
+            {
+                "symbol": f"{560000 + index:06d}.SH",
+                "name": f"未来占位{index}ETF",
+                "market": "CN",
+                "exchange": "SH",
+                "asset_type": "etf",
+                "status": "P",
+                "list_date": "2099-01-01",
+                "delist_date": "",
+            }
+            for index in range(99)
+        ],
+        *[
+            {
+                "symbol": f"{600000 + index:06d}.SH",
+                "name": f"目录股票{index}",
+                "market": "CN",
+                "exchange": "SH",
+                "asset_type": "stock",
+                "status": "L",
+                "list_date": "2020-01-01",
+                "delist_date": "",
+            }
+            for index in range(3_000)
+        ],
+    ]
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.TUSHARE_MINIMUM_ASSET_COUNTS",
+        {"CN:stock": 3000, "CN:etf": 1},
+    )
+    catalog = [item for item in catalog if item["status"] != "P"]
+    catalog, catalog_outcomes = bound_tushare_catalog(catalog)
+    freeze_instrument_catalog(
+        catalog,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=catalog_outcomes,
+        acquired_at=pd.Timestamp("2026-08-09T15:01:00+08:00").to_pydatetime(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-09").date(),
+    )
     metadata = pd.DataFrame(
         [
             {
@@ -375,6 +706,49 @@ def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement
     assert profiles[0].benchmark == ""
     assert service._profile_capabilities["official_covered_symbols"] == 1
     assert service._profile_capabilities["enhanced_covered_symbols"] == 0
+
+
+def test_live_profiles_reject_partial_mutable_master_without_catalog_artifact(
+    tmp_path, monkeypatch,
+):
+    class EmptyRotationStore:
+        @staticmethod
+        def etf_metadata_history():
+            return pd.DataFrame()
+
+        @staticmethod
+        def etf_observations():
+            return pd.DataFrame()
+
+    class OneMutableInstrument:
+        @staticmethod
+        def list(*, market=""):
+            return [
+                Instrument(
+                    "510300.SH",
+                    "510300",
+                    "沪深300ETF",
+                    "CN",
+                    "SH",
+                    "etf",
+                    list_date="2012-05-28",
+                )
+            ]
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", EmptyRotationStore)
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-09").date(),
+    )
+    service = EtfResearchService(
+        source=object(),
+        instruments=OneMutableInstrument(),
+        ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    with pytest.raises(RuntimeError, match="没有完整、可复验"):
+        service.profiles()
 
 
 def test_duplicate_same_index_product_does_not_change_sector_trend_input():
@@ -658,3 +1032,110 @@ def test_snapshot_history_omits_obsolete_research_models(tmp_path):
     )
 
     assert store.history() == []
+
+
+def test_product_history_replays_frozen_ingest_and_factors_after_restart(tmp_path):
+    store, ingest_store, snapshot, daily, factors = _published_replay_snapshot(tmp_path)
+    changing_source = _MutableReplaySource(daily.assign(close=999.0))
+    first = EtfResearchService(
+        source=changing_source,
+        ingest_store=ingest_store,
+        store=store,
+    ).product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+    current_factor_cache = store.root / "evidence" / "adjustment_factors.parquet"
+    current_factor_cache.parent.mkdir(parents=True, exist_ok=True)
+    factors.assign(adj_factor=77.0).to_parquet(current_factor_cache, index=False)
+    restarted_source = _MutableReplaySource(daily.assign(close=0.01))
+    restarted = EtfResearchService(
+        source=restarted_source,
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    second = restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+    assert second == first
+    assert first[-1]["price"] == pytest.approx(4.0)
+    assert changing_source.calls == 0
+    assert restarted_source.calls == 0
+
+
+def test_old_snapshot_without_frozen_factors_fails_closed_after_restart(tmp_path):
+    store, ingest_store, snapshot, _daily, factors = _published_replay_snapshot(
+        tmp_path,
+        freeze_factors=False,
+    )
+    current_factor_cache = store.root / "evidence" / "adjustment_factors.parquet"
+    current_factor_cache.parent.mkdir(parents=True, exist_ok=True)
+    factors.to_parquet(current_factor_cache, index=False)
+    restarted = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    with pytest.raises(RuntimeError, match=r"冻结复权证据缺失.*旧快照不可用当前因子回填"):
+        restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+
+def test_product_history_rejects_frozen_factor_hash_mismatch(tmp_path):
+    store, ingest_store, snapshot, _daily, factors = _published_replay_snapshot(tmp_path)
+    frozen = store.frozen_adjustments / f"{snapshot.evidence_hashes['复权']}.parquet"
+    factors.assign(adj_factor=9.0).to_parquet(frozen, index=False)
+    restarted = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    with pytest.raises(RuntimeError, match="冻结复权证据哈希不匹配"):
+        restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+
+def test_product_history_rejects_frozen_market_hash_mismatch(tmp_path):
+    store, ingest_store, snapshot, daily, _factors = _published_replay_snapshot(tmp_path)
+    ingest = ingest_store.get(snapshot.ingest_id)
+    assert ingest is not None
+    frozen = ingest_store.content / f"{ingest.content_hashes['etf_daily']}.parquet"
+    daily.assign(close=999.0).to_parquet(frozen, index=False)
+    restarted = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    with pytest.raises(RuntimeError, match="冻结行情证据哈希不匹配"):
+        restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+
+def test_product_history_rejects_snapshot_path_identity_mismatch(tmp_path):
+    store, ingest_store, snapshot, _daily, _factors = _published_replay_snapshot(tmp_path)
+    snapshot_path = store.root / "snapshots" / f"{snapshot.snapshot_id}.json"
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    payload["snapshot_id"] = "etf_000000000000000000000000"
+    snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
+    restarted = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    with pytest.raises(RuntimeError, match="快照路径与内部标识不匹配"):
+        restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)
+
+
+def test_product_history_rejects_ingest_manifest_content_mismatch(tmp_path):
+    store, ingest_store, snapshot, _daily, _factors = _published_replay_snapshot(tmp_path)
+    manifest_path = ingest_store.manifests / f"{snapshot.ingest_id}.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["coverage"] = {"symbol_ratio": 0.5}
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    restarted = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=StockDBIngestStore(ingest_store.root),
+        store=EtfResearchStore(store.root),
+    )
+
+    with pytest.raises(RuntimeError, match="摄取清单内容哈希不匹配"):
+        restarted.product_history("510300.SH", snapshot_id=snapshot.snapshot_id)

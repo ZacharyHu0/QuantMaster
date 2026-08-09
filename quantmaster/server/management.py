@@ -37,6 +37,7 @@ from quantmaster.settings import (
     SettingsUpdate,
     document_from_config,
 )
+from quantmaster.trading_sessions import market_date
 
 router = APIRouter(prefix="/api/v1")
 settings_manager = migration_manager.config_manager
@@ -313,16 +314,14 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
 
     capabilities = {
         "daily_bars": capability(
-            "verified" if probe else "unavailable",
+            "unverified" if probe else "unavailable",
             ["stock", "etf"],
             ["1d"],
-            verified=bool(probe),
         ),
         "daily_cross_section": capability(
-            "verified" if probe else "unavailable",
+            "unverified" if probe else "unavailable",
             ["stock", "etf"],
             ["1d"],
-            verified=bool(probe),
         ),
         "intraday_bars": capability(
             "unverified" if probe else "unavailable",
@@ -330,10 +329,9 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
             ["1m", "5m", "15m", "30m", "60m"],
         ),
         "eod_snapshot": capability(
-            "verified" if probe else "unavailable",
+            "unverified" if probe else "unavailable",
             ["stock", "etf"],
             ["1d"],
-            verified=bool(probe),
         ),
         "realtime_tick": capability(
             "experimental" if get_config().data.free_stockdb_experimental_tick_enabled else "disabled",
@@ -341,16 +339,14 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
             ["tick"],
         ),
         "security_catalog": capability(
-            "verified" if catalog else "degraded",
+            "unverified" if catalog else "unavailable",
             ["stock", "etf", "fund"],
             ["snapshot"],
-            verified=bool(catalog),
         ),
         "board_hierarchy": capability(
-            "verified" if boards else "degraded",
+            "unverified" if boards else "unavailable",
             ["stock"],
             ["snapshot"],
-            verified=bool(boards),
         ),
         "etf_shares": capability(
             "semantic_lag_disclosed" if probe else "unavailable",
@@ -373,8 +369,9 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
         ),
     }
     return {
-        "status": "ok" if not issues else ("degraded" if probe else "unavailable"),
-        "upstream": "tushare",
+        "status": "degraded" if probe else "unavailable",
+        "upstream": "vendor-declared-unverified",
+        "upstream_evidence": "not_provided",
         "distribution": "free-stockdb",
         "independent_cross_validation": False,
         "runtime": runtime,
@@ -884,9 +881,9 @@ def _validate_replacement(name: str, references: list[dict[str, str]]) -> str:
         if any(item["key"] == "automation.primary_universe" for item in references):
             raise ValueError("csi800 只适用于 Quant Lab，不能替代自动化主候选")
         return "csi800"
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
 
-    load_universe(value)
+    load_universe_analysis(value)
     return value
 
 
@@ -927,12 +924,12 @@ def universes(request: Request) -> dict:
 @router.get("/settings/universes/{name}")
 def universe_detail(name: str, request: Request, as_of: date | None = None) -> dict:
     _require_local(request)
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
 
     try:
         if name.casefold() == "csi800":
-            chosen = as_of or date.today()
-            if chosen > date.today():
+            chosen = as_of or market_date()
+            if chosen > market_date():
                 raise ValueError("查看日期不能晚于今天")
             from quantmaster.lab.dataset import load_csi800_members_as_of
 
@@ -951,7 +948,10 @@ def universe_detail(name: str, request: Request, as_of: date | None = None) -> d
                 "snapshot_dates": dynamic["snapshot_dates"],
                 "references": _universe_references("csi800"),
             }
-        symbols = load_universe(name)
+        snapshot = load_universe_analysis_snapshot(
+            name, as_of=as_of.isoformat() if as_of else None,
+        )
+        symbols = list(snapshot.symbols)
         built_in = name.casefold() == "demo"
         return {
             "name": "demo" if built_in else name,
@@ -960,8 +960,11 @@ def universe_detail(name: str, request: Request, as_of: date | None = None) -> d
             "count": len(symbols),
             "readonly": built_in,
             "kind": "fixed",
-            "source": "built_in" if built_in else "custom",
+            "source": snapshot.source,
             "research_quality": "sandbox",
+            "formal_eligible": snapshot.formal_eligible,
+            "issues": list(snapshot.issues),
+            "evidence": snapshot.to_dict(),
             "references": _universe_references(name),
         }
     except FileNotFoundError as exc:
@@ -1027,11 +1030,11 @@ def create_universe(request: Request, value: UniverseBody) -> dict:
     _require_csrf(request)
     if not value.name:
         raise HTTPException(400, "缺少候选名称")
-    from quantmaster.data.universe import load_universe, save_universe
+    from quantmaster.data.universe import load_universe_analysis, save_universe
 
     try:
         try:
-            load_universe(value.name)
+            load_universe_analysis(value.name)
         except FileNotFoundError:
             pass
         else:
@@ -1046,10 +1049,10 @@ def create_universe(request: Request, value: UniverseBody) -> dict:
 @router.put("/settings/universes/{name}")
 def update_universe(name: str, request: Request, value: UniverseBody) -> dict:
     _require_csrf(request)
-    from quantmaster.data.universe import load_universe, save_universe
+    from quantmaster.data.universe import load_universe_analysis, save_universe
 
     try:
-        load_universe(name)
+        load_universe_analysis(name)
         _validate_universe_instruments(value.symbols)
         save_universe(name, value.symbols)
         return {"status": "ok", "name": name}

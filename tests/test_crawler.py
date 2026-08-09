@@ -1,6 +1,7 @@
 """爬虫存储与舆情聚合测试（不触网）。"""
 
 from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
+from quantmaster.ai.news_contracts import FetchBatch, FetchedArticle
 from quantmaster.ai.sentiment import sentiment_panel
 
 
@@ -31,13 +32,78 @@ class TestCrawlerSkipLLM:
     def test_run_with_fake_source(self, tmp_path, monkeypatch):
         from quantmaster.ai import crawler as crawler_mod
 
-        monkeypatch.setitem(crawler_mod.SOURCES, "fake",
-                            lambda limit=30: [_item("快讯1"), _item("快讯2")])
         c = AICrawler(store=NewsStore(path=tmp_path / "news.sqlite"))
-        result = c.run(sources=["fake"], skip_llm=True)
+        source = c.source_store.create({
+            "name": "测试来源", "kind": "rss", "group_name": "fast",
+            "url": "https://example.test/feed", "is_official": False,
+        })
+        monkeypatch.setattr(
+            crawler_mod,
+            "fetch_declarative_source",
+            lambda *args, **kwargs: FetchBatch(source_id=source["id"], articles=[
+                FetchedArticle(
+                    source=source["id"], title="快讯1", content="快讯1",
+                    provider_item_id="1",
+                ),
+                FetchedArticle(
+                    source=source["id"], title="快讯2", content="快讯2",
+                    provider_item_id="2",
+                ),
+            ], watermark="1"),
+        )
+        result = c.run(sources=[source["id"]], skip_llm=True)
         assert result["fetched"] == 2
         assert result["saved"] == 2
         assert not result["errors"]
+
+    def test_custom_source_304_returns_batch_without_index_error(self, tmp_path, monkeypatch):
+        c = AICrawler(store=NewsStore(path=tmp_path / "news.sqlite"))
+        source = c.source_store.create({
+            "name": "自定义 RSS", "kind": "rss", "group_name": "periodic",
+            "url": "https://example.test/feed", "is_official": False,
+            "max_age_hours": 24,
+        })
+        latest = 1786240800.0
+        c.source_store.record_batch(FetchBatch(
+            source_id=source["id"], watermark="custom-watermark",
+            latest_published_at=latest,
+        ))
+        monkeypatch.setattr(
+            "quantmaster.ai.news_sources._fetch_bytes",
+            lambda *args, **kwargs: (None, source["url"], ""),
+        )
+        monkeypatch.setattr(
+            "quantmaster.ai.news_sources.time.time", lambda: latest + 3600,
+        )
+
+        result = c.run(sources=[source["id"]], skip_llm=True)
+
+        assert result["fetched"] == 0
+        assert result["errors"] == {}
+        assert result["sources"][0]["health"] == "not_modified"
+
+    def test_incomplete_batch_run_status_is_degraded(self, tmp_path, monkeypatch):
+        from quantmaster.ai import crawler as crawler_mod
+
+        c = AICrawler(store=NewsStore(path=tmp_path / "news.sqlite"))
+        source = c.source_store.create({
+            "name": "缺口 RSS", "kind": "rss", "group_name": "periodic",
+            "url": "https://example.test/feed", "max_age_hours": 24,
+        })
+        monkeypatch.setattr(
+            crawler_mod,
+            "fetch_declarative_source",
+            lambda *args, **kwargs: FetchBatch(
+                source_id=source["id"], watermark="old", previous_watermark="old",
+                pending_watermark="new", complete=False, health="degraded",
+                error_code="watermark_not_reached",
+            ),
+        )
+        result = c.run(sources=[source["id"]], skip_llm=True)
+        listed = next(item for item in c.source_store.list() if item["id"] == source["id"])
+        assert result["sources"][0]["health"] == "degraded"
+        assert listed["last_status"] == "degraded"
+        assert listed["health"] == "degraded"
 
 
 class TestSentimentPanel:

@@ -156,6 +156,101 @@ function ingestResponseProblems(data, scope = 'operation') {
   ));
   return problems;
 }
+function dataProvenanceSummary(data) {
+  if (!data || typeof data !== 'object') return '';
+  const raw = data.provenance || data.market_provenance
+    || data.selection?.market_provenance || [];
+  const values = Array.isArray(raw)
+    ? raw
+    : Object.values(raw).flatMap(value => Array.isArray(value) ? value : [value]);
+  const labels = values.map(item => {
+    if (!item || typeof item !== 'object') return '';
+    const source = String(item.source || item.provider || item.contract_source || '').trim();
+    const identity = String(
+      item.content_hash || item.artifact_id || item.snapshot_id
+      || item.evidence_manifest_id || '',
+    ).trim();
+    if (!source && !identity) return '';
+    return `${source || '证据'}${identity ? ` #${identity.slice(0, 12)}` : ''}`;
+  }).filter(Boolean);
+  return [...new Set(labels)].slice(0, 4).join('；');
+}
+function ingestDataQuality(data, scope = 'operation') {
+  if (!data || typeof data !== 'object') return null;
+  const quality = data.data_quality && typeof data.data_quality === 'object'
+    ? data.data_quality
+    : null;
+  const key = `${scope}:data-quality`;
+  if (!quality) {
+    runtimeInfo.resolve(key);
+    return null;
+  }
+  const status = String(quality.status || '').toLowerCase();
+  const freshness = String(quality.freshness || '').toLowerCase();
+  const completeness = String(quality.completeness || '').toLowerCase();
+  const degraded = Boolean(
+    quality.degraded || quality.stale
+    || ['degraded','partial','stale','rejected','unavailable'].includes(status)
+    || ['stale','unavailable'].includes(freshness)
+    || ['partial','empty'].includes(completeness)
+  );
+  const effective = String(
+    quality.effective_as_of || quality.observed_end || quality.actual_end || '',
+  ).slice(0, 19);
+  const sources = Array.isArray(quality.sources)
+    ? quality.sources.map(String).filter(Boolean)
+    : [quality.provider, quality.source].filter(Boolean).map(String);
+  const issues = Array.isArray(quality.issues)
+    ? quality.issues.map(item => typeof item === 'string' ? item : item?.message || item?.code)
+      .filter(Boolean)
+    : [];
+  const missing = Array.isArray(quality.missing_symbols)
+    ? quality.missing_symbols.length
+    : Number(quality.missing_symbol_count || 0);
+  const coverage = Number(quality.coverage_ratio);
+  const adjustment = String(quality.adjustment || '').trim();
+  const units = Array.isArray(quality.units)
+    ? quality.units.slice(0, 4).map(item => Array.isArray(item) ? `${item[0]}=${item[1]}` : String(item))
+      .filter(Boolean).join(', ')
+    : quality.units && typeof quality.units === 'object'
+      ? Object.entries(quality.units).slice(0, 4).map(([field, unit]) => `${field}=${unit}`)
+        .filter(Boolean).join(', ')
+      : '';
+  const provenance = dataProvenanceSummary(data);
+  const summary = [
+    effective ? `数据截至 ${effective}` : '',
+    sources.length ? `来源 ${sources.join(' → ')}` : '',
+    Number.isFinite(coverage) ? `覆盖率 ${(coverage * 100).toFixed(2)}%` : '',
+    missing ? `${missing} 个标的缺失` : '',
+    adjustment ? `复权 ${adjustment}` : '',
+    units ? `单位 ${units}` : '',
+    provenance ? `证据链 ${provenance}` : '',
+  ].filter(Boolean).join('；') || '当前结果使用了未完整或已过期的数据证据。';
+  const detail = [summary, ...issues.slice(0, 3)].join('；');
+  if (!degraded) {
+    if (summary) {
+      runtimeInfo.add('success', '数据证据', '数据来源与口径已验证', {
+        detail, key, scope, persistent:true,
+        revision:String(quality.revision || quality.evidence_manifest_id || detail),
+      });
+    } else runtimeInfo.resolve(key);
+    return quality;
+  }
+  const blocked = ['unavailable','rejected','blocked'].includes(status)
+    || freshness === 'unavailable';
+  runtimeInfo.add(
+    blocked ? 'error' : 'warning',
+    '行情数据', blocked ? '行情证据不可用，计算已停止' : '使用降级数据继续计算', {
+      detail,
+      action:blocked
+        ? '当前结果不可采信；请补齐缺失证据或恢复可信数据源后重新运行。'
+        : '结果仍可查看；请以真实数据日、来源和缺失范围为准，并在数据源恢复后刷新。',
+      key, scope, persistent:true,
+      revision:String(quality.revision || quality.evidence_manifest_id || detail),
+    },
+  );
+  return quality;
+}
 function responseError(response, data, path, method, key = '') {
   const fallbackTitle = friendlyHttpMessage(response.status);
   const detail = readableDetail(data.detail);
@@ -175,6 +270,7 @@ function responseError(response, data, path, method, key = '') {
     detail:problem.message || `HTTP ${response.status}`, action:problem.action,
     requestId, path:`${method} ${route}`, key, revision:problem.revision,
   });
+  if (data.data_quality) ingestDataQuality(data, key || `request:${method}:${route}`);
   return error;
 }
 async function api(path, opts = {}) {
@@ -204,7 +300,10 @@ async function api(path, opts = {}) {
       key:requestKey,
     });
   } else runtimeInfo.resolve(requestKey);
-  if (route !== '/api/v1/diagnostics') ingestResponseProblems(data, requestKey);
+  if (route !== '/api/v1/diagnostics') {
+    ingestResponseProblems(data, requestKey);
+    ingestDataQuality(data, requestKey);
+  }
   return data;
 }
 function post(path, body) {
@@ -612,6 +711,7 @@ async function readNdjsonEvents(path, opts = {}, onEvent) {
       const event = JSON.parse(line);
       requestId = event.request_id || event.error_id || requestId;
       if (event.type === 'error') {
+        if (event.data_quality) ingestDataQuality(event, operationKey);
         const problem = normalizeProblem(event.problem, {
           id:`stream:${method}:${route}`, source, title:'后台任务未完成',
           message:event.message || '数据流异常中断',
@@ -628,6 +728,10 @@ async function readNdjsonEvents(path, opts = {}, onEvent) {
         });
       }
       if (event.type === 'progress') runtimeInfo.phase(source, event, `${method} ${route}`, operationKey);
+      if (event.type === 'result' && event.data && typeof event.data === 'object') {
+        ingestResponseProblems(event.data, operationKey);
+        ingestDataQuality(event.data, operationKey);
+      }
       onEvent?.(event);
     };
     while (true) {
@@ -685,6 +789,7 @@ async function streamJson(path, opts, onProgress) {
       if (event.type === 'error') streamError = {
         message:event.message || '数据任务失败', requestId:event.error_id || requestId,
         problem:event.problem || null, dataQuality:event.data_quality || null,
+        provenance:event.provenance || null,
       };
     };
     while (true) {
@@ -697,6 +802,9 @@ async function streamJson(path, opts, onProgress) {
     }
     consume(buffer);
     if (streamError) {
+      if (streamError.dataQuality) ingestDataQuality({
+        data_quality:streamError.dataQuality, provenance:streamError.provenance,
+      }, operationKey);
       const problem = normalizeProblem(streamError.problem, {
         id:`stream:${method}:${route}`, source, title:'数据任务未完成',
         message:streamError.message,
@@ -719,6 +827,7 @@ async function streamJson(path, opts, onProgress) {
       requestId, path:`${method} ${route}`, key:operationKey,
     });
     ingestResponseProblems(result, operationKey);
+    ingestDataQuality(result, operationKey);
     return result;
   } catch (error) {
     if (!error?.logged) {
@@ -2608,6 +2717,13 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
   const tone = current.trend_score > .2 ? 'up' : current.trend_score < -.2 ? 'down' : '';
   const picks = selection.picks || [];
   const snapshot = selection.model_snapshot || data.model_snapshot || data.policy || null;
+  const persistence = data.persistence || selection.persistence || {};
+  const persistenceBlocked = persistence.status === 'blocked';
+  const persistenceNotice = persistenceBlocked
+    ? `<div class="panel reveal" data-decision-persistence="blocked"><div class="panel-heading"><h3>本次结果未写入正式历史</h3><span class="state-pill fallback">未保存</span></div><div class="hint">${esc(persistence.reason || '行情证据未通过正式存档门禁；当前结果仅供查看。')}</div></div>`
+    : persistence.status === 'saved'
+      ? `<div class="hint" data-decision-persistence="saved">本次决策已写入正式历史快照。</div>`
+      : '';
   const profile = selection.profile || snapshot?.profile || 'risk_adjusted';
   const modelFallback = Boolean(snapshot?.fallback_active || (snapshot?.components || []).some(item => item.status === 'fallback'));
   const activeComponents = (snapshot?.components || []).filter(item => item.status !== 'fallback').map(item => decisionComponentLabel(item.role));
@@ -2635,6 +2751,7 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         <div class="metric-cell"><div class="k">决策周期</div><div class="v">${selectionReady ? `${selection.holding_horizon_days} 日` : '计算中'}</div></div>
       </div>
     </div>
+    ${persistenceNotice}
     ${decisionModelEvidenceMarkup(snapshot, selection)}
     <div class="indicator-dashboard reveal reveal-delay">
       <section class="panel">
@@ -2689,7 +2806,9 @@ function renderDecision(data, target = document.getElementById('decision-out')) 
         ${(market.sectors || []).map(s => `<tr><td>${esc(s.sector)}</td><td>${s.members}</td><td class="${cls(s.trend_score)}">${esc(s.state_label)}</td><td>${fixed(s.bull_score,1)}</td><td><span class="rsi-badge ${rsiVisualClass(s.rsi_14)}">${fixed(s.rsi_14,1)}</span></td><td><span class="state-pill opportunity-signal" data-opportunity-rsi="${fixed(s.rsi_14,2)}"></span></td><td>${pct(s.advance_ratio)}</td></tr>`).join('') || `<tr><td colspan="7" class="msg">${sectorsReady ? '暂无行业映射' : '板块状态聚合中…'}</td></tr>`}
         </tbody></table></div></div>
       <div class="panel decision-history-panel"><div class="panel-heading"><h3>历史决策快照</h3><span class="state-pill">T+1 后续验证 · 本地行情</span></div>
-        ${decisionHistoryTableMarkup(data.history || [], historyReady ? '生成后会自动保存快照' : '正在读取本地快照…')}</div>
+        ${decisionHistoryTableMarkup(data.history || [], historyReady
+          ? persistenceBlocked ? '本次结果因行情证据未通过门禁，未保存为正式快照' : '生成后会自动保存快照'
+          : '正在读取本地快照…')}</div>
     </div>`;
 
   regimeHistory = market.past || [];

@@ -1,4 +1,12 @@
-from quantmaster.data.base import Bar, DataCapability, DataSource, Market
+from quantmaster.data.base import (
+    Bar,
+    BarDataEnvelope,
+    BarDataQuality,
+    DataCapability,
+    DataSource,
+    Market,
+    MarketDataUnavailable,
+)
 from quantmaster.data.instruments import (
     Instrument,
     InstrumentStore,
@@ -21,11 +29,14 @@ from quantmaster.data.registry import (
 
 __all__ = [
     "Bar",
+    "BarDataEnvelope",
+    "BarDataQuality",
     "DataCapability",
     "DataSource",
     "Instrument",
     "InstrumentStore",
     "Market",
+    "MarketDataUnavailable",
     "RefreshMode",
     "data_source_capabilities",
     "get_source",

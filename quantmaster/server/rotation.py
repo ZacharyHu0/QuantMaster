@@ -26,6 +26,7 @@ router = APIRouter(prefix="/api/v1", tags=["rotation"])
 
 class EtfScanBody(ContractModel):
     as_of: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
+    tier: Literal["production", "sandbox"] = "production"
 
 
 def _pagination(
@@ -496,14 +497,19 @@ def rotation_etfs(
     sort: Literal["trend", "activity", "position", "amount", "return", "name"] = "trend",
     order: Literal["asc", "desc"] = "desc",
     snapshot_id: str = Query("", max_length=80),
+    tier: Literal["production", "sandbox"] = "production",
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    store = get_etf_research_service().store
-    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
+    service = get_etf_research_service()
+    snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         return {
-            "meta": {"quality": {"status": "cold", "issues": ["尚未生成 ETF 研究快照"]}},
+            "meta": {
+                "tier": tier,
+                "formal_eligible": False,
+                "quality": {"status": "cold", "issues": ["尚未生成 ETF 研究快照"]},
+            },
             "data": {"items": [], "categories": [], "pagination": _pagination([], 1, page_size)[1]},
         }
     needle = query.strip().casefold()
@@ -570,6 +576,8 @@ def rotation_etfs(
             "quality": _compact_etf_quality(snapshot.coverage),
             "staleness": snapshot.staleness,
             "research_model_version": snapshot.research_model_version,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
         },
         "data": {
             "items": visible_projection,
@@ -898,25 +906,31 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
 def rotation_etf_overview(
     asset: Literal["equity", "overseas_equity", "bond", "commodity", "money", "all"] = "equity",
     snapshot_id: str = Query("", max_length=80),
+    tier: Literal["production", "sandbox"] = "production",
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
     service = get_etf_research_service()
-    store = service.store
-    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
+    snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     refresh = (
         _etf_refresh_hint(service, snapshot)
-        if not snapshot_id
+        if not snapshot_id and tier == "production"
         else {
             "recommended": False,
             "input_id": "",
             "input_as_of": "",
-            "reason": "正在查看历史快照，不自动补算",
+            "reason": (
+                "sandbox 预览不自动发布或补算 production 快照"
+                if tier == "sandbox"
+                else "正在查看历史快照，不自动补算"
+            ),
         }
     )
     if snapshot is None:
         return {
             "meta": {
+                "tier": tier,
+                "formal_eligible": False,
                 "quality": {"status": "cold", "issues": ["尚未生成 ETF V2 研究快照"]},
                 "refresh": refresh,
             },
@@ -941,6 +955,8 @@ def rotation_etf_overview(
             "snapshot_id": snapshot.snapshot_id,
             "as_of": snapshot.as_of_date,
             "research_model_version": snapshot.research_model_version,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
             "staleness": snapshot.staleness,
             "quality": _compact_etf_quality(snapshot.coverage),
             "refresh": refresh,
@@ -953,6 +969,7 @@ def rotation_etf_overview(
 def rotation_etf_sector_detail(
     sector_id: str,
     snapshot_id: str = Query("", max_length=80),
+    tier: Literal["production", "sandbox"] = "production",
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=50),
     index_key: str = Query("", max_length=160),
@@ -960,7 +977,7 @@ def rotation_etf_sector_detail(
     from quantmaster.rotation.etf_research import get_etf_research_service
 
     service = get_etf_research_service()
-    snapshot = service.store.get(snapshot_id) if snapshot_id else service.store.latest()
+    snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF V2 研究快照")
     sector = next((item for item in snapshot.sectors if item["sector_id"] == sector_id), None)
@@ -1069,6 +1086,8 @@ def rotation_etf_sector_detail(
             "snapshot_id": snapshot.snapshot_id,
             "as_of": snapshot.as_of_date,
             "staleness": snapshot.staleness,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
         },
         "data": {
             **sector,
@@ -1100,10 +1119,13 @@ def rotation_etf_snapshots(limit: int = Query(50, ge=1, le=500)) -> dict[str, An
 
 
 @router.get("/rotation/etfs/snapshots/{snapshot_id}/coverage")
-def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
+def rotation_etf_snapshot_coverage(
+    snapshot_id: str,
+    tier: Literal["production", "sandbox"] = "production",
+) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().store.get(snapshot_id)
+    snapshot = get_etf_research_service().resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "ETF 研究快照不存在")
     semantic_counts: dict[str, int] = {}
@@ -1124,6 +1146,8 @@ def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
             "ingest_id": snapshot.ingest_id,
             "as_of": snapshot.as_of_date,
             "staleness": snapshot.staleness,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
         },
         "data": {
             "coverage": snapshot.coverage,
@@ -1143,10 +1167,11 @@ def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
 def rotation_etf_export(
     snapshot_id: str,
     format: Literal["json", "csv"] = "json",
+    tier: Literal["production", "sandbox"] = "production",
 ) -> Response:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().store.get(snapshot_id)
+    snapshot = get_etf_research_service().resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "ETF 研究快照不存在")
     if format == "json":
@@ -1209,7 +1234,7 @@ def rotation_etf_scan(body: EtfScanBody, request: Request) -> dict[str, Any]:
     require_csrf(request)
     from quantmaster.rotation.etf_jobs import get_etf_research_jobs
 
-    job, created = get_etf_research_jobs().submit(as_of=body.as_of)
+    job, created = get_etf_research_jobs().submit(as_of=body.as_of, tier=body.tier)
     return {**get_etf_research_jobs().public(job), "created": created}
 
 
@@ -1253,11 +1278,12 @@ def rotation_etf_job_retry(job_id: str, request: Request) -> dict[str, Any]:
 def rotation_etf_intraday(
     symbol: str,
     snapshot_id: str = Query("", max_length=80),
+    tier: Literal["production", "sandbox"] = "production",
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
     service = get_etf_research_service()
-    snapshot = service.store.get(snapshot_id) if snapshot_id else service.store.latest()
+    snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
     canonical = symbol.upper()
@@ -1272,18 +1298,23 @@ def rotation_etf_intraday(
             "snapshot_id": snapshot.snapshot_id,
             "as_of": snapshot.as_of_date,
             "scoring_input": False,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
         },
         "data": data,
     }
 
 
 @router.get("/rotation/etfs/{symbol}")
-def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)) -> dict[str, Any]:
+def rotation_etf_detail(
+    symbol: str,
+    snapshot_id: str = Query("", max_length=80),
+    tier: Literal["production", "sandbox"] = "production",
+) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
     service = get_etf_research_service()
-    store = service.store
-    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
+    snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
     canonical = symbol.upper()
@@ -1312,11 +1343,14 @@ def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)
     try:
         history = service.product_history(
             item.symbol,
-            as_of_date=snapshot.as_of_date,
-            adjustment_hash=snapshot.evidence_hashes.get("复权", ""),
+            snapshot_id=snapshot.snapshot_id,
+            tier=tier,
         )
-    except (OSError, RuntimeError, TypeError, ValueError):
-        history = []
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            409,
+            f"ETF 历史证据不可复现：{str(exc)[:240]}",
+        ) from None
     data = item.to_dict()
     data.update(
         {
@@ -1347,6 +1381,8 @@ def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)
             "snapshot_id": snapshot.snapshot_id,
             "as_of": snapshot.as_of_date,
             "staleness": snapshot.staleness,
+            "tier": snapshot.tier,
+            "formal_eligible": snapshot.formal_eligible,
         },
         "data": data,
     }

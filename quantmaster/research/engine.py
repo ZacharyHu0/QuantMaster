@@ -9,9 +9,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from quantmaster.research.adapters import (
+    COMPLETE_CROSS_SECTION_DATASETS,
     DATASET_BY_ID,
     DEFAULT_DATASETS,
     CompositeResearchAdapter,
@@ -36,6 +38,7 @@ from quantmaster.research.lake import ResearchLake
 from quantmaster.research.providers import build_future_continuous
 from quantmaster.research.registry import ProviderRegistry, built_in_registry
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.trading_sessions import market_date
 
 
 def _asset_dataset(asset_class: AssetClass) -> str:
@@ -84,6 +87,12 @@ class ResearchEngine:
             "kernel": kernel_capabilities(),
         }
 
+    def preview_date(self, dataset_id: str, trade_date: str) -> pd.DataFrame:
+        """Build a non-persistent degraded cross-section preview."""
+        if not isinstance(self.adapter, CompositeResearchAdapter):
+            raise RuntimeError("当前研究适配器不支持 degraded preview")
+        return self.adapter.preview_date(dataset_id, trade_date)
+
     def coverage(self) -> list[dict[str, Any]]:
         rows = self.lake.catalog.partitions()
         grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
@@ -116,7 +125,7 @@ class ResearchEngine:
         start_date, end_date = date.fromisoformat(start), date.fromisoformat(end)
         if start_date > end_date:
             raise ValueError("开始日期不能晚于结束日期")
-        if end_date > date.today():
+        if end_date > market_date():
             raise ValueError("结束日期不能晚于今天")
         if mode not in {"historical", "incremental"}:
             raise ValueError("mode 只支持 historical/incremental")
@@ -154,7 +163,7 @@ class ResearchEngine:
                 (pd.Timestamp(start) - pd.tseries.offsets.BDay(history_margin)).date()
             )
             latest_needed = pd.Timestamp(end) + pd.tseries.offsets.BDay(future_margin)
-            calendar_end = str(min(latest_needed.date(), date.today()))
+            calendar_end = str(min(latest_needed.date(), market_date()))
             calendar, source = self.adapter.official_calendar(asset, calendar_start, calendar_end)
             if source.startswith("fallback"):
                 calendar_dataset = (
@@ -349,6 +358,13 @@ class ResearchEngine:
             frame = self.adapter.fetch_date(task.dataset_id, task.trade_date)
             if frame.empty:
                 raise RuntimeError(f"{task.dataset_id} {task.trade_date} 返回空数据")
+            if task.dataset_id in COMPLETE_CROSS_SECTION_DATASETS:
+                quality = frame.attrs.get("research_partition_quality")
+                if not isinstance(quality, dict) or quality.get("status") != "verified_complete":
+                    raise RuntimeError(
+                        f"{task.dataset_id} {task.trade_date} 缺少完整横截面质量证明，"
+                        "拒绝发布 RAW 分区"
+                    )
             return [self.lake.write_partition(
                 ArtifactKind.RAW, task.asset_class, task.frequency, task.dataset_id,
                 task.trade_date, frame, run_id=run_id, owner=run_id or plan.id,
@@ -405,7 +421,7 @@ class ResearchEngine:
         }[asset_class]
         available = self.lake.catalog.partitions(
             kind=ArtifactKind.RAW, asset_class=asset_class, frequency=Frequency.DAILY,
-            dataset_id=base_dataset, end=str(date.today()),
+            dataset_id=base_dataset, end=market_date().isoformat(),
         )
         available_dates = pd.DatetimeIndex(
             pd.to_datetime([item["trade_date"] for item in available]).unique()
@@ -425,17 +441,33 @@ class ResearchEngine:
             bars = self.lake.read_range(
                 ArtifactKind.RAW, asset_class, Frequency.DAILY, "stock_bars", load_start, load_end,
             )
+            if bars.empty:
+                raise RuntimeError(f"stock 缺少 {load_start} 至 {load_end} 的研究行情")
             adjustment = self.lake.read_range(
                 ArtifactKind.RAW, asset_class, Frequency.DAILY, "stock_adj_factor", load_start, load_end,
             )
-            if not adjustment.empty:
-                keep = adjustment[["trade_date", "symbol", "adj_factor"]]
-                bars = bars.merge(keep, on=["trade_date", "symbol"], how="left", validate="one_to_one")
-                bars["research_price"] = pd.to_numeric(bars["close"], errors="coerce") * pd.to_numeric(
-                    bars["adj_factor"], errors="coerce"
+            if adjustment.empty:
+                raise RuntimeError("股票研究价格缺少不可变 stock_adj_factor 分区")
+            keys = ["trade_date", "symbol"]
+            if bars.duplicated(keys).any() or adjustment.duplicated(keys).any():
+                raise RuntimeError("股票 bars/adj_factor 主键重复，拒绝构造研究价格")
+            bar_keys = set(map(tuple, bars[keys].astype(str).to_numpy()))
+            factor_keys = set(map(tuple, adjustment[keys].astype(str).to_numpy()))
+            if bar_keys != factor_keys:
+                missing = sorted(bar_keys - factor_keys)[:10]
+                extra = sorted(factor_keys - bar_keys)[:10]
+                raise RuntimeError(
+                    "stock_adj_factor 与 stock_bars 不是一对一完整集合；"
+                    f"missing={missing}，extra={extra}"
                 )
-            elif "research_price" not in bars:
-                bars["research_price"] = bars.get("close")
+            factors = pd.to_numeric(adjustment["adj_factor"], errors="coerce")
+            if not (factors.notna() & np.isfinite(factors) & factors.gt(0)).all():
+                raise RuntimeError("stock_adj_factor 包含非 finite 或非正值")
+            keep = adjustment[[*keys, "adj_factor"]]
+            bars = bars.merge(keep, on=keys, how="inner", validate="one_to_one")
+            bars["research_price"] = pd.to_numeric(
+                bars["close"], errors="coerce",
+            ) * pd.to_numeric(bars["adj_factor"], errors="coerce")
             daily_basic = self.lake.read_range(
                 ArtifactKind.RAW, asset_class, Frequency.DAILY, "stock_daily_basic",
                 load_start, load_end,

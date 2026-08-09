@@ -106,8 +106,11 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
         "600000.SH", "2024-01-02 09:30", "2024-01-02 09:45", "5m", store=store)
     whole_day = registry.load_intraday(
         "600000.SH", "2024-01-02", "2024-01-02", "5m", store=store)
-    assert len(first) == len(second) == 4
-    assert len(whole_day) == 4
+    assert len(first.data) == len(second.data) == 4
+    assert len(whole_day.data) == 4
+    assert first.quality.status != "unavailable"
+    assert second.quality.status != "unavailable"
+    assert whole_day.quality.status != "unavailable"
     assert FakeSource.calls == ["5m"]
     assert not list(store.root.glob("*.tmp"))
     assert IntradayBarStore("15m", root=tmp_path / "intraday").root != store.root
@@ -133,10 +136,12 @@ def test_multisymbol_intraday_panel(monkeypatch):
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     updates = []
-    panel = registry.load_bar_panel(
+    panel_envelope = registry.load_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02 09:30", "2024-01-02 09:40", "5m",
         progress=lambda *args: updates.append(args),
     )
+    panel = panel_envelope.data
+    assert panel_envelope.quality.status != "unavailable"
     assert set(panel) >= {"open", "high", "low", "close", "volume"}
     assert panel["close"].shape == (3, 2)
     # 并发加载按实际完成顺序回调，但进度编号连续且每只标的只报告一次。
@@ -144,7 +149,9 @@ def test_multisymbol_intraday_panel(monkeypatch):
     assert {(item[2], item[3]) for item in updates} == {
         ("600000.SH", True), ("000001.SZ", True),
     }
-    close = registry.load_bar_panel(
+    close_envelope = registry.load_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02 09:30", "2024-01-02 09:40",
         "5m", field="close")
+    close = close_envelope.data
+    assert close_envelope.quality.status != "unavailable"
     pd.testing.assert_frame_equal(close, panel["close"])

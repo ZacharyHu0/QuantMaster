@@ -35,7 +35,7 @@ from quantmaster.config import get_config
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.trading_sessions import SHANGHAI
+from quantmaster.trading_sessions import SHANGHAI, market_date
 
 logger = logging.getLogger(__name__)
 PAPER_SCHEMA_VERSION = 3
@@ -296,7 +296,7 @@ class PaperStore:
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"模拟账户名称已存在：{spec.name.strip()}") from exc
         Ledger(path=self.ledger_path(account_id)).add_cashflow(
-            str(pd.Timestamp.now().date()),
+            market_date().isoformat(),
             spec.initial_capital,
             "deposit",
             "模拟盘初始资金",
@@ -909,9 +909,14 @@ class PaperService:
                 "snapshot_dates": snapshot["snapshot_dates"],
                 "quality": "production",
             }
-        from quantmaster.data.universe import load_universe
+        from quantmaster.data.universe import load_universe_snapshot
 
-        return load_universe(name), {"as_of": as_of, "quality": "sandbox"}
+        snapshot = load_universe_snapshot(name, as_of=as_of)
+        return list(snapshot.symbols), {
+            "as_of": as_of,
+            "quality": "sandbox",
+            "universe_evidence": snapshot.to_dict(),
+        }
 
     def _materialize_account_spec(
         self,
@@ -927,7 +932,7 @@ class PaperService:
 
         symbols, meta = self._resolve_universe(
             spec.universe,
-            str(pd.Timestamp.now().date()),
+            market_date().isoformat(),
         )
         strategy = pin_decision_strategy(
             spec.strategy,
@@ -1140,19 +1145,30 @@ class PaperService:
         if not eligible_symbols:
             raise ValueError("账户候选快照为空")
         loaded_live = panel is None
+        market_quality = None
         if panel is None:
             from quantmaster.data import load_panel
 
-            end = pd.Timestamp.now().normalize()
+            end = pd.Timestamp(market_date())
             start = end - pd.Timedelta(days=lookback_days)
-            panel = load_panel(symbols, str(start.date()), str(end.date()))
+            market_envelope = load_panel(symbols, str(start.date()), str(end.date()))
+            panel = market_envelope.require_data()
+            market_quality = market_envelope.quality
         close = panel.get("close")
         if close is None or close.empty:
             raise ValueError("没有可用于生成信号的收盘行情")
         close = close.sort_index()
         latest_date = pd.Timestamp(close.index[-1])
         warnings: list[dict[str, str]] = []
-        if loaded_live and (pd.Timestamp.now().normalize() - latest_date.normalize()).days > 7:
+        if market_quality is not None and (
+            market_quality.status != "verified"
+            or market_quality.stale
+            or market_quality.partial
+        ):
+            message = "行情证据未通过正式提案门禁：" + "；".join(market_quality.issues)
+            self.store.set_warning(account_id, message, pause=True)
+            raise ValueError(message)
+        if loaded_live and (pd.Timestamp(market_date()) - latest_date.normalize()).days > 7:
             message = f"最新行情停留在 {latest_date.date()}，账户已暂停以避免使用过期数据。"
             self.store.set_warning(account_id, message, pause=True)
             raise ValueError(message)
@@ -1342,7 +1358,19 @@ class PaperService:
             from quantmaster.data import load_panel
 
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
-            panel = load_panel(symbols, start, str(pd.Timestamp.now().date()))
+            market_envelope = load_panel(symbols, start, market_date().isoformat())
+            panel = market_envelope.require_data()
+            if (
+                market_envelope.quality.status != "verified"
+                or market_envelope.quality.stale
+                or market_envelope.quality.partial
+            ):
+                message = (
+                    "待撮合行情证据未通过成交门禁："
+                    + "；".join(market_envelope.quality.issues)
+                )
+                self.store.set_warning(account_id, message, pause=True)
+                raise ValueError(message)
         close, open_prices = panel.get("close"), panel.get("open")
         if close is None or open_prices is None or close.empty or open_prices.empty:
             raise ValueError("缺少开盘价或昨收价，订单继续等待")
@@ -1362,7 +1390,7 @@ class PaperService:
         day_open = open_prices.reindex(index=dates).loc[execution]
         day_previous = close.loc[previous] if previous is not None else pd.Series(dtype=float)
         valuation = self._prices_from_row(day_open)
-        report = ledger_report(ledger, prices=valuation)
+        report = ledger_report(ledger, prices=valuation, as_of=execution_date)
         total_assets, cash = float(report["total_assets"]), float(report["cash"])
         current = {position.symbol: position.shares for position in ledger.positions()}
         trade_config = get_config().trade
@@ -1491,7 +1519,7 @@ class PaperService:
             filled.append({**trade.__dict__, "written": written})
         status = "blocked" if blocked else "completed"
         cycle = self.store.update_cycle_status(cycle["id"], status, execution_date)
-        final_report = ledger_report(ledger, prices=valuation)
+        final_report = ledger_report(ledger, prices=valuation, as_of=execution_date)
         if float(final_report["cash"]) < -1e-6:
             message = "撮合后现金为负，账户已暂停；请检查账本完整性。"
             self.store.set_warning(account_id, message, pause=True)
@@ -1533,7 +1561,16 @@ class PaperService:
                     "as_of": pd.Timestamp(series.index[-1]).strftime("%Y-%m-%d"),
                 }
             )
-        report = ledger_report(ledger, prices=price_map)
+        observed_dates = [
+            str(item["as_of"])
+            for item in freshness
+            if item.get("status") == "ready" and item.get("as_of")
+        ]
+        report = ledger_report(
+            ledger,
+            prices=price_map,
+            as_of=min(observed_dates) if observed_dates else None,
+        )
         dates: list[str] = []
         twr: list[float] = []
         warnings = list(report.get("warnings") or [])

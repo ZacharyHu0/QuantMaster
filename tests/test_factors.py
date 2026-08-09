@@ -210,7 +210,11 @@ class TestCacheReplaceSemantics:
                 return df
 
         monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FullSource]})
-        df = registry.load_history("600000.SH", "2024-01-02", "2024-06-28", store=store)
+        envelope = registry.load_history(
+            "600000.SH", "2024-01-02", "2024-06-28", store=store,
+        )
+        df = envelope.data
+        assert envelope.quality.status != "unavailable"
         assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
 
     def test_partial_refetch_calibrates_prices_and_preserves_old_volume(self, tmp_path, monkeypatch):
@@ -246,9 +250,11 @@ class TestCacheReplaceSemantics:
 
         result = registry.load_history(
             "600000.SH", "2024-01-02", "2024-12-31", store=store)
+        data = result.data
         cached = store.get("600000.SH")
-        assert str(result.index.min().date()) == "2024-01-02"
-        assert str(result.index.max().date()) == "2024-12-31"
+        assert result.quality.status != "unavailable"
+        assert str(data.index.min().date()) == "2024-01-02"
+        assert str(data.index.max().date()) == "2024-12-31"
         assert cached.loc["2024-02-01", "close"] == 80.0
         assert cached.loc["2024-05-02", "close"] == 80.0
         assert cached.loc["2024-02-01", "volume"] == 1e6

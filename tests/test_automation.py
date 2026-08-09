@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -17,6 +19,7 @@ from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
 from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.server.app import app
 
 
@@ -32,6 +35,27 @@ class MemoryCredentials:
 
     def delete(self, target):
         self.values.pop(target, None)
+
+
+def test_v6_to_v7_news_schedule_migration_preserves_custom_intervals(tmp_path):
+    path = tmp_path / "automation.sqlite"
+    AutomationStore(path)
+    expected = {
+        "fast_news_scan": {"type": "interval", "minutes": 1},
+        "official_news_scan": {"type": "interval", "minutes": 10},
+        "periodic_news_scan": {"type": "interval", "minutes": 60},
+    }
+    with sqlite3.connect(path) as connection:
+        for name, schedule in expected.items():
+            connection.execute(
+                "UPDATE job_templates SET schedule=? WHERE name=?",
+                (json.dumps(schedule), name),
+            )
+        connection.execute("PRAGMA user_version=6")
+
+    migrated = AutomationStore(path)
+    schedules = {item["name"]: item["schedule"] for item in migrated.jobs()}
+    assert {name: schedules[name] for name in expected} == expected
 
 
 class RecordingGateway:
@@ -826,8 +850,26 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
             timezone="Asia/Shanghai", sentinel_indices=symbols, primary_universe="demo",
         )),
     )
-    monkeypatch.setattr("quantmaster.data.load_intraday", lambda *args, **kwargs: frame)
-    monkeypatch.setattr("quantmaster.data.universe.load_universe", lambda _name: symbols)
+    monkeypatch.setattr(
+        "quantmaster.data.load_intraday",
+        lambda *args, **kwargs: BarDataEnvelope(
+            data=frame,
+            quality=BarDataQuality(
+                status="verified",
+                requested_start=str(index[0]),
+                requested_end=str(index[-1]),
+                observed_start=str(index[0]),
+                observed_end=str(index[-1]),
+                coverage_ratio=1.0,
+                sources=("fixture",),
+                timezone="Asia/Shanghai",
+            ),
+            provenance=({"source": "fixture"},),
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.universe.load_universe_analysis", lambda _name: symbols,
+    )
 
     def unavailable(*args, **kwargs):
         raise RuntimeError("eastmoney circuit open")
@@ -839,6 +881,100 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
     assert result["status"] == "degraded"
     assert result["breadth_source"] == "cache"
     assert result["breadth"] == pytest.approx(0.63)
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_daily_close_keeps_degraded_analysis_preview_without_formal_save(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    dates = pd.bdate_range("2026-07-01", "2026-08-07")
+    close = pd.DataFrame({"600519.SH": range(len(dates))}, index=dates, dtype=float)
+    panel = {
+        "open": close + 1,
+        "high": close + 2,
+        "low": close,
+        "close": close + 1,
+        "volume": close + 1_000,
+    }
+    envelope = BarDataEnvelope(
+        data=panel,
+        quality=BarDataQuality(
+            status="degraded",
+            requested_start="2025-03-25",
+            requested_end="2026-08-07",
+            observed_start="2026-07-01",
+            observed_end="2026-08-07",
+            coverage_ratio=1.0,
+            sources=("free-stockdb",),
+            issues=("复权因子链未验证",),
+            timezone="exchange-date",
+            adjustment="qfq_requested_unverified",
+            requested_symbols=("600519.SH",),
+            observed_symbols=("600519.SH",),
+        ),
+        provenance=({"source": "free-stockdb"},),
+    )
+    saved = []
+    monkeypatch.setattr(
+        "quantmaster.automation.service.get_config",
+        lambda: SimpleNamespace(
+            automation=SimpleNamespace(primary_universe="demo"),
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.automation.service.market_date",
+        lambda: datetime(2026, 8, 7).date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.universe.load_universe_analysis_snapshot",
+        lambda _name: SimpleNamespace(
+            symbols=("600519.SH",),
+            to_dict=lambda: {"name": "demo", "symbols": ["600519.SH"]},
+        ),
+    )
+    monkeypatch.setattr("quantmaster.data.load_panel", lambda *_args, **_kwargs: envelope)
+    monkeypatch.setattr(
+        "quantmaster.data.load_stock_names", lambda _symbols: {"600519.SH": "贵州茅台"},
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.industry.load_industry_analysis_context",
+        lambda: ({"600519.SH": "食品饮料"}, {
+            "status": "degraded", "formal_eligible": False, "issues": ["目录过期"],
+        }),
+    )
+    monkeypatch.setattr(
+        "quantmaster.decision.hybrid_daily_selection",
+        lambda *_args, **_kwargs: {
+            "signal_date": "2026-08-07",
+            "picks": [{"symbol": "600519.SH", "score": 0.8}],
+            "data_quality": {"status": "complete"},
+        },
+    )
+    monkeypatch.setattr(
+        "quantmaster.decision.DecisionStore.save",
+        lambda *_args, **_kwargs: saved.append(True),
+    )
+    monkeypatch.setattr(
+        "quantmaster.market.regime.analyze_market",
+        lambda _panel: {"current": {"regime": "neutral"}},
+    )
+    monkeypatch.setattr(
+        "quantmaster.automation.service.close_regime_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = service._task_daily_close_pipeline()
+
+    assert result["status"] == "degraded"
+    assert result["preview_picks"][0]["symbol"] == "600519.SH"
+    assert result["persistence"]["status"] == "blocked"
+    assert result["persistence"]["saved"] is False
+    assert saved == []
     service.jobs.stop()
     service.executor.shutdown(wait=False, cancel_futures=True)
 

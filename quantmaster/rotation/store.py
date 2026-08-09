@@ -9,8 +9,12 @@ import logging
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from io import BufferedRandom
 from pathlib import Path
 from typing import Any
 
@@ -23,14 +27,146 @@ from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 logger = logging.getLogger(__name__)
+ETF_METADATA_HISTORY_SCHEMA_VERSION = "1.0"
+_ETF_METADATA_DERIVED_COLUMNS = frozenset(
+    {"observation_id", "observation_content_sha256", "observation_integrity"}
+)
+_ETF_METADATA_LOCK = threading.RLock()
 
 
 class RotationIntegrityError(RuntimeError):
     """A rebuildable rotation artifact exists but failed integrity validation."""
 
 
+@contextmanager
+def _etf_metadata_file_lock(path: Path, timeout: float = 30.0) -> Iterator[None]:
+    """Serialize the parquet/manifest pair across worker processes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream: BufferedRandom = path.open("a+b")
+    if path.stat().st_size == 0:
+        stream.write(b"\0")
+        stream.flush()
+    deadline = time.monotonic() + max(0.1, timeout)
+    while True:
+        try:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    stream.fileno(), msvcrt.LK_NBLCK, 1,  # type: ignore[attr-defined]
+                )
+            else:
+                import fcntl
+
+                fcntl.flock(  # type: ignore[attr-defined]
+                    stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                )
+            break
+        except (OSError, BlockingIOError):
+            if time.monotonic() >= deadline:
+                stream.close()
+                raise RotationIntegrityError("等待 ETF 元数据历史文件锁超时") from None
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        try:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    stream.fileno(), msvcrt.LK_UNLCK, 1,  # type: ignore[attr-defined]
+                )
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        finally:
+            stream.close()
+
+
 def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_metadata_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_metadata_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            (_canonical_metadata_value(item) for item in value),
+            key=lambda item: strict_json_dumps(item, sort_keys=True),
+        )
+    if isinstance(value, (list, tuple)):
+        return [_canonical_metadata_value(item) for item in value]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        try:
+            converted = value.tolist()
+        except (TypeError, ValueError):
+            pass
+        else:
+            if converted is not value:
+                return _canonical_metadata_value(converted)
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _metadata_content_hash(row: dict[str, Any]) -> str:
+    payload = {}
+    for key, value in sorted(row.items()):
+        if key in _ETF_METADATA_DERIVED_COLUMNS:
+            continue
+        normalized = _canonical_metadata_value(value)
+        if normalized is not None:
+            payload[str(key)] = normalized
+    return _hash_text(strict_json_dumps(payload, sort_keys=True))
+
+
+def _metadata_observation_id(symbol: str, observed_at: str) -> str:
+    return "etf_meta_observation_" + _hash_text(
+        strict_json_dumps(
+            {
+                "schema_version": ETF_METADATA_HISTORY_SCHEMA_VERSION,
+                "symbol": str(symbol).upper(),
+                "observed_at": observed_at,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 class RotationStore:
@@ -44,6 +180,10 @@ class RotationStore:
         self.preferences_path = self.root / "preferences.sqlite"
         self.etf_path = self.root / "etf_observations.parquet"
         self.etf_metadata_path = self.root / "etf_metadata.parquet"
+        self.etf_metadata_history_path = self.root / "etf_metadata_history.parquet"
+        self.etf_metadata_history_manifest_path = (
+            self.root / "etf_metadata_history.manifest.json"
+        )
         self._initialize()
 
     def _cache(self) -> sqlite3.Connection:
@@ -471,22 +611,204 @@ class RotationStore:
             raise RotationIntegrityError("ETF 观察文件损坏，拒绝按空数据继续计算") from exc
 
     def save_etf_metadata(self, frame: pd.DataFrame) -> None:
-        """Persist the complete ETF directory independently from share coverage."""
+        """Persist immutable observations and a tamper-evident history manifest."""
 
         if frame is None or frame.empty:
             return
+        with _ETF_METADATA_LOCK, _etf_metadata_file_lock(
+            self.root / ".etf_metadata_history.lock"
+        ):
+            current = self._prepare_etf_metadata_observations(frame)
+            history = (
+                self._read_verified_etf_metadata_history()
+                if self.etf_metadata_history_path.is_file()
+                else pd.DataFrame()
+            )
+            combined = pd.concat((history, current), ignore_index=True, sort=False)
+            conflicts = (
+                combined.groupby("observation_id")["observation_content_sha256"].nunique()
+                if not combined.empty
+                else pd.Series(dtype=int)
+            )
+            conflicting_ids = sorted(conflicts[conflicts.gt(1)].index.astype(str))
+            if conflicting_ids:
+                raise RotationIntegrityError(
+                    "ETF 元数据观察身份出现冲突内容，拒绝改写历史: "
+                    + ", ".join(conflicting_ids[:5])
+                )
+            combined = (
+                combined.sort_values(["observed_at", "symbol", "observation_id"])
+                .drop_duplicates("observation_id", keep="first")
+                .reset_index(drop=True)
+            )
+            previous_ids = (
+                set(history.get("observation_id", pd.Series(dtype=str)).astype(str))
+                if not history.empty
+                else set()
+            )
+            if set(combined["observation_id"].astype(str)) != previous_ids:
+                self._write_etf_metadata_history(combined)
+            self._write_etf_metadata_frame(
+                self.etf_metadata_path,
+                current,
+                ".etf_metadata.",
+            )
+
+    @staticmethod
+    def _prepare_etf_metadata_observations(frame: pd.DataFrame) -> pd.DataFrame:
+        current = frame.copy()
+        if "symbol" not in current:
+            raise RotationIntegrityError("ETF 元数据观察缺少 symbol")
+        current["symbol"] = current["symbol"].fillna("").astype(str).str.upper()
+        if current["symbol"].eq("").any():
+            raise RotationIntegrityError("ETF 元数据观察包含空 symbol")
+        if "observed_at" not in current:
+            current["observed_at"] = pd.Timestamp.now(tz="UTC").isoformat()
+        parsed = pd.to_datetime(current["observed_at"], errors="coerce", utc=True)
+        missing = parsed.isna()
+        if missing.any():
+            parsed.loc[missing] = pd.Timestamp.now(tz="UTC")
+        current["observed_at"] = parsed.map(lambda value: value.isoformat())
+        for column in _ETF_METADATA_DERIVED_COLUMNS:
+            if column in current:
+                current = current.drop(columns=column)
+        records = current.to_dict("records")
+        current["observation_id"] = [
+            _metadata_observation_id(str(row["symbol"]), str(row["observed_at"]))
+            for row in records
+        ]
+        current["observation_content_sha256"] = [
+            _metadata_content_hash(row) for row in records
+        ]
+        current["observation_integrity"] = "verified"
+        return current
+
+    @staticmethod
+    def _write_etf_metadata_frame(
+        target: Path,
+        value: pd.DataFrame,
+        prefix: str,
+    ) -> None:
         fd, temp_name = tempfile.mkstemp(
-            prefix=".etf_metadata.", suffix=".parquet.tmp", dir=self.root,
+            prefix=prefix, suffix=".parquet.tmp", dir=target.parent,
         )
         os.close(fd)
         temp = Path(temp_name)
         try:
-            frame.to_parquet(temp, index=False)
+            value.to_parquet(temp, index=False)
             with temp.open("rb+") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temp, self.etf_metadata_path)
+            os.replace(temp, target)
         finally:
             temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _history_logical_hash(frame: pd.DataFrame) -> str:
+        rows = sorted(
+            (
+                {
+                    "observation_id": str(row.observation_id),
+                    "content_sha256": str(row.observation_content_sha256),
+                }
+                for row in frame[[
+                    "observation_id", "observation_content_sha256"
+                ]].itertuples(index=False)
+            ),
+            key=lambda row: row["observation_id"],
+        )
+        return _hash_text(strict_json_dumps(rows, sort_keys=True))
+
+    def _write_etf_metadata_history(self, frame: pd.DataFrame) -> None:
+        self._write_etf_metadata_frame(
+            self.etf_metadata_history_path,
+            frame,
+            ".etf_metadata_history.",
+        )
+        manifest = {
+            "schema_version": ETF_METADATA_HISTORY_SCHEMA_VERSION,
+            "artifact": "etf_metadata_history",
+            "file_sha256": _hash_file(self.etf_metadata_history_path),
+            "logical_sha256": self._history_logical_hash(frame),
+            "row_count": len(frame),
+            "observation_count": frame["observation_id"].nunique(),
+            "written_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        }
+        manifest["manifest_sha256"] = _hash_text(
+            strict_json_dumps(manifest, sort_keys=True)
+        )
+        encoded = json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".etf_metadata_history.manifest.",
+            suffix=".json.tmp",
+            dir=self.root,
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        try:
+            temp.write_text(encoded, encoding="utf-8")
+            with temp.open("rb+") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temp, self.etf_metadata_history_manifest_path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def _read_verified_etf_metadata_history(self) -> pd.DataFrame:
+        if not self.etf_metadata_history_manifest_path.is_file():
+            raise RotationIntegrityError(
+                "ETF 元数据历史缺少完整性 manifest；旧历史不得静默升级为可信证据"
+            )
+        try:
+            manifest = json.loads(
+                self.etf_metadata_history_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RotationIntegrityError("ETF 元数据历史 manifest 损坏") from exc
+        claimed_manifest_hash = str(manifest.pop("manifest_sha256", ""))
+        actual_manifest_hash = _hash_text(strict_json_dumps(manifest, sort_keys=True))
+        if claimed_manifest_hash != actual_manifest_hash:
+            raise RotationIntegrityError("ETF 元数据历史 manifest 哈希不匹配")
+        if (
+            manifest.get("schema_version") != ETF_METADATA_HISTORY_SCHEMA_VERSION
+            or manifest.get("artifact") != "etf_metadata_history"
+        ):
+            raise RotationIntegrityError("ETF 元数据历史 manifest 契约已淘汰或类型错误")
+        if _hash_file(self.etf_metadata_history_path) != manifest.get("file_sha256"):
+            raise RotationIntegrityError("ETF 元数据历史文件哈希与 manifest 不匹配")
+        try:
+            history = pd.read_parquet(self.etf_metadata_history_path)
+        except (OSError, ValueError) as exc:
+            raise RotationIntegrityError("ETF 元数据历史损坏，拒绝丢失 PIT 证据") from exc
+        required = {
+            "symbol",
+            "observed_at",
+            "observation_id",
+            "observation_content_sha256",
+            "observation_integrity",
+        }
+        if not required.issubset(history.columns):
+            raise RotationIntegrityError("ETF 元数据历史缺少不可变观察字段")
+        prepared = self._prepare_etf_metadata_observations(history)
+        if (
+            prepared["observation_id"].tolist() != history["observation_id"].astype(str).tolist()
+            or prepared["observation_content_sha256"].tolist()
+            != history["observation_content_sha256"].astype(str).tolist()
+            or not history["observation_integrity"].astype(str).eq("verified").all()
+        ):
+            raise RotationIntegrityError("ETF 元数据历史观察身份或内容哈希不匹配")
+        if len(history) != int(manifest.get("row_count") or -1):
+            raise RotationIntegrityError("ETF 元数据历史行数与 manifest 不匹配")
+        if history["observation_id"].nunique() != int(
+            manifest.get("observation_count") or -1
+        ):
+            raise RotationIntegrityError("ETF 元数据历史观察数与 manifest 不匹配")
+        if self._history_logical_hash(history) != manifest.get("logical_sha256"):
+            raise RotationIntegrityError("ETF 元数据历史逻辑哈希与 manifest 不匹配")
+        return history
 
     def etf_metadata(self) -> pd.DataFrame:
         if not self.etf_metadata_path.is_file():
@@ -496,6 +818,14 @@ class RotationStore:
         except (OSError, ValueError) as exc:
             logger.error("ETF 元数据文件完整性校验失败: %s", self.etf_metadata_path, exc_info=True)
             raise RotationIntegrityError("ETF 元数据文件损坏，拒绝按空目录继续分类") from exc
+
+    def etf_metadata_history(self) -> pd.DataFrame:
+        if not self.etf_metadata_history_path.is_file():
+            return pd.DataFrame()
+        with _ETF_METADATA_LOCK, _etf_metadata_file_lock(
+            self.root / ".etf_metadata_history.lock"
+        ):
+            return self._read_verified_etf_metadata_history()
 
 
 class RotationJobStore:

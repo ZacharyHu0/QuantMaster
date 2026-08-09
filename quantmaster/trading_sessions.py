@@ -7,7 +7,6 @@ validated local market data.  With neither source it returns a safe skip.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -17,6 +16,7 @@ from zoneinfo import ZoneInfo
 from quantmaster.config import get_config
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+DAILY_SIGNAL_CUTOFF = wall_time(15, 0)
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,33 @@ def _normalize_now(value: datetime | None) -> datetime:
     if current.tzinfo is None:
         return current.replace(tzinfo=SHANGHAI)
     return current.astimezone(SHANGHAI)
+
+
+def market_now(value: datetime | None = None) -> datetime:
+    """Return an aware wall clock in the China exchange timezone.
+
+    UTC remains the storage clock, but every default trading date must be
+    derived from this function so host timezone changes cannot move a run to a
+    different market day.
+    """
+    return _normalize_now(value)
+
+
+def market_date(value: datetime | None = None) -> date:
+    """Return the Shanghai market calendar date for an optional instant."""
+    return market_now(value).date()
+
+
+def daily_signal_cutoff(value: date | str) -> datetime:
+    """Return the contractual availability cutoff for a daily close signal.
+
+    A date-only ``as_of`` means the information set available at the Shanghai
+    close, not the end of that host-machine day.  Keeping that interpretation
+    here prevents individual replay consumers from drifting to UTC midnight or
+    a 23:59 wall-clock cutoff.
+    """
+    target = date.fromisoformat(value) if isinstance(value, str) else value
+    return datetime.combine(target, DAILY_SIGNAL_CUTOFF, SHANGHAI)
 
 
 def _latest_not_after(values: Iterable[object], cutoff: date) -> str:
@@ -81,26 +108,6 @@ class SessionExpectationResolver:
             AssetClass.STOCK, Frequency.DAILY, start.isoformat(), end.isoformat(),
         )
 
-    @staticmethod
-    def _bar_sessions(end: date) -> list[str]:
-        from quantmaster.data.storage import BarStore
-
-        metadata = BarStore().metadata_many()
-        candidates = [
-            str(item.get("end") or "")[:10]
-            for symbol, item in metadata.items()
-            if symbol.endswith((".SH", ".SZ", ".BJ"))
-            and item.get("content_sha256")
-            and int(item.get("row_count") or 0) > 0
-            and str(item.get("end") or "")[:10] <= end.isoformat()
-        ]
-        if not candidates:
-            return []
-        value, count = Counter(candidates).most_common(1)[0]
-        # A lone security can be suspended or stale; require broad corroboration.
-        minimum = min(100, max(5, len(metadata) // 10))
-        return [value] if count >= minimum else []
-
     def resolve(self, now: datetime | None = None) -> SessionExpectation:
         current = _normalize_now(now)
         cutoff = current.date()
@@ -120,12 +127,6 @@ class SessionExpectationResolver:
                 return SessionExpectation(session, "research_lake", True, "已验证本地交易分区")
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             failures.append(f"研究湖日历不可用：{str(exc)[:160]}")
-        try:
-            session = _latest_not_after(self._bar_sessions(cutoff), cutoff)
-            if session:
-                return SessionExpectation(session, "bar_catalog", True, "多标的校验行情")
-        except (ImportError, OSError, RuntimeError, ValueError) as exc:
-            failures.append(f"行情目录不可用：{str(exc)[:160]}")
         action = "请配置 Tushare 交易日历或先完成一次全市场日线同步"
         detail = "；".join(failures)
         return SessionExpectation(

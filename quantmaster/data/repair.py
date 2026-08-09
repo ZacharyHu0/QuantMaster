@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,7 @@ from quantmaster.config import get_config
 from quantmaster.runtime.jobs import WorkerIdentity, lease_deadline
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def quarantine_file(
     if not source.is_file():
         return None
     root = get_config().data_root.resolve()
-    quarantine = root / "quarantine" / category / date.today().isoformat()
+    quarantine = root / "quarantine" / category / market_date().isoformat()
     quarantine.mkdir(parents=True, exist_ok=True)
     content_sha256 = _file_sha256(source)
     file_size = source.stat().st_size
@@ -377,7 +377,7 @@ class DataRepairManager:
 
     def _claim(self) -> dict[str, Any] | None:
         now = time.time()
-        today = date.today().isoformat()
+        today = market_date().isoformat()
         budget = max(0, int(get_config().data.repair_daily_budget))
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -527,18 +527,23 @@ class DataRepairManager:
         symbol = str(spec["symbol"])
         store = BarStore(root=root)
         start = str(spec.get("start") or "1990-01-01")
-        end = str(spec.get("end") or date.today())
+        end = str(spec.get("end") or market_date())
         with store.lock(symbol):
             target = store.path_for_repair(symbol)
             quarantine = quarantine_file(
                 target, category="bars", target=symbol, reason=str(item["reason"]),
             )
-            frame = load_history(
+            market_envelope = load_history(
                 symbol, start, end, store=store, refresh=RefreshMode.FULL,
                 priority="maintenance",
             )
+            frame = market_envelope.require_data()
             result = store.read(symbol, enqueue_repair=False)
-        if result.status != "ready" or frame.empty:
+        if (
+            result.status != "ready"
+            or frame.empty
+            or market_envelope.quality.status != "verified"
+        ):
             raise RuntimeError(f"重拉后完整性仍异常: {result.status}: {result.reason}")
         return {
             "rows": len(frame), "content_sha256": result.content_sha256,

@@ -34,6 +34,7 @@ from quantmaster.automation.stock_cards import (
 )
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import LLMConfig
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.server.app import app
 
@@ -75,6 +76,21 @@ class OfflineDeepLoader:
 
 def build_service() -> StockAnalysisService:
     bars = sample_bars()
+    market_envelope = BarDataEnvelope(
+        data=bars,
+        quality=BarDataQuality(
+            status="verified",
+            requested_start=str(bars.index.min().date()),
+            requested_end=str(bars.index.max().date()),
+            observed_start=str(bars.index.min().date()),
+            observed_end=str(bars.index.max().date()),
+            coverage_ratio=1.0,
+            sources=("fixture",),
+            timezone="Asia/Shanghai",
+            adjustment="qfq",
+        ),
+        provenance=({"source": "fixture", "contract": "test-bars-v1"},),
+    )
     symbol = "600519.SH"
     dates = bars.index
     fundamentals = {
@@ -98,7 +114,7 @@ def build_service() -> StockAnalysisService:
                 "currency": "CNY",
             },
         },
-        history_loader=lambda *args, **kwargs: bars,
+        history_loader=lambda *args, **kwargs: market_envelope,
         fundamental_loader=lambda *args: fundamentals,
         news_loader=lambda *args: [
             {

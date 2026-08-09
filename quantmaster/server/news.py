@@ -31,6 +31,7 @@ class ParserRules(StrictModel):
     headers: dict[str, str] = Field(default_factory=dict)
     encoding: str = Field(default="utf-8-sig", max_length=40)
     items_path: str = Field(default="", max_length=300)
+    id_path: str = Field(default="", max_length=300)
     title_path: str = Field(default="", max_length=300)
     content_path: str = Field(default="", max_length=300)
     url_path: str = Field(default="", max_length=300)
@@ -51,6 +52,7 @@ class SourceValue(StrictModel):
     group_name: Literal["fast", "official", "periodic"] = "periodic"
     url: str = Field(..., min_length=8, max_length=2048)
     item_limit: int = Field(default=30, ge=1, le=100)
+    max_age_hours: float | None = Field(default=None, ge=1, le=8760)
     factor_weight: float = Field(default=1.0, ge=0, le=3)
     is_official: bool = False
     parser: ParserRules = Field(default_factory=ParserRules)

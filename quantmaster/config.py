@@ -46,7 +46,7 @@ class DataConfig:
     free_stockdb_managed: bool = True
     free_stockdb_auto_update: bool = True  # 到点自动停库、更新、验收并恢复服务
     free_stockdb_update_time: str = "18:30"
-    free_stockdb_online_enabled: bool = True
+    free_stockdb_online_enabled: bool = False
     free_stockdb_online_url: str = "http://8.138.149.215:7899"
     free_stockdb_online_timeout: float = 4.0
     free_stockdb_ingest_retain: int = 30

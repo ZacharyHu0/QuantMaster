@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+import json
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,6 +13,7 @@ from quantmaster.research.engine import ResearchEngine
 from quantmaster.research.jobs import get_research_job_manager
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.management import _require_csrf, _require_local
+from quantmaster.trading_sessions import market_date
 
 router = APIRouter(prefix="/api/v1/research/data", tags=["research-data"])
 
@@ -30,7 +31,7 @@ class ResearchPlanRequest(ContractModel):
 
     def make_plan(self, engine: ResearchEngine):
         return engine.plan(
-            self.start, self.end or str(date.today()),
+            self.start, self.end or market_date().isoformat(),
             asset_classes=tuple(AssetClass(item) for item in self.assets),
             datasets=tuple(self.datasets) or None, spec_ids=tuple(self.specs) or None,
             mode=self.mode, backend=KernelBackend(self.backend),
@@ -44,6 +45,12 @@ class MaterializeRequest(ContractModel):
     symbols: list[str] = Field(default_factory=list, max_length=10_000)
 
 
+class ResearchPreviewRequest(ContractModel):
+    dataset_id: str = Field(default="stock_bars", min_length=1, max_length=80)
+    trade_date: str | None = Field(default=None, min_length=10, max_length=10)
+    limit: int = Field(default=500, ge=1, le=10_000)
+
+
 @router.get("/catalog")
 def research_catalog(request: Request) -> dict:
     _require_local(request)
@@ -54,6 +61,29 @@ def research_catalog(request: Request) -> dict:
 def research_capabilities(request: Request) -> dict:
     _require_local(request)
     return ResearchEngine().capabilities()
+
+
+@router.post("/preview")
+def preview_research_partition(request: Request, value: ResearchPreviewRequest) -> dict:
+    """Return an explicit sandbox preview without writing a Research Lake partition."""
+    _require_csrf(request)
+    trade_date = value.trade_date or market_date().isoformat()
+    try:
+        frame = ResearchEngine().preview_date(value.dataset_id, trade_date)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from None
+    rows = json.loads(
+        frame.head(value.limit).to_json(orient="records", date_format="iso", force_ascii=False)
+    )
+    return {
+        "tier": "sandbox",
+        "dataset_id": value.dataset_id,
+        "trade_date": trade_date,
+        "row_count": len(frame),
+        "returned_rows": len(rows),
+        "quality": dict(frame.attrs.get("research_partition_quality") or {}),
+        "rows": rows,
+    }
 
 
 @router.post("/plans")
@@ -142,7 +172,7 @@ def materialize_bar_store(request: Request, value: MaterializeRequest) -> dict:
     engine = ResearchEngine()
     try:
         records = engine.lake.materialize_bar_store(
-            value.symbols or None, value.start, value.end or str(date.today()),
+            value.symbols or None, value.start, value.end or market_date().isoformat(),
             asset_class=AssetClass(value.asset),
         )
     except (ValueError, RuntimeError) as exc:

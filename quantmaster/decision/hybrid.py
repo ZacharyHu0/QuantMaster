@@ -14,15 +14,18 @@ import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.trading_sessions import daily_signal_cutoff
 
 logger = logging.getLogger(__name__)
 DecisionProfile = Literal["risk_adjusted", "short_term", "stable"]
+PolicyMode = Literal["live", "historical_replay", "retrospective"]
 EPS = 1e-12
 
 
@@ -305,8 +308,19 @@ def resolve_policy(
     *,
     symbols: list[str] | None = None,
     store=None,
+    as_of: str = "",
+    mode: PolicyMode = "live",
 ) -> dict[str, Any]:
     """Resolve active Lab champions into an immutable runtime snapshot."""
+    if mode not in {"live", "historical_replay", "retrospective"}:
+        raise ValueError("模型模式只支持 live/historical_replay/retrospective")
+    if mode == "historical_replay" and not as_of:
+        raise ValueError("历史重放必须提供 as_of")
+    if as_of:
+        try:
+            pd.Timestamp(as_of)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("模型查看日期需要使用 YYYY-MM-DD 格式") from exc
     definition = profile_definition(profile)
     components: list[dict[str, Any]] = [{
         "role": "rule", "name": "自适应规则基线", "kind": "rule",
@@ -321,16 +335,38 @@ def resolve_policy(
             from quantmaster.lab.store import LabStore
 
             store = LabStore()
-        deployments = store.active_deployments()
+        if mode == "historical_replay":
+            if not hasattr(store, "deployments_as_of") or not hasattr(
+                store, "champion_strategies_as_of"
+            ):
+                raise RuntimeError("Lab 账本不支持冻结部署/Champion 历史证据")
+            deployments = store.deployments_as_of(as_of)
+        else:
+            deployments = store.active_deployments()
         selected: dict[str, tuple[int, dict, dict]] = {}
         for deployment in deployments:
+            if mode == "historical_replay":
+                deployed_at = str(deployment.get("created_at") or "")
+                cutoff = pd.Timestamp(daily_signal_cutoff(as_of))
+                deployed = pd.to_datetime(deployed_at, errors="coerce", utc=True)
+                if pd.isna(deployed) or pd.Timestamp(deployed) > cutoff:
+                    continue
             matches, rank = _deployment_matches(
                 deployment, universe=universe, horizon=horizon, profile=profile,
                 a_share_compatible=a_share_compatible,
             )
             if not matches:
                 continue
-            version = store.version(deployment["version_id"])
+            if mode == "historical_replay":
+                version = deployment.get("version_snapshot")
+                if deployment.get("evidence_status") != "verified" or not isinstance(
+                    version, dict
+                ):
+                    raise RuntimeError(
+                        f"部署 {deployment.get('id') or ''} 缺少可验证的冻结版本/验证快照"
+                    )
+            else:
+                version = store.version(deployment["version_id"])
             if not version or version.get("status") not in {"production", "approved"}:
                 continue
             component = _component_summary(deployment, version)
@@ -340,21 +376,42 @@ def resolve_policy(
             if role not in selected or rank > selected[role][0]:
                 selected[role] = (rank, deployment, component)
         champions = (
-            store.strategies(horizon=horizon, status="champion", limit=1)
-            if hasattr(store, "strategies") else []
+            store.champion_strategies_as_of(as_of, horizon=horizon)
+            if mode == "historical_replay"
+            else store.strategies(horizon=horizon, status="champion", limit=1)
+            if hasattr(store, "strategies")
+            else []
         )
         if champions:
             champion = champions[0]
             nested = []
+            frozen_versions = champion.get("component_versions") or {}
             for item in champion.get("components") or []:
-                version = store.version(str(item.get("version_id") or ""))
+                version_id = str(item.get("version_id") or "")
+                version = (
+                    frozen_versions.get(version_id)
+                    if mode == "historical_replay"
+                    else store.version(version_id)
+                )
                 if version is None:
+                    if mode == "historical_replay":
+                        raise RuntimeError(
+                            f"Champion {champion.get('id') or ''} 缺少成分 {version_id} 的冻结证据"
+                        )
                     continue
                 nested.append({
                     "version_id": version["id"], "weight": float(item.get("weight") or 0),
                     "spec": version.get("spec") or {}, "name": version.get("name") or "因子",
                 })
             if nested:
+                champion_events = champion.get("promotion_events") or []
+                champion_event = next(
+                    (
+                        event for event in reversed(champion_events)
+                        if str(event.get("to_status") or "") == "champion"
+                    ),
+                    {},
+                )
                 component = {
                     "role": "factor", "name": champion["name"], "kind": "composite",
                     "status": "active", "strategy_id": champion["id"],
@@ -362,10 +419,18 @@ def resolve_policy(
                     "scope": "a_share", "universe": "csi800", "horizon": horizon,
                     "spec": {"kind": "composite", "components": nested},
                     "validation": champion.get("sealed_evidence") or {},
+                    "deployed_at": str(champion_event.get("created_at") or ""),
                 }
                 selected["factor"] = (99, {}, component)
+        if mode == "historical_replay" and not selected:
+            raise RuntimeError(
+                f"{as_of} 的模型部署/Champion 事件证据不可用；"
+                "拒绝把证据缺失静默解释为当时仅使用规则基线"
+            )
         components.extend(value[2] for value in selected.values())
-    except Exception:
+    except Exception as exc:
+        if mode == "historical_replay":
+            raise RuntimeError(f"历史模型策略无法重建：{exc}") from exc
         logger.warning("Quant Lab Champion 解析失败，已使用规则基线", exc_info=True)
         warnings.append("Quant Lab Champion 暂不可用，已使用规则基线")
 
@@ -409,6 +474,8 @@ def resolve_policy(
         "profile_label": definition.label,
         "universe": universe,
         "horizon": horizon,
+        "policy_mode": mode,
+        "policy_effective_as_of": as_of if mode == "historical_replay" else "",
         "components": components,
         "warnings": warnings,
         "risk": {
@@ -472,7 +539,9 @@ def _learned_component(
 
 
 def _python_component(
-    panel: dict[str, pd.DataFrame], component: dict[str, Any],
+    panel: dict[str, pd.DataFrame],
+    component: dict[str, Any],
+    evidence_sink: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     from quantmaster.config import get_config
     from quantmaster.data.research import ResearchDataBundle
@@ -503,6 +572,16 @@ def _python_component(
         close = panel["close"]
         bundle.membership = pd.DataFrame(True, index=close.index, columns=close.columns)
     features, _catalog = registered_features(bundle)
+    if evidence_sink is not None:
+        for name in sorted(required):
+            value = features.get(name)
+            if value is None:
+                continue
+            key = f"feature::{name}"
+            existing = evidence_sink.get(key)
+            if existing is not None and not existing.equals(value):
+                raise RuntimeError(f"同一决策内特征 {name} 出现不一致的输入版本")
+            evidence_sink[key] = value.copy()
     values = execute_python_factor_artifact(
         get_config().data_root, spec.get("artifact") or {}, features,
     )
@@ -510,7 +589,9 @@ def _python_component(
 
 
 def _composite_component(
-    panel: dict[str, pd.DataFrame], component: dict[str, Any],
+    panel: dict[str, pd.DataFrame],
+    component: dict[str, Any],
+    evidence_sink: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     spec = component.get("spec") or {}
     combined: pd.DataFrame | None = None
@@ -525,7 +606,9 @@ def _composite_component(
         kind = str(nested_component["spec"].get("kind") or "expression")
         values = (
             _learned_component(panel, nested_component) if kind == "learned"
-            else _python_component(panel, nested_component) if kind == "python"
+            else _python_component(
+                panel, nested_component, evidence_sink=evidence_sink,
+            ) if kind == "python"
             else _expression_component(panel, nested_component)
         )
         weight = float(nested.get("weight") or 0)
@@ -543,6 +626,7 @@ def hybrid_score_bundle(
     profile: DecisionProfile = "risk_adjusted",
     universe: str = "demo",
     policy_snapshot: dict[str, Any] | None = None,
+    evidence_sink: dict[str, pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """Compute official component scores and deterministic fallback metadata."""
     close = panel["close"].sort_index()
@@ -563,12 +647,24 @@ def hybrid_score_bundle(
             spec_kind = str((component.get("spec") or {}).get("kind") or "expression")
             values = (
                 _learned_component(panel, component) if role == "ml"
-                else _python_component(panel, component) if spec_kind == "python"
-                else _composite_component(panel, component) if spec_kind == "composite"
+                else _python_component(
+                    panel, component, evidence_sink=evidence_sink,
+                ) if spec_kind == "python"
+                else _composite_component(
+                    panel, component, evidence_sink=evidence_sink,
+                ) if spec_kind == "composite"
                 else _expression_component(panel, component)
             ).reindex_like(close)
             if values.dropna(how="all").empty:
                 raise ValueError("没有满足覆盖率的有效预测")
+            if evidence_sink is not None:
+                component_id = str(
+                    component.get("version_id")
+                    or component.get("content_hash")
+                    or component.get("name")
+                    or role
+                )
+                evidence_sink[f"component_score::{role}::{component_id}"] = values.copy()
             scores[role] = values
             active_components.append(component)
         except Exception:
@@ -739,6 +835,8 @@ def hybrid_daily_selection(
     name_map: dict[str, str] | None = None,
     policy_snapshot: dict[str, Any] | None = None,
     cap_weight: float = 0.25,
+    policy_mode: PolicyMode = "live",
+    evidence_sink: dict[str, pd.DataFrame] | None = None,
 ) -> dict[str, Any]:
     """Generate a calibrated Hybrid decision with an executable position plan."""
     if top_n < 1:
@@ -748,9 +846,28 @@ def hybrid_daily_selection(
     definition = profile_definition(profile)
     industries = industry_map or {}
     names = name_map or {}
+    close_input = panel.get("close")
+    if close_input is None or close_input.empty:
+        raise ValueError("行情面板缺少 close，无法生成 Hybrid 决策")
+    signal_dates = close_input.dropna(how="all").index
+    if signal_dates.empty:
+        raise ValueError("有效历史不足，无法生成 Hybrid 决策")
+    signal_as_of = pd.Timestamp(signal_dates[-1]).strftime("%Y-%m-%d")
+    if policy_snapshot is None:
+        policy_snapshot = resolve_policy(
+            universe,
+            horizon,
+            profile,
+            symbols=list(close_input.columns),
+            as_of=signal_as_of if policy_mode == "historical_replay" else "",
+            mode=policy_mode,
+        )
+    elif str(policy_snapshot.get("policy_mode") or "live") != policy_mode:
+        raise ValueError("决策模式与模型快照模式不一致")
     bundle = hybrid_score_bundle(
         panel, horizon=horizon, profile=profile, universe=universe,
         policy_snapshot=policy_snapshot,
+        evidence_sink=evidence_sink,
     )
     scores = bundle["score"]
     valid = scores.dropna(how="all")
@@ -890,6 +1007,9 @@ def hybrid_daily_selection(
         "profile": profile,
         "profile_label": definition.label,
         "policy_hash": snapshot["policy_hash"],
+        "policy_mode": policy_mode,
+        "policy_effective_at": str(snapshot.get("policy_effective_as_of") or ""),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "signal_date": str(date.date()) if hasattr(date, "date") else str(date),
         "holding_horizon_days": horizon,
         "market_regime": regime,

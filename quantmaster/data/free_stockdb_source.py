@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import math
 import sys
 import threading
 import tokenize
@@ -77,6 +78,8 @@ def _compact_time(value: str | None, *, intraday: bool) -> str:
     if not value:
         return ""
     stamp = pd.Timestamp(value)
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert("Asia/Shanghai")
     return stamp.strftime("%Y%m%d%H%M%S" if intraday else "%Y%m%d")
 
 
@@ -122,11 +125,17 @@ class FreeStockDBSource(DataSource):
         self.timeout = float(timeout if timeout is not None else cfg.free_stockdb_timeout)
         resolved_sdk = resolve_free_stockdb_sdk_path(sdk_path)
         self.sdk_path = str(resolved_sdk) if resolved_sdk is not None else ""
-        self._trust_env = urlparse(self.base_url).hostname not in {
+        hostname = urlparse(self.base_url).hostname
+        loopback = hostname in {
             "127.0.0.1",
             "localhost",
             "::1",
         }
+        if self.name == "free-stockdb" and not loopback:
+            raise ValueError(
+                "可信 free-stockdb 必须是本机回环服务；公网 HTTP 仅允许实验模块显式调用"
+            )
+        self._trust_env = not loopback
         self._sdk_checked = False
         self._client: Any | None = None
         self._sdk_error: BaseException | None = None
@@ -430,7 +439,17 @@ class FreeStockDBSource(DataSource):
         for column in (*OHLCV_COLUMNS, "amount", "turnover"):
             if column in frame:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        return normalize_bars(frame)
+        result = normalize_bars(frame)
+        result.attrs.update({
+            "timezone": "Asia/Shanghai" if intraday else "exchange-date",
+            "units": {
+                "open": "CNY/share", "high": "CNY/share", "low": "CNY/share",
+                "close": "CNY/share", "volume": "share", "amount": "CNY",
+            },
+            # The vendor interface does not expose a versioned unit manifest.
+            "unit_status": "unverified_vendor_contract",
+        })
+        return result
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         code = symbol.partition(".")[0].zfill(6)
@@ -565,12 +584,27 @@ class FreeStockDBSource(DataSource):
         # ETF valuation sentinels mean not-applicable, never a literal zero.
         etf_mask = frame["symbol"].astype(str).str.partition(".")[0].str.startswith(("1", "5"))
         frame.loc[etf_mask & frame["pb"].eq(0), "pb"] = pd.NA
-        return (
+        frame = (
             frame[columns]
             .dropna(subset=["date"])
             .sort_values(["symbol", "date"], kind="mergesort")
             .reset_index(drop=True)
         )
+        duplicate_rows = int(frame.duplicated(["symbol", "date"], keep=False).sum())
+        if duplicate_rows:
+            raise RuntimeError(
+                f"free-stockdb 日频截面存在 {duplicate_rows} 行重复 (symbol,date)"
+            )
+        frame.attrs.update({
+            "timezone": "exchange-date",
+            "units": {
+                "open": "CNY/share", "high": "CNY/share", "low": "CNY/share",
+                "close": "CNY/share", "volume": "share", "amount": "CNY",
+            },
+            "unit_status": "unverified_vendor_contract",
+            "adjustment": "none",
+        })
+        return frame
 
     def board_hierarchy(self) -> list[dict[str, Any]]:
         levels = {"申万一级": "L1", "申万二级": "L2", "申万三级": "L3", "概念": "CONCEPT"}
@@ -837,10 +871,6 @@ class FreeStockDBSource(DataSource):
             ],
         )
 
-    def spot(self, symbols: list[str]) -> pd.DataFrame:
-        """Deprecated compatibility method; this source does not advertise SPOT."""
-        return self.eod_snapshot(symbols)
-
     def adjustment_factors(
         self,
         symbols: list[str],
@@ -886,13 +916,29 @@ class FreeStockDBSource(DataSource):
                     sdk_rows.append(previous[-1])
                 sdk_rows.extend(row for row in values if row["date"] >= begin)
             frame = pd.DataFrame(sdk_rows, columns=["symbol", "date", "adj_factor"])
-            frame.attrs["authoritative"] = True
+            frame.attrs["authoritative"] = False
             frame.attrs["source"] = "free-stockdb:cum-factor-events"
             if not frame.empty:
                 frame["date"] = pd.to_datetime(frame["date"], format="%Y%m%d", errors="coerce")
                 frame = frame.dropna(subset=["date", "adj_factor"]).sort_values(["symbol", "date"])
-                frame.attrs["authoritative"] = True
+                duplicate = frame.duplicated(["symbol", "date"], keep=False)
+                if duplicate.any():
+                    conflicts = frame.loc[duplicate].groupby(
+                        ["symbol", "date"]
+                    )["adj_factor"].nunique()
+                    if bool(conflicts.gt(1).any()):
+                        raise RuntimeError("free-stockdb 复权因子存在同证券同日冲突值")
+                    frame = frame.drop_duplicates(["symbol", "date"], keep="last")
+                frame.attrs["authoritative"] = False
                 frame.attrs["source"] = "free-stockdb:cum-factor-events"
+            observed = set(frame.get("symbol", pd.Series(dtype=str)).astype(str))
+            requested_symbols = set(requested.values())
+            frame.attrs.update({
+                "contract_status": "event_rows_only_no_per_symbol_no_event_proof",
+                "requested_symbols": sorted(requested_symbols),
+                "observed_symbols": sorted(observed),
+                "missing_symbols": sorted(requested_symbols - observed),
+            })
             return frame
 
         http_rows: list[dict[str, Any]] = []
@@ -908,8 +954,24 @@ class FreeStockDBSource(DataSource):
             frame["date"] = pd.to_datetime(frame["date"].astype(str).str[:8], errors="coerce")
             frame["adj_factor"] = pd.to_numeric(frame["adj_factor"], errors="coerce")
             frame = frame.dropna(subset=["date", "adj_factor"])
-        frame.attrs["authoritative"] = True
+            duplicate = frame.duplicated(["symbol", "date"], keep=False)
+            if duplicate.any():
+                conflicts = frame.loc[duplicate].groupby(
+                    ["symbol", "date"]
+                )["adj_factor"].nunique()
+                if bool(conflicts.gt(1).any()):
+                    raise RuntimeError("free-stockdb HTTP 复权因子存在同证券同日冲突值")
+                frame = frame.drop_duplicates(["symbol", "date"], keep="last")
+        frame.attrs["authoritative"] = False
         frame.attrs["source"] = "free-stockdb:http-cum-factor-events"
+        observed = set(frame.get("symbol", pd.Series(dtype=str)).astype(str))
+        requested_symbols = set(requested.values())
+        frame.attrs.update({
+            "contract_status": "event_rows_only_no_per_symbol_no_event_proof",
+            "requested_symbols": sorted(requested_symbols),
+            "observed_symbols": sorted(observed),
+            "missing_symbols": sorted(requested_symbols - observed),
+        })
         return frame
 
     @staticmethod
@@ -1028,12 +1090,43 @@ class FreeStockDBSource(DataSource):
                 "sdk_version": self.sdk_version(),
                 "artifact": self.artifact_identity().to_dict(),
             }
-        payload = self._request({"cmd": "ping"}, probe=True)
-        result = payload if isinstance(payload, dict) else {"status": "ok"}
-        result.setdefault("engine", "http-compatible")
-        result.setdefault("sdk_path", self.sdk_path)
-        result.setdefault("service_url", self.base_url.rstrip("/"))
-        return result
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        start = (now - timedelta(days=45)).strftime("%Y%m%d")
+        end = now.strftime("%Y%m%d")
+        payload = self._request(
+            {
+                "cmd": "vals",
+                "t": "日k",
+                "k1": "key:600519",
+                "k2": f"fwd:{start},{end}",
+            },
+            probe=True,
+        )
+        records = self._records(payload)
+        valid = []
+        for item in records:
+            raw_close = item.get("close")
+            if raw_close is None:
+                continue
+            try:
+                close = float(raw_close)
+            except (TypeError, ValueError):
+                continue
+            if str(item.get("date") or "")[:8].isdigit() and math.isfinite(close) and close > 0:
+                valid.append(item)
+        if not valid:
+            raise RuntimeError("本地 StockDB 可连接，但只读日线探针没有返回可验证记录")
+        latest = max(str(item["date"])[:8] for item in valid)
+        return {
+            "status": "ok",
+            "engine": "http-compatible",
+            "sdk_path": self.sdk_path,
+            "service_url": self.base_url.rstrip("/"),
+            "probe_contract": "stockdb-http-vals-daily-v1",
+            "sample_symbol": "600519.SH",
+            "sample_latest": latest,
+            "sample_rows": len(valid),
+        }
 
 
 class FreeStockDBOnlineSource(FreeStockDBSource):

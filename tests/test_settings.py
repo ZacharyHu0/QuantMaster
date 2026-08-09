@@ -228,13 +228,14 @@ def test_plaintext_fallback_requires_confirmation(tmp_path):
 
 def test_automation_settings_are_normalized_and_validated(tmp_path):
     data_root = tmp_path / "data"
-    pool_dir = data_root / "universe"
-    pool_dir.mkdir(parents=True)
-    (pool_dir / "core_pool.json").write_text('["600519.SH"]', encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump({"data": {"root": str(data_root)}}), encoding="utf-8")
     manager = ConfigManager(config_path, tmp_path / "backups", FakeCredentials())
+    set_config(manager.load())
+    from quantmaster.data.universe import save_universe
+
+    save_universe("core_pool", ["600519.SH"])
     raw = _update(manager).model_dump()
     raw["automation"].update({
         "timezone": "Asia/Shanghai",
@@ -261,6 +262,29 @@ def test_automation_settings_are_normalized_and_validated(tmp_path):
     raw["automation"]["primary_universe"] = "csi800"
     with pytest.raises(ValueError, match="只读"):
         SettingsUpdate.model_validate(raw)
+    set_config(None)
+
+
+def test_legacy_universe_is_explicit_sandbox_warning_in_settings(tmp_path):
+    data_root = tmp_path / "data"
+    universe_root = data_root / "universe"
+    universe_root.mkdir(parents=True)
+    (universe_root / "legacy_pool.json").write_text(
+        json.dumps(["600519.SH"]), encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"data": {"root": str(data_root)}}), encoding="utf-8",
+    )
+    manager = ConfigManager(config_path, tmp_path / "backups", FakeCredentials())
+    set_config(manager.load())
+    raw = _update(manager).model_dump()
+    raw["automation"]["primary_universe"] = "legacy_pool"
+
+    result = manager.validate(SettingsUpdate.model_validate(raw))
+
+    assert result["valid"] is True
+    assert any("sandbox" in item and "legacy_pool" in item for item in result["warnings"])
     set_config(None)
 
 

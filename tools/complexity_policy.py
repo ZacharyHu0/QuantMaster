@@ -8,7 +8,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = 121
+# v1.6.0 adds audited, contract-heavy ingestion and point-in-time orchestration.
+# Keep this as an exact ratchet: later work must lower the number when refactoring
+# and cannot add another complex entry point unnoticed.
+BASELINE = 169
 
 
 def main() -> int:

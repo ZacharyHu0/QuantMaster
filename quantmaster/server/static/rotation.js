@@ -44,6 +44,8 @@
   let etfOverview = {};
   let selectedEtfSnapshotId = '';
   let displayedEtfSnapshotId = '';
+  let selectedEtfTier = 'production';
+  let displayedEtfTier = 'production';
   let etfLastJob = null;
   let etfDrawerReturnFocus = null;
   let activeWindow = 5;
@@ -1022,10 +1024,12 @@
     const overview = data.overview || {}, products = data.products || {};
     updateMeta('etfs',meta); etfOverview = overview; etfSectorCatalog = overview.sectors || [];
     etfProductCatalog = products.items || []; etfProductPagination = products.pagination || etfProductPagination;
-    displayedEtfSnapshotId = meta.snapshot_id || displayedEtfSnapshotId;
+    displayedEtfSnapshotId = meta.snapshot_id || '';
+    displayedEtfTier = meta.tier || selectedEtfTier;
     const json = document.getElementById('rotation-etf-json'), csv = document.getElementById('rotation-etf-csv');
-    if (json) json.href = displayedEtfSnapshotId ? `/api/v1/rotation/etfs/export/${encodeURIComponent(displayedEtfSnapshotId)}?format=json` : '#';
-    if (csv) csv.href = displayedEtfSnapshotId ? `/api/v1/rotation/etfs/export/${encodeURIComponent(displayedEtfSnapshotId)}?format=csv` : '#';
+    const exportTier = displayedEtfTier === 'sandbox' ? '&tier=sandbox' : '';
+    if (json) json.href = displayedEtfSnapshotId ? `/api/v1/rotation/etfs/export/${encodeURIComponent(displayedEtfSnapshotId)}?format=json${exportTier}` : '#';
+    if (csv) csv.href = displayedEtfSnapshotId ? `/api/v1/rotation/etfs/export/${encodeURIComponent(displayedEtfSnapshotId)}?format=csv${exportTier}` : '#';
     if (!etfSectorCatalog.length && !etfProductCatalog.length) { out.innerHTML = emptyMarkup(meta,'尚未生成 ETF V3 研究快照。点击“更新研究”建立板块雷达。','etf'); return; }
     const assets = [['equity','境内权益'],['overseas_equity','海外权益'],['bond','债券'],['commodity','商品'],['money','货币']];
     const summaries = overview.summaries || [];
@@ -1042,9 +1046,10 @@
     const categories = products.categories || [];
     const map = overview.map || {}, mapItems = (map.sector_ids || []).map(id => sectorLookup.get(id)).filter(Boolean);
     const stale = meta.staleness?.stale ? `<aside class="rotation-callout" data-tone="warning"><strong>刷新失败，继续展示旧研究</strong><span>${esc(meta.staleness.reason || '最新证据未通过')}</span></aside>` : '';
+    const sandbox = meta.formal_eligible === false ? '<aside class="rotation-callout" data-tone="warning"><strong>本地降级预览</strong><span>母集仅包含本地已观测 ETF，适合探索分析，不会发布或覆盖正式快照。</span></aside>' : '';
     const refreshWarnings = overview.capabilities?.refresh_warnings || [];
     const warningMarkup = refreshWarnings.length ? `<aside class="rotation-callout" data-tone="warning"><strong>部分证据已降级</strong><ul>${refreshWarnings.map(value => `<li>${esc(value)}</li>`).join('')}</ul></aside>` : '';
-    out.innerHTML = `${stale}${warningMarkup}${etfFreshnessMarkup(overview.freshness)}
+    out.innerHTML = `${stale}${sandbox}${warningMarkup}${etfFreshnessMarkup(overview.freshness)}
       <div class="etf-asset-tabs" role="tablist" aria-label="ETF 资产类别">${assets.map(([value,label]) => `<button type="button" role="tab" data-etf-asset="${value}" aria-selected="${String(etfAsset===value)}" tabindex="${etfAsset===value?0:-1}">${label}</button>`).join('')}</div>
       <div class="sr-only" aria-live="polite">当前为${esc(assets.find(([value])=>value===etfAsset)?.[1] || '')}，${etfSectorCatalog.length} 个板块，位置口径为${esc(map.label || '待补')}</div>
       <section class="etf-summary-grid" aria-label="本期研究结论">${summaries.map(item => `<button type="button" class="etf-summary" data-kind="${esc(item.kind)}" data-evaluation="${esc(item.evaluation_status || 'unavailable')}" ${item.sector_id ? `data-etf-sector="${esc(item.sector_id)}"` : 'disabled'}><span>${esc(item.title)} · ${{confirmed:'已确认',candidate:'候选',unavailable:'暂不可评估'}[item.evaluation_status] || '待核查'}</span><strong>${esc(item.sector_name || (item.evaluation_status === 'unavailable' ? '证据待补' : '本期无'))}</strong><small>${esc(item.text)}</small></button>`).join('')}</section>
@@ -1062,7 +1067,7 @@
     select.innerHTML = '<option value="">最新正式快照</option>' + (payload.items || []).map(item =>
       `<option value="${esc(item.snapshot_id)}">${esc(item.as_of_date)} · ${esc(item.snapshot_id.slice(-8))}</option>`
     ).join('');
-    select.value = selectedEtfSnapshotId;
+    select.value = selectedEtfTier === 'production' ? selectedEtfSnapshotId : '';
   }
 
   async function openEtfDetail(symbol) {
@@ -1071,8 +1076,10 @@
     target.hidden = false; target.setAttribute('aria-hidden','false'); target.setAttribute('aria-modal','true');
     target.innerHTML = '<div class="rotation-skeleton"><span></span><span></span></div>';
     try {
-      const suffix = displayedEtfSnapshotId ? `?snapshot_id=${encodeURIComponent(displayedEtfSnapshotId)}` : '';
-      const payload = await api(`/api/v1/rotation/etfs/${encodeURIComponent(symbol)}${suffix}`);
+      const params = new URLSearchParams();
+      if (displayedEtfSnapshotId) params.set('snapshot_id',displayedEtfSnapshotId);
+      if (displayedEtfTier === 'sandbox') params.set('tier','sandbox');
+      const payload = await api(`/api/v1/rotation/etfs/${encodeURIComponent(symbol)}?${params}`);
       const item=payload.data||{}, m=item.metrics||{}, funds=item.funds||{}, history=item.history||[], peers=item.peer_products||[];
       const eligibleCandidates = Object.values(item.candidates||{}).filter(value=>value.eligible);
       target.dataset.etfIntradaySymbol = item.symbol || symbol;
@@ -1103,8 +1110,10 @@
     const status = drawer.querySelector('[data-etf-intraday-status]');
     if (status) status.textContent = '正在读取单只 ETF 分钟缓存…';
     try {
-      const suffix = displayedEtfSnapshotId ? `?snapshot_id=${encodeURIComponent(displayedEtfSnapshotId)}` : '';
-      const payload = await api(`/api/v1/rotation/etfs/${encodeURIComponent(symbol)}/intraday${suffix}`);
+      const params = new URLSearchParams();
+      if (displayedEtfSnapshotId) params.set('snapshot_id',displayedEtfSnapshotId);
+      if (displayedEtfTier === 'sandbox') params.set('tier','sandbox');
+      const payload = await api(`/api/v1/rotation/etfs/${encodeURIComponent(symbol)}/intraday?${params}`);
       const data = payload.data || {}, series = data.series || [];
       drawer.dataset.etfIntradayLoaded = 'true';
       if (status) status.textContent = series.length
@@ -1128,6 +1137,7 @@
     try {
       const params = new URLSearchParams({page:String(memberPage),page_size:'25'});
       if (displayedEtfSnapshotId) params.set('snapshot_id',displayedEtfSnapshotId);
+      if (displayedEtfTier === 'sandbox') params.set('tier','sandbox');
       if (indexKey) params.set('index_key',indexKey);
       const payload = await api(`/api/v1/rotation/etfs/sectors/${encodeURIComponent(sectorId)}?${params}`);
       const item=payload.data||{}, m=item.metrics||{}, funds=item.funds||{}, members=item.members||[], groups=item.index_groups||[], pagination=item.member_pagination||{};
@@ -1152,7 +1162,8 @@
     if (!target || !displayedEtfSnapshotId) return;
     target.hidden = false; target.innerHTML = '<div class="rotation-skeleton"><span></span></div>';
     try {
-      const payload = await api(`/api/v1/rotation/etfs/snapshots/${encodeURIComponent(displayedEtfSnapshotId)}/coverage`);
+      const suffix = displayedEtfTier === 'sandbox' ? '?tier=sandbox' : '';
+      const payload = await api(`/api/v1/rotation/etfs/snapshots/${encodeURIComponent(displayedEtfSnapshotId)}/coverage${suffix}`);
       const data = payload.data || {}, counts = data.share_semantic_counts || {};
       const currentMap=data.map_position?.[etfAsset]||{};
       target.innerHTML = `<div class="rotation-detail-head"><div><h3>ETF 证据覆盖</h3><p>${esc(payload.meta?.as_of || '')} · ${data.sector_count || 0} 个板块 · ${data.total_symbols || 0} 只产品</p></div><button class="rotation-link" type="button" data-close-etf-panel>关闭诊断</button></div><div class="rotation-detail-signals"><div><span>可核查复权</span><strong>${data.coverage?.verified_adjustment_products ?? 0}</strong><small>stockdb 优先，官方接口补缺</small></div><div><span>当前地图口径</span><strong>${esc(currentMap.label||'待补')}</strong><small>板块位置覆盖 ${percent(Number(currentMap.coverage||0)*100,0)}</small></div><div><span>份额已确认</span><strong>${(counts.confirmed_change || 0) + (counts.confirmed_zero || 0)}</strong><small>含 ${counts.confirmed_zero || 0} 只确认零变化</small></div><div><span>滞后 / 缺失</span><strong>${(counts.stale || 0)} / ${(counts.missing || 0)}</strong><small>分钟线按单只 ETF 打开时读取</small></div></div>${etfFreshnessMarkup(data.freshness)}`;
@@ -1248,6 +1259,7 @@
         if (etfCategory) productParams.set('category',etfCategory);
         if (etfState) productParams.set('state',etfState);
         if (selectedEtfSnapshotId) { overviewParams.set('snapshot_id',selectedEtfSnapshotId); productParams.set('snapshot_id',selectedEtfSnapshotId); }
+        if (selectedEtfTier === 'sandbox') { overviewParams.set('tier','sandbox'); productParams.set('tier','sandbox'); }
         const [overview,products] = await Promise.all([
           fetchView(`etf-overview:${overviewParams}`,`/api/v1/rotation/etfs/overview?${overviewParams}`,force),
           fetchView(`etf-products:${productParams}`,`/api/v1/rotation/etfs?${productParams}`,force),
@@ -1413,8 +1425,9 @@
     openGroupDetail(kind,code);
   }
 
-  async function scanEtfResearch(button, existingJob = null) {
+  async function scanEtfResearch(button, existingJob = null, tier = 'production') {
     const original = button.textContent;
+    const selectedTier = existingJob?.tier || tier;
     button.disabled = true;
     button.textContent = '正在提交…';
     const jobBox = document.getElementById('rotation-etf-job');
@@ -1423,7 +1436,7 @@
     if (jobBox) jobBox.hidden = false;
     if (retry) retry.hidden = true;
     try {
-      let job = existingJob || await api('/api/v1/rotation/etfs/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      let job = existingJob || await api('/api/v1/rotation/etfs/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tier:selectedTier})});
       etfLastJob = job;
       if (cancel) cancel.hidden = !job.can_cancel;
       while (['queued','running','cancelling'].includes(job.status)) {
@@ -1435,10 +1448,11 @@
         if (cancel) cancel.hidden = !job.can_cancel;
       }
       if (!['completed','completed_with_warnings'].includes(job.status)) throw new Error(job.error || job.message || 'ETF 扫描失败');
-      selectedEtfSnapshotId = '';
+      selectedEtfTier = selectedTier;
+      selectedEtfSnapshotId = selectedTier === 'sandbox' ? (job.result?.preview_id || '') : '';
       Array.from(cache.keys()).filter(key => key.startsWith('etf-')).forEach(key => cache.delete(key));
       button.textContent = '扫描完成';
-      if (jobBox) jobBox.querySelector('[data-etf-job-status]').textContent = job.message || 'ETF 研究快照已发布';
+      if (jobBox) jobBox.querySelector('[data-etf-job-status]').textContent = job.message || (selectedTier === 'sandbox' ? 'ETF 本地降级预览已生成' : 'ETF 研究快照已发布');
       await loadCurrent(true);
       if (jobBox) jobBox.hidden = true;
     } catch (error) {
@@ -1468,7 +1482,7 @@
     try {
       etfLastJob = await api(`/api/v1/rotation/etfs/jobs/${encodeURIComponent(etfLastJob.id)}/retry`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
       button.hidden = true;
-      await scanEtfResearch(document.querySelector('[data-etf-research-scan]'),etfLastJob);
+      await scanEtfResearch(document.querySelector('[data-etf-research-scan]'),etfLastJob,etfLastJob?.tier || 'production');
     } catch (error) { reportLocalError('ETF 研究','恢复任务失败',error); }
     finally { button.disabled = false; }
   }
@@ -1542,6 +1556,8 @@
     if (refreshButton) { refresh(refreshButton.dataset.rotationRefresh,refreshButton); return; }
     const etfScan = event.target.closest('[data-etf-research-scan]');
     if (etfScan) { scanEtfResearch(etfScan); return; }
+    const etfPreview = event.target.closest('[data-etf-research-preview]');
+    if (etfPreview) { scanEtfResearch(etfPreview,null,'sandbox'); return; }
     const etfCancel = event.target.closest('[data-etf-research-cancel]');
     if (etfCancel) { cancelEtfResearch(etfCancel); return; }
     const etfRetry = event.target.closest('[data-etf-research-retry]');
@@ -1684,7 +1700,7 @@
       drawer.dataset.etfSectorIndex=event.target.value;
       openEtfSectorDetail(drawer.dataset.etfSectorId,1,event.target.value);
     } else if (event.target.matches('#rotation-etf-history')) {
-      selectedEtfSnapshotId = event.target.value; etfProductPage = 1; etfSectorPage = 1;
+      selectedEtfTier = 'production'; selectedEtfSnapshotId = event.target.value; etfProductPage = 1; etfSectorPage = 1;
       Array.from(cache.keys()).filter(key => key.startsWith('etf-')).forEach(key => cache.delete(key));
       loadCurrent();
     }

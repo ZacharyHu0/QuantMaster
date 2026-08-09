@@ -3,6 +3,7 @@
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.data.storage import BarStore
 from quantmaster.portfolio import AssetListStore, Ledger, TradeRecord
 from quantmaster.server.app import app
@@ -59,7 +60,24 @@ def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
     ))
     dates = pd.bdate_range("2026-07-20", periods=3)
     bars = pd.DataFrame({"close": [1500.0, 1515.0, 1530.0]}, index=dates)
-    monkeypatch.setattr("quantmaster.data.load_history", lambda *args, **kwargs: bars)
+    market_envelope = BarDataEnvelope(
+        data=bars,
+        quality=BarDataQuality(
+            status="verified",
+            requested_start="2026-07-01",
+            requested_end=str(dates[-1].date()),
+            observed_start=str(dates[0].date()),
+            observed_end=str(dates[-1].date()),
+            coverage_ratio=1.0,
+            sources=("fixture",),
+            timezone="Asia/Shanghai",
+            adjustment="qfq",
+        ),
+        provenance=({"source": "fixture"},),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.load_history", lambda *args, **kwargs: market_envelope,
+    )
     monkeypatch.setattr(app_module, "_market_groups", dict)
 
     result = app_module._market_overview_data("2026-07-01")

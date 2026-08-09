@@ -261,6 +261,7 @@
       <dl class="rotation-asof" data-rotation-asof="etfs"><dt>研究日</dt><dd>等待盘后研究</dd><dt>模型</dt><dd>板块雷达 V3</dd></dl>
       <div class="rotation-etf-actions">
         <button class="rotation-refresh rotation-primary-action" type="button" data-etf-research-scan>更新研究</button>
+        <button class="rotation-refresh" type="button" data-etf-research-preview>本地降级预览</button>
         <button class="rotation-refresh" type="button" data-etf-research-cancel hidden>安全取消</button>
         <button class="rotation-refresh" type="button" data-etf-research-retry hidden>恢复任务</button>
         <details class="rotation-etf-more">
@@ -1302,9 +1303,6 @@
           <div class="field-grid settings-subsection">
             <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
             <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源。</small></label>
-            <label class="toggle-field"><span><strong>启用在线补缺</strong><small>仅在本地缺数时低并发访问 free-stockdb-online。</small></span><input name="data.free_stockdb_online_enabled" type="checkbox" role="switch"></label>
-            <label>在线补缺超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
-            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required><small>公开体验节点，不用于全市场高频批量任务。</small></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button></div><small id="tushare-secret-state"></small></label>
             <label>AKShare 重试<input name="data.akshare_retries" type="number" min="1" max="20" required></label>
             <label>退避初始秒数<input name="data.akshare_retry_backoff" type="number" min="0" max="60" step="0.1" required></label>

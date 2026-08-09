@@ -11,6 +11,7 @@ venv/
 /.pytest-*/
 .pytest_tmp*/
 /.pytest-tmp*/
+/.pytest-*/
 /.test-runtime/
 /.test-tmp/
 /.uv-cache/

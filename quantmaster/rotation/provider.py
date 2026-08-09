@@ -14,7 +14,6 @@ import math
 import re
 import time
 from collections.abc import Callable
-from datetime import date
 from typing import Any
 
 import httpx
@@ -22,12 +21,13 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
-from quantmaster.data.instruments import InstrumentStore
+from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.rotation.store import RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
+from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
 logger = logging.getLogger(__name__)
 
@@ -182,14 +182,91 @@ class RotationProvider:
         except Exception as exc:  # Tushare SDK raises a plain Exception for permissions
             raise RotationProviderCallError(f"Tushare {endpoint} 调用失败：{_compact_error(exc)}") from exc
 
+    def _trusted_etf_master_evidence(
+        self,
+        end: pd.Timestamp,
+    ) -> dict[str, Any]:
+        """Load a verified immutable catalog; the mutable master is never a denominator."""
+
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_instrument_catalog_snapshot,
+        )
+
+        target = pd.Timestamp(end).normalize()
+        cutoff = pd.Timestamp(daily_signal_cutoff(target.date()))
+        try:
+            snapshot, expected, evidence = load_instrument_catalog_snapshot(
+                as_of=target.date().isoformat(),
+                market="CN",
+                asset_type="etf",
+            )
+        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError) as exc:
+            return {
+                "status": "unavailable",
+                "source": "tushare:catalog",
+                "acquired_at": market_now().isoformat(),
+                "cutoff_at": cutoff.isoformat(),
+                "freshness": "unverified",
+                "master_record_count": 0,
+                "master_batch_record_count": 0,
+                "expected_symbols": 0,
+                "observed_symbols": 0,
+                "records": (),
+                "catalog_evidence": {},
+                "reasons": [f"不可变 Tushare 证券目录证据不可用：{_compact_error(exc)}"],
+            }
+
+        records = {
+            str(row.get("symbol") or "").upper(): dict(row)
+            for row in snapshot.records
+            if str(row.get("symbol") or "").upper() in expected
+        }
+        reasons: list[str] = []
+        if set(records) != expected:
+            reasons.append(
+                "不可变证券目录 records 与其 PIT expected 集合不一致"
+            )
+        for symbol, row in records.items():
+            listed = pd.to_datetime(row.get("list_date"), errors="coerce")
+            delisted = pd.to_datetime(row.get("delist_date"), errors="coerce")
+            status = str(row.get("status") or "").strip().casefold()
+            if str(row.get("exchange") or "").upper() not in {"SH", "SZ"}:
+                reasons.append(f"{symbol} 不是沪深交易所 ETF")
+            if str(row.get("asset_type") or "").casefold() != "etf":
+                reasons.append(f"{symbol} 目录资产类型不是 ETF")
+            if pd.isna(listed) or pd.Timestamp(listed).normalize() > target:
+                reasons.append(f"{symbol} 缺少目标日有效 list_date")
+            if not status:
+                reasons.append(f"{symbol} 缺少目录生命周期状态")
+            if status in {"d", "delisted", "terminated"} and pd.isna(delisted):
+                reasons.append(f"{symbol} 已退市但缺少 delist_date")
+        acquired = pd.Timestamp(snapshot.acquired_at)
+        catalog_evidence = {
+            **evidence,
+            "record_count": int(snapshot.manifest["record_count"]),
+        }
+        return {
+            "status": "verified_complete" if not reasons else "unavailable",
+            "source": snapshot.source,
+            "acquired_at": acquired.isoformat(),
+            "cutoff_at": cutoff.isoformat(),
+            "freshness": "fresh" if not reasons else "unverified",
+            "master_record_count": int(snapshot.manifest["record_count"]),
+            "master_batch_record_count": int(snapshot.manifest["record_count"]),
+            "expected_symbols": len(expected),
+            "observed_symbols": len(records),
+            "records": tuple(records[symbol] for symbol in sorted(records)),
+            "catalog_evidence": catalog_evidence,
+            "reasons": reasons,
+        }
+
     def _local_etf_metadata(self, previous: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
-        """Build the complete ETF directory from local security master before remote enhancement."""
+        """Freeze a complete ETF directory observation before remote field enhancement."""
+        from quantmaster.rotation.etf_research import etf_directory_master_hash
         from quantmaster.rotation.etf_v2 import classify_etf_profile
 
-        if self.instrument_store is None:
-            return self.store.etf_metadata()
-
-        existing = self.store.etf_metadata()
+        existing = self.store.etf_metadata_history()
         existing_rows = (
             {
                 str(row.get("symbol") or "").upper(): row
@@ -222,17 +299,50 @@ class RotationProvider:
                     return value
             return ""
 
+        target = pd.Timestamp(end).normalize()
+        selected_instruments: list[Any] = []
+        master_evidence = self._trusted_etf_master_evidence(target)
+        if master_evidence["status"] == "verified_complete":
+            acquired_epoch = pd.Timestamp(master_evidence["acquired_at"]).timestamp()
+            selected_instruments = [
+                Instrument(
+                    symbol=str(row.get("symbol") or "").upper(),
+                    code=str(row.get("symbol") or "").split(".", 1)[0],
+                    name=str(row.get("name") or ""),
+                    market="CN",
+                    exchange=str(row.get("exchange") or "").upper(),
+                    asset_type="etf",
+                    provider_symbol=str(row.get("provider_symbol") or row.get("symbol") or ""),
+                    status=str(row.get("status") or ""),
+                    source=master_evidence["source"],
+                    list_date=str(row.get("list_date") or ""),
+                    delist_date=str(row.get("delist_date") or ""),
+                    observed_at=acquired_epoch,
+                )
+                for row in master_evidence["records"]
+            ]
+        elif self.instrument_store is not None:
+            for instrument in self.instrument_store.list(market="CN"):
+                name = clean(instrument.name)
+                if instrument.exchange not in {"SH", "SZ"}:
+                    continue
+                if "LOF" in name.upper() or "联接" in name:
+                    continue
+                if instrument.asset_type != "etf" and not (
+                    instrument.asset_type == "fund"
+                    and ("ETF" in name.upper() or "交易型" in name)
+                ):
+                    continue
+                listed = pd.to_datetime(instrument.list_date, errors="coerce")
+                delisted = pd.to_datetime(instrument.delist_date, errors="coerce")
+                if pd.notna(listed) and pd.Timestamp(listed).normalize() > target:
+                    continue
+                if pd.notna(delisted) and pd.Timestamp(delisted).normalize() < target:
+                    continue
+                selected_instruments.append(instrument)
         rows: list[dict[str, Any]] = []
-        for instrument in self.instrument_store.list(market="CN"):
+        for instrument in selected_instruments:
             name = clean(instrument.name)
-            if instrument.exchange not in {"SH", "SZ"}:
-                continue
-            if instrument.status.casefold() not in {"listed", "active", "l"}:
-                continue
-            if instrument.asset_type != "etf" and not (
-                instrument.asset_type == "fund" and ("ETF" in name.upper() or "交易型" in name)
-            ):
-                continue
             rich = existing_rows.get(instrument.symbol, {})
             share = share_rows.get(instrument.symbol, {})
             metadata_source = clean(rich.get("metadata_source"), "free-stockdb:security-master")
@@ -276,7 +386,11 @@ class RotationProvider:
                     "custod_name": clean(rich.get("custod_name"), rich.get("custodian")),
                     "mgt_fee": rich.get("mgt_fee", rich.get("management_fee")),
                     "etf_type": clean(rich.get("etf_type")),
-                    "list_date": clean(rich.get("list_date"), instrument.list_date),
+                    "exchange": instrument.exchange,
+                    "asset_type": instrument.asset_type,
+                    "status": instrument.status,
+                    "list_date": clean(instrument.list_date, rich.get("list_date")),
+                    "delist_date": clean(instrument.delist_date),
                     "category": taxonomy["category"],
                     "asset_class": taxonomy["asset_class"],
                     "sector_id": taxonomy["sector_id"],
@@ -286,11 +400,73 @@ class RotationProvider:
                     "classification_confidence": taxonomy["classification_confidence"],
                     "metadata_source": metadata_source,
                     "updated_at": clean(rich.get("updated_at"), end.date().isoformat()),
+                    "directory_member_source": str(instrument.source),
+                    "directory_member_observed_at": pd.Timestamp(
+                        float(instrument.observed_at or 0), unit="s", tz="UTC"
+                    ).isoformat()
+                    if float(instrument.observed_at or 0) > 0
+                    else master_evidence["acquired_at"],
                 }
             )
         frame = pd.DataFrame(rows)
         if not frame.empty:
             frame = frame.sort_values("symbol").reset_index(drop=True)
+            effective_date = end.date().isoformat()
+            observed = pd.Timestamp(market_now())
+            acquired = pd.Timestamp(master_evidence["acquired_at"])
+            if acquired.tzinfo is None:
+                acquired = acquired.tz_localize("Asia/Shanghai")
+            if observed.tzinfo is None:
+                observed = observed.tz_localize("Asia/Shanghai")
+            if observed.tz_convert("UTC") < acquired.tz_convert("UTC"):
+                observed = acquired.tz_convert("Asia/Shanghai")
+            observed_at = observed.isoformat()
+            frame["effective_date"] = effective_date
+            frame["observed_at"] = observed_at
+            frame["directory_source"] = master_evidence["source"]
+            frame["directory_acquired_at"] = master_evidence["acquired_at"]
+            frame["directory_cutoff_at"] = master_evidence["cutoff_at"]
+            frame["directory_freshness"] = master_evidence["freshness"]
+            frame["directory_master_record_count"] = master_evidence[
+                "master_record_count"
+            ]
+            frame["directory_master_batch_record_count"] = master_evidence[
+                "master_batch_record_count"
+            ]
+            frame["directory_expected_symbols"] = master_evidence["expected_symbols"]
+            frame["directory_observed_symbols"] = master_evidence["observed_symbols"]
+            frame["directory_quality_reason"] = "；".join(master_evidence["reasons"])
+            catalog = master_evidence["catalog_evidence"]
+            frame["directory_catalog_snapshot_id"] = catalog.get("snapshot_id", "")
+            frame["directory_catalog_records_sha256"] = catalog.get("records_sha256", "")
+            frame["directory_catalog_file_sha256"] = catalog.get("file_sha256", "")
+            frame["directory_catalog_file_size"] = str(catalog.get("file_size", 0))
+            frame["directory_catalog_file_mtime_ns"] = str(
+                catalog.get("file_mtime_ns", 0)
+            )
+            frame["directory_catalog_relative_path"] = catalog.get("relative_path", "")
+            frame["directory_catalog_as_of"] = catalog.get("as_of", effective_date)
+            frame["directory_catalog_expected_count"] = catalog.get("expected_count", 0)
+            frame["directory_master_snapshot_sha256"] = catalog.get("snapshot_id", "")
+            complete = master_evidence["status"] == "verified_complete"
+            if complete:
+                attestation_hash = etf_directory_master_hash(frame)
+                frame["directory_snapshot_id"] = "etf_directory_" + attestation_hash[:24]
+            else:
+                attestation_hash = hashlib.sha256(
+                    repr(
+                        (
+                            effective_date,
+                            tuple(frame["symbol"].astype(str)),
+                            tuple(master_evidence["reasons"]),
+                        )
+                    ).encode("utf-8")
+                ).hexdigest()
+                frame["directory_snapshot_id"] = (
+                    "etf_directory_unverified_" + attestation_hash[:24]
+                )
+            frame["directory_attestation_sha256"] = attestation_hash
+            frame["directory_complete"] = complete
             self.store.save_etf_metadata(frame)
         return frame
 
@@ -605,7 +781,7 @@ class RotationProvider:
         previous_items: list[dict[str, Any]],
     ) -> dict[str, Any]:  # pragma: no cover - 网络
         """Use the permission-gated Tushare DC catalog as the second provider."""
-        end = pd.Timestamp(date.today())
+        end = pd.Timestamp(market_date())
         start = end - pd.Timedelta(days=14)
         sessions = list(self.source.trade_calendar(str(start.date()), str(end.date())))
         if not sessions:
@@ -1028,7 +1204,8 @@ class RotationProvider:
 
         previous = self.store.etf_observations()
         issues: list[str] = []
-        end = pd.Timestamp(date.today())
+        acquired_at = market_now().isoformat()
+        end = pd.Timestamp(market_date())
         history_start = end - pd.DateOffset(years=3, days=20)
         recent_start = end - pd.Timedelta(days=45 if previous.empty else 20)
         local_basic = self._local_etf_metadata(previous, end)
@@ -1222,6 +1399,59 @@ class RotationProvider:
                 .drop(columns="_metadata_priority")
                 .reset_index(drop=True)
             )
+            catalog = local_basic.set_index("symbol")
+            for column in (
+                "exchange",
+                "asset_type",
+                "status",
+                "list_date",
+                "delist_date",
+                "effective_date",
+                "directory_member_source",
+                "directory_member_observed_at",
+                "directory_source",
+                "directory_acquired_at",
+                "directory_cutoff_at",
+                "directory_freshness",
+                "directory_master_record_count",
+                "directory_master_batch_record_count",
+                "directory_master_snapshot_sha256",
+                "directory_catalog_snapshot_id",
+                "directory_catalog_records_sha256",
+                "directory_catalog_file_sha256",
+                "directory_catalog_file_size",
+                "directory_catalog_file_mtime_ns",
+                "directory_catalog_relative_path",
+                "directory_catalog_as_of",
+                "directory_catalog_expected_count",
+                "directory_attestation_sha256",
+                "directory_snapshot_id",
+                "directory_complete",
+                "directory_expected_symbols",
+                "directory_observed_symbols",
+                "directory_quality_reason",
+            ):
+                fallback = basic["symbol"].map(catalog[column])
+                if column not in basic:
+                    basic[column] = fallback
+                    continue
+                missing = basic[column].isna()
+                if basic[column].dtype == object:
+                    missing |= basic[column].astype(str).str.strip().isin({"", "nan", "None"})
+                basic.loc[missing, column] = fallback.loc[missing]
+        metadata_observed = pd.Timestamp(market_now())
+        if metadata_observed.tzinfo is None:
+            metadata_observed = metadata_observed.tz_localize("Asia/Shanghai")
+        if not local_basic.empty and "observed_at" in local_basic:
+            local_observed = pd.to_datetime(
+                local_basic["observed_at"], errors="coerce", utc=True
+            ).max()
+            candidate_utc = metadata_observed.tz_convert("UTC")
+            if pd.notna(local_observed) and candidate_utc <= local_observed:
+                metadata_observed = (
+                    local_observed + pd.Timedelta(microseconds=1)
+                ).tz_convert("Asia/Shanghai")
+        basic["observed_at"] = metadata_observed.isoformat()
         self.store.save_etf_metadata(basic)
         names = basic.set_index("symbol")["name"].to_dict()
         categories = basic.set_index("symbol")["category"].to_dict()
@@ -1431,6 +1661,7 @@ class RotationProvider:
             else:
                 merged["nav"] = pd.NA
             merged["trade_date"] = trade_date.normalize()
+            merged["acquired_at"] = acquired_at
             merged["name"] = merged["symbol"].map(names).fillna(merged["symbol"])
             merged["category"] = merged["symbol"].map(categories)
             merged["benchmark"] = merged["symbol"].map(benchmarks).fillna("")
@@ -1447,6 +1678,7 @@ class RotationProvider:
                         "close",
                         "total_size",
                         "share_source",
+                        "acquired_at",
                     ]
                 ]
             )
@@ -1463,6 +1695,10 @@ class RotationProvider:
             previous["total_size"] = pd.NA
         if not previous.empty and "share_source" not in previous:
             previous["share_source"] = "tushare:fund_share"
+        if not previous.empty and "acquired_at" not in previous:
+            # Clean replacement: legacy observations stay visible for current
+            # diagnostics but cannot enter historical replay without evidence.
+            previous["acquired_at"] = pd.NaT
         result = pd.concat(
             [*([previous] if not previous.empty else []), *rows],
             ignore_index=True,
@@ -1479,13 +1715,23 @@ class RotationProvider:
             )
         ]
         result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce")
+        evidenced_groups = result.groupby(
+            ["trade_date", "symbol"], dropna=False
+        )["acquired_at"].transform(lambda values: values.notna().any())
+        # Once a dated observation has acquisition evidence, discard an
+        # otherwise identical legacy projection whose acquisition time is
+        # unknowable.  Real observations from distinct acquisition instants
+        # remain append-only for point-in-time replay.
+        result = result.loc[
+            ~(result["acquired_at"].isna() & evidenced_groups)
+        ]
         result = (
             result.dropna(subset=["trade_date", "symbol"])
             .drop_duplicates(
-                ["trade_date", "symbol"],
+                ["trade_date", "symbol", "acquired_at"],
                 keep="last",
             )
-            .sort_values(["symbol", "trade_date"])
+            .sort_values(["symbol", "trade_date", "acquired_at"])
         )
         self.store.save_etf_observations(result)
         available_dates = result["trade_date"].dropna()

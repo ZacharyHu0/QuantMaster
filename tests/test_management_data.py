@@ -7,9 +7,11 @@ import sqlite3
 import time
 from typing import ClassVar
 
+import pandas as pd
 import pytest
 
 from quantmaster.config import Config, set_config
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.data.migration import DataMigrationManager, MigrationError
 from quantmaster.data.universe import (
     delete_universe,
@@ -211,6 +213,23 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
 
     def fake_load(symbol, start, end, **kwargs):
         calls.append((symbol, start, end, kwargs))
+        return BarDataEnvelope(
+            data=pd.DataFrame({"close": [1.0]}, index=pd.to_datetime([end])),
+            quality=BarDataQuality(
+                status="verified",
+                requested_start=start,
+                requested_end=end,
+                observed_start=end,
+                observed_end=end,
+                coverage_ratio=1.0,
+                sources=("fixture",),
+                timezone="Asia/Shanghai",
+                adjustment="qfq",
+                requested_symbols=(symbol,),
+                observed_symbols=(symbol,),
+            ),
+            provenance=({"source": "fixture"},),
+        )
 
     monkeypatch.setattr("quantmaster.data.maintenance.load_history", fake_load)
     job = manager.create("market")

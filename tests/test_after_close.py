@@ -181,8 +181,72 @@ def test_gate_failure_keeps_previous_snapshot_and_marks_it_stale(service) -> Non
     assert "覆盖" in latest["staleness"]["reason"]
 
 
+def test_gate_rejects_first_snapshot_with_stable_twenty_percent_symbol_gap(service) -> None:
+    with pytest.raises(DataGateRejected, match="没有停牌/退市证据"):
+        service._gate(service.source.frame, service.source.board_hierarchy(), expected_count=5)
+
+
+def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
+    service, isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data import instrument_snapshots
+
+    isolated_config.data.tushare_token = "test-token"
+    symbols = [*sorted(service.source.frame["symbol"].unique()), "000002.SZ"]
+    monkeypatch.setattr(
+        instrument_snapshots,
+        "load_or_fetch_suspension_snapshot",
+        lambda _source, _date: {
+            "source": "tushare:suspend_d",
+            "contract": "tushare-suspend_d-trade-date-v1",
+            "symbols": ["000002.SZ"],
+            "content_hash": "suspension-proof",
+        },
+    )
+
+    _as_of, coverage = service._gate(
+        service.source.frame,
+        service.source.board_hierarchy(),
+        expected_count=len(symbols),
+        expected_symbols=symbols,
+    )
+
+    assert coverage["status"] == "complete"
+    assert coverage["catalog_symbols"] == 5
+    assert coverage["expected_symbols"] == 4
+    assert coverage["excused_suspended_symbols"] == ["000002.SZ"]
+    assert coverage["suspension_evidence"]["content_hash"] == "suspension-proof"
+
+
+def test_gate_rejects_nonfinite_and_impossible_ohlcv(service) -> None:
+    frame = service.source.frame.copy()
+    latest = pd.to_datetime(frame["date"]).eq(pd.to_datetime(frame["date"]).max())
+    frame.loc[latest, "close"] = np.inf
+    frame.loc[latest, "volume"] = -1
+
+    with pytest.raises(DataGateRejected) as caught:
+        service._gate(frame, service.source.board_hierarchy(), expected_count=4)
+
+    assert caught.value.coverage["required_ohlcv_ratio"] == 0.0
+    assert caught.value.coverage["invalid_ohlcv"]["nonfinite_rows"] == 4
+
+
 def test_historical_force_rejects_current_board_taxonomy(service) -> None:
     with pytest.raises(DataGateRejected, match="当前分类"):
+        service.scan(as_of="2026-08-05", force=True)
+
+
+def test_historical_force_rejects_future_dated_board_taxonomy(service) -> None:
+    original = service.source.board_hierarchy
+
+    def future_boards():
+        return [
+            {**item, "effective_date": "2026-08-06"}
+            for item in original()
+        ]
+
+    service.source.board_hierarchy = future_boards
+    with pytest.raises(DataGateRejected, match="晚于历史目标日"):
         service.scan(as_of="2026-08-05", force=True)
 
 

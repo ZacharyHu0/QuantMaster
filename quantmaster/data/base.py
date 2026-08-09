@@ -18,12 +18,108 @@ import enum
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any, Literal, TypeVar
 
 import pandas as pd
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
 _SYMBOL_PATTERN = re.compile(r"[0-9A-Za-z._^=-]{1,48}")
+TMarketData = TypeVar("TMarketData")
+
+
+class MarketDataUnavailable(RuntimeError):
+    """Raised when a result has data bytes but lacks usable evidence."""
+
+    def __init__(
+        self,
+        quality: BarDataQuality,
+        provenance: tuple[dict[str, Any], ...] = (),
+    ):
+        details = "；".join(quality.issues) or "没有可验证的行情证据"
+        super().__init__(f"行情证据不可用：{details}")
+        self.quality = quality
+        self.provenance = provenance
+
+
+@dataclass(frozen=True)
+class BarDataQuality:
+    """Machine-readable truth boundary for one market-data result."""
+
+    status: Literal["verified", "degraded", "unavailable"]
+    requested_start: str
+    requested_end: str
+    observed_start: str = ""
+    observed_end: str = ""
+    coverage_ratio: float | None = None
+    calendar_source: str = "unavailable"
+    sources: tuple[str, ...] = ()
+    issues: tuple[str, ...] = ()
+    stale: bool = False
+    partial: bool = False
+    timezone: str = "unknown"
+    adjustment: str = "unknown"
+    units: tuple[tuple[str, str], ...] = (
+        ("open", "unknown"),
+        ("high", "unknown"),
+        ("low", "unknown"),
+        ("close", "unknown"),
+        ("volume", "unknown"),
+        ("amount", "unknown"),
+    )
+    duplicate_rows: int = 0
+    requested_symbols: tuple[str, ...] = ()
+    observed_symbols: tuple[str, ...] = ()
+    missing_symbols: tuple[str, ...] = ()
+
+    @property
+    def analysis_eligible(self) -> bool:
+        """Whether the bytes can support an explicitly qualified analysis preview."""
+        return self.status != "unavailable"
+
+    @property
+    def formal_eligible(self) -> bool:
+        """Whether the result may enter formal history without another quality gate."""
+        return self.status == "verified" and not self.stale and not self.partial
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "requested_start": self.requested_start,
+            "requested_end": self.requested_end,
+            "observed_start": self.observed_start,
+            "observed_end": self.observed_end,
+            "coverage_ratio": self.coverage_ratio,
+            "calendar_source": self.calendar_source,
+            "sources": list(self.sources),
+            "issues": list(self.issues),
+            "stale": self.stale,
+            "partial": self.partial,
+            "timezone": self.timezone,
+            "adjustment": self.adjustment,
+            "units": dict(self.units),
+            "duplicate_rows": self.duplicate_rows,
+            "requested_symbols": list(self.requested_symbols),
+            "observed_symbols": list(self.observed_symbols),
+            "missing_symbols": list(self.missing_symbols),
+            "analysis_eligible": self.analysis_eligible,
+            "formal_eligible": self.formal_eligible,
+        }
+
+
+@dataclass(frozen=True)
+class BarDataEnvelope[TMarketData]:
+    """Market data plus explicit quality and immutable provenance evidence."""
+
+    data: TMarketData
+    quality: BarDataQuality
+    provenance: tuple[dict[str, Any], ...] = ()
+
+    def require_data(self) -> TMarketData:
+        """Return usable data, failing closed for structurally unavailable evidence."""
+        if not self.quality.analysis_eligible:
+            raise MarketDataUnavailable(self.quality, self.provenance)
+        return self.data
 
 
 class Market(enum.StrEnum):

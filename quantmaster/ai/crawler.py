@@ -24,12 +24,8 @@ from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
-
-import httpx
 
 from quantmaster.ai.llm import LLMClient, LLMError
 from quantmaster.ai.news_claims import (
@@ -38,8 +34,13 @@ from quantmaster.ai.news_claims import (
     NewsClaimStore,
     normalize_news_ids,
 )
-from quantmaster.ai.news_sources import (
+from quantmaster.ai.news_contracts import (
+    FetchBatch,
     FetchedArticle,
+    NewsProviderError,
+)
+from quantmaster.ai.news_providers import fetch_builtin_source
+from quantmaster.ai.news_sources import (
     NewsSourceStore,
     fetch_declarative_source,
 )
@@ -49,6 +50,7 @@ from quantmaster.ai.news_storage import (
     migrate_news_schema,
     news_content_hash,
     news_fingerprint,
+    register_news_raw_verifier,
     replace_news_dimensions,
 )
 from quantmaster.config import get_config
@@ -56,7 +58,6 @@ from quantmaster.runtime.jobs import WorkerIdentity
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
-USER_AGENT = "Mozilla/5.0 (compatible; QuantMaster/0.1; +https://github.com/ZacharyHu0/QuantMaster)"
 
 # 与行情、因子模块使用的申万 2021 一级行业口径保持一致。模型输出只接受该白名单，
 # 避免“新能源 / AI / 大消费”等主题概念与一级行业混在同一评分维度。
@@ -87,6 +88,9 @@ class NewsItem:
     content: str
     url: str = ""
     published_at: str = ""
+    published_at_epoch: float = 0.0
+    fetched_at: float = 0.0
+    provider_item_id: str = ""
     # LLM 结构化结果
     symbols: list[str] = field(default_factory=list)
     sectors: list[str] = field(default_factory=list)  # 申万 2021 一级行业，最多 5 个
@@ -100,120 +104,14 @@ class NewsItem:
     fingerprint: str = ""
     is_official: bool = False
     raw_cache_key: str = ""
+    content_scope: str = "unknown"
+    parser_version: str = "1"
+    evidence_binding_hash: str = ""
+    ingest_window_id: str = ""
+    ingest_batch_id: str = ""
     analysis_status: str = "pending"
     db_id: int | None = None
 
-
-# ---- 抓取器（每个源一个函数，返回 list[NewsItem]） ----
-
-def fetch_sina_live(limit: int = 30) -> list[NewsItem]:  # pragma: no cover - 网络
-    """新浪财经 7x24 快讯。"""
-    url = "https://zhibo.sina.com.cn/api/zhibo/feed"
-    params = {"page": 1, "page_size": limit, "zhibo_id": 152, "tag_id": 0}
-    resp = httpx.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    items = []
-    for entry in data.get("result", {}).get("data", {}).get("feed", {}).get("list", []):
-        text = re.sub(r"<[^>]+>", "", entry.get("rich_text", ""))
-        items.append(NewsItem(
-            source="sina_live",
-            title=text[:60],
-            content=text,
-            published_at=entry.get("create_time", ""),
-        ))
-    return items
-
-
-def fetch_eastmoney_fast(limit: int = 30) -> list[NewsItem]:  # pragma: no cover - 网络
-    """东方财富全球财经快讯。"""
-    url = "https://np-listapi.eastmoney.com/comm/web/getFastNewsList"
-    params = {"client": "web", "biz": "web_724", "fastColumn": "102", "sortEnd": "", "pageSize": limit}
-    resp = httpx.get(url, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    items = []
-    for entry in (data.get("data") or {}).get("fastNewsList", []) or []:
-        items.append(NewsItem(
-            source="eastmoney_fast",
-            title=entry.get("title", "")[:60],
-            content=entry.get("summary") or entry.get("title", ""),
-            published_at=entry.get("showTime", ""),
-        ))
-    return items
-
-
-class _ListingParser(HTMLParser):
-    def __init__(self, base_url: str):
-        super().__init__()
-        self.base_url = base_url
-        self._href = ""
-        self._text: list[str] = []
-        self.links: list[tuple[str, str]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() == "a":
-            self._href = dict(attrs).get("href") or ""
-            self._text = []
-
-    def handle_data(self, data: str) -> None:
-        if self._href:
-            self._text.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or not self._href:
-            return
-        text = re.sub(r"\s+", " ", "".join(self._text)).strip()
-        if len(text) >= 8 and not self._href.lower().startswith(("javascript:", "#")):
-            self.links.append((text, urljoin(self.base_url, self._href)))
-        self._href, self._text = "", []
-
-
-def _fetch_official_listing(source: str, url: str, limit: int = 30) -> list[NewsItem]:
-    response = httpx.get(url, headers={"User-Agent": USER_AGENT}, timeout=20, follow_redirects=True)
-    response.raise_for_status()
-    parser = _ListingParser(str(response.url))
-    parser.feed(response.text)
-    seen: set[tuple[str, str]] = set()
-    items: list[NewsItem] = []
-    for title, link in parser.links:
-        key = (title, link)
-        if key in seen:
-            continue
-        seen.add(key)
-        if not re.search(r"公告|通知|决定|意见|规则|监管|处罚|问询|回复|报告|发布|答记者问|解读", title) \
-                and not re.search(r"/20\d{2}[-_/]", link):
-            continue
-        items.append(NewsItem(
-            source=source, title=title[:120], content=title, url=link, is_official=True,
-        ))
-        if len(items) >= limit:
-            break
-    return items
-
-
-def fetch_csrc(limit: int = 30) -> list[NewsItem]:  # pragma: no cover - 网络
-    return _fetch_official_listing(
-        "csrc", "https://www.csrc.gov.cn/csrc/c100028/common_list.shtml", limit)
-
-
-def fetch_sse(limit: int = 30) -> list[NewsItem]:  # pragma: no cover - 网络
-    return _fetch_official_listing(
-        "sse", "https://www.sse.com.cn/disclosure/listedinfo/announcement/", limit)
-
-
-def fetch_szse(limit: int = 30) -> list[NewsItem]:  # pragma: no cover - 网络
-    return _fetch_official_listing(
-        "szse", "https://www.szse.cn/disclosure/listed/notice/index.html", limit)
-
-
-SOURCES = {
-    "sina_live": fetch_sina_live,
-    "eastmoney_fast": fetch_eastmoney_fast,
-    "csrc": fetch_csrc,
-    "sse": fetch_sse,
-    "szse": fetch_szse,
-}
 
 EXTRACT_SYSTEM = """你是A股财经新闻分析师。对每条新闻输出：
 - symbols: 直接相关的A股代码数组（格式 600519.SH / 000001.SZ，无法确定则空数组）
@@ -345,9 +243,18 @@ class NewsStore:
         self.path = path or get_config().data_root / "news.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.sources = NewsSourceStore(self.path)
-        from quantmaster.data.industry import load_cached_industry_map
+        from quantmaster.data.industry import (
+            IndustrySnapshotIntegrityError,
+            load_cached_industry_map,
+        )
 
-        self._industry_map = load_cached_industry_map()
+        try:
+            self._industry_map = load_cached_industry_map()
+        except (IndustrySnapshotIntegrityError, OSError, TypeError, ValueError) as exc:
+            # Industry labels are optional analysis enrichment.  A legacy or
+            # damaged projection must not make the news corpus unreadable.
+            logger.warning("行业映射不可用于资讯标签增强，继续使用原始 symbols/sectors: %s", exc)
+            self._industry_map = {}
         self._migrate()
         self.claims = NewsClaimStore(self.path)
 
@@ -370,8 +277,37 @@ class NewsStore:
         )
 
     @staticmethod
+    def _factor_analysis_values(
+        connection: sqlite3.Connection,
+        source_id: str,
+        importance_score: float,
+    ) -> tuple[float | None, float | None]:
+        """Freeze formal importance and source weight in the analysis transaction."""
+        try:
+            importance = float(importance_score)
+        except (TypeError, ValueError, OverflowError):
+            return None, None
+        if not math.isfinite(importance) or not 0 <= importance <= 100:
+            return None, None
+        row = connection.execute(
+            "SELECT factor_weight FROM news_sources WHERE id=?",
+            (str(source_id or ""),),
+        ).fetchone()
+        if row is None:
+            return None, None
+        try:
+            source_weight = float(row[0])
+        except (TypeError, ValueError, OverflowError):
+            return None, None
+        if not math.isfinite(source_weight) or not 0 <= source_weight <= 3:
+            return None, None
+        return importance, source_weight
+
+    @staticmethod
     def fingerprint(item: NewsItem) -> str:
-        return news_fingerprint(item.source, item.title, item.url, item.published_at)
+        return news_fingerprint(
+            item.source, item.title, item.url, item.published_at, item.provider_item_id,
+        )
 
     @staticmethod
     def content_hash(item: NewsItem) -> str:
@@ -397,6 +333,9 @@ class NewsStore:
         inferred = [self._industry_map.get(str(symbol), "") for symbol in value["symbols"]]
         value["sectors"] = _normalize_sectors([*value["sectors"], *inferred])
         value["is_official"] = bool(value.get("is_official"))
+        # Workbench and alert APIs retain the established public name, while
+        # formal factor consumers select factor_importance_score explicitly.
+        value["importance_score"] = float(value.get("alert_importance_score") or 0)
         epoch = float(value.get("first_seen_at") or value.get("created_at") or 0)
         value["first_seen_epoch"] = epoch
         value["first_seen_at"] = (
@@ -415,6 +354,11 @@ class NewsStore:
     def save(self, items: list[NewsItem]) -> int:
         saved = 0
         now = time.time()
+        ingest_identities = {
+            (item.ingest_window_id, item.ingest_batch_id)
+            for item in items
+            if item.ingest_window_id and item.ingest_batch_id
+        }
         with self._conn() as conn:
             for item in items:
                 item.sectors = _normalize_sectors(item.sectors)
@@ -425,51 +369,195 @@ class NewsStore:
                     if item.analysis_status in {"pending", "complete"}
                     else "pending"
                 )
-                row = conn.execute(
-                    "SELECT id,analysis_status,length(content) AS content_length FROM news "
-                    "WHERE fingerprint=? OR (source=? AND title=? AND published_at=?) LIMIT 1",
-                    (item.fingerprint, item.source, item.title, item.published_at),
-                ).fetchone()
+                if item.provider_item_id:
+                    row = conn.execute(
+                        "SELECT id,source_id,analysis_status,title,content,content_hash,raw_cache_key,"
+                        "content_scope,fetched_at,provider_item_id,evidence_binding_hash,"
+                        "ingest_window_id,ingest_batch_id FROM news "
+                        "WHERE source_id=? AND provider_item_id=? LIMIT 1",
+                        (item.source, item.provider_item_id),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT id,source_id,analysis_status,title,content,content_hash,raw_cache_key,"
+                        "content_scope,fetched_at,provider_item_id,evidence_binding_hash,"
+                        "ingest_window_id,ingest_batch_id FROM news "
+                        "WHERE fingerprint=? OR "
+                        "(provider_item_id='' AND source=? AND title=? AND published_at=?) "
+                        "LIMIT 1",
+                        (item.fingerprint, item.source, item.title, item.published_at),
+                    ).fetchone()
                 if row:
+                    scope_downgrade = (
+                        str(row["content_scope"] or "") in {"full_article", "full_text"}
+                        and item.content_scope not in {"full_article", "full_text"}
+                    )
+                    if scope_downgrade:
+                        conn.execute(
+                            "UPDATE news SET last_seen_at=?,fetched_at=MAX(fetched_at,?) "
+                            "WHERE id=?",
+                            (now, item.fetched_at or now, int(row["id"])),
+                        )
+                        continue
+                    previous_hash = str(row["content_hash"] or news_content_hash(
+                        str(row["content"] or ""), str(row["title"] or ""),
+                    ))
+                    is_provider_revision = bool(
+                        item.provider_item_id
+                        and item.provider_item_id == str(row["provider_item_id"] or "")
+                        and (
+                            content_hash != previous_hash
+                            or item.title != str(row["title"] or "")
+                        )
+                    )
+                    if is_provider_revision:
+                        factor_importance, factor_weight = (
+                            self._factor_analysis_values(
+                                conn,
+                                str(row["source_id"] or item.source),
+                                item.importance_score,
+                            )
+                            if status == "complete" else (None, None)
+                        )
+                        conn.execute(
+                            "INSERT INTO news_revisions("
+                            "news_id,revision_number,title,content,content_hash,raw_cache_key,"
+                            "fetched_at,evidence_binding_hash,recorded_at) VALUES (?,"
+                            "COALESCE((SELECT MAX(revision_number)+1 FROM news_revisions "
+                            "WHERE news_id=?),1),?,?,?,?,?,?,?)",
+                            (
+                                int(row["id"]), int(row["id"]), str(row["title"] or ""),
+                                str(row["content"] or ""), previous_hash,
+                                str(row["raw_cache_key"] or ""),
+                                float(row["fetched_at"] or 0),
+                                str(row["evidence_binding_hash"] or ""), now,
+                            ),
+                        )
+                        conn.execute(
+                            "UPDATE news SET title=?,content=?,content_hash=?,url=?,last_seen_at=?,"
+                            "fetched_at=MAX(fetched_at,?),published_at=CASE WHEN ?<>'' THEN ? "
+                            "ELSE published_at END,published_at_epoch=CASE WHEN ?>0 THEN ? "
+                            "ELSE published_at_epoch END,raw_cache_key=?,evidence_binding_hash=?,"
+                            "parser_version=?,ingest_window_id=?,ingest_batch_id=?,"
+                            "is_official=?,content_scope=?,"
+                            "symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,"
+                            "importance_score=?,factor_importance_score=?,"
+                            "factor_weight_at_analysis=?,alert_importance_score=?,"
+                            "scope=?,urgency=?,confidence=?,analysis_status=?,"
+                            "analysis_attempts=0,analysis_error='',next_retry_at=0,"
+                            "last_failure_code='',analysis_updated_at=?,content_version_at=?,"
+                            "analysis_version=? "
+                            "WHERE id=?",
+                            (
+                                item.title, item.content, content_hash, item.url, now,
+                                item.fetched_at or now, item.published_at, item.published_at,
+                                item.published_at_epoch, item.published_at_epoch,
+                                item.raw_cache_key, item.evidence_binding_hash,
+                                item.parser_version, item.ingest_window_id,
+                                item.ingest_batch_id, int(item.is_official), item.content_scope,
+                                json.dumps(item.symbols, ensure_ascii=False),
+                                json.dumps(item.sectors, ensure_ascii=False), item.event_type,
+                                item.sentiment, item.summary, item.importance_score,
+                                factor_importance, factor_weight, item.importance_score,
+                                item.scope, item.urgency, item.confidence, status,
+                                now if status == "complete" else 0,
+                                now, self.ANALYSIS_VERSION, int(row["id"]),
+                            ),
+                        )
+                        self._replace_dimensions(conn, int(row["id"]), item)
+                        saved += 1
+                        continue
                     analysis_sql = ""
                     analysis_params: list[Any] = []
                     if status == "complete" and row["analysis_status"] != "complete":
+                        factor_importance, factor_weight = self._factor_analysis_values(
+                            conn,
+                            str(row["source_id"] or item.source),
+                            item.importance_score,
+                        )
                         analysis_sql = (
                             ",symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
-                            "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error=''"
+                            "factor_importance_score=?,factor_weight_at_analysis=?,"
+                            "alert_importance_score=?,scope=?,urgency=?,confidence=?,"
+                            "analysis_status='complete',analysis_error='',"
+                            "analysis_updated_at=?"
                         )
                         analysis_params = [
                             json.dumps(item.symbols, ensure_ascii=False),
                             json.dumps(item.sectors, ensure_ascii=False), item.event_type,
-                            item.sentiment, item.summary, item.importance_score, item.scope,
-                            item.urgency, item.confidence,
+                            item.sentiment, item.summary, item.importance_score,
+                            factor_importance, factor_weight, item.importance_score,
+                            item.scope, item.urgency, item.confidence, now,
                         ]
-                    content = item.content if len(item.content) >= int(row["content_length"] or 0) else None
+                    content = (
+                        item.content
+                        if not item.evidence_binding_hash
+                        and len(item.content) >= len(str(row["content"] or ""))
+                        else None
+                    )
                     conn.execute(
                         "UPDATE news SET content=COALESCE(?,content),url=CASE WHEN ?<>'' THEN ? ELSE url END,"
-                        "last_seen_at=?,raw_cache_key=CASE WHEN ?<>'' THEN ? ELSE raw_cache_key END "
+                        "last_seen_at=?,fetched_at=MAX(fetched_at,?),"
+                        "published_at=CASE WHEN ?<>'' THEN ? ELSE published_at END,"
+                        "published_at_epoch=CASE WHEN ?>0 THEN ? ELSE published_at_epoch END,"
+                        "provider_item_id=CASE WHEN ?<>'' THEN ? ELSE provider_item_id END,"
+                        "raw_cache_key=CASE WHEN ?<>'' AND ?<>'' THEN ? ELSE raw_cache_key END,"
+                        "evidence_binding_hash=CASE WHEN ?<>'' AND ?<>'' THEN ? "
+                        "ELSE evidence_binding_hash END,"
+                        "parser_version=CASE WHEN ?<>'' AND ?<>'' THEN ? ELSE parser_version END,"
+                        "ingest_window_id=CASE WHEN ?<>'' THEN ? ELSE ingest_window_id END,"
+                        "ingest_batch_id=CASE WHEN ?<>'' THEN ? ELSE ingest_batch_id END,"
+                        "content_scope=CASE WHEN ?<>'unknown' THEN ? ELSE content_scope END "
                         f"{analysis_sql} WHERE id=?",
-                        [content, item.url, item.url, now, item.raw_cache_key, item.raw_cache_key,
-                         *analysis_params, row["id"]],
+                        [content, item.url, item.url, now, item.fetched_at or now,
+                         item.published_at, item.published_at,
+                         item.published_at_epoch, item.published_at_epoch,
+                          item.provider_item_id, item.provider_item_id,
+                          item.raw_cache_key, item.evidence_binding_hash, item.raw_cache_key,
+                          item.raw_cache_key, item.evidence_binding_hash,
+                          item.evidence_binding_hash,
+                          item.raw_cache_key, item.evidence_binding_hash, item.parser_version,
+                          item.ingest_window_id, item.ingest_window_id,
+                          item.ingest_batch_id, item.ingest_batch_id,
+                          item.content_scope, item.content_scope,
+                          *analysis_params, row["id"]],
                     )
                     if analysis_sql:
                         self._replace_dimensions(conn, int(row["id"]), item)
                     continue
                 try:
+                    factor_importance, factor_weight = (
+                        self._factor_analysis_values(
+                            conn, item.source, item.importance_score,
+                        )
+                        if status == "complete" else (None, None)
+                    )
                     cursor = conn.execute(
                         "INSERT INTO news "
-                        "(source,title,content,url,published_at,symbols,sectors,event_type,sentiment,summary,"
-                        "created_at,importance_score,scope,urgency,confidence,fingerprint,is_official,"
-                        "source_id,content_hash,first_seen_at,last_seen_at,raw_cache_key,analysis_status,"
-                        "analysis_version,parser_version) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "(source,title,content,url,published_at,published_at_epoch,fetched_at,provider_item_id,"
+                        "symbols,sectors,event_type,sentiment,summary,"
+                        "created_at,importance_score,factor_importance_score,"
+                        "factor_weight_at_analysis,alert_importance_score,"
+                        "scope,urgency,confidence,fingerprint,is_official,"
+                        "content_scope,source_id,content_hash,first_seen_at,last_seen_at,"
+                        "raw_cache_key,evidence_binding_hash,ingest_window_id,ingest_batch_id,"
+                        "analysis_status,"
+                        "analysis_updated_at,content_version_at,analysis_version,parser_version) "
+                        "VALUES (" + ",".join("?" for _ in range(37)) + ")",
                         (item.source, item.title, item.content, item.url, item.published_at,
+                         item.published_at_epoch, item.fetched_at or now, item.provider_item_id,
                          json.dumps(item.symbols, ensure_ascii=False),
                          json.dumps(item.sectors, ensure_ascii=False), item.event_type, item.sentiment,
-                         item.summary, now, item.importance_score, item.scope, item.urgency,
-                         item.confidence, item.fingerprint, int(item.is_official), item.source,
-                         content_hash, now, now, item.raw_cache_key, status,
-                         self.ANALYSIS_VERSION, "1"),
+                         item.summary, now, item.importance_score,
+                           factor_importance, factor_weight, item.importance_score,
+                           item.scope, item.urgency, item.confidence,
+                           item.fingerprint, int(item.is_official),
+                          item.content_scope, item.source,
+                          content_hash, now, now, item.raw_cache_key,
+                          item.evidence_binding_hash, item.ingest_window_id,
+                          item.ingest_batch_id, status,
+                          now if status == "complete" else 0, now,
+                          self.ANALYSIS_VERSION, item.parser_version),
                     )
                     if cursor.lastrowid is None:
                         raise sqlite3.IntegrityError("资讯写入未返回记录 ID")
@@ -477,6 +565,7 @@ class NewsStore:
                     saved += 1
                 except sqlite3.IntegrityError:
                     continue
+        self.sources.complete_persisted_ingest_batches(ingest_identities)
         return saved
 
     def pending(self, limit: int = 100, ids: list[int] | None = None) -> list[dict]:
@@ -535,15 +624,26 @@ class NewsStore:
             item_id, claim_token, claim_owner, connection=conn,
         ):
             return False
+        source_row = conn.execute(
+            "SELECT source_id FROM news WHERE id=?", (item_id,),
+        ).fetchone()
+        if source_row is None:
+            return False
+        factor_importance, factor_weight = self._factor_analysis_values(
+            conn, str(source_row[0] or item.source), item.importance_score,
+        )
         changed = conn.execute(
             "UPDATE news SET symbols=?,sectors=?,event_type=?,sentiment=?,summary=?,importance_score=?,"
+            "factor_importance_score=?,factor_weight_at_analysis=?,alert_importance_score=?,"
             "scope=?,urgency=?,confidence=?,analysis_status='complete',analysis_error='',"
             "analysis_version=?,next_retry_at=0,last_failure_code='',analysis_updated_at=? "
             "WHERE id=?",
             (json.dumps(item.symbols, ensure_ascii=False),
              json.dumps(item.sectors, ensure_ascii=False), item.event_type,
-             item.sentiment, item.summary, item.importance_score, item.scope, item.urgency,
-             item.confidence, self.ANALYSIS_VERSION, time.time(), item_id),
+             item.sentiment, item.summary, item.importance_score,
+             factor_importance, factor_weight, item.importance_score,
+             item.scope, item.urgency, item.confidence,
+             self.ANALYSIS_VERSION, time.time(), item_id),
         ).rowcount
         if changed:
             self._replace_dimensions(conn, item_id, item)
@@ -825,7 +925,10 @@ class NewsStore:
             clauses.append("n.first_seen_at<=?")
             params.append(date_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        order = "n.importance_score DESC,n.id DESC" if sort == "importance" else "n.id DESC"
+        order = (
+            "n.alert_importance_score DESC,n.id DESC"
+            if sort == "importance" else "n.id DESC"
+        )
         page_size = max(1, min(limit, 100))
         offset = max(0, int(cursor or 0)) if sort == "importance" else 0
         with self._conn() as conn:
@@ -876,7 +979,7 @@ class NewsStore:
                        scope: str, urgency: str) -> None:
         with self._conn() as conn:
             conn.execute(
-                "UPDATE news SET importance_score=?,scope=?,urgency=? WHERE id=?",
+                "UPDATE news SET alert_importance_score=?,scope=?,urgency=? WHERE id=?",
                 (importance_score, scope, urgency, item_id),
             )
 
@@ -892,40 +995,235 @@ class NewsStore:
 
     def factor_rows(self, start_epoch: float | None = None,
                     end_epoch: float | None = None) -> list[dict]:
-        clauses = ["n.analysis_status='complete'"]
+        clauses = [
+            "n.analysis_status='complete'",
+            "n.content_scope IN ('full_text','full_article','feed_summary')",
+            "n.is_official=1",
+            "COALESCE(s.is_official,0)=1",
+            "COALESCE(s.built_in,0)=1",
+            "n.published_at_epoch>0",
+            "n.factor_importance_score>0",
+            "n.factor_importance_score<=100",
+            "n.factor_weight_at_analysis>0",
+            "n.factor_weight_at_analysis<=3",
+            "n.raw_cache_key<>''",
+            "qm_news_raw_valid(n.raw_cache_key)=1",
+            "n.evidence_binding_hash<>''",
+            "n.ingest_window_id<>''",
+            "n.ingest_batch_id<>''",
+            "qm_news_article_evidence_valid("
+            "n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,"
+            "n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,"
+            "n.content_hash,n.evidence_binding_hash)=1",
+            "EXISTS (SELECT 1 FROM news_raw_manifest h "
+            "WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key)",
+            "EXISTS (SELECT 1 FROM news_article_evidence_manifest e "
+            "WHERE e.binding_hash=n.evidence_binding_hash "
+            "AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key "
+            "AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id "
+            "AND e.content_hash=n.content_hash AND e.title=n.title AND e.content=n.content "
+            "AND e.published_at=n.published_at "
+            "AND e.published_at_epoch=n.published_at_epoch "
+            "AND e.content_scope=n.content_scope AND e.parser_version=n.parser_version)",
+            "EXISTS (SELECT 1 FROM news_ingest_windows w "
+            "JOIN news_ingest_batches b ON b.window_id=w.window_id "
+            "JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id "
+            "WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id "
+            "AND w.status='complete' AND w.completed_batch_id<>'' "
+            "AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id "
+            "AND ba.evidence_binding_hash=n.evidence_binding_hash "
+            "AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id "
+            "AND ba.raw_cache_key=n.raw_cache_key)",
+        ]
         params: list[Any] = []
         if start_epoch is not None:
-            clauses.append("n.first_seen_at>=?")
+            clauses.append("n.published_at_epoch>=?")
             params.append(start_epoch)
         if end_epoch is not None:
-            clauses.append("n.first_seen_at<=?")
+            clauses.append("n.published_at_epoch<=?")
+            params.append(end_epoch)
+            clauses.append("n.first_seen_at>0 AND n.first_seen_at<=?")
+            params.append(end_epoch)
+            clauses.append("n.content_version_at>0 AND n.content_version_at<=?")
+            params.append(end_epoch)
+            clauses.append("n.analysis_updated_at>0 AND n.analysis_updated_at<=?")
             params.append(end_epoch)
         with self._conn() as conn:
+            register_news_raw_verifier(conn)
             rows = conn.execute(
-                "SELECT n.id,n.first_seen_at,n.symbols,n.sentiment,n.confidence,"
-                "n.importance_score,n.content_hash,COALESCE(s.factor_weight,1) AS source_weight "
+                "SELECT n.id,n.first_seen_at,n.content_version_at,n.analysis_updated_at,"
+                "n.published_at_epoch,n.symbols,n.sentiment,n.confidence,"
+                "n.factor_importance_score AS importance_score,n.content_hash,"
+                "n.factor_weight_at_analysis AS source_weight,n.source_id,"
+                "COALESCE(s.name,n.source_id) AS source_name,"
+                "COALESCE(s.group_name,'') AS source_group,n.content_scope "
                 "FROM news n LEFT JOIN news_sources s ON s.id=n.source_id WHERE "
-                + " AND ".join(clauses) + " ORDER BY n.first_seen_at,n.id",
+                + " AND ".join(clauses)
+                + " ORDER BY MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at),n.id",
                 params,
             ).fetchall()
         result = []
         for row in rows:
             value = dict(row)
             value["symbols"] = json.loads(value.get("symbols") or "[]")
+            value["formal_eligible"] = True
+            value["formal_ineligible_reasons"] = []
+            result.append(value)
+        return result
+
+    def sandbox_factor_rows(self, start_epoch: float | None = None,
+                            end_epoch: float | None = None) -> list[dict]:
+        """Return PIT-visible built-in rows for explicitly non-production research.
+
+        This path deliberately permits provider excerpts and pending ingest windows so
+        recent news can be explored before the formal evidence window is complete.  It
+        does *not* relax :meth:`factor_rows`: every returned row carries the exact
+        reasons that keep it out of the production contract, and all three availability
+        timestamps are still bounded by ``end_epoch`` to prevent look-ahead.
+        """
+        published_epoch_sql = (
+            "COALESCE(NULLIF(n.published_at_epoch,0),"
+            "CAST(strftime('%s',n.published_at) AS REAL))"
+        )
+        importance_sql = (
+            "COALESCE(NULLIF(n.factor_importance_score,0),n.importance_score)"
+        )
+        source_weight_sql = (
+            "COALESCE(NULLIF(n.factor_weight_at_analysis,0),s.factor_weight)"
+        )
+        clauses = [
+            "n.analysis_status='complete'",
+            "n.content_scope IN ("
+            "'full_text','full_article','feed_summary','provider_excerpt','unknown')",
+            "COALESCE(s.built_in,0)=1",
+            f"{published_epoch_sql}>0",
+            "n.first_seen_at>0",
+            "n.content_version_at>0",
+            "n.analysis_updated_at>0",
+            f"{importance_sql}>0",
+            f"{importance_sql}<=100",
+            f"{source_weight_sql}>0",
+            f"{source_weight_sql}<=3",
+        ]
+        params: list[Any] = []
+        if start_epoch is not None:
+            clauses.append(f"{published_epoch_sql}>=?")
+            params.append(start_epoch)
+        if end_epoch is not None:
+            clauses.extend([
+                f"{published_epoch_sql}<=?",
+                "n.first_seen_at<=?",
+                "n.content_version_at<=?",
+                "n.analysis_updated_at<=?",
+            ])
+            params.extend([end_epoch, end_epoch, end_epoch, end_epoch])
+
+        formal_ids = {
+            int(row["id"])
+            for row in self.factor_rows(start_epoch, end_epoch)
+        }
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT n.id,n.first_seen_at,n.content_version_at,n.analysis_updated_at,"
+                f"{published_epoch_sql} AS published_at_epoch,"
+                "n.symbols,n.sentiment,n.confidence,"
+                f"{importance_sql} AS importance_score,n.content_hash,"
+                f"{source_weight_sql} AS source_weight,n.source_id,"
+                "COALESCE(s.name,n.source_id) AS source_name,"
+                "COALESCE(s.group_name,'') AS source_group,"
+                "n.is_official AS article_is_official,"
+                "COALESCE(s.is_official,0) AS source_is_official,n.content_scope,"
+                "(n.published_at_epoch<=0) AS legacy_published_epoch,"
+                "(n.factor_importance_score IS NULL) AS legacy_factor_importance,"
+                "(n.factor_weight_at_analysis IS NULL) AS legacy_source_weight,"
+                "n.raw_cache_key,n.evidence_binding_hash,n.ingest_window_id,"
+                "n.ingest_batch_id,EXISTS (SELECT 1 FROM news_ingest_windows w "
+                "WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id "
+                "AND w.status='complete' AND w.completed_batch_id<>'') "
+                "AS ingest_window_complete FROM news n "
+                "LEFT JOIN news_sources s ON s.id=n.source_id WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY MAX(n.first_seen_at,n.content_version_at,"
+                "n.analysis_updated_at),n.id",
+                params,
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["symbols"] = json.loads(value.get("symbols") or "[]")
+            reasons: list[str] = []
+            if not bool(value.get("article_is_official")) or not bool(
+                value.get("source_is_official")
+            ):
+                reasons.append("non_official_source")
+            if value.get("content_scope") == "provider_excerpt":
+                reasons.append("provider_excerpt_only")
+            if value.get("content_scope") == "unknown":
+                reasons.append("legacy_unknown_content_scope")
+            if (
+                bool(value.get("legacy_published_epoch"))
+                or bool(value.get("legacy_factor_importance"))
+                or bool(value.get("legacy_source_weight"))
+            ):
+                reasons.append("legacy_unfrozen_analysis_contract")
+            if not value.get("raw_cache_key") or not value.get("evidence_binding_hash"):
+                reasons.append("formal_raw_evidence_missing")
+            if not bool(value.get("ingest_window_complete")):
+                reasons.append("ingest_window_incomplete")
+            formal_eligible = int(value["id"]) in formal_ids
+            if not formal_eligible and not reasons:
+                reasons.append("formal_evidence_contract_failed")
+            value["formal_eligible"] = formal_eligible
+            value["formal_ineligible_reasons"] = reasons
             result.append(value)
         return result
 
     def factor_coverage(self, minimum_confidence: float = 0.0) -> dict[str, Any]:
         """Return the usable local annotation span without materialising news rows."""
         with self._conn() as conn:
+            register_news_raw_verifier(conn)
             row = conn.execute(
-                "SELECT MIN(n.first_seen_at) AS first_seen_at,"
-                "MAX(n.first_seen_at) AS last_seen_at,COUNT(*) AS event_count "
+                "SELECT MIN(MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at)) "
+                "AS first_seen_at,"
+                "MAX(MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at)) "
+                "AS last_seen_at,COUNT(*) AS event_count "
                 "FROM news n LEFT JOIN news_sources s ON s.id=n.source_id "
                 "WHERE n.analysis_status='complete' AND n.first_seen_at>0 "
+                "AND n.content_version_at>0 AND n.analysis_updated_at>0 "
                 "AND COALESCE(n.confidence,0)>=? "
-                "AND COALESCE(n.importance_score,0)>0 "
-                "AND COALESCE(s.factor_weight,1)>0",
+                "AND n.factor_importance_score>0 AND n.factor_importance_score<=100 "
+                "AND n.published_at_epoch>0 "
+                "AND n.content_scope IN ('full_text','full_article','feed_summary') "
+                "AND n.is_official=1 AND COALESCE(s.is_official,0)=1 "
+                "AND COALESCE(s.built_in,0)=1 "
+                "AND n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1 "
+                "AND n.evidence_binding_hash<>'' "
+                "AND n.ingest_window_id<>'' AND n.ingest_batch_id<>'' "
+                "AND qm_news_article_evidence_valid("
+                "n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,"
+                "n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,"
+                "n.content_hash,n.evidence_binding_hash)=1 "
+                "AND EXISTS (SELECT 1 FROM news_raw_manifest h "
+                "WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key) "
+                "AND EXISTS (SELECT 1 FROM news_article_evidence_manifest e "
+                "WHERE e.binding_hash=n.evidence_binding_hash "
+                "AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key "
+                "AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id "
+                "AND e.content_hash=n.content_hash AND e.title=n.title "
+                "AND e.content=n.content AND e.published_at=n.published_at "
+                "AND e.published_at_epoch=n.published_at_epoch "
+                "AND e.content_scope=n.content_scope "
+                "AND e.parser_version=n.parser_version) "
+                "AND EXISTS (SELECT 1 FROM news_ingest_windows w "
+                "JOIN news_ingest_batches b ON b.window_id=w.window_id "
+                "JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id "
+                "WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id "
+                "AND w.status='complete' AND w.completed_batch_id<>'' "
+                "AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id "
+                "AND ba.evidence_binding_hash=n.evidence_binding_hash "
+                "AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id "
+                "AND ba.raw_cache_key=n.raw_cache_key) "
+                "AND n.factor_weight_at_analysis>0 AND n.factor_weight_at_analysis<=3",
                 (max(0.0, float(minimum_confidence)),),
             ).fetchone()
         value = dict(row) if row else {}
@@ -954,7 +1252,7 @@ class NewsStore:
                 now=reference,
                 halflife_days=halflife_days,
             )
-        market_row = next(
+        market_row: dict[str, Any] = next(
             (row for row in aggregate_rows if str(row.get("item_type") or "") == "market"),
             {},
         )
@@ -985,7 +1283,7 @@ class NewsStore:
                 "SUM(analysis_status='pending') AS pending,"
                 "SUM(analysis_status='failed') AS failed,"
                 "SUM(analysis_status='dead_letter') AS dead_letter,"
-                "SUM(importance_score>=80) AS important,"
+                "SUM(alert_importance_score>=80) AS important,"
                 "SUM(sentiment>0.15 AND analysis_status='complete') AS positive,"
                 "SUM(sentiment<-0.15 AND analysis_status='complete') AS negative "
                 "FROM news WHERE first_seen_at>=? AND first_seen_at<=?", (cutoff, now),
@@ -1097,12 +1395,14 @@ class NewsStore:
         window_days = int(days)
         if window_days not in {1, 3, 7, 30}:
             raise ValueError("事件聚焦窗口仅支持 1、3、7、30 日")
-        cutoff = time.time() - window_days * 86400
+        now = time.time()
+        cutoff = now - window_days * 86400
         minimum = get_config().news.factor_min_confidence
         with self._conn() as conn:
             rows = aggregate_news_event_focus(
                 conn,
                 cutoff=cutoff,
+                until=now,
                 minimum_confidence=minimum,
             )
         from quantmaster.data import load_stock_names
@@ -1240,26 +1540,41 @@ class AICrawler:
     def _from_fetched(value: FetchedArticle) -> NewsItem:
         return NewsItem(
             source=value.source, title=value.title, content=value.content, url=value.url,
-            published_at=value.published_at, is_official=value.is_official,
-            raw_cache_key=value.raw_cache_key, analysis_status="pending",
+            published_at=value.published_at, published_at_epoch=value.published_at_epoch,
+            fetched_at=value.fetched_at, provider_item_id=value.provider_item_id,
+            is_official=value.is_official,
+            raw_cache_key=value.raw_cache_key, content_scope=value.content_scope,
+            parser_version=value.parser_version,
+            evidence_binding_hash=value.evidence_binding_hash,
+            ingest_window_id=value.ingest_window_id,
+            ingest_batch_id=value.ingest_batch_id,
+            analysis_status="pending",
         )
+
+    def _fetch_source_batch(self, source: dict, limit: int | None = None,
+                            *, preview: bool = False) -> FetchBatch:
+        selected_limit = min(limit or source["item_limit"], source["item_limit"])
+        if source["kind"] == "builtin":
+            if preview:
+                raise ValueError("内置来源请使用来源测试接口")
+            batch = fetch_builtin_source(source, self.source_store, limit=selected_limit)
+        else:
+            value = dict(source)
+            value["item_limit"] = selected_limit
+            batch = fetch_declarative_source(
+                value,
+                self.source_store,
+                preview=preview,
+                state={} if preview else self.source_store.state(source["id"]),
+            )
+        if not preview:
+            self.source_store.bind_articles(batch.articles)
+        return batch
 
     def _fetch_source(self, source: dict, limit: int | None = None,
                       *, preview: bool = False) -> list[NewsItem]:
-        if source["kind"] == "builtin":
-            fetcher = SOURCES.get(source["id"])
-            if fetcher is None:
-                raise ValueError("内置来源采集器不存在")
-            items = fetcher(limit=min(limit or source["item_limit"], source["item_limit"]))
-            for item in items:
-                item.is_official = bool(source["is_official"])
-                item.analysis_status = "pending"
-            return items
-        value = dict(source)
-        if limit is not None:
-            value["item_limit"] = min(limit, int(value["item_limit"]))
-        return [self._from_fetched(item) for item in fetch_declarative_source(
-            value, self.source_store, preview=preview)]
+        batch = self._fetch_source_batch(source, limit, preview=preview)
+        return [self._from_fetched(item) for item in batch.articles]
 
     def preview(self, value: dict, token: str = "") -> list[dict]:
         """测试尚未保存的声明式来源；Token 只存在于本次调用内存。"""
@@ -1289,11 +1604,16 @@ class AICrawler:
             def touch_not_modified(self, *args, **kwargs):
                 return None
 
-        articles = fetch_declarative_source(temporary, _PreviewStore(self.source_store, token), preview=True)
+            def cached_response(self, source_id, url):
+                return None
+
+        batch = fetch_declarative_source(
+            temporary, _PreviewStore(self.source_store, token), preview=True,
+        )
         return [
             {"title": item.title, "content": item.content[:500], "url": item.url,
              "published_at": item.published_at}
-            for item in articles
+            for item in batch.articles
         ]
 
     @staticmethod
@@ -1600,11 +1920,6 @@ class AICrawler:
         if sources:
             for source_id in sources:
                 config = self.source_store.get(source_id)
-                if config is None and source_id in SOURCES:
-                    config = {
-                        "id": source_id, "kind": "builtin", "item_limit": limit,
-                        "is_official": source_id in {"csrc", "sse", "szse"},
-                    }
                 if config is not None:
                     configs.append(config)
             missing = sorted(set(sources) - {item["id"] for item in configs})
@@ -1619,17 +1934,45 @@ class AICrawler:
             source_id = source["id"]
             run_id = self.source_store.start_run(source_id) if self.source_store.get(source_id) else ""
             try:
-                items = self._fetch_source(source, limit)
+                batch = self._fetch_source_batch(source, limit)
+                window_id = self.source_store.register_ingest_batch(
+                    batch, run_id or uuid.uuid4().hex,
+                )
+                items = [self._from_fetched(item) for item in batch.articles]
                 saved = self.store.save(items)
+                if (
+                    batch.complete
+                    and batch.articles
+                    and all(
+                        not item.is_official or bool(item.evidence_binding_hash)
+                        for item in batch.articles
+                    )
+                ):
+                    self.source_store.complete_evidence_bootstrap(source_id)
                 fetched_count += len(items)
                 saved_count += saved
                 if run_id:
-                    self.source_store.finish_run(run_id, fetched=len(items), saved=saved, pending=saved)
-                source_results.append({"source": source_id, "fetched": len(items), "saved": saved})
-            except Exception:
+                    run_status = (
+                        "success"
+                        if batch.complete and batch.health in {"healthy", "not_modified"}
+                        else "degraded"
+                    )
+                    self.source_store.finish_run(
+                        run_id, fetched=len(items), saved=saved, pending=saved,
+                        status=run_status,
+                    )
+                self.source_store.record_batch(batch)
+                source_results.append({
+                    "source": source_id, "fetched": len(items), "saved": saved,
+                    "health": batch.health, "watermark": batch.watermark,
+                    "complete": batch.complete, "ingest_window_id": window_id,
+                })
+            except Exception as exc:
                 logger.warning("资讯来源抓取失败 source=%s", source_id, exc_info=True)
-                public_error = "资讯来源抓取失败，请查看本机日志"
+                code = exc.code if isinstance(exc, NewsProviderError) else type(exc).__name__.casefold()
+                public_error = f"资讯来源抓取失败（{code}），请查看本机日志"
                 errors[source_id] = public_error
+                self.source_store.record_failure(source_id, code=code, message=str(exc))
                 if run_id:
                     self.source_store.finish_run(run_id, error=public_error)
         annotation: dict[str, Any] = {

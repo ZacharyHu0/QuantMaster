@@ -28,22 +28,39 @@ import sys
 
 import pandas as pd
 
+from quantmaster.trading_sessions import market_date
+
 
 def _today() -> str:
-    return str(pd.Timestamp.now().date())
+    return market_date().isoformat()
 
 
 def _print_json(data) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
 
+def _usable_market_data(envelope, *, label: str):
+    if envelope.quality.status == "degraded":
+        issues = "；".join(envelope.quality.issues) or "证据降级"
+        print(f"{label} 使用降级行情：{issues}", file=sys.stderr)
+    return envelope.require_data()
+
+
 def _load_panel(universe: str, start: str, end: str):
     from quantmaster.data import load_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
 
-    symbols = load_universe(universe)
+    universe_snapshot = load_universe_analysis_snapshot(universe)
+    symbols = list(universe_snapshot.symbols)
+    if not universe_snapshot.formal_eligible:
+        print(
+            f"{universe} 使用旧候选 sandbox 预览：{'；'.join(universe_snapshot.issues)}",
+            file=sys.stderr,
+        )
     print(f"加载 {len(symbols)} 只标的 {start} ~ {end} …", file=sys.stderr)
-    return load_panel(symbols, start, end)
+    return _usable_market_data(
+        load_panel(symbols, start, end), label=f"{universe} 面板",
+    )
 
 
 def cmd_serve(args) -> None:
@@ -91,7 +108,7 @@ def cmd_automation(args) -> None:
         _print_json(service.dispatcher.dispatch(args.limit))
         return
 
-    checks = {}
+    checks: dict[str, dict[str, object]] = {}
     for module in ("apscheduler", "lark_oapi", "qrcode", "keyring"):
         try:
             __import__(module)
@@ -246,14 +263,20 @@ def cmd_lab(args) -> None:
 
 def cmd_fetch(args) -> None:
     from quantmaster.data import load_bars
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
 
-    symbols = load_universe(args.universe)
+    symbols = load_universe_analysis(args.universe)
     end = args.end or _today()
     ok = failed = 0
     for symbol in symbols:
         try:
-            df = load_bars(symbol, args.start, end, frequency=args.frequency, use_cache=not args.force)
+            df = _usable_market_data(
+                load_bars(
+                    symbol, args.start, end, frequency=args.frequency,
+                    use_cache=not args.force,
+                ),
+                label=symbol,
+            )
             print(f"  {symbol} {args.frequency}: {len(df)} 条 ({df.index.min()} ~ {df.index.max()})")
             ok += 1
         except Exception as e:
@@ -263,7 +286,7 @@ def cmd_fetch(args) -> None:
 
 
 def cmd_regime(args) -> None:
-    from quantmaster.data.industry import load_industry_map
+    from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.market import analyze_market, analyze_sectors
 
     end = args.end or _today()
@@ -285,21 +308,40 @@ def cmd_regime(args) -> None:
         "sectors": [],
     }
     if not args.no_sectors:
-        mapping = load_industry_map()
+        mapping, industry_evidence = load_industry_analysis_context(
+            as_of=end if args.end else None,
+        )
         sectors = analyze_sectors(panel, mapping).head(args.sector_top)
         payload["sectors"] = sectors.to_dict(orient="records")
+        payload["industry_evidence"] = industry_evidence
     _print_json(payload)
 
 
 def cmd_select(args) -> None:
-    from quantmaster.data.industry import load_industry_map
+    from quantmaster.data import load_panel
+    from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.names import load_stock_names
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
     end = args.end or _today()
-    panel = _load_panel(args.universe, args.start, end)
-    mapping = {} if args.no_industry else load_industry_map()
+    if args.end and args.policy_mode == "live":
+        raise ValueError(
+            "显式历史截止日不能使用 live 模式；请选择 historical_replay 或 retrospective"
+        )
+    if not args.no_save and args.policy_mode == "retrospective":
+        raise ValueError("retrospective 结果只能配合 --no-save 使用")
+    universe_snapshot = load_universe_analysis_snapshot(
+        args.universe, as_of=end if args.end else None,
+    )
+    market_envelope = load_panel(list(universe_snapshot.symbols), args.start, end)
+    panel = _usable_market_data(market_envelope, label=f"{args.universe} 面板")
+    mapping, industry_evidence = (
+        ({}, None) if args.no_industry
+        else load_industry_analysis_context(as_of=end if args.end else None)
+    )
     names = load_stock_names(list(panel["close"].columns))
+    decision_feature_inputs: dict[str, pd.DataFrame] = {}
     report = hybrid_daily_selection(
         panel,
         top_n=args.top,
@@ -308,9 +350,39 @@ def cmd_select(args) -> None:
         universe=args.universe,
         industry_map=mapping,
         name_map=names,
+        policy_mode=args.policy_mode,
+        evidence_sink=decision_feature_inputs,
     )
+    report["calculation_quality"] = report.get("data_quality")
+    report["data_quality"] = market_envelope.quality.to_dict()
+    report["market_provenance"] = list(market_envelope.provenance)
+    report["universe_evidence"] = universe_snapshot.to_dict()
+    report["industry_evidence"] = industry_evidence
+    save_allowed = (
+        market_envelope.quality.formal_eligible
+        and universe_snapshot.formal_eligible
+        and (
+            args.no_industry
+            or bool((industry_evidence or {}).get("formal_eligible"))
+        )
+    )
+    report["persistence"] = {
+        "requested": not args.no_save,
+        "saved": False,
+        "status": (
+            "not_requested" if args.no_save else "pending" if save_allowed else "blocked"
+        ),
+        "reason": (
+            "" if args.no_save or save_allowed
+            else "行情、候选池或行业证据未通过正式门；结果按降级预览输出"
+        ),
+    }
     if not args.no_save:
-        DecisionStore().save(report, args.universe)
+        if save_allowed:
+            report["persistence"].update(saved=True, status="saved")
+            DecisionStore().save(
+                report, args.universe, panel={**panel, **decision_feature_inputs},
+            )
     _print_json(report)
 
 
@@ -476,7 +548,7 @@ def cmd_stockdb(args) -> int:
 
         from quantmaster.data.free_stockdb_compatibility import validate_runtime_profile
 
-        end = args.end or date.today().isoformat()
+        end = args.end or market_date().isoformat()
         start = args.start or (date.fromisoformat(end) - timedelta(days=300)).isoformat()
         samples = [
             {"symbol": symbol, "start": start, "end": end, "kind": kind}
@@ -514,7 +586,8 @@ def cmd_stockdb(args) -> int:
         _print_json(
             {
                 "status": "ok",
-                "upstream": "tushare",
+                "upstream": "vendor-declared-unverified",
+                "upstream_evidence": "not_provided",
                 "distribution": "free-stockdb",
                 "independent_cross_validation": False,
                 "probe": probe,
@@ -618,12 +691,14 @@ def cmd_factors(args) -> None:
 
 
 def cmd_factor_test(args) -> None:
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors import analyze_factor, compute_factor
     from quantmaster.factors.fundamental import resolve_factor
 
     end = args.end or _today()
-    factor = resolve_factor(args.expression, load_universe(args.universe), args.start, end)
+    factor = resolve_factor(
+        args.expression, load_universe_analysis(args.universe), args.start, end,
+    )
     panel = _load_panel(args.universe, args.start, end)
     values = compute_factor(factor, panel)
     if args.neutralize:
@@ -647,12 +722,12 @@ def cmd_backtest(args) -> None:
         yearly_returns,
     )
     from quantmaster.data import load_history
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors.fundamental import resolve_factor
 
     end = args.end or _today()
     panel = _load_panel(args.universe, args.start, end)
-    symbols = load_universe(args.universe)
+    symbols = load_universe_analysis(args.universe)
     names = [n.strip() for n in args.factor.split(",") if n.strip()]
     if args.strategy == "decision":
         from quantmaster.decision import HybridDecisionStrategy
@@ -678,7 +753,9 @@ def cmd_backtest(args) -> None:
         )
     benchmark = None
     try:
-        benchmark = load_history(args.benchmark, args.start, end)["close"]
+        benchmark = _usable_market_data(
+            load_history(args.benchmark, args.start, end), label=args.benchmark,
+        )["close"]
     except Exception as e:
         print(f"基准 {args.benchmark} 加载失败: {e}", file=sys.stderr)
     result = run_backtest(
@@ -698,11 +775,13 @@ def cmd_backtest(args) -> None:
 def cmd_validate(args) -> None:
     """样本外验证：防过拟合的第一道关卡。"""
     from quantmaster.backtest import train_test_ic, walk_forward_ic
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors.fundamental import resolve_factor
 
     end = args.end or _today()
-    factor = resolve_factor(args.expression, load_universe(args.universe), args.start, end)
+    factor = resolve_factor(
+        args.expression, load_universe_analysis(args.universe), args.start, end,
+    )
     panel = _load_panel(args.universe, args.start, end)
     result = train_test_ic(factor, panel, split=args.split)
     _print_json(result)
@@ -718,7 +797,9 @@ def cmd_grid(args) -> None:
     panel = _load_panel(args.universe, args.start, end)
     benchmark = None
     try:
-        benchmark = load_history(args.benchmark, args.start, end)["close"]
+        benchmark = _usable_market_data(
+            load_history(args.benchmark, args.start, end), label=args.benchmark,
+        )["close"]
     except Exception:
         pass
     table = grid_search(
@@ -736,12 +817,14 @@ def cmd_fund_test(args) -> None:
     """基本面因子体检（需要网络拉取估值/财务数据，结果会缓存）。"""
     from quantmaster.data import load_panel
     from quantmaster.data.fundamentals import fundamental_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors import analyze_factor, compute_factor, make_fundamental_factors
 
     end = args.end or _today()
-    symbols = load_universe(args.universe)
-    panel = load_panel(symbols, args.start, end)
+    symbols = load_universe_analysis(args.universe)
+    panel = _usable_market_data(
+        load_panel(symbols, args.start, end), label=f"{args.universe} 面板",
+    )
     fund = fundamental_panel(symbols, args.start, end)
     factors = make_fundamental_factors(fund)
     if args.factor not in factors:
@@ -856,17 +939,21 @@ def cmd_daily(args) -> None:
     from quantmaster.backtest.paper_accounts import get_paper_service
     from quantmaster.backtest.spec import PaperAccountSpec
     from quantmaster.data import load_history, load_panel, load_stock_names
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.industry import load_industry_analysis_context
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
     end = _today()
-    symbols = load_universe(args.universe)
+    universe_snapshot = load_universe_analysis_snapshot(args.universe)
+    symbols = list(universe_snapshot.symbols)
 
     print(f"== 1/4 更新行情（{len(symbols)} 只 + 基准）==", file=sys.stderr)
     ok = 0
     for symbol in [*symbols, args.benchmark]:
         try:
-            load_history(symbol, args.start, end)
+            _usable_market_data(
+                load_history(symbol, args.start, end), label=symbol,
+            )
             ok += 1
         except Exception as e:
             print(f"  {symbol}: {e}", file=sys.stderr)
@@ -880,21 +967,52 @@ def cmd_daily(args) -> None:
         print(f"  快讯抓取失败（不影响后续）: {e}", file=sys.stderr)
 
     print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
-    panel = load_panel(symbols, args.start, end)
+    market_envelope = load_panel(symbols, args.start, end)
+    panel = _usable_market_data(market_envelope, label=f"{args.universe} 面板")
+    industry_map, industry_evidence = load_industry_analysis_context()
+    decision_feature_inputs: dict[str, pd.DataFrame] = {}
     selection = hybrid_daily_selection(
         panel,
         top_n=args.top,
         horizon=args.holding_days,
         profile=args.profile,
         universe=args.universe,
+        industry_map=industry_map,
         name_map=load_stock_names(symbols),
+        evidence_sink=decision_feature_inputs,
     )
-    DecisionStore().save(selection, args.universe)
+    selection["calculation_quality"] = selection.get("data_quality")
+    selection["data_quality"] = market_envelope.quality.to_dict()
+    selection["market_provenance"] = list(market_envelope.provenance)
+    selection["universe_evidence"] = universe_snapshot.to_dict()
+    selection["industry_evidence"] = industry_evidence
+    save_allowed = (
+        market_envelope.quality.formal_eligible
+        and universe_snapshot.formal_eligible
+        and bool(industry_evidence.get("formal_eligible"))
+    )
+    selection["persistence"] = {
+        "requested": True,
+        "saved": save_allowed,
+        "status": "saved" if save_allowed else "blocked",
+        "reason": (
+            "" if save_allowed
+            else "行情、候选池或行业证据未通过正式门；已生成预览但未写入正式历史"
+        ),
+    }
+    if save_allowed:
+        DecisionStore().save(
+            selection, args.universe, panel={**panel, **decision_feature_inputs},
+        )
     print(
         f"  {selection['signal_date']}：{len(selection['picks'])} 只候选，"
         f"建议仓位 {selection['recommended_exposure']:.0%}",
         file=sys.stderr,
     )
+    if not save_allowed:
+        print("== 4/4 正式执行已跳过；输出降级分析预览 ==", file=sys.stderr)
+        _print_json(selection)
+        return
 
     print("== 4/4 处理模拟订单并生成收盘提案 ==", file=sys.stderr)
     strategy = _paper_strategy_payload(args)
@@ -929,7 +1047,11 @@ def cmd_daily(args) -> None:
 
 
 def cmd_universe(args) -> None:
-    from quantmaster.data.universe import index_universe, load_universe, save_universe
+    from quantmaster.data.universe import (
+        index_universe,
+        load_universe_analysis_snapshot,
+        save_universe,
+    )
 
     if args.universe_cmd == "create":
         if args.index:
@@ -942,8 +1064,11 @@ def cmd_universe(args) -> None:
         save_universe(args.name, symbols)
         print(f"候选 {args.name} 已保存：{len(symbols)} 只")
     elif args.universe_cmd == "show":
-        symbols = load_universe(args.name)
+        snapshot = load_universe_analysis_snapshot(args.name)
+        symbols = list(snapshot.symbols)
         print(f"{args.name}: {len(symbols)} 只")
+        if not snapshot.formal_eligible:
+            print(f"  [sandbox] {'；'.join(snapshot.issues)}")
         for s in symbols:
             print(f"  {s}")
     else:
@@ -978,7 +1103,9 @@ def cmd_ledger(args) -> None:
         prices = {}
         for symbol in symbols:
             try:
-                prices[symbol] = load_history(symbol, start, end, store=store)["close"]
+                prices[symbol] = _usable_market_data(
+                    load_history(symbol, start, end, store=store), label=symbol,
+                )["close"]
             except Exception as e:
                 print(f"  {symbol} 行情缺失（按最近成交价估值）: {e}", file=sys.stderr)
         nav = daily_nav(ledger, pd.DataFrame(prices))
@@ -991,7 +1118,10 @@ def cmd_ledger(args) -> None:
             "twr_nav": round(float(nav["twr_nav"].iloc[-1]), 4),
         }
         try:
-            bench = load_history(args.benchmark, start, end, store=store)["close"]
+            bench = _usable_market_data(
+                load_history(args.benchmark, start, end, store=store),
+                label=args.benchmark,
+            )["close"]
             summary["benchmark"] = args.benchmark
             summary["excess_annual"] = nav_with_benchmark(nav, bench)["excess_annual"]
         except Exception:
@@ -1040,6 +1170,24 @@ def cmd_data(args) -> None:
         return
     if args.data_cmd == "capabilities":
         _print_json(engine.capabilities())
+        return
+    if args.data_cmd == "preview":
+        trade_date = args.date or _today()
+        frame = engine.preview_date(args.dataset, trade_date)
+        rows = json.loads(
+            frame.head(args.limit).to_json(
+                orient="records", date_format="iso", force_ascii=False,
+            )
+        )
+        _print_json({
+            "tier": "sandbox",
+            "dataset_id": args.dataset,
+            "trade_date": trade_date,
+            "row_count": len(frame),
+            "returned_rows": len(rows),
+            "quality": dict(frame.attrs.get("research_partition_quality") or {}),
+            "rows": rows,
+        })
         return
     if args.data_cmd in {"jobs", "status", "cancel", "resume"}:
         from quantmaster.research.jobs import get_research_job_manager
@@ -1191,8 +1339,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     lprepare = lq.add_parser("prepare-data", help="冻结数据与候选快照")
     lab_common(lprepare)
-    for command in ("validate", "score"):
-        item = lq.add_parser(command, help="提交统一样本外验证任务")
+    for lab_command in ("validate", "score"):
+        item = lq.add_parser(lab_command, help="提交统一样本外验证任务")
         item.add_argument("version_id")
         lab_common(item)
     ldiscover = lq.add_parser("discover", help="提交遗传、DSL LLM 或 Python AutoMiner 任务")
@@ -1260,6 +1408,10 @@ def build_parser() -> argparse.ArgumentParser:
     dsub = p.add_subparsers(dest="data_cmd", required=True)
     dsub.add_parser("catalog", help="列出数据集、版本化研究规格和本地覆盖")
     dsub.add_parser("capabilities", help="查看 Tushare 权限和 Python/Rust 内核状态")
+    preview = dsub.add_parser("preview", help="预览不完整横截面；不写入正式研究湖")
+    preview.add_argument("--dataset", default="stock_bars")
+    preview.add_argument("--date", default=None)
+    preview.add_argument("--limit", type=int, default=500)
 
     def data_plan_args(command):
         command.add_argument("--assets", default="stock", help="逗号分隔：stock,etf,future")
@@ -1281,8 +1433,8 @@ def build_parser() -> argparse.ArgumentParser:
     dm.add_argument("--start", default="2022-01-01")
     dm.add_argument("--end", default=None)
     for command_name in ("jobs", "status"):
-        command = dsub.add_parser(command_name, help="查看持久化研究任务")
-        command.add_argument("--limit", type=int, default=50)
+        job_parser = dsub.add_parser(command_name, help="查看持久化研究任务")
+        job_parser.add_argument("--limit", type=int, default=50)
     dc = dsub.add_parser("cancel", help="请求取消正在由 Web/Worker 执行的任务")
     dc.add_argument("job_id")
     dr = dsub.add_parser("resume", help="恢复中断、取消或部分失败的任务")
@@ -1303,6 +1455,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default="risk_adjusted", choices=["risk_adjusted", "short_term", "stable"])
     p.add_argument("--no-industry", action="store_true", help="不加载行业名称")
     p.add_argument("--no-save", action="store_true", help="不保存本次决策快照")
+    p.add_argument(
+        "--policy-mode",
+        choices=["live", "historical_replay", "retrospective"],
+        default="live",
+    )
     p.set_defaults(func=cmd_select)
 
     p = sub.add_parser("decisions", help="查看本地保存的历史选股快照")

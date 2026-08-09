@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -30,12 +31,14 @@ from pydantic import Field
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.config import get_config
+from quantmaster.data.base import MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
+from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +258,30 @@ async def operation_problem(request: Request, exc: OperationProblem):
     )
 
 
+@app.exception_handler(MarketDataUnavailable)
+async def market_data_unavailable(request: Request, exc: MarketDataUnavailable):
+    """Preserve the complete market-data truth contract across HTTP failures."""
+    problem = make_problem(
+        "market_data_unavailable",
+        source="行情数据",
+        title="行情证据不可用",
+        message=str(exc),
+        action="检查缺失范围、来源与刷新状态后重试；不要据此生成正式决策。",
+        blocking=True,
+        can_continue=False,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": str(exc),
+            "problem": problem,
+            "data_quality": exc.quality.to_dict(),
+            "provenance": list(exc.provenance),
+            "error_id": _request_id(request),
+        },
+    )
+
+
 @app.middleware("http")
 async def request_context_and_migration_lock(request: Request, call_next):
     """Apply the local security boundary, request context and migration lock."""
@@ -467,6 +494,25 @@ def _progress_stream(
             if exc.data_quality is not None:
                 event["data_quality"] = exc.data_quality
             events.put(event)
+        except MarketDataUnavailable as exc:
+            problem = make_problem(
+                "market_data_unavailable",
+                source="行情数据",
+                title="行情证据不可用",
+                message=str(exc),
+                action="检查缺失范围、来源与刷新状态后重试；不要据此生成正式决策。",
+                blocking=True,
+                can_continue=False,
+            )
+            events.put({
+                "type": "error",
+                "message": str(exc),
+                "problem": problem,
+                "data_quality": exc.quality.to_dict(),
+                "provenance": list(exc.provenance),
+                "error_id": request_id,
+                "request_id": request_id,
+            })
         except Exception as exc:
             logger.exception("流式数据任务失败 request_id=%s", request_id)
             message = _safe_client_error(exc)
@@ -713,6 +759,22 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
             rsi = round(float(rsi_series.iloc[-1]), 2)
     except ValueError:
         rsi = None
+    try:
+        quality = json.loads(str((meta or {}).get("quality_json") or "{}"))
+        if not isinstance(quality, dict):
+            quality = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        quality = {}
+    if not quality:
+        quality = {
+            "status": "degraded",
+            "sources": [str((meta or {}).get("last_source") or "local-cache")],
+            "issues": ["缓存缺少版本化质量与来源证据"],
+            "stale": str((meta or {}).get("last_status") or "") in {
+                "stale", "refresh_failed",
+            },
+            "partial": True,
+        }
     return {
         "symbol": symbol,
         "name": name,
@@ -726,6 +788,7 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         "rsi_14": rsi,
         "rsi_history": rsi_history,
         "opportunity": classify_opportunity(rsi),
+        "data_quality": quality,
         "freshness": (
             "stale"
             if str((meta or {}).get("last_status") or "ready") in {"stale", "refresh_failed"}
@@ -759,7 +822,7 @@ def _sync_reference_market(
         ReferenceMarketUnavailable,
         fetch_reference,
     )
-    from quantmaster.data.registry import _covers_requested_range
+    from quantmaster.data.registry import _assess_daily_frame, _covers_requested_range
     from quantmaster.data.resilience import data_priority
 
     plans: dict[str, str] = {}
@@ -788,8 +851,18 @@ def _sync_reference_market(
                 cached = store.get(symbol)
                 merged = frame if cached is None or cached.empty else pd.concat([cached, frame])
                 merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-                store.put(symbol, merged, replace=True)
-                store.mark_checked(symbol, fetch_start, end, source=fetched.source)
+                quality = _assess_daily_frame(
+                    merged.loc[start:end], start, end, symbol=symbol, source=fetched.source,
+                )
+                store.put(
+                    symbol,
+                    merged,
+                    replace=True,
+                    request_start=fetch_start,
+                    request_end=end,
+                    source=fetched.source,
+                    quality=quality.to_dict(),
+                )
         except ReferenceMarketUnavailable as exc:
             failures[symbol] = {
                 "error_code": "all_sources_unavailable",
@@ -835,7 +908,7 @@ def _market_overview_data(
     from quantmaster.data.storage import BarStore
     from quantmaster.data.yfinance_source import GLOBAL_REFS
 
-    end = pd.Timestamp.now().normalize()
+    end = pd.Timestamp(market_date())
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
     start_value, end_value = str(start_ts.date()), str(end.date())
     personal_symbols, personal_memberships = _personal_market_symbols()
@@ -869,7 +942,7 @@ def _market_overview_data(
     yahoo_symbols = set(GLOBAL_REFS)
 
     def one(group: str, symbol: str, name: str):
-        frame = load_history(
+        envelope = load_history(
             symbol,
             start_value,
             end_value,
@@ -877,7 +950,7 @@ def _market_overview_data(
             refresh=refresh,
             priority="interactive",
         )
-        return group, symbol, name, frame
+        return group, symbol, name, envelope.require_data(), envelope.quality.to_dict()
 
     futures = {}
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-sync") as executor:
@@ -947,11 +1020,13 @@ def _market_overview_data(
             completed += 1
             try:
                 market_result = cast(
-                    tuple[str, str, str, pd.DataFrame],
+                    tuple[str, str, str, pd.DataFrame, dict],
                     future.result(),
                 )
                 frame = market_result[3]
                 item = _market_item(symbol, name, frame, store.metadata(symbol))
+                if item is not None:
+                    item["data_quality"] = market_result[4]
             except Exception as exc:
                 logger.debug("市场概览跳过 %s: %s", symbol, exc)
                 item = items.get((group, symbol))
@@ -1021,11 +1096,42 @@ def _market_overview_data(
                 if (status_issue := failures.get((group, symbol)))
             ],
         }
+    item_qualities = [
+        item.get("data_quality") or {}
+        for values in result.values()
+        for item in values
+    ]
+    stale_total = sum(int(str(value["stale"])) for value in group_statuses.values())
+    degraded_total = sum(
+        str(value.get("status") or "degraded") != "verified"
+        or bool(value.get("stale"))
+        or bool(value.get("partial"))
+        for value in item_qualities
+    )
+    missing_total = len(unavailable)
+    ready_total = sum(len(value) for value in result.values())
+    quality_status = (
+        "unavailable" if total and not ready_total
+        else "degraded" if degraded_total or stale_total or missing_total
+        else "verified"
+    )
     return {
         "groups": result,
         "group_counts": {group: len(symbols) for group, symbols in groups.items()},
         "group_statuses": group_statuses,
         "unavailable_items": unavailable,
+        "data_quality": {
+            "status": quality_status,
+            "stale": bool(stale_total),
+            "partial": bool(stale_total or missing_total),
+            "issues": [item for item in [
+                f"{missing_total} 个标的不可用" if missing_total else "",
+                f"{stale_total} 个标的使用陈旧缓存" if stale_total else "",
+                f"{degraded_total} 个标的证据未完全验证" if degraded_total else "",
+            ] if item],
+            "requested_count": total,
+            "observed_count": ready_total,
+        },
     }
 
 
@@ -1070,7 +1176,7 @@ def market_history(
     from quantmaster.data import load_bars
     from quantmaster.data.base import validate_frequency, validate_symbol
 
-    end = end or str(pd.Timestamp.now().date())
+    end = end or market_date().isoformat()
     try:
         symbol = validate_symbol(symbol)
         frequency = validate_frequency(frequency)
@@ -1086,7 +1192,10 @@ def market_history(
         start = str(start_stamp.date())
     started = time.perf_counter()
     try:
-        df = load_bars(symbol, start, end, frequency=frequency)
+        market_envelope = load_bars(symbol, start, end, frequency=frequency)
+        df = market_envelope.require_data()
+    except MarketDataUnavailable:
+        raise
     except Exception:
         logger.warning("行情历史读取失败 symbol=%s frequency=%s", symbol, frequency, exc_info=True)
         raise HTTPException(503, f"{symbol} 行情暂不可用，请查看本机日志") from None
@@ -1120,6 +1229,8 @@ def market_history(
         "symbol": symbol,
         "frequency": frequency,
         "kline": kline,
+        "data_quality": market_envelope.quality.to_dict(),
+        "provenance": list(market_envelope.provenance),
     }
 
 
@@ -1136,13 +1247,17 @@ class RegimeRequest(ContractModel):
 def market_regime(req: RegimeRequest) -> dict:
     """当前/过去/未来市场状态，以及行业板块强弱。"""
     from quantmaster.data import load_panel
-    from quantmaster.data.industry import load_industry_map
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.industry import load_industry_analysis_context
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.market import analyze_market, analyze_sectors
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        panel = load_panel(load_universe(req.universe), req.start, end)
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        panel = market_envelope.require_data()
         report = analyze_market(panel)
         past = report.pop("past").tail(req.history)
         report["past"] = [
@@ -1151,9 +1266,20 @@ def market_regime(req: RegimeRequest) -> dict:
         ]
         report["sectors"] = []
         if req.sectors:
-            sectors = analyze_sectors(panel, load_industry_map()).head(req.sector_top)
+            mapping, industry_evidence = load_industry_analysis_context(
+                as_of=end if req.end else None,
+            )
+            sectors = analyze_sectors(
+                panel,
+                mapping,
+            ).head(req.sector_top)
             report["sectors"] = sectors.to_dict(orient="records")
+            report["industry_evidence"] = industry_evidence
+        report["data_quality"] = market_envelope.quality.to_dict()
+        report["universe_evidence"] = universe_snapshot.to_dict()
         return report
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 
@@ -1168,22 +1294,45 @@ class SelectionRequest(ContractModel):
     cap_weight: float = Field(0.25, gt=0, le=1)
     include_industry: bool = True
     save: bool = False
+    policy_mode: Literal["live", "historical_replay", "retrospective"] = "live"
 
 
 @app.post("/api/v1/research/selection/daily")
 def selection_daily(req: SelectionRequest) -> dict:
     """收盘后生成适合次日执行的 1–30 日预测选股决策。"""
     from quantmaster.data import load_panel, load_stock_names
-    from quantmaster.data.industry import load_industry_map
-    from quantmaster.data.universe import load_universe
-    from quantmaster.decision import hybrid_daily_selection
+    from quantmaster.data.industry import load_industry_analysis_context
+    from quantmaster.data.universe import load_universe_analysis_snapshot
+    from quantmaster.decision import hybrid_daily_selection, resolve_policy
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        symbols = load_universe(req.universe)
-        panel = load_panel(symbols, req.start, end)
-        mapping = load_industry_map() if req.include_industry else {}
+        if req.end and req.policy_mode == "live":
+            raise ValueError(
+                "显式历史截止日不能使用 live 模式；请选择 historical_replay 或 retrospective"
+            )
+        if req.save and req.policy_mode == "retrospective":
+            raise ValueError("retrospective 结果不能写入正式决策历史")
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        symbols = list(universe_snapshot.symbols)
+        market_envelope = load_panel(symbols, req.start, end)
+        panel = market_envelope.require_data()
+        mapping, industry_evidence = (
+            load_industry_analysis_context(as_of=end if req.end else None)
+            if req.include_industry else ({}, None)
+        )
         names = load_stock_names(symbols)
+        policy = resolve_policy(
+            req.universe,
+            req.horizon,
+            req.profile,
+            symbols=list(panel["close"].columns),
+            as_of=end if req.policy_mode == "historical_replay" else "",
+            mode=req.policy_mode,
+        )
+        decision_feature_inputs: dict[str, pd.DataFrame] = {}
         report = hybrid_daily_selection(
             panel,
             top_n=req.top_n,
@@ -1192,13 +1341,51 @@ def selection_daily(req: SelectionRequest) -> dict:
             universe=req.universe,
             industry_map=mapping,
             name_map=names,
+            policy_snapshot=policy,
             cap_weight=req.cap_weight,
+            policy_mode=req.policy_mode,
+            evidence_sink=decision_feature_inputs,
         )
+        report["calculation_quality"] = report.get("data_quality")
+        report["data_quality"] = market_envelope.quality.to_dict()
+        report["market_provenance"] = list(market_envelope.provenance)
+        report["universe_evidence"] = universe_snapshot.to_dict()
+        report["industry_evidence"] = industry_evidence
+        save_allowed = (
+            market_envelope.quality.formal_eligible
+            and universe_snapshot.formal_eligible
+            and (
+                not req.include_industry
+                or bool((industry_evidence or {}).get("formal_eligible"))
+            )
+        )
+        persistence = {
+            "requested": req.save,
+            "saved": False,
+            "status": (
+                "not_requested" if not req.save else "pending" if save_allowed else "blocked"
+            ),
+            "reason": "",
+        }
         if req.save:
-            from quantmaster.decision import DecisionStore
+            if save_allowed:
+                from quantmaster.decision import DecisionStore
 
-            DecisionStore().save(report, req.universe)
+                persistence.update(saved=True, status="saved")
+                report["persistence"] = persistence
+                DecisionStore().save(
+                    report,
+                    req.universe,
+                    panel={**panel, **decision_feature_inputs},
+                )
+            else:
+                persistence["reason"] = (
+                    "正式决策未保存：行情、候选池或行业证据未通过正式门；计算结果仅供查看"
+                )
+        report["persistence"] = persistence
         return report
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 
@@ -1283,6 +1470,7 @@ class DecisionDashboardRequest(ContractModel):
     sector_top: int = Field(10, ge=1, le=50)
     history: int = Field(2600, ge=7, le=3000)
     save: bool = True
+    policy_mode: Literal["live", "historical_replay", "retrospective"] = "live"
 
 
 @app.post("/api/v1/research/decision/dashboard")
@@ -1290,6 +1478,8 @@ def decision_dashboard(req: DecisionDashboardRequest) -> dict:
     """决策工作台：只加载一次行情，同时生成市场、板块、选股和历史快照。"""
     try:
         return _decision_dashboard_data(req)
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
 
@@ -1299,8 +1489,8 @@ def _decision_dashboard_data(
     progress: ProgressEmitter | None = None,
 ) -> dict:
     from quantmaster.data import load_panel, load_stock_names
-    from quantmaster.data.industry import load_industry_map
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.industry import load_industry_analysis_context
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import (
         DecisionStore,
         enrich_decision_snapshots,
@@ -1310,8 +1500,17 @@ def _decision_dashboard_data(
     )
     from quantmaster.market import analyze_market, analyze_sectors
 
-    end = req.end or str(pd.Timestamp.now().date())
-    symbols = load_universe(req.universe)
+    end = req.end or market_date().isoformat()
+    if req.end and req.policy_mode == "live":
+        raise ValueError(
+            "显式历史截止日不能使用 live 模式；请选择 historical_replay 或 retrospective"
+        )
+    if req.save and req.policy_mode == "retrospective":
+        raise ValueError("retrospective 结果不能写入正式决策历史")
+    universe_snapshot = load_universe_analysis_snapshot(
+        req.universe, as_of=end if req.end else None,
+    )
+    symbols = list(universe_snapshot.symbols)
     if progress:
         progress(3, "准备候选", f"共 {len(symbols)} 只标的")
 
@@ -1331,10 +1530,15 @@ def _decision_dashboard_data(
                 "info" if success else "warning",
             )
 
-    panel = load_panel(symbols, req.start, end, progress=on_symbol if progress else None)
+    market_envelope = load_panel(
+        symbols, req.start, end, progress=on_symbol if progress else None,
+    )
+    panel = market_envelope.require_data()
     if progress:
         progress(67, "加载行业与名称", "优先复用本地缓存")
-    mapping = load_industry_map()
+    mapping, industry_evidence = load_industry_analysis_context(
+        as_of=end if req.end else None,
+    )
     names = load_stock_names(symbols)
     if progress:
         progress(78, "计算牛熊与趋势", "汇总 MACD、资金量和市场宽度")
@@ -1369,6 +1573,8 @@ def _decision_dashboard_data(
         req.horizon,
         req.profile,
         symbols=list(panel["close"].columns),
+        as_of=end if req.policy_mode == "historical_replay" else "",
+        mode=req.policy_mode,
     )
     if progress:
         progress(
@@ -1378,6 +1584,7 @@ def _decision_dashboard_data(
             {"kind": "decision_policy", "policy": policy},
         )
         progress(93, "生成每日候选", f"目标持有 {req.horizon} 日")
+    decision_feature_inputs: dict[str, pd.DataFrame] = {}
     selection = hybrid_daily_selection(
         panel,
         top_n=req.top_n,
@@ -1388,7 +1595,32 @@ def _decision_dashboard_data(
         name_map=names,
         policy_snapshot=policy,
         cap_weight=req.cap_weight,
+        policy_mode=req.policy_mode,
+        evidence_sink=decision_feature_inputs,
     )
+    selection["calculation_quality"] = selection.get("data_quality")
+    selection["data_quality"] = market_envelope.quality.to_dict()
+    selection["market_provenance"] = list(market_envelope.provenance)
+    selection["universe_evidence"] = universe_snapshot.to_dict()
+    selection["industry_evidence"] = industry_evidence
+    save_allowed = (
+        market_envelope.quality.formal_eligible
+        and universe_snapshot.formal_eligible
+        and bool(industry_evidence.get("formal_eligible"))
+    )
+    persistence = {
+        "requested": req.save,
+        "saved": False,
+        "status": (
+            "not_requested" if not req.save else "pending" if save_allowed else "blocked"
+        ),
+        "reason": "",
+    }
+    if req.save and not save_allowed:
+        persistence["reason"] = (
+            "正式决策未保存：行情、候选池或行业证据未通过正式门；计算结果仅供查看"
+        )
+    selection["persistence"] = persistence
     if progress:
         progress(
             96,
@@ -1397,10 +1629,16 @@ def _decision_dashboard_data(
             {"kind": "decision_selection", "selection": selection},
         )
     store = DecisionStore()
-    if req.save:
+    if req.save and save_allowed:
         if progress:
             progress(97, "保存决策快照", "写入本地 SQLite")
-        store.save(selection, req.universe)
+        persistence.update(saved=True, status="saved")
+        selection["persistence"] = persistence
+        store.save(
+            selection,
+            req.universe,
+            panel={**panel, **decision_feature_inputs},
+        )
     history = store.history(req.universe, limit=10, profile=req.profile)
     # 旧版本快照没有 name 字段；响应时补齐，避免历史区继续只显示代码。
     for snapshot in history:
@@ -1423,7 +1661,12 @@ def _decision_dashboard_data(
         "selection": selection,
         "history": history,
         "model_snapshot": selection.get("model_snapshot"),
-        "data_quality": selection.get("data_quality"),
+        "calculation_quality": selection.get("calculation_quality"),
+        "data_quality": market_envelope.quality.to_dict(),
+        "provenance": list(market_envelope.provenance),
+        "persistence": persistence,
+        "universe_evidence": universe_snapshot.to_dict(),
+        "industry_evidence": industry_evidence,
     }
     if progress:
         progress(100, "决策数据已就绪", f"生成 {len(selection.get('picks', []))} 只候选")
@@ -1482,26 +1725,35 @@ class FactorTestRequest(ContractModel):
 @app.post("/api/v1/research/factors/test")
 def factors_test(req: FactorTestRequest) -> dict:
     from quantmaster.data import load_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors import analyze_factor, compute_factor
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        symbols = load_universe(req.universe)
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        symbols = list(universe_snapshot.symbols)
         factor = resolve_factor(req.expression, symbols, req.start, end)
-        panel = load_panel(symbols, req.start, end)
+        market_envelope = load_panel(symbols, req.start, end)
+        panel = market_envelope.require_data()
         values = compute_factor(factor, panel)
         neutralized = False
+        industry_evidence = None
         if req.neutralize:
-            from quantmaster.data.industry import load_industry_map
+            from quantmaster.data.industry import load_industry_analysis_context
             from quantmaster.factors.neutral import industry_neutralize
 
-            mapping = load_industry_map()
+            mapping, industry_evidence = load_industry_analysis_context(
+                as_of=end if req.end else None,
+            )
             if mapping:
                 values = industry_neutralize(values, mapping)
                 neutralized = True
         report = analyze_factor(values, panel["close"], name=factor.name, quantiles=req.quantiles)
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
     return {
@@ -1511,6 +1763,9 @@ def factors_test(req: FactorTestRequest) -> dict:
         "quantile_nav": {
             col: _series_to_points(report.quantile_returns[col]) for col in report.quantile_returns.columns
         },
+        "data_quality": market_envelope.quality.to_dict(),
+        "universe_evidence": universe_snapshot.to_dict(),
+        "industry_evidence": industry_evidence,
     }
 
 
@@ -1528,14 +1783,18 @@ def factors_validate(req: ValidateRequest) -> dict:
     """样本外验证：split 前训练、split 后验证，外加滚动分段稳定性。"""
     from quantmaster.backtest import train_test_ic, walk_forward_ic
     from quantmaster.data import load_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        symbols = load_universe(req.universe)
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        symbols = list(universe_snapshot.symbols)
         factor = resolve_factor(req.expression, symbols, req.start, end)
-        panel = load_panel(symbols, req.start, end)
+        market_envelope = load_panel(symbols, req.start, end)
+        panel = market_envelope.require_data()
         result = train_test_ic(factor, panel, split=req.split)
         segments = walk_forward_ic(factor, panel, n_splits=req.n_splits)
         result["segments"] = [
@@ -1545,8 +1804,12 @@ def factors_validate(req: ValidateRequest) -> dict:
             }
             for _, row in segments.iterrows()
         ]
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
+    result["data_quality"] = market_envelope.quality.to_dict()
+    result["universe_evidence"] = universe_snapshot.to_dict()
     return result
 
 
@@ -1566,17 +1829,27 @@ class MineRequest(ContractModel):
 @app.post("/api/v1/research/mining/genetic")
 def mine_genetic(req: MineRequest) -> dict:
     from quantmaster.data import load_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import GeneticMiner
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        panel = load_panel(load_universe(req.universe), req.start, end)
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        panel = market_envelope.require_data()
         miner = GeneticMiner(population=req.population, generations=req.generations, seed=req.seed)
         mined = miner.mine(panel, top_n=req.top_n, progress=False)
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
-    return {"factors": [m.__dict__ for m in mined]}
+    return {
+        "factors": [m.__dict__ for m in mined],
+        "data_quality": market_envelope.quality.to_dict(),
+        "universe_evidence": universe_snapshot.to_dict(),
+    }
 
 
 class MineLLMRequest(ContractModel):
@@ -1590,17 +1863,27 @@ class MineLLMRequest(ContractModel):
 @app.post("/api/v1/research/mining/llm")
 def mine_llm(req: MineLLMRequest) -> dict:
     from quantmaster.data import load_panel
-    from quantmaster.data.universe import load_universe
+    from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import LLMFactorMiner
 
-    end = req.end or str(pd.Timestamp.now().date())
+    end = req.end or market_date().isoformat()
     try:
-        panel = load_panel(load_universe(req.universe), req.start, end)
+        universe_snapshot = load_universe_analysis_snapshot(
+            req.universe, as_of=end if req.end else None,
+        )
+        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        panel = market_envelope.require_data()
         miner = LLMFactorMiner()
         mined = miner.mine(panel, n=req.n, rounds=req.rounds)
+    except MarketDataUnavailable:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e)) from e
-    return {"factors": [m.__dict__ for m in mined]}
+    return {
+        "factors": [m.__dict__ for m in mined],
+        "data_quality": market_envelope.quality.to_dict(),
+        "universe_evidence": universe_snapshot.to_dict(),
+    }
 
 
 # ---------- 实盘账本 ----------
@@ -1764,31 +2047,88 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     ledger = Ledger()
     trades = ledger.trades()
     if trades.empty:
-        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0, "assets": [], "pnl": []}
+        return {
+            "dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0,
+            "assets": [], "pnl": [],
+            "data_quality": {
+                "status": "verified", "partial": False, "stale": False,
+                "issues": [], "by_symbol": {},
+            },
+            "market_provenance": {},
+        }
     symbols = sorted(trades["symbol"].unique())
     start = str(pd.to_datetime(trades["date"]).min().date())
-    end = str(pd.Timestamp.now().date())
+    end = market_date().isoformat()
     store = BarStore()
     prices: dict[str, pd.Series] = {}
+    market_quality: dict[str, dict] = {}
+    market_provenance: dict[str, list[dict]] = {}
     for symbol in symbols:
         try:
-            prices[symbol] = load_history(symbol, start, end, store=store)["close"]
+            envelope = load_history(symbol, start, end, store=store)
+            prices[symbol] = envelope.require_data()["close"]
+            market_quality[symbol] = envelope.quality.to_dict()
+            market_provenance[symbol] = list(envelope.provenance)
         except Exception as e:
             logger.warning("实盘净值缺行情 %s: %s", symbol, e)
+            market_quality[symbol] = {
+                "status": "unavailable", "stale": False, "partial": True,
+                "issues": [str(e)],
+            }
+            market_provenance[symbol] = []
     nav = daily_nav(ledger, pd.DataFrame(prices))
     if nav.empty:
-        return {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0, "assets": [], "pnl": []}
+        return {
+            "dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0,
+            "assets": [], "pnl": [],
+            "data_quality": {
+                "status": "unavailable", "partial": True,
+                "stale": any(bool(value.get("stale")) for value in market_quality.values()),
+                "issues": ["没有足够行情构建实盘净值曲线"],
+                "by_symbol": market_quality,
+            },
+            "market_provenance": market_provenance,
+        }
     payload = {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0}
     try:
-        bench = load_history(benchmark, start, end, store=store)["close"]
+        benchmark_envelope = load_history(benchmark, start, end, store=store)
+        bench = benchmark_envelope.require_data()["close"]
+        market_quality[benchmark] = benchmark_envelope.quality.to_dict()
+        market_provenance[benchmark] = list(benchmark_envelope.provenance)
         payload = nav_with_benchmark(nav, bench)
     except Exception as e:
         logger.warning("基准 %s 加载失败: %s", benchmark, e)
+        market_quality[benchmark] = {
+            "status": "unavailable", "stale": False, "partial": True,
+            "issues": [f"基准行情不可用：{e}"],
+        }
+        market_provenance[benchmark] = []
         payload["dates"] = [str(d.date()) for d in nav.index]
         payload["twr"] = [round(float(v), 6) for v in nav["twr_nav"]]
     payload["assets"] = _series_to_points(nav["total_assets"])
     payload["pnl"] = _series_to_points(nav["pnl"])
     payload["warnings"] = nav_warnings(nav)
+    statuses = [str(value.get("status") or "unavailable") for value in market_quality.values()]
+    issues = [
+        f"{symbol}: {issue}"
+        for symbol, quality in market_quality.items()
+        for issue in (quality.get("issues") or [])
+    ]
+    missing_count = len(symbols) - len(prices)
+    if missing_count:
+        issues.append(f"{missing_count} 个持仓缺少可用行情")
+    status = (
+        "unavailable" if "unavailable" in statuses
+        else "degraded" if "degraded" in statuses else "verified"
+    )
+    payload["data_quality"] = {
+        "status": status,
+        "partial": missing_count > 0 or any(bool(value.get("partial")) for value in market_quality.values()),
+        "stale": any(bool(value.get("stale")) for value in market_quality.values()),
+        "issues": list(dict.fromkeys(issues)),
+        "by_symbol": market_quality,
+    }
+    payload["market_provenance"] = market_provenance
     return payload
 
 

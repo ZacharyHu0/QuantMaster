@@ -26,6 +26,7 @@ from quantmaster.backtest.spec import (
     split_factor_references,
 )
 from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.portfolio import TradeRecord
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
@@ -414,7 +415,26 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
     monkeypatch.setattr(service, "_strategy_change_signal_date", lambda: "2026-08-06")
     recent_index = pd.bdate_range(end="2026-08-06", periods=len(panel["close"]))
     recent_panel = {name: values.set_axis(recent_index) for name, values in panel.items()}
-    monkeypatch.setattr("quantmaster.data.load_panel", lambda *_args, **_kwargs: recent_panel)
+    recent_envelope = BarDataEnvelope(
+        data=recent_panel,
+        quality=BarDataQuality(
+            status="verified",
+            requested_start=str(recent_index[0].date()),
+            requested_end=str(recent_index[-1].date()),
+            observed_start=str(recent_index[0].date()),
+            observed_end=str(recent_index[-1].date()),
+            coverage_ratio=1.0,
+            sources=("fixture",),
+            timezone="Asia/Shanghai",
+            adjustment="qfq",
+            requested_symbols=("600000.SH", "600001.SH"),
+            observed_symbols=("600000.SH", "600001.SH"),
+        ),
+        provenance=({"source": "fixture"},),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.load_panel", lambda *_args, **_kwargs: recent_envelope,
+    )
     changed_strategy = same_strategy.model_copy(update={"top_n": 2})
     changed = service.update_account(account["id"], strategy=changed_strategy)
     assert changed["strategy"]["top_n"] == 2

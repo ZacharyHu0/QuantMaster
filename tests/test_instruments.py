@@ -2,13 +2,98 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 from fastapi.testclient import TestClient
 
 from quantmaster.data.instruments import InstrumentStore, resolve_instruments
 from quantmaster.server.app import app
+
+
+def test_forced_authoritative_catalog_refresh_bypasses_old_endpoint_cache(
+    tmp_path, monkeypatch,
+):
+    from quantmaster.data import instrument_snapshots, instruments, tushare_source
+    from quantmaster.data.resilience import EndpointFrameCache
+
+    cache = EndpointFrameCache("catalog-bypass", root=tmp_path / "cache")
+    fields = (
+        "ts_code,symbol,name,fullname,enname,exchange,curr_type,"
+        "list_status,list_date,delist_date"
+    )
+    cache.put(
+        "stock_basic",
+        {"list_status": "L", "fields": fields},
+        pd.DataFrame([{
+            "ts_code": "600999.SH", "symbol": "600999", "name": "旧缓存",
+            "fullname": "", "enname": "", "exchange": "SSE", "curr_type": "CNY",
+            "list_status": "L", "list_date": "20200101", "delist_date": "",
+        }]),
+    )
+
+    class Api:
+        def __init__(self):
+            self.calls = []
+
+        def stock_basic(self, **params):
+            self.calls.append(("stock_basic", params["list_status"]))
+            status = params["list_status"]
+            code = {"L": "600001.SH", "D": "600002.SH", "P": "600003.SH"}[status]
+            return pd.DataFrame([{
+                "ts_code": code, "symbol": code[:6], "name": f"新目录{status}",
+                "fullname": "", "enname": "", "exchange": "SSE", "curr_type": "CNY",
+                "list_status": status, "list_date": "20200101",
+                "delist_date": "20260801" if status == "D" else "",
+            }])
+
+        def fund_basic(self, **params):
+            status = params["status"]
+            return pd.DataFrame([{
+                "ts_code": f"51030{0 if status == 'L' else 1}.SH",
+                "name": f"ETF{status}", "fund_type": "ETF", "status": status,
+                "list_date": "20200101", "delist_date": "20260801" if status == "D" else "",
+            }])
+
+        def index_basic(self, **params):
+                return pd.DataFrame([{
+                    "ts_code": f"00000{len(self.calls)}.CSI", "name": params["market"],
+                    "fullname": params["market"], "market": params["market"],
+                }])
+
+        def hk_basic(self, **params):
+            status = params["list_status"]
+            return pd.DataFrame([{
+                "ts_code": f"0000{len(self.calls)}.HK", "symbol": f"0000{len(self.calls)}",
+                "name": f"HK{status}", "fullname": "", "enname": "",
+                "list_status": status, "list_date": "20200101",
+                "delist_date": "20260801" if status == "D" else "",
+            }])
+
+    source = tushare_source.TushareSource(cache)
+    api = Api()
+    source._api = api
+    captured = {}
+
+    def freeze(records, **_kwargs):
+        captured["symbols"] = {item["symbol"] for item in records}
+        return SimpleNamespace(
+            snapshot_id="fresh-catalog",
+            acquired_at=datetime.now(UTC).isoformat(),
+        )
+
+    monkeypatch.setattr(tushare_source, "TushareSource", lambda: source)
+    monkeypatch.setattr(instrument_snapshots, "freeze_instrument_catalog", freeze)
+    monkeypatch.setattr(instruments, "_nasdaq_directory_records", list)
+
+    result = instruments.refresh_instrument_master(force=True)
+
+    assert result["sources"]["tushare:catalog"]["snapshot_id"] == "fresh-catalog"
+    assert ("stock_basic", "L") in api.calls
+    assert "600001.SH" in captured["symbols"]
+    assert "600999.SH" not in captured["symbols"]
 
 
 def test_bundled_master_is_offline_and_covers_core_markets(isolated_config):

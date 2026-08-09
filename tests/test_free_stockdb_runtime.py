@@ -40,7 +40,7 @@ def test_free_stockdb_settings_validate_schedule_and_root() -> None:
     assert settings.free_stockdb_managed is True
     assert settings.free_stockdb_auto_update is True
     assert settings.free_stockdb_update_time == "18:30"
-    assert settings.free_stockdb_online_enabled is True
+    assert settings.free_stockdb_online_enabled is False
     assert settings.free_stockdb_online_url == "http://8.138.149.215:7899"
 
     with pytest.raises(ValueError):
@@ -208,6 +208,15 @@ def test_vendor_notice_parser_extracts_data_date_and_version() -> None:
         "version": "2.3.1",
         "announcement": "[08-05] 二次加速修复",
     }
+
+
+def test_vendor_date_validation_uses_shanghai_market_date(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.market_date",
+        lambda: pd.Timestamp("2026-08-10").date(),
+    )
+    assert FreeStockDBRuntime._valid_date("2026-08-10") == "2026-08-10"
+    assert FreeStockDBRuntime._valid_date("2026-08-11") == ""
 
 
 def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) -> None:
@@ -508,3 +517,149 @@ def test_full_market_validation_uses_actual_target_rows(isolated_config, monkeyp
     assert validation["complete"] is True
     assert validation["actual_session"] == "2026-08-07"
     assert validation["symbol_ratio"] == 1.0
+
+
+def test_full_market_validation_rejects_stable_twenty_percent_symbol_gap(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+
+    instruments = [
+        SimpleNamespace(symbol=f"{index:06d}.SZ", status="listed", exchange="SZ")
+        for index in range(10)
+    ]
+    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+
+    def cross_section(_self, symbols, _start, _end):
+        selected = symbols[:8]
+        return pd.DataFrame({
+            "symbol": selected,
+            "date": [pd.Timestamp("2026-08-07")] * len(selected),
+            "open": [1.0] * len(selected), "high": [1.0] * len(selected),
+            "low": [1.0] * len(selected), "close": [1.0] * len(selected),
+            "volume": [1.0] * len(selected),
+        })
+
+    monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+    assert validation["complete"] is False
+    assert validation["symbol_ratio"] == 0.8
+    assert any("没有停牌/退市证据" in issue for issue in validation["issues"])
+
+
+def test_full_market_validation_accepts_only_explicit_suspension_evidence(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data import instrument_snapshots
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+
+    instruments = [
+        SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
+        SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
+    ]
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    monkeypatch.setattr(
+        FreeStockDBSource,
+        "daily_cross_section",
+        lambda _self, _symbols, _start, _end: pd.DataFrame({
+            "symbol": ["000001.SZ"],
+            "date": [pd.Timestamp("2026-08-07")],
+            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+            "volume": [1.0],
+        }),
+    )
+    monkeypatch.setattr(
+        instrument_snapshots,
+        "load_or_fetch_suspension_snapshot",
+        lambda _source, _date: {
+            "source": "tushare:suspend_d",
+            "contract": "tushare-suspend_d-trade-date-v1",
+            "symbols": ["000002.SZ"],
+            "content_hash": "suspension-proof",
+        },
+    )
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+
+    assert validation["complete"] is True
+    assert validation["catalog_symbols"] == 2
+    assert validation["expected_trading_symbols"] == 1
+    assert validation["observed_symbols"] == 1
+    assert validation["excused_suspended_symbols"] == ["000002.SZ"]
+    assert validation["suspension_evidence"]["content_hash"] == "suspension-proof"
+
+
+def test_self_signed_suspension_payload_cannot_reduce_expected_denominator(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+    from quantmaster.data.tushare_source import TushareSource
+
+    isolated_config.data.tushare_token = "test-token"
+    instruments = [
+        SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
+        SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
+    ]
+    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    monkeypatch.setattr(
+        FreeStockDBSource,
+        "daily_cross_section",
+        lambda _self, _symbols, _start, _end: pd.DataFrame({
+            "symbol": ["000001.SZ"], "date": [pd.Timestamp("2026-08-07")],
+            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+            "volume": [1.0],
+        }),
+    )
+    monkeypatch.setattr(
+        TushareSource,
+        "suspension_snapshot",
+        lambda _self, _date: {
+            "schema_version": 2,
+            "source": "user:self-signed",
+            "contract": "self-signed-suspension-v1",
+            "trade_date": "2026-08-07",
+            "acquired_at": "2026-08-07T07:01:00+00:00",
+            "rows": [], "symbols": ["000002.SZ"], "content_hash": "x" * 64,
+        },
+    )
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+
+    assert validation["complete"] is False
+    assert validation["expected_trading_symbols"] == 2
+    assert validation["excused_suspended_symbols"] == []
+    assert any("停牌证据不可用" in issue for issue in validation["issues"])
+
+
+def test_full_market_validation_rejects_nonfinite_and_impossible_ohlcv(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+
+    instruments = [
+        SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
+        SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
+    ]
+    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+
+    def cross_section(_self, symbols, _start, _end):
+        return pd.DataFrame({
+            "symbol": symbols,
+            "date": [pd.Timestamp("2026-08-07")] * len(symbols),
+            "open": [1.0, -1.0], "high": [1.0, 1.0],
+            "low": [1.0, 99.0], "close": [float("inf"), 50.0],
+            "volume": [1.0, -1.0],
+        })
+
+    monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+    assert validation["complete"] is False
+    assert validation["required_ohlcv_ratio"] == 0.0
+    assert validation["invalid_ohlcv"]["nonfinite_rows"] == 1
