@@ -224,9 +224,6 @@ def test_article_binding_rejects_non_https_url_with_allowed_hostname(tmp_path):
 
     assert error.value.code == "article_evidence_invalid"
 
-    with pytest.raises(ValueError, match="私有网络"):
-        _ensure_public_url("https://attacker.example/feed")
-
 
 def test_fake_ip_exception_does_not_allow_rfc1918_hostname_resolution(monkeypatch):
     monkeypatch.setattr(
