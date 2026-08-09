@@ -24,6 +24,7 @@ from quantmaster.data.free_stockdb_ingest import (
 )
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
+from quantmaster.data.resilience import PROVIDER_HEALTH
 from quantmaster.research.contracts import content_hash
 from quantmaster.rotation.etf_models import (
     ETF_RESEARCH_MODEL_VERSION,
@@ -272,6 +273,12 @@ class EtfResearchService:
                 "status": "fallback",
                 "source": "quantmaster:local-rules",
                 "reason": "当前进程未读取到 Tushare 凭据，使用本地证券主表与显式主题词典",
+            }
+        if PROVIDER_HEALTH.disabled_status("tushare:etf_basic"):
+            return {}, {
+                "status": "fallback",
+                "source": "quantmaster:local-rules",
+                "reason": "etf_basic 已按当前凭据跳过，使用本地证券主表与显式主题词典",
             }
         try:
             from quantmaster.data.tushare_source import TushareSource

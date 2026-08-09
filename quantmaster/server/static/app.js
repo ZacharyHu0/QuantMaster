@@ -112,6 +112,11 @@ function recoveryForStatus(status) {
   if (status === 429) return '稍候再试；如频繁出现，请降低刷新频率。';
   return '重试一次；如仍失败，请复制诊断信息排查后端日志。';
 }
+function optionalCount(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : null;
+}
 function normalizeProblem(value, fallback = {}) {
   const raw = value && typeof value === 'object' ? value : {};
   const message = typeof value === 'string' ? value : (raw.message || fallback.message || '操作未能完成');
@@ -128,6 +133,8 @@ function normalizeProblem(value, fallback = {}) {
     blocking:Boolean(raw.blocking ?? fallback.blocking),
     can_continue:Boolean(raw.can_continue ?? fallback.can_continue),
     items:Array.isArray(raw.items) ? raw.items.map(String) : [],
+    remote_failures:optionalCount(raw.remote_failures ?? fallback.remote_failures),
+    local_blocks:optionalCount(raw.local_blocks ?? fallback.local_blocks),
   };
 }
 function ingestResponseProblems(data, scope = 'operation') {
@@ -263,6 +270,8 @@ const runtimeInfo = (() => {
     if (entry.detail) rows.push(`<dt>原因</dt><dd>${esc(entry.detail)}</dd>`);
     if (entry.path) rows.push(`<dt>接口</dt><dd><code>${esc(entry.path)}</code></dd>`);
     if (entry.requestId) rows.push(`<dt>请求编号</dt><dd><span class="runtime-request"><code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span></dd>`);
+    if (entry.remoteFailures !== null) rows.push(`<dt>远端失败</dt><dd>${entry.remoteFailures} 次</dd>`);
+    if (entry.localBlocks !== null) rows.push(`<dt>本地拦截</dt><dd>${entry.localBlocks} 次</dd>`);
     return rows.length ? `<details class="runtime-diagnostics"><summary>诊断信息</summary><dl class="runtime-diagnostics-grid">${rows.join('')}</dl></details>` : '';
   }
   function render() {
@@ -298,6 +307,7 @@ const runtimeInfo = (() => {
       source:compactText(source || '系统', 40), message:compactText(message || '状态已更新', 160),
       detail:compactText(meta.detail), action:compactText(meta.action, 220),
       path:compactText(meta.path, 220), requestId:compactText(meta.requestId, 80),
+      remoteFailures:optionalCount(meta.remoteFailures), localBlocks:optionalCount(meta.localBlocks),
       revision, scope:compactText(meta.scope, 80), persistent:Boolean(meta.persistent),
       iso:now.toISOString(),
       time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
@@ -325,7 +335,8 @@ const runtimeInfo = (() => {
       problem.source, problem.title, {
         detail:problem.message, action:problem.action,
         key:`persistent:${scope}:${problem.id}`, scope, persistent:true,
-        revision:problem.revision,
+        revision:problem.revision, remoteFailures:problem.remote_failures,
+        localBlocks:problem.local_blocks,
       },
     ));
     render();

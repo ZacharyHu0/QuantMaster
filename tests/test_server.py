@@ -371,6 +371,9 @@ class TestBasics:
         assert 'data-runtime-filter="problem"' in resp.text
         assert 'data-runtime-filter="running"' in resp.text
         assert '<summary>诊断信息</summary>' in app_script
+        assert '<dt>远端失败</dt>' in app_script
+        assert '<dt>本地拦截</dt>' in app_script
+        assert "remoteFailures:problem.remote_failures" in app_script
         assert "runtimeInfo.begin(source, '正在加载数据'" in app_script
         assert "if (safeLevel === 'error') setExpanded(true)" not in app_script
         assert "window.QuantMasterAPI" in app_script

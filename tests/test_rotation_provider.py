@@ -7,8 +7,13 @@ import pandas as pd
 import pytest
 
 from quantmaster.data.instruments import Instrument
+from quantmaster.data.resilience import PROVIDER_HEALTH
 from quantmaster.rotation.analytics import estimate_etf_flows
-from quantmaster.rotation.provider import RotationProvider, _broad_etf_category
+from quantmaster.rotation.provider import (
+    RotationProvider,
+    ThemeSourceUnavailable,
+    _broad_etf_category,
+)
 from quantmaster.rotation.store import RotationStore
 
 
@@ -185,6 +190,41 @@ def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monk
     )
 
 
+def test_provider_directly_falls_back_from_known_denied_etf_endpoints(
+    tmp_path, monkeypatch,
+):
+    PROVIDER_HEALTH.failure(
+        "tushare:etf_basic", RuntimeError("etf_basic permission denied"), immediate=True,
+    )
+    PROVIDER_HEALTH.failure(
+        "tushare:etf_share_size",
+        RuntimeError("etf_share_size permission denied"),
+        immediate=True,
+    )
+    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
+        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
+    ))
+    source = FakeTushare()
+    provider = RotationProvider(RotationStore(tmp_path / "rotation"), source)
+
+    result = provider.sync_etf_observations(lambda *_: None, lambda: False)
+
+    endpoints = [endpoint for endpoint, _params in source.calls]
+    assert "etf_basic" not in endpoints
+    assert "etf_share_size" not in endpoints
+    assert "fund_basic" in endpoints
+    assert "fund_share" in endpoints
+    assert any("etf_basic 已按当前凭据跳过" in issue for issue in result["issues"])
+    assert any("etf_share_size 已按当前凭据跳过" in issue for issue in result["issues"])
+    assert PROVIDER_HEALTH.status("tushare:etf_basic")["tushare:etf_basic"]["suppressed"] == 0
+    assert (
+        PROVIDER_HEALTH.status("tushare:etf_share_size")["tushare:etf_share_size"][
+            "suppressed"
+        ]
+        == 0
+    )
+
+
 def test_provider_marks_close_fallback_when_fund_nav_is_unavailable(tmp_path, monkeypatch):
     class FakeNoNav(FakeTushare):
         def _call(self, endpoint, ttl, **params):
@@ -342,6 +382,34 @@ def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
     themes = store.themes()
     assert {item["code"] for item in themes} == {"BK0816.DC", "BK1184.DC"}
     assert {item["source"] for item in themes} == {"tushare:dc-concept"}
+
+
+def test_provider_skips_known_denied_dc_catalog_before_public_ths_fallback(
+    tmp_path, monkeypatch, isolated_config,
+):
+    isolated_config.data.primary_provider = "akshare"
+    PROVIDER_HEALTH.failure(
+        "tushare:dc-concept", RuntimeError("dc_index permission denied"), immediate=True,
+    )
+    source = FakeTushare()
+    provider = RotationProvider(RotationStore(tmp_path / "rotation"), source)
+    monkeypatch.setattr(
+        provider,
+        "_sync_eastmoney_themes",
+        lambda *_: (_ for _ in ()).throw(ThemeSourceUnavailable("offline")),
+    )
+    monkeypatch.setattr(
+        provider,
+        "_sync_ths_themes",
+        lambda *_: {"source": "ths:concept", "available": 100},
+    )
+
+    result = provider.sync_themes(lambda *_: None, lambda: False)
+
+    assert result["source"] == "ths:concept"
+    assert all(endpoint != "dc_index" for endpoint, _params in source.calls)
+    health = PROVIDER_HEALTH.status("tushare:dc-concept")["tushare:dc-concept"]
+    assert health["suppressed"] == 0
 
 
 def test_provider_keeps_previous_theme_catalog_when_both_sources_fail(

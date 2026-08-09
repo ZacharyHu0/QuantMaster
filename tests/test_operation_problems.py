@@ -8,6 +8,7 @@ from quantmaster.server.problems import (
     OperationProblem,
     assess_panel_quality,
     assess_signal_quality,
+    collect_health_report,
     make_problem,
 )
 
@@ -19,6 +20,34 @@ def price_panel(symbols=("A", "B"), periods=25):
         "open": pd.DataFrame({symbol: values for symbol in symbols}, index=dates),
         "close": pd.DataFrame({symbol: values + 0.5 for symbol in symbols}, index=dates),
     }
+
+
+def test_provider_health_problem_reports_remote_failures_and_local_blocks(monkeypatch):
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+
+    monkeypatch.setattr(
+        PROVIDER_HEALTH,
+        "status",
+        lambda _lane=None: {
+            "tushare:etf_basic": {
+                "state": "disabled",
+                "open_until": 0,
+                "failure_class": "permission",
+                "last_error": "permission denied",
+                "last_success": 0,
+                "failures": 2,
+                "suppressed": 7,
+            }
+        },
+    )
+
+    report = collect_health_report()
+    problem = next(
+        item for item in report["issues"] if item["id"] == "provider:tushare:etf_basic"
+    )
+
+    assert problem["remote_failures"] == 2
+    assert problem["local_blocks"] == 7
 
 
 def test_missing_required_price_field_blocks_backtest():

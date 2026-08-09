@@ -69,6 +69,8 @@ def collect_health_report() -> dict[str, Any]:
                 failure_class=failure_class,
                 last_success=float(item.get("last_success") or 0),
                 next_probe_at=float(item.get("next_probe_at") or 0),
+                remote_failures=int(item.get("failures") or 0),
+                local_blocks=int(item.get("suppressed") or 0),
                 can_continue=True,
             ))
     except Exception:

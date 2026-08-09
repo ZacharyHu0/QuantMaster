@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 RELEASE_DATE = "2026-08-09"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Tushare 无权限端点清理",
+                "items": (
+                    (
+                        "已确认无权限的 dc_index、etf_basic 与 etf_share_size 在任务层直接"
+                        "进入现有降级链，不再重复进入数据源边界或累加本地拦截噪声。"
+                    ),
+                    (
+                        "移除已无调用代码的 ths_index 历史健康记录；后台诊断新增远端失败"
+                        "与本地拦截计数，可直接区分真实请求和零配额消耗的本地跳过。"
+                    ),
+                    (
+                        "资金历史图的回归契约同步为当前单一金额坐标轴，不再用已淘汰的"
+                        "双轴缩放要求阻塞真实界面验收。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.5.1",
         "date": RELEASE_DATE,
         "sections": (
             {

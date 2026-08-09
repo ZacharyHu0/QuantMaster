@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from quantmaster.data.instruments import Instrument
+from quantmaster.data.resilience import PROVIDER_HEALTH
 from quantmaster.rotation.etf_models import EtfProfile, EtfResearchSnapshot
 from quantmaster.rotation.etf_research import EtfResearchService, EtfResearchStore
 from quantmaster.rotation.etf_v2 import (
@@ -296,6 +297,21 @@ def test_tushare_factor_source_remains_distinct_from_verified_local():
 
     assert result["adjustment_status"] == "official"
     assert result["adjustment_source"] == "tushare:fund_adj"
+
+
+def test_official_metadata_skips_known_denied_etf_basic(isolated_config):
+    isolated_config.data.tushare_token = "test-token"
+    PROVIDER_HEALTH.failure(
+        "tushare:etf_basic", RuntimeError("etf_basic permission denied"), immediate=True,
+    )
+
+    metadata, capability = EtfResearchService._official_metadata()
+
+    assert metadata == {}
+    assert capability["status"] == "fallback"
+    assert "已按当前凭据跳过" in capability["reason"]
+    health = PROVIDER_HEALTH.status("tushare:etf_basic")["tushare:etf_basic"]
+    assert health["suppressed"] == 0
 
 
 def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement(

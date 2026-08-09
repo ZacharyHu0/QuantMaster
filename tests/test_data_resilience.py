@@ -916,6 +916,39 @@ def test_permanent_provider_failure_stays_disabled_until_config_changes(isolated
     assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "closed"
 
 
+def test_disabled_status_is_read_only_and_allows_a_changed_credential(isolated_config):
+    isolated_config.data.tushare_token = "old-token"
+    lane = "tushare:optional-permission-test"
+    PROVIDER_HEALTH.failure(lane, RuntimeError("permission denied"), immediate=True)
+
+    before = PROVIDER_HEALTH.status(lane)[lane]
+    disabled = PROVIDER_HEALTH.disabled_status(lane)
+    after = PROVIDER_HEALTH.status(lane)[lane]
+
+    assert disabled is not None
+    assert disabled["failure_class"] == "permission"
+    assert after["suppressed"] == before["suppressed"] == 0
+
+    isolated_config.data.tushare_token = "new-token"
+    assert PROVIDER_HEALTH.disabled_status(lane) is None
+
+
+def test_source_health_removes_obsolete_tushare_ths_lane():
+    lane = "tushare:ths-concept"
+    with PROVIDER_HEALTH._conn() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO source_health"
+            "(lane,state,last_error,failure_class,config_revision) "
+            "VALUES (?,'disabled','ths_index permission denied','permission','old')",
+            (lane,),
+        )
+        connection.execute("PRAGMA user_version=3")
+
+    assert lane not in PROVIDER_HEALTH.status()
+    with PROVIDER_HEALTH._conn() as connection:
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 4
+
+
 def test_rate_limit_opens_recoverable_circuit(isolated_config):
     lane = "yahoo:rate-limit-test"
     response = httpx.Response(

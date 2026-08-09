@@ -126,7 +126,7 @@ def test_theme_staging_keeps_old_catalog_until_atomic_quality_commit(tmp_path):
     assert resumed["attempted_count"] == 1
 
 
-def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
+def test_rotation_charts_use_adaptive_axes_and_scoped_zoom():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
     ).read_text(encoding="utf-8")
@@ -167,7 +167,8 @@ def test_rotation_charts_use_adaptive_axes_and_two_axis_zoom():
     assert "TEMPERATURE_WINDOW_KEY" in script
     assert "rotation-meter-reference" in script
     assert "dataZoom:chartZoom(points.length)" in script
-    assert "dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1],initialPoints:260})" in script
+    assert "dataZoom:chartZoom(daily.length,{initialPoints:260})" in script
+    assert "dataZoom:chartZoom(daily.length,{yAxisIndex:[0,1]" not in script
     assert "orient:'vertical',yAxisIndex" in script
     assert script.count('class="rotation-layout two rotation-temperature-layout"') == 1
     assert 'class="rotation-regime" data-regime="${esc(current.regime || \'unavailable\')}"' in script

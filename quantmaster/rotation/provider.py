@@ -23,7 +23,7 @@ import pandas as pd
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import InstrumentStore
-from quantmaster.data.resilience import akshare_call, provider_call
+from quantmaster.data.resilience import PROVIDER_HEALTH, akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.rotation.store import RotationStore
@@ -987,32 +987,40 @@ class RotationProvider:
                 "东方财富概念目录不可用，尝试 Tushare DC 后备源：%s",
                 _compact_error(eastmoney_error),
             )
-            try:
-                return self._sync_tushare_themes(
-                    progress,
-                    cancelled,
-                    previous_items,
+            disabled_dc = PROVIDER_HEALTH.disabled_status("tushare:dc-concept")
+            if disabled_dc:
+                tushare_error: BaseException = ThemeSourceUnavailable(
+                    "当前 Tushare 凭据已确认无 DC 概念权限"
                 )
-            except InterruptedError:
-                raise
-            except (RotationProviderCallError, ThemeSourceUnavailable) as tushare_error:
-                logger.warning(
-                    "Tushare DC 题材目录不可用，尝试同花顺后备源：%s",
-                    _compact_error(tushare_error),
-                )
+                logger.info("Tushare DC 已按当前凭据跳过，直接尝试同花顺题材目录")
+            else:
                 try:
-                    return self._sync_ths_themes(progress, cancelled, previous_items)
+                    return self._sync_tushare_themes(
+                        progress,
+                        cancelled,
+                        previous_items,
+                    )
                 except InterruptedError:
                     raise
-                except ThemeSourceUnavailable as ths_error:
-                    prefix = f"free-stockdb {str(free_stockdb_error)[:90]}；" if free_stockdb_error else ""
-                    raise RuntimeError(
-                        "题材目录全部不可用："
-                        f"{prefix}"
-                        f"东方财富 {str(eastmoney_error)[:90]}；"
-                        f"Tushare {str(tushare_error)[:90]}；"
-                        f"同花顺 {str(ths_error)[:90]}"
-                    ) from ths_error
+                except (RotationProviderCallError, ThemeSourceUnavailable) as exc:
+                    tushare_error = exc
+                    logger.warning(
+                        "Tushare DC 题材目录不可用，尝试同花顺后备源：%s",
+                        _compact_error(tushare_error),
+                    )
+            try:
+                return self._sync_ths_themes(progress, cancelled, previous_items)
+            except InterruptedError:
+                raise
+            except ThemeSourceUnavailable as ths_error:
+                prefix = f"free-stockdb {str(free_stockdb_error)[:90]}；" if free_stockdb_error else ""
+                raise RuntimeError(
+                    "题材目录全部不可用："
+                    f"{prefix}"
+                    f"东方财富 {str(eastmoney_error)[:90]}；"
+                    f"Tushare {str(tushare_error)[:90]}；"
+                    f"同花顺 {str(ths_error)[:90]}"
+                ) from ths_error
 
     def sync_etf_observations(self, progress, cancelled) -> dict[str, Any]:
         """Keep legacy broad history and maintain a 25-session all-market share panel."""
@@ -1036,7 +1044,10 @@ class RotationProvider:
         if not calendar:
             calendar = self.source.trade_calendar(str(recent_start.date()), str(end.date()))
         metadata_source = "tushare:etf_basic"
+        disabled_etf_basic = PROVIDER_HEALTH.disabled_status("tushare:etf_basic")
         try:
+            if disabled_etf_basic:
+                raise RotationProviderCallError("当前 Tushare 凭据已确认无 etf_basic 权限")
             basic = self._tushare_call(
                 "etf_basic",
                 7,
@@ -1099,8 +1110,14 @@ class RotationProvider:
                     status="L",
                     fields="ts_code,name,fund_type,invest_type,benchmark,list_date,market",
                 )
-                issues.append(f"etf_basic 不可用，官方字段降级 fund_basic：{_compact_error(exc)}")
-                logger.warning(issues[-1])
+                if disabled_etf_basic:
+                    issues.append("etf_basic 已按当前凭据跳过，官方字段直接使用 fund_basic")
+                    logger.info(issues[-1])
+                else:
+                    issues.append(
+                        f"etf_basic 不可用，官方字段降级 fund_basic：{_compact_error(exc)}"
+                    )
+                    logger.warning(issues[-1])
             except RotationProviderCallError as fallback_exc:
                 if local_basic.empty:
                     raise
@@ -1317,7 +1334,11 @@ class RotationProvider:
             )
 
         nav_available = True
-        share_size_available = True
+        disabled_share_size = PROVIDER_HEALTH.disabled_status("tushare:etf_share_size")
+        share_size_available = disabled_share_size is None
+        if disabled_share_size:
+            issues.append("etf_share_size 已按当前凭据跳过，最近份额直接使用 fund_share")
+            logger.info(issues[-1])
         for index, trade_date in enumerate(dates, start=1):
             if cancelled():
                 raise InterruptedError("ETF 份额同步已取消")

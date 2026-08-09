@@ -359,6 +359,14 @@ class ProviderHealthStore:
             # transaction on this same connection.  End the migration
             # transaction first so a first request after upgrade is usable.
             conn.commit()
+        if schema_version < 4:
+            # Older builds briefly used Tushare ``ths_index`` as a concept
+            # fallback.  The current fallback reads the public THS catalog and
+            # no code can probe this lane, so keeping its permanent failure
+            # would leave a false, unactionable warning in diagnostics.
+            conn.execute("DELETE FROM source_health WHERE lane='tushare:ths-concept'")
+            conn.execute("PRAGMA user_version=4")
+            conn.commit()
         return conn
 
     def status(self, lane: str | None = None) -> dict[str, dict]:
@@ -386,6 +394,21 @@ class ProviderHealthStore:
                 value["next_probe_at"] = float(value.get("open_until") or 0)
                 result[str(value["lane"])] = value
         return result
+
+    def disabled_status(self, lane: str) -> dict[str, Any] | None:
+        """Return a current permanent failure without recording a suppressed call.
+
+        Optional task layers use this to select their documented fallback
+        before entering the provider boundary.  A changed credential revision
+        deliberately returns ``None`` so the new credential gets one normal
+        capability attempt.
+        """
+        value = self.status(lane).get(lane)
+        if not value or value.get("state") != "disabled":
+            return None
+        if str(value.get("config_revision") or "") != _provider_revision(lane):
+            return None
+        return value
 
     def before_call(self, lane: str, *, probe: bool = False) -> None:
         now = time.time()
