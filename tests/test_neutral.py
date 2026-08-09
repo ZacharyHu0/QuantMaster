@@ -132,7 +132,37 @@ class TestIndustryMapCache:
         assert evidence["status"] == "degraded"
         assert evidence["formal_eligible"] is False
         assert evidence["preview_symbols"] == len(MAPPING)
-        assert any("拒绝返回" in issue for issue in evidence["issues"])
+        assert evidence["issues"][0] == (
+            "正式行业证据不可用；结果已降级为研究预览，详细信息已写入本机日志"
+        )
+
+    def test_analysis_context_keeps_loader_exception_out_of_public_evidence(
+        self, monkeypatch, caplog,
+    ):
+        from quantmaster.data import industry as mod
+
+        secret = "token=industry-secret"
+
+        def fail_strict_load(**_kwargs):
+            raise RuntimeError(secret)
+
+        monkeypatch.setattr(mod, "load_industry_map", fail_strict_load)
+        monkeypatch.setattr(mod, "load_cached_industry_map", lambda **_kwargs: {})
+        monkeypatch.setattr(
+            mod,
+            "load_industry_evidence",
+            lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+        )
+
+        with caplog.at_level("ERROR", logger="quantmaster.data.industry"):
+            mapping, evidence = load_industry_analysis_context()
+
+        assert mapping == {}
+        assert evidence["issues"] == [
+            "正式行业证据不可用；结果已降级为研究预览，详细信息已写入本机日志",
+        ]
+        assert secret not in str(evidence)
+        assert secret in caplog.text
 
     def test_historical_lookup_never_backdates_current_mapping(self, monkeypatch):
         _trust_industry_universe(monkeypatch, MAPPING)

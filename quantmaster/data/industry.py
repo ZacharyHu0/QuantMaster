@@ -537,8 +537,11 @@ def load_industry_analysis_context(
         RuntimeError,
         TypeError,
         ValueError,
-    ) as exc:
-        strict_issue = str(exc)
+    ):
+        logger.exception("严格行业证据加载失败，降级到研究预览")
+        strict_issue = (
+            "正式行业证据不可用；结果已降级为研究预览，详细信息已写入本机日志"
+        )
     legacy_preview = False
     try:
         mapping = load_cached_industry_map(as_of=as_of)

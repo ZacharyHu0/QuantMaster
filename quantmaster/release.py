@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 RELEASE_DATE = "2026-08-10"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "行业证据异常隔离",
+                "items": (
+                    (
+                        "行业证据降级响应改为固定公开说明，不再把严格加载异常文本传播到市场、"
+                        "选股、决策工作台和因子检验接口；完整堆栈仅保留在本机日志。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.6.3",
+        "date": "2026-08-10",
         "sections": (
             {
                 "title": "CI DNS 隔离修复",
