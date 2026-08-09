@@ -4,13 +4,36 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 RELEASE_DATE = "2026-08-09"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "ETF 真实数据链路修复",
+                "items": (
+                    (
+                        "修复 Pandas 空值被序列化为字符串 nan 后污染规范化指数的问题；同指数"
+                        "代表产品重新按真实指数分组，stockdb 复权位置也不再误标为官方来源。"
+                    ),
+                    (
+                        "元数据变化只重做分类与研究聚合，复用标的、日期和行情内容一致的本地"
+                        "日线摄取，不再无意义地重读三年行情。"
+                    ),
+                    (
+                        "overview 与产品列表只返回质量摘要，完整字段诊断保留在覆盖率接口；"
+                        "真实 1,617 只产品环境下三项响应体积均通过验收。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.5.0",
         "date": RELEASE_DATE,
         "sections": (
             {
@@ -63,8 +86,12 @@ RELEASES = (
                         "Tushare fund_adj 仅补本地缺口；250 日位置不再因稀疏事件表被误判为 0% 覆盖。"
                     ),
                     (
-                        "元数据先由本地证券主表建立完整 ETF 目录，再用 etf_basic 增强跟踪指数、"
-                        "管理人和费率；页面分别显示本地可用覆盖与官方增强覆盖。"
+                        "元数据先由本地证券主表建立完整 ETF 目录，再用 fund_basic 官方目录和"
+                        "etf_basic 增强字段补缺；页面分别显示本地、官方目录与指数增强覆盖。"
+                    ),
+                    (
+                        "Tushare 健康状态按接口隔离；etf_basic 或 etf_share_size 无权限时，"
+                        "不再误停 fund_basic、fund_share、交易日历等仍可用接口。"
                     ),
                     (
                         "数据获取规则固定为 stockdb 与本地缓存优先；同时明确 MAJOR 版本只能由"

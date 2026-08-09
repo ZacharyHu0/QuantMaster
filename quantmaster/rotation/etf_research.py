@@ -44,6 +44,23 @@ Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
 
 
+def _clean_scalar_text(*candidates: Any) -> str:
+    """Return the first real scalar string without serializing pandas null sentinels."""
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if bool(pd.isna(candidate)):
+                continue
+        except (TypeError, ValueError):
+            pass
+        value = str(candidate).strip()
+        if value and value.casefold() not in {"nan", "nat", "none", "<na>"}:
+            return value
+    return ""
+
+
 def _atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -291,9 +308,9 @@ class EtfResearchService:
             )
             if not benchmarks.empty and "ts_code" in benchmarks:
                 benchmark_rows = {
-                    str(row.get("ts_code") or "").upper(): row
+                    _clean_scalar_text(row.get("ts_code")).upper(): row
                     for row in benchmarks.to_dict("records")
-                    if row.get("ts_code")
+                    if _clean_scalar_text(row.get("ts_code"))
                 }
             benchmark_capability = {
                 "status": "ready" if benchmark_rows else "fallback",
@@ -310,23 +327,23 @@ class EtfResearchService:
             }
         metadata: dict[str, dict[str, Any]] = {}
         for row in basic.to_dict("records"):
-            symbol = str(row.get("ts_code") or "").upper()
+            symbol = _clean_scalar_text(row.get("ts_code")).upper()
             if not symbol:
                 continue
-            benchmark = benchmark_rows.get(str(row.get("index_code") or "").upper(), {})
+            benchmark = benchmark_rows.get(_clean_scalar_text(row.get("index_code")).upper(), {})
             metadata[symbol] = {
-                "name": str(row.get("extname") or row.get("cname") or ""),
-                "benchmark_code": str(row.get("index_code") or ""),
-                "index_name": str(row.get("index_name") or ""),
-                "benchmark_type": str(benchmark.get("bmk_type") or ""),
-                "benchmark_level": str(benchmark.get("bmk_level") or ""),
-                "index_type": str(benchmark.get("idx_type") or ""),
-                "index_provider": str(benchmark.get("bmk_src") or ""),
-                "manager": str(row.get("mgr_name") or ""),
-                "custodian": str(row.get("custod_name") or ""),
+                "name": _clean_scalar_text(row.get("extname"), row.get("cname")),
+                "benchmark_code": _clean_scalar_text(row.get("index_code")),
+                "index_name": _clean_scalar_text(row.get("index_name")),
+                "benchmark_type": _clean_scalar_text(benchmark.get("bmk_type")),
+                "benchmark_level": _clean_scalar_text(benchmark.get("bmk_level")),
+                "index_type": _clean_scalar_text(benchmark.get("idx_type")),
+                "index_provider": _clean_scalar_text(benchmark.get("bmk_src")),
+                "manager": _clean_scalar_text(row.get("mgr_name")),
+                "custodian": _clean_scalar_text(row.get("custod_name")),
                 "management_fee": pd.to_numeric(pd.Series([row.get("mgt_fee")]), errors="coerce").iloc[0],
-                "etf_type": str(row.get("etf_type") or ""),
-                "list_date": str(row.get("list_date") or ""),
+                "etf_type": _clean_scalar_text(row.get("etf_type")),
+                "list_date": _clean_scalar_text(row.get("list_date")),
             }
         return metadata, {
             "status": "ready",
@@ -343,7 +360,8 @@ class EtfResearchService:
             for symbol, group in observations.groupby("symbol"):
                 last = group.sort_values("trade_date").iloc[-1]
                 share_metadata[str(symbol).upper()] = {
-                    key: str(last.get(key) or "") for key in ("benchmark", "fund_type", "invest_type")
+                    key: _clean_scalar_text(last.get(key))
+                    for key in ("benchmark", "fund_type", "invest_type")
                 }
         cached = pd.DataFrame()
         try:
@@ -411,7 +429,9 @@ class EtfResearchService:
                 continue
             extra = share_metadata.get(instrument.symbol, {})
             rich = directory.get(instrument.symbol, {})
-            raw_source = str(rich.get("metadata_source") or self._profile_capabilities.get("source") or "")
+            raw_source = _clean_scalar_text(
+                rich.get("metadata_source"), self._profile_capabilities.get("source")
+            )
             source = (
                 "etf_basic"
                 if "etf_basic" in raw_source
@@ -419,18 +439,23 @@ class EtfResearchService:
                 if "tushare:fund_basic" in raw_source
                 else "local_stockdb"
             )
-            benchmark = str(rich.get("benchmark") or extra.get("benchmark") or "")
-            index_name = str(rich.get("index_name") or rich.get("benchmark") or "")
+            benchmark = _clean_scalar_text(rich.get("benchmark"), extra.get("benchmark"))
+            index_name = _clean_scalar_text(
+                rich.get("index_name"), rich.get("normalized_index"), benchmark
+            )
+            benchmark_code = _clean_scalar_text(rich.get("benchmark_code"))
+            fund_type = _clean_scalar_text(rich.get("fund_type"), extra.get("fund_type"))
+            invest_type = _clean_scalar_text(rich.get("invest_type"), extra.get("invest_type"))
             taxonomy = classify_etf_profile(
                 instrument.name,
                 benchmark=benchmark,
-                benchmark_code=str(rich.get("benchmark_code") or ""),
+                benchmark_code=benchmark_code,
                 index_name=index_name,
-                fund_type=str(rich.get("fund_type") or extra.get("fund_type") or ""),
-                invest_type=str(rich.get("invest_type") or extra.get("invest_type") or ""),
-                etf_type=str(rich.get("etf_type") or ""),
-                benchmark_type=str(rich.get("benchmark_type") or ""),
-                index_type=str(rich.get("index_type") or ""),
+                fund_type=fund_type,
+                invest_type=invest_type,
+                etf_type=_clean_scalar_text(rich.get("etf_type")),
+                benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
+                index_type=_clean_scalar_text(rich.get("index_type")),
                 metadata_source=source,
             )
             fee = rich.get("management_fee", rich.get("mgt_fee"))
@@ -444,21 +469,21 @@ class EtfResearchService:
                     sector_id=taxonomy["sector_id"],
                     sector_name=taxonomy["sector_name"],
                     benchmark=benchmark,
-                    benchmark_code=str(rich.get("benchmark_code") or ""),
-                    benchmark_type=str(rich.get("benchmark_type") or ""),
-                    benchmark_level=str(rich.get("benchmark_level") or ""),
-                    index_type=str(rich.get("index_type") or ""),
-                    index_provider=str(rich.get("index_provider") or ""),
+                    benchmark_code=benchmark_code,
+                    benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
+                    benchmark_level=_clean_scalar_text(rich.get("benchmark_level")),
+                    index_type=_clean_scalar_text(rich.get("index_type")),
+                    index_provider=_clean_scalar_text(rich.get("index_provider")),
                     normalized_index=taxonomy["normalized_index"],
-                    fund_type=str(rich.get("fund_type") or extra.get("fund_type") or ""),
-                    invest_type=str(rich.get("invest_type") or extra.get("invest_type") or ""),
-                    manager=str(rich.get("manager") or rich.get("mgr_name") or ""),
-                    custodian=str(rich.get("custodian") or rich.get("custod_name") or ""),
+                    fund_type=fund_type,
+                    invest_type=invest_type,
+                    manager=_clean_scalar_text(rich.get("manager"), rich.get("mgr_name")),
+                    custodian=_clean_scalar_text(rich.get("custodian"), rich.get("custod_name")),
                     management_fee=float(numeric_fee) if pd.notna(numeric_fee) else None,
                     metadata_source=source,
                     classification_source=taxonomy["classification_source"],
                     classification_confidence=taxonomy["classification_confidence"],
-                    list_date=str(rich.get("list_date") or instrument.list_date),
+                    list_date=_clean_scalar_text(rich.get("list_date"), instrument.list_date),
                     status=instrument.status,
                     classification_evidence=taxonomy["classification_evidence"],
                 )
@@ -850,10 +875,11 @@ class EtfResearchService:
                 "etf_research_schema": ETF_SCHEMA_VERSION,
             }
         )
+        ingest_history = self.ingest_store.history(100)
         ingest = next(
             (
                 item
-                for item in self.ingest_store.history(100)
+                for item in ingest_history
                 if item.provenance.get("cache_key") == cache_key and "etf" in item.assets
             ),
             None,
@@ -861,6 +887,60 @@ class EtfResearchService:
         daily = pd.DataFrame()
         if ingest is not None:
             daily = self.ingest_store.load_frame(ingest, "etf_daily")
+        if daily.empty:
+            target_symbols = set(symbols)
+            compatible = None
+            for candidate in ingest_history:
+                if (
+                    candidate.status != "complete"
+                    or "etf" not in candidate.assets
+                    or candidate.artifact_id != identity.artifact_id
+                    or candidate.start_date > str(start.date())
+                    or candidate.end_date < str(end.date())
+                ):
+                    continue
+                try:
+                    cached_profiles = self.ingest_store.load_json(candidate, "etf_profiles")
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                cached_symbols = {
+                    str(item.get("symbol") or "").upper()
+                    for item in cached_profiles
+                    if isinstance(item, dict) and item.get("symbol")
+                }
+                if cached_symbols == target_symbols:
+                    compatible = candidate
+                    break
+            if compatible is not None:
+                daily = self.ingest_store.load_frame(compatible, "etf_daily")
+                if not daily.empty:
+                    actual = pd.to_datetime(daily["date"], errors="coerce").max().date().isoformat()
+                    session_dates = list(compatible.session_dates) or sorted(
+                        pd.to_datetime(daily["date"], errors="coerce")
+                        .dropna()
+                        .dt.strftime("%Y-%m-%d")
+                        .unique()
+                        .tolist()
+                    )
+                    ingest = self.ingest_store.publish_etf(
+                        daily=daily,
+                        minutes=pd.DataFrame(),
+                        profiles=[item.to_dict() for item in profiles],
+                        as_of_date=actual,
+                        artifact_id=identity.artifact_id,
+                        master_snapshot_id=master_id,
+                        start_date=compatible.start_date,
+                        end_date=compatible.end_date,
+                        coverage=compatible.coverage,
+                        provenance={
+                            **compatible.provenance,
+                            "cache_key": cache_key,
+                            "profile_refresh_from": compatible.ingest_id,
+                        },
+                        session_dates=session_dates,
+                        session_source=compatible.session_source,
+                    )
+                    progress(5, "复用 ETF 日线", f"元数据重算复用 {compatible.ingest_id}")
         if daily.empty:
             frames = []
             for offset in range(0, len(symbols), 300):

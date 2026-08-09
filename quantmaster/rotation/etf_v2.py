@@ -673,7 +673,7 @@ def _representative_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
                 metrics.get("avg_amount_20d"),
             )
         )
-        + int(metrics.get("adjustment_status") == "official")
+        + int(metrics.get("adjustment_status") in {"official", "verified_local"})
         + int(funds.get("status") in {"confirmed_zero", "confirmed_change"})
     )
     size = row.get("total_size") or funds.get("share") or 0
@@ -781,6 +781,19 @@ def build_sector_research(
         if not reps:
             reps = [max(members, key=_representative_key)]
         representative = max(reps, key=_representative_key)
+        adjustment_statuses = {
+            str(row["metrics"].get("adjustment_status") or "") for row in reps
+        }
+        verified_statuses = adjustment_statuses & {"official", "verified_local"}
+        long_position_source = (
+            "official_adjusted"
+            if verified_statuses == {"official"}
+            else "verified_local_adjusted"
+            if verified_statuses == {"verified_local"}
+            else "mixed_verified_adjusted"
+            if verified_statuses
+            else "unavailable"
+        )
         metrics = {key: _median((row["metrics"] for row in reps), key) for key in metric_keys}
         metrics["above_ma20"] = bool(
             reps and sum(bool(row["metrics"].get("above_ma20")) for row in reps) >= len(reps) / 2
@@ -870,8 +883,13 @@ def build_sector_research(
                 "classification_confidence": round(
                     float(np.mean([row["profile"].classification_confidence for row in members])), 4
                 ),
+                "long_position_source": long_position_source,
                 "adjustment_coverage": round(
-                    sum(row["metrics"].get("adjustment_status") == "official" for row in reps)
+                    sum(
+                        row["metrics"].get("adjustment_status")
+                        in {"official", "verified_local"}
+                        for row in reps
+                    )
                     / max(1, len(reps)),
                     4,
                 ),
@@ -950,7 +968,11 @@ def build_sector_research(
             )
             sector["display_position"] = metric.get(position_metric)
             sector["position_source"] = (
-                "official_adjusted" if use_long_position else "stage_research_series"
+                "unavailable"
+                if sector["display_position"] is None
+                else sector["long_position_source"]
+                if use_long_position
+                else "stage_research_series"
             )
             sector["position_metric"] = position_metric
             sector["position_horizon"] = position_horizon

@@ -431,6 +431,27 @@ def _compact_etf_funds(value: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _compact_etf_quality(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep list and overview responses light; field diagnostics live on coverage endpoint."""
+
+    quality = value or {}
+    keys = (
+        "status",
+        "product_count",
+        "sector_count",
+        "expected_symbols",
+        "observed_symbols",
+        "symbol_ratio",
+        "required_ohlcv_ratio",
+        "verified_adjustment_products",
+        "official_metadata_products",
+        "enhanced_metadata_products",
+        "share_status_counts",
+        "issues",
+    )
+    return {key: quality.get(key) for key in keys if key in quality}
+
+
 def _etf_product_projection(item: Any, sector: dict[str, Any]) -> dict[str, Any]:
     metrics = item.metrics
     position_metric = str(sector.get("position_metric") or "position_60d")
@@ -546,7 +567,7 @@ def rotation_etfs(
             "ingest_id": snapshot.ingest_id,
             "artifact_id": snapshot.artifact_id,
             "as_of": snapshot.as_of_date,
-            "quality": snapshot.coverage,
+            "quality": _compact_etf_quality(snapshot.coverage),
             "staleness": snapshot.staleness,
             "research_model_version": snapshot.research_model_version,
         },
@@ -720,7 +741,13 @@ def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
                 "position_metric": map_metric,
                 "position_horizon": map_horizon,
                 "position_label": map_label,
-                "position_source": "official_adjusted" if use_long else "stage_research_series",
+                "position_source": (
+                    "unavailable"
+                    if (metrics.get(map_metric) if map_metric else None) is None
+                    else str(item.get("long_position_source") or "verified_adjusted")
+                    if use_long
+                    else "stage_research_series"
+                ),
                 "state": item["state"],
                 "state_label": item["state_label"],
                 "risk_badges": item.get("risk_badges", []),
@@ -915,7 +942,7 @@ def rotation_etf_overview(
             "as_of": snapshot.as_of_date,
             "research_model_version": snapshot.research_model_version,
             "staleness": snapshot.staleness,
-            "quality": snapshot.coverage,
+            "quality": _compact_etf_quality(snapshot.coverage),
             "refresh": refresh,
         },
         "data": _etf_overview_payload(snapshot, asset),

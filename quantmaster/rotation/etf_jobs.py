@@ -42,7 +42,13 @@ class EtfResearchJobs:
                 warnings.extend(str(value) for value in result.get("issues") or ())
             except InterruptedError:
                 raise
-            except RotationProviderCallError as exc:  # 仅远端证据失败允许降级到本地缓存
+            except (
+                RotationProviderCallError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:  # 可选证据失败允许降级；编程错误仍应显式暴露
                 warnings.append(f"元数据或份额同步失败，使用本地缓存：{str(exc)[:180]}")
             snapshot = service.scan(
                 as_of=str(spec.get("as_of") or ""),

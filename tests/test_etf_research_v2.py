@@ -306,7 +306,8 @@ def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement
             {
                 "symbol": "510300.SH",
                 "name": "沪深300ETF",
-                "benchmark": "沪深300指数收益率×100%",
+                "benchmark": np.nan,
+                "normalized_index": "沪深300",
                 "mgt_fee": "",
                 "metadata_source": "tushare:fund_basic",
                 "updated_at": "2026-08-09",
@@ -319,7 +320,15 @@ def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement
             return metadata
 
         def etf_observations(self):
-            return pd.DataFrame()
+            return pd.DataFrame(
+                {
+                    "symbol": ["510300.SH"],
+                    "trade_date": ["2026-08-07"],
+                    "benchmark": [pd.NA],
+                    "fund_type": [pd.NA],
+                    "invest_type": [pd.NA],
+                }
+            )
 
     class OneInstrument:
         def list(self, *, market=""):
@@ -346,6 +355,8 @@ def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement
 
     assert profiles[0].management_fee is None
     assert profiles[0].metadata_source == "fund_basic"
+    assert profiles[0].normalized_index == "沪深300"
+    assert profiles[0].benchmark == ""
     assert service._profile_capabilities["official_covered_symbols"] == 1
     assert service._profile_capabilities["enhanced_covered_symbols"] == 0
 
@@ -384,6 +395,18 @@ def test_same_index_label_in_different_sectors_keeps_one_representative_per_sect
     assert {item["sector_id"] for item in sectors} == {first.sector_id, second.sector_id}
     assert representatives[first.symbol] == first.symbol
     assert representatives[second.symbol] == second.symbol
+
+
+def test_verified_local_adjustment_counts_as_sector_evidence_and_is_labeled_truthfully():
+    profile = _profile("510300.SH", "沪深300ETF", benchmark_code="000300.SH")
+
+    sectors, *_ = build_sector_research(
+        [_row(profile, adjustment_status="verified_local", position_250d=62.0)]
+    )
+
+    assert sectors[0]["adjustment_coverage"] == 1.0
+    assert sectors[0]["long_position_source"] == "verified_local_adjusted"
+    assert sectors[0]["position_source"] == "verified_local_adjusted"
 
 
 def test_absolute_state_gates_allow_low_turn_leader_risk_and_cold_market():

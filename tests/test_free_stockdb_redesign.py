@@ -320,6 +320,7 @@ class _EtfSource:
 
     def __init__(self):
         self.intraday_calls = 0
+        self.daily_calls = 0
         dates = pd.bdate_range(end="2026-08-07", periods=65)
         rows = []
         for index, symbol in enumerate(("510300.SH", "159920.SZ", "511010.SH"), 1):
@@ -356,6 +357,7 @@ class _EtfSource:
         return StockDBArtifactIdentity.discover(None, None, data_session=kwargs.get("data_session", ""))
 
     def daily_cross_section(self, symbols, start, end):
+        self.daily_calls += 1
         return self.frame[self.frame["symbol"].isin(symbols)].copy()
 
     def intraday_many(self, symbols, start, end, frequency):
@@ -401,11 +403,12 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     snapshot = service.scan(as_of="2026-08-08")
     repeated = service.scan(as_of="2026-08-08")
     assert source.intraday_calls == 0
+    assert source.daily_calls == 1
 
     assert len(snapshot.items) == 3
     assert {item.category for item in snapshot.items} == {"境内宽基", "海外权益", "债券"}
     assert snapshot.schema_version == "3.0"
-    assert snapshot.research_model_version == "QM_ETF_SECTOR_RADAR_V3.3"
+    assert snapshot.research_model_version == "QM_ETF_SECTOR_RADAR_V3.4"
     assert len(snapshot.sectors) == 3
     assert all(item.funds["status"] == "missing" for item in snapshot.items)
     assert all("score" not in item.to_dict() for item in snapshot.items)
@@ -445,6 +448,7 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     assert overview.status_code == 200
     assert len(overview.json()["data"]["sectors"]) == 1
     assert "items" not in overview.json()["data"]
+    assert "fields" not in overview.json()["meta"]["quality"]
     assert overview.json()["data"]["map"]["position_metric"] == "position_60d"
     assert overview.json()["data"]["map"]["sector_ids"]
     assert overview.json()["meta"]["refresh"]["recommended"] is False
@@ -505,6 +509,48 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     assert cold.json()["meta"]["refresh"]["input_id"]
     assert cold.json()["meta"]["refresh"]["input_as_of"] == snapshot.as_of_date
     assert "本地证据已变化" in cold.json()["meta"]["refresh"]["reason"]
+
+
+def test_etf_metadata_only_change_reuses_compatible_local_daily_ingest(
+    tmp_path,
+    isolated_config,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        EtfResearchService, "_direct_share_observations", staticmethod(lambda: pd.DataFrame())
+    )
+    source = _EtfSource()
+    instruments = _EtfInstruments()
+    instruments.items = list(instruments.items)
+    service = EtfResearchService(
+        source=source,
+        instruments=instruments,
+        ingest_store=StockDBIngestStore(tmp_path / "ingest"),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    first = service.scan(as_of="2026-08-08")
+    original = instruments.items[0]
+    instruments.items[0] = Instrument(
+        symbol=original.symbol,
+        code=original.code,
+        name="沪深300增强标注ETF",
+        market=original.market,
+        exchange=original.exchange,
+        asset_type=original.asset_type,
+        status=original.status,
+    )
+    second = service.scan(as_of="2026-08-08")
+
+    assert source.daily_calls == 1
+    assert second.snapshot_id != first.snapshot_id
+    assert second.ingest_id != first.ingest_id
+    republished = service.ingest_store.get(second.ingest_id)
+    assert republished is not None
+    assert republished.provenance["profile_refresh_from"] == first.ingest_id
+    assert republished.content_hashes["etf_daily"] == service.ingest_store.get(
+        first.ingest_id
+    ).content_hashes["etf_daily"]
 
 
 def test_etf_cli_contract_supports_cancel_and_resume():

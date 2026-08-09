@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 ETF_SCHEMA_VERSION = "3.0"
-ETF_RESEARCH_MODEL_VERSION = "QM_ETF_SECTOR_RADAR_V3.3"
+ETF_RESEARCH_MODEL_VERSION = "QM_ETF_SECTOR_RADAR_V3.4"
 
 
 @dataclass(frozen=True, slots=True)
