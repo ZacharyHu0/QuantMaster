@@ -35,6 +35,7 @@ def _trust_industry_universe(monkeypatch, symbols):
     from quantmaster.data import industry as industry_module
     from quantmaster.data import instrument_snapshots
 
+    fixture_date = date(2026, 8, 9)
     expected = set(symbols)
     snapshot_id = "fixture:" + ",".join(sorted(expected))
     _TRUSTED_UNIVERSES[snapshot_id] = expected
@@ -51,6 +52,7 @@ def _trust_industry_universe(monkeypatch, symbols):
         "_active_cn_universe",
         lambda **_kwargs: (expected, evidence),
     )
+    monkeypatch.setattr(industry_module, "market_date", lambda: fixture_date)
     monkeypatch.setattr(
         instrument_snapshots,
         "verify_instrument_catalog_evidence",

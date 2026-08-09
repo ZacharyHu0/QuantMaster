@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 RELEASE_DATE = "2026-08-10"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "CI 日期夹具修复",
+                "items": (
+                    (
+                        "行业映射测试把合成证券目录与默认生效日固定在同一市场日，避免上海"
+                        "午夜换日后误用真实运行日期并触发无关的完整性失败；生产证据门保持不变。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.6.1",
+        "date": "2026-08-10",
         "sections": (
             {
                 "title": "代码扫描安全加固",
