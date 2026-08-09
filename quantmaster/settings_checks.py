@@ -167,6 +167,9 @@ def check_tushare(token: str) -> dict[str, Any]:
 
         pro = ts.pro_api(token)
         frame = pro.trade_cal(exchange="SSE", start_date="20240102", end_date="20240103")
+        from quantmaster.data.resilience import PROVIDER_HEALTH
+
+        PROVIDER_HEALTH.success("tushare")
         return _result("success", f"Token 可用，返回 {len(frame)} 个交易日历记录", started)
     except Exception as exc:  # tushare 将服务端错误包装为通用 Exception
         text = str(exc).lower()

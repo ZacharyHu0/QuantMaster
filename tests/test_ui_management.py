@@ -30,7 +30,8 @@ def _wait_for_text(locator, text: str, *, timeout: float = 30_000) -> None:
 
 def _wait_for_class(locator, class_name: str, *, timeout: float = 30_000) -> None:
     playwright_sync.expect(locator).to_have_class(
-        re.compile(rf"(?:^|\s){re.escape(class_name)}(?:\s|$)"), timeout=timeout,
+        re.compile(rf"(?:^|\s){re.escape(class_name)}(?:\s|$)"),
+        timeout=timeout,
     )
 
 
@@ -58,8 +59,18 @@ def live_server(tmp_path_factory):
     project = Path(__file__).parents[1]
     env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "quantmaster.server.app:app",
-         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "quantmaster.server.app:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
         cwd=root,
         env=env,
         stdout=subprocess.DEVNULL,
@@ -115,10 +126,21 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
         assert page.locator("#nav.workspace-nav button").all_inner_texts() == [
-            "观察", "选股", "研究", "交易", "自动化",
+            "观察",
+            "选股",
+            "研究",
+            "交易",
+            "自动化",
         ]
         assert page.locator('[data-workspace-pages="observe"] button').all_inner_texts() == [
-            "行情", "市场温度", "市场风格", "轮动总览", "行业周期", "细分题材", "ETF 研究", "资讯",
+            "行情",
+            "市场温度",
+            "市场风格",
+            "轮动总览",
+            "行业周期",
+            "细分题材",
+            "ETF 研究",
+            "资讯",
         ]
         page.get_by_role("button", name="自动化", exact=True).click()
         assert page.locator(".workspace-context").is_hidden()
@@ -129,13 +151,20 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.locator("#settings-nav .settings-nav-group").count() == 5
         assert page.locator("#settings-nav [data-settings-section]").count() == 11
         assert page.locator("#settings-nav [data-settings-section]").all_inner_texts() == [
-            "模型服务", "在线数据源", "本地行情库", "研究数据", "Quant Lab",
-            "交易规则", "自动化", "资讯处理", "资讯来源", "本机服务", "快照回滚",
+            "模型服务",
+            "在线数据源",
+            "本地行情库",
+            "研究数据",
+            "Quant Lab",
+            "交易规则",
+            "自动化",
+            "资讯处理",
+            "资讯来源",
+            "本机服务",
+            "快照回滚",
         ]
 
-        browser_settings = page.evaluate(
-            "structuredClone(window.QuantMasterManagement.state.config)"
-        )
+        browser_settings = page.evaluate("structuredClone(window.QuantMasterManagement.state.config)")
 
         def fulfill_settings_save(route):
             if route.request.method != "PUT":
@@ -143,7 +172,14 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
                 return
             body = route.request.post_data_json
             for key in (
-                "config_version", "llm", "data", "trade", "news", "server", "automation", "lab",
+                "config_version",
+                "llm",
+                "data",
+                "trade",
+                "news",
+                "server",
+                "automation",
+                "lab",
             ):
                 if key in body:
                     browser_settings[key] = body[key]
@@ -151,11 +187,17 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps({
-                    "status": "ok", "warnings": [], "changed_fields": [],
-                    "restart_required": [], "apply_status": {},
-                    "runtime": browser_settings["runtime"], "settings": browser_settings,
-                }),
+                body=json.dumps(
+                    {
+                        "status": "ok",
+                        "warnings": [],
+                        "changed_fields": [],
+                        "restart_required": [],
+                        "apply_status": {},
+                        "runtime": browser_settings["runtime"],
+                        "settings": browser_settings,
+                    }
+                ),
             )
 
         page.route("**/api/v1/settings", fulfill_settings_save)
@@ -178,9 +220,9 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.locator('[name="llm.model"]').input_value() == "manual-local-model"
         assert page.locator('[name="llm.reasoning_effort"]').input_value() == "high"
         assert page.locator('[name="llm.max_concurrency"]').input_value() == "2"
-        assert model_check.locator("xpath=ancestor::section[1]").get_attribute(
-            "data-diagnostic"
-        ) == "llm-models"
+        assert (
+            model_check.locator("xpath=ancestor::section[1]").get_attribute("data-diagnostic") == "llm-models"
+        )
         page.locator('[name="llm.timeout"]').fill("179")
         playwright_sync.expect(model_check).to_have_class(re.compile(r"(?:^|\s)stale(?:\s|$)"))
         playwright_sync.expect(model_check.locator(".check-stale")).to_be_visible()
@@ -192,24 +234,27 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             lambda route: route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps({
-                    "status": "warning",
-                    "message": "数据源检测完成",
-                    "latency_ms": 24,
-                    "checked_at": "2026-08-08T01:14:56Z",
-                    "details": {
-                        "sources": {
-                            "akshare": {"status": "success", "message": "端点可达"},
-                            "yfinance": {"status": "warning", "message": "端点限流"},
+                body=json.dumps(
+                    {
+                        "status": "warning",
+                        "message": "数据源检测完成",
+                        "latency_ms": 24,
+                        "checked_at": "2026-08-08T01:14:56Z",
+                        "details": {
+                            "sources": {
+                                "akshare": {"status": "success", "message": "端点可达"},
+                                "yfinance": {"status": "warning", "message": "端点限流"},
+                            },
+                            "circuits": {"yahoo": {"state": "open"}},
+                            "security_master": {
+                                "status": "success",
+                                "record_count": 33984,
+                                "coverage": [{"market": "CN", "asset_type": "stock", "count": 5871}],
+                            },
+                            "proxies": {},
                         },
-                        "circuits": {"yahoo": {"state": "open"}},
-                        "security_master": {
-                            "status": "success", "record_count": 33984,
-                            "coverage": [{"market": "CN", "asset_type": "stock", "count": 5871}],
-                        },
-                        "proxies": {},
-                    },
-                }),
+                    }
+                ),
             ),
         )
         page.locator('[data-settings-section="online-data"]').click()
@@ -220,7 +265,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         source_result = data_diagnostic.locator('[data-check-result="data-sources"]')
         playwright_sync.expect(source_result.locator(".check-details")).to_have_attribute("open", "")
         assert source_result.locator(".check-detail-groups h5").all_inner_texts() == [
-            "依赖与端点", "熔断状态", "证券主数据", "代理",
+            "依赖与端点",
+            "熔断状态",
+            "证券主数据",
+            "代理",
         ]
 
         page.locator('[data-settings-section="automation"]').click()
@@ -230,7 +278,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
 
         page.locator('[data-settings-section="backup"]').click()
         page.locator('#snapshot-form [name="name"]').fill("UI baseline")
-        page.locator('#snapshot-form button').click()
+        page.locator("#snapshot-form button").click()
         page.get_by_text("UI baseline", exact=True).first.wait_for()
 
         page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
@@ -259,7 +307,8 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         member_symbols = page.locator(".candidate-member-symbol")
         playwright_sync.expect(member_symbols).to_have_count(2)
         assert member_symbols.all_inner_texts() == [
-            "600519.SH", "000001.SZ",
+            "600519.SH",
+            "000001.SZ",
         ]
         page.get_by_role("button", name="创建候选", exact=True).click()
         page.get_by_role("heading", name="ui_candidate", exact=True).wait_for()
@@ -273,18 +322,18 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             encoding="utf-8-sig",
         )
         page.locator('header [data-tab="ledger"]').evaluate("element => element.click()")
-        page.locator('#broker-csv').set_input_files(csv)
-        preview_button = page.locator('#csv-preview-form button')
+        page.locator("#broker-csv").set_input_files(csv)
+        preview_button = page.locator("#csv-preview-form button")
         preview_button.wait_for(state="visible")
         preview_button.click()
-        page.locator('#csv-submit-actions').wait_for(state="visible")
-        _wait_for_text(page.locator('#csv-preview'), "坏行")
-        page.locator('#csv-submit').click()
+        page.locator("#csv-submit-actions").wait_for(state="visible")
+        _wait_for_text(page.locator("#csv-preview"), "坏行")
+        page.locator("#csv-submit").click()
         _wait_for_text(page.locator("#csv-import-status"), "未导入")
         page.locator('[name="csv-mode"][value="valid"]').check()
-        page.locator('#csv-submit').click()
+        page.locator("#csv-submit").click()
         _wait_for_text(page.locator("#csv-import-status"), "已导入 1 笔")
-        assert page.locator('#csv-download-errors').is_visible()
+        assert page.locator("#csv-download-errors").is_visible()
 
         page.set_viewport_size({"width": 390, "height": 844})
         page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
@@ -296,9 +345,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.locator("#settings-nav").is_hidden()
         mobile_settings.select_option("local-data")
         assert page.locator('[data-settings-panel="local-data"]').is_visible()
-        columns = page.locator(".settings-shell").evaluate(
-            "el => getComputedStyle(el).gridTemplateColumns"
-        )
+        columns = page.locator(".settings-shell").evaluate("el => getComputedStyle(el).gridTemplateColumns")
         assert columns != "196px"
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         browser.close()
@@ -346,7 +393,8 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.goto(f"{url}/#help/validation")
         page.locator("#help-validation").wait_for(state="visible")
         playwright_sync.expect(page.locator('[data-help-link="validation"]')).to_have_attribute(
-            "aria-current", "location",
+            "aria-current",
+            "location",
         )
         assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
         assert page.locator('[data-help-nav-part="signals"]').evaluate(
@@ -382,52 +430,102 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
     decision = {
         "market": {
             "current": {
-                "as_of": "2026-07-27", "universe_size": 2, "state_label": "震荡",
-                "bull_score": 52, "trend_score": 0.05, "advance_ratio": 0.5,
-                "above_ma20_ratio": 0.55, "macd_hist": 0.01, "amount_ratio": 1.1,
+                "as_of": "2026-07-27",
+                "universe_size": 2,
+                "state_label": "震荡",
+                "bull_score": 52,
+                "trend_score": 0.05,
+                "advance_ratio": 0.5,
+                "above_ma20_ratio": 0.55,
+                "macd_hist": 0.01,
+                "amount_ratio": 1.1,
                 "volatility_20d": 0.02,
             },
-            "forecast_validation": [], "future": [], "sectors": [], "past": [],
+            "forecast_validation": [],
+            "future": [],
+            "sectors": [],
+            "past": [],
         },
         "selection": {
-            "recommended_exposure": 0.5, "holding_horizon_days": 3,
-            "signal_date": "2026-07-27", "risk_note": "测试风险说明",
+            "recommended_exposure": 0.5,
+            "holding_horizon_days": 3,
+            "signal_date": "2026-07-27",
+            "risk_note": "测试风险说明",
             "picks": [
                 {
-                    "rank": 1, "symbol": "600519.SH", "name": "贵州茅台",
-                    "industry": "白酒", "score": 82, "action": "buy",
-                    "last_close": 1500, "money_ratio": 1.2, "expected_return": 0.03,
-                    "stop_loss": 0.04, "take_profit": 0.08, "reasons": ["趋势向上"],
+                    "rank": 1,
+                    "symbol": "600519.SH",
+                    "name": "贵州茅台",
+                    "industry": "白酒",
+                    "score": 82,
+                    "action": "buy",
+                    "last_close": 1500,
+                    "money_ratio": 1.2,
+                    "expected_return": 0.03,
+                    "stop_loss": 0.04,
+                    "take_profit": 0.08,
+                    "reasons": ["趋势向上"],
                 },
                 {
-                    "rank": 2, "symbol": "300750.SZ", "name": "宁德时代",
-                    "industry": "电池", "score": 76, "action": "buy",
-                    "last_close": 260, "money_ratio": 1.1, "expected_return": 0.02,
-                    "stop_loss": 0.04, "take_profit": 0.07, "reasons": ["资金改善"],
+                    "rank": 2,
+                    "symbol": "300750.SZ",
+                    "name": "宁德时代",
+                    "industry": "电池",
+                    "score": 76,
+                    "action": "buy",
+                    "last_close": 260,
+                    "money_ratio": 1.1,
+                    "expected_return": 0.02,
+                    "stop_loss": 0.04,
+                    "take_profit": 0.07,
+                    "reasons": ["资金改善"],
                 },
             ],
         },
         "history": [
             {
-                "signal_date": "2026-07-24", "holding_horizon_days": 3,
-                "profile": "risk_adjusted", "recommended_exposure": 0.5,
+                "signal_date": "2026-07-24",
+                "holding_horizon_days": 3,
+                "profile": "risk_adjusted",
+                "recommended_exposure": 0.5,
                 "picks": [
                     {"rank": 1, "symbol": "600519.SH", "name": "贵州茅台"},
                     {"rank": 2, "symbol": "300750.SZ", "name": "宁德时代"},
                     {"rank": 3, "symbol": "000858.SZ", "name": "五粮液"},
                 ],
                 "follow_up_validation": {
-                    "status": "in_progress", "horizon_days": 3,
-                    "completed_sessions": 2, "available_picks": 3,
-                    "average_return": 0.018, "entry_date": "2026-07-25",
+                    "status": "in_progress",
+                    "horizon_days": 3,
+                    "completed_sessions": 2,
+                    "available_picks": 3,
+                    "average_return": 0.018,
+                    "entry_date": "2026-07-25",
                     "evaluation_date": "2026-07-27",
                     "picks": [
-                        {"symbol": "600519.SH", "status": "ready", "entry_price": 1500,
-                         "price": 1530, "price_date": "2026-07-27", "return": 0.02},
-                        {"symbol": "300750.SZ", "status": "ready", "entry_price": 260,
-                         "price": 265.2, "price_date": "2026-07-27", "return": 0.02},
-                        {"symbol": "000858.SZ", "status": "ready", "entry_price": 120,
-                         "price": 121.68, "price_date": "2026-07-27", "return": 0.014},
+                        {
+                            "symbol": "600519.SH",
+                            "status": "ready",
+                            "entry_price": 1500,
+                            "price": 1530,
+                            "price_date": "2026-07-27",
+                            "return": 0.02,
+                        },
+                        {
+                            "symbol": "300750.SZ",
+                            "status": "ready",
+                            "entry_price": 260,
+                            "price": 265.2,
+                            "price_date": "2026-07-27",
+                            "return": 0.02,
+                        },
+                        {
+                            "symbol": "000858.SZ",
+                            "status": "ready",
+                            "entry_price": 120,
+                            "price": 121.68,
+                            "price_date": "2026-07-27",
+                            "return": 0.014,
+                        },
                     ],
                 },
             }
@@ -435,7 +533,8 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
     }
     lists = {
         "favorites": [{"symbol": "600519.SH", "name": "贵州茅台"}],
-        "following": [], "holdings": [],
+        "following": [],
+        "holdings": [],
     }
     history_calls = []
 
@@ -447,13 +546,16 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
             return
         symbol = request_url.split("/api/v1/market/history/", 1)[1].split("?", 1)[0]
         frequency = request_url.split("frequency=", 1)[1].split("&", 1)[0]
-        route.fulfill(json={
-            "symbol": symbol, "frequency": frequency,
-            "kline": [
-                ["2026-07-24", 10, 10.5, 9.8, 10.8, 1000],
-                ["2026-07-25", 10.5, 11, 10.2, 11.2, 1200],
-            ],
-        })
+        route.fulfill(
+            json={
+                "symbol": symbol,
+                "frequency": frequency,
+                "kline": [
+                    ["2026-07-24", 10, 10.5, 9.8, 10.8, 1000],
+                    ["2026-07-25", 10.5, 11, 10.2, 11.2, 1200],
+                ],
+            }
+        )
 
     def asset_handler(route):
         request = route.request
@@ -462,15 +564,12 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
             list_name = tail.split("/", 1)[0]
             item = request.post_data_json
             lists[list_name] = [
-                existing for existing in lists[list_name]
-                if existing["symbol"] != item["symbol"]
+                existing for existing in lists[list_name] if existing["symbol"] != item["symbol"]
             ]
             lists[list_name].insert(0, item)
         elif request.method == "DELETE":
             list_name, symbol = tail.split("/", 1)
-            lists[list_name] = [
-                item for item in lists[list_name] if item["symbol"] != symbol
-            ]
+            lists[list_name] = [item for item in lists[list_name] if item["symbol"] != symbol]
         route.fulfill(json=lists)
 
     empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
@@ -479,8 +578,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
             "**/api/v1/market/overview/stream*",
-            lambda route: route.fulfill(
-                status=200, content_type="application/x-ndjson", body=empty_market),
+            lambda route: route.fulfill(status=200, content_type="application/x-ndjson", body=empty_market),
         )
         page.route("**/api/v1/market/history/**", history_handler)
         page.route("**/api/v1/portfolio/lists**", asset_handler)
@@ -500,12 +598,8 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         history_detail = page.locator(".snapshot-detail-row").first
         history_box = history_row.bounding_box()
         assert history_box is not None and history_box["height"] <= 56
-        playwright_sync.expect(history_row.locator(".snapshot-pick-summary")).to_contain_text(
-            "贵州茅台"
-        )
-        playwright_sync.expect(
-            history_row.locator(".snapshot-summary-validation")
-        ).to_contain_text("验证中")
+        playwright_sync.expect(history_row.locator(".snapshot-pick-summary")).to_contain_text("贵州茅台")
+        playwright_sync.expect(history_row.locator(".snapshot-summary-validation")).to_contain_text("验证中")
         assert history_detail.is_hidden()
         history_row.click()
         playwright_sync.expect(history_detail).to_be_visible()
@@ -523,13 +617,9 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         assert page.locator("#tab-decision").is_visible()
         assert not page.locator("#tab-market").is_visible()
         assert page.locator(".decision-detail-row").count() == 1
-        assert first_row.evaluate(
-            "row => row.nextElementSibling.classList.contains('decision-detail-row')"
-        )
+        assert first_row.evaluate("row => row.nextElementSibling.classList.contains('decision-detail-row')")
         assert first_trigger.get_attribute("aria-expanded") == "true"
-        assert page.locator(
-            '[data-decision-asset-toggle="favorites"]'
-        ).inner_text() == "已自选"
+        assert page.locator('[data-decision-asset-toggle="favorites"]').inner_text() == "已自选"
 
         page.locator('[data-decision-frequency="60m"]').click()
         page.locator("#decision-kline canvas").wait_for()
@@ -543,9 +633,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         playwright_sync.expect(following).to_have_text("加入关注")
         assert page.locator(".decision-detail-row").count() == 1
 
-        second_trigger = page.locator(
-            'tr[data-symbol="300750.SZ"] [data-decision-kline-trigger]'
-        )
+        second_trigger = page.locator('tr[data-symbol="300750.SZ"] [data-decision-kline-trigger]')
         second_trigger.click()
         page.locator("#decision-kline canvas").wait_for()
         assert page.locator(".decision-detail-row").count() == 1
@@ -620,7 +708,9 @@ def test_kline_cache_and_stale_view_protection(live_server):
         page.route(
             "**/api/v1/market/overview/stream*",
             lambda route: route.fulfill(
-                status=200, content_type="application/x-ndjson", body=empty_market,
+                status=200,
+                content_type="application/x-ndjson",
+                body=empty_market,
             ),
         )
         page.goto(url)
@@ -768,55 +858,92 @@ def test_kline_cache_and_stale_view_protection(live_server):
 def test_major_indexes_are_first_and_personal_group_shows_memberships(live_server):
     url, _ = live_server
     personal = {
-        "symbol": "600519.SH", "name": "贵州茅台", "last": 1530.0,
-        "change_pct": 0.99, "nav": [[1784505600000, 1.0], [1784592000000, 1.02]],
-        "as_of": "2026-07-21", "cache_status": "ready",
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "last": 1530.0,
+        "change_pct": 0.99,
+        "nav": [[1784505600000, 1.0], [1784592000000, 1.02]],
+        "as_of": "2026-07-21",
+        "cache_status": "ready",
         "memberships": ["favorites", "holdings"],
-        "rsi_14": 58.0, "rsi_history": [
-            ["2026-05-01", 40.0], ["2026-06-15", 52.0], ["2026-07-21", 58.0],
+        "rsi_14": 58.0,
+        "rsi_history": [
+            ["2026-05-01", 40.0],
+            ["2026-06-15", 52.0],
+            ["2026-07-21", 58.0],
         ],
     }
     index = {
-        "symbol": "000300.SH", "name": "沪深300", "last": 4600.0,
-        "change_pct": -0.2, "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
-        "as_of": "2026-07-21", "cache_status": "ready",
-        "rsi_14": 60.0, "rsi_history": [
-            ["2026-03-01", 20.0], ["2026-04-20", 30.0], ["2026-05-01", 35.0],
-            ["2026-06-15", 50.0], ["2026-07-21", 60.0],
+        "symbol": "000300.SH",
+        "name": "沪深300",
+        "last": 4600.0,
+        "change_pct": -0.2,
+        "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
+        "as_of": "2026-07-21",
+        "cache_status": "ready",
+        "rsi_14": 60.0,
+        "rsi_history": [
+            ["2026-03-01", 20.0],
+            ["2026-04-20", 30.0],
+            ["2026-05-01", 35.0],
+            ["2026-06-15", 50.0],
+            ["2026-07-21", 60.0],
         ],
     }
-    stream = "\n".join([
-        json.dumps({
-            "type": "progress", "progress": 10, "phase": "读取本地市场缓存",
-            "detail": "贵州茅台", "partial": {
-                "kind": "market_item", "group": "我的股票", "item": personal,
-            }, "request_id": "market-test",
-        }, ensure_ascii=False),
-        json.dumps({
-            "type": "result", "data": {
-                "groups": {"我的股票": [personal], "A股指数": [index]},
-            }, "request_id": "market-test",
-        }, ensure_ascii=False),
-    ]) + "\n"
+    stream = (
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "progress",
+                        "progress": 10,
+                        "phase": "读取本地市场缓存",
+                        "detail": "贵州茅台",
+                        "partial": {
+                            "kind": "market_item",
+                            "group": "我的股票",
+                            "item": personal,
+                        },
+                        "request_id": "market-test",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "data": {
+                            "groups": {"我的股票": [personal], "A股指数": [index]},
+                        },
+                        "request_id": "market-test",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n"
+    )
     kline = [
         [f"2026-06-{day:02d}", price, price + 0.2, price - 0.3, price + 0.5, 1000 + day]
-        for day, price in enumerate([100.0] + [10.0 + index * 0.1 for index in range(27)],1)
+        for day, price in enumerate([100.0] + [10.0 + index * 0.1 for index in range(27)], 1)
     ]
     history_calls = []
 
     def history_handler(route):
         history_calls.append(route.request.url)
-        route.fulfill(json={
-            "symbol": "000300.SH", "frequency": "1d", "kline": kline,
-        })
+        route.fulfill(
+            json={
+                "symbol": "000300.SH",
+                "frequency": "1d",
+                "kline": kline,
+            }
+        )
 
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
             "**/api/v1/market/overview/stream*",
-            lambda route: route.fulfill(
-                status=200, content_type="application/x-ndjson", body=stream),
+            lambda route: route.fulfill(status=200, content_type="application/x-ndjson", body=stream),
         )
         page.route(
             "**/api/v1/market/history/**",
@@ -872,9 +999,9 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
             "lineColor": "#24a06b",
             "endpointPoints": 1,
             "tooltipText": (
-                "07.21<br><span style=\"color:#24a06b\">●</span> "
+                '07.21<br><span style="color:#24a06b">●</span> '
                 "区间涨跌&nbsp;&nbsp;<b>-0.20%</b><br>"
-                "<span style=\"color:#24a06b\">●</span> "
+                '<span style="color:#24a06b">●</span> '
                 "当日涨跌&nbsp;&nbsp;<b>-0.20%</b>"
             ),
         }
@@ -899,8 +1026,8 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert hover_dot.get_attribute("visibility") == "visible"
         hover_dot_bounds = hover_dot.bounding_box()
         assert abs(hover_dot_bounds["width"] - hover_dot_bounds["height"]) <= 0.5
-        assert max(hover_dot_bounds["width"],hover_dot_bounds["height"]) <= 4.0
-        page.mouse.move(rsi_bounds["x"] - 4,rsi_bounds["y"] + 18)
+        assert max(hover_dot_bounds["width"], hover_dot_bounds["height"]) <= 4.0
+        page.mouse.move(rsi_bounds["x"] - 4, rsi_bounds["y"] + 18)
         tooltip.wait_for(state="hidden")
         index_section.locator(".mkt-item").click()
         page.locator("#kline canvas").wait_for()
@@ -956,17 +1083,25 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
     url, _ = live_server
     factors = [
         {
-            "name": "mom_20d", "description": "20 日动量", "source": "builtin",
+            "name": "mom_20d",
+            "description": "20 日动量",
+            "source": "builtin",
         },
         {
-            "name": "人工反转", "slug": "manual_a1b2c3d4e5",
-            "description": "Quant Lab 人工表达式", "category": "人工研究",
-            "status": "candidate", "source": "quant_lab",
+            "name": "人工反转",
+            "slug": "manual_a1b2c3d4e5",
+            "description": "Quant Lab 人工表达式",
+            "category": "人工研究",
+            "status": "candidate",
+            "source": "quant_lab",
         },
         {
-            "name": "GP 候选 2", "slug": "gp_2222222222",
-            "description": "遗传规划候选", "category": "AI 发现",
-            "status": "draft", "source": "quant_lab",
+            "name": "GP 候选 2",
+            "slug": "gp_2222222222",
+            "description": "遗传规划候选",
+            "category": "AI 发现",
+            "status": "draft",
+            "source": "quant_lab",
         },
     ]
     with playwright_sync.sync_playwright() as manager:
@@ -996,8 +1131,10 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         assert "mom_20d" not in menu.inner_text()
         input_box = factor_input.bounding_box()
         menu_box = menu.bounding_box()
-        assert menu_box["y"] >= input_box["y"] + input_box["height"] \
+        assert (
+            menu_box["y"] >= input_box["y"] + input_box["height"]
             or menu_box["y"] + menu_box["height"] <= input_box["y"]
+        )
 
         factor_input.type("人工")
         assert menu.locator('[role="option"]').count() == 1
@@ -1021,27 +1158,49 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
 def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     url, _ = live_server
     target = {
-        "id": "feishu_owner", "channel": "feishu", "label": "飞书管理员私聊",
-        "target": "oc_test", "account_id": "cli_app", "chat_type": "direct",
-        "enabled": True, "preset": "balanced", "overrides": {}, "status": "healthy",
-        "last_error": "", "owner_actor": "feishu:cli_app:ou_owner", "has_context": False,
+        "id": "feishu_owner",
+        "channel": "feishu",
+        "label": "飞书管理员私聊",
+        "target": "oc_test",
+        "account_id": "cli_app",
+        "chat_type": "direct",
+        "enabled": True,
+        "preset": "balanced",
+        "overrides": {},
+        "status": "healthy",
+        "last_error": "",
+        "owner_actor": "feishu:cli_app:ou_owner",
+        "has_context": False,
         "updated_at": "2026-07-27T10:00:00+00:00",
     }
     job = {
-        "name": "news_digest", "enabled": False,
+        "name": "news_digest",
+        "enabled": False,
         "schedule": {"type": "daily", "times": ["11:35", "21:00"]},
-        "args": {}, "next_run": None, "updated_at": "2026-07-27T10:00:00+00:00",
+        "args": {},
+        "next_run": None,
+        "updated_at": "2026-07-27T10:00:00+00:00",
     }
     overview = {
-        "enabled": True, "timezone": "Asia/Shanghai", "runtime": "running",
-        "bot_accounts": [{
-            "channel": "feishu", "account_id": "cli_app", "status": "listening",
-            "last_error": "",
-        }],
-        "jobs": [job], "recent_runs": [], "recent_events": [], "targets": [target],
+        "enabled": True,
+        "timezone": "Asia/Shanghai",
+        "runtime": "running",
+        "bot_accounts": [
+            {
+                "channel": "feishu",
+                "account_id": "cli_app",
+                "status": "listening",
+                "last_error": "",
+            }
+        ],
+        "jobs": [job],
+        "recent_runs": [],
+        "recent_events": [],
+        "targets": [target],
         "inbound": {
             "feishu": {
-                "total": 1, "last_received_at": "2026-07-27T10:02:00+00:00",
+                "total": 1,
+                "last_received_at": "2026-07-27T10:02:00+00:00",
                 "direct": {"total": 1, "last_received_at": "2026-07-27T10:02:00+00:00"},
                 "group": {"total": 0, "last_received_at": ""},
             },
@@ -1049,11 +1208,22 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         },
     }
     source = {
-        "id": "sse", "name": "上海证券交易所", "kind": "builtin",
-        "group_name": "official", "url": "https://www.sse.com.cn/",
-        "item_limit": 30, "factor_weight": 1, "enabled": True, "is_official": True,
-        "built_in": True, "auth_type": "none", "auth_header": "",
-        "auth_configured": False, "parser": {}, "last_error": "", "last_run": "",
+        "id": "sse",
+        "name": "上海证券交易所",
+        "kind": "builtin",
+        "group_name": "official",
+        "url": "https://www.sse.com.cn/",
+        "item_limit": 30,
+        "factor_weight": 1,
+        "enabled": True,
+        "is_official": True,
+        "built_in": True,
+        "auth_type": "none",
+        "auth_header": "",
+        "auth_configured": False,
+        "parser": {},
+        "last_error": "",
+        "last_run": "",
     }
     requests = {"audit": 0, "events": 0, "jobs": 0, "run": 0}
 
@@ -1067,42 +1237,84 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
     def audit_handler(route):
         requests["audit"] += 1
-        route.fulfill(status=200, json={"items": [{
-            "created_at": "2026-07-27T10:00:00+00:00", "actor": "web",
-            "action": "update_policy", "object_type": "target",
-            "object_id": "feishu_owner", "result": "ok",
-        }]})
+        route.fulfill(
+            status=200,
+            json={
+                "items": [
+                    {
+                        "created_at": "2026-07-27T10:00:00+00:00",
+                        "actor": "web",
+                        "action": "update_policy",
+                        "object_type": "target",
+                        "object_id": "feishu_owner",
+                        "result": "ok",
+                    }
+                ]
+            },
+        )
 
     def event_handler(route):
         requests["events"] += 1
-        route.fulfill(status=200, json={"items": [{
-            "id": "event-1", "kind": "important_news", "score": 82,
-            "direction": "up", "occurred_at": "2026-07-27T10:03:00+00:00",
-            "payload": {"title": "测试市场事件"},
-        }]})
+        route.fulfill(
+            status=200,
+            json={
+                "items": [
+                    {
+                        "id": "event-1",
+                        "kind": "important_news",
+                        "score": 82,
+                        "direction": "up",
+                        "occurred_at": "2026-07-27T10:03:00+00:00",
+                        "payload": {"title": "测试市场事件"},
+                    }
+                ]
+            },
+        )
 
     def jobs_handler(route):
         if route.request.url.endswith("/run"):
             requests["run"] += 1
-            route.fulfill(status=200, json={
-                "status": "accepted", "run_id": "job-2", "job_id": "job-2",
-                "task": "news_digest", "created": True,
-            })
+            route.fulfill(
+                status=200,
+                json={
+                    "status": "accepted",
+                    "run_id": "job-2",
+                    "job_id": "job-2",
+                    "task": "news_digest",
+                    "created": True,
+                },
+            )
             return
         if route.request.method == "PATCH":
             job["enabled"] = route.request.post_data_json["action"] == "resume"
             route.fulfill(status=200, json=job)
             return
         requests["jobs"] += 1
-        route.fulfill(status=200, json={"jobs": [job], "runs": [{
-            "domain": "automation", "id": "job-1", "type": "automation.news_digest",
-            "status": "completed", "progress": 1, "phase": "completed",
-            "detail": "摘要生成完成", "attempt": 1, "cancel_requested": False,
-            "created_at": "2026-07-27T09:59:00+00:00",
-            "updated_at": "2026-07-27T10:01:00+00:00",
-            "estimated_remaining_seconds": 0, "can_cancel": False,
-            "can_retry": False, "links": {},
-        }]})
+        route.fulfill(
+            status=200,
+            json={
+                "jobs": [job],
+                "runs": [
+                    {
+                        "domain": "automation",
+                        "id": "job-1",
+                        "type": "automation.news_digest",
+                        "status": "completed",
+                        "progress": 1,
+                        "phase": "completed",
+                        "detail": "摘要生成完成",
+                        "attempt": 1,
+                        "cancel_requested": False,
+                        "created_at": "2026-07-27T09:59:00+00:00",
+                        "updated_at": "2026-07-27T10:01:00+00:00",
+                        "estimated_remaining_seconds": 0,
+                        "can_cancel": False,
+                        "can_retry": False,
+                        "links": {},
+                    }
+                ],
+            },
+        )
 
     def source_handler(route):
         if route.request.method == "GET":
@@ -1131,20 +1343,22 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
         page.get_by_role("button", name="自动化", exact=True).click()
         page.locator("#automation-overview").get_by_text(
-            "重要消息摘要已暂停", exact=True,
+            "重要消息摘要已暂停",
+            exact=True,
         ).wait_for()
         overview_tab = page.get_by_role("tab", name="运行总览", exact=True)
         overview_tab.focus()
         overview_tab.press("ArrowRight")
-        assert page.get_by_role("tab", name="任务调度", exact=True).get_attribute(
-            "aria-selected"
-        ) == "true"
+        assert page.get_by_role("tab", name="任务调度", exact=True).get_attribute("aria-selected") == "true"
 
         page.locator('[data-job-row="news_digest"] [data-job-expand]').click()
         page.get_by_role("button", name="立即运行任务", exact=True).click()
-        _wait_for_class(page.locator(
-            '[data-job-row="news_digest"] .automation-row-feedback',
-        ), "success")
+        _wait_for_class(
+            page.locator(
+                '[data-job-row="news_digest"] .automation-row-feedback',
+            ),
+            "success",
+        )
         assert requests["run"] == 1
 
         page.get_by_role("tab", name="消息推送", exact=True).click()
@@ -1156,13 +1370,17 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
         for kind in ("important_news", "market_turn", "market_close", "task_report", "task_failure"):
             page.locator(f'[data-target="feishu_owner"][data-event-type="{kind}"]').uncheck()
-            _wait_for_class(page.locator(
-                '[data-target-card="feishu_owner"] .target-feedback',
-            ), "success")
+            _wait_for_class(
+                page.locator(
+                    '[data-target-card="feishu_owner"] .target-feedback',
+                ),
+                "success",
+            )
         assert target["overrides"]["event_types"] == []
-        assert "自动化与 Bot 监听仍会继续运行" in page.locator(
-            '[data-target-card="feishu_owner"] .target-content-note'
-        ).inner_text()
+        assert (
+            "自动化与 Bot 监听仍会继续运行"
+            in page.locator('[data-target-card="feishu_owner"] .target-content-note').inner_text()
+        )
 
         page.get_by_role("tab", name="运行记录", exact=True).click()
         page.locator("#automation-runs").get_by_text("job-1", exact=True).wait_for()
@@ -1183,12 +1401,10 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
         page.get_by_role("button", name="刷新状态", exact=True).click()
         page.wait_for_function(
-            "() => document.querySelector('#automation-page-feedback')"
-            "?.textContent.includes('已刷新')"
+            "() => document.querySelector('#automation-page-feedback')?.textContent.includes('已刷新')"
         )
         page.wait_for_function(
-            "() => document.querySelector('#automation-audit')"
-            "?.textContent.includes('update_policy')"
+            "() => document.querySelector('#automation-audit')?.textContent.includes('update_policy')"
         )
         assert requests["audit"] == 2
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -1196,35 +1412,26 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
 
         page.emulate_media(reduced_motion="reduce")
         page.get_by_role("tab", name="任务调度", exact=True).click()
-        assert page.locator("#automation-panel-jobs").evaluate(
-            "element => getComputedStyle(element).animationName"
-        ) == "none"
+        assert (
+            page.locator("#automation-panel-jobs").evaluate(
+                "element => getComputedStyle(element).animationName"
+            )
+            == "none"
+        )
 
         page.set_viewport_size({"width": 1280, "height": 900})
         page.get_by_role("tab", name="消息推送", exact=True).click()
-        channel_status = page.locator(
-            '#automation-channel-feishu .status-label'
-        )
-        assert channel_status.evaluate(
-            "element => getComputedStyle(element).whiteSpace"
-        ) == "nowrap"
-        assert channel_status.evaluate(
-            "element => element.getBoundingClientRect().height"
-        ) < 24
-        target_toggle = page.locator(
-            '[data-target-card="feishu_owner"] [data-target-expand]'
-        )
+        channel_status = page.locator("#automation-channel-feishu .status-label")
+        assert channel_status.evaluate("element => getComputedStyle(element).whiteSpace") == "nowrap"
+        assert channel_status.evaluate("element => element.getBoundingClientRect().height") < 24
+        target_toggle = page.locator('[data-target-card="feishu_owner"] [data-target-expand]')
         if target_toggle.get_attribute("aria-expanded") != "true":
             target_toggle.click()
         subscription_checkbox = page.locator(
             '[data-target-card="feishu_owner"] .target-content-options input'
         ).first
-        assert subscription_checkbox.evaluate(
-            "element => element.getBoundingClientRect().width"
-        ) < 18
-        assert page.evaluate(
-            "document.documentElement.scrollWidth <= window.innerWidth"
-        )
+        assert subscription_checkbox.evaluate("element => element.getBoundingClientRect().width") < 18
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
         page.get_by_role("button", name="设置", exact=True).click()
         page.locator('[data-settings-section="sources"]').click()
@@ -1259,14 +1466,16 @@ def test_market_style_confirmation_path_chart_layout(live_server):
     }
     for day, (candidate, confirmed) in enumerate(states, 1):
         spread = spread_by_state[candidate]
-        history.append({
-            "date": f"2026-07-{day:02d}",
-            "strong_return": 0.003 + spread / 2,
-            "weak_return": 0.003 - spread / 2,
-            "spread": spread,
-            "candidate": candidate,
-            "confirmed": confirmed,
-        })
+        history.append(
+            {
+                "date": f"2026-07-{day:02d}",
+                "strong_return": 0.003 + spread / 2,
+                "weak_return": 0.003 - spread / 2,
+                "spread": spread,
+                "candidate": candidate,
+                "confirmed": confirmed,
+            }
+        )
     payload = {
         "meta": {
             "as_of": "2026-07-12",
@@ -1422,9 +1631,7 @@ def test_market_style_confirmation_path_chart_layout(live_server):
             "lineType": "solid",
             "showSymbol": False,
         }
-        assert chart_colors["axisExtent"][0] == pytest.approx(
-            -chart_colors["axisExtent"][1]
-        )
+        assert chart_colors["axisExtent"][0] == pytest.approx(-chart_colors["axisExtent"][1])
         assert "低位样本 +0.50%" in chart_colors["tooltipText"]
         assert chart_colors["deadZone"] == [-0.0025, 0.0025]
         assert chart_colors["deadZoneColor"] == "rgba(201,150,66,.07)"
@@ -1523,30 +1730,32 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
     }
 
     def industries_handler(route):
-        visible = [
-            item for item in items
-            if item["level"] == "L1" or item["code"] in selected_codes
-        ]
-        route.fulfill(json={
-            "meta": meta,
-            "data": {"items": visible, "summary": {}, "window": 5},
-        })
+        visible = [item for item in items if item["level"] == "L1" or item["code"] in selected_codes]
+        route.fulfill(
+            json={
+                "meta": meta,
+                "data": {"items": visible, "summary": {}, "window": 5},
+            }
+        )
 
     def preferences_handler(route):
         if route.request.method == "PUT":
             body = route.request.post_data_json
             selected_codes.clear()
             selected_codes.update(body["l2_codes"])
-        route.fulfill(json={
-            "data": {"l2_codes": sorted(selected_codes), "theme_limit": 16},
-        })
+        route.fulfill(
+            json={
+                "data": {"l2_codes": sorted(selected_codes), "theme_limit": 16},
+            }
+        )
 
     taxonomy = {
         "meta": meta,
         "data": {
             "l2": [
                 {"code": item["code"], "name": item["name"], "member_count": 20}
-                for item in items if item["level"] == "L2"
+                for item in items
+                if item["level"] == "L2"
             ],
         },
     }
@@ -1562,8 +1771,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.on(
             "console",
-            lambda message: console_errors.append(message.text)
-            if message.type == "error" else None,
+            lambda message: console_errors.append(message.text) if message.type == "error" else None,
         )
         page.route("**/api/v1/rotation/industries**", industries_handler)
         page.route(
@@ -1598,9 +1806,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         )
         assert 0 < axis_bounds["xMin"] < axis_bounds["xMax"] < 100
         assert 0 < axis_bounds["yMin"] < axis_bounds["yMax"] < 100
-        chart_panel_box = page.locator(
-            ".rotation-industry-chart-panel"
-        ).bounding_box()
+        chart_panel_box = page.locator(".rotation-industry-chart-panel").bounding_box()
         summary_box = page.locator(".rotation-industry-summary").bounding_box()
         assert summary_box["x"] > chart_panel_box["x"] + chart_panel_box["width"]
         assert summary_box["height"] < chart_panel_box["height"]
@@ -1626,12 +1832,8 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
             }"""
         )
         l1_tab.click()
-        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text(
-            "周期坐标暂不可用"
-        )
-        unexpected_page_errors = [
-            error for error in page_errors if error != "synthetic init failure"
-        ]
+        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text("周期坐标暂不可用")
+        unexpected_page_errors = [error for error in page_errors if error != "synthetic init failure"]
         assert unexpected_page_errors == []
         page_errors.clear()
         page.evaluate(
@@ -1641,9 +1843,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
             }"""
         )
         l2_tab.click()
-        page.locator("#rotation-industry-scatter canvas").first.wait_for(
-            state="visible"
-        )
+        page.locator("#rotation-industry-scatter canvas").first.wait_for(state="visible")
 
         page.get_by_role("button", name="3 日", exact=True).click()
         playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
@@ -1661,9 +1861,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         page.locator("#rotation-l2-save").click()
         playwright_sync.expect(matrix).to_contain_text("未成图二级")
         playwright_sync.expect(l2_tab).to_have_attribute("aria-selected", "true")
-        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text(
-            "暂无可绘制坐标"
-        )
+        playwright_sync.expect(page.locator(".rotation-chart-state")).to_contain_text("暂无可绘制坐标")
 
         page.get_by_role("button", name="管理关注区", exact=True).click()
         page.locator('.rotation-l2-option input[value="L2-C"]').set_checked(False)
@@ -1687,10 +1885,10 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         signals = {
             str(window): {
                 "rotation_change_pp": change,
-                "member_return": .012 - index * .001,
-                "excess_return": .006 - index * .0005,
-                "advance_ratio": .72 - index * .03,
-                "amount_activity": .09 - index * .01,
+                "member_return": 0.012 - index * 0.001,
+                "excess_return": 0.006 - index * 0.0005,
+                "advance_ratio": 0.72 - index * 0.03,
+                "amount_activity": 0.09 - index * 0.01,
             }
             for window in (1, 3, 5, 20)
         }
@@ -1700,7 +1898,7 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
             {"id": "breadth", "label": "上涨宽度过半"},
             {"id": "amount", "label": "量能活跃"},
             {"id": "grade", "label": "周期结构 A/B"},
-        ][:max(1, 5 - index // 2)]
+        ][: max(1, 5 - index // 2)]
         return {
             "code": f"BK{index + 1:04d}",
             "name": ["机器人", "光模块", "创新药", "商业航天", "存储芯片", "液冷服务器"][index],
@@ -1711,25 +1909,25 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
             "grade": "A" if index < 2 else "B",
             "member_count": 36 + index,
             "eligible_count": 32 + index,
-            "coverage": .88,
+            "coverage": 0.88,
             "signals": signals,
             "primary_industry": {
                 "name": "电子" if index != 2 else "医药生物",
                 "overlap_count": 12 + index,
-                "theme_share": .48,
+                "theme_share": 0.48,
             },
             "representatives": [
                 {
                     "name": f"代表样本 {index + 1}",
                     "symbol": f"600{index:03d}",
-                    "trend_score": .72 - index * .03,
-                    "return_1d": .018 - index * .002,
+                    "trend_score": 0.72 - index * 0.03,
+                    "return_1d": 0.018 - index * 0.002,
                 },
                 {
                     "name": f"次代表 {index + 1}",
                     "symbol": f"300{index:03d}",
-                    "trend_score": .64 - index * .02,
-                    "return_1d": .009 - index * .001,
+                    "trend_score": 0.64 - index * 0.02,
+                    "return_1d": 0.009 - index * 0.001,
                 },
             ],
             "focus": {
@@ -1750,50 +1948,52 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
     def themes_handler(route):
         filtered = "query=" in route.request.url
         visible = [] if filtered else items
-        route.fulfill(json={
-            "meta": meta,
-            "data": {
-                "items": visible,
-                "focus_items": items[:4],
-                "focus_definition": {
-                    "criteria": [
-                        {"id": "rotation", "label": "轮动改善"},
-                        {"id": "excess", "label": "相对收益为正"},
-                        {"id": "breadth", "label": "上涨宽度过半"},
-                        {"id": "amount", "label": "量能活跃"},
-                        {"id": "grade", "label": "周期结构 A/B"},
-                    ],
-                    "limit": 4,
-                    "window": 5,
-                },
-                "pagination": {
-                    "page": 1,
-                    "page_size": 50,
-                    "total": len(visible),
-                    "pages": 1,
-                    "has_previous": False,
-                    "has_next": False,
-                },
-                "summary": {
-                    "group_count": len(items),
-                    "movements": {
-                        "5": {
-                            "improving_count": 5,
-                            "retreating_count": 1,
-                            "leader": {
-                                "name": "机器人",
-                                "rotation_change_pp": 9.0,
+        route.fulfill(
+            json={
+                "meta": meta,
+                "data": {
+                    "items": visible,
+                    "focus_items": items[:4],
+                    "focus_definition": {
+                        "criteria": [
+                            {"id": "rotation", "label": "轮动改善"},
+                            {"id": "excess", "label": "相对收益为正"},
+                            {"id": "breadth", "label": "上涨宽度过半"},
+                            {"id": "amount", "label": "量能活跃"},
+                            {"id": "grade", "label": "周期结构 A/B"},
+                        ],
+                        "limit": 4,
+                        "window": 5,
+                    },
+                    "pagination": {
+                        "page": 1,
+                        "page_size": 50,
+                        "total": len(visible),
+                        "pages": 1,
+                        "has_previous": False,
+                        "has_next": False,
+                    },
+                    "summary": {
+                        "group_count": len(items),
+                        "movements": {
+                            "5": {
+                                "improving_count": 5,
+                                "retreating_count": 1,
+                                "leader": {
+                                    "name": "机器人",
+                                    "rotation_change_pp": 9.0,
+                                },
                             },
                         },
-                    },
-                    "persistence": {
-                        "longest": [
-                            {"name": "机器人", "sessions": 6, "stage_label": "修复扩散"},
-                        ],
+                        "persistence": {
+                            "longest": [
+                                {"name": "机器人", "sessions": 6, "stage_label": "修复扩散"},
+                            ],
+                        },
                     },
                 },
-            },
-        })
+            }
+        )
 
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
@@ -1806,8 +2006,7 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.on(
             "console",
-            lambda message: console_errors.append(message.text)
-            if message.type == "error" else None,
+            lambda message: console_errors.append(message.text) if message.type == "error" else None,
         )
         page.route("**/api/v1/rotation/themes?*", themes_handler)
         page.goto(f"{url}/#observe/themes")
@@ -1852,8 +2051,14 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
 def test_market_temperature_change_window_rerenders_cached_evidence(live_server):
     url, _ = live_server
     current_items = [
-        {"id": identifier, "label": label, "score": score, "weight": weight,
-         "note": f"{label}当前证据", "available": True}
+        {
+            "id": identifier,
+            "label": label,
+            "score": score,
+            "weight": weight,
+            "note": f"{label}当前证据",
+            "available": True,
+        }
         for identifier, label, score, weight in [
             ("trend", "趋势分布", 40.0, 40),
             ("breadth", "涨跌宽度", 55.0, 20),
@@ -1868,20 +2073,29 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
         for index, item in enumerate(current_items):
             comparable = not partial or index < 3
             previous = item["score"] - change if comparable else None
-            compared.append({
-                "id": item["id"], "label": item["label"], "weight": item["weight"],
-                "current_score": item["score"], "previous_score": previous,
-                "change_pp": change if comparable else None,
-                "current_available": True, "previous_available": comparable,
-                "comparable": comparable, "current_note": item["note"],
-                "previous_note": "历史证据" if comparable else "历史证据不足",
-            })
+            compared.append(
+                {
+                    "id": item["id"],
+                    "label": item["label"],
+                    "weight": item["weight"],
+                    "current_score": item["score"],
+                    "previous_score": previous,
+                    "change_pp": change if comparable else None,
+                    "current_available": True,
+                    "previous_available": comparable,
+                    "comparable": comparable,
+                    "current_note": item["note"],
+                    "previous_note": "历史证据" if comparable else "历史证据不足",
+                }
+            )
         return {
             "window": window,
             "current_as_of": "2026-08-08",
             "reference_as_of": f"2026-07-{30 - window:02d}",
             "temperature": {
-                "current": 40.0, "previous": 40.0 - change, "change_pp": change,
+                "current": 40.0,
+                "previous": 40.0 - change,
+                "change_pp": change,
             },
             "evidence": {
                 "previous_score": 50.0 - change,
@@ -1894,31 +2108,41 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
 
     history = [
         {
-            "date": f"2026-07-{day:02d}", "temperature": 30.0 + day / 3,
-            "ma5": 32.0, "ma10": 31.0, "ma20": 30.0,
-            "eligible": 100, "strong_up": 20, "up": 20,
-            "range": 35, "weak": 25,
+            "date": f"2026-07-{day:02d}",
+            "temperature": 30.0 + day / 3,
+            "ma5": 32.0,
+            "ma10": 31.0,
+            "ma20": 30.0,
+            "eligible": 100,
+            "strong_up": 20,
+            "up": 20,
+            "range": 35,
+            "weak": 25,
         }
         for day in range(1, 31)
     ]
     payload = {
         "meta": {
-            "as_of": "2026-08-08", "algorithm_version": "QM_ROTATION_V7",
+            "as_of": "2026-08-08",
+            "algorithm_version": "QM_ROTATION_V7",
             "sources": ["local:bars", "local:news"],
             "quality": {"status": "complete", "issues": []},
         },
         "data": {
             "as_of": "2026-08-08",
             "current": {
-                "temperature": 40.0, "regime": "expansion",
-                "regime_label": "强势扩散区", "eligible_count": 100,
+                "temperature": 40.0,
+                "regime": "expansion",
+                "regime_label": "强势扩散区",
+                "eligible_count": 100,
                 "counts": {"strong_up": 20, "up": 20, "range": 35, "weak": 25},
                 "ratios": {"strong_up": 20.0, "up": 20.0, "range": 35.0, "weak": 25.0},
             },
             "history": history,
             "evidence": {"score": 49.75, "available_weight": 100, "items": current_items},
             "change_windows": {
-                "default_window": 5, "supported_windows": [1, 3, 5, 20],
+                "default_window": 5,
+                "supported_windows": [1, 3, 5, 20],
                 "windows": {
                     "1": comparison(1, 1.0),
                     "3": comparison(3, 3.0, partial=True),
@@ -1933,9 +2157,7 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 1000}, reduced_motion="reduce")
-        page.add_init_script(
-            "localStorage.setItem('quantmaster.rotation.window.v2','20')"
-        )
+        page.add_init_script("localStorage.setItem('quantmaster.rotation.window.v2','20')")
         page.route(
             "**/api/v1/market/temperature",
             lambda route: (requests.append(route.request.url), route.fulfill(json=payload))[-1],
@@ -1944,9 +2166,7 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
 
         five = page.locator('[data-temperature-window="5"]')
         playwright_sync.expect(five).to_have_attribute("aria-pressed", "true")
-        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
-            "5 日 +5.0 · 升温"
-        )
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text("5 日 +5.0 · 升温")
         playwright_sync.expect(page.locator(".rotation-meter-reference")).to_have_count(5)
         etf_row = page.locator(".rotation-evidence-row", has_text="ETF 资金")
         playwright_sync.expect(etf_row).to_contain_text("+5.0")
@@ -1960,17 +2180,13 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
         assert radar["series"][1]["lineStyle"]["type"] == "dashed"
 
         page.locator('[data-temperature-window="20"]').click()
-        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
-            "20 日 -2.0 · 降温"
-        )
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text("20 日 -2.0 · 降温")
         assert len(requests) == 1
         assert page.evaluate("localStorage.getItem('quantmaster.rotation.window.v2')") == "20"
         assert page.evaluate("localStorage.getItem('quantmaster.market.temperature-window.v1')") == "20"
 
         page.locator('[data-temperature-window="1"]').click()
-        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text(
-            "1 日 +1.0 · 升温"
-        )
+        playwright_sync.expect(page.locator(".rotation-kpi").first).to_contain_text("1 日 +1.0 · 升温")
         playwright_sync.expect(page.locator(".rotation-meter-reference")).to_have_count(5)
         assert len(requests) == 1
 
@@ -2018,9 +2234,7 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page.goto(f"{url}/#observe/rotation")
         page.locator("#rotation-overview-view").wait_for(state="visible")
         assert page.url.endswith("#observe/rotation")
-        assert "· 0%" not in page.locator(
-            '[data-rotation-asof="overview"]'
-        ).inner_text()
+        assert "· 0%" not in page.locator('[data-rotation-asof="overview"]').inner_text()
         page.get_by_role("tab", name="行业周期", exact=True).click()
         page.locator("#rotation-industry-view").wait_for(state="visible")
         assert page.url.endswith("#observe/industry")
@@ -2028,63 +2242,618 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page.locator("#rotation-themes-view").wait_for(state="visible")
         assert page.url.endswith("#observe/themes")
         playwright_sync.expect(page.locator("#rotation-themes-content")).to_contain_text(
-            re.compile("等待|计算"), timeout=30_000,
+            re.compile("等待|计算"),
+            timeout=30_000,
         )
         theme_meta = page.locator('[data-rotation-asof="themes"]').inner_text()
-        assert any(
-            marker in theme_meta for marker in ("等待刷新", "尚无快照", "正在计算")
-        )
+        assert any(marker in theme_meta for marker in ("等待刷新", "尚无快照", "正在计算"))
         assert "· 0%" not in theme_meta
         page.get_by_role("tab", name="ETF 研究", exact=True).click()
         page.locator("#rotation-etf-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/etf-flows")
+        assert page.url.endswith("#observe/etfs")
 
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert page_errors == []
         browser.close()
 
 
+def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_server):
+    url, _ = live_server
+    sectors = [
+        {
+            "sector_id": "semi",
+            "sector_name": "半导体",
+            "category": "行业主题",
+            "asset_class": "equity",
+            "representative": {"symbol": "512480.SH", "name": "半导体ETF", "normalized_index": "中证半导体"},
+            "member_count": 8,
+            "index_count": 2,
+            "state": "leading",
+            "state_label": "领涨共振",
+            "trend_strength": 86,
+            "activity_score": 82,
+            "risk_badges": [{"code": "crowded_high", "label": "高位拥挤风险", "tone": "risk"}],
+            "metrics": {
+                "return_5d": 0.041,
+                "return_20d": 0.128,
+                "return_60d": 0.224,
+                "position_250d": 91,
+                "position_20d": 88,
+                "position_60d": 90,
+                "drawdown_250d": -0.032,
+                "amount_ratio_5v20": 1.42,
+            },
+            "funds": {
+                "status": "confirmed",
+                "effective_date": "2026-08-07",
+                "coverage": 0.875,
+                "share_delta": 120_000_000,
+                "share_change_pct": 0.032,
+                "estimated_flow": 310_000_000,
+                "source": "tushare:etf_share_size",
+            },
+            "invalidation": "MA20 下穿 MA60，或 20 日收益转负",
+        },
+        {
+            "sector_id": "medicine",
+            "sector_name": "医药",
+            "category": "行业主题",
+            "asset_class": "equity",
+            "representative": {"symbol": "512010.SH", "name": "医药ETF", "normalized_index": "中证全指医药"},
+            "member_count": 6,
+            "index_count": 2,
+            "state": "low_turn",
+            "state_label": "低位转强",
+            "trend_strength": 68,
+            "activity_score": 64,
+            "risk_badges": [],
+            "metrics": {
+                "return_5d": 0.026,
+                "return_20d": 0.031,
+                "return_60d": -0.042,
+                "position_250d": 34,
+                "position_20d": 67,
+                "position_60d": 49,
+                "drawdown_250d": -0.28,
+                "amount_ratio_5v20": 1.23,
+            },
+            "funds": {
+                "status": "confirmed",
+                "effective_date": "2026-08-07",
+                "coverage": 0.83,
+                "share_delta": 0,
+                "share_change_pct": 0,
+                "estimated_flow": 0,
+                "source": "tushare:etf_share_size",
+            },
+            "invalidation": "跌回 MA20 下方，或量能比低于 1.10",
+        },
+        {
+            "sector_id": "property",
+            "sector_name": "房地产",
+            "category": "行业主题",
+            "asset_class": "equity",
+            "representative": {"symbol": "512200.SH", "name": "房地产ETF", "normalized_index": "中证房地产"},
+            "member_count": 3,
+            "index_count": 1,
+            "state": "weakening",
+            "state_label": "走弱",
+            "trend_strength": 22,
+            "activity_score": 51,
+            "risk_badges": [],
+            "metrics": {
+                "return_5d": -0.032,
+                "return_20d": -0.088,
+                "return_60d": -0.102,
+                "position_250d": 18,
+                "position_20d": 12,
+                "position_60d": 15,
+                "drawdown_250d": -0.39,
+                "amount_ratio_5v20": 0.82,
+            },
+            "funds": {
+                "status": "stale",
+                "effective_date": "2026-08-06",
+                "coverage": 0,
+                "share_delta": None,
+                "share_change_pct": None,
+                "estimated_flow": None,
+                "source": "tushare:fund_share",
+            },
+            "invalidation": "重新站上 MA20 且 5 日收益转正",
+        },
+    ]
+    for sector in sectors:
+        sector["display_position"] = sector["metrics"]["position_60d"]
+        sector["position_metric"] = "position_60d"
+        sector["position_horizon"] = 60
+        sector["position_label"] = "60 日阶段位置"
+        sector["position_source"] = "stage_research_series"
+        sector["candidate_codes"] = []
+        sector["candidates"] = {}
+        sector["funds"].update(
+            {
+                "period_kind": "daily",
+                "period_sessions": 1,
+                "period_label": "当日变化",
+                "consecutive": True,
+                "coverage_level": "high" if sector["funds"]["coverage"] >= 0.8 else "low",
+                "interpretation_note": "连续交易日证据可用于辅助核查主状态",
+            }
+        )
+    sectors[1]["candidate_codes"] = ["stage_low_rebound"]
+    sectors[1]["candidates"] = {
+        "stage_low_rebound": {
+            "label": "阶段低位转强候选",
+            "eligible": True,
+            "met_conditions": ["60 日阶段位置不高于 40"],
+            "unmet_conditions": ["250 日复权位置不高于 40"],
+        }
+    }
+    products = [
+        {
+            "symbol": sector["representative"]["symbol"],
+            "name": sector["representative"]["name"],
+            "category": sector["category"],
+            "asset_class": "equity",
+            "sector_id": sector["sector_id"],
+            "sector_name": sector["sector_name"],
+            "normalized_index": sector["representative"]["normalized_index"],
+            "is_representative": True,
+            "sector_state": sector["state"],
+            "sector_state_label": sector["state_label"],
+            "metrics": {
+                **sector["metrics"],
+                "avg_amount_20d": 280_000_000,
+                "adjustment_status": "raw_short_fallback",
+                "display_position": sector["display_position"],
+                "position_metric": "position_60d",
+            },
+            "funds": sector["funds"],
+            "metadata": {"total_size": 5_200_000_000, "management_fee": 0.5},
+            "coverage": {"daily": True, "adjustment": False, "shares": True},
+            "display_position": sector["display_position"],
+            "position_label": "60 日阶段位置",
+            "candidate_codes": sector["candidate_codes"],
+        }
+        for sector in sectors
+    ]
+    overview = {
+        "meta": {
+            "snapshot_id": "etf_v3_demo",
+            "as_of": "2026-08-07",
+            "staleness": {"stale": False},
+            "quality": {"status": "complete"},
+        },
+        "data": {
+            "freshness": {
+                key: {"date": "2026-08-07", "status": "ready", "coverage": coverage}
+                for key, coverage in {
+                    "market": 1,
+                    "shares": 0.87,
+                    "adjustment": 0,
+                    "metadata": 1,
+                }.items()
+            },
+            "capabilities": {},
+            "summaries": [
+                {
+                    "kind": "strongest",
+                    "title": "最强板块",
+                    "sector_id": "semi",
+                    "sector_name": "半导体",
+                    "state": "leading",
+                    "text": "半导体 · 领涨共振 · 趋势 86",
+                    "evaluation_status": "confirmed",
+                },
+                {
+                    "kind": "low_turn",
+                    "title": "低位转强",
+                    "sector_id": "medicine",
+                    "sector_name": "医药",
+                    "state": "low_turn",
+                    "text": "医药 · 低位转强 · 趋势 68",
+                    "evaluation_status": "candidate",
+                },
+                {
+                    "kind": "risk",
+                    "title": "主要风险",
+                    "sector_id": "semi",
+                    "sector_name": "半导体",
+                    "state": "leading",
+                    "text": "半导体 · 高位拥挤风险",
+                    "evaluation_status": "confirmed",
+                },
+            ],
+            "sectors": sectors,
+            "queues": {
+                "leading": ["semi"],
+                "low_turn": ["medicine"],
+                "improving": [],
+                "weakening": ["property"],
+                "watch": [],
+                "risk": ["semi"],
+            },
+            "candidate_queues": {
+                "momentum_hot": [],
+                "stage_low_rebound": ["medicine"],
+                "stage_high_activity": [],
+            },
+            "map": {
+                "position_metric": "position_60d",
+                "horizon": 60,
+                "label": "60 日阶段位置",
+                "coverage": 1,
+                "sector_ids": ["semi", "medicine", "property"],
+            },
+        },
+    }
+    history = [
+        {"date": f"2026-08-{day:02d}", "price": 96 + day, "amount": 100_000_000 + day * 5_000_000}
+        for day in range(1, 8)
+    ]
+    fund_history = [
+        {
+            "date": f"2026-08-{day:02d}",
+            "share_delta": day * 10_000_000,
+            "estimated_flow": day * 20_000_000,
+            "confirmed_members": 6,
+        }
+        for day in range(1, 8)
+    ]
+
+    intraday_calls = {"count": 0}
+
+    def route_api(route):
+        request_url = route.request.url
+        path = request_url.split("?", 1)[0]
+        if "/rotation/etfs/overview" in request_url:
+            route.fulfill(json=overview)
+        elif "/rotation/etfs/sectors/" in request_url:
+            selected = next(item for item in sectors if item["sector_id"] in request_url)
+            route.fulfill(
+                json={
+                    "meta": overview["meta"],
+                    "data": {
+                        **selected,
+                        "history": history,
+                        "members": products,
+                        "member_pagination": {
+                            "page": 1,
+                            "page_size": 25,
+                            "total": len(products),
+                            "pages": 1,
+                            "has_previous": False,
+                            "has_next": False,
+                        },
+                        "index_groups": [
+                            {
+                                "index_key": selected["representative"]["normalized_index"],
+                                "normalized_index": selected["representative"]["normalized_index"],
+                                "member_count": len(products),
+                            }
+                        ],
+                        "selected_index_key": "",
+                        "funds": {
+                            **selected["funds"],
+                            "history": fund_history,
+                            "provenance_note": "份额只解释一级市场申赎；二级市场成交不会自动改变总份额。",
+                        },
+                        "explanation": {"conclusion": selected["state_label"]},
+                    },
+                }
+            )
+        elif path.endswith("/rotation/etfs/512480.SH/intraday"):
+            intraday_calls["count"] += 1
+            route.fulfill(
+                json={
+                    "meta": {"snapshot_id": "etf_v3_demo", "as_of": "2026-08-07"},
+                    "data": {
+                        "symbol": "512480.SH",
+                        "date": "2026-08-07",
+                        "status": "ready",
+                        "cache_hit": False,
+                        "series": [
+                            {"time": "2026-08-07T09:30", "close": 1.0},
+                            {"time": "2026-08-07T09:31", "close": 1.01},
+                        ],
+                    },
+                }
+            )
+        elif path.endswith("/rotation/etfs/512480.SH"):
+            selected = products[0]
+            route.fulfill(
+                json={
+                    "meta": overview["meta"],
+                    "data": {
+                        **selected,
+                        "metrics": {**sectors[0]["metrics"], "avg_amount_20d": 280_000_000},
+                        "sector_state": "leading",
+                        "sector_state_label": "领涨共振",
+                        "trend_strength": 86,
+                        "activity_score": 82,
+                        "risk_badges": sectors[0]["risk_badges"],
+                        "candidate_codes": [],
+                        "candidates": {},
+                        "invalidation": sectors[0]["invalidation"],
+                        "history": history,
+                        "peer_products": [],
+                    },
+                }
+            )
+        elif "/rotation/etfs/snapshots" in request_url:
+            route.fulfill(json={"items": [{"snapshot_id": "etf_v3_demo", "as_of_date": "2026-08-07"}]})
+        elif "/rotation/etfs" in request_url:
+            route.fulfill(
+                json={
+                    "meta": overview["meta"],
+                    "data": {
+                        "items": products,
+                        "categories": ["行业主题"],
+                        "pagination": {
+                            "page": 1,
+                            "page_size": 50,
+                            "total": 3,
+                            "pages": 1,
+                            "has_previous": False,
+                            "has_next": False,
+                        },
+                    },
+                }
+            )
+        else:
+            route.continue_()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 720}, reduced_motion="reduce")
+        page.route("**/api/v1/rotation/etfs**", route_api)
+        page_errors = []
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.goto(f"{url}/#observe/etfs")
+        page.locator("#rotation-etf-view").wait_for(state="visible")
+        playwright_sync.expect(page.locator(".etf-summary")).to_have_count(3)
+        playwright_sync.expect(page.locator("#rotation-etf-map")).to_be_visible()
+        playwright_sync.expect(page.locator(".etf-queues")).to_contain_text("领涨")
+        assert page.locator("#rotation-etf-product-results tbody tr").count() <= 50
+        product_results = page.locator("#rotation-etf-product-results")
+        playwright_sync.expect(product_results).to_contain_text("+1.20 亿份（+3.20%）· 估算净申购3.10 亿元")
+        playwright_sync.expect(product_results).to_contain_text("0 份（0.00%）· 已确认当日无净申赎")
+        assert "估算净申购+" not in product_results.inner_text()
+        for selector in (".etf-freshness", ".etf-summary-grid", ".etf-radar-grid"):
+            box = page.locator(selector).bounding_box()
+            assert box and box["y"] + box["height"] <= 720, (selector, box)
+
+        category_filter = page.locator("[data-rotation-etf-category]")
+        category_filter.select_option("行业主题")
+        asset_tabs = page.locator(".etf-asset-tabs [role='tab']")
+        asset_tabs.first.focus()
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(asset_tabs.nth(1)).to_have_attribute("aria-selected", "true")
+        playwright_sync.expect(page.locator("[data-rotation-etf-category]")).to_have_value("")
+        asset_tabs.first.click()
+
+        map_select = page.locator("[data-etf-map-select]")
+        map_select.focus()
+        map_select.select_option("semi")
+        drawer = page.locator("#rotation-etf-detail")
+        drawer.wait_for(state="visible")
+        conclusion_tab = drawer.locator('[data-etf-drawer-tab="conclusion"]')
+        playwright_sync.expect(conclusion_tab).to_be_visible()
+        conclusion_tab.focus()
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(drawer.locator('[data-etf-drawer-panel="trend"]')).to_be_visible()
+        assert intraday_calls["count"] == 0
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(drawer.locator('[data-etf-drawer-panel="funds"]')).to_be_visible()
+        page.keyboard.press("ArrowRight")
+        product_panel = drawer.locator('[data-etf-drawer-panel="products"]')
+        playwright_sync.expect(product_panel).to_be_visible()
+        playwright_sync.expect(product_panel).to_contain_text("52.00 亿元")
+        playwright_sync.expect(product_panel).to_contain_text("第 1/1 页")
+        page.keyboard.press("Escape")
+        playwright_sync.expect(drawer).to_be_hidden()
+        assert page.evaluate("document.activeElement === document.querySelector('[data-etf-map-select]')")
+
+        selected_product = page.locator("#rotation-etf-product-results [data-etf-detail='512480.SH']")
+        selected_product.click()
+        drawer.wait_for(state="visible")
+        playwright_sync.expect(drawer.locator("h3")).to_have_text("半导体ETF")
+        assert intraday_calls["count"] == 0
+        drawer.locator('[data-etf-drawer-tab="trend"]').click()
+        for _ in range(20):
+            if intraday_calls["count"] == 1:
+                break
+            page.wait_for_timeout(25)
+        assert intraday_calls["count"] == 1
+        playwright_sync.expect(drawer.locator("[data-etf-intraday-status]")).to_contain_text("按需读取")
+        page.keyboard.press("Escape")
+        playwright_sync.expect(drawer).to_be_hidden()
+
+        page.set_viewport_size({"width": 1024, "height": 768})
+        page.evaluate("document.documentElement.style.zoom = '2'")
+        _wait_for_document_fit(page)
+        page.evaluate("document.documentElement.style.zoom = ''")
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
+        assert page_errors == []
+        browser.close()
+
+
+def test_etf_v21_auto_research_runs_once_and_returns_to_latest(live_server):
+    url, _ = live_server
+    calls = {"scan": 0, "published": False}
+    overview = {
+        "meta": {
+            "snapshot_id": "etf_old_snapshot",
+            "quality": {"status": "complete", "issues": []},
+            "refresh": {
+                "recommended": True,
+                "input_id": "evidence_fingerprint_20260807",
+                "input_as_of": "2026-08-07",
+                "reason": "本地证据已变化（份额），进入页面时仅补算一次",
+            },
+        },
+        "data": {
+            "freshness": {}, "capabilities": {}, "summaries": [], "sectors": [],
+            "queues": {}, "candidate_queues": {},
+            "map": {
+                "position_metric": "position_60d",
+                "horizon": 60,
+                "label": "60 日阶段位置",
+                "coverage": 0,
+                "sector_ids": [],
+            },
+        },
+    }
+
+    def route_api(route):
+        request = route.request
+        path = request.url.split("?", 1)[0]
+        if path.endswith("/rotation/etfs/overview"):
+            payload = json.loads(json.dumps(overview))
+            if calls["published"]:
+                payload["meta"]["snapshot_id"] = "etf_new_snapshot"
+                payload["meta"]["refresh"] = {
+                    "recommended": False,
+                    "input_id": "evidence_fingerprint_20260807",
+                    "input_as_of": "2026-08-07",
+                    "reason": "研究快照已使用最新证据",
+                }
+            route.fulfill(json=payload)
+        elif path.endswith("/rotation/etfs/snapshots"):
+            route.fulfill(json={"items": [
+                {"snapshot_id": "etf_new_snapshot", "as_of_date": "2026-08-07"},
+                {"snapshot_id": "etf_old_snapshot", "as_of_date": "2026-08-06"},
+            ]})
+        elif path.endswith("/rotation/etfs/scan") and request.method == "POST":
+            calls["scan"] += 1
+            calls["published"] = True
+            route.fulfill(
+                status=202,
+                json={
+                    "id": "etf-auto-job",
+                    "status": "completed",
+                    "progress": 100,
+                    "phase": "已完成",
+                    "message": "ETF 研究快照已发布",
+                    "can_cancel": False,
+                    "created": True,
+                },
+            )
+        elif path.endswith("/rotation/etfs"):
+            route.fulfill(
+                json={
+                    "meta": overview["meta"],
+                    "data": {
+                        "items": [],
+                        "categories": [],
+                        "pagination": {"page": 1, "page_size": 50, "total": 0, "pages": 1},
+                    },
+                },
+            )
+        else:
+            route.continue_()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.route("**/api/v1/rotation/etfs**", route_api)
+        page.goto(f"{url}/#observe/etfs")
+        for _ in range(40):
+            if calls["scan"] == 1:
+                break
+            page.wait_for_timeout(50)
+        assert calls["scan"] == 1
+        playwright_sync.expect(page.locator("#rotation-etf-job")).to_be_hidden()
+        playwright_sync.expect(page.locator("#rotation-etf-history")).to_have_value("")
+        playwright_sync.expect(page.locator("#rotation-etf-json")).to_have_attribute(
+            "href", re.compile("etf_new_snapshot")
+        )
+
+        page.reload()
+        page.wait_for_timeout(500)
+        assert calls["scan"] == 1
+        browser.close()
+
+
 def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
     url, _ = live_server
     keys = [
-        ("fundamental", "①", "基本面"), ("technical", "②", "技术面"),
-        ("news", "③", "消息面"), ("capital", "④", "资金面"),
-        ("sentiment", "⑤", "市场心理面"), ("macro", "⑥", "宏观/政策面"),
+        ("fundamental", "①", "基本面"),
+        ("technical", "②", "技术面"),
+        ("news", "③", "消息面"),
+        ("capital", "④", "资金面"),
+        ("sentiment", "⑤", "市场心理面"),
+        ("macro", "⑥", "宏观/政策面"),
     ]
-    dimensions = [{
-        "key": key, "number": number, "title": title, "score": 61 + index,
-        "stance": "谨慎偏强", "status": "complete", "summary": f"{title}证据已完成复核。",
-        "metrics": [{"label": "样本指标", "value": index, "display": str(index), "note": ""}],
-        "signals": ["证据支持当前方向。"], "risks": ["仍需等待后续数据。"],
-        "as_of": "2026-07-30", "generation": "llm_assisted", "degraded_reason": "",
-        "evidence_ids": [f"ev_{index:020d}"],
-        "evidence": [{
-            "id": f"ev_{index:020d}", "title": f"{title}来源", "value": {"sample": index},
-            "excerpt": "可核查摘要", "published_at": "2026-07-30", "data_as_of": "2026-07-30",
-            "source": {"name": "官方来源", "level": 1, "url": f"https://example.com/{key}"},
-        }],
-    } for index, (key, number, title) in enumerate(keys)]
+    dimensions = [
+        {
+            "key": key,
+            "number": number,
+            "title": title,
+            "score": 61 + index,
+            "stance": "谨慎偏强",
+            "status": "complete",
+            "summary": f"{title}证据已完成复核。",
+            "metrics": [{"label": "样本指标", "value": index, "display": str(index), "note": ""}],
+            "signals": ["证据支持当前方向。"],
+            "risks": ["仍需等待后续数据。"],
+            "as_of": "2026-07-30",
+            "generation": "llm_assisted",
+            "degraded_reason": "",
+            "evidence_ids": [f"ev_{index:020d}"],
+            "evidence": [
+                {
+                    "id": f"ev_{index:020d}",
+                    "title": f"{title}来源",
+                    "value": {"sample": index},
+                    "excerpt": "可核查摘要",
+                    "published_at": "2026-07-30",
+                    "data_as_of": "2026-07-30",
+                    "source": {"name": "官方来源", "level": 1, "url": f"https://example.com/{key}"},
+                }
+            ],
+        }
+        for index, (key, number, title) in enumerate(keys)
+    ]
     dimensions[0]["summary"] = {
         "text": "基本面结构化信封已转换为正文。",
         "evidence_ids": [dimensions[0]["evidence_ids"][0]],
     }
     report = {
-        "schema_version": "2.0", "instrument": {
-            "symbol": "600519.SH", "name": "贵州茅台", "market_label": "中国内地",
+        "schema_version": "2.0",
+        "instrument": {
+            "symbol": "600519.SH",
+            "name": "贵州茅台",
+            "market_label": "中国内地",
         },
-        "quote": {"current": 1500, "change_pct": 1.25}, "data_as_of": "2026-07-30",
+        "quote": {"current": 1500, "change_pct": 1.25},
+        "data_as_of": "2026-07-30",
         "overall": {
-            "score": 65.5, "stance": "谨慎偏强", "coverage": 100, "confidence": 85,
-            "thesis": "六维证据总体偏强，但仍需等待新披露。", "summary": "终审已检查证据时点与冲突。",
+            "score": 65.5,
+            "stance": "谨慎偏强",
+            "coverage": 100,
+            "confidence": 85,
+            "thesis": "六维证据总体偏强，但仍需等待新披露。",
+            "summary": "终审已检查证据时点与冲突。",
             "risks": ["市场波动可能放大。"],
         },
         "dimensions": dimensions,
-        "scenarios": [{
-            "title": "基准情景", "priority": "当前主场景",
-            "condition": "价格维持区间。", "response": "等待新证据。",
-        }],
-        "warnings": [], "research": {
-            "mode": "deep", "elapsed_seconds": 128, "evidence_count": 6,
+        "scenarios": [
+            {
+                "title": "基准情景",
+                "priority": "当前主场景",
+                "condition": "价格维持区间。",
+                "response": "等待新证据。",
+            }
+        ],
+        "warnings": [],
+        "research": {
+            "mode": "deep",
+            "elapsed_seconds": 128,
+            "evidence_count": 6,
             "sources": [{"id": "src_1"}],
         },
         "disclaimer": "仅作量化研究与记录，不构成投资建议。",
@@ -2097,24 +2866,45 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         path = request.url.split("?", 1)[0]
         if path.endswith("/api/v1/market/stock-analyses") and request.method == "POST":
             submitted.append(request.post_data_json)
-            route.fulfill(status=202, json={
-                "analysis_id": "analysis-stock", "job_id": "job-stock", "status": "queued",
-            })
+            route.fulfill(
+                status=202,
+                json={
+                    "analysis_id": "analysis-stock",
+                    "job_id": "job-stock",
+                    "status": "queued",
+                },
+            )
         elif path.endswith("/api/v1/market/stock-analyses/analysis-stock"):
             route.fulfill(json={"analysis_id": "analysis-stock", "status": "completed", "report": report})
         elif path.endswith("/api/v1/jobs/job-stock/events"):
             event_calls["count"] += 1
-            items = [] if event_calls["count"] > 1 else [
-                {"seq": index + 1, "type": "dimension_completed", "payload": {
-                    "dimension": item["key"], "result": item, "completed": index + 1,
-                }} for index, item in enumerate(dimensions)
-            ]
+            items = (
+                []
+                if event_calls["count"] > 1
+                else [
+                    {
+                        "seq": index + 1,
+                        "type": "dimension_completed",
+                        "payload": {
+                            "dimension": item["key"],
+                            "result": item,
+                            "completed": index + 1,
+                        },
+                    }
+                    for index, item in enumerate(dimensions)
+                ]
+            )
             route.fulfill(json={"items": items})
         elif path.endswith("/api/v1/jobs/job-stock"):
-            route.fulfill(json={
-                "id": "job-stock", "status": "completed", "progress": 100,
-                "phase": "分析完成", "estimated_remaining_seconds": 0,
-            })
+            route.fulfill(
+                json={
+                    "id": "job-stock",
+                    "status": "completed",
+                    "progress": 100,
+                    "phase": "分析完成",
+                    "estimated_remaining_seconds": 0,
+                }
+            )
         else:
             route.fallback()
 

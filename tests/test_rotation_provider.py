@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quantmaster.data.instruments import Instrument
 from quantmaster.rotation.analytics import estimate_etf_flows
 from quantmaster.rotation.provider import RotationProvider, _broad_etf_category
 from quantmaster.rotation.store import RotationStore
@@ -168,6 +169,7 @@ def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monk
     ))
     result = provider.sync_etf_observations(lambda *args: None, lambda: False)
     observations = store.etf_observations()
+    metadata = store.etf_metadata()
 
     assert result["symbols"] == 1
     assert len(observations) == 3
@@ -175,6 +177,8 @@ def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monk
     assert observations.iloc[-1]["shares"] == 1_100_000
     assert observations.iloc[-1]["nav"] == 4.15
     assert observations.iloc[-1]["close"] == 4.1
+    assert metadata["symbol"].tolist() == ["510300.SH"]
+    assert metadata.iloc[0]["metadata_source"] == "tushare:fund_basic"
     assert any(
         endpoint == "fund_share" and params.get("start_date") == "20230710"
         for endpoint, params in provider.source.calls
@@ -232,6 +236,71 @@ def test_provider_uses_akshare_concept_code_for_member_lookup(tmp_path, monkeypa
     assert result["source"] == "eastmoney-concept"
     assert member_symbols == ["BK0816"]
     assert store.themes()[0]["members"] == ["000001.SZ", "600001.SH"]
+
+
+def test_provider_persists_stockdb_metadata_before_remote_sources(tmp_path):
+    class LocalInstruments:
+        def list(self, *, market=""):
+            assert market == "CN"
+            return [
+                Instrument(
+                    symbol="510300.SH",
+                    code="510300",
+                    name="沪深300ETF",
+                    market="CN",
+                    exchange="SH",
+                    asset_type="etf",
+                    list_date="20120528",
+                ),
+                Instrument(
+                    symbol="159915.SZ",
+                    code="159915",
+                    name="创业板ETF",
+                    market="CN",
+                    exchange="SZ",
+                    asset_type="etf",
+                    list_date="20111209",
+                ),
+            ]
+
+    class OfflineSource:
+        def trade_calendar(self, start, end):
+            raise RuntimeError("offline")
+
+        def _call(self, endpoint, ttl, **params):
+            raise RuntimeError("offline")
+
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(
+        store,
+        OfflineSource(),
+        local_source=OfflineSource(),
+        instrument_store=LocalInstruments(),
+    )
+
+    with pytest.raises(RuntimeError, match="offline"):
+        provider.sync_etf_observations(lambda *_: None, lambda: False)
+
+    metadata = store.etf_metadata()
+    assert metadata["symbol"].tolist() == ["159915.SZ", "510300.SH"]
+    assert metadata["metadata_source"].eq("free-stockdb:security-master").all()
+    assert metadata["name"].notna().all()
+    assert metadata["normalized_index"].notna().all()
+
+
+def test_provider_skips_missing_stockdb_calendar_and_continues_remote_sync(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr("quantmaster.rotation.provider.date", type(
+        "FixedDate", (), {"today": staticmethod(lambda: pd.Timestamp("2026-07-30").date())}
+    ))
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare(), local_source=object())
+
+    result = provider.sync_etf_observations(lambda *_: None, lambda: False)
+
+    assert result["symbols"] == 1
+    assert store.etf_metadata()["symbol"].tolist() == ["510300.SH"]
 
 
 def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(

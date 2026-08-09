@@ -401,15 +401,79 @@ def rotation_etf_flow_items(
     }
 
 
+def _compact_etf_funds(value: dict[str, Any] | None) -> dict[str, Any]:
+    funds = value or {}
+    keys = (
+        "status",
+        "effective_date",
+        "lag_sessions",
+        "source",
+        "share_delta",
+        "share_change_pct",
+        "estimated_flow",
+        "unchanged_sessions",
+        "period_kind",
+        "period_sessions",
+        "period_label",
+        "consecutive",
+        "coverage",
+        "coverage_level",
+        "confirmed_members",
+        "member_count",
+        "directional_interpretation",
+        "interpretation_note",
+        "message",
+    )
+    return {
+        key: funds.get(key)
+        for key in keys
+        if key in funds and funds.get(key) is not None and funds.get(key) != ""
+    }
+
+
+def _etf_product_projection(item: Any, sector: dict[str, Any]) -> dict[str, Any]:
+    metrics = item.metrics
+    position_metric = str(sector.get("position_metric") or "position_60d")
+    return {
+        "symbol": item.symbol,
+        "name": item.name,
+        "category": item.category,
+        "asset_class": item.asset_class,
+        "sector_id": item.sector_id,
+        "sector_name": item.sector_name,
+        "normalized_index": item.normalized_index,
+        "is_representative": item.is_representative,
+        "representative_symbol": item.representative_symbol,
+        "metrics": {
+            "return_20d": metrics.get("return_20d"),
+            "avg_amount_20d": metrics.get("avg_amount_20d"),
+            "position_60d": metrics.get("position_60d"),
+            "position_250d": metrics.get("position_250d"),
+            "display_position": metrics.get(position_metric),
+            "position_metric": position_metric,
+        },
+        "funds": _compact_etf_funds(item.funds),
+        "sector_state": sector.get("state", "watch"),
+        "sector_state_label": sector.get("state_label", "震荡观察"),
+        "trend_strength": sector.get("trend_strength"),
+        "activity_score": sector.get("activity_score"),
+        "display_position": sector.get("display_position"),
+        "position_label": sector.get("position_label", "60 日阶段位置"),
+        "risk_badges": sector.get("risk_badges", []),
+        "candidate_codes": sector.get("candidate_codes", []),
+    }
+
+
 @router.get("/rotation/etfs")
 def rotation_etfs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     query: str = Query("", max_length=80),
     category: str = Query("", max_length=80),
-    rankable: bool | None = None,
-    sort: Literal["rank", "score", "amount", "return", "name"] = "rank",
-    order: Literal["asc", "desc"] = "asc",
+    asset: Literal["equity", "overseas_equity", "bond", "commodity", "money", "all"] = "all",
+    state: Literal["leading", "low_turn", "improving", "weakening", "watch", ""] = "",
+    sort: Literal["trend", "activity", "position", "amount", "return", "name"] = "trend",
+    order: Literal["asc", "desc"] = "desc",
     snapshot_id: str = Query("", max_length=80),
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
@@ -422,31 +486,45 @@ def rotation_etfs(
             "data": {"items": [], "categories": [], "pagination": _pagination([], 1, page_size)[1]},
         }
     needle = query.strip().casefold()
-    items = [item.to_dict() for item in snapshot.items]
+    sectors = {item["sector_id"]: item for item in snapshot.sectors}
+    all_items = list(snapshot.items)
+    categories = sorted(
+        {item.category for item in all_items if asset == "all" or item.asset_class == asset}
+    )
+    items = all_items
     items = [
         item
         for item in items
         if (
-            (not needle or needle in item["symbol"].casefold() or needle in item["name"].casefold())
-            and (not category or item["category"] == category)
-            and (rankable is None or bool(item["rankable"]) is rankable)
+            (
+                not needle
+                or needle in item.symbol.casefold()
+                or needle in item.name.casefold()
+                or needle in item.sector_name.casefold()
+                or needle in item.normalized_index.casefold()
+            )
+            and (not category or item.category == category)
+            and (asset == "all" or item.asset_class == asset)
+            and (not state or sectors.get(item.sector_id, {}).get("state") == state)
         )
     ]
 
-    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
-        metric = item.get("metrics") or {}
+    def sort_key(item: Any) -> tuple[Any, ...]:
+        metric = item.metrics
+        sector = sectors.get(item.sector_id, {})
         values = {
-            "rank": item.get("category_rank"),
-            "score": item.get("score"),
+            "trend": sector.get("trend_strength"),
+            "activity": sector.get("activity_score"),
+            "position": sector.get("display_position"),
             "amount": metric.get("avg_amount_20d"),
             "return": metric.get("return_20d"),
-            "name": item.get("name"),
+            "name": item.name,
         }
         if sort == "name":
-            return (str(values[sort]).casefold(), item["symbol"])
+            return (str(values[sort]).casefold(), item.symbol)
         value = values[sort]
         # Missing rows always remain behind rankable observations.
-        return (value is None, _number(value, 0), item["symbol"])
+        return (value is None, _number(value, 0), item.symbol)
 
     if sort == "name":
         items.sort(key=sort_key, reverse=order == "desc")
@@ -459,6 +537,9 @@ def rotation_etfs(
             )
         )
     visible, pagination = _pagination(items, page, page_size)
+    visible_projection = [
+        _etf_product_projection(item, sectors.get(item.sector_id, {})) for item in visible
+    ]
     return {
         "meta": {
             "snapshot_id": snapshot.snapshot_id,
@@ -467,13 +548,519 @@ def rotation_etfs(
             "as_of": snapshot.as_of_date,
             "quality": snapshot.coverage,
             "staleness": snapshot.staleness,
-            "score_version": snapshot.score_version,
+            "research_model_version": snapshot.research_model_version,
         },
         "data": {
-            "items": visible,
-            "categories": list(snapshot.categories),
+            "items": visible_projection,
+            "categories": categories,
             "pagination": pagination,
             "provenance": snapshot.provenance,
+        },
+    }
+
+
+def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
+    selected = [item for item in snapshot.sectors if asset == "all" or item.get("asset_class") == asset]
+    selected_ids = {item["sector_id"] for item in selected}
+    queues = {
+        key: [sector_id for sector_id in values if sector_id in selected_ids]
+        for key, values in snapshot.queues.items()
+    }
+    candidate_queues = {
+        key: [sector_id for sector_id in values if sector_id in selected_ids]
+        for key, values in snapshot.candidate_queues.items()
+    }
+    lookup = {item["sector_id"]: item for item in selected}
+    rankable = [item for item in selected if item.get("trend_strength") is not None]
+    strongest = max(rankable, key=lambda item: item["trend_strength"], default=None)
+    strict_low = lookup.get(queues.get("low_turn", [""])[0]) if queues.get("low_turn") else None
+    staged_low = (
+        lookup.get(candidate_queues.get("stage_low_rebound", [""])[0])
+        if candidate_queues.get("stage_low_rebound")
+        else None
+    )
+    strict_risk = lookup.get(queues.get("risk", [""])[0]) if queues.get("risk") else None
+    staged_risk = (
+        lookup.get(candidate_queues.get("stage_high_activity", [""])[0])
+        if candidate_queues.get("stage_high_activity")
+        else None
+    )
+    weakening = (
+        lookup.get(queues.get("weakening", [""])[0]) if queues.get("weakening") else None
+    )
+    position_available = any(item.get("display_position") is not None for item in selected)
+    summaries: list[dict[str, Any]] = []
+    if strongest:
+        summaries.append(
+            {
+                "kind": "strongest",
+                "title": "趋势最强",
+                "sector_id": strongest["sector_id"],
+                "sector_name": strongest["sector_name"],
+                "state": strongest["state"],
+                "evaluation_status": "confirmed",
+                "text": (
+                    f"代表 {strongest['representative']['name']} · "
+                    f"趋势 {strongest['trend_strength']:.0f}"
+                ),
+            }
+        )
+    else:
+        summaries.append(
+            {
+                "kind": "strongest",
+                "title": "趋势最强",
+                "sector_id": "",
+                "sector_name": "",
+                "state": "none",
+                "evaluation_status": "unavailable",
+                "text": "收益或成交额证据不足，暂无法比较",
+            }
+        )
+    low = strict_low or staged_low
+    summaries.append(
+        {
+            "kind": "low_turn",
+            "title": "低位机会",
+            "sector_id": low["sector_id"] if low else "",
+            "sector_name": low["sector_name"] if low else "",
+            "state": low["state"] if low else "none",
+            "evaluation_status": (
+                "confirmed"
+                if strict_low
+                else (
+                    "candidate"
+                    if staged_low
+                    else ("confirmed" if position_available else "unavailable")
+                )
+            ),
+            "text": (
+                f"{low['state_label']} · 趋势 {low['trend_strength']:.0f}"
+                if strict_low
+                else (
+                    "60 日阶段低位候选，尚缺长期确认"
+                    if staged_low
+                    else (
+                        "本期未发现满足严格或阶段候选条件的板块"
+                        if position_available
+                        else "阶段位置证据不足，暂无法评估"
+                    )
+                )
+            ),
+        }
+    )
+    risk = strict_risk or staged_risk or weakening
+    if strict_risk:
+        risk_status, risk_text = "confirmed", "长期高位拥挤风险已确认"
+    elif staged_risk:
+        risk_status, risk_text = "candidate", "60 日阶段高位活跃候选"
+    elif weakening:
+        risk_status, risk_text = "confirmed", "严格走弱，留意趋势延续"
+    elif position_available:
+        risk_status, risk_text = "confirmed", "本期未发现拥挤、阶段高位活跃或严格走弱板块"
+    else:
+        risk_status, risk_text = "unavailable", "位置证据不足，暂无法评估"
+    summaries.append(
+        {
+            "kind": "risk",
+            "title": "主要风险",
+            "sector_id": risk["sector_id"] if risk else "",
+            "sector_name": risk["sector_name"] if risk else "",
+            "state": risk["state"] if risk else "none",
+            "evaluation_status": risk_status,
+            "text": risk_text,
+        }
+    )
+
+    long_coverage = (
+        sum(item.get("metrics", {}).get("position_250d") is not None for item in selected)
+        / len(selected)
+        if selected
+        else 0.0
+    )
+    use_long = asset != "money" and long_coverage >= 0.8
+    map_metric = "position_250d" if use_long else "position_60d"
+    map_horizon = 250 if use_long else 60
+    if asset == "money":
+        map_metric, map_horizon, map_label = "", 0, "货币 ETF 不评估高低位"
+    else:
+        map_label = "250 日复权位置" if use_long else "60 日阶段位置"
+
+    compact: list[dict[str, Any]] = []
+    for item in selected:
+        metrics = item.get("metrics") or {}
+        eligible_candidates = {
+            code: value
+            for code, value in (item.get("candidates") or {}).items()
+            if value.get("eligible")
+        }
+        compact.append(
+            {
+                "sector_id": item["sector_id"],
+                "sector_name": item["sector_name"],
+                "category": item["category"],
+                "asset_class": item["asset_class"],
+                "representative": item["representative"],
+                "member_count": item["member_count"],
+                "index_count": item["index_count"],
+                "metrics": {
+                    key: metrics.get(key)
+                    for key in (
+                        "return_5d",
+                        "return_20d",
+                        "return_60d",
+                        "amount_ratio_5v20",
+                        "position_60d",
+                        "position_250d",
+                    )
+                },
+                "trend_strength": item.get("trend_strength"),
+                "activity_score": item.get("activity_score"),
+                "display_position": metrics.get(map_metric) if map_metric else None,
+                "position_metric": map_metric,
+                "position_horizon": map_horizon,
+                "position_label": map_label,
+                "position_source": "official_adjusted" if use_long else "stage_research_series",
+                "state": item["state"],
+                "state_label": item["state_label"],
+                "risk_badges": item.get("risk_badges", []),
+                "candidate_codes": list(eligible_candidates),
+                "candidates": eligible_candidates,
+                "funds": _compact_etf_funds(item.get("funds")),
+            }
+        )
+
+    critical_ids = {
+        item["sector_id"]
+        for item in compact
+        if item["state"] not in {"watch", "not_applicable"}
+        or item["candidate_codes"]
+        or item["risk_badges"]
+    }
+    ranked_for_map = sorted(
+        compact,
+        key=lambda item: (item.get("activity_score") is not None, item.get("activity_score") or -1),
+        reverse=True,
+    )
+    map_ids = [item["sector_id"] for item in compact if item["sector_id"] in critical_ids]
+    for item in ranked_for_map:
+        if len(map_ids) >= 40 and len(critical_ids) <= 40:
+            break
+        if item["sector_id"] not in map_ids:
+            map_ids.append(item["sector_id"])
+        if len(map_ids) >= max(40, len(critical_ids)):
+            break
+    map_coverage = (
+        sum(item.get("display_position") is not None for item in compact) / len(compact)
+        if compact
+        else 0.0
+    )
+    return {
+        "freshness": snapshot.freshness,
+        "capabilities": snapshot.capabilities,
+        "summaries": summaries,
+        "sectors": compact,
+        "queues": queues,
+        "candidate_queues": candidate_queues,
+        "map": {
+            "position_metric": map_metric,
+            "horizon": map_horizon,
+            "label": map_label,
+            "coverage": round(map_coverage, 4),
+            "sector_ids": map_ids,
+        },
+    }
+
+
+def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
+    import pandas as pd
+
+    from quantmaster.research.contracts import content_hash
+    from quantmaster.rotation.etf_research import _frame_hash
+
+    local_inputs = [
+        item
+        for item in service.ingest_store.history(100)
+        if "etf" in item.assets and "etf_daily" in item.content_hashes
+    ]
+    latest_input = max(
+        local_inputs,
+        key=lambda item: str(item.as_of_date),
+        default=None,
+    )
+    if latest_input is None:
+        return {
+            "recommended": False,
+            "input_id": "",
+            "input_as_of": "",
+            "reason": "尚无可用于补算的本地 ETF 行情输入",
+        }
+    direct = service._direct_share_observations()
+    if not direct.empty and "trade_date" in direct:
+        direct = direct.copy()
+        direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
+        direct = direct[direct["trade_date"].dt.date <= pd.Timestamp(latest_input.as_of_date).date()]
+    metadata = service._direct_metadata()
+    factor_path = service.store.root / "evidence" / "adjustment_factors.parquet"
+    try:
+        factors = pd.read_parquet(factor_path) if factor_path.is_file() else pd.DataFrame()
+    except (OSError, ValueError):
+        factors = pd.DataFrame()
+    current_hashes = {
+        "行情": content_hash(latest_input.content_hashes),
+        "份额": _frame_hash(
+            direct,
+            (
+                "symbol",
+                "trade_date",
+                "shares",
+                "total_size",
+                "nav",
+                "close",
+                "share_source",
+                "source",
+            ),
+        ),
+        "复权": _frame_hash(factors, ("symbol", "date", "adj_factor", "source")),
+        "元数据": _frame_hash(
+            metadata,
+            (
+                "symbol",
+                "name",
+                "benchmark",
+                "benchmark_code",
+                "benchmark_type",
+                "benchmark_level",
+                "index_type",
+                "index_provider",
+                "fund_type",
+                "invest_type",
+                "mgt_fee",
+                "metadata_source",
+            ),
+        ),
+    }
+    if metadata.empty and snapshot is not None:
+        current_hashes["元数据"] = snapshot.evidence_hashes.get("元数据", current_hashes["元数据"])
+    changed = [
+        label
+        for label, value in current_hashes.items()
+        if snapshot is None or snapshot.evidence_hashes.get(label) != value
+    ]
+    recommended = snapshot is None or bool(changed)
+    fingerprint = content_hash(
+        {
+            "input": latest_input.ingest_id,
+            "as_of": latest_input.as_of_date,
+            "evidence": current_hashes,
+        }
+    )
+    return {
+        "recommended": recommended,
+        "input_id": fingerprint,
+        "input_as_of": latest_input.as_of_date,
+        "reason": (
+            f"本地证据已变化（{'、'.join(changed)}），进入页面时仅补算一次"
+            if recommended
+            else "研究快照已使用最新行情、份额、复权与元数据证据"
+        ),
+    }
+
+
+@router.get("/rotation/etfs/overview")
+def rotation_etf_overview(
+    asset: Literal["equity", "overseas_equity", "bond", "commodity", "money", "all"] = "equity",
+    snapshot_id: str = Query("", max_length=80),
+) -> dict[str, Any]:
+    from quantmaster.rotation.etf_research import get_etf_research_service
+
+    service = get_etf_research_service()
+    store = service.store
+    snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
+    refresh = (
+        _etf_refresh_hint(service, snapshot)
+        if not snapshot_id
+        else {
+            "recommended": False,
+            "input_id": "",
+            "input_as_of": "",
+            "reason": "正在查看历史快照，不自动补算",
+        }
+    )
+    if snapshot is None:
+        return {
+            "meta": {
+                "quality": {"status": "cold", "issues": ["尚未生成 ETF V2 研究快照"]},
+                "refresh": refresh,
+            },
+            "data": {
+                "freshness": {},
+                "capabilities": {},
+                "summaries": [],
+                "sectors": [],
+                "queues": {},
+                "candidate_queues": {},
+                "map": {
+                    "position_metric": "",
+                    "horizon": 0,
+                    "label": "位置证据待补",
+                    "coverage": 0.0,
+                    "sector_ids": [],
+                },
+            },
+        }
+    return {
+        "meta": {
+            "snapshot_id": snapshot.snapshot_id,
+            "as_of": snapshot.as_of_date,
+            "research_model_version": snapshot.research_model_version,
+            "staleness": snapshot.staleness,
+            "quality": snapshot.coverage,
+            "refresh": refresh,
+        },
+        "data": _etf_overview_payload(snapshot, asset),
+    }
+
+
+@router.get("/rotation/etfs/sectors/{sector_id}")
+def rotation_etf_sector_detail(
+    sector_id: str,
+    snapshot_id: str = Query("", max_length=80),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=50),
+    index_key: str = Query("", max_length=160),
+) -> dict[str, Any]:
+    from quantmaster.rotation.etf_research import get_etf_research_service
+
+    service = get_etf_research_service()
+    snapshot = service.store.get(snapshot_id) if snapshot_id else service.store.latest()
+    if snapshot is None:
+        raise HTTPException(404, "尚无 ETF V2 研究快照")
+    sector = next((item for item in snapshot.sectors if item["sector_id"] == sector_id), None)
+    if sector is None:
+        raise HTTPException(404, "ETF 板块不存在")
+    member_items = [item for item in snapshot.items if item.sector_id == sector_id]
+    members = list(member_items)
+    members.sort(
+        key=lambda item: (
+            not item.is_representative,
+            -_number(item.metrics.get("avg_amount_20d"), 0),
+            item.symbol,
+        )
+    )
+    index_groups: dict[str, list[Any]] = {}
+    for item in members:
+        key = item.benchmark_code or item.normalized_index or item.symbol
+        index_groups.setdefault(key, []).append(item)
+    groups = [
+        {
+            "index_key": key,
+            "normalized_index": values[0].normalized_index or "指数待补",
+            "benchmark_code": values[0].benchmark_code,
+            "member_count": len(values),
+            "representative": next(
+                (
+                    {"symbol": value.symbol, "name": value.name}
+                    for value in values
+                    if value.is_representative
+                ),
+                {"symbol": values[0].symbol, "name": values[0].name},
+            ),
+        }
+        for key, values in index_groups.items()
+    ]
+    groups.sort(key=lambda value: (-value["member_count"], value["normalized_index"]))
+    if index_key:
+        members = [
+            item
+            for item in members
+            if (item.benchmark_code or item.normalized_index or item.symbol) == index_key
+        ]
+    visible_members, member_pagination = _pagination(members, page, page_size)
+    member_projection = [
+        {
+            "symbol": item.symbol,
+            "name": item.name,
+            "normalized_index": item.normalized_index,
+            "benchmark_code": item.benchmark_code,
+            "is_representative": item.is_representative,
+            "metrics": {
+                key: item.metrics.get(key)
+                for key in (
+                    "return_20d",
+                    "avg_amount_20d",
+                    "position_60d",
+                    "position_250d",
+                    "adjustment_status",
+                )
+            },
+            "metadata": {
+                key: item.metadata.get(key)
+                for key in ("total_size", "management_fee", "classification_confidence")
+            },
+            "funds": _compact_etf_funds(item.funds),
+            "coverage": item.coverage,
+        }
+        for item in visible_members
+    ]
+    fund_history: list[dict[str, Any]] = []
+    observations = service._direct_share_observations()
+    if not observations.empty and {"symbol", "trade_date", "shares"}.issubset(observations.columns):
+        import pandas as pd
+
+        symbols = {item.symbol for item in member_items}
+        frame = observations[observations["symbol"].astype(str).str.upper().isin(symbols)].copy()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame["shares"] = pd.to_numeric(frame["shares"], errors="coerce")
+        frame = frame[frame["trade_date"].dt.date <= pd.Timestamp(snapshot.as_of_date).date()]
+        frame = frame.dropna(subset=["trade_date", "shares"]).sort_values(["symbol", "trade_date"])
+        frame["share_delta"] = frame.groupby("symbol")["shares"].diff()
+        nav = pd.to_numeric(frame.get("nav"), errors="coerce")
+        close = pd.to_numeric(frame.get("close"), errors="coerce")
+        frame["price"] = nav.fillna(close)
+        frame["estimated_flow"] = frame["share_delta"] * frame["price"]
+        grouped = (
+            frame.dropna(subset=["share_delta"])
+            .groupby("trade_date", as_index=False)
+            .agg(
+                share_delta=("share_delta", "sum"),
+                estimated_flow=("estimated_flow", lambda values: values.sum(min_count=1)),
+                confirmed_members=("symbol", "nunique"),
+            )
+        )
+        fund_history = [
+            {
+                "date": row.trade_date.date().isoformat(),
+                "share_delta": float(row.share_delta),
+                "estimated_flow": (float(row.estimated_flow) if pd.notna(row.estimated_flow) else None),
+                "confirmed_members": int(row.confirmed_members),
+            }
+            for row in grouped.tail(25).itertuples(index=False)
+        ]
+    return {
+        "meta": {
+            "snapshot_id": snapshot.snapshot_id,
+            "as_of": snapshot.as_of_date,
+            "staleness": snapshot.staleness,
+        },
+        "data": {
+            **sector,
+            "members": member_projection,
+            "member_pagination": member_pagination,
+            "index_groups": groups,
+            "selected_index_key": index_key,
+            "explanation": {
+                "conclusion": sector["state_label"],
+                "trigger_evidence": sector["evidence"],
+                "risks": sector["risk_badges"],
+                "candidates": sector.get("candidates", {}),
+                "invalidation": sector["invalidation"],
+            },
+            "funds": {
+                **sector["funds"],
+                "history": fund_history,
+                "provenance_note": "份额只解释一级市场申赎；二级市场成交不会自动改变总份额。",
+            },
         },
     }
 
@@ -493,21 +1080,17 @@ def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
     if snapshot is None:
         raise HTTPException(404, "ETF 研究快照不存在")
     semantic_counts: dict[str, int] = {}
-    minute_complete = 0
-    minute_rows = 0
     excluded: dict[str, int] = {}
     for item in snapshot.items:
-        semantic_counts[item.share_semantic_status] = (
-            semantic_counts.get(
-                item.share_semantic_status,
-                0,
-            )
-            + 1
-        )
-        minute_complete += int(bool(item.minute_evidence.get("complete_session")))
-        minute_rows += int(item.minute_evidence.get("rows") or 0)
-        if item.excluded_reason:
-            excluded[item.excluded_reason] = excluded.get(item.excluded_reason, 0) + 1
+        share_status = str(item.funds.get("status") or "missing")
+        semantic_counts[share_status] = semantic_counts.get(share_status, 0) + 1
+        if item.metrics.get("adjustment_status") not in {"official", "verified_local"}:
+            reason = "缺少可核查复权因子，长期位置不输出；地图使用 60 日阶段口径"
+            excluded[reason] = excluded.get(reason, 0) + 1
+    map_coverage = {
+        asset: _etf_overview_payload(snapshot, asset).get("map", {})
+        for asset in ("equity", "overseas_equity", "bond", "commodity", "money")
+    }
     return {
         "meta": {
             "snapshot_id": snapshot.snapshot_id,
@@ -518,10 +1101,13 @@ def rotation_etf_snapshot_coverage(snapshot_id: str) -> dict[str, Any]:
         "data": {
             "coverage": snapshot.coverage,
             "share_semantic_counts": semantic_counts,
-            "minute_complete_symbols": minute_complete,
-            "minute_rows": minute_rows,
+            "intraday_mode": "on_demand",
+            "map_position": map_coverage,
             "excluded_reasons": excluded,
             "total_symbols": len(snapshot.items),
+            "sector_count": len(snapshot.sectors),
+            "evidence_hashes": snapshot.evidence_hashes,
+            "freshness": snapshot.freshness,
         },
     }
 
@@ -545,23 +1131,24 @@ def rotation_etf_export(
     output = io.StringIO(newline="")
     fields = [
         "category",
-        "category_rank",
+        "asset_class",
+        "sector_name",
+        "normalized_index",
         "symbol",
         "name",
-        "score",
         "as_of_date",
-        "rankable",
-        "excluded_reason",
+        "is_representative",
         "return_5d",
         "return_20d",
         "return_60d",
         "avg_amount_20d",
-        "drawdown_20d",
-        "total_share",
-        "shares_effective_date",
-        "share_lag_sessions",
-        "price_source",
-        "share_source",
+        "position_250d",
+        "amount_ratio_5v20",
+        "adjustment_status",
+        "share_status",
+        "share_delta",
+        "share_change_pct",
+        "estimated_flow",
     ]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
@@ -569,18 +1156,18 @@ def rotation_etf_export(
         writer.writerow(
             {
                 "category": item.category,
-                "category_rank": item.category_rank,
+                "asset_class": item.asset_class,
+                "sector_name": item.sector_name,
+                "normalized_index": item.normalized_index,
                 "symbol": item.symbol,
                 "name": item.name,
-                "score": item.score,
                 "as_of_date": item.as_of_date,
-                "rankable": item.rankable,
-                "excluded_reason": item.excluded_reason,
+                "is_representative": item.is_representative,
                 **{key: item.metrics.get(key) for key in fields if key in item.metrics},
-                "shares_effective_date": item.shares_effective_date,
-                "share_lag_sessions": item.share_lag_sessions,
-                "price_source": item.provenance.get("price"),
-                "share_source": item.provenance.get("shares"),
+                "share_status": item.funds.get("status"),
+                "share_delta": item.funds.get("share_delta"),
+                "share_change_pct": item.funds.get("share_change_pct"),
+                "estimated_flow": item.funds.get("estimated_flow"),
             }
         )
     return Response(
@@ -635,11 +1222,40 @@ def rotation_etf_job_retry(job_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(409, str(exc)) from None
 
 
+@router.get("/rotation/etfs/{symbol}/intraday")
+def rotation_etf_intraday(
+    symbol: str,
+    snapshot_id: str = Query("", max_length=80),
+) -> dict[str, Any]:
+    from quantmaster.rotation.etf_research import get_etf_research_service
+
+    service = get_etf_research_service()
+    snapshot = service.store.get(snapshot_id) if snapshot_id else service.store.latest()
+    if snapshot is None:
+        raise HTTPException(404, "尚无 ETF 研究快照")
+    canonical = symbol.upper()
+    if not any(item.symbol == canonical for item in snapshot.items):
+        raise HTTPException(404, f"ETF 不在当前研究股票池: {canonical}")
+    try:
+        data = service.intraday(canonical, as_of_date=snapshot.as_of_date)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(503, f"分钟走势暂不可用：{str(exc)[:180]}") from None
+    return {
+        "meta": {
+            "snapshot_id": snapshot.snapshot_id,
+            "as_of": snapshot.as_of_date,
+            "scoring_input": False,
+        },
+        "data": data,
+    }
+
+
 @router.get("/rotation/etfs/{symbol}")
 def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    store = get_etf_research_service().store
+    service = get_etf_research_service()
+    store = service.store
     snapshot = store.get(snapshot_id) if snapshot_id else store.latest()
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
@@ -647,13 +1263,65 @@ def rotation_etf_detail(symbol: str, snapshot_id: str = Query("", max_length=80)
     item = next((value for value in snapshot.items if value.symbol == canonical), None)
     if item is None:
         raise HTTPException(404, f"ETF 不在当前研究股票池: {canonical}")
+    sector = next(
+        (value for value in snapshot.sectors if value["sector_id"] == item.sector_id),
+        {},
+    )
+    peer_key = item.benchmark_code or item.normalized_index
+    peers = [
+        value.to_dict()
+        for value in snapshot.items
+        if value.symbol != item.symbol
+        and bool(peer_key)
+        and (value.benchmark_code or value.normalized_index) == peer_key
+    ]
+    peers.sort(
+        key=lambda value: (
+            not value["is_representative"],
+            -_number((value.get("metrics") or {}).get("avg_amount_20d"), 0),
+            value["symbol"],
+        )
+    )
+    try:
+        history = service.product_history(
+            item.symbol,
+            as_of_date=snapshot.as_of_date,
+            adjustment_hash=snapshot.evidence_hashes.get("复权", ""),
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        history = []
+    data = item.to_dict()
+    data.update(
+        {
+            "sector_state": sector.get("state", "watch"),
+            "sector_state_label": sector.get("state_label", "震荡观察"),
+            "trend_strength": sector.get("trend_strength"),
+            "activity_score": sector.get("activity_score"),
+            "risk_badges": sector.get("risk_badges", []),
+            "invalidation": sector.get("invalidation", ""),
+            "candidates": sector.get("candidates", {}),
+            "candidate_codes": sector.get("candidate_codes", []),
+            "display_position": sector.get("display_position"),
+            "position_label": sector.get("position_label", "60 日阶段位置"),
+            "sector_history": sector.get("history", []),
+            "history": history,
+            "peer_products": peers,
+            "display": {
+                "资产类别": item.category,
+                "研究板块": item.sector_name,
+                "规范化指数": item.normalized_index or "—",
+                "复权状态": item.metrics.get("adjustment_status") or "unavailable",
+                "资金状态": item.funds.get("message") or "—",
+            },
+        }
+    )
     return {
         "meta": {
             "snapshot_id": snapshot.snapshot_id,
             "as_of": snapshot.as_of_date,
             "staleness": snapshot.staleness,
         },
-        "data": item.to_dict(),
+        "data": data,
     }
 
 

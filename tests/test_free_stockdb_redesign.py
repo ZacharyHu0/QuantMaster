@@ -278,7 +278,7 @@ def test_research_adapter_reuses_ingest_and_exposes_factor_lineage(tmp_path, iso
     ("name", "category"),
     [
         ("沪深300ETF", "境内宽基"),
-        ("恒生科技ETF(QDII)", "港股及海外 QDII"),
+        ("恒生科技ETF(QDII)", "海外权益"),
         ("国债ETF", "债券"),
         ("黄金ETF", "商品"),
         ("货币ETF", "货币"),
@@ -319,6 +319,7 @@ class _EtfSource:
     name = "free-stockdb"
 
     def __init__(self):
+        self.intraday_calls = 0
         dates = pd.bdate_range(end="2026-08-07", periods=65)
         rows = []
         for index, symbol in enumerate(("510300.SH", "159920.SZ", "511010.SH"), 1):
@@ -358,6 +359,7 @@ class _EtfSource:
         return self.frame[self.frame["symbol"].isin(symbols)].copy()
 
     def intraday_many(self, symbols, start, end, frequency):
+        self.intraday_calls += 1
         if "510300.SH" not in symbols:
             return pd.DataFrame()
         stamps = pd.date_range("2026-08-07 09:30", periods=241, freq="min")
@@ -375,7 +377,7 @@ class _EtfSource:
         )
 
 
-def test_etf_scan_includes_qdii_uses_category_rank_and_keeps_minute_non_scoring(
+def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     tmp_path,
     isolated_config,
     monkeypatch,
@@ -383,27 +385,40 @@ def test_etf_scan_includes_qdii_uses_category_rank_and_keeps_minute_non_scoring(
     monkeypatch.setattr(
         EtfResearchService, "_direct_share_observations", staticmethod(lambda: pd.DataFrame())
     )
+    source = _EtfSource()
     service = EtfResearchService(
-        source=_EtfSource(),
+        source=source,
         instruments=_EtfInstruments(),
         ingest_store=StockDBIngestStore(tmp_path / "ingest"),
         store=EtfResearchStore(tmp_path / "research"),
     )
+    obsolete = service.store.root / "snapshots" / "obsolete_v2.json"
+    obsolete.parent.mkdir(parents=True)
+    obsolete.write_text(
+        '{"schema_version":"2.0","research_model_version":"QM_ETF_SECTOR_RADAR_V2.4"}',
+        encoding="utf-8",
+    )
     snapshot = service.scan(as_of="2026-08-08")
     repeated = service.scan(as_of="2026-08-08")
+    assert source.intraday_calls == 0
 
     assert len(snapshot.items) == 3
-    assert {item.category for item in snapshot.items} == {"境内宽基", "港股及海外 QDII", "债券"}
-    assert all(item.category_rank == 1 for item in snapshot.items)
-    assert all(item.share_lag_sessions == 1 for item in snapshot.items)
-    assert all(item.share_semantic_status == "unconfirmed" for item in snapshot.items)
-    assert all(item.metrics.get("flow") is None for item in snapshot.items)
-    broad = next(item for item in snapshot.items if item.symbol == "510300.SH")
-    assert broad.minute_evidence["complete_session"] is True
-    assert broad.minute_evidence["scoring_input"] is False
-    assert snapshot.provenance["independent_cross_validation"] is False
+    assert {item.category for item in snapshot.items} == {"境内宽基", "海外权益", "债券"}
+    assert snapshot.schema_version == "3.0"
+    assert snapshot.research_model_version == "QM_ETF_SECTOR_RADAR_V3.3"
+    assert len(snapshot.sectors) == 3
+    assert all(item.funds["status"] == "missing" for item in snapshot.items)
+    assert all("score" not in item.to_dict() for item in snapshot.items)
+    assert all("minute_evidence" not in item.to_dict() for item in snapshot.items)
+    assert "分钟" not in snapshot.evidence_hashes
+    assert snapshot.capabilities["intraday"]["status"] == "on_demand"
+    assert snapshot.freshness["metadata"]["coverage"] == 1.0
+    assert snapshot.freshness["metadata"]["official_coverage"] == 0.0
+    assert snapshot.provenance["calculation"] == "QuantMaster ETF Sector Radar V3"
     assert repeated.snapshot_id == snapshot.snapshot_id
     assert repeated.generated_at == snapshot.generated_at
+    assert service.store.get(snapshot.snapshot_id) is service.store.get(snapshot.snapshot_id)
+    assert not obsolete.exists()
     assert service.ingest_store.references(snapshot.ingest_id)[0]["namespace"] == "etf_research"
 
     monkeypatch.setattr(
@@ -412,20 +427,84 @@ def test_etf_scan_includes_qdii_uses_category_rank_and_keeps_minute_non_scoring(
     )
     client = TestClient(app)
     listing = client.get("/api/v1/rotation/etfs?category=境内宽基")
+    equity_listing = client.get("/api/v1/rotation/etfs?asset=equity")
+    overview = client.get("/api/v1/rotation/etfs/overview?asset=equity")
+    sector_id = next(item.sector_id for item in snapshot.items if item.symbol == "510300.SH")
+    sector = client.get(f"/api/v1/rotation/etfs/sectors/{sector_id}")
     detail = client.get("/api/v1/rotation/etfs/510300.SH")
     history = client.get("/api/v1/rotation/etfs/snapshots")
     exported = client.get(f"/api/v1/rotation/etfs/export/{snapshot.snapshot_id}?format=csv")
     historical = client.get(f"/api/v1/rotation/etfs?snapshot_id={snapshot.snapshot_id}&category=境内宽基")
     coverage = client.get(f"/api/v1/rotation/etfs/snapshots/{snapshot.snapshot_id}/coverage")
+    intraday = client.get("/api/v1/rotation/etfs/510300.SH/intraday")
+    legacy_sort = client.get("/api/v1/rotation/etfs?sort=score")
 
     assert listing.status_code == 200
     assert [item["symbol"] for item in listing.json()["data"]["items"]] == ["510300.SH"]
+    assert equity_listing.json()["data"]["categories"] == ["境内宽基"]
+    assert overview.status_code == 200
+    assert len(overview.json()["data"]["sectors"]) == 1
+    assert "items" not in overview.json()["data"]
+    assert overview.json()["data"]["map"]["position_metric"] == "position_60d"
+    assert overview.json()["data"]["map"]["sector_ids"]
+    assert overview.json()["meta"]["refresh"]["recommended"] is False
+    monkeypatch.setattr(
+        service,
+        "_direct_share_observations",
+        lambda: pd.DataFrame(
+            {
+                "symbol": ["510300.SH"],
+                "trade_date": [snapshot.as_of_date],
+                "shares": [1_000_000_000],
+                "share_source": ["tushare:etf_share_size"],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_direct_metadata",
+        lambda: pd.DataFrame(
+            {
+                "symbol": ["510300.SH"],
+                "name": ["沪深300ETF"],
+                "benchmark": ["沪深300指数"],
+                "metadata_source": ["tushare:fund_basic"],
+            }
+        ),
+    )
+    changed_evidence = client.get("/api/v1/rotation/etfs/overview?asset=equity")
+    assert changed_evidence.json()["meta"]["refresh"]["recommended"] is True
+    assert "份额" in changed_evidence.json()["meta"]["refresh"]["reason"]
+    assert "元数据" in changed_evidence.json()["meta"]["refresh"]["reason"]
+    monkeypatch.setattr(service, "_direct_share_observations", lambda: pd.DataFrame())
+    monkeypatch.setattr(service, "_direct_metadata", lambda: pd.DataFrame())
+    assert sector.status_code == 200 and sector.json()["data"]["members"][0]["symbol"] == "510300.SH"
     assert detail.status_code == 200 and detail.json()["data"]["category"] == "境内宽基"
     assert history.status_code == 200 and history.json()["items"][0]["ingest_id"] == snapshot.ingest_id
     assert exported.status_code == 200 and exported.content.startswith(b"\xef\xbb\xbf")
     assert historical.status_code == 200 and historical.json()["meta"]["snapshot_id"] == snapshot.snapshot_id
     assert coverage.status_code == 200
-    assert coverage.json()["data"]["share_semantic_counts"]["unconfirmed"] == 3
+    assert coverage.json()["data"]["share_semantic_counts"]["missing"] == 3
+    assert coverage.json()["data"]["intraday_mode"] == "on_demand"
+    assert intraday.status_code == 200
+    assert source.intraday_calls == 1
+    assert intraday.json()["data"]["metrics"]["complete_session"] is True
+    assert len(intraday.json()["data"]["series"]) == 241
+    assert len(overview.content) <= 180_000
+    assert len(listing.content) <= 60_000
+    assert len(sector.content) <= 100_000
+    assert legacy_sort.status_code == 422
+
+    (service.store.root / "latest.json").write_text(
+        json.dumps({"snapshot_id": "obsolete_v1"}),
+        encoding="utf-8",
+    )
+    cold = client.get("/api/v1/rotation/etfs/overview?asset=equity")
+    assert cold.json()["meta"]["quality"]["status"] == "cold"
+    assert cold.json()["meta"]["refresh"]["recommended"] is True
+    assert cold.json()["meta"]["refresh"]["input_id"]
+    assert cold.json()["meta"]["refresh"]["input_as_of"] == snapshot.as_of_date
+    assert "本地证据已变化" in cold.json()["meta"]["refresh"]["reason"]
 
 
 def test_etf_cli_contract_supports_cancel_and_resume():
@@ -436,6 +515,55 @@ def test_etf_cli_contract_supports_cancel_and_resume():
 
     assert cancel.etf_research_cmd == "cancel" and cancel.job_id == "job-1"
     assert resume.etf_research_cmd == "resume" and resume.job_id == "job-1"
+
+
+def test_etf_job_syncs_optional_evidence_before_research_and_keeps_warnings(monkeypatch):
+    from quantmaster.rotation.etf_jobs import EtfResearchJobs
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeProvider:
+        def __init__(self, _store):
+            pass
+
+        def sync_etf_observations(self, _progress, _cancelled):
+            calls.append(("sync", None))
+            return {"issues": ["份额接口降级 fund_share"]}
+
+    snapshot = SimpleNamespace(
+        schema_version="3.0",
+        snapshot_id="etf_test",
+        ingest_id="ingest_test",
+        artifact_id="upstream_test",
+        input_hash="hash_test",
+        to_dict=lambda: {"schema_version": "3.0", "snapshot_id": "etf_test"},
+    )
+
+    class FakeService:
+        store = SimpleNamespace(record_failure=lambda _reason: None)
+
+        @staticmethod
+        def scan(**kwargs):
+            calls.append(("scan", kwargs.get("refresh_warnings")))
+            return snapshot
+
+    context = SimpleNamespace(
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        write_artifact=lambda *_args: {"id": "artifact_test"},
+    )
+    monkeypatch.setattr("quantmaster.rotation.provider.RotationProvider", FakeProvider)
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", lambda: object())
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_jobs.get_etf_research_service",
+        lambda: FakeService(),
+    )
+
+    outcome = EtfResearchJobs._handle(context, {"as_of": "2026-08-07"})
+
+    assert calls == [("sync", None), ("scan", ["份额接口降级 fund_share"])]
+    assert outcome.result_artifact_id == "artifact_test"
+    assert "1 项证据已降级" in outcome.detail
 
 
 def test_experimental_online_endpoints_are_disabled_by_default(isolated_config):

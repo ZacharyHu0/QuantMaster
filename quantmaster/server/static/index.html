@@ -96,7 +96,7 @@
         <button id="rotation-overview-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="overview" data-workspace-page="rotation" aria-selected="false" aria-controls="rotation-overview-view" tabindex="-1">轮动总览</button>
         <button id="rotation-industry-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="industry" data-workspace-page="industry" aria-selected="false" aria-controls="rotation-industry-view" tabindex="-1">行业周期</button>
         <button id="rotation-themes-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="themes" data-workspace-page="themes" aria-selected="false" aria-controls="rotation-themes-view" tabindex="-1">细分题材</button>
-        <button id="rotation-etf-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="etf-flows" data-workspace-page="etf-flows" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">ETF 研究</button>
+        <button id="rotation-etf-tab" type="button" role="tab" data-tab="rotation" data-rotation-page="etfs" data-workspace-page="etfs" aria-selected="false" aria-controls="rotation-etf-view" tabindex="-1">ETF 研究</button>
       </div>
       </section>
       <section class="workspace-context-section" aria-label="市场信息">
@@ -254,20 +254,25 @@
     <div id="rotation-themes-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
 
-  <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etf-flows" role="tabpanel" aria-labelledby="rotation-etf-tab" hidden>
-    <div class="rotation-masthead">
-      <div><span class="rotation-eyebrow">ETF RESEARCH</span><h2>全场 ETF 研究</h2>
-        <p>覆盖沪深场内 ETF 与 QDII，按资产类别比较趋势、流动性和份额证据；分钟数据只作补充，不构成交易评级。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="etf_flows"><dt>快照</dt><dd>等待盘后扫描</dd><dt>血缘</dt><dd>Tushare · stockdb 本地分发</dd></dl>
+  <section class="rotation-view" id="rotation-etf-view" data-rotation-view="etfs" role="tabpanel" aria-labelledby="rotation-etf-tab" hidden>
+    <div class="rotation-masthead rotation-etf-masthead">
+      <div><span class="rotation-eyebrow">ETF SECTOR RADAR</span><h2>板块热度与位置雷达</h2>
+        <p>先读研究结论，再核查板块趋势、所处位置、活跃度与一级市场申赎证据。日终研究，不构成买卖建议。</p></div>
+      <dl class="rotation-asof" data-rotation-asof="etfs"><dt>研究日</dt><dd>等待盘后研究</dd><dt>模型</dt><dd>板块雷达 V3</dd></dl>
       <div class="rotation-etf-actions">
-        <label class="rotation-compact-field">研究快照<select id="rotation-etf-history"><option value="">最新正式快照</option></select></label>
-        <button class="rotation-refresh" type="button" data-etf-research-scan>运行 ETF 扫描</button>
+        <button class="rotation-refresh rotation-primary-action" type="button" data-etf-research-scan>更新研究</button>
         <button class="rotation-refresh" type="button" data-etf-research-cancel hidden>安全取消</button>
         <button class="rotation-refresh" type="button" data-etf-research-retry hidden>恢复任务</button>
-        <button class="rotation-refresh" type="button" data-etf-coverage>覆盖诊断</button>
-        <a class="rotation-refresh" id="rotation-etf-json" href="#" download>JSON</a>
-        <a class="rotation-refresh" id="rotation-etf-csv" href="#" download>CSV</a>
-        <button class="rotation-refresh" type="button" data-rotation-refresh="etf">刷新资金</button>
+        <details class="rotation-etf-more">
+          <summary class="rotation-refresh">更多</summary>
+          <div class="rotation-etf-more-menu">
+            <label class="rotation-compact-field">研究历史<select id="rotation-etf-history"><option value="">最新正式快照</option></select></label>
+            <button type="button" data-etf-coverage>数据覆盖与证据</button>
+            <button type="button" data-etf-fund-history>资金历史</button>
+            <a id="rotation-etf-json" href="#" download>导出 JSON</a>
+            <a id="rotation-etf-csv" href="#" download>导出 CSV</a>
+          </div>
+        </details>
       </div>
     </div>
     <aside class="rotation-etf-job" id="rotation-etf-job" hidden aria-live="polite"><strong>ETF 扫描</strong><span data-etf-job-status>准备中</span></aside>

@@ -197,6 +197,32 @@ def test_tushare_permission_gated_endpoint_can_use_an_isolated_health_lane(
     assert lanes == ["tushare:dc-concept"]
 
 
+def test_tushare_default_health_lane_is_isolated_per_endpoint(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    lanes = []
+
+    def direct_call(lane, key, fetch, **kwargs):
+        lanes.append(lane)
+        return fetch()
+
+    monkeypatch.setattr("quantmaster.data.tushare_source.provider_call", direct_call)
+
+    class FakePro:
+        def fund_basic(self, **params):
+            return pd.DataFrame([{"ts_code": "510300.SH", "name": "沪深300ETF"}])
+
+    source = TushareSource(EndpointFrameCache("tushare", root=tmp_path / "cache"))
+    source._api = FakePro()
+
+    frame = source._call("fund_basic", 1, market="E")
+
+    assert len(frame) == 1
+    assert lanes == ["tushare:fund_basic"]
+
+
 def test_tushare_required_nonempty_ignores_poisoned_empty_cache(
     tmp_path, isolated_config, monkeypatch,
 ):

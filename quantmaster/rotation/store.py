@@ -43,6 +43,7 @@ class RotationStore:
         self.cache_path = self.root / "cache.sqlite"
         self.preferences_path = self.root / "preferences.sqlite"
         self.etf_path = self.root / "etf_observations.parquet"
+        self.etf_metadata_path = self.root / "etf_metadata.parquet"
         self._initialize()
 
     def _cache(self) -> sqlite3.Connection:
@@ -468,6 +469,33 @@ class RotationStore:
         except (OSError, ValueError) as exc:
             logger.error("ETF 观察文件完整性校验失败: %s", self.etf_path, exc_info=True)
             raise RotationIntegrityError("ETF 观察文件损坏，拒绝按空数据继续计算") from exc
+
+    def save_etf_metadata(self, frame: pd.DataFrame) -> None:
+        """Persist the complete ETF directory independently from share coverage."""
+
+        if frame is None or frame.empty:
+            return
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".etf_metadata.", suffix=".parquet.tmp", dir=self.root,
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        try:
+            frame.to_parquet(temp, index=False)
+            with temp.open("rb+") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temp, self.etf_metadata_path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def etf_metadata(self) -> pd.DataFrame:
+        if not self.etf_metadata_path.is_file():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(self.etf_metadata_path)
+        except (OSError, ValueError) as exc:
+            logger.error("ETF 元数据文件完整性校验失败: %s", self.etf_metadata_path, exc_info=True)
+            raise RotationIntegrityError("ETF 元数据文件损坏，拒绝按空目录继续分类") from exc
 
 
 class RotationJobStore:

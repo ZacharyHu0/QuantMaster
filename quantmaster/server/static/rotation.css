@@ -1,4 +1,5 @@
 /* 板块联动：延续 QuantMaster 暗色研究工作台与 A 股红涨绿跌语义。 */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 .rotation-local-nav {
   display:flex; flex-direction:column; gap:10px; margin:-4px 0 20px;
   min-width:0; max-width:100%; padding-bottom:12px; border-bottom:1px solid var(--border);
@@ -25,7 +26,10 @@
 .rotation-pagination button:focus-visible,.rotation-inline-link:focus-visible,
 .rotation-filterbar input:focus-visible,.rotation-filterbar select:focus-visible,
 .rotation-compact-field select:focus-visible,.rotation-industry-level-tabs button:focus-visible,
-.rotation-l2-manage-toggle:focus-visible,.rotation-theme-focus-card-foot button:focus-visible {
+.rotation-l2-manage-toggle:focus-visible,.rotation-theme-focus-card-foot button:focus-visible,
+.etf-summary:focus-visible,.etf-asset-tabs button:focus-visible,.etf-queues button:focus-visible,
+.etf-map-select select:focus-visible,.etf-drawer-tabs button:focus-visible,
+.rotation-etf-more summary:focus-visible,.rotation-etf-more-menu :focus-visible {
   outline:2px solid var(--s1); outline-offset:2px;
 }
 .rotation-local-meta {
@@ -55,6 +59,22 @@
 .rotation-refresh:is(a) { display:inline-flex; align-items:center; text-decoration:none; }
 .rotation-etf-actions { display:flex; flex-wrap:wrap; align-items:flex-end; gap:7px; }
 .rotation-etf-actions .rotation-compact-field { min-width:min(220px,100%); }
+.rotation-etf-actions .rotation-refresh,.rotation-etf-more > summary { min-height:44px; }
+.rotation-primary-action { border-color:var(--s1); background:var(--s1); color:var(--page); font-weight:650; }
+.rotation-primary-action:hover { background:color-mix(in oklch,var(--s1) 88%,var(--ink)); color:var(--page); }
+.rotation-etf-more { position:relative; }
+.rotation-etf-more > summary { display:list-item; list-style-position:inside; user-select:none; }
+.rotation-etf-more-menu {
+  position:absolute; z-index:12; inset-block-start:calc(100% + 6px); inset-inline-end:0;
+  display:grid; gap:2px; width:248px; padding:8px; border:1px solid var(--axis);
+  border-radius:8px; background:var(--surface); box-shadow:0 14px 38px color-mix(in oklch,var(--ink) 16%,transparent);
+}
+.rotation-etf-more:not([open]) .rotation-etf-more-menu { display:none; }
+.rotation-etf-more-menu button,.rotation-etf-more-menu a {
+  min-height:44px; padding:8px; border:0; border-radius:5px; background:transparent;
+  color:var(--ink-2); cursor:pointer; font:inherit; font-size:11px; text-align:left; text-decoration:none;
+}
+.rotation-etf-more-menu button:hover,.rotation-etf-more-menu a:hover { background:var(--grid); color:var(--ink); }
 .rotation-etf-job {
   display:flex; align-items:center; gap:12px; margin:-8px 0 16px; padding:9px 11px;
   border:1px solid var(--axis); border-radius:7px; color:var(--muted); font-size:10px;
@@ -67,6 +87,82 @@
   border:1px solid var(--axis); border-radius:12px; background:var(--surface);
   box-shadow:0 18px 50px color-mix(in oklch,var(--ink) 18%,transparent);
 }
+
+.rotation-etf-masthead { margin-bottom:10px; }
+.etf-freshness {
+  display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); margin-bottom:8px;
+  border:1px solid var(--border); border-radius:8px; overflow:hidden;
+}
+.etf-freshness > div { position:relative; display:grid; gap:1px; min-width:0; padding:7px 9px; border-inline-end:1px solid var(--border); }
+.etf-freshness > div:last-child { border-inline-end:0; }
+.etf-freshness > div::before { content:""; position:absolute; inset-block-start:9px; inset-inline-end:9px; width:6px; height:6px; border-radius:50%; background:var(--muted); }
+.etf-freshness > div[data-status="ready"]::before { background:var(--s3); }
+.etf-freshness > div[data-status="stale"]::before,.etf-freshness > div[data-status="partial"]::before { background:var(--s4); }
+.etf-freshness span,.etf-freshness small { overflow:hidden; color:var(--muted); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.etf-freshness strong { overflow:hidden; color:var(--ink-2); font-size:11px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; white-space:nowrap; }
+.etf-asset-tabs { display:flex; gap:2px; margin-bottom:8px; overflow-x:auto; }
+.etf-asset-tabs button,.etf-drawer-tabs button {
+  min-height:44px; padding:7px 10px; border:0; border-radius:6px; background:transparent;
+  color:var(--muted); cursor:pointer; font:inherit; font-size:11px; white-space:nowrap;
+}
+.etf-asset-tabs button[aria-selected="true"],.etf-drawer-tabs button[aria-selected="true"] { background:var(--surface); color:var(--ink); }
+.etf-summary-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin-bottom:8px; border:1px solid var(--border); background:var(--border); }
+.etf-summary {
+  display:grid; grid-template-columns:auto minmax(0,1fr); gap:2px 10px; min-width:0; min-height:70px;
+  padding:9px 11px; border:0; background:var(--page); color:var(--ink); cursor:pointer; text-align:left;
+}
+.etf-summary:disabled { cursor:default; }
+.etf-summary > span { color:var(--muted); font-size:10px; letter-spacing:.05em; }
+.etf-summary > strong { overflow:hidden; color:var(--ink); font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
+.etf-summary > small { grid-column:1 / -1; overflow:hidden; color:var(--ink-2); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.etf-summary[data-evaluation="candidate"] > span { color:var(--s4); }
+.etf-summary[data-evaluation="unavailable"] > strong { color:var(--muted); }
+.etf-radar-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,310px); gap:8px; align-items:stretch; }
+.etf-radar-panel,.etf-queues { min-width:0; border:1px solid var(--border); border-radius:8px; background:var(--page); }
+.etf-radar-panel { padding:10px 10px 6px; }
+.rotation-chart.etf-map { height:160px; }
+.etf-map-select { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:8px; padding-top:5px; color:var(--muted); font-size:10px; }
+.etf-map-select select { min-width:0; min-height:44px; padding:6px 9px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--ink-2); font:inherit; font-size:11px; }
+.etf-queues { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-content:start; gap:0 8px; padding:8px 10px; }
+.etf-queues .rotation-section-head { grid-column:1 / -1; margin-bottom:3px; }
+.etf-queues section { min-width:0; padding:3px 0; border-top:1px solid var(--border); }
+.etf-queues h4 { display:flex; justify-content:space-between; color:var(--ink-2); font-size:11px; font-weight:650; }
+.etf-queues h4 span { color:var(--muted); font-variant-numeric:tabular-nums; }
+.etf-queues section > div { display:flex; gap:4px; margin-top:3px; overflow-x:auto; }
+.etf-queues section button {
+  display:grid; flex:1 0 110px; gap:1px; min-width:0; min-height:44px; padding:4px 6px; border:0; border-radius:4px;
+  background:var(--surface); color:var(--ink-2); cursor:pointer; text-align:left;
+}
+.etf-queues section button strong { overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.etf-queues section button span,.etf-queues section p { color:var(--muted); font-size:10px; }
+.etf-sector-library,.etf-product-library { margin-top:24px; }
+.etf-state { display:inline-flex; align-items:center; gap:4px; min-height:22px; padding:2px 7px; border:1px solid var(--axis); border-radius:999px; color:var(--ink-2); font-size:10px; white-space:nowrap; }
+.etf-state b { color:var(--muted); font-size:10px; }
+.etf-state[data-state="leading"] b,.etf-state[data-state="low_turn"] b,.etf-state[data-state="improving"] b { color:var(--up); }
+.etf-state[data-state="weakening"] b { color:var(--down); }
+.etf-risk-badge,.etf-candidate-badge { display:inline-flex; margin:3px 0 0 4px; padding:2px 6px; border:1px solid color-mix(in oklch,var(--bad) 42%,var(--axis)); border-radius:999px; color:var(--bad); font-size:10px; white-space:nowrap; }
+.etf-candidate-badge { border-color:color-mix(in oklch,var(--s4) 46%,var(--axis)); color:var(--s4); }
+.etf-fund-cell { min-width:220px; max-width:340px; color:var(--ink-2); font-variant-numeric:tabular-nums; }
+.etf-fund-cell small { display:block; margin-top:3px; color:var(--muted); font-size:10px; line-height:1.35; }
+.rotation-etf-research-table td small,#rotation-etf-view .etf-product-filters label { font-size:10px; }
+.etf-product-filters { grid-template-columns:minmax(220px,1.3fr) repeat(3,minmax(120px,.55fr)); }
+.etf-drawer-tabs { position:sticky; z-index:2; top:-18px; display:flex; gap:2px; margin:12px -4px 14px; padding:5px 4px; overflow-x:auto; border-bottom:1px solid var(--border); background:var(--surface); }
+.etf-drawer-panel { min-width:0; }
+.etf-conclusion,.etf-fund-proof { display:grid; gap:10px; padding:14px; border:1px solid var(--border); border-radius:8px; background:var(--page); }
+.etf-conclusion > span,.etf-fund-proof > span { color:var(--muted); font-size:10px; letter-spacing:.08em; }
+.etf-conclusion > strong,.etf-fund-proof > strong { color:var(--ink); font-size:15px; }
+.etf-conclusion p,.etf-fund-proof p { color:var(--ink-2); font-size:10px; line-height:1.6; }
+.etf-conclusion details { padding-top:8px; border-top:1px solid var(--border); color:var(--ink-2); font-size:10px; }
+.etf-conclusion summary { min-height:32px; color:var(--s4); cursor:pointer; }
+.etf-invalidation { padding-top:9px; border-top:1px solid var(--border); }
+.etf-invalidation b { display:block; margin-bottom:3px; color:var(--s4); font-size:10px; }
+.rotation-etf-drawer .rotation-detail-signals span,
+.rotation-etf-drawer .rotation-detail-signals small { font-size:10px; }
+.etf-amount-chart { margin-top:10px; border-top:1px solid var(--border); }
+.etf-chart-label,.etf-intraday-head h4 { margin:12px 0 4px; color:var(--ink-2); font-size:11px; }
+.etf-intraday-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-top:12px; border-top:1px solid var(--border); }
+.etf-intraday-head span { color:var(--muted); font-size:10px; text-align:right; }
+.rotation-table tr[data-selected-product="true"] { background:color-mix(in oklch,var(--s1) 7%,var(--page)); }
 
 .rotation-view[hidden] { display:none !important; }
 .rotation-view { min-width:0; max-width:100%; }
@@ -688,13 +784,32 @@
   .rotation-local-tabs button,.rotation-refresh,.rotation-link,.rotation-table button,
   .rotation-l2-option,.rotation-window-control button,.rotation-industry-level-tabs button,
   .rotation-l2-manage-toggle,
-  .rotation-pagination button,.rotation-inline-link,.rotation-theme-focus-card-foot button { min-height:44px; }
+  .rotation-pagination button,.rotation-inline-link,.rotation-theme-focus-card-foot button,
+  .etf-summary,.etf-asset-tabs button,.etf-queues button,.etf-map-select select,
+  .etf-drawer-tabs button,.rotation-etf-more-menu button,.rotation-etf-more-menu a { min-height:44px; }
+}
+
+@media (max-width:959px) {
+  .etf-radar-grid { grid-template-columns:1fr; }
+  .etf-queues { grid-template-columns:repeat(2,minmax(0,1fr)); grid-template-rows:auto; }
+  .etf-queues > .rotation-section-head { grid-column:1 / -1; }
+  .rotation-etf-drawer { inset:54px 0 0; width:100%; border-width:1px 0 0; border-radius:0; }
+  .etf-product-filters { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 
 @media (max-width:679px) {
   .rotation-etf-drawer { inset:54px 0 0; width:100%; border-width:1px 0 0; border-radius:0; }
   .rotation-etf-actions { width:100%; }
   .rotation-etf-actions .rotation-compact-field { flex:1 0 100%; }
+  .etf-freshness { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .etf-freshness > div { border-bottom:1px solid var(--border); }
+  .etf-summary-grid { grid-template-columns:1fr; }
+  .etf-summary { min-height:62px; }
+  .etf-queues { grid-template-columns:1fr; }
+  .etf-product-filters { grid-template-columns:1fr; }
+  .etf-map-select { grid-template-columns:1fr; }
+  .rotation-chart.etf-map { height:230px; }
+  .rotation-etf-more-menu { position:fixed; inset:120px 12px auto; width:auto; }
   .rotation-etf-research-table,.rotation-etf-research-table tbody,
   .rotation-etf-research-table tr,.rotation-etf-research-table td { display:block; width:100%; }
   .rotation-etf-research-table thead { display:none; }
@@ -706,7 +821,14 @@
     display:grid; grid-template-columns:minmax(96px,.7fr) minmax(0,1.3fr); gap:10px;
     padding:5px 0 !important; border:0 !important; text-align:left !important;
   }
-  .rotation-etf-research-table td::before { content:attr(data-label); color:var(--muted); font-size:9px; }
+  .rotation-etf-research-table td button {
+    display:inline-flex; min-height:44px; align-items:center; text-align:left;
+  }
+  #rotation-etf-view .rotation-pagination button,
+  #rotation-etf-view .rotation-page-size select,
+  #rotation-etf-view .etf-product-filters input,
+  #rotation-etf-view .etf-product-filters select { min-height:44px; }
+  .rotation-etf-research-table td::before { content:attr(data-label); color:var(--muted); font-size:10px; }
   .rotation-theme-focus-compact-row { grid-template-columns:auto minmax(0,1fr); }
   .rotation-theme-focus-compact-row .rotation-theme-focus-evidence { align-self:center; }
   .rotation-theme-focus-compact-row dl { grid-column:1 / -1; }
@@ -723,5 +845,6 @@
 @media (prefers-reduced-motion:reduce) {
   .rotation-view,.rotation-skeleton span { animation:none; }
   .rotation-meter i,.rotation-local-tabs button,.rotation-refresh,
-  .rotation-table tbody tr,.rotation-theme-focus-card-foot button { transition:none; }
+  .rotation-table tbody tr,.rotation-theme-focus-card-foot button,
+  .etf-summary,.etf-asset-tabs button,.etf-queues button,.etf-drawer-tabs button { transition:none; }
 }

@@ -886,9 +886,14 @@ class FreeStockDBSource(DataSource):
                     sdk_rows.append(previous[-1])
                 sdk_rows.extend(row for row in values if row["date"] >= begin)
             frame = pd.DataFrame(sdk_rows, columns=["symbol", "date", "adj_factor"])
+            frame.attrs["authoritative"] = True
+            frame.attrs["source"] = "free-stockdb:cum-factor-events"
             if not frame.empty:
                 frame["date"] = pd.to_datetime(frame["date"], format="%Y%m%d", errors="coerce")
-                return frame.dropna(subset=["date", "adj_factor"]).sort_values(["symbol", "date"])
+                frame = frame.dropna(subset=["date", "adj_factor"]).sort_values(["symbol", "date"])
+                frame.attrs["authoritative"] = True
+                frame.attrs["source"] = "free-stockdb:cum-factor-events"
+            return frame
 
         http_rows: list[dict[str, Any]] = []
         for symbol in dict.fromkeys(str(item).upper() for item in symbols):
@@ -903,6 +908,8 @@ class FreeStockDBSource(DataSource):
             frame["date"] = pd.to_datetime(frame["date"].astype(str).str[:8], errors="coerce")
             frame["adj_factor"] = pd.to_numeric(frame["adj_factor"], errors="coerce")
             frame = frame.dropna(subset=["date", "adj_factor"])
+        frame.attrs["authoritative"] = True
+        frame.attrs["source"] = "free-stockdb:http-cum-factor-events"
         return frame
 
     @staticmethod

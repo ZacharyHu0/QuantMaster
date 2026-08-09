@@ -131,12 +131,13 @@ class TushareSource(DataSource):
         endpoint: str,
         ttl_days: int,
         *,
-        provider_lane: str = "tushare",
+        provider_lane: str = "",
         required_nonempty: bool = False,
         required_columns: tuple[str, ...] = (),
         **params,
     ) -> pd.DataFrame:
         clean = {key: value for key, value in params.items() if value not in (None, "")}
+        provider_lane = provider_lane or f"tushare:{endpoint}"
         force_refresh = endpoint_cache_bypassed()
         min_mtime = _current_session_cache_floor(clean.get("end_date"))
 

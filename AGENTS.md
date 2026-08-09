@@ -1,5 +1,19 @@
 # QuantMaster repository instructions
 
+## Product evolution
+
+- QuantMaster is personal software. Unless the owner explicitly requests compatibility, prefer a
+  clean replacement over legacy adapters, deprecated parameter mappings, duplicate routes, or old
+  snapshot decoders. Delete obsolete paths instead of carrying historical baggage forward.
+- Data integrity and recoverability still matter: a clean replacement must fail explicitly when
+  evidence is unavailable and must not silently reinterpret old data as a new contract.
+
+## Data source priority
+
+- Whenever research needs data, inspect stockdb and existing local caches first. Only call Tushare
+  or another remote provider for fields that are missing or stale locally; never report remote
+  unavailability before checking the local evidence.
+
 ## Verification environment
 
 - Run Python validation through the project virtual environment: `./.venv/Scripts/python.exe`
@@ -14,6 +28,8 @@
 - Every repository modification, including documentation and test changes, must increment
   `VERSION` in `quantmaster/release.py` using semantic versioning and set `RELEASE_DATE` to
   the actual release date.
+- `MAJOR` is owner-controlled and must never change without a separate, explicit authorization from
+  the owner. New functionality increments `MINOR`; fixes and patches increment only `PATCH`.
 - Add the matching user-facing notes to `RELEASES` in `quantmaster/release.py` and to the top
   of `CHANGELOG.md` in the same change.
 - `quantmaster/release.py` is the runtime version source. Do not hard-code another application

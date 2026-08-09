@@ -28,11 +28,27 @@ class EtfResearchJobs:
     @staticmethod
     def _handle(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
         service = get_etf_research_service()
+        warnings: list[str] = []
         try:
+            from quantmaster.rotation.provider import RotationProvider, RotationProviderCallError
+            from quantmaster.rotation.store import RotationStore
+
+            context.progress(2, "同步 ETF 研究证据", "元数据与最近 25 个交易日份额")
+            try:
+                result = RotationProvider(RotationStore()).sync_etf_observations(
+                    context.progress,
+                    context.cancelled,
+                )
+                warnings.extend(str(value) for value in result.get("issues") or ())
+            except InterruptedError:
+                raise
+            except RotationProviderCallError as exc:  # 仅远端证据失败允许降级到本地缓存
+                warnings.append(f"元数据或份额同步失败，使用本地缓存：{str(exc)[:180]}")
             snapshot = service.scan(
                 as_of=str(spec.get("as_of") or ""),
                 progress=context.progress,
                 cancelled=context.cancelled,
+                refresh_warnings=warnings,
             )
         except (InterruptedError, OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
             service.store.record_failure(str(exc) or exc.__class__.__name__)
@@ -50,7 +66,10 @@ class EtfResearchJobs:
                 },
             },
         )
-        return JobOutcome("completed", "ETF 研究快照已发布", artifact["id"])
+        message = "ETF 研究快照已发布"
+        if warnings:
+            message += f"（{len(warnings)} 项证据已降级）"
+        return JobOutcome("completed", message, artifact["id"])
 
     def submit(self, *, as_of: str = "") -> tuple[dict[str, Any], bool]:
         spec = {"as_of": as_of}

@@ -420,7 +420,7 @@ class TestBasics:
         )
         assert 'data-workspace-pages="automation"' not in resp.text
         workspace_pages = (
-            "quotes", "temperature", "style", "rotation", "industry", "themes", "etf-flows", "news",
+            "quotes", "temperature", "style", "rotation", "industry", "themes", "etfs", "news",
             "after-close", "candidates", "stock-analysis", "decision", "lab", "backtest", "paper",
             "ledger",
         )
