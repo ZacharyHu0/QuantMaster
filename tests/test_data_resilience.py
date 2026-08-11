@@ -22,10 +22,13 @@ from quantmaster.data.resilience import (
     PROVIDER_SCHEDULER,
     CircuitOpenError,
     EndpointFrameCache,
+    LocalOnlyDataAccessError,
+    ProviderScheduler,
     ProviderTimeoutError,
     TushareRateLimiter,
     akshare_call,
     classify_provider_failure,
+    local_only_data_access,
     provider_call,
 )
 from quantmaster.data.storage import BarStore
@@ -35,9 +38,9 @@ from quantmaster.data.tushare_source import TushareSource, _current_session_cach
 def test_default_daily_bar_store_is_reused_per_root(tmp_path, monkeypatch):
     created = []
 
-    def factory(*, root):
+    def factory(*, root, read_only):
         store = object()
-        created.append((root, store))
+        created.append((root, read_only, store))
         return store
 
     config = type("Config", (), {"data_root": tmp_path})()
@@ -49,8 +52,56 @@ def test_default_daily_bar_store_is_reused_per_root(tmp_path, monkeypatch):
     second = registry._default_bar_store()
 
     assert first is second
-    assert created == [((tmp_path / "bars").resolve(), first)]
+    assert created == [((tmp_path / "bars").resolve(), False, first)]
     registry._DEFAULT_BAR_STORES.clear()
+
+
+def test_local_only_bar_store_does_not_initialize_a_cold_cache(tmp_path):
+    root = tmp_path / "cold-bars"
+
+    with local_only_data_access():
+        store = BarStore(root=root)
+        result = store.read("600000.SH")
+
+    assert store.read_only is True
+    assert result.status == "missing"
+    assert not root.exists()
+
+
+def test_local_only_reader_does_not_repair_or_mutate_a_bad_cache(tmp_path):
+    from quantmaster.data.registry import read_history
+
+    store = BarStore(root=tmp_path / "bars")
+    dates = pd.bdate_range("2026-08-03", periods=3)
+    store.put("600000.SH", pd.DataFrame({"close": [10.0, 11.0, 12.0]}, index=dates))
+    path = store.path_for_repair("600000.SH")
+    path.write_bytes(b"not a parquet file")
+    before = store.metadata("600000.SH")
+
+    with local_only_data_access():
+        result = read_history("600000.SH", "2026-08-03", "2026-08-07", store=store)
+
+    assert result.quality.status == "unavailable"
+    assert store.metadata("600000.SH") == before
+
+
+def test_local_only_context_rejects_provider_call():
+    with local_only_data_access(), pytest.raises(LocalOnlyDataAccessError):
+        provider_call("akshare:local-only-test", "blocked", lambda: "unexpected")
+
+
+def test_public_history_reader_enforces_local_only_without_http_middleware(tmp_path, monkeypatch):
+    """A future helper inside the reader cannot silently restore provider I/O."""
+
+    store = BarStore(root=tmp_path / "bars")
+
+    def accidental_provider(*_args, **_kwargs):
+        return provider_call("akshare:reader-contract", "unexpected", lambda: "remote")
+
+    monkeypatch.setattr(registry, "_bar_envelope", accidental_provider)
+
+    with pytest.raises(LocalOnlyDataAccessError):
+        registry.read_history("600000.SH", "2026-08-03", "2026-08-07", store=store)
 
 
 def _hold_cross_process_bar_lock(root: str, start, events) -> None:
@@ -308,9 +359,9 @@ def test_incremental_refresh_bypasses_cached_tushare_tail(
             self._api = api
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeTushare]})
-    refreshed = registry.load_history(
+    refreshed = registry.refresh_history(
         "000300.SH", "2024-01-02", "2024-01-03", store=store,
-        refresh="incremental",
+        mode="incremental",
     )
 
     assert str(refreshed.data.index.max().date()) == "2024-01-03"
@@ -351,9 +402,9 @@ def test_incremental_tail_tries_fallback_when_primary_has_no_new_date(
 
     monkeypatch.setattr(
         registry, "_factories", lambda: {Market.CN: [Lagging, Current]})
-    refreshed = registry.load_history(
+    refreshed = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-01-03", store=store,
-        refresh="incremental",
+        mode="incremental",
     )
 
     assert str(refreshed.data.index.max().date()) == "2024-01-03"
@@ -494,7 +545,7 @@ def test_fresh_cache_does_not_hide_missing_end(tmp_path, isolated_config, monkey
             }, index=full_dates)
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-06-28", store=store)
     assert FakeSource.calls == 1
     assert str(result.data.index.max().date()) == "2024-06-28"
@@ -574,7 +625,7 @@ def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkey
             raise AssertionError("历史覆盖完整时不应触网")
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [MustNotRun]})
-    result = registry.load_history("600000.SH", "2024-01-02", "2024-03-29", store=store)
+    result = registry.refresh_history("600000.SH", "2024-01-02", "2024-03-29", store=store)
     pd.testing.assert_frame_equal(result.data, frame, check_freq=False)
 
 
@@ -606,14 +657,14 @@ def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [TailSource]})
     start = str(dates[0].date())
     end_value = str(end.date())
-    registry.load_history("600000.SH", start, end_value, store=store)
+    registry.refresh_history("600000.SH", start, end_value, store=store)
     assert TailSource.calls == [(str(dates[-5].date()), end_value)]
 
     # 同一 TTL 内自动加载完全本地命中；显式“同步最新行情”仍会检查尾部。
-    registry.load_history("600000.SH", start, end_value, store=store)
+    registry.refresh_history("600000.SH", start, end_value, store=store)
     assert len(TailSource.calls) == 1
-    registry.load_history(
-        "600000.SH", start, end_value, store=store, refresh="incremental")
+    registry.refresh_history(
+        "600000.SH", start, end_value, store=store, mode="incremental")
     assert len(TailSource.calls) == 2
 
 
@@ -637,7 +688,7 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [SlowSource]})
 
     def load(_):
-        return registry.load_history(
+        return registry.refresh_history(
             "600000.SH", "2024-01-02", "2024-03-29", store=store)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -691,8 +742,8 @@ def test_failed_full_refresh_keeps_previous_cache(tmp_path, monkeypatch):
             raise ConnectionError("offline")
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Broken]})
-    result = registry.load_history(
-        "600000.SH", "2024-01-02", "2024-03-29", store=store, refresh="full")
+    result = registry.refresh_history(
+        "600000.SH", "2024-01-02", "2024-03-29", store=store, mode="full")
     pd.testing.assert_frame_equal(result.data, cached, check_freq=False)
     pd.testing.assert_frame_equal(store.get("600000.SH"), cached, check_freq=False)
     assert store.metadata("600000.SH")["last_status"] == "refresh_failed"
@@ -736,9 +787,9 @@ def test_full_refresh_httpx_failures_continue_to_fallback(
     monkeypatch.setattr(registry, "_factories", lambda: {
         Market.CN: [Broken, Fallback],
     })
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-01-12",
-        store=store, refresh="full",
+        store=store, mode="full",
     )
 
     assert not result.data.empty
@@ -760,7 +811,7 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
             "close": 10.0, "volume": 1.0,
         }, index=index)
 
-    monkeypatch.setattr(registry, "BarStore", lambda *, root: store)
+    monkeypatch.setattr(registry, "BarStore", lambda *, root, read_only=False: store)
     monkeypatch.setattr(FreeStockDBSource, "native_batch_available", lambda _self: True)
 
     def daily_many(_self, symbols, start, end):
@@ -768,17 +819,6 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
         return {symbols[0]: bars(start, end)}
 
     monkeypatch.setattr(FreeStockDBSource, "daily_many", daily_many)
-    monkeypatch.setattr(
-        registry,
-        "_supplement_stockdb_contract",
-        lambda _symbol, _start, _end, frame, **_kwargs: (
-            frame,
-            {
-                "price_source": "free-stockdb",
-                "contract_source": "tushare:daily+adj_factor",
-            },
-        ),
-    )
     monkeypatch.setattr(
         registry,
         "_local_sessions",
@@ -793,16 +833,16 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
             return bars(start, end)
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Fallback]})
-    panel = registry.load_bar_panel(
+    panel = registry.refresh_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02", "2024-01-12",
         field="close",
     )
 
     assert calls == [["600000.SH", "000001.SZ"]]
     assert list(panel.data.columns) == ["600000.SH", "000001.SZ"]
-    assert store.metadata("600000.SH")["last_source"] == (
-        "stockdb-price+tushare-contract-v2"
-    )
+    # A complete native StockDB batch is published as local evidence.  The
+    # panel path must not contact Tushare merely to decorate its lineage.
+    assert store.metadata("600000.SH")["last_source"] == "free-stockdb"
     assert store.metadata("000001.SZ")["last_source"] == "fallback"
 
 
@@ -831,7 +871,7 @@ def test_successful_fallback_without_truth_contract_is_recorded_as_degraded(
 
     monkeypatch.setattr(
         registry, "_factories", lambda: {Market.CN: [Broken, Fallback]})
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-03-29", store=store)
     assert not result.data.empty
     meta = store.metadata("600000.SH")
@@ -849,6 +889,72 @@ def test_different_provider_lanes_execute_in_parallel():
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(call, ["akshare:eastmoney", "yahoo"]))
     assert len(results) == 2
+
+
+def test_provider_scheduler_enforces_global_network_concurrency_ceiling():
+    scheduler = ProviderScheduler()
+    release = threading.Event()
+    eight_entered = threading.Event()
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def blocked(index: int) -> int:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == scheduler.MAX_NETWORK_CONCURRENCY:
+                eight_entered.set()
+        try:
+            assert release.wait(2.0)
+            return index
+        finally:
+            with lock:
+                active -= 1
+
+    with ThreadPoolExecutor(max_workers=scheduler.MAX_NETWORK_CONCURRENCY + 1) as pool:
+        lanes = [
+            "tushare:global-limit-0",
+            "tushare:global-limit-1",
+            "akshare:global-limit-0",
+            "yahoo:global-limit-1",
+            "free-stockdb:global-limit-0",
+            "free-stockdb:global-limit-1",
+            "free-stockdb:global-limit-2",
+            "free-stockdb:global-limit-3",
+            "free-stockdb:global-limit-4",
+        ]
+        pending = [
+            pool.submit(
+                scheduler.call,
+                lanes[index],
+                str(index),
+                lambda index=index: blocked(index),
+                timeout=2.0,
+            )
+            for index in range(scheduler.MAX_NETWORK_CONCURRENCY + 1)
+        ]
+        assert eight_entered.wait(1.0)
+        time.sleep(0.05)
+        assert peak == scheduler.MAX_NETWORK_CONCURRENCY
+        assert scheduler.status()["network_active"] == scheduler.MAX_NETWORK_CONCURRENCY
+        release.set()
+        assert sorted(item.result(timeout=2.0) for item in pending) == list(
+            range(scheduler.MAX_NETWORK_CONCURRENCY + 1)
+        )
+
+
+def test_provider_scheduler_uses_fixed_provider_family_pools():
+    scheduler = ProviderScheduler()
+    lanes = ["tushare:daily", "akshare:daily", "free-stockdb:daily", "yahoo:daily"]
+
+    for index, lane in enumerate(lanes):
+        assert scheduler.call(lane, str(index), lambda index=index: index) == index
+
+    assert set(scheduler._queues) == {"tushare", "external", "stockdb"}
+    assert sum(scheduler.FAMILY_WORKERS.values()) == scheduler.MAX_NETWORK_CONCURRENCY
+    assert scheduler._lanes == set(lanes)
 
 
 def test_provider_timeout_opens_circuit_and_fences_late_success(isolated_config):

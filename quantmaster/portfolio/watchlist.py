@@ -29,19 +29,30 @@ def normalize_symbol(symbol: str) -> str:
 class AssetListStore:
     """管理互相独立的自选（favorites）与关注（following）列表。"""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "asset_lists.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._conn() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS asset_lists ("
-                "list_name TEXT NOT NULL, symbol TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',"
-                "added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-                "PRIMARY KEY (list_name, symbol))"
-            )
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self._conn() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS asset_lists ("
+                    "list_name TEXT NOT NULL, symbol TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',"
+                    "added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    "PRIMARY KEY (list_name, symbol))"
+                )
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 30.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise RuntimeError("只读自选列表不能修改")
 
     @staticmethod
     def _validate_list(list_name: str) -> str:
@@ -50,6 +61,7 @@ class AssetListStore:
         return list_name
 
     def add(self, list_name: str, symbol: str, name: str = "") -> dict:
+        self._require_writable()
         list_name = self._validate_list(list_name)
         symbol = normalize_symbol(symbol)
         clean_name = str(name).strip()[:80]
@@ -63,6 +75,7 @@ class AssetListStore:
         return next(item for item in self.list(list_name) if item["symbol"] == symbol)
 
     def remove(self, list_name: str, symbol: str) -> bool:
+        self._require_writable()
         list_name = self._validate_list(list_name)
         symbol = normalize_symbol(symbol)
         with self._conn() as conn:
@@ -74,12 +87,21 @@ class AssetListStore:
 
     def list(self, list_name: str) -> list[dict]:
         list_name = self._validate_list(list_name)
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT symbol,name,added_at FROM asset_lists "
-                "WHERE list_name=? ORDER BY added_at DESC, symbol",
-                (list_name,),
-            ).fetchall()
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT symbol,name,added_at FROM asset_lists "
+                    "WHERE list_name=? ORDER BY added_at DESC, symbol",
+                    (list_name,),
+                ).fetchall()
+        except FileNotFoundError:
+            if self.read_only:
+                return []
+            raise
+        except sqlite3.OperationalError as exc:
+            if self.read_only and "no such table" in str(exc).lower():
+                return []
+            raise
         return [dict(row) for row in rows]
 
     def all(self) -> dict[str, list[dict]]:

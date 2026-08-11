@@ -256,6 +256,64 @@ class TushareSource(DataSource):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
         return self._normalize_market_frame(merged).loc[start:end]
 
+    def cached_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
+        """Read an already-cached daily contract without ever contacting Tushare.
+
+        Batch StockDB acceptance uses this before scheduling its bounded
+        cross-source sample.  Keeping the read here makes the cache key and
+        normalization exactly match :meth:`daily`, while making accidental
+        request-path network I/O impossible to hide behind a cache probe.
+        """
+
+        start_c, end_c = start.replace("-", ""), end.replace("-", "")
+        ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
+        floor = _current_session_cache_floor(end_c)
+
+        def local(endpoint: str, **params: Any) -> pd.DataFrame | None:
+            clean = {key: value for key, value in params.items() if value not in (None, "")}
+            return self.cache.get(endpoint, clean, ttl, min_mtime=floor)
+
+        fields = "ts_code,trade_date,open,high,low,close,vol,amount"
+        if _is_a_share_index(symbol):
+            raw = local(
+                "index_daily", ts_code=symbol, start_date=start_c,
+                end_date=end_c, fields=fields,
+            )
+            return None if raw is None else self._normalize_market_frame(raw).loc[start:end]
+        if _instrument_type(symbol) in {"etf", "fund"}:
+            raw = local(
+                "fund_daily", ts_code=symbol, start_date=start_c,
+                end_date=end_c, fields=fields,
+            )
+            return None if raw is None else self._normalize_market_frame(raw).loc[start:end]
+        raw = local(
+            "daily", ts_code=symbol, start_date=start_c,
+            end_date=end_c, fields=fields,
+        )
+        factors = local(
+            "adj_factor", ts_code=symbol, start_date=start_c,
+            end_date=end_c, fields="ts_code,trade_date,adj_factor",
+        )
+        if raw is None or factors is None or raw.empty or factors.empty:
+            return None
+        if not {"trade_date", "adj_factor"}.issubset(factors):
+            return None
+        merged = raw.merge(
+            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
+        )
+        if merged.empty:
+            return None
+        merged["trade_date"] = pd.to_datetime(merged["trade_date"])
+        merged = merged.sort_values("trade_date")
+        factor = pd.to_numeric(merged["adj_factor"], errors="coerce")
+        latest = factor.dropna().iloc[-1] if factor.notna().any() else None
+        if latest is None or latest == 0:
+            return None
+        ratio = factor / latest
+        for column in ("open", "high", "low", "close"):
+            merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
+        return self._normalize_market_frame(merged).loc[start:end]
+
     def research_daily(
         self, symbol: str, start: str, end: str, *, calendar: pd.DatetimeIndex | None = None,
     ) -> dict[str, pd.DataFrame]:

@@ -36,17 +36,30 @@ def utc_now() -> str:
 class BacktestStore:
     """SQLite 保存任务元数据，JSON 文件保存可导出的完整结果。"""
 
-    def __init__(self, path: str | Path | None = None, artifact_root: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        artifact_root: str | Path | None = None,
+        *,
+        read_only: bool = False,
+    ):
         self.path = Path(path) if path else get_config().data_root / "backtests.sqlite"
         self.artifact_root = (
             Path(artifact_root) if artifact_root else get_config().data_root / "backtests"
         )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.artifact_root.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.artifact_root.mkdir(parents=True, exist_ok=True)
+            self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         with self._conn() as conn:
@@ -404,7 +417,7 @@ class BacktestService:
         )
         from quantmaster.backtest.report import full_report
         from quantmaster.backtest.spec import build_strategy
-        from quantmaster.data import load_history, load_panel
+        from quantmaster.data import refresh_history, refresh_panel
         from quantmaster.data.universe import load_universe
         from quantmaster.lab.dataset import create_snapshot, load_csi800_membership
         from quantmaster.runtime.problems import OperationProblem, make_problem
@@ -475,7 +488,7 @@ class BacktestService:
                     "manifest_hash": research_bundle.manifest_hash,
                 }
             else:
-                market_envelope = load_panel(symbols, spec.start, end)
+                market_envelope = refresh_panel(symbols, spec.start, end)
                 panel = market_envelope.require_data()
                 market_quality = market_envelope.quality
                 warnings.append({
@@ -536,7 +549,7 @@ class BacktestService:
 
         if benchmark_close is None and spec.benchmark:
             try:
-                benchmark_envelope = load_history(spec.benchmark, spec.start, end)
+                benchmark_envelope = refresh_history(spec.benchmark, spec.start, end)
                 benchmark_close = benchmark_envelope.require_data()["close"]
                 if benchmark_close.empty:
                     raise ValueError("基准没有可用收盘价")

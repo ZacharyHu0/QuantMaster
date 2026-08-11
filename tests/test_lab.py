@@ -279,6 +279,77 @@ def test_store_versions_validation_approval_deployment_and_jobs(tmp_path):
     assert len(store.events(queued["id"])) >= 3
 
 
+def test_lab_summary_lists_never_decode_large_job_or_study_artifacts(tmp_path, monkeypatch):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    marker = "x" * 200_000
+    queued = store.enqueue(
+        "prepare_data", {"universe": "demo"},
+        preflight={"resource_class": "cpu", "coverage": marker},
+    )
+    experiment = store.create_experiment("摘要实验", "ridge", {
+        "universe": "demo", "start": "2024-01-01", "horizon": 3,
+    })
+    store.update_experiment(experiment["id"], status="completed", result={
+        "metrics": {"correlation": 0.12}, "artifact": marker,
+        "telemetry": {"effective_device": "cpu"},
+    })
+    study = store.create_study({
+        "universe": "demo", "start": "2024-01-01", "budget_hours": 1,
+        "protocol": {"fold_test_days": 63},
+    })
+    store.update_study(study["id"], status="completed", result={
+        "trials": [{"number": index, "artifact": marker} for index in range(2)],
+        "sealed_metrics": {"rank_ic": 0.03},
+    })
+
+    monkeypatch.setattr(
+        LabStore, "_decode",
+        staticmethod(lambda *_args, **_kwargs: pytest.fail("summary decoded an artifact blob")),
+    )
+    jobs = store.jobs(summary=True)
+    experiments = store.list_experiments(summary=True)
+    studies = store.studies(summary=True)
+
+    assert jobs[0]["id"] == queued["id"]
+    assert jobs[0]["preflight"] == {}
+    assert jobs[0]["params"] == {}
+    assert experiments[0]["result_json"]["metrics"]["correlation"] == 0.12
+    assert experiments[0]["result_json"]["telemetry"]["effective_device"] == "cpu"
+    assert studies[0]["id"] == study["id"]
+    assert studies[0]["result"] == {"trial_count": 2, "sealed": True}
+
+
+def test_lab_capabilities_are_published_by_worker_and_read_without_hardware_probe(
+    tmp_path, monkeypatch,
+):
+    _config(tmp_path)
+    from quantmaster.lab import capabilities as capability_snapshot
+
+    expected = capability_snapshot._fallback_capabilities()
+    expected["models"]["torch"] = True
+    expected["models"]["available_models"] = ["ridge", "transformer"]
+    expected["local_data"]["catalogued_symbols"] = 800
+    monkeypatch.setattr(capability_snapshot, "build_capabilities", lambda: expected)
+
+    published = capability_snapshot.publish_capabilities()
+    monkeypatch.setattr(
+        "quantmaster.lab.dataset.readiness",
+        lambda: pytest.fail("Web read ran local data readiness inspection"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.lab.ml.capabilities",
+        lambda: pytest.fail("Web read ran hardware capability probe"),
+    )
+
+    value = LabService(read_only=True).capabilities()
+
+    assert value["models"]["available_models"] == ["ridge", "transformer"]
+    assert value["local_data"]["catalogued_symbols"] == 800
+    assert value["snapshot"]["id"] == published["id"]
+    assert value["snapshot"]["state"] == "fresh"
+
+
 def test_factor_registry_enforces_unique_names_and_resolves_runtime_aliases(tmp_path):
     _config(tmp_path)
     store = LabStore(tmp_path / "lab.sqlite")
@@ -915,11 +986,11 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         lab_api.get_lab_service().store.finish_job(
             queued.json()["id"], error="测试失败",
         )
-        retried = client.post(f"/api/v1/lab/jobs/{queued.json()['id']}/retry")
+        retried = client.post(f"/api/v1/jobs/{queued.json()['id']}/retry")
         assert retried.status_code == 202
         assert retried.json()["status"] == "queued"
         events = client.get(
-            f"/api/v1/lab/jobs/{retried.json()['id']}/events?after=0",
+            f"/api/v1/jobs/{retried.json()['id']}/events?after=0",
         ).json()["items"]
         assert any(item["type"] == "retry_of" for item in events)
 

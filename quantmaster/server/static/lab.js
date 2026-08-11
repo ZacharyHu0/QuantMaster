@@ -11,6 +11,8 @@
     jobs: [],
     experiments: [],
     studies: [],
+    studyDetail: null,
+    studyDetailLoadingId: '',
     miningRuns: [],
     selectedMiningRun: '',
     selectedStudyId: '',
@@ -986,9 +988,9 @@
     }
     state.jobDetailLoading = true;
     try {
-      const job = await request(`/api/v1/lab/jobs/${encodeURIComponent(jobId)}`);
+      const job = await request(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
       if (state.selectedJobId !== jobId) return;
-      const response = await request(`/api/v1/lab/jobs/${encodeURIComponent(jobId)}/events?after=${state.jobLastSeq}&limit=2000`);
+      const response = await request(`/api/v1/jobs/${encodeURIComponent(jobId)}/events?after=${state.jobLastSeq}&limit=2000`);
       if (state.selectedJobId !== jobId) return;
       const events = response.items || [];
       if (events.length) {
@@ -1156,19 +1158,27 @@
     target.innerHTML = `<div class="table-scroll"><table class="lab-study-table"><thead><tr><th>Study</th><th>状态</th><th>候选</th><th>Trials</th><th>密封集</th><th>更新</th><th></th></tr></thead><tbody>${state.studies.map(item => {
       const result = item.result || {};
       const candidate = result.version_id ? 'Shadow Candidate' : result.candidate === false ? '未晋级' : '—';
-      return `<tr><td><button type="button" data-study-id="${h(item.id)}">${h(item.config?.universe || '—')} · ${h(String(item.id).slice(0, 8))}</button></td><td><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span></td><td>${h(candidate)}</td><td>${(result.trials || []).length}</td><td>${result.sealed_metrics ? '已锁定评估' : '未完成'}</td><td>${h(formatDate(item.updated_at))}</td><td>${['paused','failed','interrupted'].includes(item.status) ? `<button type="button" data-resume-study="${h(item.id)}">恢复</button>` : ''}</td></tr>`;
+      const trialCount = Number(result.trial_count ?? (result.trials || []).length);
+      const sealed = Boolean(result.sealed || result.sealed_metrics);
+      return `<tr><td><button type="button" data-study-id="${h(item.id)}">${h(item.config?.universe || '—')} · ${h(String(item.id).slice(0, 8))}</button></td><td><span class="lab-status ${h(item.status)}">${h(statusLabel[item.status] || item.status)}</span></td><td>${h(candidate)}</td><td>${trialCount}</td><td>${sealed ? '已锁定评估' : '未完成'}</td><td>${h(formatDate(item.updated_at))}</td><td>${['paused','failed','interrupted'].includes(item.status) ? `<button type="button" data-resume-study="${h(item.id)}">恢复</button>` : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
 
   function renderStudyDetail() {
     const target = document.getElementById('lab-study-detail');
     if (!target) return;
-    const study = state.studies.find(item => item.id === state.selectedStudyId) || state.studies[0];
-    if (!study) {
+    const summary = state.studies.find(item => item.id === state.selectedStudyId) || state.studies[0];
+    if (!summary) {
       target.innerHTML = '<div class="lab-empty">创建或选择一个 Study，查看折线时间轴、Pareto 推荐和密封证据。</div>';
       return;
     }
-    state.selectedStudyId = study.id;
+    state.selectedStudyId = summary.id;
+    const study = state.studyDetail?.id === summary.id ? state.studyDetail : null;
+    if (!study) {
+      target.innerHTML = '<div class="lab-job-loading"><i></i><span>正在读取所选 Study 的审计证据…</span></div>';
+      void loadStudyDetail(summary.id);
+      return;
+    }
     const result = study.result || {};
     const protocol = result.protocol || study.config?.protocol || {};
     const sealed = result.sealed_holdout || {};
@@ -1186,10 +1196,31 @@
       <div class="lab-study-actions">${result.version_id ? `<button type="button" data-factor-version="${h(result.version_id)}">查看 Shadow 候选</button>` : ''}${['paused','failed','interrupted'].includes(study.status) ? `<button type="button" data-resume-study="${h(study.id)}">从检查点恢复</button>` : ''}${study.job_id ? `<button type="button" data-job-detail="${h(study.job_id)}">打开任务时间线</button>` : ''}</div>`;
   }
 
+  async function loadStudyDetail(studyId) {
+    if (!studyId || state.studyDetailLoadingId === studyId) return;
+    state.studyDetailLoadingId = studyId;
+    try {
+      const detail = await request(`/api/v1/lab/studies/${encodeURIComponent(studyId)}`, {
+        requestKey:'study-detail',
+      });
+      if (state.selectedStudyId !== studyId) return;
+      state.studyDetail = detail;
+      renderStudyDetail();
+    } catch (error) {
+      if (state.selectedStudyId === studyId) {
+        const target = document.getElementById('lab-study-detail');
+        if (target) target.innerHTML = `<div class="lab-job-load-error"><b>Study 详情读取失败</b><p>${h(error.message || error)}</p><button type="button" data-study-id="${h(studyId)}">重试</button></div>`;
+      }
+    } finally {
+      if (state.studyDetailLoadingId === studyId) state.studyDetailLoadingId = '';
+    }
+  }
+
   async function refreshStudies() {
     try {
       const response = await request('/api/v1/lab/studies?limit=100');
       state.studies = response.items || [];
+      state.studyDetail = null;
       renderStudyList();
       renderStudyDetail();
     } catch (error) {
@@ -1300,6 +1331,7 @@
     state.jobs = dashboard.jobs || [];
     state.experiments = dashboard.experiments || [];
     state.studies = dashboard.studies || state.studies;
+    state.studyDetail = null;
     renderReadiness();
     renderCapabilities();
     renderSnapshot();
@@ -1517,7 +1549,9 @@
       }
       const studyButton = event.target.closest('[data-study-id]');
       if (studyButton) {
-        state.selectedStudyId = studyButton.dataset.studyId;
+        const studyId = studyButton.dataset.studyId;
+        if (state.selectedStudyId !== studyId) state.studyDetail = null;
+        state.selectedStudyId = studyId;
         renderStudyDetail();
       }
       const resumeStudy = event.target.closest('[data-resume-study]');
@@ -1611,7 +1645,7 @@
       } catch (error) { showError('建议未能应用', error); }
       const cancel = event.target.closest('[data-cancel-job]');
       if (cancel) try {
-        await request(`/api/v1/lab/jobs/${cancel.dataset.cancelJob}/cancel`, {method:'POST'});
+        await request(`/api/v1/jobs/${cancel.dataset.cancelJob}/cancel`, {method:'POST'});
         await refreshJobs();
       } catch (error) { showError('任务取消失败', error); }
       const retry = event.target.closest('[data-retry-job]');
@@ -1625,7 +1659,7 @@
         try {
           retry.disabled = true;
           if (!await confirmPreflight(source.kind, source.params || {}, '按原参数重跑')) return;
-          const created = await request(`/api/v1/lab/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
+          const created = await request(`/api/v1/jobs/${retry.dataset.retryJob}/retry`, {method:'POST'});
           await refreshJobs();
           openJobDetail(created.id, retry);
         } catch (error) {

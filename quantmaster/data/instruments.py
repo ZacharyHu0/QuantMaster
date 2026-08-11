@@ -118,15 +118,22 @@ def _seed_records() -> list[dict[str, Any]]:
 class InstrumentStore:
     """线程安全的 SQLite 证券主数据仓库。"""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(self, path: str | Path | None = None, *, read_only: bool = False):
         self.path = Path(path) if path else get_config().data_root / "security_master.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._initialize()
+        if not self.read_only:
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(
-            self.path, policy="cache", timeout=20.0, row_factory=True,
+            self.path,
+            policy="cache",
+            timeout=0.25 if self.read_only else 20.0,
+            row_factory=True,
+            read_only=self.read_only,
         )
 
     @contextmanager
@@ -595,6 +602,8 @@ class InstrumentStore:
         }
 
     def remember(self, query: str, symbol: str) -> None:
+        if self.read_only:
+            return
         normalized = _normalized_alias(query)
         with self._connection() as connection:
             connection.execute(
@@ -709,11 +718,18 @@ def _online_yahoo_records(query: str, limit: int) -> list[dict[str, Any]]:
 
 
 def search_instruments(
-    query: str, limit: int = 20, *, online: bool = True,
+    query: str,
+    limit: int = 20,
+    *,
+    online: bool = False,
+    read_only: bool = False,
 ) -> list[dict[str, Any]]:
-    store = InstrumentStore()
-    local = store.search(query, limit=limit)
-    if local or not online or not str(query).strip():
+    try:
+        store = InstrumentStore(read_only=read_only)
+        local = store.search(query, limit=limit)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return []
+    if local or read_only or not online or not str(query).strip():
         return local
     try:
         records = _online_yahoo_records(query, limit)
@@ -727,27 +743,62 @@ def search_instruments(
 
 
 def resolve_instrument(
-    query: str, selected_symbol: str = "", *, online: bool = True,
+    query: str,
+    selected_symbol: str = "",
+    *,
+    online: bool = False,
+    read_only: bool = False,
 ) -> dict[str, Any]:
-    store = InstrumentStore()
-    result = store.resolve(query, selected_symbol=selected_symbol)
+    try:
+        store = InstrumentStore(read_only=read_only)
+        result = store.resolve(query, selected_symbol=selected_symbol)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return {
+            "query": str(query).strip(),
+            "status": "unresolved",
+            "candidates": [],
+            "message": "证券主数据快照尚未发布",
+        }
     if result["status"] == "unresolved" and online:
-        search_instruments(query, online=True)
+        search_instruments(query, online=True, read_only=read_only)
         result = store.resolve(query, selected_symbol=selected_symbol)
     return result
 
 
 def resolve_instruments(
-    queries: Iterable[str], selections: dict[str, str] | None = None, *, online: bool = True,
+    queries: Iterable[str],
+    selections: dict[str, str] | None = None,
+    *,
+    online: bool = False,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     values = list(queries)
-    store = InstrumentStore()
-    result = store.resolve_many(values, selections=selections)
+    try:
+        store = InstrumentStore(read_only=read_only)
+        result = store.resolve_many(values, selections=selections)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return {
+            "status": "needs_confirmation",
+            "resolved": [],
+            "ambiguous": [],
+            "unresolved": [
+                {
+                    "query": str(value).strip(),
+                    "status": "unresolved",
+                    "candidates": [],
+                    "message": "证券主数据快照尚未发布",
+                }
+                for value in values
+                if str(value).strip()
+            ],
+            "corrections": [],
+            "duplicates": [],
+        }
     if online and result["unresolved"]:
         for item in result["unresolved"]:
             query = item["query"]
             if re.search(r"[A-Za-z]", query):
-                search_instruments(query, online=True)
+                search_instruments(query, online=True, read_only=read_only)
         result = store.resolve_many(values, selections=selections)
     return result
 
@@ -909,12 +960,12 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
         return instrument
     from datetime import timedelta
 
-    from quantmaster.data.registry import load_history
+    from quantmaster.data.registry import refresh_history
 
     end = market_date()
     start = end - timedelta(days=21)
     try:
-        market_envelope = load_history(
+        market_envelope = refresh_history(
             instrument.symbol, start.isoformat(), end.isoformat(),
         )
         bars = market_envelope.require_data()

@@ -17,6 +17,8 @@ _ready = threading.Event()
 _refreshing = False
 _cached: dict[str, Any] | None = None
 _cached_at = 0.0
+_sampler_stop = threading.Event()
+_sampler: threading.Thread | None = None
 logger = logging.getLogger(__name__)
 
 
@@ -64,11 +66,43 @@ def _start_refresh() -> None:
     threading.Thread(target=_refresh, name="qm-diagnostics", daemon=True).start()
 
 
-def diagnostics(*, wait_for_first: bool = True) -> dict[str, Any]:
+def start_diagnostics_sampler(interval_seconds: float = _TTL_SECONDS) -> None:
+    """Refresh expensive diagnostics from the runtime worker, never a page GET."""
+
+    global _sampler
+    with _lock:
+        if _sampler is not None and _sampler.is_alive():
+            return
+        _sampler_stop.clear()
+
+        def run() -> None:
+            while not _sampler_stop.is_set():
+                _start_refresh()
+                _sampler_stop.wait(max(1.0, float(interval_seconds)))
+
+        _sampler = threading.Thread(
+            target=run,
+            name="qm-diagnostics-sampler",
+            daemon=True,
+        )
+        _sampler.start()
+
+
+def stop_diagnostics_sampler() -> None:
+    global _sampler
+    _sampler_stop.set()
+    with _lock:
+        sampler = _sampler
+        _sampler = None
+    if sampler is not None:
+        sampler.join(timeout=1.0)
+
+
+def diagnostics(*, wait_for_first: bool = True, refresh: bool = True) -> dict[str, Any]:
     with _lock:
         cached = _cached
         fresh = cached is not None and time.monotonic() - _cached_at < _TTL_SECONDS
-    if not fresh:
+    if not fresh and refresh:
         _start_refresh()
     if cached is None and wait_for_first:
         _ready.wait(_WAIT_SECONDS)

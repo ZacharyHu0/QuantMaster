@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -7,15 +8,83 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field, SecretStr
 
+from quantmaster.automation.store import AutomationStore
 from quantmaster.automation.runtime import get_runtime
+from quantmaster.config import get_config
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.jobs import UnifiedJobStore
+from quantmaster.runtime.worker import runtime_worker_status
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter()
+_MISSING = object()
 
 
 def service():
     return get_runtime().service
+
+
+def _reader() -> AutomationStore:
+    """Open the worker-owned automation ledger without a migration or seed."""
+
+    return AutomationStore(read_only=True)
+
+
+def _snapshot_unavailable(exc: Exception) -> HTTPException:
+    return HTTPException(503, "automation_snapshot_unavailable")
+
+
+def _read(call, *, default: Any = _MISSING):
+    try:
+        return call(_reader())
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        if default is not _MISSING:
+            return default() if callable(default) else default
+        raise _snapshot_unavailable(exc) from None
+
+
+def _public_target(value: dict[str, Any]) -> dict[str, Any]:
+    result = {key: item for key, item in value.items() if key != "context_token"}
+    result["has_context"] = bool(value.get("context_token"))
+    return result
+
+
+def _automation_runs() -> list[dict[str, Any]]:
+    try:
+        values = UnifiedJobStore(
+            get_config().data_root / "jobs.sqlite", read_only=True,
+        ).list(200)
+    except (FileNotFoundError, sqlite3.Error):
+        return []
+    return [
+        value for value in values
+        if str(value.get("type") or "").startswith("automation.")
+    ][:50]
+
+
+def _cold_overview() -> dict[str, Any]:
+    enabled = bool(get_config().automation.enabled)
+    worker = runtime_worker_status()
+    return {
+        "enabled": enabled,
+        "timezone": get_config().automation.timezone,
+        "runtime": "disabled" if not enabled else "degraded",
+        "runtime_detail": {**worker, "channels": {}, "source": "runtime-worker-heartbeat"},
+        "channels": {
+            "feishu": {"configured": False, "label": "飞书应用 Bot", "role": "primary"},
+            "weixin": {"configured": False, "label": "腾讯微信 ClawBot", "role": "limited"},
+        },
+        "bot_accounts": [],
+        "inbound": {
+            "feishu": {"total": 0, "last_received_at": "", "direct": {}, "group": {}},
+            "weixin": {"total": 0, "last_received_at": ""},
+        },
+        "targets": [],
+        "jobs": [],
+        "recent_runs": [],
+        "recent_events": [],
+        "snapshot": {"state": "degraded", "issues": ["automation_snapshot_unavailable"]},
+    }
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -45,40 +114,83 @@ class FeishuConfigIn(ContractModel):
 @router.get("/api/v1/automation/overview")
 def automation_overview(request: Request) -> dict:
     _require_local(request)
-    runtime = get_runtime()
-    result = runtime.service.overview()
-    result["runtime"] = runtime.status()["status"]
-    result["runtime_detail"] = runtime.status()
-    return result
+    def project(store: AutomationStore) -> dict:
+        targets = [_public_target(value) for value in store.targets()]
+        accounts = [
+            {key: value for key, value in account.items() if key != "secret_target"}
+            for account in store.bot_accounts()
+        ]
+        worker = runtime_worker_status()
+        enabled = bool(get_config().automation.enabled)
+        runtime = "disabled" if not enabled else "running" if worker.get("available") else "degraded"
+        return {
+            "enabled": enabled,
+            "timezone": get_config().automation.timezone,
+            "runtime": runtime,
+            "runtime_detail": {
+                **worker,
+                "channels": {},
+                "source": "runtime-worker-heartbeat",
+            },
+            "channels": {
+                "feishu": {
+                    "configured": any(a.get("channel") == "feishu" for a in accounts),
+                    "label": "飞书应用 Bot", "role": "primary",
+                },
+                "weixin": {
+                    "configured": any(a.get("channel") == "weixin" for a in accounts),
+                    "label": "腾讯微信 ClawBot", "role": "limited",
+                },
+            },
+            "bot_accounts": accounts,
+            "inbound": {
+                "feishu": {
+                    **store.inbound_status("feishu"),
+                    "direct": store.inbound_status("feishu", "direct"),
+                    "group": store.inbound_status("feishu", "group"),
+                },
+                "weixin": store.inbound_status("weixin"),
+            },
+            "targets": targets,
+            "jobs": store.jobs(),
+            "recent_runs": store.recent_runs(12),
+            "recent_events": store.recent_events(12),
+        }
+
+    return _read(project, default=_cold_overview)
 
 
 @router.get("/api/v1/automation/targets")
 def automation_targets(request: Request) -> dict:
     _require_local(request)
-    return {"targets": service().public_targets()}
+    return {
+        "targets": _read(
+            lambda store: [_public_target(value) for value in store.targets()],
+            default=[],
+        )
+    }
 
 
 @router.get("/api/v1/automation/jobs")
 def automation_jobs(request: Request) -> dict:
     _require_local(request)
-    runs = [
-        service().jobs.public(job)
-        for job in service().jobs.store.list(200)
-        if str(job.get("type") or "").startswith("automation.")
-    ][:50]
-    return {"jobs": service().store.jobs(), "runs": runs}
+    return {"jobs": _read(lambda store: store.jobs(), default=[]), "runs": _automation_runs()}
 
 
 @router.get("/api/v1/automation/audit")
 def automation_audit(request: Request, limit: int = 100) -> dict:
     _require_local(request)
-    return {"items": service().store.audit_entries(max(1, min(limit, 500)))}
+    return {
+        "items": _read(lambda store: store.audit_entries(max(1, min(limit, 500))), default=[])
+    }
 
 
 @router.get("/api/v1/automation/events")
 def automation_events(request: Request, limit: int = 100) -> dict:
     _require_local(request)
-    return {"items": service().store.recent_events(max(1, min(limit, 500)))}
+    return {
+        "items": _read(lambda store: store.recent_events(max(1, min(limit, 500))), default=[])
+    }
 
 
 @router.post("/api/v1/automation/bindings/code")
@@ -93,10 +205,28 @@ def automation_binding_code(target_id: str, request: Request) -> dict:
 @router.get("/api/v1/automation/bindings/{action_id}")
 def automation_binding_status(action_id: str, request: Request) -> dict:
     _require_csrf(request)
+    def project(store: AutomationStore) -> dict:
+        action = store.binding_action(action_id)
+        if not action:
+            raise KeyError("绑定会话不存在")
+        target_id = str((action.get("payload") or {}).get("target_id") or "")
+        target = store.target(target_id)
+        if not target:
+            raise KeyError("推送目标不存在")
+        bound = bool(target.get("target") and target.get("account_id"))
+        return {
+            "id": action_id,
+            "target_id": target_id,
+            "status": "bound" if action.get("status") == "consumed" and bound else action.get("status"),
+            "expires_at": action.get("expires_at"),
+            "bound": bound,
+            "inbound": store.inbound_status("feishu", str(target.get("chat_type") or "")),
+        }
+
     try:
-        return service().binding_status(action_id)
-    except Exception as exc:
-        raise _error(exc) from exc
+        return _read(project)
+    except KeyError as exc:
+        raise _error(exc) from None
 
 
 @router.patch("/api/v1/automation/targets/{target_id}/policy")

@@ -21,22 +21,28 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, FactorProviderSpec] = {}
         self._functions: dict[str, ProviderFunction] = {}
-        self._outputs: dict[str, ResearchSpec] = {}
+        self._outputs: dict[tuple[str, str], ResearchSpec] = {}
+        self._latest_outputs: dict[str, ResearchSpec] = {}
         self._aliases: dict[str, str] = {}
 
     def register(self, provider: FactorProviderSpec, function: ProviderFunction | None = None) -> None:
         if provider.id in self._providers and self._providers[provider.id] != provider:
             raise ValueError(f"provider {provider.id} 已注册且定义不同")
         for output in provider.outputs:
-            existing = self._outputs.get(output.id)
+            identity = (output.id, output.version)
+            existing = self._outputs.get(identity)
             if existing and existing != output:
-                raise ValueError(f"研究输出 {output.id} 已注册且定义不同")
+                raise ValueError(f"研究输出 {output.id}@{output.version} 已注册且定义不同")
             for alias in output.aliases:
                 canonical = self._aliases.get(alias)
                 if canonical and canonical != output.id:
                     raise ValueError(f"研究别名 {alias} 同时指向 {canonical} 和 {output.id}")
                 self._aliases[alias] = output.id
-            self._outputs[output.id] = output
+            self._outputs[identity] = output
+            # Bare IDs intentionally select the current registry definition.
+            # Version-pinned plans must use ``resolve(..., version=...)`` so
+            # a historical artifact never silently changes meaning.
+            self._latest_outputs[output.id] = output
         self._providers[provider.id] = provider
         if function is not None:
             self._functions[provider.id] = function
@@ -53,12 +59,15 @@ class ProviderRegistry:
         except KeyError:
             raise KeyError(f"provider {provider_id} 没有可执行实现") from None
 
-    def resolve(self, output_id: str) -> ResearchSpec:
+    def resolve(self, output_id: str, *, version: str | None = None) -> ResearchSpec:
         canonical = self._aliases.get(output_id, output_id)
         try:
-            return self._outputs[canonical]
+            if version is not None:
+                return self._outputs[(canonical, str(version))]
+            return self._latest_outputs[canonical]
         except KeyError:
-            raise KeyError(f"未知研究输出: {output_id}") from None
+            suffix = f"@{version}" if version is not None else ""
+            raise KeyError(f"未知或不可用的研究输出: {output_id}{suffix}") from None
 
     def select(
         self,
@@ -77,7 +86,7 @@ class ProviderRegistry:
                     selected.append(self.resolve(item))
             selected = list({(item.id, item.version): item for item in selected}.values())
         else:
-            selected = list(self._outputs.values())
+            selected = list(self._latest_outputs.values())
         required_tags = set(tags or ())
         return sorted((
             item for item in selected
@@ -197,7 +206,13 @@ def _register_legacy_catalog(registry: ProviderRegistry) -> None:
             "stock_bars", tuple(legacy.required_features), lookback_sessions=lookback,
         ),)
         output = ResearchSpec(
-            id=legacy.slug, version="1.0.0", kind=ArtifactKind.FACTOR,
+            id=legacy.slug,
+            # The publication-aligned news factor changed its evidence and
+            # timing contract.  Preserve pre-v2 artifacts as 1.0.0 evidence;
+            # new plans must use a distinct identity instead of overwriting
+            # the historic specification in the research catalog.
+            version="2.0.0" if legacy.slug == "news_sentiment" else "1.0.0",
+            kind=ArtifactKind.FACTOR,
             asset_classes=(AssetClass.STOCK,), name=legacy.name,
             description=legacy.description, tags=tuple(dict.fromkeys((*legacy.tags, "curated-48"))),
             provider_id=f"legacy_{legacy.slug}", output=legacy.slug,

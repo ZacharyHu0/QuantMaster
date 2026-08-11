@@ -13,9 +13,11 @@ from pydantic import ConfigDict, Field
 from quantmaster.backtest.paper_accounts import get_paper_service
 from quantmaster.backtest.paper_automation import get_paper_automation_worker
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec, StrategySpec
-from quantmaster.backtest.workbench import BacktestService, get_backtest_worker
+from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
+from quantmaster.config import get_config
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf
 
 router = APIRouter(prefix="/api/v1")
@@ -24,6 +26,44 @@ logger = logging.getLogger(__name__)
 
 def _service() -> BacktestService:
     return get_backtest_worker().service
+
+
+def _read_backtests() -> BacktestStore:
+    path = get_config().data_root / "backtests.sqlite"
+    if not path.is_file():
+        raise OperationProblem(
+            503,
+            make_problem(
+                "snapshot_unavailable",
+                severity="warning",
+                source="回测账本",
+                title="尚无已发布回测记录",
+                message="后台 worker 尚未创建本地回测账本。",
+                action="可提交显式回测任务，或继续浏览其他本地页面。",
+                blocking=True,
+                can_continue=True,
+            ),
+        )
+    return BacktestStore(path=path, read_only=True)
+
+
+def _read_paper_service():
+    service = get_paper_service(read_only=True)
+    if service.store.path.is_file():
+        return service
+    raise OperationProblem(
+        503,
+        make_problem(
+            "snapshot_unavailable",
+            severity="warning",
+            source="模拟盘账本",
+            title="尚无本地模拟盘账本",
+            message="后台 worker 尚未创建任何可展示的模拟账户。",
+            action="可先创建模拟账户，或继续浏览其他页面。",
+            blocking=True,
+            can_continue=True,
+        ),
+    )
 
 
 def _wake_auto_account(account: dict) -> dict:
@@ -56,12 +96,12 @@ def create_backtest(spec: BacktestSpec, request: Request) -> dict:
 
 @router.get("/backtests")
 def list_backtests(limit: int = Query(50, ge=1, le=200)) -> dict:
-    return {"items": _service().store.list(limit)}
+    return {"items": _read_backtests().list(limit)}
 
 
 @router.get("/backtests/{run_id}")
 def get_backtest(run_id: str) -> dict:
-    run = _service().store.get(run_id, include_artifact=True)
+    run = _read_backtests().get(run_id, include_artifact=True)
     if run is None:
         raise HTTPException(404, "回测不存在")
     return run
@@ -70,7 +110,7 @@ def get_backtest(run_id: str) -> dict:
 @router.get("/backtests/{run_id}/events")
 def backtest_events(run_id: str, after: int = Query(0, ge=0)) -> dict:
     try:
-        return {"items": _service().store.events(run_id, after=after)}
+        return {"items": _read_backtests().events(run_id, after=after)}
     except Exception as exc:
         raise _error(exc) from None
 
@@ -100,7 +140,7 @@ def compare_backtests(payload: CompareRequest, request: Request) -> dict:
 
 @router.get("/backtests/{run_id}/export")
 def export_backtest(run_id: str, format: Literal["json", "trades_csv"] = "json") -> Response:
-    run = _service().store.get(run_id, include_artifact=True)
+    run = _read_backtests().get(run_id, include_artifact=True)
     if run is None:
         raise HTTPException(404, "回测不存在")
     artifact = run.get("artifact")
@@ -167,14 +207,14 @@ def create_paper_account(spec: PaperAccountSpec, request: Request) -> dict:
 
 @router.get("/paper/accounts")
 def list_paper_accounts(include_archived: bool = False) -> dict:
-    service = get_paper_service()
+    service = _read_paper_service()
     return {"items": service.store.accounts(include_archived=include_archived)}
 
 
 @router.get("/paper/accounts/{account_id}")
 def get_paper_account(account_id: str) -> dict:
     try:
-        return get_paper_service().account_details(account_id)
+        return _read_paper_service().account_details(account_id)
     except (KeyError, ValueError) as exc:
         raise _error(exc) from None
 
@@ -267,14 +307,14 @@ def process_paper_account(account_id: str, request: Request) -> dict:
 @router.get("/paper/accounts/{account_id}/report")
 def paper_account_report(account_id: str) -> dict:
     try:
-        return get_paper_service().report(account_id)
+        return _read_paper_service().report(account_id)
     except Exception as exc:
         raise _error(exc) from None
 
 
 @router.get("/paper/accounts/{account_id}/cycles")
 def paper_account_cycles(account_id: str, limit: int = Query(30, ge=1, le=200)) -> dict:
-    service = get_paper_service()
+    service = _read_paper_service()
     if service.store.account(account_id) is None:
         raise HTTPException(404, "模拟账户不存在")
     return {"items": service.store.cycles(account_id, limit=limit)}

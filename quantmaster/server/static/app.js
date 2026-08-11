@@ -273,42 +273,245 @@ function responseError(response, data, path, method, key = '') {
   if (data.data_quality) ingestDataQuality(data, key || `request:${method}:${route}`);
   return error;
 }
-async function api(path, opts = {}) {
-  const method = String(opts.method || 'GET').toUpperCase();
-  const route = apiRoute(path), requestKey = `request:${method}:${route}`;
+const LOCAL_READ_TIMEOUT_MS = 5_000;
+const MUTATION_TIMEOUT_MS = 15_000;
+const apiFlights = new Map();
+
+function apiFlightKey(path, opts, method, route) {
+  const body = opts.body === undefined || opts.body === null
+    ? ''
+    : typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
+  return `${method}:${route}:${body}`;
+}
+
+function timedFetchOptions(opts, timeoutMs) {
+  const {timeoutMs: _timeoutMs, noDedupe: _noDedupe, ...fetchOptions} = opts;
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer = null;
+  const external = fetchOptions.signal;
+  const abortFromCaller = () => controller.abort(external?.reason);
+  if (external) {
+    if (external.aborted) abortFromCaller();
+    else external.addEventListener('abort', abortFromCaller, {once:true});
+  }
+  if (timeoutMs > 0) {
+    timer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException('本地服务响应超过时间预算', 'TimeoutError'));
+    }, timeoutMs);
+  }
+  return {
+    options:{...fetchOptions, signal:controller.signal},
+    timedOut:() => timedOut,
+    dispose:() => {
+      if (timer !== null) window.clearTimeout(timer);
+      if (external) external.removeEventListener('abort', abortFromCaller);
+    },
+  };
+}
+
+async function runApi(path, opts, method, route, requestKey) {
+  const timeout = Number.isFinite(Number(opts.timeoutMs))
+    ? Math.max(0, Number(opts.timeoutMs))
+    : method === 'GET' ? LOCAL_READ_TIMEOUT_MS : MUTATION_TIMEOUT_MS;
+  const timed = timedFetchOptions(opts, timeout);
   let res;
   try {
-    res = await protectedFetch(path, opts);
+    res = await protectedFetch(path, timed.options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw responseError(res, data, path, method, requestKey);
+    if (method !== 'GET') {
+      runtimeInfo.add('success', sourceForPath(path), '操作已完成', {
+        requestId:res.headers.get('X-Request-ID') || '', path:`${method} ${route}`,
+        key:requestKey,
+      });
+    } else runtimeInfo.resolve(requestKey);
+    if (route !== '/api/v1/diagnostics') {
+      ingestResponseProblems(data, requestKey);
+      ingestDataQuality(data, requestKey);
+    }
+    return data;
   } catch (cause) {
+    if (cause instanceof QuantApiError) throw cause;
     const cancelled = cause?.name === 'AbortError';
-    const message = cancelled ? '请求已取消' : '无法连接本地服务';
+    const timeout = timed.timedOut();
+    const message = timeout ? '本地服务响应超时，已保留当前页面内容'
+      : cancelled ? '请求已取消' : '无法连接本地服务';
     const error = new QuantApiError(message, {
-      cause, path:route, method, logged:true,
+      cause, path:route, method, logged:true, timeout,
     });
-    runtimeInfo.add(cancelled ? 'warning' : 'error', sourceForPath(path), message, {
+    runtimeInfo.add(timeout ? 'error' : cancelled ? 'warning' : 'error', sourceForPath(path), message, {
       detail:cause?.message || '',
-      action:cancelled ? '无需处理；需要时可重新执行。' : '确认 QuantMaster 服务仍在运行，然后重试。',
+      action:timeout
+        ? '当前内容未被清空；可稍后重试或查看后台刷新状态。'
+        : cancelled ? '无需处理；需要时可重新执行。' : '确认 QuantMaster 服务仍在运行，然后重试。',
       path:`${method} ${route}`, key:requestKey,
     });
     throw error;
+  } finally {
+    timed.dispose();
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw responseError(res, data, path, method, requestKey);
-  if (method !== 'GET') {
-    runtimeInfo.add('success', sourceForPath(path), '操作已完成', {
-      requestId:res.headers.get('X-Request-ID') || '', path:`${method} ${route}`,
-      key:requestKey,
-    });
-  } else runtimeInfo.resolve(requestKey);
-  if (route !== '/api/v1/diagnostics') {
-    ingestResponseProblems(data, requestKey);
-    ingestDataQuality(data, requestKey);
+}
+
+async function api(path, opts = {}) {
+  const method = String(opts.method || 'GET').toUpperCase();
+  const route = apiRoute(path), requestKey = `request:${method}:${route}`;
+  // A caller-owned AbortSignal has caller-specific cancellation semantics, so
+  // it must not be joined to another component's request.  All ordinary page
+  // reads and repeated clicks coalesce by method, route and body.
+  const canDedupe = !opts.signal && !opts.noDedupe;
+  const flightKey = apiFlightKey(path, opts, method, route);
+  if (canDedupe && apiFlights.has(flightKey)) return apiFlights.get(flightKey);
+  const flight = runApi(path, opts, method, route, requestKey);
+  if (canDedupe) {
+    apiFlights.set(flightKey, flight);
+    flight.finally(() => apiFlights.delete(flightKey)).catch(() => {});
   }
-  return data;
+  return flight;
 }
 function post(path, body) {
   return api(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
 }
+
+// All pages share one bounded task poller.  Individual views used to start
+// their own one-second loops, so rapid tab changes could multiply status
+// requests and let stale callbacks repaint a newer view.  A task has one
+// entry here regardless of how many panels are observing it.
+const globalJobPoller = (() => {
+  const entries = new Map();
+  let timer = null;
+  let polling = false;
+  let repollRequested = false;
+  const terminal = new Set([
+    'completed', 'completed_with_errors', 'completed_with_warnings',
+    'failed', 'cancelled', 'interrupted', 'paused', 'needs_confirmation', 'unavailable',
+  ]);
+
+  function normalize(job) {
+    const id = typeof job === 'string' ? job : String(job?.id || '');
+    if (!id) return null;
+    const path = typeof job === 'object' && job?.links?.self
+      ? String(job.links.self) : `/api/v1/jobs/${encodeURIComponent(id)}`;
+    return {id, path};
+  }
+
+  function delayFor(entry) {
+    if (entry.polls <= 1) return 1_000;
+    if (entry.polls <= 3) return 2_000;
+    return 5_000;
+  }
+
+  function clearTimer() {
+    if (timer !== null) window.clearTimeout(timer);
+    timer = null;
+  }
+
+  function schedule(delay = 0) {
+    if (document.visibilityState === 'hidden' || entries.size === 0) return;
+    if (polling) {
+      repollRequested = true;
+      return;
+    }
+    if (timer !== null) return;
+    timer = window.setTimeout(poll, Math.max(0, delay));
+  }
+
+  function notify(entry, kind, value) {
+    for (const listener of [...entry.listeners]) {
+      try { listener?.[kind]?.(value); } catch (error) {
+        console.warn('任务状态监听器失败', error);
+      }
+    }
+  }
+
+  async function poll() {
+    timer = null;
+    if (polling || document.visibilityState === 'hidden' || entries.size === 0) return;
+    polling = true;
+    const batch = [...entries.values()];
+    let nextDelay = 5_000;
+    try {
+      const results = await Promise.allSettled(batch.map(entry => api(entry.path)));
+      results.forEach((result, index) => {
+        const entry = batch[index];
+        // An observer may have unsubscribed while this request was in flight.
+        if (entries.get(entry.id) !== entry) return;
+        if (result.status === 'fulfilled') {
+          const value = result.value || {};
+          entry.polls += 1;
+          entry.last = value;
+          notify(entry, 'onUpdate', value);
+          if (terminal.has(String(value.status || ''))) {
+            entries.delete(entry.id);
+            notify(entry, 'onTerminal', value);
+            return;
+          }
+          nextDelay = Math.min(nextDelay, delayFor(entry));
+          return;
+        }
+        entry.polls += 1;
+        notify(entry, 'onError', result.reason);
+        // A task deleted by the worker cannot recover through polling; expose
+        // that as a terminal unavailable state instead of leaking a timer.
+        if (Number(result.reason?.status) === 404) {
+          entries.delete(entry.id);
+          notify(entry, 'onTerminal', {
+            id:entry.id, status:'unavailable', detail:'后台任务记录已不可用',
+          });
+          return;
+        }
+        nextDelay = Math.min(nextDelay, delayFor(entry));
+      });
+    } finally {
+      polling = false;
+      if (entries.size > 0 && document.visibilityState !== 'hidden') {
+        const immediate = repollRequested;
+        repollRequested = false;
+        schedule(immediate ? 0 : nextDelay);
+      }
+    }
+  }
+
+  function watch(job, listener = {}) {
+    const normalized = normalize(job);
+    if (!normalized) return () => {};
+    let entry = entries.get(normalized.id);
+    if (!entry) {
+      entry = {...normalized, listeners:new Set(), polls:0, last:null};
+      entries.set(entry.id, entry);
+    }
+    entry.listeners.add(listener);
+    if (entry.last) queueMicrotask(() => listener.onUpdate?.(entry.last));
+    clearTimer();
+    schedule(0);
+    return () => {
+      entry.listeners.delete(listener);
+      if (entry.listeners.size === 0 && entries.get(entry.id) === entry) {
+        entries.delete(entry.id);
+        if (entries.size === 0) clearTimer();
+      }
+    };
+  }
+
+  function wait(job) {
+    return new Promise(resolve => {
+      watch(job, {onTerminal:resolve});
+    });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      clearTimer();
+      return;
+    }
+    for (const entry of entries.values()) entry.polls = 0;
+    schedule(0);
+  });
+  return {watch, wait, pollNow:() => { clearTimer(); schedule(0); }};
+})();
+window.QuantMasterJobs = globalJobPoller;
+
 function busy(form, on, label = '') {
   const b = form.querySelector('button.primary');
   if (!b) return;
@@ -1324,6 +1527,8 @@ loadAssetLists();
 /* ---------- 市场 ---------- */
 let marketLoading = false;
 let marketReloadPending = false;
+let marketColdRetryTimer = null;
+let marketColdRetryCount = 0;
 let marketStreamCycle = 0;
 let marketFearGreed = null;
 const PERSONAL_MARKET_GROUP = '我的股票';
@@ -1674,9 +1879,9 @@ function acceptMarketFearGreed(data) {
   refreshSentimentBindings();
 }
 
-async function loadMarketFearGreed(force = false) {
+async function loadMarketFearGreed() {
   try {
-    acceptMarketFearGreed(await api(`/api/v1/market/fear-greed?refresh=${force ? 'true' : 'false'}`));
+    acceptMarketFearGreed(await api('/api/v1/market/fear-greed'));
   } catch (error) {
     acceptMarketFearGreed({status:'unavailable', score:null, rating_label:'暂不可用',
       warning:`CNN 指数读取失败：${error.message}；RSI 仍可独立使用。`});
@@ -2006,31 +2211,66 @@ function queueMarketReload() {
   void loadMarket();
 }
 
+function retryColdMarketSnapshot() {
+  if (marketColdRetryTimer !== null || marketColdRetryCount >= 3) return;
+  marketColdRetryCount += 1;
+  const stamp = document.getElementById('mkt-stamp');
+  stamp.textContent = `本地快照尚未发布；将在 2 秒后自动重试（${marketColdRetryCount}/3）`;
+  marketColdRetryTimer = window.setTimeout(() => {
+    marketColdRetryTimer = null;
+    queueMarketReload();
+  }, 2_000);
+}
+
 async function loadMarket() {
   if (marketLoading) return;
   marketLoading = true;
-  disposeMarketSparks();
   const majorIndexes = document.getElementById('major-indexes');
-  majorIndexes.querySelector('.mkt-grid').replaceChildren();
-  majorIndexes.querySelector('.market-section-count').textContent = '正在读取';
-  majorIndexes.querySelector('.market-section-empty').textContent = '正在读取本地指数行情…';
-  majorIndexes.querySelector('.market-section-empty').hidden = false;
   const container = document.getElementById('mkt-groups');
-  const tracker = createLoadProgress(container, '准备市场数据', 'market');
-  const renderer = createMarketStreamRenderer(tracker.results, {'A股指数':majorIndexes});
-  void loadMarketFearGreed(false);
+  const hasExisting = Boolean(container.querySelector('.mkt-item, .market-section'))
+    || Boolean(majorIndexes.querySelector('.mkt-item'));
+  let tracker = null, renderer = null;
+  const beginRender = () => {
+    disposeMarketSparks();
+    majorIndexes.querySelector('.mkt-grid').replaceChildren();
+    majorIndexes.querySelector('.market-section-count').textContent = '正在读取';
+    majorIndexes.querySelector('.market-section-empty').textContent = '正在读取本地指数行情…';
+    majorIndexes.querySelector('.market-section-empty').hidden = false;
+    tracker = createLoadProgress(container, '准备市场数据', 'market');
+    renderer = createMarketStreamRenderer(tracker.results, {'A股指数':majorIndexes});
+  };
+  if (!hasExisting) beginRender();
+  else document.getElementById('mkt-stamp').textContent = '正在刷新本地快照；当前内容仍可使用';
+  void loadMarketFearGreed();
   try {
-    const data = await api('/api/v1/market/overview');
+    const response = await api('/api/v1/market/overview');
+    const data = response?.data || response;
+    const snapshot = response?.snapshot || null;
+    if (!renderer) beginRender();
     renderer.addAll(data);
     if (renderer.count) tracker.reveal();
     tracker.finish(`已加载 ${renderer.count} 个行情标的，可点击查看 K 线`);
-    document.getElementById('mkt-stamp').textContent =
-      '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+    marketColdRetryCount = 0;
+    if (marketColdRetryTimer !== null) {
+      window.clearTimeout(marketColdRetryTimer);
+      marketColdRetryTimer = null;
+    }
+    document.getElementById('mkt-stamp').textContent = snapshot?.state === 'stale'
+      ? `正在展示陈旧快照${snapshot.as_of ? `（截至 ${snapshot.as_of}）` : ''}`
+      : '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
   } catch (e) {
-    renderer.failPinned('指数行情加载失败');
-    tracker.fail(e.message);
-    tracker.reveal().insertAdjacentHTML('beforeend',
-      `<div class="err">市场数据加载失败：${esc(e.message)}\n已完成的卡片仍可继续使用。</div>`);
+    const snapshotUnavailable = e?.problem?.code === 'snapshot_unavailable';
+    if (renderer && tracker) {
+      renderer.failPinned(snapshotUnavailable ? '本地市场快照尚未发布' : '指数行情加载失败');
+      tracker.fail(e.message);
+      tracker.reveal().insertAdjacentHTML('beforeend',
+        `<div class="err">${snapshotUnavailable ? '本地市场快照尚未发布，等待后台生成。' : `市场数据加载失败：${esc(e.message)}`}\n已完成的卡片仍可继续使用。</div>`);
+    }
+    if (snapshotUnavailable) {
+      retryColdMarketSnapshot();
+    } else if (!renderer) {
+      document.getElementById('mkt-stamp').textContent = '本地快照刷新失败；正在保留上次内容';
+    }
   } finally {
     marketLoading = false;
     if (marketReloadPending) {
@@ -2041,26 +2281,17 @@ async function loadMarket() {
 }
 
 async function waitForMarketRefresh(job) {
-  const target = String(job?.links?.self || '');
-  if (!target) return;
-  const deadline = Date.now() + 30 * 60 * 1000;
-  while (Date.now() < deadline) {
-    const current = await api(target);
-    const status = String(current.status || '');
-    if (['completed','completed_with_errors','failed','cancelled'].includes(status)) {
-      if (status.startsWith('completed')) {
-        invalidateKlineSeriesCache();
-        await loadMarket();
-      }
-      return;
-    }
-    await new Promise(resolve => setTimeout(resolve, 1000));
+  const current = await globalJobPoller.wait(job);
+  const status = String(current?.status || '');
+  if (status.startsWith('completed')) {
+    invalidateKlineSeriesCache();
+    await loadMarket();
   }
 }
 document.getElementById('mkt-refresh').onsubmit = async e => {
   e.preventDefault(); busy(e.target, true, '已提交…');
   try {
-    const job = await post('/api/v1/market/overview/refresh', {});
+    const job = await post('/api/v1/data/refresh', {scope:'market'});
     const button = e.target.querySelector('button.primary');
     if (button) button.textContent = job.coalesced ? '正在复用同步…' : '后台同步中…';
     void waitForMarketRefresh(job).finally(() => busy(e.target, false));
@@ -3206,7 +3437,8 @@ document.getElementById('news-form').onsubmit = async e => {
   e.preventDefault(); const form = e.target; busy(form, true);
   try {
     const skip = form.querySelector('[name=skip_llm]').checked;
-    await post('/api/v1/news/crawl?skip_llm=' + skip, {});
+    const job = await post('/api/v1/news/crawl?skip_llm=' + skip, {});
+    document.getElementById('news-out').innerHTML = `<div class="msg">${job.coalesced ? '已关联到现有' : '已提交'}资讯刷新任务；现有快照会继续可用。</div>`;
     await loadNews();
   } catch (err) { document.getElementById('news-out').innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);

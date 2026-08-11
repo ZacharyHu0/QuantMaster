@@ -1,9 +1,9 @@
 """数据源注册与统一入口：按市场路由，带本地缓存与自动降级。
 
 用法：
-    from quantmaster.data import load_history, load_panel
-    df = load_history("600519.SH", "2022-01-01", "2024-12-31").require_data()
-    panel = load_panel(["600519.SH", "000858.SZ"], "2022-01-01", "2024-12-31").require_data()
+    from quantmaster.data import refresh_history, refresh_panel
+    df = refresh_history("600519.SH", "2022-01-01", "2024-12-31").require_data()
+    panel = refresh_panel(["600519.SH", "000858.SZ"], "2022-01-01", "2024-12-31").require_data()
 """
 
 from __future__ import annotations
@@ -35,7 +35,12 @@ from quantmaster.data.base import (
     guess_market,
     validate_frequency,
 )
-from quantmaster.data.resilience import bypass_endpoint_cache, data_priority
+from quantmaster.data.resilience import (
+    bypass_endpoint_cache,
+    data_priority,
+    local_only_data_access,
+    remote_io_allowed,
+)
 from quantmaster.data.storage import BarStore, IntradayBarStore
 from quantmaster.trading_sessions import market_date, market_now
 
@@ -64,13 +69,53 @@ _DEFAULT_BAR_STORES: dict[tuple[str, object], BarStore] = {}
 def _default_bar_store() -> BarStore:
     """Reuse the default daily store without affecting explicitly supplied stores."""
     root = (Path(get_config().data_root) / "bars").resolve()
-    key = (str(root), BarStore)
+    read_only = not remote_io_allowed()
+    # Never reuse a writable store object for a page read.  Apart from making
+    # the boundary enforceable, this avoids a hidden schema migration or
+    # integrity backfill after a cache miss.
+    key = (str(root), BarStore, read_only)
     with _DEFAULT_STORE_LOCK:
         store = _DEFAULT_BAR_STORES.get(key)
         if store is None:
-            store = BarStore(root=root)
+            store = BarStore(root=root, read_only=read_only)
             _DEFAULT_BAR_STORES[key] = store
         return store
+
+
+def _default_read_bar_store() -> BarStore:
+    """Return a strict local-only daily store even outside an HTTP context."""
+
+    root = (Path(get_config().data_root) / "bars").resolve()
+    key = (str(root), BarStore, True)
+    with _DEFAULT_STORE_LOCK:
+        store = _DEFAULT_BAR_STORES.get(key)
+        if store is None:
+            store = BarStore(root=root, read_only=True)
+            _DEFAULT_BAR_STORES[key] = store
+        return store
+
+
+def _local_read_store(
+    store: BarStore | IntradayBarStore,
+    frequency: str,
+) -> BarStore | IntradayBarStore:
+    """Return a non-mutating view when a caller supplied a writable store.
+
+    Tests and worker code often retain one ``BarStore`` instance and pass it
+    through several layers.  The request boundary must still win over that
+    convenience object: a local page read gets a new SQLite ``mode=ro`` view
+    of the same files.
+    """
+
+    if getattr(store, "read_only", False):
+        return store
+    if frequency == "1d":
+        return BarStore(root=store.root, read_only=True)
+    return IntradayBarStore(
+        frequency,
+        root=store.root.parent,
+        read_only=True,
+    )
 
 
 class RefreshMode(StrEnum):
@@ -92,7 +137,10 @@ def _instrument_range(
     try:
         from quantmaster.data.instruments import InstrumentStore
 
-        instrument = InstrumentStore().get(symbol)
+        # The same evidence assessor runs in Web reads and worker refreshes.
+        # A page read may consult the security master but may not bootstrap or
+        # migrate it merely to discover a listing date.
+        instrument = InstrumentStore(read_only=not remote_io_allowed()).get(symbol)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError):
         instrument = None
     if instrument is None:
@@ -120,7 +168,7 @@ def _unit_contract(symbol: str) -> tuple[tuple[tuple[str, str], ...], str]:
     try:
         from quantmaster.data.instruments import InstrumentStore
 
-        instrument = InstrumentStore().get(symbol)
+        instrument = InstrumentStore(read_only=not remote_io_allowed()).get(symbol)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError):
         instrument = None
     if instrument is None:
@@ -170,7 +218,9 @@ def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.Datetime
 
         path = get_config().data_root / "research_lake" / "_meta" / "catalog.sqlite"
         if path.is_file():
-            values = ResearchCatalog(path).trading_dates(
+            values = ResearchCatalog(
+                path, read_only=not remote_io_allowed(),
+            ).trading_dates(
                 AssetClass.STOCK,
                 Frequency.DAILY,
                 start.date().isoformat(),
@@ -729,19 +779,22 @@ def _bar_envelope(
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
 
-    witness_events = [
-        event for event in provenance
-        if isinstance(event.get("quality"), dict)
-        and str(event["quality"].get("status") or "") == "verified"
-        and "tushare:daily+adj_factor-contract-v2" in {
-            str(value) for value in event["quality"].get("sources") or ()
-        }
-    ]
-    if frequency == "1d" and lineage_covers(witness_events):
-        # Parquet does not preserve DataFrame.attrs. A persisted, range-overlapping
-        # StockDB/Tushare witness is the explicit proof that may restore only the
-        # unit/adjustment dimensions; generic degraded contracts can never upgrade.
-        quality = _apply_stockdb_contract_quality(quality)
+    # A former release persisted per-symbol Tushare witnesses beside StockDB
+    # bytes.  They have no immutable batch-manifest identity, so they remain
+    # viewable but cannot silently satisfy the new formal evidence contract.
+    if frequency == "1d" and any(
+        "stockdb-price+tushare-contract-v2" in str(event.get("source") or "")
+        for event in provenance
+    ):
+        quality = replace(
+            quality,
+            status="degraded" if quality.status == "verified" else quality.status,
+            partial=True,
+            issues=tuple(dict.fromkeys((
+                *quality.issues,
+                "旧版逐标的交叉证据缺少整批内容清单，仅可作为预览快照",
+            ))),
+        )
 
     for persisted in persisted_contracts:
         persisted_status_raw = str(persisted.get("status") or "")
@@ -847,186 +900,6 @@ def _align_increment(
     return merged[~merged.index.duplicated(keep="last")].sort_index()
 
 
-def _supplement_stockdb_contract(
-    symbol: str,
-    start: str,
-    end: str,
-    frame: pd.DataFrame,
-    *,
-    priority: str,
-    refresh_provider_cache: bool = False,
-) -> tuple[pd.DataFrame, dict[str, object] | None]:
-    """Verify StockDB prices with remote contract evidence without replacing them."""
-    if not get_config().data.tushare_token or guess_market(symbol) != Market.CN:
-        return frame, None
-    existing_evidence = frame.attrs.get("contract_evidence") if hasattr(frame, "attrs") else None
-    if (
-        isinstance(existing_evidence, dict)
-        and str(frame.attrs.get("unit_status") or "").endswith("daily-contract-v2")
-        and str(frame.attrs.get("adjustment_status") or "").endswith("adj-factor-v2")
-    ):
-        return frame, existing_evidence
-    try:
-        from quantmaster.data.instruments import InstrumentStore
-        from quantmaster.data.tushare_source import TushareSource
-
-        instrument = InstrumentStore().get(symbol)
-        if instrument is None or str(instrument.asset_type).lower() != "stock":
-            return frame, None
-        with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
-            witness = TushareSource().daily(symbol, start, end)
-        if witness is None or witness.empty:
-            raise RuntimeError("Tushare daily+adj_factor 证据为空")
-        local = frame.sort_index()
-        remote = witness.sort_index()
-        local_dates = pd.DatetimeIndex(local.index).normalize().tz_localize(None)
-        remote_dates = pd.DatetimeIndex(remote.index).normalize().tz_localize(None)
-        if not local_dates.is_unique or not remote_dates.is_unique:
-            raise RuntimeError("Tushare 证据包含重复交易日，无法建立日期依据")
-        missing = local_dates.difference(remote_dates)
-        extra = remote_dates.difference(local_dates)
-        if len(missing):
-            raise RuntimeError(
-                "Tushare 证据缺少 StockDB 已返回交易日，无法建立日期依据："
-                f"缺 {len(missing)} 日"
-            )
-        local = local.copy()
-        remote = remote.copy()
-        local.index = local_dates
-        remote.index = remote_dates
-        common = local.index
-        checks: dict[str, dict[str, object]] = {}
-        contract_columns = [*OHLCV_COLUMNS]
-        missing_local_columns = [column for column in contract_columns if column not in local]
-        if missing_local_columns:
-            raise RuntimeError(
-                "StockDB 证据缺少必需字段：" + ",".join(missing_local_columns)
-            )
-        missing_remote_columns = [column for column in contract_columns if column not in remote]
-        if missing_remote_columns:
-            raise RuntimeError(
-                "Tushare 证据缺少必需字段：" + ",".join(missing_remote_columns)
-            )
-        if "amount" not in remote:
-            raise RuntimeError("Tushare 证据缺少 StockDB amount 单位核对字段")
-        filled_fields: list[str] = []
-        if "amount" not in local:
-            # amount is optional in StockDB's price payload.  Preserve StockDB as
-            # the OHLCV source and use the remote contract only for this missing
-            # field instead of discarding an otherwise useful local frame.
-            local["amount"] = pd.to_numeric(remote["amount"], errors="coerce")
-            filled_fields.append("amount")
-        contract_columns.append("amount")
-        price_columns = [
-            column for column in ("open", "high", "low", "close")
-            if column in local and column in remote
-        ]
-        price_ratios: list[float] = []
-        for column in price_columns:
-            left = pd.to_numeric(local.loc[common, column], errors="coerce")
-            right = pd.to_numeric(remote.loc[common, column], errors="coerce")
-            finite = left.map(math.isfinite) & right.map(math.isfinite)
-            positive = finite & left.gt(0) & right.gt(0)
-            if not bool(positive.all()):
-                raise RuntimeError(f"Tushare {column} 不是逐日有限正价格观测")
-            price_ratios.extend(
-                (right.loc[positive] / left.loc[positive]).astype(float).tolist()
-            )
-        if not price_ratios:
-            raise RuntimeError("Tushare 证据没有可用于复权比例核对的 OHLC 观测")
-        ratio_series = pd.Series(price_ratios, dtype=float)
-        scale = float(ratio_series.median())
-        stable_rows = (ratio_series / scale - 1.0).abs() <= 0.005
-        if not bool(stable_rows.all()):
-            raise RuntimeError("StockDB/Tushare OHLC 复权比例不稳定")
-        scale = float(ratio_series.loc[stable_rows].median())
-        for column in contract_columns:
-            left = pd.to_numeric(local.loc[common, column], errors="coerce")
-            right = pd.to_numeric(remote.loc[common, column], errors="coerce")
-            finite = left.map(math.isfinite) & right.map(math.isfinite)
-            if not bool(finite.all()):
-                raise RuntimeError(f"Tushare {column} 不是逐日有限可比观测")
-            if column in price_columns:
-                aligned_right = right / scale
-                tolerance = 0.005
-                matching_rows = (left - aligned_right).abs().le(
-                    left.abs().clip(lower=1e-12) * tolerance
-                )
-                if float(matching_rows.mean()) < 0.8:
-                    raise RuntimeError(
-                        f"StockDB/Tushare {column} 复权比例核对仅 "
-                        f"{float(matching_rows.mean()):.1%} 一致"
-                    )
-                mode = "stable_price_scale_cross_checked"
-            else:
-                tolerance = 0.01
-                matching_rows = (left - right).abs().le(right.abs().clip(lower=1e-12) * tolerance)
-                if not bool(matching_rows.all()):
-                    matching = float(matching_rows.mean())
-                    raise RuntimeError(
-                        f"StockDB/Tushare {column} 逐日单位核对仅 "
-                        f"{matching:.1%} 一致"
-                    )
-            matching = float(matching_rows.mean())
-            checks[column] = {
-                "rows": int(finite.sum()),
-                "matching_ratio": round(matching, 6),
-                "mode": (
-                    "filled_missing_field" if column in filled_fields
-                    else mode if column in price_columns
-                    else "unit_cross_checked"
-                ),
-            }
-        verified = local.copy()
-        verified.attrs.update(frame.attrs)
-        verified.attrs.update({
-            "unit_status": "verified:tushare-daily-contract-v2",
-            "adjustment_status": "verified:tushare-adj-factor-v2",
-            "contract_evidence": {
-                "price_source": "free-stockdb",
-                "contract_source": "tushare:daily+adj_factor-v2",
-                "requested_start": start,
-                "requested_end": end,
-                "price_scale": round(scale, 12),
-                "extra_remote_dates": [value.isoformat() for value in extra],
-                "checks": checks,
-                "filled_fields": filled_fields,
-                "field_sources": {
-                    **{column: "free-stockdb" for column in OHLCV_COLUMNS},
-                    "amount": (
-                        "tushare:daily" if "amount" in filled_fields else "free-stockdb"
-                    ),
-                },
-            },
-        })
-        return verified, verified.attrs["contract_evidence"]
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        logger.warning("%s StockDB 单位/复权证据补全失败，保留降级：%s", symbol, exc)
-        return frame, None
-
-
-def _apply_stockdb_contract_quality(quality: BarDataQuality) -> BarDataQuality:
-    issues = tuple(
-        issue for issue in quality.issues
-        if "单位" not in issue and "复权" not in issue
-    )
-    status = quality.status
-    if status != "unavailable":
-        status = "degraded" if issues or quality.stale or quality.partial else "verified"
-    return replace(
-        quality,
-        status=status,
-        sources=("free-stockdb", "tushare:daily+adj_factor-contract-v2"),
-        issues=issues,
-        adjustment="qfq_verified:tushare-adj-factor-v2",
-        units=(
-            ("open", "CNY/share"), ("high", "CNY/share"),
-            ("low", "CNY/share"), ("close", "CNY/share"),
-            ("volume", "share"), ("amount", "CNY"),
-        ),
-    )
-
-
 def _full_refresh(
     symbol: str,
     start: str,
@@ -1073,18 +946,10 @@ def _full_refresh(
             if not _is_complete_refresh(frame, cached, start, end, symbol=symbol):
                 errors.append(f"{factory.__name__}: 响应缺失已有交易日或内部过于稀疏")
                 continue
-            contract_evidence = None
-            if source.name.startswith("free-stockdb"):
-                frame, contract_evidence = _supplement_stockdb_contract(
-                    symbol, start, end, frame, priority=priority,
-                )
             quality = _assess_daily_frame(
                 frame, start, end, symbol=symbol, source=source.name,
             )
             storage_source = source.name
-            if contract_evidence is not None:
-                storage_source = "stockdb-price+tushare-contract-v2"
-                quality = _apply_stockdb_contract_quality(quality)
             if quality.status == "verified":
                 return persist(frame, quality, storage_source)
             errors.append(
@@ -1143,12 +1008,6 @@ def _fetch_segment(
         source: DataSource,
         evidence: pd.DataFrame,
     ) -> tuple[pd.DataFrame, BarDataQuality, str]:
-        contract_evidence = None
-        if source.name.startswith("free-stockdb"):
-            evidence, contract_evidence = _supplement_stockdb_contract(
-                symbol, start, end, evidence, priority=priority,
-                refresh_provider_cache=refresh_provider_cache,
-            )
         quality = _assess_daily_frame(
             evidence,
             start,
@@ -1157,9 +1016,6 @@ def _fetch_segment(
             source=source.name,
         )
         storage_source = source.name
-        if contract_evidence is not None:
-            storage_source = "stockdb-price+tushare-contract-v2"
-            quality = _apply_stockdb_contract_quality(quality)
         return evidence, quality, storage_source
 
     def save(
@@ -1306,6 +1162,13 @@ def _request_factories(
     allow_online: bool,
     provider: str = "",
 ) -> dict[Market, list]:
+    # A Web page is allowed to consume an already-published local snapshot but
+    # never to turn a cache miss, stale flag or formal-evidence failure into an
+    # upstream wait.  Keep the empty result explicit so the caller can return
+    # a fast unavailable/degraded envelope instead of accidentally using a
+    # lower-priority remote provider.
+    if not remote_io_allowed():
+        return {market: [] for market in Market}
     selected_provider = str(provider or "").strip().lower()
     if selected_provider:
         from quantmaster.data.free_stockdb_source import FreeStockDBSource
@@ -1513,12 +1376,17 @@ def _parse_spot_timestamp(value: object) -> pd.Timestamp | None:
         return None
 
 
-def load_spot(
-    symbols: list[str], *, priority: str = "normal",
+def refresh_spot(
+    symbols: list[str], *, work_class: str = "normal",
 ) -> BarDataEnvelope[pd.DataFrame]:
-    """加载 A 股快照，并公开标的覆盖、来源、单位与观测时点。"""
+    """Refresh A-share spot data in a worker, with evidence attached.
+
+    Spot data has no page-readable local snapshot contract yet, so this is
+    deliberately refresh-only.  A page must render its published derivative
+    snapshot instead of calling an upstream spot provider.
+    """
     requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
-    frame, provenance, errors = _load_spot_frame(list(requested), priority=priority)
+    frame, provenance, errors = _load_spot_frame(list(requested), priority=work_class)
     by_code = {symbol.partition(".")[0].zfill(6): symbol for symbol in requested}
     observed = tuple(
         by_code[code]
@@ -1644,16 +1512,12 @@ def _load_history_locked(
     cfg = get_config()
     cached = store.get(symbol)
     mode = _mode(use_cache, refresh)
-    if mode != RefreshMode.FULL and priority == "formal" and cached is not None and not cached.empty:
-        # Formal consumers may not silently promote an incremental cache whose
-        # source chain has a gap or lacks the v2 StockDB/Tushare witness.  A
-        # full request below writes one covering lineage event; legacy bytes
-        # remain readable only as a degraded preview until that succeeds.
-        cached_quality = _bar_envelope(
-            cached, symbol=symbol, start=start, end=end, store=store, frequency="1d",
-        ).quality
-        if not cached_quality.formal_eligible:
-            mode = RefreshMode.FULL
+    # Evidence eligibility is intentionally *not* a refresh mode.  The former
+    # ``priority='formal'`` branch promoted a merely degraded local cache to a
+    # full upstream refresh and could do so once per symbol in a panel.  Formal
+    # callers now receive the local envelope and make a pure, fail-fast
+    # eligibility decision themselves; refresh work belongs to the durable
+    # background queue.
     if mode == RefreshMode.FULL:
         fetch_start, fetch_end = start, end
         if cached is not None and not cached.empty:
@@ -1750,18 +1614,23 @@ def _load_history_frame(
         )
 
 
-def load_history(
+def refresh_history(
     symbol: str,
     start: str,
     end: str,
     use_cache: bool = True,
     store: BarStore | None = None,
     *,
-    refresh: RefreshMode | str | None = None,
-    priority: str = "normal",
-    provider: str = "",
+    mode: RefreshMode | str | None = None,
+    work_class: str = "normal",
+    source_name: str = "",
 ) -> BarDataEnvelope[pd.DataFrame]:
-    """Load daily bars with mandatory quality and provenance evidence."""
+    """Refresh daily bars in a worker context and return their evidence.
+
+    Page handlers must use :func:`read_history`; this entry point may acquire
+    providers and write the cache.  Its public arguments intentionally do not
+    expose the old mixed read/refresh contract.
+    """
     resolved_store = store or _default_bar_store()
     frame = _load_history_frame(
         symbol,
@@ -1769,13 +1638,86 @@ def load_history(
         end,
         use_cache=use_cache,
         store=resolved_store,
-        refresh=refresh,
-        priority=priority,
-        provider=provider,
+        refresh=mode,
+        priority=work_class,
+        provider=source_name,
     )
     return _bar_envelope(
         frame, symbol=symbol, start=start, end=end, store=resolved_store, frequency="1d",
     )
+
+
+def read_history(
+    symbol: str,
+    start: str,
+    end: str,
+    store: BarStore | None = None,
+) -> BarDataEnvelope[pd.DataFrame]:
+    """Read daily bars from the local cache only.
+
+    This is the page-read contract.  It never acquires a symbol lock, mutates
+    freshness metadata, falls back to a provider, or retries a failed source.
+    A missing range is represented by an unavailable envelope so callers can
+    render an honest cold-start state in bounded time.
+    """
+
+    # The public reader is strict even when invoked outside FastAPI (for
+    # example from a report exporter or a contract test).  HTTP middleware is
+    # a second line of defence, not the only thing preventing a future helper
+    # from turning this method into a provider request or a schema bootstrap.
+    with local_only_data_access():
+        resolved_store = (
+            _local_read_store(store, "1d")
+            if store is not None else _default_read_bar_store()
+        )
+        cached = resolved_store.get(symbol)
+        frame = _cached_slice(cached, start, end)
+        if frame is None:
+            frame = pd.DataFrame(columns=OHLCV_COLUMNS)
+        return _bar_envelope(
+            frame,
+            symbol=symbol,
+            start=start,
+            end=end,
+            store=resolved_store,
+            frequency="1d",
+        )
+
+
+def read_bars(
+    symbol: str,
+    start: str,
+    end: str,
+    frequency: str = "1d",
+    *,
+    store: BarStore | IntradayBarStore | None = None,
+) -> BarDataEnvelope[pd.DataFrame]:
+    """Read daily or intraday bars locally, without an implicit refresh."""
+
+    with local_only_data_access():
+        normalized = validate_frequency(frequency)
+        if normalized == "1d":
+            return read_history(symbol, start, end, store=cast(BarStore | None, store))
+        resolved_store = (
+            cast(IntradayBarStore, _local_read_store(cast(IntradayBarStore, store), normalized))
+            if store is not None
+            else IntradayBarStore(normalized, read_only=True)
+        )
+        cached = resolved_store.get(symbol)
+        start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+        if len(str(end).strip()) <= 10:
+            end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        frame = pd.DataFrame(columns=OHLCV_COLUMNS)
+        if cached is not None and not cached.empty:
+            frame = cached.loc[start_ts:end_ts]
+        return _bar_envelope(
+            frame,
+            symbol=symbol,
+            start=start,
+            end=end,
+            store=resolved_store,
+            frequency=normalized,
+        )
 
 
 def _load_intraday_frame(
@@ -1902,7 +1844,7 @@ def _load_intraday_frame(
     )
 
 
-def load_intraday(
+def refresh_intraday(
     symbol: str,
     start: str,
     end: str,
@@ -1910,13 +1852,13 @@ def load_intraday(
     use_cache: bool = True,
     store: IntradayBarStore | None = None,
     *,
-    priority: str = "normal",
+    work_class: str = "normal",
 ) -> BarDataEnvelope[pd.DataFrame]:
-    """Explicit unadjusted minute-bar contract."""
+    """Refresh minute bars in a worker context with explicit evidence."""
     normalized = validate_frequency(frequency)
     if normalized == "1d":
-        return load_history(
-            symbol, start, end, use_cache=use_cache, priority=priority,
+        return refresh_history(
+            symbol, start, end, use_cache=use_cache, work_class=work_class,
         )
     resolved_store = store or IntradayBarStore(normalized)
     frame = _load_intraday_frame(
@@ -1926,7 +1868,7 @@ def load_intraday(
         normalized,
         use_cache=use_cache,
         store=resolved_store,
-        priority=priority,
+        priority=work_class,
     )
     envelope = _bar_envelope(
         frame,
@@ -1939,21 +1881,21 @@ def load_intraday(
     return envelope
 
 
-def load_bars(
+def refresh_bars(
     symbol: str,
     start: str,
     end: str,
     frequency: str = "1d",
     use_cache: bool = True,
     *,
-    refresh: RefreshMode | str | None = None,
-    priority: str = "normal",
+    mode: RefreshMode | str | None = None,
+    work_class: str = "normal",
 ) -> BarDataEnvelope[pd.DataFrame]:
-    """日线/分钟线统一入口，始终返回显式质量契约。"""
+    """Refresh daily or minute bars; never call this from a page read."""
     frequency = validate_frequency(frequency)
     if frequency == "1d":
-        return load_history(symbol, start, end, use_cache=use_cache, refresh=refresh, priority=priority)
-    return load_intraday(symbol, start, end, frequency, use_cache=use_cache, priority=priority)
+        return refresh_history(symbol, start, end, use_cache=use_cache, mode=mode, work_class=work_class)
+    return refresh_intraday(symbol, start, end, frequency, use_cache=use_cache, work_class=work_class)
 
 
 def _load_bar_panel_frame(
@@ -2031,13 +1973,6 @@ def _load_bar_panel_frame(
                             )
                         ):
                             return None
-                        frame, contract_evidence = _supplement_stockdb_contract(
-                            symbol,
-                            start,
-                            end,
-                            frame,
-                            priority=priority,
-                        )
                         source_name = source.name
                         quality = _assess_daily_frame(
                             frame,
@@ -2046,10 +1981,11 @@ def _load_bar_panel_frame(
                             symbol=symbol,
                             source=source.name,
                         )
-                        if contract_evidence is not None:
-                            quality = _apply_stockdb_contract_quality(quality)
-                            source_name = "stockdb-price+tushare-contract-v2"
-                        if quality.status != "verified":
+                        # A batch from the local StockDB is still useful as a
+                        # preview even before its immutable acceptance manifest
+                        # has cross-source evidence.  Do not fan out into one
+                        # remote fallback per symbol merely to upgrade it.
+                        if quality.status == "unavailable":
                             return None
                         with daily_store.lock(symbol):
                             daily_store.put(
@@ -2171,7 +2107,7 @@ def _load_bar_panel_frame(
     return panel
 
 
-def load_bar_panel(
+def refresh_bar_panel(
     symbols: list[str],
     start: str,
     end: str,
@@ -2180,12 +2116,12 @@ def load_bar_panel(
     use_cache: bool = True,
     progress: Callable[[int, int, str, bool], None] | None = None,
     *,
-    refresh: RefreshMode | str | None = None,
-    priority: str = "normal",
-    max_workers: int = 8,
-    provider: str = "",
+    mode: RefreshMode | str | None = None,
+    work_class: str = "normal",
+    concurrency: int = 8,
+    source_name: str = "",
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
-    """Load a panel without silently shrinking the requested universe."""
+    """Refresh a panel without silently shrinking the requested universe."""
     normalized = validate_frequency(frequency)
     requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
     data = _load_bar_panel_frame(
@@ -2196,10 +2132,10 @@ def load_bar_panel(
         field=field,
         use_cache=use_cache,
         progress=progress,
-        refresh=refresh,
-        priority=priority,
-        max_workers=max_workers,
-        provider=provider,
+        refresh=mode,
+        priority=work_class,
+        max_workers=concurrency,
+        provider=source_name,
     )
     if isinstance(data, pd.DataFrame):
         observed = tuple(str(value) for value in data.columns)
@@ -2294,7 +2230,7 @@ def load_bar_panel(
     return BarDataEnvelope(data, quality, tuple(provenance))
 
 
-def load_panel(
+def refresh_panel(
     symbols: list[str],
     start: str,
     end: str,
@@ -2302,13 +2238,13 @@ def load_panel(
     use_cache: bool = True,
     progress: Callable[[int, int, str, bool], None] | None = None,
     *,
-    refresh: RefreshMode | str | None = None,
-    priority: str = "normal",
-    max_workers: int = 8,
-    provider: str = "",
+    mode: RefreshMode | str | None = None,
+    work_class: str = "normal",
+    concurrency: int = 8,
+    source_name: str = "",
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
-    """日线面板入口，始终返回显式质量契约。"""
-    return load_bar_panel(
+    """Refresh a daily panel; page handlers must use :func:`read_panel`."""
+    return refresh_bar_panel(
         symbols,
         start,
         end,
@@ -2316,8 +2252,101 @@ def load_panel(
         field=field,
         use_cache=use_cache,
         progress=progress,
-        refresh=refresh,
-        priority=priority,
-        max_workers=max_workers,
-        provider=provider,
+        mode=mode,
+        work_class=work_class,
+        concurrency=concurrency,
+        source_name=source_name,
     )
+
+
+def read_panel(
+    symbols: list[str],
+    start: str,
+    end: str,
+    field: str | None = None,
+    *,
+    store: BarStore | None = None,
+    progress: Callable[[int, int, str, bool], None] | None = None,
+) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
+    """Compose a daily panel from local bar files only.
+
+    The method intentionally performs no parallel provider work.  Local files
+    are read one at a time so a request cannot fan out into a thread storm;
+    callers that need a full cache rebuild must submit a refresh job instead.
+    """
+
+    resolved_store = _local_read_store(store, "1d") if store is not None else _default_read_bar_store()
+    requested = tuple(dict.fromkeys(str(value).upper() for value in symbols))
+    frames: dict[str, pd.DataFrame] = {}
+    envelopes: dict[str, BarDataEnvelope[pd.DataFrame]] = {}
+    for index, symbol in enumerate(requested, start=1):
+        envelope = read_history(symbol, start, end, resolved_store)
+        envelopes[symbol] = envelope
+        if not envelope.data.empty:
+            frames[symbol] = envelope.data
+        if progress is not None:
+            try:
+                progress(index, len(requested), symbol, not envelope.data.empty)
+            except Exception:
+                logger.debug("本地面板进度回调失败", exc_info=True)
+
+    fields = sorted({column for frame in frames.values() for column in frame.columns})
+    panels = {
+        column: pd.DataFrame(
+            {symbol: frame[column] for symbol, frame in frames.items() if column in frame},
+        ).sort_index()
+        for column in fields
+    }
+    data: pd.DataFrame | dict[str, pd.DataFrame]
+    data = panels.get(field, pd.DataFrame()) if field is not None else panels
+    observed = tuple(symbol for symbol in requested if symbol in frames)
+    missing = tuple(symbol for symbol in requested if symbol not in frames)
+    qualities = [envelopes[symbol].quality for symbol in requested]
+    issues = [
+        f"{symbol}: {issue}"
+        for symbol, envelope in envelopes.items()
+        for issue in envelope.quality.issues
+    ]
+    if missing:
+        issues.append("缺少请求标的：" + "、".join(missing[:20]))
+    stale = any(item.stale for item in qualities)
+    partial = bool(missing) or any(item.partial for item in qualities)
+    if not observed:
+        status: QualityStatus = "unavailable"
+    elif any(item.status == "unavailable" for item in qualities):
+        # Missing symbols are already captured above.  Existing local symbols
+        # with invalid evidence keep the panel visible but explicitly degraded.
+        status = "degraded"
+    elif any(item.status == "degraded" for item in qualities) or partial or stale:
+        status = "degraded"
+    else:
+        status = "verified"
+    coverage = len(observed) / len(requested) if requested else 1.0
+    sources = tuple(dict.fromkeys(
+        source for item in qualities for source in item.sources
+    )) or ("local-cache",)
+    starts = [item.observed_start for item in qualities if item.observed_start]
+    ends = [item.observed_end for item in qualities if item.observed_end]
+    quality = BarDataQuality(
+        status,
+        start,
+        end,
+        observed_start=max(starts) if starts else "",
+        observed_end=min(ends) if ends else "",
+        coverage_ratio=round(coverage, 6),
+        calendar_source="local-cache",
+        sources=sources,
+        issues=tuple(dict.fromkeys(issues)),
+        stale=stale,
+        partial=partial,
+        timezone="Asia/Shanghai",
+        adjustment="per-symbol-local-contract",
+        requested_symbols=requested,
+        observed_symbols=observed,
+        missing_symbols=missing,
+    )
+    provenance = tuple(
+        {"symbol": symbol, "quality": envelope.quality.to_dict(), "read_mode": "local_only"}
+        for symbol, envelope in envelopes.items()
+    )
+    return BarDataEnvelope(data, quality, provenance)

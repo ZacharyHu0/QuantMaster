@@ -25,6 +25,7 @@ from typing import Any, Literal
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.runtime.paths import confined_path
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -195,10 +196,18 @@ class BarBatchReadResult:
 
 
 class BarStore:
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, *, read_only: bool | None = None):
         self.root = Path(root) if root else get_config().data_root / "bars"
-        self.root.mkdir(parents=True, exist_ok=True)
+        # A Web request enters ``local_only_data_access`` before routing.  In
+        # that context a store must not create directories, run schema DDL,
+        # recover interrupted writes, or backfill metadata.  A missing cache
+        # is an explicit cold-start result, not permission to initialize it on
+        # the request path.
+        self.read_only = (not remote_io_allowed()) if read_only is None else bool(read_only)
         self.meta_db = self.root / "meta.sqlite"
+        if self.read_only:
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS bar_meta ("
@@ -249,7 +258,12 @@ class BarStore:
         self._recover_writes()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.meta_db, policy="cache")
+        return connect_sqlite(
+            self.meta_db,
+            policy="cache",
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     def _path(self, symbol: str) -> Path:
         return confined_path(
@@ -264,6 +278,8 @@ class BarStore:
         self, symbol: str, target: Path, metadata: dict,
     ) -> bool:
         """Atomically adopt a uniquely owned, hash-matched pre-hardening filename."""
+        if self.read_only:
+            return False
         legacy_name = _legacy_safe_name(symbol)
         if legacy_name == _safe_name(symbol):
             return False
@@ -306,7 +322,7 @@ class BarStore:
     def _resolve_integrity_repair(
         self, symbol: str, content_hash: str, reason: str,
     ) -> None:
-        if self.root.name != "bars":
+        if self.read_only or self.root.name != "bars":
             return
         try:
             from quantmaster.data.repair import resolve_repair
@@ -347,10 +363,12 @@ class BarStore:
         enqueue_repair: bool = True,
     ) -> BarReadResult:
         """Read a cache file and report missing/corrupt/orphaned states explicitly."""
+        if self.read_only:
+            enqueue_repair = False
         path = self._path(symbol)
         metadata = self.metadata(symbol)
         migrated = False
-        if not path.exists() and metadata is not None:
+        if not self.read_only and not path.exists() and metadata is not None:
             migrated = self._restore_legacy_path(symbol, path, metadata)
         if not path.exists():
             if metadata is None:
@@ -396,7 +414,7 @@ class BarStore:
                 return BarReadResult(
                     None, "corrupt", reason, expected_hash if unchanged else actual_hash,
                 )
-            if not unchanged:
+            if not unchanged and not self.read_only:
                 self._backfill_file_identity(symbol, path, value, actual_hash)
             content_hash = expected_hash or actual_hash
             if migrated and metadata is not None:
@@ -551,6 +569,15 @@ class BarStore:
         metadata: dict,
         enqueue: bool,
     ) -> None:
+        if self.read_only:
+            # Integrity is still represented in the returned read result, but
+            # only the runtime-worker may persist repair work or mutate cache
+            # metadata.  This keeps a damaged file from turning every page
+            # render into a database write race.
+            logger.debug(
+                "Read-only BarStore integrity issue symbol=%s reason=%s", symbol, reason,
+            )
+            return
         self._mark_corrupt(symbol)
         log_key = (str(self.root.resolve()), symbol, reason)
         now = time.time()
@@ -620,6 +647,8 @@ class BarStore:
     def _backfill_file_identity(
         self, symbol: str, path: Path, frame: pd.DataFrame, content_hash: str,
     ) -> None:
+        if self.read_only:
+            return
         stat = path.stat()
         with self._conn() as connection:
             connection.execute(
@@ -630,6 +659,8 @@ class BarStore:
 
     def _recover_writes(self) -> None:
         """Complete or roll back interrupted file/catalog commits."""
+        if self.read_only:
+            return
         with self._conn() as connection:
             rows = connection.execute("SELECT * FROM bar_write_intents").fetchall()
         for row in rows:
@@ -698,6 +729,8 @@ class BarStore:
         ``replace=True`` 只用于已确认完整的前复权响应；来源只返回部分区间时
         必须合并保存，避免 AKShare 的缺块响应冲掉本地已有研究数据。
         """
+        if self.read_only:
+            raise RuntimeError("页面本地读取上下文禁止写入行情缓存")
         if df is None or df.empty:
             return
         df = self._normalize_frame_index(df)
@@ -866,27 +899,37 @@ class BarStore:
 
     def metadata(self, symbol: str) -> dict | None:
         """返回单个标的的缓存覆盖与检查状态。"""
-        with self._conn() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM bar_meta WHERE symbol=?", (symbol,)
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM bar_meta WHERE symbol=?", (symbol,)
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return None
+            raise
         return dict(row) if row else None
 
     def metadata_many(self, symbols: list[str] | None = None) -> dict[str, dict]:
         """批量读取元信息，避免面板加载时为每只股票反复连接 SQLite。"""
-        with self._conn() as conn:
-            conn.row_factory = sqlite3.Row
-            if symbols:
-                rows = []
-                for start in range(0, len(symbols), 500):
-                    chunk = symbols[start:start + 500]
-                    placeholders = ",".join("?" for _ in chunk)
-                    rows.extend(conn.execute(
-                        f"SELECT * FROM bar_meta WHERE symbol IN ({placeholders})", chunk
-                    ).fetchall())
-            else:
-                rows = conn.execute("SELECT * FROM bar_meta").fetchall()
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                if symbols:
+                    rows = []
+                    for start in range(0, len(symbols), 500):
+                        chunk = symbols[start:start + 500]
+                        placeholders = ",".join("?" for _ in chunk)
+                        rows.extend(conn.execute(
+                            f"SELECT * FROM bar_meta WHERE symbol IN ({placeholders})", chunk
+                        ).fetchall())
+                else:
+                    rows = conn.execute("SELECT * FROM bar_meta").fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return {}
+            raise
         return {str(row["symbol"]): dict(row) for row in rows}
 
     def mark_checked(
@@ -901,6 +944,8 @@ class BarStore:
         quality: dict[str, Any] | None = None,
     ) -> None:
         """记录已经成功检查的请求范围；没有新 K 线时也必须调用。"""
+        if self.read_only:
+            raise RuntimeError("页面本地读取上下文禁止更新行情检查状态")
         with self.lock(symbol), self._conn() as conn:
             row = conn.execute(
                 "SELECT coverage_start,coverage_end,source_chain_json FROM bar_meta WHERE symbol=?",
@@ -954,6 +999,8 @@ class BarStore:
             )
 
     def mark_status(self, symbol: str, status: str, source: str = "") -> None:
+        if self.read_only:
+            raise RuntimeError("页面本地读取上下文禁止更新行情状态")
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT quality_json,last_source,source_chain_json FROM bar_meta WHERE symbol=?",
@@ -1014,37 +1061,63 @@ class BarStore:
 
     def freshness(self, symbol: str) -> float | None:
         """距上次更新的秒数；无记录返回 None。"""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT updated_at FROM bar_meta WHERE symbol=?", (symbol,)
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT updated_at FROM bar_meta WHERE symbol=?", (symbol,)
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return None
+            raise
         return (time.time() - row[0]) if row else None
 
     def check_freshness(self, symbol: str) -> float | None:
         """距最近一次成功检查的秒数；与数据实际更新时间分开。"""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT checked_at FROM bar_meta WHERE symbol=?", (symbol,)
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT checked_at FROM bar_meta WHERE symbol=?", (symbol,)
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return None
+            raise
         return (time.time() - row[0]) if row and row[0] is not None else None
 
     def coverage(self, symbol: str) -> tuple[str, str] | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT start, end FROM bar_meta WHERE symbol=?", (symbol,)
-            ).fetchone()
+        try:
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT start, end FROM bar_meta WHERE symbol=?", (symbol,)
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return None
+            raise
         return (row[0], row[1]) if row else None
 
     def symbols(self) -> list[str]:
-        with self._conn() as conn:
-            rows = conn.execute("SELECT symbol FROM bar_meta ORDER BY symbol").fetchall()
+        try:
+            with self._conn() as conn:
+                rows = conn.execute("SELECT symbol FROM bar_meta ORDER BY symbol").fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if self.read_only:
+                return []
+            raise
         return [r[0] for r in rows]
 
 
 class IntradayBarStore(BarStore):
     """分钟线缓存；按频率隔离目录，避免 1m/5m 数据相互覆盖。"""
 
-    def __init__(self, frequency: str = "5m", root: Path | None = None):
+    def __init__(
+        self,
+        frequency: str = "5m",
+        root: Path | None = None,
+        *,
+        read_only: bool | None = None,
+    ):
         from quantmaster.data.base import validate_frequency
 
         self.frequency = validate_frequency(frequency)
@@ -1063,7 +1136,7 @@ class IntradayBarStore(BarStore):
             directory = "60m"
         else:  # validate_frequency 已拒绝未知值；保留显式安全边界。
             raise ValueError("IntradayBarStore 收到未知分钟频率")
-        super().__init__(base / directory)
+        super().__init__(base / directory, read_only=read_only)
 
     def _normalize_frame_index(self, value: pd.DataFrame) -> pd.DataFrame:
         """Intraday timestamps retain their provider timezone when one is present."""

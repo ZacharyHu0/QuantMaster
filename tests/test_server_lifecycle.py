@@ -148,7 +148,7 @@ def test_reload_ignores_release_bookkeeping_until_backend_changes(tmp_path, monk
     assert lifecycle._meaningful_reload_paths(
         {release, config}, package_dir,
     ) == [config]
-    assert lifecycle._reload_timing_ms() == (30_000, 300_000, 300_000)
+    assert lifecycle._reload_timing_ms() == (2_000, 30_000, 5_000)
     monkeypatch.setenv("QM_RELOAD_QUIET_SECONDS", "45")
     monkeypatch.setenv("QM_RELOAD_MAX_BATCH_SECONDS", "600")
     monkeypatch.setenv("QM_RELOAD_MIN_INTERVAL_SECONDS", "900")
@@ -159,12 +159,102 @@ def test_reload_timing_is_bounded_and_invalid_values_use_defaults(monkeypatch):
     monkeypatch.setenv("QM_RELOAD_QUIET_SECONDS", "invalid")
     monkeypatch.setenv("QM_RELOAD_MAX_BATCH_SECONDS", "1")
     monkeypatch.setenv("QM_RELOAD_MIN_INTERVAL_SECONDS", "invalid")
-    assert lifecycle._reload_timing_ms() == (30_000, 30_000, 300_000)
+    assert lifecycle._reload_timing_ms() == (2_000, 2_000, 5_000)
 
     monkeypatch.setenv("QM_RELOAD_QUIET_SECONDS", "9999")
     monkeypatch.setenv("QM_RELOAD_MAX_BATCH_SECONDS", "9999")
     monkeypatch.setenv("QM_RELOAD_MIN_INTERVAL_SECONDS", "9999")
     assert lifecycle._reload_timing_ms() == (300_000, 1_800_000, 1_800_000)
+
+
+def test_reload_lifecycle_deadlines_are_bounded(monkeypatch):
+    assert lifecycle._reload_lifecycle_seconds() == (20.0, 10.0, 5.0)
+    monkeypatch.setenv("QM_RELOAD_READY_SECONDS", "invalid")
+    monkeypatch.setenv("QM_RELOAD_DRAIN_SECONDS", "0")
+    monkeypatch.setenv("QM_RELOAD_FORCE_KILL_SECONDS", "999")
+    assert lifecycle._reload_lifecycle_seconds() == (20.0, 1.0, 120.0)
+
+
+def test_reload_stop_never_joins_a_wedged_worker_without_a_deadline(monkeypatch):
+    class FakeProcess:
+        pid = 42
+
+        def __init__(self):
+            self.alive = True
+            self.terminations = 0
+            self.joins = []
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            self.joins.append(timeout)
+
+        def terminate(self):
+            self.terminations += 1
+            if self.terminations >= 2:
+                self.alive = False
+
+    # Avoid emitting a real Ctrl+C event in this unit test; Unix semantics
+    # still exercise the bounded drain and forced-stop path.
+    monkeypatch.setattr(lifecycle.os, "name", "posix")
+    process = FakeProcess()
+
+    assert lifecycle._stop_reload_process(
+        process, drain_seconds=10.0, force_seconds=5.0,
+    ) is True
+    assert process.terminations == 2
+    assert process.joins == [10.0, 5.0]
+
+
+def test_reload_stop_uses_private_drain_not_windows_console_broadcast(monkeypatch):
+    """A Web replacement must never Ctrl+C the independent worker process."""
+
+    class DrainEvent:
+        def __init__(self):
+            self.set_calls = 0
+
+        def set(self):
+            self.set_calls += 1
+
+    class FakeProcess:
+        pid = 42
+
+        def __init__(self, event):
+            self.alive = True
+            self.event = event
+            self.terminations = 0
+            self.joins = []
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            self.joins.append(timeout)
+            if self.event.set_calls:
+                self.alive = False
+
+        def terminate(self):
+            self.terminations += 1
+
+    event = DrainEvent()
+    process = FakeProcess(event)
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(
+        lifecycle.os,
+        "kill",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("不得发送 CTRL_C_EVENT")),
+    )
+
+    assert lifecycle._stop_reload_process(
+        process,
+        drain_seconds=10.0,
+        force_seconds=5.0,
+        drain_event=event,
+    ) is True
+    assert event.set_calls == 1
+    assert process.terminations == 0
+    assert process.joins == [10.0]
 
 
 def test_reload_gate_accumulates_changes_during_five_minute_cooldown(tmp_path):
@@ -210,3 +300,34 @@ def test_reload_worker_restores_cli_logging(monkeypatch):
 
     assert server_app._configure_reload_worker_logging() is True
     assert calls == [True]
+
+
+def test_runtime_worker_heartbeat_is_a_fast_local_lease(isolated_config):
+    from quantmaster.runtime.worker import RuntimeWorker, runtime_worker_status
+
+    worker = RuntimeWorker()
+    worker._started = True
+    worker._write_heartbeat()
+
+    status = runtime_worker_status()
+    assert status["available"] is True
+    assert status["worker_id"] == worker._worker_id
+    assert status["pid"] > 0
+
+    worker._stop_heartbeat()
+    assert runtime_worker_status()["available"] is False
+
+
+def test_runtime_worker_status_reports_a_persisted_bootstrap_failure(isolated_config):
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    (isolated_config.data_root / "runtime-worker-supervisor.json").write_text(
+        '{"status":"failed","detail":"RuntimeError: startup failed"}',
+        encoding="utf-8",
+    )
+
+    status = runtime_worker_status()
+
+    assert status["available"] is False
+    assert status["supervisor"]["status"] == "failed"
+    assert "startup failed" in status["reason"]

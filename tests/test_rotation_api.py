@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.service import get_rotation_service
+from quantmaster.runtime.jobs import UnifiedJobRuntime
 from quantmaster.server.app import app
 
 
@@ -68,8 +69,11 @@ def test_manual_rotation_refresh_does_not_reset_provider_circuit(monkeypatch):
     monkeypatch.setattr(
         worker, "submit",
         lambda spec: {
-            "id": "rotation-probe", "status": "queued", "progress": 0,
-            "spec": spec.model_dump(mode="json"), "attempt": 1,
+            "id": "rotation-probe", "type": "rotation.refresh", "status": "queued",
+            "progress": 0, "spec": spec.model_dump(mode="json"), "attempt": 1,
+            "max_attempts": 2, "deadline_seconds": 3600, "created_at": "",
+            "updated_at": "", "input_fingerprint": "probe", "algorithm_version": "QM_ROTATION_V7",
+            "cancel_requested": False,
         },
     )
     response = client.post(
@@ -124,10 +128,19 @@ def test_rotation_preferences_validate_known_l2_codes():
 
 def test_rotation_refresh_returns_unified_job_contract(monkeypatch):
     service = get_rotation_service()
-    created = service.jobs.create(RotationJobSpec().model_dump(mode="json"))
+    created, _ = service.jobs.submit(
+        "rotation.refresh",
+        RotationJobSpec().model_dump(mode="json"),
+        input_fingerprint="fixture",
+        algorithm_version="QM_ROTATION_V7",
+    )
     scopes = []
+    runtime = UnifiedJobRuntime(service.jobs, max_workers=1)
 
     class Worker:
+        def __init__(self, job_runtime):
+            self.runtime = job_runtime
+
         def start(self):
             return None
 
@@ -135,7 +148,9 @@ def test_rotation_refresh_returns_unified_job_contract(monkeypatch):
             scopes.append(spec.scope)
             return created
 
-    monkeypatch.setattr("quantmaster.server.rotation.get_rotation_worker", lambda: Worker())
+    monkeypatch.setattr(
+        "quantmaster.server.rotation.get_rotation_worker", lambda: Worker(runtime),
+    )
     response = _client().post(
         "/api/v1/market/analytics/refresh",
         json={"scope": "all", "mode": "incremental", "source": "local"},
@@ -151,39 +166,104 @@ def test_rotation_refresh_returns_unified_job_contract(monkeypatch):
     )
     assert close.status_code == 202
     assert scopes == ["all", "close"]
+    runtime.stop()
 
 
 def test_unified_jobs_support_rotation_cancel_and_retry(monkeypatch):
     service = get_rotation_service()
-    created = service.jobs.create(RotationJobSpec(scope="etf").model_dump(mode="json"))
+    created, _ = service.jobs.submit(
+        "rotation.refresh",
+        RotationJobSpec(scope="etf").model_dump(mode="json"),
+        input_fingerprint="fixture",
+        algorithm_version="QM_ROTATION_V7",
+    )
     client = _client()
+    runtime = UnifiedJobRuntime(service.jobs, max_workers=1)
+    monkeypatch.setattr(runtime, "_schedule", lambda *_args, **_kwargs: None)
 
     listed = client.get("/api/v1/jobs", params={"domain": "rotation"})
     assert listed.status_code == 200
     assert listed.json()["domains"][-1] == "rotation"
     assert listed.json()["items"][0]["id"] == created["id"]
 
-    cancelled = client.post(f"/api/v1/jobs/rotation/{created['id']}/cancel")
+    cancelled = client.post(f"/api/v1/jobs/{created['id']}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
 
     class Worker:
+        def __init__(self, job_runtime):
+            self.runtime = job_runtime
+
         def start(self):
             return None
 
-    monkeypatch.setattr("quantmaster.server.rotation.get_rotation_worker", lambda: Worker())
-    retried = client.post(f"/api/v1/jobs/rotation/{created['id']}/retry")
+    monkeypatch.setattr(
+        "quantmaster.server.rotation.get_rotation_worker", lambda: Worker(runtime),
+    )
+    retried = client.post(f"/api/v1/jobs/{created['id']}/retry")
     assert retried.status_code == 202
-    assert retried.json()["id"] != created["id"]
+    assert retried.json()["id"] == created["id"]
     events = client.get(
-        f"/api/v1/jobs/rotation/{created['id']}/events",
+        f"/api/v1/jobs/{created['id']}/events",
     ).json()["items"]
-    assert any(event["type"] == "retried_as" for event in events)
+    assert any(event["type"] == "job_retried" for event in events)
+    runtime.stop()
+
+
+def test_etf_research_job_uses_the_generic_job_urls():
+    from quantmaster.rotation.etf_jobs import TASK_TYPE, get_etf_research_jobs
+
+    jobs = get_etf_research_jobs()
+    created, _ = jobs.runtime.store.submit(
+        TASK_TYPE,
+        {"as_of": "2026-08-10", "tier": "production"},
+        input_fingerprint="etf-fixture",
+        algorithm_version="QM_ETF_SECTOR_RADAR_V3.5",
+    )
+    client = _client()
+
+    public = client.get(f"/api/v1/jobs/{created['id']}")
+    assert public.status_code == 200
+    assert public.json()["type"] == TASK_TYPE
+    assert public.json()["links"]["self"] == f"/api/v1/jobs/{created['id']}"
+
+    cancelled = client.post(f"/api/v1/jobs/{created['id']}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    # The old domain-specific polling endpoint is deliberately gone.
+    assert client.get(f"/api/v1/rotation/etfs/jobs/{created['id']}").status_code == 404
 
 
 def test_rotation_detail_returns_not_found_until_group_passes_quality_gate():
     response = _client().get("/api/v1/rotation/industries/801080.SI")
     assert response.status_code == 404
+
+
+def test_rotation_snapshot_get_uses_snapshot_id_etag():
+    service = get_rotation_service()
+    service.store.save_snapshots({
+        "themes": {
+            "meta": {
+                "snapshot_id": "themes-etag-v1", "schema_version": 2,
+                "algorithm_version": "QM_ROTATION_V7", "input_fingerprint": "fixture",
+                "as_of": "2026-08-10", "generated_at": "2026-08-10T10:00:00+00:00",
+                "quality": {"status": "complete", "issues": []},
+            },
+            "data": {"as_of": "2026-08-10", "items": []},
+        },
+    })
+    client = _client()
+    first = client.get("/api/v1/rotation/themes", params={"window": 5})
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    assert client.get(
+        "/api/v1/rotation/themes", params={"window": 5}, headers={"If-None-Match": etag},
+    ).status_code == 304
+    # Normalized query parameters are part of the validator, so a different
+    # filter cannot be served from an incompatible cached page.
+    changed = client.get("/api/v1/rotation/themes", params={"window": 3})
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != etag
 
 
 def test_group_apis_materialize_selected_window_scores_and_grade_filters():

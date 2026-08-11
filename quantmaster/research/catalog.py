@@ -27,13 +27,20 @@ RESEARCH_SCHEMA_VERSION = 1
 class ResearchCatalog:
     """Small transactional source of truth; Parquet remains the numeric store."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, read_only: bool = False):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _initialize(self) -> None:
         def schema_v1(connection: sqlite3.Connection) -> None:

@@ -47,11 +47,17 @@ def normalize_news_ids(values: list[int] | None) -> list[int] | None:
 class NewsClaimStore:
     """Atomic SQLite claims with token fencing and bounded renewable leases."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = bool(read_only)
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, timeout=10.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 10.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     @staticmethod
     def migrate(connection: sqlite3.Connection) -> None:
@@ -224,7 +230,8 @@ class NewsClaimStore:
     def stats(self, *, now: float | None = None) -> dict[str, int]:
         current = time.time() if now is None else float(now)
         with self._conn() as connection:
-            self.migrate(connection)
+            if not self.read_only:
+                self.migrate(connection)
             row = connection.execute(
                 "SELECT COUNT(*) AS total,"
                 "SUM(lease_expires_at>?) AS active,"

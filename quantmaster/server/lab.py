@@ -13,19 +13,50 @@ from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.service import LabService
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.problems import OperationProblem, make_problem
 
 router = APIRouter(prefix="/api/v1/lab", tags=["quant-lab"])
 _service: LabService | None = None
 _service_path = ""
+_read_service: LabService | None = None
+_read_service_path = ""
 
 
-def get_lab_service() -> LabService:
-    global _service, _service_path
+def get_lab_service(*, read_only: bool = False) -> LabService:
+    """Return a writer service for commands or a bounded reader for GETs."""
+
+    global _service, _service_path, _read_service, _read_service_path
     expected = str((get_config().data_root / "lab.sqlite").resolve())
+    if read_only:
+        if _read_service is None or expected != _read_service_path:
+            _read_service = LabService(read_only=True)
+            _read_service_path = expected
+        return _read_service
     if _service is None or expected != _service_path:
         _service = LabService()
         _service_path = expected
     return _service
+
+
+def _published_lab_service() -> LabService:
+    """Return the immutable Lab ledger view or an explicit cold-start error."""
+
+    service = get_lab_service(read_only=True)
+    if service.store.path.is_file():
+        return service
+    raise OperationProblem(
+        503,
+        make_problem(
+            "snapshot_unavailable",
+            severity="warning",
+            source="Quant Lab 快照",
+            title="Quant Lab 尚无已发布快照",
+            message="后台 worker 尚未完成 Lab 账本初始化或没有可展示的本地快照。",
+            action="可先继续浏览其他页面；启动 runtime-worker 或提交显式数据准备任务后重试。",
+            blocking=True,
+            can_continue=True,
+        ),
+    )
 
 
 def _fail(exc: Exception) -> JSONResponse:
@@ -133,14 +164,16 @@ class StrategyPromotion(ContractModel):
 
 @router.get("/overview")
 def overview() -> dict:
-    return get_lab_service().overview()
+    return _published_lab_service().overview()
 
 
 @router.get("/dashboard")
 def dashboard() -> dict:
-    from quantmaster.lab.worker import get_worker
+    from quantmaster.runtime.worker import runtime_worker_status
 
-    return {**get_lab_service().dashboard(), "worker": get_worker().status()}
+    # Do not import/construct the Lab worker in a disposable Web generation.
+    # Its supervisor publishes a tiny heartbeat instead.
+    return {**_published_lab_service().dashboard(), "worker": runtime_worker_status()}
 
 
 @router.get("/workbench")
@@ -149,7 +182,7 @@ def workbench(
 ) -> dict:
     if horizon is not None and horizon not in SUPPORTED_HORIZONS:
         raise HTTPException(422, detail="horizon 只支持 1/3/5/7/10/20/30")
-    return get_lab_service().workbench(horizon)
+    return _published_lab_service().workbench(horizon)
 
 
 @router.get("/strategies")
@@ -160,14 +193,14 @@ def strategies(
 ) -> dict:
     if horizon is not None and horizon not in SUPPORTED_HORIZONS:
         raise HTTPException(422, detail="horizon 只支持 1/3/5/7/10/20/30")
-    return {"items": get_lab_service().store.strategies(
+    return {"items": _published_lab_service().store.strategies(
         horizon=horizon, status=status, limit=limit,
     )}
 
 
 @router.get("/strategies/{strategy_id}")
 def strategy(strategy_id: str) -> dict:
-    value = get_lab_service().store.strategy(strategy_id)
+    value = _published_lab_service().store.strategy(strategy_id)
     if value is None:
         raise HTTPException(404, "策略候选不存在")
     return value
@@ -176,7 +209,7 @@ def strategy(strategy_id: str) -> dict:
 @router.get("/strategies/{strategy_id}/return-curve")
 def strategy_return_curve(strategy_id: str) -> dict:
     try:
-        return get_lab_service().store.strategy_return_curve(strategy_id)
+        return _published_lab_service().store.strategy_return_curve(strategy_id)
     except (LabError, KeyError, TypeError, ValueError) as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -198,7 +231,7 @@ def preflight(body: PreflightCreate) -> dict:
 
 @router.get("/capabilities")
 def capabilities() -> dict:
-    return get_lab_service().capabilities()
+    return _published_lab_service().capabilities()
 
 
 @router.get("/factors")
@@ -209,13 +242,13 @@ def factors(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict:
-    return get_lab_service().store.list_factors(
+    return _published_lab_service().store.list_factors(
         status=status, category=category, search=search, limit=limit, offset=offset)
 
 
 @router.get("/factors/{version_id}")
 def factor_version(version_id: str) -> dict:
-    value = get_lab_service().store.version(version_id)
+    value = _published_lab_service().store.version(version_id)
     if value is None:
         raise HTTPException(404, "因子版本不存在")
     return value
@@ -312,12 +345,12 @@ def mining_preview(body: MiningPreview) -> dict:
 
 @router.get("/mining/runs")
 def mining_runs(limit: int = Query(30, ge=1, le=200)) -> dict:
-    return {"items": get_lab_service().store.mining_runs(limit)}
+    return {"items": _published_lab_service().store.mining_runs(limit)}
 
 
 @router.get("/mining/runs/{run_id}")
 def mining_run(run_id: str) -> dict:
-    value = get_lab_service().store.mining_run(run_id)
+    value = _published_lab_service().store.mining_run(run_id)
     if value is None:
         raise HTTPException(404, "AutoMiner 运行不存在")
     return value
@@ -325,7 +358,7 @@ def mining_run(run_id: str) -> dict:
 
 @router.get("/mining/candidates/{candidate_id}")
 def mining_candidate(candidate_id: str) -> dict:
-    value = get_lab_service().store.mining_candidate(candidate_id)
+    value = _published_lab_service().store.mining_candidate(candidate_id)
     if value is None:
         raise HTTPException(404, "AutoMiner 候选不存在")
     return value
@@ -340,13 +373,16 @@ def create_study(body: StudyCreate) -> dict:
 
 
 @router.get("/studies")
-def studies(limit: int = Query(50, ge=1, le=500)) -> dict:
-    return {"items": get_lab_service().store.studies(limit)}
+def studies(
+    limit: int = Query(50, ge=1, le=500),
+    summary: bool = True,
+) -> dict:
+    return {"items": _published_lab_service().store.studies(limit, summary=summary)}
 
 
 @router.get("/studies/{study_id}")
 def study(study_id: str) -> dict:
-    value = get_lab_service().store.study(study_id)
+    value = _published_lab_service().store.study(study_id)
     if value is None:
         raise HTTPException(404, "优化 Study 不存在")
     return value
@@ -370,7 +406,7 @@ def create_audit(body: AuditCreate) -> dict:
 
 @router.get("/audits/{audit_id}")
 def audit(audit_id: str) -> dict:
-    value = get_lab_service().store.bias_audit(audit_id)
+    value = _published_lab_service().store.bias_audit(audit_id)
     if value is None:
         raise HTTPException(404, "偏差审计不存在")
     return value
@@ -385,46 +421,13 @@ def jobs(
     kind: str | None = None,
     summary: bool = True,
 ) -> dict:
-    items = get_lab_service().store.jobs(
+    items = _published_lab_service().store.jobs(
         limit, offset=offset, cursor=cursor, status=status, kind=kind, summary=summary,
     )
     return {
         "items": items,
         "next_cursor": items[-1]["id"] if len(items) == limit else "",
     }
-
-
-@router.get("/jobs/{job_id}")
-def job(job_id: str) -> dict:
-    value = get_lab_service().store.job(job_id)
-    if value is None:
-        raise HTTPException(404, "任务不存在")
-    return value
-
-
-@router.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str) -> dict:
-    try:
-        return get_lab_service().store.request_cancel(job_id)
-    except Exception as exc:
-        return _fail(exc)  # type: ignore[return-value]
-
-
-@router.post("/jobs/{job_id}/retry", status_code=202)
-def retry_job(job_id: str) -> dict:
-    try:
-        return get_lab_service().retry_job(job_id)
-    except Exception as exc:
-        return _fail(exc)  # type: ignore[return-value]
-
-
-@router.get("/jobs/{job_id}/events")
-def job_events(
-    job_id: str, after: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000),
-) -> dict:
-    if get_lab_service().store.job(job_id) is None:
-        raise HTTPException(404, "任务不存在")
-    return {"items": get_lab_service().store.events(job_id, after, limit)}
 
 
 @router.get("/experiments")
@@ -435,7 +438,7 @@ def experiments(
     method: str | None = None,
     summary: bool = True,
 ) -> dict:
-    items = get_lab_service().store.list_experiments(
+    items = _published_lab_service().store.list_experiments(
         limit, cursor=cursor, status=status, method=method, summary=summary,
     )
     return {
@@ -446,7 +449,7 @@ def experiments(
 
 @router.get("/experiments/{experiment_id}")
 def experiment(experiment_id: str) -> dict:
-    value = get_lab_service().store.experiment(experiment_id)
+    value = _published_lab_service().store.experiment(experiment_id)
     if value is None:
         raise HTTPException(404, "实验不存在")
     return value

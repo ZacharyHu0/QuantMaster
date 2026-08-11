@@ -722,6 +722,21 @@ class FreeStockDBRuntime:
         except (OSError, ValueError, TypeError):
             return {}
 
+    def cached_vendor_notice(self) -> dict[str, Any]:
+        """Return only the last local vendor-notice snapshot.
+
+        Settings-page GETs use this method so a missing or expired cache never
+        promotes into an HTTP request.  The supervisor-owned runtime refreshes
+        the cache through :meth:`check_vendor_notice` on its own schedule.
+        """
+
+        cached = self._read_vendor_cache()
+        return cached or {
+            "status": "unavailable",
+            "url": _VENDOR_HOME,
+            "message": "尚无本地公告快照；后台运行时会在下一次验收时更新",
+        }
+
     def check_vendor_notice(self, *, force: bool = False) -> dict[str, Any]:
         """Read the vendor announcement without ever opening the vendor website."""
         cached = self._read_vendor_cache()

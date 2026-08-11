@@ -32,6 +32,14 @@ def test_generations_fingerprint_artifacts_and_atomic_pointer(tmp_path):
     assert catalog.current_snapshot("rotation", "themes")["artifact"]["artifact_id"] == artifact["artifact_id"]
     assert catalog.read_json(artifact["artifact_id"])["items"][0]["code"] == "A"
 
+    industries = catalog.put_json({"schema_version": 2, "items": [{"code": "801080.SI"}]})
+    published = catalog.publish_snapshots("rotation", {
+        "themes": artifact["artifact_id"],
+        "industries": industries["artifact_id"],
+    })
+    assert set(published) == {"themes", "industries"}
+    assert catalog.current_snapshot("rotation", "industries")["artifact"]["artifact_id"] == industries["artifact_id"]
+
 
 def test_parquet_artifacts_are_verified_before_reading(tmp_path):
     catalog = DerivedArtifactCatalog(tmp_path / "derived")

@@ -170,6 +170,77 @@ def test_ingest_store_is_immutable_content_addressed_and_reusable(tmp_path, isol
     assert store.load_frame(first).loc[0, "close"] == 10.5
 
 
+def test_stockdb_cross_validation_sample_is_content_addressed_and_stratified():
+    dates = pd.bdate_range("2026-07-01", periods=8)
+    rows = []
+    for exchange, base in (("SH", 600000), ("SZ", 1), ("BJ", 830000)):
+        for offset in range(16):
+            symbol = f"{base + offset:06d}.{exchange}"
+            for day, stamp in enumerate(dates):
+                rows.append({
+                    "symbol": symbol,
+                    "date": stamp,
+                    "amount": float((offset + 1) * (day + 1) * 10_000),
+                })
+    frame = pd.DataFrame(rows)
+
+    first = StockDBIngestService.cross_validation_sample(frame)
+    second = StockDBIngestService.cross_validation_sample(
+        frame.sample(frac=1.0, random_state=7).reset_index(drop=True),
+    )
+
+    assert first == second
+    assert len(first["symbols"]) == 32
+    assert len(first["trade_dates"]) == 5
+    assert {item["exchange"] for item in first["strata"]} == {"SH", "SZ", "BJ"}
+
+
+def test_stockdb_cross_validation_reuses_local_tushare_cache_before_network(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "fixture-token"
+    dates = pd.bdate_range("2026-07-01", periods=5)
+    rows = []
+    for symbol, price in (("600000.SH", 10.0), ("000001.SZ", 20.0)):
+        for stamp in dates:
+            rows.append({
+                "symbol": symbol,
+                "date": stamp,
+                "open": price,
+                "high": price + 1,
+                "low": price - 1,
+                "close": price,
+                "volume": 1_000.0,
+                "amount": 10_000.0,
+            })
+    frame = pd.DataFrame(rows)
+
+    def cached_daily(_self, symbol, _start, _end):
+        return (
+            frame.loc[frame["symbol"] == symbol]
+            .drop(columns="symbol")
+            .set_index("date")
+        )
+
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.cached_daily", cached_daily,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.daily",
+        lambda *_args, **_kwargs: pytest.fail("缓存命中时不应联网"),
+    )
+    service = StockDBIngestService(
+        source=SimpleNamespace(),
+        store=StockDBIngestStore(tmp_path / "ingest"),
+    )
+
+    evidence = service._cross_source_validation(frame)
+
+    assert evidence["status"] == "verified"
+    assert evidence["cache_hits"] == 2
+    assert evidence["remote_fetches"] == 0
+
+
 def test_ingest_prune_uses_publish_time_not_content_id(tmp_path, isolated_config):
     isolated_config.data.free_stockdb_ingest_retain = 10
     store = StockDBIngestStore(tmp_path / "ingest", retain=10)
@@ -556,7 +627,7 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
 
     monkeypatch.setattr(
         "quantmaster.rotation.etf_research.get_etf_research_service",
-        lambda: service,
+        lambda **_kwargs: service,
     )
     client = TestClient(app)
     listing = client.get("/api/v1/rotation/etfs?category=境内宽基")
@@ -621,9 +692,12 @@ def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
     assert coverage.json()["data"]["share_semantic_counts"]["missing"] == 3
     assert coverage.json()["data"]["intraday_mode"] == "on_demand"
     assert intraday.status_code == 200
-    assert source.intraday_calls == 1
-    assert intraday.json()["data"]["metrics"]["complete_session"] is True
-    assert len(intraday.json()["data"]["series"]) == 241
+    # Detail reads are snapshot-only.  A missing minute artifact is an
+    # explicit degraded result, never a hidden StockDB request.
+    assert source.intraday_calls == 0
+    assert intraday.json()["data"]["status"] == "missing"
+    assert intraday.json()["data"]["issue"] == "snapshot_unavailable"
+    assert intraday.json()["data"]["series"] == []
     assert len(overview.content) <= 180_000
     assert len(listing.content) <= 60_000
     assert len(sector.content) <= 100_000
@@ -855,7 +929,7 @@ def test_etf_sandbox_preview_uses_local_pit_denominator_without_publishing(
 
     monkeypatch.setattr(
         "quantmaster.rotation.etf_research.get_etf_research_service",
-        lambda: service,
+        lambda **_kwargs: service,
     )
     client = TestClient(app)
     default_listing = client.get("/api/v1/rotation/etfs")
@@ -1218,25 +1292,13 @@ def test_stockdb_audit_api_discloses_same_upstream_and_experimental_state(
     monkeypatch,
     isolated_config,
 ):
-    monkeypatch.setattr(FreeStockDBSource, "probe", lambda self: {"status": "ok"})
-    monkeypatch.setattr(
-        FreeStockDBSource,
-        "board_hierarchy",
-        lambda self: [
-            {"code": "801000.SI", "level": "L1", "members": ["600000.SH"]},
-        ],
-    )
-    monkeypatch.setattr(FreeStockDBSource, "security_catalog", lambda self: [{"code": "600000"}])
-    monkeypatch.setattr(FreeStockDBSource, "delisted_catalog", lambda self: [])
-    monkeypatch.setattr(
-        FreeStockDBSource,
-        "artifact_identity",
-        lambda self, **kwargs: StockDBArtifactIdentity.discover(
-            None,
-            None,
-            data_session=kwargs.get("data_session", ""),
-        ),
-    )
+    def must_not_run(*_args, **_kwargs):
+        pytest.fail("audit GET must not call the StockDB provider")
+
+    monkeypatch.setattr(FreeStockDBSource, "probe", must_not_run)
+    monkeypatch.setattr(FreeStockDBSource, "board_hierarchy", must_not_run)
+    monkeypatch.setattr(FreeStockDBSource, "security_catalog", must_not_run)
+    monkeypatch.setattr(FreeStockDBSource, "delisted_catalog", must_not_run)
 
     response = TestClient(app).get("/api/v1/data-sources/free-stockdb/audit")
 
@@ -1248,23 +1310,45 @@ def test_stockdb_audit_api_discloses_same_upstream_and_experimental_state(
     assert payload["independent_cross_validation"] is False
     assert payload["capabilities"]["realtime_tick"]["state"] == "disabled"
     assert payload["capabilities"]["daily_bars"]["asset_classes"] == ["stock", "etf"]
-    assert payload["capabilities"]["daily_bars"]["state"] == "unverified"
+    assert payload["capabilities"]["daily_bars"]["state"] == "unavailable"
     assert payload["capabilities"]["daily_bars"]["verified"] is False
-    assert payload["capabilities"]["security_catalog"]["state"] == "unverified"
+    assert payload["capabilities"]["security_catalog"]["state"] == "unavailable"
     assert payload["capabilities"]["security_catalog"]["verified"] is False
     assert payload["experimental_online"]["max_concurrency"] == 2
+    assert payload["probe"]["status"] == "not_run_in_request"
+    assert payload["status"] == "unavailable"
 
 
-def test_stockdb_audit_api_redacts_probe_exception_details(monkeypatch, isolated_config):
-    internal = r"C:\private\stockdb.sqlite Bearer secret-value"
+def test_stockdb_audit_api_projects_latest_manifest_without_live_catalog(
+    monkeypatch,
+    isolated_config,
+):
+    store = StockDBIngestStore()
+    store.publish(
+        frame=pd.DataFrame({"symbol": ["600000.SH"], "date": ["2026-08-10"], "close": [10.0]}),
+        boards=[{"code": "801000.SI", "level": "L1", "members": ["600000.SH"]}],
+        catalog=[{"code": "600000"}],
+        delisted=[{"code": "000001"}],
+        as_of_date="2026-08-10",
+        artifact_id="published-artifact",
+        master_snapshot_id="master",
+        start_date="2026-08-10",
+        end_date="2026-08-10",
+        coverage={"status": "locally_validated"},
+        provenance={"source": "test"},
+    )
 
-    def fail_probe(_self):
-        raise RuntimeError(internal)
+    def must_not_run(*_args, **_kwargs):
+        pytest.fail("published audit must not reload a live catalog")
 
-    monkeypatch.setattr(FreeStockDBSource, "probe", fail_probe)
+    monkeypatch.setattr(FreeStockDBSource, "probe", must_not_run)
+    monkeypatch.setattr(FreeStockDBSource, "security_catalog", must_not_run)
+    monkeypatch.setattr(FreeStockDBSource, "board_hierarchy", must_not_run)
     response = TestClient(app).get("/api/v1/data-sources/free-stockdb/audit")
 
     assert response.status_code == 200
-    assert response.json()["issues"] == ["连接探测失败；详细信息已写入本机日志"]
-    assert "private" not in response.text
-    assert "secret-value" not in response.text
+    payload = response.json()
+    assert payload["status"] == "degraded"
+    assert payload["capabilities"]["daily_bars"]["state"] == "locally_validated"
+    assert payload["catalog"] == {"securities": 1, "delisted_records": 1}
+    assert payload["boards"]["total"] == 1

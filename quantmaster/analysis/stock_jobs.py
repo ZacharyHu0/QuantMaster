@@ -16,8 +16,10 @@ from quantmaster.analysis.stock_research import (
     StockAnalysisSpec,
 )
 from quantmaster.runtime.jobs import (
+    ArtifactIntegrityError,
     JobContext,
     JobOutcome,
+    UnifiedJobStore,
     UnifiedJobRuntime,
 )
 
@@ -212,6 +214,86 @@ class StockAnalysisJobs:
             "report": report_artifact["payload"] if report_artifact else None,
             "error": report_error,
         }
+
+
+def _read_store() -> UnifiedJobStore:
+    """Open the durable analysis ledger without constructing a Web runtime."""
+
+    return UnifiedJobStore(read_only=True)
+
+
+def _read_job(job_id: str) -> tuple[UnifiedJobStore, dict[str, Any]]:
+    store = _read_store()
+    job = store.get(job_id)
+    if str(job.get("type") or "") != STOCK_ANALYSIS_TASK_TYPE:
+        raise KeyError(job_id)
+    return store, job
+
+
+def read_stock_analysis_public_job(job_id: str) -> dict[str, Any]:
+    """Read one public analysis job projection from the local ledger only."""
+
+    _store, job = _read_job(job_id)
+    return UnifiedJobRuntime.public(job)
+
+
+def read_stock_analysis_jobs(limit: int = 50) -> list[dict[str, Any]]:
+    """List published stock-analysis jobs without starting threads or DDL."""
+
+    return [
+        UnifiedJobRuntime.public(job)
+        for job in _read_store().list(limit, job_type=STOCK_ANALYSIS_TASK_TYPE)
+    ]
+
+
+def read_stock_analysis_events(
+    job_id: str, after: int = 0, limit: int = 500,
+) -> list[dict[str, Any]]:
+    """Read durable analysis events only; no manager fallback on GET."""
+
+    store, _job = _read_job(job_id)
+    return store.events(job_id, after, limit)
+
+
+def read_stock_analysis(analysis_id: str) -> dict[str, Any]:
+    """Return the published report/artifacts for a page read.
+
+    Corrupt or incomplete artifacts remain an explicit unavailable report; the
+    runtime-worker observes and repairs them separately.  A page must never
+    instantiate ``StockAnalysisJobs`` just to answer this projection.
+    """
+
+    store, job = _read_job(analysis_id)
+    public = UnifiedJobRuntime.public(job)
+    dimensions: list[dict[str, Any]] = []
+    for key in DIMENSION_ORDER:
+        try:
+            artifact = store.latest_artifact(
+                analysis_id, f"stock_analysis.dimension.{key}",
+            )
+        except (ArtifactIntegrityError, OSError, RuntimeError, ValueError):
+            artifact = None
+        if artifact:
+            dimensions.append(dict(artifact["payload"].get("dimension") or {}))
+    try:
+        report_artifact = store.latest_artifact(analysis_id, "stock_analysis.report")
+    except (ArtifactIntegrityError, OSError, RuntimeError, ValueError):
+        report_artifact = None
+    report_error = ""
+    if report_artifact is None and str(public["status"]).startswith("completed"):
+        report_error = "最终报告产物未通过完整性校验，已请求修复；可以安全重试任务"
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "analysis_id": analysis_id,
+        "job_id": analysis_id,
+        "status": public["status"],
+        "progress": public["progress"],
+        "phase": public["phase"],
+        "attempt": public["attempt"],
+        "dimensions": dimensions,
+        "report": report_artifact["payload"] if report_artifact else None,
+        "error": report_error,
+    }
 
 
 _lock = threading.Lock()

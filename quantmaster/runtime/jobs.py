@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import importlib
 import json
 import logging
+import multiprocessing
 import os
+import queue
 import socket
 import sqlite3
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import zlib
 from collections.abc import Mapping
@@ -39,6 +43,7 @@ TERMINAL_STATUSES = frozenset(
 )
 DEFAULT_LEASE_SECONDS = 30.0
 INLINE_ARTIFACT_LIMIT = 128 * 1024
+_CPU_JOB_GATE = threading.Semaphore(1)
 
 
 @dataclass(frozen=True)
@@ -95,21 +100,46 @@ class JobHandler(Protocol):
     def __call__(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome: ...
 
 
+@dataclass(frozen=True)
+class _HandlerRegistration:
+    """Execution declaration for one task type.
+
+    ``process_entrypoint`` is deliberately an importable ``module:qualname``
+    instead of a pickled callable.  Windows uses ``spawn`` and a bound service
+    object commonly captures locks, database connections or web state.  An
+    import path gives the compute child a clean interpreter while the parent
+    remains the sole lease owner.
+    """
+
+    handler: JobHandler
+    process_entrypoint: str = ""
+
+
 class UnifiedJobStore:
     """Strict job/event/artifact ledger shared by registered runtime task types."""
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = Path(path) if path else get_config().data_root / "jobs.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
         # Keep bulky result/checkpoint bodies out of the hot SQLite ledger.
         # The manifest remains transactional in SQLite, while the immutable
         # body is content-addressed beneath the same data root.
         self.artifacts_root = self.path.parent / "derived" / "job-artifacts"
-        self.artifacts_root.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        # Web generations use this class for task status polling.  Opening a
+        # nonexistent ledger must be a fast read failure, not an implicit
+        # schema migration or a new directory tree.
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.artifacts_root.mkdir(parents=True, exist_ok=True)
+            self._migrate()
 
     def _conn(self):
-        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         with self._conn() as connection:
@@ -265,6 +295,26 @@ class UnifiedJobStore:
                 existing["created"] = False
                 existing["coalesced"] = True
                 return existing, False
+            # A completed immutable artifact is a valid singleflight result as
+            # well.  Reusing it avoids re-running a provider/CPU pipeline when
+            # the canonical specification, input generation and algorithm are
+            # identical.  Do not apply this fallback to legacy callers that
+            # have not supplied a real versioned input fingerprint.
+            if fingerprint and algorithm:
+                completed_row = connection.execute(
+                    "SELECT * FROM runtime_jobs WHERE type=? AND spec_hash=? "
+                    "AND input_fingerprint=? AND algorithm_version=? "
+                    "AND status='completed' AND result_artifact_id<>'' "
+                    "ORDER BY finished_at DESC LIMIT 1",
+                    (str(job_type), spec_hash, fingerprint, algorithm),
+                ).fetchone()
+                if completed_row is not None:
+                    existing = self._decode_job(completed_row) or {}
+                    existing["created"] = False
+                    existing["coalesced"] = True
+                    existing["reused"] = True
+                    existing["outcome"] = "unchanged"
+                    return existing, False
             job_id = f"job_{uuid.uuid4().hex}"
             connection.execute(
                 "INSERT INTO runtime_jobs "
@@ -367,8 +417,8 @@ class UnifiedJobStore:
                     raise JobLeaseLost(job_id)
                 row = connection.execute(
                     "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
-                    "AND status IN ('running','cancelling')",
-                    (job_id, owner, str(lease_token)),
+                    "AND status IN ('running','cancelling') AND lease_expires>?",
+                    (job_id, owner, str(lease_token), time.time()),
                 ).fetchone()
             else:
                 row = connection.execute(
@@ -487,8 +537,11 @@ class UnifiedJobStore:
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET lease_expires=?,heartbeat_at=?,updated_at=? "
                 "WHERE id=? AND owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (lease_deadline(lease_seconds), now, _utc_now(), job_id, owner, str(lease_token)),
+                "AND status IN ('running','cancelling') AND lease_expires>?",
+                (
+                    lease_deadline(lease_seconds), now, _utc_now(), job_id, owner,
+                    str(lease_token), now,
+                ),
             )
         return cursor.rowcount == 1
 
@@ -505,7 +558,7 @@ class UnifiedJobStore:
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET progress=?,phase=?,detail=?,updated_at=? "
                 "WHERE id=? AND owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
+                "AND status IN ('running','cancelling') AND lease_expires>?",
                 (
                     max(0, min(100, int(progress))),
                     str(phase)[:200],
@@ -514,6 +567,7 @@ class UnifiedJobStore:
                     job_id,
                     owner,
                     str(lease_token),
+                    time.time(),
                 ),
             )
         if cursor.rowcount != 1:
@@ -555,13 +609,14 @@ class UnifiedJobStore:
                 if not lease_token:
                     raise JobLeaseLost(job_id)
                 row = connection.execute(
-                    "SELECT cancel_requested,owner,lease_token FROM runtime_jobs WHERE id=?",
+                    "SELECT cancel_requested,owner,lease_token,lease_expires FROM runtime_jobs WHERE id=?",
                     (job_id,),
                 ).fetchone()
                 if (
                     row is None
                     or str(row["owner"]) != owner
                     or str(row["lease_token"]) != str(lease_token)
+                    or float(row["lease_expires"] or 0) <= time.time()
                 ):
                     raise JobLeaseLost(job_id)
             else:
@@ -588,8 +643,8 @@ class UnifiedJobStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (job_id, owner, str(lease_token)),
+                "AND status IN ('running','cancelling') AND lease_expires>?",
+                (job_id, owner, str(lease_token), time.time()),
             ).fetchone()
             if row is None:
                 raise JobLeaseLost(job_id)
@@ -755,8 +810,8 @@ class UnifiedJobStore:
                     raise JobLeaseLost(job_id)
                 job = connection.execute(
                     "SELECT attempt,spec_hash FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
-                    "AND status IN ('running','cancelling')",
-                    (job_id, owner, str(lease_token)),
+                    "AND status IN ('running','cancelling') AND lease_expires>?",
+                    (job_id, owner, str(lease_token), time.time()),
                 ).fetchone()
                 if job is None:
                     raise JobLeaseLost(job_id)
@@ -802,6 +857,11 @@ class UnifiedJobStore:
         }
 
     def _queue_repair(self, artifact: Mapping[str, Any], reason: str) -> None:
+        # A Web reader reports a corrupt artifact as unavailable.  Repair is
+        # queued by the runtime-worker after it observes the same evidence;
+        # never turn a GET into a SQLite write.
+        if self.read_only:
+            return
         now = _utc_now()
         with self._conn() as connection:
             connection.execute(
@@ -901,6 +961,7 @@ class JobContext:
         self.store = runtime.store
         self.job_id = str(job["id"])
         self.spec_hash = str(job["spec_hash"])
+        self.input_fingerprint = str(job.get("input_fingerprint") or "")
         self.attempt = int(job["attempt"])
         self._lease_token = str(job.get("lease_token") or "")
         if not self._lease_token:
@@ -978,13 +1039,164 @@ class JobContext:
         )
 
 
+class ProcessJobContext:
+    """Lease-fenced context made available to an isolated compute child.
+
+    The child has no scheduler and never renews a lease.  It may only report
+    progress, create immutable artifacts, or inspect cancellation through the
+    token issued by its parent Supervisor.  A stolen/expired lease therefore
+    rejects every late write at the ledger boundary.
+    """
+
+    def __init__(
+        self,
+        store_path: str,
+        job_id: str,
+        owner: str,
+        lease_token: str,
+    ) -> None:
+        self.store = UnifiedJobStore(Path(store_path))
+        self.job_id = str(job_id)
+        self.owner = str(owner)
+        self._lease_token = str(lease_token)
+        job = self.store.get(self.job_id)
+        if (
+            str(job.get("owner") or "") != self.owner
+            or str(job.get("lease_token") or "") != self._lease_token
+        ):
+            raise JobLeaseLost(self.job_id)
+        self.spec_hash = str(job["spec_hash"])
+        self.input_fingerprint = str(job.get("input_fingerprint") or "")
+        self.attempt = int(job["attempt"])
+        self.deadline_seconds = float(job["deadline_seconds"])
+        self._deadline_at = time.monotonic() + self.deadline_seconds
+
+    def emit(self, event_type: str, payload: Mapping[str, Any] | None = None) -> int:
+        self.ensure_active()
+        return self.store.append_event(
+            self.job_id,
+            event_type,
+            dict(payload or {}),
+            owner=self.owner,
+            lease_token=self._lease_token,
+        )
+
+    def progress(self, value: int, phase: str, detail: str = "") -> None:
+        self.ensure_active()
+        self.store.progress(
+            self.job_id, self.owner, self._lease_token, value, phase, detail,
+        )
+
+    def cancelled(self) -> bool:
+        return self.store.cancelled(self.job_id, self.owner, self._lease_token)
+
+    def ensure_active(self) -> None:
+        if time.monotonic() >= self._deadline_at:
+            raise JobDeadlineExceeded(
+                f"任务尝试超过截止时间 {self.deadline_seconds:.0f} 秒"
+            )
+        if self.store.cancelled(self.job_id, self.owner, self._lease_token):
+            raise InterruptedError("job cancelled")
+
+    def write_artifact(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.ensure_active()
+        return self.store.write_artifact(
+            self.job_id,
+            kind,
+            payload,
+            metadata,
+            owner=self.owner,
+            lease_token=self._lease_token,
+        )
+
+    def load_checkpoint(self, key: str, spec_hash: str) -> dict[str, Any] | None:
+        self.ensure_active()
+        return self.store.checkpoint(self.job_id, key, spec_hash)
+
+    def write_checkpoint(self, key: str, spec_hash: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_active()
+        if spec_hash != self.spec_hash:
+            raise ValueError("检查点规格与任务规格不一致")
+        return self.store.write_artifact(
+            self.job_id,
+            f"checkpoint.{key}",
+            payload,
+            {
+                "schema_version": payload.get("schema_version") or "1.0",
+                "lineage": {"spec_hash": spec_hash, "checkpoint_key": key},
+            },
+            checkpoint_key=key,
+            owner=self.owner,
+            lease_token=self._lease_token,
+        )
+
+
+def _resolve_process_entrypoint(value: str) -> JobHandler:
+    """Resolve a stable process handler without serialising service objects."""
+
+    module_name, separator, qualified_name = str(value).partition(":")
+    if not separator or not module_name or not qualified_name:
+        raise ValueError("进程任务入口必须为 module:qualname")
+    target: Any = importlib.import_module(module_name)
+    for name in qualified_name.split("."):
+        target = getattr(target, name)
+    if not callable(target):
+        raise TypeError(f"进程任务入口不可调用：{value}")
+    return target
+
+
+def _run_process_handler(
+    entrypoint: str,
+    store_path: str,
+    job_id: str,
+    owner: str,
+    lease_token: str,
+    spec: dict[str, Any],
+    result_queue: Any,
+) -> None:
+    """Spawn target: run pure computation while the parent owns the lease."""
+
+    try:
+        os.environ["QM_COMPUTE_CHILD"] = "1"
+        handler = _resolve_process_entrypoint(entrypoint)
+        context = ProcessJobContext(store_path, job_id, owner, lease_token)
+        outcome = handler(context, dict(spec))
+        if not isinstance(outcome, JobOutcome):
+            raise TypeError("进程任务 handler 必须返回 JobOutcome")
+        context.ensure_active()
+        result_queue.put({
+            "kind": "outcome",
+            "status": outcome.status,
+            "detail": outcome.detail,
+            "result_artifact_id": outcome.result_artifact_id,
+        })
+    except BaseException as exc:  # child must report before its process exits
+        result_queue.put({
+            "kind": "error",
+            "type": exc.__class__.__name__,
+            "detail": str(exc)[:1000],
+            "traceback": traceback.format_exc(limit=20)[-6000:],
+        })
+
+
 class UnifiedJobRuntime:
     """Handler registry and lease-aware worker pool for extensible task types."""
 
-    def __init__(self, store: UnifiedJobStore | None = None, *, max_workers: int = 2):
+    def __init__(
+        self,
+        store: UnifiedJobStore | None = None,
+        *,
+        max_workers: int = 2,
+        dispatch: bool | None = None,
+    ):
         self.store = store or UnifiedJobStore()
         self.identity = WorkerIdentity.create("unified-jobs")
-        self._handlers: dict[str, JobHandler] = {}
+        self._handlers: dict[str, _HandlerRegistration] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, min(8, int(max_workers))),
             thread_name_prefix="qm-unified-job",
@@ -995,32 +1207,96 @@ class UnifiedJobRuntime:
         self._started = False
         self._paused = threading.Event()
         self._stop = threading.Event()
+        # Web API processes only enqueue/query durable records.  The dedicated
+        # Supervisor owns claims, heartbeats and all handler execution.
+        self._dispatch_enabled = (
+            os.environ.get("QM_WEB_PROCESS") != "1"
+            if dispatch is None else bool(dispatch)
+        )
+        self._dispatcher_stop = threading.Event()
+        self._dispatcher: threading.Thread | None = None
 
     @property
     def stopping(self) -> bool:
         return self._stop.is_set() or self._paused.is_set()
 
     @property
+    def dispatch_enabled(self) -> bool:
+        """Whether this process is permitted to claim and execute jobs."""
+
+        return self._dispatch_enabled
+
+    @property
     def idle(self) -> bool:
         with self._lock:
             return not self._active
 
-    def register(self, job_type: str, handler: JobHandler) -> None:
+    def register(
+        self,
+        job_type: str,
+        handler: JobHandler,
+        *,
+        process_entrypoint: str = "",
+    ) -> None:
+        """Register a task handler.
+
+        A non-empty ``process_entrypoint`` opts the task into Windows-spawned
+        computation.  The normal handler remains available for unit tests and
+        controlled in-process fallbacks, but production execution resolves the
+        importable entrypoint in a fresh child interpreter.
+        """
+
         name = str(job_type).strip()
         if not name or not callable(handler):
             raise ValueError("任务类型和 handler 不能为空")
+        entrypoint = str(process_entrypoint or "").strip()
+        if entrypoint:
+            _resolve_process_entrypoint(entrypoint)
         with self._lock:
             existing = self._handlers.get(name)
-            if existing is not None and existing is not handler:
+            if existing is not None and (
+                existing.handler is not handler
+                or existing.process_entrypoint != entrypoint
+            ):
                 raise ValueError(f"任务类型已注册：{name}")
-            self._handlers[name] = handler
+            self._handlers[name] = _HandlerRegistration(handler, entrypoint)
             should_schedule = self._started
         if should_schedule:
-            for job in self.store.list(1000, job_type=name):
-                if job["status"] in {"queued", "interrupted"}:
-                    self._schedule(job["id"])
+            self._dispatch_pending(job_type=name)
+
+    def _dispatch_pending(self, *, job_type: str = "") -> None:
+        if not self._dispatch_enabled or self.stopping:
+            return
+        self.store.recover_expired()
+        for job in self.store.list(1000, job_type=job_type):
+            if job["status"] in {"queued", "interrupted"} and job["type"] in self._handlers:
+                self._schedule(job["id"])
+
+    def _dispatch_loop(self) -> None:
+        while not self._dispatcher_stop.wait(0.75):
+            try:
+                self._dispatch_pending()
+            except (OSError, RuntimeError, sqlite3.Error):
+                logger.warning("Unified job dispatcher tick failed", exc_info=True)
+
+    def _start_dispatcher(self) -> None:
+        if not self._dispatch_enabled:
+            return
+        if self._dispatcher is not None and self._dispatcher.is_alive():
+            return
+        self._dispatcher_stop.clear()
+        self._dispatcher = threading.Thread(
+            target=self._dispatch_loop,
+            name=f"qm-job-dispatcher-{self.identity.pid}",
+            daemon=True,
+        )
+        self._dispatcher.start()
 
     def start(self) -> None:
+        if not self._dispatch_enabled:
+            # A web-side runtime intentionally has no worker threads.  The
+            # persistent child Supervisor will observe the inserted row.
+            return
         with self._lock:
             if self._stop.is_set():
                 raise RuntimeError("任务运行时已经永久停止")
@@ -1029,10 +1305,8 @@ class UnifiedJobRuntime:
                     return
             self._paused.clear()
             self._started = True
-        self.store.recover_expired()
-        for job in self.store.list(1000):
-            if job["status"] in {"queued", "interrupted"} and job["type"] in self._handlers:
-                self._schedule(job["id"])
+        self._dispatch_pending()
+        self._start_dispatcher()
 
     def submit(
         self,
@@ -1059,7 +1333,7 @@ class UnifiedJobRuntime:
             max_attempts=max_attempts,
         )
         self.start()
-        if job["status"] in {"queued", "interrupted"}:
+        if self._dispatch_enabled and job["status"] in {"queued", "interrupted"}:
             self._schedule(job["id"])
         return job, created
 
@@ -1087,6 +1361,80 @@ class UnifiedJobRuntime:
             lease_alive.clear()
             return
 
+    def _run_process_handler(
+        self,
+        entrypoint: str,
+        job: dict[str, Any],
+        lease_token: str,
+        lease_alive: threading.Event,
+    ) -> JobOutcome:
+        """Wait on a compute child while this Supervisor keeps the lease alive."""
+
+        context = multiprocessing.get_context("spawn")
+        results = context.Queue(maxsize=1)
+        process = context.Process(
+            target=_run_process_handler,
+            args=(
+                entrypoint,
+                str(self.store.path),
+                str(job["id"]),
+                self.identity.value,
+                lease_token,
+                dict(job["spec"]),
+                results,
+            ),
+            name=f"qm-compute-{str(job['type']).replace('.', '-')}-{str(job['id'])[-8:]}",
+            daemon=False,
+        )
+        process.start()
+        deadline = time.monotonic() + float(job["deadline_seconds"])
+        try:
+            while process.is_alive():
+                process.join(0.2)
+                if not lease_alive.is_set():
+                    raise JobLeaseLost(str(job["id"]))
+                if self.stopping:
+                    raise InterruptedError("worker stopped")
+                if time.monotonic() >= deadline:
+                    raise JobDeadlineExceeded(
+                        f"任务尝试超过截止时间 {float(job['deadline_seconds']):.0f} 秒"
+                    )
+            process.join(timeout=0.1)
+            try:
+                message = results.get(timeout=0.5)
+            except queue.Empty:
+                message = None
+            if not isinstance(message, dict):
+                raise RuntimeError(
+                    f"计算子进程未返回结果（exit_code={process.exitcode}）"
+                )
+            if message.get("kind") == "outcome":
+                return JobOutcome(
+                    str(message.get("status") or "completed"),
+                    str(message.get("detail") or ""),
+                    str(message.get("result_artifact_id") or ""),
+                )
+            detail = str(message.get("detail") or message.get("type") or "计算子进程失败")
+            if str(message.get("type") or "") == "InterruptedError":
+                raise InterruptedError(detail)
+            if str(message.get("type") or "") == "JobLeaseLost":
+                raise JobLeaseLost(str(job["id"]))
+            if str(message.get("type") or "") == "JobDeadlineExceeded":
+                raise JobDeadlineExceeded(detail)
+            logger.error(
+                "Isolated job handler failed job_id=%s type=%s traceback=%s",
+                job["id"],
+                job["type"],
+                str(message.get("traceback") or ""),
+            )
+            raise RuntimeError(detail)
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=3.0)
+            results.close()
+            results.join_thread()
+
     def _run(self, job_id: str) -> None:
         heartbeat_stop = threading.Event()
         lease_alive = threading.Event()
@@ -1102,8 +1450,8 @@ class UnifiedJobRuntime:
             lease_token = str(job.get("lease_token") or "")
             if not lease_token:
                 return
-            handler = self._handlers.get(str(job["type"]))
-            if handler is None:
+            registration = self._handlers.get(str(job["type"]))
+            if registration is None:
                 self.store.finish(
                     job_id,
                     self.identity.value,
@@ -1118,10 +1466,26 @@ class UnifiedJobRuntime:
                 daemon=True,
             )
             heartbeat.start()
-            context = JobContext(self, job, lease_alive)
             try:
-                outcome = handler(context, dict(job["spec"]))
-                context.ensure_active()
+                if registration.process_entrypoint:
+                    # All process-isolated CPU DAGs in one Supervisor share a
+                    # single slot by default.  I/O fan-out remains inside the
+                    # handler and retains its provider-specific limits.
+                    with _CPU_JOB_GATE:
+                        outcome = self._run_process_handler(
+                            registration.process_entrypoint,
+                            job,
+                            lease_token,
+                            lease_alive,
+                        )
+                    if not lease_alive.is_set():
+                        raise JobLeaseLost(job_id)
+                    if self.store.cancelled(job_id, self.identity.value, lease_token):
+                        raise InterruptedError("job cancelled")
+                else:
+                    context = JobContext(self, job, lease_alive)
+                    outcome = registration.handler(context, dict(job["spec"]))
+                    context.ensure_active()
             except JobLeaseLost:
                 return
             except InterruptedError as exc:
@@ -1191,13 +1555,15 @@ class UnifiedJobRuntime:
             raise RuntimeError("任务运行时正在维护或已经停止")
         job = self.store.retry(job_id)
         self.start()
-        self._schedule(job_id, reschedule_after_active=True)
+        if self._dispatch_enabled:
+            self._schedule(job_id, reschedule_after_active=True)
         return job
 
     def pause(self) -> None:
         """Stop accepting work and durably interrupt owned jobs for maintenance."""
         self._paused.set()
-        self.store.interrupt_owned(self.identity.value)
+        if self._dispatch_enabled:
+            self.store.interrupt_owned(self.identity.value)
 
     def resume(self) -> None:
         """Resume interrupted jobs after a bounded maintenance window."""
@@ -1206,10 +1572,15 @@ class UnifiedJobRuntime:
     def stop(self) -> None:
         self._stop.set()
         self._paused.set()
-        self.store.interrupt_owned(self.identity.value)
+        self._dispatcher_stop.set()
+        if self._dispatcher is not None and self._dispatcher.is_alive():
+            self._dispatcher.join(timeout=1.0)
+        if self._dispatch_enabled:
+            self.store.interrupt_owned(self.identity.value)
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def public(self, job: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def public(job: dict[str, Any]) -> dict[str, Any]:
         elapsed = 0.0
         if job.get("started_at"):
             try:
@@ -1233,6 +1604,8 @@ class UnifiedJobRuntime:
             "status": job["status"],
             "created": bool(job.get("created")),
             "coalesced": bool(job.get("coalesced")),
+            "reused": bool(job.get("reused")),
+            "outcome": str(job.get("outcome") or ""),
             "input_fingerprint": str(job.get("input_fingerprint") or ""),
             "algorithm_version": str(job.get("algorithm_version") or ""),
             "progress": progress,

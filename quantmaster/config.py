@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -169,9 +170,23 @@ class Config:
 
     @property
     def data_root(self) -> Path:
-        p = Path(self.data.root)
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        """Return the configured data path without changing the filesystem.
+
+        This property is used pervasively by Web snapshot readers.  Creating
+        the directory here made an apparently read-only GET mutate a cold
+        installation, and let readiness accidentally report that cold state
+        as healthy.  Persistent workers call :meth:`ensure_data_root` during
+        their explicit startup phase instead.
+        """
+
+        return Path(self.data.root)
+
+    def ensure_data_root(self) -> Path:
+        """Create the configured data root from an explicit writer context."""
+
+        root = self.data_root
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
 
 def _apply_dict(obj: Any, data: dict) -> None:
@@ -297,7 +312,17 @@ def _apply_managed_secrets(cfg: Config, raw: dict) -> None:
             setattr(owner, attr, str(section.get(key) or ""))
 
 
-def load_config(path: str | Path | None = None) -> Config:
+def load_config(
+    path: str | Path | None = None,
+    *,
+    load_secrets: bool = True,
+) -> Config:
+    """Load configuration, optionally leaving keyring-backed secrets untouched.
+
+    Settings pages only need public configuration fields.  They must not open
+    the platform credential manager on a GET, because a locked/unavailable
+    credential backend used to make every settings render block or fail.
+    """
     cfg = Config()
     explicit = path or os.environ.get("QM_CONFIG_PATH", "").strip()
     candidates = [Path(explicit)] if explicit else DEFAULT_CONFIG_PATHS
@@ -312,7 +337,8 @@ def load_config(path: str | Path | None = None) -> Config:
         _apply_env(cfg)
         _apply_dict(cfg, raw)
         cfg.managed_by_gui = True
-        _apply_managed_secrets(cfg, raw)
+        if load_secrets:
+            _apply_managed_secrets(cfg, raw)
     else:
         _apply_dict(cfg, raw)
         _apply_env(cfg)
@@ -320,16 +346,93 @@ def load_config(path: str | Path | None = None) -> Config:
 
 
 _config: Config | None = None
+_config_generation = 0
+_config_lock = threading.RLock()
+_config_readiness: tuple[str, dict[str, str]] | None = None
+
+
+def _cache_readiness_locked(cfg: Config) -> None:
+    """Refresh the small, process-local readiness snapshot.
+
+    This runs only when configuration is installed or explicitly changed.
+    HTTP readiness probes therefore never need to touch SQLite, create a
+    directory, or wait on configuration/keyring I/O.
+    """
+
+    global _config_readiness
+    root = cfg.data_root
+    _config_readiness = (
+        str(cfg.data.root),
+        {
+            "status": "ready" if root.is_dir() else "not_ready",
+            "data_root": str(root),
+        },
+    )
 
 
 def get_config() -> Config:
+    """Return the current config without letting a slow load overwrite a switch.
+
+    Loading a GUI-managed config may initialize the platform credential backend.
+    That can take seconds.  Previously a metrics/background thread could begin
+    that load, another thread could then install an explicit data-root config,
+    and the first thread would finally overwrite it with the stale default.
+    The result was a page reading the wrong SQLite/cache root.  Keep slow I/O
+    outside the lock, then publish its result only if the configuration
+    generation is still current.
+    """
+
     global _config
-    if _config is None:
-        _config = load_config()
-    return _config
+    while True:
+        with _config_lock:
+            if _config is not None:
+                return _config
+            generation = _config_generation
+        loaded = load_config()
+        with _config_lock:
+            if _config is not None:
+                return _config
+            if generation == _config_generation:
+                _config = loaded
+                _cache_readiness_locked(loaded)
+                return loaded
+            # ``set_config(None)`` can deliberately invalidate a load while
+            # it is in flight.  Retry against the new generation rather than
+            # returning a config that has already been superseded.
 
 
 def set_config(cfg: Config | None) -> None:
     """设置全局配置；传 None 重置（下次 get_config 时按默认路径重新加载）。"""
-    global _config
-    _config = cfg
+    global _config, _config_generation, _config_readiness
+    with _config_lock:
+        _config = cfg
+        _config_generation += 1
+        _config_readiness = None
+        if cfg is not None:
+            _cache_readiness_locked(cfg)
+
+
+def get_config_readiness() -> dict[str, str]:
+    """Return the cached data-root state used by ``/health/ready``.
+
+    The initial call may establish configuration during process bootstrap.  A
+    running Web generation is already configured in its lifespan, so ordinary
+    readiness requests return only this in-memory snapshot.  The small root
+    comparison also keeps tests and controlled runtime root switches correct
+    when the active ``Config`` object is deliberately updated in place.
+    """
+
+    global _config_readiness
+    while True:
+        with _config_lock:
+            cfg = _config
+            cached = _config_readiness
+            if cfg is not None and cached is not None and cached[0] == str(cfg.data.root):
+                return dict(cached[1])
+        # This branch is startup/configuration transition only.  It is outside
+        # the lock because ``get_config`` can load GUI-managed credentials.
+        cfg = get_config()
+        with _config_lock:
+            if _config is cfg:
+                _cache_readiness_locked(cfg)
+                return dict(_config_readiness[1])

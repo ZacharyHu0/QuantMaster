@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -298,3 +299,57 @@ def test_unified_store_singleflight_lease_token_and_external_artifact(tmp_path):
     restored = store.artifact(artifact["id"])
     assert restored["payload"] == payload
     assert restored["payload_json"] == ""
+
+
+def test_unified_store_reuses_completed_artifact_for_identical_versioned_input(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    first, created = store.submit(
+        "rotation.refresh",
+        {"scope": "etf", "mode": "incremental"},
+        input_fingerprint="etf-generation-v7",
+        algorithm_version="QM_ETF_V3",
+    )
+    assert created
+    assert store.claim(first["id"], "worker", lease_seconds=30)
+    active = store.get(first["id"])
+    artifact = store.write_artifact(
+        first["id"], "rotation.etf.snapshot", {"snapshot_id": "etf_immutable"},
+        owner="worker", lease_token=active["lease_token"],
+    )
+    store.finish(
+        first["id"], "worker", JobOutcome("completed", "published", artifact["id"]),
+        lease_token=active["lease_token"],
+    )
+
+    reused, reused_created = store.submit(
+        "rotation.refresh",
+        {"scope": "etf", "mode": "incremental"},
+        input_fingerprint="etf-generation-v7",
+        algorithm_version="QM_ETF_V3",
+    )
+
+    assert reused_created is False
+    assert reused["id"] == first["id"]
+    assert reused["status"] == "completed"
+    assert reused["coalesced"] is True
+    assert reused["reused"] is True
+    assert reused["outcome"] == "unchanged"
+
+
+def test_unified_runtime_runs_registered_process_handler_outside_supervisor(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    runtime.register(
+        "test.process",
+        lambda _context, _spec: (_ for _ in ()).throw(AssertionError("must spawn")),
+        process_entrypoint="tests.process_handler:write_artifact",
+    )
+
+    job, created = runtime.submit("test.process", {"value": "fixture"})
+    assert created is True
+    completed = _wait(store, job["id"], {"completed", "failed", "cancelled"}, timeout=15)
+    assert completed["status"] == "completed"
+    artifact = store.artifact(completed["result_artifact_id"])
+    assert artifact["payload"]["value"] == "fixture"
+    assert artifact["payload"]["pid"] != os.getpid()
+    runtime.stop()

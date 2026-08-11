@@ -974,14 +974,14 @@ class AutomationService:
     # ---------- 任务实现 ----------
 
     def _task_intraday_monitor(self) -> dict:
-        from quantmaster.data import load_intraday, load_spot
+        from quantmaster.data import refresh_intraday, refresh_spot
         from quantmaster.data.universe import load_universe_analysis
 
         now = pd.Timestamp.now(tz=get_config().automation.timezone).tz_localize(None)
         cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
         start = cutoff - pd.Timedelta(days=35)
         bar_envelopes = {
-            symbol: load_intraday(symbol, str(start), str(now), "5m")
+            symbol: refresh_intraday(symbol, str(start), str(now), "5m")
             for symbol in get_config().automation.sentinel_indices
         }
         bars = {
@@ -995,7 +995,7 @@ class AutomationService:
         breadth_source = "live"
         warning = ""
         try:
-            spot_envelope = load_spot(symbols)
+            spot_envelope = refresh_spot(symbols)
             spot = spot_envelope.require_data()
             if (
                 spot_envelope.quality.status != "verified"
@@ -1124,7 +1124,7 @@ class AutomationService:
         return AICrawler().recover_dead_letters(limit=20, batch_size=5)
 
     def _task_daily_close_pipeline(self, *, as_of: str = "") -> dict:
-        from quantmaster.data import load_panel, load_stock_names
+        from quantmaster.data import read_stock_names, refresh_panel
         from quantmaster.data.industry import load_industry_analysis_context
         from quantmaster.data.universe import load_universe_analysis_snapshot
         from quantmaster.decision import DecisionStore, hybrid_daily_selection
@@ -1158,8 +1158,8 @@ class AutomationService:
             # market-data gate below still decides whether anything is persisted.
             universe_snapshot = load_universe_analysis_snapshot(cfg.primary_universe)
         symbols = list(universe_snapshot.symbols)
-        market_envelope = load_panel(
-            symbols, str(start.date()), str(end.date()), priority="formal",
+        market_envelope = refresh_panel(
+            symbols, str(start.date()), str(end.date()), work_class="normal",
         )
         panel = market_envelope.require_data()
         market_formal = market_envelope.quality.formal_eligible
@@ -1182,7 +1182,7 @@ class AutomationService:
             panel, top_n=10, horizon=3, profile="risk_adjusted",
             universe=cfg.primary_universe,
             industry_map=industry_map,
-            name_map=load_stock_names(symbols),
+            name_map=read_stock_names(symbols),
             evidence_sink=decision_feature_inputs,
         )
         selection["calculation_quality"] = selection.get("data_quality")
@@ -1233,7 +1233,18 @@ class AutomationService:
         items = [
             item for item in self.store.recent_events(100)
             if item["kind"] == "important_news" and not item.get("payload", {}).get("digest")
-        ][:10]
+        ]
+        # ``recent_events`` is ordered by its second-resolution timestamp.  A
+        # burst of news therefore used to reverse equally-timestamped items as
+        # SQLite happened to return them, making the digest (and its strongest
+        # item) non-deterministic.  Digest consumers should see the most
+        # material evidence first, with stable tie-breakers.
+        items.sort(key=lambda value: (
+            -float(value.get("score") or 0),
+            str(value.get("occurred_at") or ""),
+            str(value.get("dedupe_key") or ""),
+        ))
+        items = items[:10]
         if not items:
             return {"items": 0}
         compact_items = []

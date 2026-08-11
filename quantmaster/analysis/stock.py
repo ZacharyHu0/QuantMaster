@@ -680,9 +680,9 @@ class StockAnalysisService:
 
             resolver = resolve_instrument
         if history_loader is None:
-            from quantmaster.data import load_history
+            from quantmaster.data import refresh_history
 
-            history_loader = load_history
+            history_loader = refresh_history
         if llm_factory is _DEFAULT_LLM:
             from quantmaster.ai.llm import LLMClient
 
@@ -724,7 +724,7 @@ class StockAnalysisService:
 
         _emit(progress, 22, "读取行情", f"读取 {name}（{symbol}）近 500 天日线")
         market_envelope = self.history_loader(
-            symbol, str(start_ts.date()), str(end_ts.date()), priority="normal",
+            symbol, str(start_ts.date()), str(end_ts.date()), work_class="normal",
         )
         bars = market_envelope.require_data()
         if bars is None or bars.empty or len(bars.dropna(subset=["close"])) < 20:

@@ -885,6 +885,9 @@ def test_etf_refresh_hint_reuses_unchanged_file_hashes_without_loading_frames(
         etf_path = share_path
         etf_metadata_path = metadata_path
 
+        def __init__(self, *, read_only: bool = False):
+            assert read_only is True
+
     monkeypatch.setattr("quantmaster.rotation.store.RotationStore", LocalRotationStore)
     latest_input = SimpleNamespace(
         assets=("etf",),

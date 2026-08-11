@@ -851,7 +851,7 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
         )),
     )
     monkeypatch.setattr(
-        "quantmaster.data.load_intraday",
+        "quantmaster.data.refresh_intraday",
         lambda *args, **kwargs: BarDataEnvelope(
             data=frame,
             quality=BarDataQuality(
@@ -875,7 +875,7 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
         raise RuntimeError("eastmoney circuit open")
 
     monkeypatch.setattr("quantmaster.data.akshare_source.AkshareSource.spot", unavailable)
-    monkeypatch.setattr("quantmaster.data.load_spot", unavailable)
+    monkeypatch.setattr("quantmaster.data.refresh_spot", unavailable)
     result = service._task_intraday_monitor()
 
     assert result["status"] == "degraded"
@@ -937,9 +937,9 @@ def test_daily_close_keeps_degraded_analysis_preview_without_formal_save(
             to_dict=lambda: {"name": "demo", "symbols": ["600519.SH"]},
         ),
     )
-    monkeypatch.setattr("quantmaster.data.load_panel", lambda *_args, **_kwargs: envelope)
+    monkeypatch.setattr("quantmaster.data.refresh_panel", lambda *_args, **_kwargs: envelope)
     monkeypatch.setattr(
-        "quantmaster.data.load_stock_names", lambda _symbols: {"600519.SH": "贵州茅台"},
+        "quantmaster.data.read_stock_names", lambda _symbols: {"600519.SH": "贵州茅台"},
     )
     monkeypatch.setattr(
         "quantmaster.data.industry.load_industry_analysis_context",

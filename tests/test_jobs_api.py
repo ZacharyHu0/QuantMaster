@@ -31,23 +31,23 @@ def test_unified_jobs_lists_gets_cancels_and_retries_backtests(monkeypatch):
     item = next(value for value in listed.json()["items"] if value["id"] == created["id"])
     assert item["domain"] == "backtests"
     assert item["can_cancel"] is True
-    assert item["links"]["self"].startswith("/api/v1/jobs/backtests/")
+    assert item["links"]["self"] == f"/api/v1/jobs/{created['id']}"
 
     token = client.get("/api/v1/session").json()["csrf_token"]
     headers = {"X-CSRF-Token": token}
     cancelled = client.post(
-        f"/api/v1/jobs/backtests/{created['id']}/cancel", headers=headers,
+        f"/api/v1/jobs/{created['id']}/cancel", headers=headers,
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
 
     retried = client.post(
-        f"/api/v1/jobs/backtests/{created['id']}/retry", headers=headers,
+        f"/api/v1/jobs/{created['id']}/retry", headers=headers,
     )
     assert retried.status_code == 202
     assert retried.json()["id"] != created["id"]
     events = client.get(
-        f"/api/v1/jobs/backtests/{created['id']}/events",
+        f"/api/v1/jobs/{created['id']}/events",
     ).json()["items"]
     assert any(event["type"] == "retried_as" for event in events)
 
@@ -68,16 +68,16 @@ def test_unified_jobs_exposes_repair_events_cancel_and_retry():
     token = client.get("/api/v1/session").json()["csrf_token"]
     headers = {"X-CSRF-Token": token}
     cancelled = client.post(
-        f"/api/v1/jobs/repairs/{created['id']}/cancel", headers=headers,
+        f"/api/v1/jobs/{created['id']}/cancel", headers=headers,
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
     retried = client.post(
-        f"/api/v1/jobs/repairs/{created['id']}/retry", headers=headers,
+        f"/api/v1/jobs/{created['id']}/retry", headers=headers,
     )
     assert retried.status_code == 202
     assert retried.json()["id"] == created["id"]
     events = client.get(
-        f"/api/v1/jobs/repairs/{created['id']}/events",
+        f"/api/v1/jobs/{created['id']}/events",
     ).json()["items"]
     assert [item["type"] for item in events] == ["queued", "cancelled", "retried"]

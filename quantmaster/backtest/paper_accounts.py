@@ -123,15 +123,28 @@ def _migrate_swing_accounts(conn: sqlite3.Connection) -> None:
 
 
 class PaperStore:
-    def __init__(self, path: str | Path | None = None, account_root: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        account_root: str | Path | None = None,
+        *,
+        read_only: bool = False,
+    ):
         self.path = Path(path) if path else get_config().data_root / "paper.sqlite"
         self.account_root = Path(account_root) if account_root else get_config().data_root / "paper_accounts"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.account_root.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.account_root.mkdir(parents=True, exist_ok=True)
+            self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 30.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         def schema_v1(conn: sqlite3.Connection) -> None:
@@ -259,13 +272,14 @@ class PaperStore:
         if safe_id != account_id:
             raise ValueError("模拟账户 ID 非法")
         directory = self.account_root / safe_id
-        directory.mkdir(parents=True, exist_ok=True)
+        if not self.read_only:
+            directory.mkdir(parents=True, exist_ok=True)
         return directory / "ledger.sqlite"
 
     def ledger(self, account_id: str) -> Ledger:
         if self.account(account_id) is None:
             raise KeyError("模拟账户不存在")
-        return Ledger(path=self.ledger_path(account_id))
+        return Ledger(path=self.ledger_path(account_id), read_only=self.read_only)
 
     def create_account(
         self,
@@ -942,9 +956,11 @@ class PaperStore:
 
 
 class PaperService:
-    def __init__(self, store: PaperStore | None = None):
-        self.store = store or PaperStore()
-        self.store.migrate_legacy()
+    def __init__(self, store: PaperStore | None = None, *, read_only: bool = False):
+        self.read_only = bool(read_only)
+        self.store = store or PaperStore(read_only=self.read_only)
+        if not self.read_only:
+            self.store.migrate_legacy()
 
     @staticmethod
     def _resolve_universe(name: str, as_of: str) -> tuple[list[str], dict]:
@@ -1195,7 +1211,7 @@ class PaperService:
         loaded_live = panel is None
         market_quality = None
         if panel is None:
-            from quantmaster.data import load_panel
+            from quantmaster.data import refresh_panel
 
             expectation = resolve_session_target()
             if not expectation.ready or not expectation.session:
@@ -1210,8 +1226,8 @@ class PaperService:
                 )
             end = pd.Timestamp(expectation.session)
             start = end - pd.Timedelta(days=lookback_days)
-            market_envelope = load_panel(
-                symbols, str(start.date()), str(end.date()), priority="formal",
+            market_envelope = refresh_panel(
+                symbols, str(start.date()), str(end.date()), work_class="normal",
             )
             panel = market_envelope.require_data()
             market_quality = market_envelope.quality
@@ -1416,10 +1432,10 @@ class PaperService:
         held = [position.symbol for position in ledger.positions() if position.shares > 0]
         symbols = sorted(set(cycle["target_weights"]) | set(held))
         if panel is None:
-            from quantmaster.data import load_panel
+            from quantmaster.data import refresh_panel
 
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
-            market_envelope = load_panel(symbols, start, market_date().isoformat())
+            market_envelope = refresh_panel(symbols, start, market_date().isoformat())
             panel = market_envelope.require_data()
             if (
                 market_envelope.quality.status != "verified"
@@ -1602,7 +1618,7 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         ledger = self.store.ledger(account_id)
         trades = ledger.trades()
-        store = BarStore()
+        store = BarStore(read_only=self.read_only)
         price_series: dict[str, pd.Series] = {}
         price_map: dict[str, float] = {}
         symbols = sorted(trades["symbol"].unique()) if not trades.empty else []
@@ -1754,13 +1770,20 @@ class PaperService:
 
 _service: PaperService | None = None
 _service_root = ""
+_read_service: PaperService | None = None
+_read_service_root = ""
 _paper_singleton_lock = threading.RLock()
 
 
-def get_paper_service() -> PaperService:
-    global _service, _service_root
+def get_paper_service(*, read_only: bool = False) -> PaperService:
+    global _service, _service_root, _read_service, _read_service_root
     root = str(get_config().data_root.resolve())
     with _paper_singleton_lock:
+        if read_only:
+            if _read_service is None or root != _read_service_root:
+                _read_service = PaperService(read_only=True)
+                _read_service_root = root
+            return _read_service
         if _service is None or root != _service_root:
             _service = PaperService()
             _service_root = root

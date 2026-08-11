@@ -86,13 +86,29 @@ class Position:
 
 
 class Ledger:
-    def __init__(self, path: Path | None = None, name: str = "default"):
+    def __init__(
+        self,
+        path: Path | None = None,
+        name: str = "default",
+        *,
+        read_only: bool = False,
+    ):
         self.path = path or get_config().data_root / f"ledger_{name}.sqlite"
-        with self._conn() as conn:
-            migrate_schema(conn, ((LEDGER_SCHEMA_VERSION, self._schema_v1),))
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            with self._conn() as conn:
+                migrate_schema(conn, ((LEDGER_SCHEMA_VERSION, self._schema_v1),))
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
+
+    def _require_writable(self) -> None:
+        if self.read_only:
+            raise RuntimeError("只读账本不能修改")
 
     @classmethod
     def _schema_v1(cls, connection: sqlite3.Connection) -> None:
@@ -254,6 +270,7 @@ class Ledger:
     def add_trade(self, trade: TradeRecord, idempotency_key: str | None = None) -> bool:
         from quantmaster.runtime.maintenance import maintenance_barrier
 
+        self._require_writable()
         maintenance_barrier.require_writable()
         value = self._normalize_trade(trade)
         with self._conn() as conn:
@@ -275,6 +292,7 @@ class Ledger:
                      idempotency_key: str | None = None) -> bool:
         from quantmaster.runtime.maintenance import maintenance_barrier
 
+        self._require_writable()
         maintenance_barrier.require_writable()
         if kind not in ("deposit", "withdraw", "dividend"):
             raise ValueError(f"kind 必须是 deposit/withdraw/dividend: {kind}")
@@ -294,6 +312,7 @@ class Ledger:
         """导入券商成交记录 CSV。返回导入条数。"""
         from quantmaster.portfolio.csv_import import parse_broker_csv
 
+        self._require_writable()
         path = Path(csv_path)
         parsed = parse_broker_csv(path.read_bytes(), existing_fingerprints=self.fingerprints())
         bad = [row for row in parsed.rows if row.errors]
@@ -327,6 +346,7 @@ class Ledger:
 
         from quantmaster.runtime.maintenance import maintenance_barrier
 
+        self._require_writable()
         maintenance_barrier.require_writable()
 
         if not records:
@@ -354,21 +374,51 @@ class Ledger:
     # ---- 读取 ----
 
     def trades(self) -> pd.DataFrame:
-        with self._conn() as conn:
-            return pd.read_sql_query(
-                "SELECT * FROM trades ORDER BY date, id", conn)
+        columns = [
+            "id", "date", "symbol", "side", "price", "shares", "fee", "note",
+            "import_batch", "fingerprint", "idempotency_key",
+        ]
+        try:
+            with self._conn() as conn:
+                return pd.read_sql_query("SELECT * FROM trades ORDER BY date, id", conn)
+        except FileNotFoundError:
+            if self.read_only:
+                return pd.DataFrame(columns=columns)
+            raise
+        except sqlite3.OperationalError as exc:
+            if self.read_only and "no such table" in str(exc).lower():
+                return pd.DataFrame(columns=columns)
+            raise
 
     def cashflows(self) -> pd.DataFrame:
-        with self._conn() as conn:
-            return pd.read_sql_query(
-                "SELECT * FROM cashflows ORDER BY date, id", conn)
+        columns = ["id", "date", "amount", "kind", "note", "idempotency_key"]
+        try:
+            with self._conn() as conn:
+                return pd.read_sql_query("SELECT * FROM cashflows ORDER BY date, id", conn)
+        except FileNotFoundError:
+            if self.read_only:
+                return pd.DataFrame(columns=columns)
+            raise
+        except sqlite3.OperationalError as exc:
+            if self.read_only and "no such table" in str(exc).lower():
+                return pd.DataFrame(columns=columns)
+            raise
 
     def anomalies(self) -> list[dict[str, Any]]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id,kind,reference_id,symbol,trade_date,details_json,created_at "
-                "FROM ledger_anomalies ORDER BY id"
-            ).fetchall()
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    "SELECT id,kind,reference_id,symbol,trade_date,details_json,created_at "
+                    "FROM ledger_anomalies ORDER BY id"
+                ).fetchall()
+        except FileNotFoundError:
+            if self.read_only:
+                return []
+            raise
+        except sqlite3.OperationalError as exc:
+            if self.read_only and "no such table" in str(exc).lower():
+                return []
+            raise
         return [
             {
                 "id": row[0], "kind": row[1], "reference_id": row[2],

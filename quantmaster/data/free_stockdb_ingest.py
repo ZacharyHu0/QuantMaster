@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.data.free_stockdb_contracts import (
     StockDBArtifactIdentity,
     StockDBCatalogSnapshot,
@@ -25,11 +27,17 @@ from quantmaster.data.free_stockdb_contracts import (
 )
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.research.contracts import content_hash
+from quantmaster.runtime.derived import DerivedArtifactCatalog
 
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
 Validator = Callable[[pd.DataFrame, list[dict[str, Any]], int], tuple[str, dict[str, Any]]]
 STOCKDB_INGEST_SCHEMA_VERSION = "3.0"
+STOCKDB_CROSS_VALIDATION_SCHEMA_VERSION = "1.0"
+_CROSS_VALIDATION_SYMBOLS = 32
+_CROSS_VALIDATION_DATES = 5
+_CROSS_PRICE_TOLERANCE = 0.005
+_CROSS_UNIT_TOLERANCE = 0.01
 
 
 class StockDBIngestRejected(RuntimeError):
@@ -396,8 +404,10 @@ class StockDBIngestStore:
                 existing = self.get(ingest_id)
                 if existing is None or existing.content_hashes != hashes:
                     raise RuntimeError(f"free-stockdb 摄取清单不可变: {ingest_id}")
+                self._advance_generation(existing)
                 return existing
             _atomic_text(path, encoded)
+            self._advance_generation(snapshot)
             self.prune()
             return snapshot
 
@@ -461,10 +471,51 @@ class StockDBIngestStore:
                 existing = self.get(ingest_id)
                 if existing is None or existing.content_hashes != hashes:
                     raise RuntimeError(f"free-stockdb ETF 摄取清单不可变: {ingest_id}")
+                self._advance_generation(existing)
                 return existing
             _atomic_text(path, encoded)
+            self._advance_generation(snapshot)
             self.prune()
             return snapshot
+
+    @staticmethod
+    def _advance_generation(snapshot: StockDBIngestSnapshot) -> None:
+        """Publish the immutable ingest identity into the shared DAG catalog.
+
+        The manifest has already been atomically written at this point.  A
+        compact catalog generation is therefore a trustworthy input version for
+        market, ETF and after-close nodes; readers never need to hash or scan
+        the large Parquet payload again just to decide whether work is stale.
+        """
+
+        asset = "etf" if "etf" in snapshot.assets else "stock"
+        coverage_start = str(snapshot.start_date or snapshot.as_of_date or "")
+        coverage_end = str(snapshot.as_of_date or snapshot.end_date or "")
+        DerivedArtifactCatalog().advance_source_generation(
+            f"stockdb.ingest.{asset}",
+            str(snapshot.as_of_date or snapshot.ingest_id),
+            str(snapshot.ingest_id),
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
+
+    def accepted_cross_validation(self, stock_daily_hash: str) -> dict[str, Any] | None:
+        """Reuse immutable successful sample evidence for identical bytes."""
+
+        if not stock_daily_hash:
+            return None
+        for snapshot in self.history(self.retain + 20):
+            if snapshot.content_hashes.get("stock_daily") != stock_daily_hash:
+                continue
+            evidence = snapshot.coverage.get("cross_source_validation")
+            if (
+                isinstance(evidence, dict)
+                and evidence.get("schema_version") == STOCKDB_CROSS_VALIDATION_SCHEMA_VERSION
+                and evidence.get("status") == "verified"
+                and evidence.get("content_hash") == stock_daily_hash
+            ):
+                return dict(evidence)
+        return None
 
     def prune(self) -> None:
         self.backfill_references()
@@ -745,6 +796,241 @@ class StockDBIngestService:
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     @staticmethod
+    def cross_validation_sample(frame: pd.DataFrame) -> dict[str, Any]:
+        """Pick a content-addressed, exchange/liquidity-stratified sample.
+
+        The sample is deliberately computed from the immutable StockDB payload,
+        rather than the current clock or a random seed.  Re-ingesting identical
+        bytes therefore audits the same securities and sessions and can reuse
+        its accepted evidence.
+        """
+
+        digest = _frame_hash(frame)
+        required = {"symbol", "date"}
+        if frame.empty or not required.issubset(frame):
+            return {
+                "content_hash": digest,
+                "symbols": [],
+                "trade_dates": [],
+                "strata": [],
+                "issues": ["StockDB 数据缺少抽检所需的 symbol/date 字段"],
+            }
+        value = frame.copy()
+        value["symbol"] = value["symbol"].astype(str).str.upper()
+        value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
+        value = value.dropna(subset=["symbol", "date"])
+        if value.empty:
+            return {
+                "content_hash": digest,
+                "symbols": [],
+                "trade_dates": [],
+                "strata": [],
+                "issues": ["StockDB 数据没有可解析的交易日"],
+            }
+        liquidity_column = "amount" if "amount" in value else "volume" if "volume" in value else ""
+        if liquidity_column:
+            value["_liquidity"] = pd.to_numeric(value[liquidity_column], errors="coerce").fillna(0.0)
+        else:
+            value["_liquidity"] = 0.0
+        stats = value.groupby("symbol", sort=True)["_liquidity"].median().to_frame("liquidity")
+        stats["exchange"] = [
+            symbol.rsplit(".", 1)[-1] if "." in symbol else "UNKNOWN"
+            for symbol in stats.index
+        ]
+        ranked = stats.sort_values(["liquidity"], kind="mergesort").index.tolist()
+        buckets = {
+            symbol: min(2, int(position * 3 / max(1, len(ranked))))
+            for position, symbol in enumerate(ranked)
+        }
+        groups: dict[str, list[str]] = {}
+        for symbol in stats.index:
+            key = f"{stats.at[symbol, 'exchange']}:L{buckets[str(symbol)]}"
+            groups.setdefault(key, []).append(str(symbol))
+
+        def lottery(symbol: str) -> str:
+            return hashlib.sha256(f"{digest}:{symbol}".encode()).hexdigest()
+
+        for symbols in groups.values():
+            symbols.sort(key=lottery)
+        selected: list[str] = []
+        while len(selected) < _CROSS_VALIDATION_SYMBOLS:
+            added = False
+            for key in sorted(groups):
+                if not groups[key] or len(selected) >= _CROSS_VALIDATION_SYMBOLS:
+                    continue
+                selected.append(groups[key].pop(0))
+                added = True
+            if not added:
+                break
+        dates_by_symbol = {
+            symbol: set(value.loc[value["symbol"] == symbol, "date"].tolist())
+            for symbol in selected
+        }
+        common_dates = set.intersection(*dates_by_symbol.values()) if dates_by_symbol else set()
+        dates = sorted(common_dates)[-_CROSS_VALIDATION_DATES:]
+        strata = [
+            {
+                "symbol": symbol,
+                "exchange": str(stats.at[symbol, "exchange"]),
+                "liquidity_bucket": f"L{buckets[symbol]}",
+            }
+            for symbol in selected
+        ]
+        issues: list[str] = []
+        if len(selected) < _CROSS_VALIDATION_SYMBOLS:
+            issues.append(f"可抽检证券仅 {len(selected)}/{_CROSS_VALIDATION_SYMBOLS} 只")
+        if len(dates) < _CROSS_VALIDATION_DATES:
+            issues.append(f"样本共同交易日仅 {len(dates)}/{_CROSS_VALIDATION_DATES} 天")
+        return {
+            "content_hash": digest,
+            "symbols": selected,
+            "trade_dates": [pd.Timestamp(item).date().isoformat() for item in dates],
+            "strata": strata,
+            "issues": issues,
+        }
+
+    def _cross_source_validation(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Validate a small immutable StockDB sample outside any HTTP request.
+
+        A cache hit is preferred for every sample symbol.  Only a worker with a
+        configured token may schedule a remote Tushare call for missing or
+        stale cache evidence.  Network trouble leaves a truthful
+        ``locally_validated`` record; inconsistent successful observations
+        quarantine the generation instead of being repaired per security.
+        """
+
+        sample = self.cross_validation_sample(frame)
+        result: dict[str, Any] = {
+            "schema_version": STOCKDB_CROSS_VALIDATION_SCHEMA_VERSION,
+            "content_hash": sample["content_hash"],
+            "sample": {
+                "symbols": sample["symbols"],
+                "trade_dates": sample["trade_dates"],
+                "strata": sample["strata"],
+            },
+            "issues": list(sample["issues"]),
+            "field_checks": {},
+            "cache_hits": 0,
+            "remote_fetches": 0,
+            "reused": False,
+        }
+        reused = self.store.accepted_cross_validation(sample["content_hash"])
+        if reused is not None:
+            reused["reused"] = True
+            return reused
+        symbols = list(sample["symbols"])
+        dates = list(sample["trade_dates"])
+        if not symbols or not dates:
+            result["status"] = "locally_validated"
+            return result
+        if not get_config().data.tushare_token:
+            result["status"] = "locally_validated"
+            result["issues"].append("未配置 Tushare，未执行独立抽检")
+            return result
+        if not remote_io_allowed():
+            result["status"] = "locally_validated"
+            result["issues"].append("当前上下文禁止联网，未执行独立抽检")
+            return result
+
+        from quantmaster.data.tushare_source import TushareSource
+
+        start, end = dates[0], dates[-1]
+
+        def fetch(symbol: str) -> tuple[str, str, pd.DataFrame]:
+            source = TushareSource()
+            cached = source.cached_daily(symbol, start, end)
+            if cached is not None and not cached.empty:
+                return symbol, "cache", cached
+            return symbol, "remote", source.daily(symbol, start, end)
+
+        fetched: dict[str, pd.DataFrame] = {}
+        failures: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="stockdb-audit") as pool:
+            futures = {pool.submit(fetch, symbol): symbol for symbol in symbols}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    observed_symbol, origin, remote = future.result()
+                    if remote is None or remote.empty:
+                        raise RuntimeError("Tushare 抽检响应为空")
+                    fetched[observed_symbol] = remote
+                    if origin == "cache":
+                        result["cache_hits"] += 1
+                    else:
+                        result["remote_fetches"] += 1
+                except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                    failures[symbol] = str(exc)[:240]
+        if failures:
+            result["status"] = "locally_validated"
+            result["failures"] = failures
+            result["issues"].append(f"{len(failures)} 个抽检证券缺少独立证据")
+            return result
+
+        local = frame.copy()
+        local["symbol"] = local["symbol"].astype(str).str.upper()
+        local["date"] = pd.to_datetime(local["date"], errors="coerce").dt.normalize()
+        local = local.loc[
+            local["symbol"].isin(symbols) & local["date"].isin(pd.to_datetime(dates))
+        ]
+        totals: dict[str, dict[str, int]] = {}
+        mismatches: list[str] = []
+        for symbol in symbols:
+            left = local.loc[local["symbol"] == symbol].set_index("date").sort_index()
+            right = fetched[symbol].copy()
+            right.index = pd.to_datetime(right.index, errors="coerce").normalize()
+            joined = left.join(right, how="inner", lsuffix="_stockdb", rsuffix="_tushare")
+            if len(joined) != len(dates):
+                mismatches.append(f"{symbol}: 共同抽检交易日不完整")
+                continue
+            for field in ("open", "high", "low", "close", "volume", "amount"):
+                left_name, right_name = f"{field}_stockdb", f"{field}_tushare"
+                if left_name not in joined or right_name not in joined:
+                    if field in {"open", "high", "low", "close", "volume"}:
+                        mismatches.append(f"{symbol}: 缺少抽检字段 {field}")
+                    continue
+                left_values = pd.to_numeric(joined[left_name], errors="coerce")
+                right_values = pd.to_numeric(joined[right_name], errors="coerce")
+                finite = np.isfinite(left_values) & np.isfinite(right_values)
+                if not bool(finite.all()):
+                    mismatches.append(f"{symbol}: {field} 存在非有限抽检值")
+                    continue
+                if field in {"open", "high", "low", "close"}:
+                    positive = left_values.gt(0) & right_values.gt(0)
+                    if not bool(positive.all()):
+                        mismatches.append(f"{symbol}: {field} 存在非正抽检价格")
+                        continue
+                    scale = float((right_values / left_values).median())
+                    matched = (left_values - right_values / scale).abs().le(
+                        left_values.abs().clip(lower=1e-12) * _CROSS_PRICE_TOLERANCE,
+                    )
+                    threshold = 0.80
+                else:
+                    matched = (left_values - right_values).abs().le(
+                        right_values.abs().clip(lower=1e-12) * _CROSS_UNIT_TOLERANCE,
+                    )
+                    threshold = 0.99
+                stat = totals.setdefault(field, {"rows": 0, "matched": 0, "required": 0})
+                stat["rows"] += len(matched)
+                stat["matched"] += int(matched.sum())
+                stat["required"] = 1
+                if float(matched.mean()) < threshold:
+                    mismatches.append(f"{symbol}: {field} 与 Tushare 抽检不一致")
+        result["field_checks"] = {
+            field: {
+                "rows": stat["rows"],
+                "matching_ratio": round(stat["matched"] / max(1, stat["rows"]), 6),
+                "tolerance": _CROSS_PRICE_TOLERANCE if field in {"open", "high", "low", "close"} else _CROSS_UNIT_TOLERANCE,
+            }
+            for field, stat in sorted(totals.items())
+        }
+        if mismatches:
+            result["status"] = "rejected"
+            result["issues"].extend(mismatches[:100])
+        else:
+            result["status"] = "verified"
+        return result
+
+    @staticmethod
     def _broad_sessions(frame: pd.DataFrame, expected_symbols: int) -> list[str]:
         if frame.empty or "date" not in frame or "symbol" not in frame:
             return []
@@ -854,7 +1140,14 @@ class StockDBIngestService:
             frame = self.store.load_frame(reusable)
             adjustment = self.store.load_frame(reusable, "stock_adjustment_factors")
             boards = self.store.load_json(reusable, "boards")
-            if not frame.empty and boards and len(reusable.session_dates) >= history_sessions:
+            evidence = reusable.coverage.get("cross_source_validation")
+            if (
+                not frame.empty
+                and boards
+                and len(reusable.session_dates) >= history_sessions
+                and isinstance(evidence, dict)
+                and evidence.get("status") == "verified"
+            ):
                 progress(55, "复用本地摄取", reusable.ingest_id)
                 return reusable, self._research_prices(frame, adjustment), boards, True
 
@@ -965,6 +1258,19 @@ class StockDBIngestService:
             source=self.source.name,
             validation=coverage.get("consistency") or {},
         )
+        cross_validation = self._cross_source_validation(frame)
+        coverage["cross_source_validation"] = cross_validation
+        coverage["acceptance"] = {
+            "formal_allowed": (
+                cross_validation.get("status") == "verified" and not calendar_issues
+            ),
+            "preview_allowed": True,
+            "reason": (
+                ""
+                if cross_validation.get("status") == "verified" and not calendar_issues
+                else "整批独立抽检或交易日历证据尚未完成，结果仅可预览"
+            ),
+        }
         if catalog_issue:
             coverage.setdefault("issues_non_blocking", []).append(catalog_issue)
         adjustment = pd.DataFrame(columns=["symbol", "date", "adj_factor"])
@@ -998,6 +1304,12 @@ class StockDBIngestService:
             artifact_id=artifact.artifact_id,
         )
         coverage["catalog"] = catalog_snapshot.coverage
+        cross_status = str(cross_validation.get("status") or "locally_validated")
+        acceptance_issues = [*calendar_issues]
+        if cross_status != "verified":
+            acceptance_issues.append(
+                "StockDB 整批独立抽检未通过正式资格：" + cross_status
+            )
         snapshot = self.store.publish(
             frame=frame,
             adjustment=adjustment,
@@ -1028,9 +1340,18 @@ class StockDBIngestService:
             catalog_snapshot=catalog_snapshot,
             session_dates=session_dates,
             session_source=session_source,
-            status="degraded" if calendar_issues else "complete",
-            issues=calendar_issues,
+            status=(
+                "quarantined" if cross_status == "rejected"
+                else "degraded" if acceptance_issues else "complete"
+            ),
+            issues=acceptance_issues,
         )
+        if cross_status == "rejected":
+            raise StockDBIngestRejected(
+                ["StockDB 整批抽检发现严重跨源不一致，已隔离该代次"],
+                coverage,
+                as_of_date,
+            )
         return snapshot, self._research_prices(frame, adjustment), boards, False
 
     @staticmethod

@@ -24,6 +24,7 @@ from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
 from quantmaster.data.migration import MigrationError, migration_manager
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.security import (
     attach_csrf_cookie,
     is_local_request,
@@ -44,6 +45,60 @@ settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
 logger = logging.getLogger(__name__)
+
+
+def _require_runtime_worker() -> dict[str, Any]:
+    """Refuse a command when the supervisor-owned worker lease is absent."""
+
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    status = runtime_worker_status()
+    if status.get("available"):
+        return status
+    raise OperationProblem(
+        503,
+        make_problem(
+            "worker_unavailable",
+            severity="warning",
+            source="后台 runtime-worker",
+            title="后台执行器不可用",
+            message=str(status.get("reason") or "后台执行器未运行"),
+            action="页面仍可读取本地快照；请重启 QuantMaster 后再提交刷新任务。",
+            blocking=True,
+            can_continue=True,
+        ),
+    )
+
+
+def _data_refresh_worker_command(operation: str, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Forward a mutation to the worker instead of writing its ledger in Web."""
+
+    from quantmaster.runtime.worker_ipc import (
+        WorkerCommandError,
+        WorkerCommandUnavailable,
+        call_worker_command,
+    )
+
+    worker = _require_runtime_worker()
+    try:
+        return worker, call_worker_command(operation, payload)
+    except WorkerCommandUnavailable as exc:
+        raise OperationProblem(
+            503,
+            make_problem(
+                "worker_unavailable",
+                severity="warning",
+                source="后台 runtime-worker",
+                title="后台执行器不可用",
+                message=str(exc),
+                action="页面仍可读取本地快照；请重启 QuantMaster 后再提交刷新任务。",
+                blocking=True,
+                can_continue=True,
+            ),
+        ) from exc
+    except WorkerCommandError as exc:
+        status = 404 if exc.code == "job_not_found" else 409 if exc.code == "command_conflict" else 400
+        raise HTTPException(status, str(exc)) from None
 
 
 def _public_error(status_code: int, detail: str, context: str) -> HTTPException:
@@ -87,14 +142,14 @@ def capture_runtime_baseline() -> None:
 
 
 def _runtime_status() -> dict[str, Any]:
-    from quantmaster.automation.runtime import get_runtime
-    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.lab.worker import get_worker
+    from quantmaster.runtime.worker import runtime_worker_status
 
     cfg = get_config()
     configured = {"host": cfg.server.host, "port": cfg.server.port}
     running = _running_server or configured
     restart = [f"server.{name}" for name in ("host", "port") if running.get(name) != configured.get(name)]
+    worker = runtime_worker_status()
+    managed_state = "running" if worker.get("available") else "unavailable"
     return {
         "config_revision": settings_manager.public().get("config_revision", ""),
         "server": {
@@ -103,9 +158,24 @@ def _runtime_status() -> dict[str, Any]:
             "configured": configured,
             "restart_required": restart,
         },
-        "automation": get_runtime().status(),
-        "free_stockdb": free_stockdb_runtime.status(),
-        "lab": get_worker().status(),
+        # This is a page/read endpoint.  Do not instantiate AutomationRuntime,
+        # LabWorker, or the StockDB sidecar just to ask for their status: those
+        # constructors own schemas, leases and threads.  The supervisor lease
+        # is the published status projection; detailed live diagnostics remain
+        # worker-owned and are refreshed asynchronously.
+        "worker": worker,
+        "automation": {
+            "status": "disabled" if not cfg.automation.enabled else managed_state,
+            "managed_by": "runtime-worker",
+        },
+        "free_stockdb": {
+            "status": managed_state,
+            "managed_by": "runtime-worker",
+        },
+        "lab": {
+            "status": "disabled" if not cfg.lab.enabled else managed_state,
+            "managed_by": "runtime-worker",
+        },
     }
 
 
@@ -241,36 +311,16 @@ def free_stockdb_status(request: Request) -> dict:
 
 @router.get("/data-sources/free-stockdb/audit")
 def free_stockdb_audit(request: Request) -> dict[str, Any]:
+    """Project published StockDB evidence; never probe from a page GET."""
+
     _require_local(request)
     from collections import Counter
 
+    from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
     from quantmaster.data.free_stockdb_experimental import StockDBExperimentalOnline
     from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.data.free_stockdb_source import FreeStockDBSource
-
-    source = FreeStockDBSource()
-    issues: list[str] = []
-    probe: dict[str, Any] = {}
-    boards: list[dict[str, Any]] = []
-    catalog: list[dict[str, Any]] = []
-    delisted: list[dict[str, Any]] = []
-    try:
-        probe = source.probe()
-    except (OSError, RuntimeError, TypeError, ValueError):
-        logger.warning("FreeStockDB 连接探测失败", exc_info=True)
-        issues.append("连接探测失败；详细信息已写入本机日志")
-    if probe:
-        for label, reader, target in (
-            ("板块目录", source.board_hierarchy, boards),
-            ("证券目录", source.security_catalog, catalog),
-            ("退市目录", source.delisted_catalog, delisted),
-        ):
-            try:
-                target.extend(reader())
-            except (OSError, RuntimeError, TypeError, ValueError):
-                logger.warning("FreeStockDB %s读取失败", label, exc_info=True)
-                issues.append(f"{label}不可用；详细信息已写入本机日志")
+    from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
     root = Path(get_config().data.free_stockdb_root).expanduser().resolve()
     mounts = (
         [
@@ -281,17 +331,47 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
         if root.is_dir()
         else []
     )
-    levels = Counter(str(item.get("level") or "OTHER") for item in boards)
-    ingests = StockDBIngestStore().history(1)
+    store = StockDBIngestStore()
+    ingests = store.history(1)
+    latest_ingest = ingests[0] if ingests else None
+    catalog: list[dict[str, Any]] = []
+    boards: list[dict[str, Any]] = []
+    delisted: list[dict[str, Any]] = []
+    if latest_ingest is not None:
+        # A damaged artifact remains a local degraded result.  A diagnostic
+        # page may not fall through to a live provider to replace it.
+        try:
+            raw_catalog = store.load_json(latest_ingest, "catalog")
+            raw_boards = store.load_json(latest_ingest, "boards")
+            raw_delisted = store.load_json(latest_ingest, "delisted")
+            catalog = raw_catalog if isinstance(raw_catalog, list) else []
+            boards = raw_boards if isinstance(raw_boards, list) else []
+            delisted = raw_delisted if isinstance(raw_delisted, list) else []
+        except (OSError, TypeError, ValueError):
+            pass
     runtime = free_stockdb_runtime.status()
-    artifact = source.artifact_identity(
+    artifact = StockDBArtifactIdentity.discover(
+        resolve_free_stockdb_sdk_path(),
+        root,
         data_session=str(runtime.get("validated_session") or ""),
     )
-    compatibility_artifact_id = source.artifact_identity().artifact_id
     from quantmaster.data.free_stockdb_compatibility import StockDBCompatibilityStore
 
-    compatibility = StockDBCompatibilityStore().get(compatibility_artifact_id)
-    latest_ingest = ingests[0] if ingests else None
+    compatibility = StockDBCompatibilityStore(read_only=True).get(artifact.artifact_id)
+    levels = Counter(str(item.get("level") or "OTHER") for item in boards)
+    issues: list[str] = []
+    if latest_ingest is None:
+        issues.append("尚无已发布的本地 StockDB 摄取快照；请提交刷新任务")
+    elif not (catalog or boards):
+        issues.append("已发布摄取的目录产物不可读；保留旧快照并等待后台重建")
+    if latest_ingest is not None and latest_ingest.status != "complete":
+        issues.extend(str(issue) for issue in latest_ingest.issues)
+    probe = {
+        "status": "not_run_in_request",
+        "cached": False,
+        "message": "页面读取不会连接或探测 StockDB；请查看后台运行时验收状态",
+    }
+    local_state = "locally_validated" if latest_ingest is not None else "unavailable"
 
     def capability(
         state: str,
@@ -302,8 +382,8 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
     ) -> dict[str, Any]:
         return {
             "state": state,
-            "installed": bool(source.sdk_path),
-            "connected": bool(probe),
+            "installed": bool(artifact.sdk.get("available")),
+            "connected": False,
             "data_ready": bool(latest_ingest),
             "verified": verified,
             "asset_classes": assets,
@@ -314,22 +394,22 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
 
     capabilities = {
         "daily_bars": capability(
-            "unverified" if probe else "unavailable",
+            local_state,
             ["stock", "etf"],
             ["1d"],
         ),
         "daily_cross_section": capability(
-            "unverified" if probe else "unavailable",
+            local_state,
             ["stock", "etf"],
             ["1d"],
         ),
         "intraday_bars": capability(
-            "unverified" if probe else "unavailable",
+            local_state,
             ["stock", "etf"],
             ["1m", "5m", "15m", "30m", "60m"],
         ),
         "eod_snapshot": capability(
-            "unverified" if probe else "unavailable",
+            local_state,
             ["stock", "etf"],
             ["1d"],
         ),
@@ -339,17 +419,17 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
             ["tick"],
         ),
         "security_catalog": capability(
-            "unverified" if catalog else "unavailable",
+            local_state if catalog else "unavailable",
             ["stock", "etf", "fund"],
             ["snapshot"],
         ),
         "board_hierarchy": capability(
-            "unverified" if boards else "unavailable",
+            local_state if boards else "unavailable",
             ["stock"],
             ["snapshot"],
         ),
         "etf_shares": capability(
-            "semantic_lag_disclosed" if probe else "unavailable",
+            "semantic_lag_disclosed" if latest_ingest else "unavailable",
             ["etf"],
             ["1d"],
         ),
@@ -360,7 +440,7 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
                 else "partially_verified"
                 if compatibility and compatibility.status == "partial"
                 else "unverified"
-                if probe
+                if latest_ingest
                 else "unavailable"
             ),
             ["stock", "etf"],
@@ -369,7 +449,7 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
         ),
     }
     return {
-        "status": "degraded" if probe else "unavailable",
+        "status": "degraded" if latest_ingest else "unavailable",
         "upstream": "vendor-declared-unverified",
         "upstream_evidence": "not_provided",
         "distribution": "free-stockdb",
@@ -378,7 +458,7 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
         "probe": probe,
         "artifact": artifact.to_dict(),
         "compatibility": compatibility.to_dict() if compatibility else None,
-        "compatibility_artifact_id": compatibility_artifact_id,
+        "compatibility_artifact_id": artifact.artifact_id,
         "native_acceleration_enabled": get_config().data.free_stockdb_native_acceleration_enabled,
         "capabilities": capabilities,
         "catalog": {"securities": len(catalog), "delisted_records": len(delisted)},
@@ -466,7 +546,7 @@ def free_stockdb_vendor_notice(request: Request) -> dict:
     _require_local(request)
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
 
-    return free_stockdb_runtime.check_vendor_notice()
+    return free_stockdb_runtime.cached_vendor_notice()
 
 
 @router.post("/settings/free-stockdb/update")
@@ -674,90 +754,43 @@ class DataRefreshRequest(ContractModel):
     start: str = Field(default="", max_length=10)
 
 
+def _data_job_envelope(value: dict[str, Any], worker: dict[str, Any]) -> dict[str, Any]:
+    """Return a newly submitted data refresh in the unified task shape."""
+
+    result = dict(value)
+    job_id = str(result.get("id") or "")
+    result.update({
+        "domain": "data",
+        "type": "data.refresh",
+        "worker": worker,
+        "links": {
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+            "cancel": f"/api/v1/jobs/{job_id}/cancel",
+            "retry": f"/api/v1/jobs/{job_id}/retry",
+        },
+    })
+    return result
+
+
 @router.post("/data/refresh/preview")
 def preview_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
     _require_csrf(request)
-    from quantmaster.data.maintenance import data_refresh_manager
+    _worker, result = _data_refresh_worker_command(
+        "data.refresh.preview",
+        {"scope": value.scope, "universe": value.universe, "start": value.start},
+    )
+    return result
 
-    try:
-        return data_refresh_manager.preview(value.scope, value.universe, value.start)
-    except (ValueError, RuntimeError, FileNotFoundError) as exc:
-        raise HTTPException(400, str(exc)) from None
 
-
-@router.post("/data/refresh")
+@router.post("/data/refresh", status_code=202)
 def create_data_refresh(request: Request, value: DataRefreshRequest) -> dict:
     _require_csrf(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    try:
-        return data_refresh_manager.create(value.scope, value.universe, value.start)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from None
-    except (RuntimeError, FileNotFoundError) as exc:
-        raise HTTPException(400, str(exc)) from None
-
-
-@router.get("/data/refresh/latest")
-def latest_data_refresh(request: Request) -> dict:
-    _require_local(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    return {"job": data_refresh_manager.latest()}
-
-
-@router.get("/data/refresh/{job_id}")
-def get_data_refresh(job_id: str, request: Request) -> dict:
-    _require_local(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    try:
-        return data_refresh_manager.get(job_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
-
-
-@router.get("/data/refresh/{job_id}/events")
-def get_data_refresh_events(
-    job_id: str,
-    request: Request,
-    after: int = 0,
-    limit: int = 500,
-) -> dict:
-    _require_local(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    try:
-        data_refresh_manager.get(job_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
-    return {"items": data_refresh_manager.events(job_id, after, limit)}
-
-
-@router.post("/data/refresh/{job_id}/cancel")
-def cancel_data_refresh(job_id: str, request: Request) -> dict:
-    _require_csrf(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    try:
-        return data_refresh_manager.cancel(job_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from None
-
-
-@router.post("/data/refresh/{job_id}/resume")
-def resume_data_refresh(job_id: str, request: Request) -> dict:
-    _require_csrf(request)
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    try:
-        return data_refresh_manager.resume(job_id)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from None
+    worker, result = _data_refresh_worker_command(
+        "data.refresh.create",
+        {"scope": value.scope, "universe": value.universe, "start": value.start},
+    )
+    return _data_job_envelope(result, worker)
 
 
 class UniverseBody(ContractModel):
@@ -819,7 +852,7 @@ def _fixed_universe_metadata(item: dict) -> dict:
 def _universe_members(symbols: list[str]) -> list[dict[str, Any]]:
     from quantmaster.data.instruments import InstrumentStore
 
-    store = InstrumentStore()
+    store = InstrumentStore(read_only=True)
     result = []
     for symbol in symbols:
         instrument = store.get(symbol)
@@ -842,12 +875,11 @@ def instrument_search(
     request: Request,
     q: str = "",
     limit: int = 20,
-    online: bool = True,
 ) -> dict:
     _require_local(request)
     from quantmaster.data.instruments import search_instruments
 
-    return {"query": q, "items": search_instruments(q, limit=limit, online=online)}
+    return {"query": q, "items": search_instruments(q, limit=limit, read_only=True)}
 
 
 @router.post("/market/instruments/resolve")
@@ -855,7 +887,9 @@ def instrument_resolve(request: Request, value: InstrumentResolveBody) -> dict:
     _require_csrf(request)
     from quantmaster.data.instruments import resolve_instruments
 
-    return resolve_instruments(value.queries, selections=value.selections)
+    return resolve_instruments(
+        value.queries, selections=value.selections, read_only=True,
+    )
 
 
 def _rewrite_universe_references(old_name: str, new_name: str) -> tuple[list[str], dict | None]:
@@ -1002,12 +1036,12 @@ def preview_universe(request: Request, value: UniversePreview) -> dict:
 @router.post("/settings/universes/names/refresh")
 def refresh_universe_names(request: Request, value: UniverseNameRefresh) -> dict:
     _require_csrf(request)
-    from quantmaster.data.names import load_stock_names
+    from quantmaster.data.names import refresh_stock_names_if_needed
     from quantmaster.data.universe import normalize_symbols
 
     try:
         symbols = normalize_symbols(value.symbols)
-        names = load_stock_names(symbols, refresh=True)
+        names = refresh_stock_names_if_needed(symbols)
         return {
             "names": names,
             "missing": [symbol for symbol in symbols if symbol not in names],

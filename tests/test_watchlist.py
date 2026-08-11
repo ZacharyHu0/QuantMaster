@@ -76,7 +76,7 @@ def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
         provenance=({"source": "fixture"},),
     )
     monkeypatch.setattr(
-        "quantmaster.data.load_history", lambda *args, **kwargs: market_envelope,
+        "quantmaster.data.refresh_history", lambda *args, **kwargs: market_envelope,
     )
     monkeypatch.setattr(app_module, "_market_groups", dict)
 
@@ -96,8 +96,8 @@ def test_personal_market_replaces_code_only_labels_with_security_names(monkeypat
 
     AssetListStore().add("favorites", "600519", "600519.SH")
     monkeypatch.setattr(
-        "quantmaster.data.load_stock_names",
-        lambda symbols: {"600519.SH": "贵州茅台"},
+        "quantmaster.data.read_stock_names",
+        lambda symbols, **_kwargs: {"600519.SH": "贵州茅台"},
     )
 
     symbols, memberships = app_module._personal_market_symbols()

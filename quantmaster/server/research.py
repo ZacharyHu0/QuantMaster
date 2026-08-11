@@ -3,20 +3,86 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 
+from quantmaster.config import get_config
 from quantmaster.research import AssetClass, KernelBackend
+from quantmaster.research.catalog import ResearchCatalog
 from quantmaster.research.engine import ResearchEngine
-from quantmaster.research.jobs import get_research_job_manager
+from quantmaster.research.jobs import ResearchJobManager, get_research_job_manager
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf, _require_local
 from quantmaster.trading_sessions import market_date, resolve_session_target
 
 router = APIRouter(prefix="/api/v1/research/data", tags=["research-data"])
+
+
+def _read_catalog() -> ResearchCatalog:
+    """Open published research metadata without starting a job manager.
+
+    A page read must never create the directory, migrate a schema, recover a
+    lease or start job threads.  The writer owns all of those actions.
+    """
+
+    path = get_config().data_root / "research_lake" / "_meta" / "catalog.sqlite"
+    if not path.is_file():
+        raise OperationProblem(
+            503,
+            make_problem(
+                "snapshot_unavailable",
+                severity="warning",
+                source="研究数据快照",
+                title="研究快照尚未发布",
+                message="本地研究目录尚无可读取的已发布快照。",
+                action="请提交研究构建任务；页面不会在读取时联网或初始化数据。",
+                blocking=True,
+                can_continue=False,
+            ),
+        )
+    return ResearchCatalog(path, read_only=True)
+
+
+def _read_engine() -> ResearchEngine:
+    # Validate the catalog path before construction so a cold start becomes a
+    # structured 503 instead of an implicit SQLite initialization attempt.
+    _read_catalog()
+    return ResearchEngine(read_only=True)
+
+
+def _cold_catalog() -> dict:
+    """Expose static planning metadata when no research snapshot exists.
+
+    Dataset/spec definitions are code contracts, not derived market results;
+    exposing them lets the page render an explicit cold state and submit a
+    build without creating a catalog or fabricating coverage rows.
+    """
+
+    from quantmaster.research.adapters import DATASET_BY_ID
+    from quantmaster.research.registry import built_in_registry
+
+    return {
+        "datasets": [item.to_dict() for item in DATASET_BY_ID.values()],
+        "specs": built_in_registry().catalog(),
+        "partitions": [],
+        "meta": {
+            "snapshot_id": "",
+            "schema_version": 2,
+            "algorithm_version": "research-catalog-v2",
+            "input_fingerprint": "",
+            "as_of": "",
+            "generated_at": "",
+            "stale": True,
+            "cold": True,
+            "stale_reasons": ["研究目录尚未发布"],
+            "quality": {"status": "cold"},
+        },
+    }
 
 
 def _default_close_data_end() -> str:
@@ -62,13 +128,21 @@ class ResearchPreviewRequest(ContractModel):
 @router.get("/catalog")
 def research_catalog(request: Request) -> dict:
     _require_local(request)
-    return ResearchEngine().catalog()
+    try:
+        return _read_engine().catalog()
+    except OperationProblem:
+        return _cold_catalog()
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "研究快照暂不可读") from exc
 
 
 @router.get("/capabilities")
 def research_capabilities(request: Request) -> dict:
     _require_local(request)
-    return ResearchEngine().capabilities()
+    try:
+        return _read_engine().capabilities()
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "研究快照暂不可读") from exc
 
 
 @router.post("/preview")
@@ -118,20 +192,30 @@ def create_research_job(request: Request, value: ResearchPlanRequest) -> dict:
 @router.get("/jobs")
 def list_research_jobs(request: Request, limit: int = 50) -> dict:
     _require_local(request)
-    manager = get_research_job_manager()
-    return {
-        "items": [manager.public(item) for item in manager.list(max(1, min(limit, 200)))]
-    }
+    try:
+        catalog = _read_catalog()
+        return {
+            "items": [
+                ResearchJobManager.public(item)
+                for item in catalog.jobs(max(1, min(limit, 200)))
+            ]
+        }
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "研究任务快照暂不可读") from exc
 
 
 @router.get("/jobs/{job_id}")
 def get_research_job(job_id: str, request: Request) -> dict:
     _require_local(request)
     try:
-        manager = get_research_job_manager()
-        return manager.public(manager.get(job_id))
+        value = _read_catalog().job(job_id)
+        if value is None:
+            raise KeyError(job_id)
+        return ResearchJobManager.public(value)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "研究任务快照暂不可读") from exc
 
 
 @router.get("/jobs/{job_id}/events")
@@ -142,12 +226,15 @@ def get_research_job_events(
     limit: int = 500,
 ) -> dict:
     _require_local(request)
-    manager = get_research_job_manager()
     try:
-        manager.get(job_id)
+        catalog = _read_catalog()
+        if catalog.job(job_id) is None:
+            raise KeyError(job_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
-    return {"items": manager.catalog.job_events(job_id, after, limit)}
+    except sqlite3.Error as exc:
+        raise HTTPException(503, "研究任务快照暂不可读") from exc
+    return {"items": catalog.job_events(job_id, after, limit)}
 
 
 @router.post("/jobs/{job_id}/cancel")

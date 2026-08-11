@@ -66,26 +66,46 @@ def connect_sqlite(
     policy: SQLitePolicy = "authoritative",
     timeout: float = 30.0,
     row_factory: bool = False,
+    read_only: bool = False,
 ) -> sqlite3.Connection:
-    """Open a configured connection without racing WAL initialization."""
+    """Open a configured connection without racing WAL initialization.
+
+    ``read_only`` is deliberately a real SQLite read-only connection, rather
+    than merely a convention.  Web snapshot readers use it to guarantee that
+    a missing database, a schema migration, or WAL setup can never turn a GET
+    into a write or a long lock wait.
+    """
     destination = Path(path).expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    if read_only:
+        if not destination.is_file():
+            raise FileNotFoundError(destination)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
     from quantmaster.runtime.maintenance import MaintenanceActiveError, maintenance_barrier
 
     if maintenance_barrier.frozen and not destination.exists():
         raise MaintenanceActiveError("维护期间不能创建新的 SQLite 数据库")
     key = _database_key(destination)
-    connection = sqlite3.connect(
-        destination, timeout=timeout, factory=_ManagedConnection,
-    )
+    if read_only:
+        uri = f"{destination.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(
+            uri, uri=True, timeout=timeout, factory=_ManagedConnection,
+        )
+    else:
+        connection = sqlite3.connect(
+            destination, timeout=timeout, factory=_ManagedConnection,
+        )
     try:
         connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout * 1000))}")
         connection.execute("PRAGMA foreign_keys=ON")
-        _enable_wal(connection, key)
-        connection.execute(
-            "PRAGMA synchronous=FULL" if policy == "authoritative"
-            else "PRAGMA synchronous=NORMAL"
-        )
+        if read_only:
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            _enable_wal(connection, key)
+            connection.execute(
+                "PRAGMA synchronous=FULL" if policy == "authoritative"
+                else "PRAGMA synchronous=NORMAL"
+            )
         if row_factory:
             connection.row_factory = sqlite3.Row
         if maintenance_barrier.frozen:
@@ -128,10 +148,16 @@ def migrate_schema(
     """Apply ordered migrations transactionally using ``PRAGMA user_version``."""
     current = int(connection.execute("PRAGMA user_version").fetchone()[0])
     for version, migrate in sorted(migrations, key=lambda item: item[0]):
-        if version <= current:
-            continue
         connection.execute("BEGIN IMMEDIATE")
         try:
+            # Read the version *after* the writer lock is held.  Reading it
+            # before BEGIN IMMEDIATE lets two first-use constructors both see
+            # version zero; the loser would then run CREATE TABLE after the
+            # winner committed and report a spurious "already exists" error.
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version <= current:
+                connection.rollback()
+                continue
             migrate(connection)
             connection.execute(f"PRAGMA user_version={int(version)}")
             connection.commit()

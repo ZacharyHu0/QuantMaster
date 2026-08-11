@@ -55,7 +55,7 @@ def _usable_market_data(envelope, *, label: str):
 
 
 def _load_panel(universe: str, start: str, end: str):
-    from quantmaster.data import load_panel
+    from quantmaster.data import refresh_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
 
     universe_snapshot = load_universe_analysis_snapshot(universe)
@@ -67,7 +67,7 @@ def _load_panel(universe: str, start: str, end: str):
         )
     print(f"加载 {len(symbols)} 只标的 {start} ~ {end} …", file=sys.stderr)
     return _usable_market_data(
-        load_panel(symbols, start, end), label=f"{universe} 面板",
+        refresh_panel(symbols, start, end), label=f"{universe} 面板",
     )
 
 
@@ -270,7 +270,7 @@ def cmd_lab(args) -> None:
 
 
 def cmd_fetch(args) -> None:
-    from quantmaster.data import load_bars
+    from quantmaster.data import refresh_bars
     from quantmaster.data.universe import load_universe_analysis
 
     symbols = load_universe_analysis(args.universe)
@@ -279,7 +279,7 @@ def cmd_fetch(args) -> None:
     for symbol in symbols:
         try:
             df = _usable_market_data(
-                load_bars(
+                refresh_bars(
                     symbol, args.start, end, frequency=args.frequency,
                     use_cache=not args.force,
                 ),
@@ -326,9 +326,9 @@ def cmd_regime(args) -> None:
 
 
 def cmd_select(args) -> None:
-    from quantmaster.data import load_panel
+    from quantmaster.data import refresh_panel
     from quantmaster.data.industry import load_industry_analysis_context
-    from quantmaster.data.names import load_stock_names
+    from quantmaster.data.names import read_stock_names
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
@@ -342,13 +342,13 @@ def cmd_select(args) -> None:
     universe_snapshot = load_universe_analysis_snapshot(
         args.universe, as_of=end if args.end else None,
     )
-    market_envelope = load_panel(list(universe_snapshot.symbols), args.start, end)
+    market_envelope = refresh_panel(list(universe_snapshot.symbols), args.start, end)
     panel = _usable_market_data(market_envelope, label=f"{args.universe} 面板")
     mapping, industry_evidence = (
         ({}, None) if args.no_industry
         else load_industry_analysis_context(as_of=end if args.end else None)
     )
-    names = load_stock_names(list(panel["close"].columns))
+    names = read_stock_names(list(panel["close"].columns))
     decision_feature_inputs: dict[str, pd.DataFrame] = {}
     report = hybrid_daily_selection(
         panel,
@@ -729,7 +729,7 @@ def cmd_backtest(args) -> None:
         run_backtest,
         yearly_returns,
     )
-    from quantmaster.data import load_history
+    from quantmaster.data import refresh_history
     from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors.fundamental import resolve_factor
 
@@ -762,7 +762,7 @@ def cmd_backtest(args) -> None:
     benchmark = None
     try:
         benchmark = _usable_market_data(
-            load_history(args.benchmark, args.start, end), label=args.benchmark,
+            refresh_history(args.benchmark, args.start, end), label=args.benchmark,
         )["close"]
     except Exception as e:
         print(f"基准 {args.benchmark} 加载失败: {e}", file=sys.stderr)
@@ -799,14 +799,14 @@ def cmd_validate(args) -> None:
 
 def cmd_grid(args) -> None:
     from quantmaster.backtest import grid_search
-    from quantmaster.data import load_history
+    from quantmaster.data import refresh_history
 
     end = args.end or _close_day()
     panel = _load_panel(args.universe, args.start, end)
     benchmark = None
     try:
         benchmark = _usable_market_data(
-            load_history(args.benchmark, args.start, end), label=args.benchmark,
+            refresh_history(args.benchmark, args.start, end), label=args.benchmark,
         )["close"]
     except Exception:
         pass
@@ -823,7 +823,7 @@ def cmd_grid(args) -> None:
 
 def cmd_fund_test(args) -> None:
     """基本面因子体检（需要网络拉取估值/财务数据，结果会缓存）。"""
-    from quantmaster.data import load_panel
+    from quantmaster.data import refresh_panel
     from quantmaster.data.fundamentals import fundamental_panel
     from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors import analyze_factor, compute_factor, make_fundamental_factors
@@ -831,7 +831,7 @@ def cmd_fund_test(args) -> None:
     end = args.end or _close_day()
     symbols = load_universe_analysis(args.universe)
     panel = _usable_market_data(
-        load_panel(symbols, args.start, end), label=f"{args.universe} 面板",
+        refresh_panel(symbols, args.start, end), label=f"{args.universe} 面板",
     )
     fund = fundamental_panel(symbols, args.start, end)
     factors = make_fundamental_factors(fund)
@@ -946,7 +946,7 @@ def cmd_daily(args) -> None:
     from quantmaster.ai.crawler import AICrawler
     from quantmaster.backtest.paper_accounts import get_paper_service
     from quantmaster.backtest.spec import PaperAccountSpec
-    from quantmaster.data import load_history, load_panel, load_stock_names
+    from quantmaster.data import read_stock_names, refresh_history, refresh_panel
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
@@ -960,7 +960,7 @@ def cmd_daily(args) -> None:
     for symbol in [*symbols, args.benchmark]:
         try:
             _usable_market_data(
-                load_history(symbol, args.start, end), label=symbol,
+                refresh_history(symbol, args.start, end), label=symbol,
             )
             ok += 1
         except Exception as e:
@@ -975,7 +975,7 @@ def cmd_daily(args) -> None:
         print(f"  快讯抓取失败（不影响后续）: {e}", file=sys.stderr)
 
     print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
-    market_envelope = load_panel(symbols, args.start, end)
+    market_envelope = refresh_panel(symbols, args.start, end)
     panel = _usable_market_data(market_envelope, label=f"{args.universe} 面板")
     industry_map, industry_evidence = load_industry_analysis_context()
     decision_feature_inputs: dict[str, pd.DataFrame] = {}
@@ -986,7 +986,7 @@ def cmd_daily(args) -> None:
         profile=args.profile,
         universe=args.universe,
         industry_map=industry_map,
-        name_map=load_stock_names(symbols),
+        name_map=read_stock_names(symbols),
         evidence_sink=decision_feature_inputs,
     )
     selection["calculation_quality"] = selection.get("data_quality")
@@ -1096,7 +1096,7 @@ def cmd_ledger(args) -> None:
     if args.ledger_cmd == "nav":
         import pandas as pd
 
-        from quantmaster.data import load_history
+        from quantmaster.data import refresh_history
         from quantmaster.data.storage import BarStore
         from quantmaster.portfolio import daily_nav, nav_warnings, nav_with_benchmark
 
@@ -1112,7 +1112,7 @@ def cmd_ledger(args) -> None:
         for symbol in symbols:
             try:
                 prices[symbol] = _usable_market_data(
-                    load_history(symbol, start, end, store=store), label=symbol,
+                    refresh_history(symbol, start, end, store=store), label=symbol,
                 )["close"]
             except Exception as e:
                 print(f"  {symbol} 行情缺失（按最近成交价估值）: {e}", file=sys.stderr)
@@ -1127,7 +1127,7 @@ def cmd_ledger(args) -> None:
         }
         try:
             bench = _usable_market_data(
-                load_history(args.benchmark, start, end, store=store),
+                refresh_history(args.benchmark, start, end, store=store),
                 label=args.benchmark,
             )["close"]
             summary["benchmark"] = args.benchmark

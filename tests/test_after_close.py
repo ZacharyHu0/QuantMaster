@@ -316,7 +316,7 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     from quantmaster.server.app import app
 
     snapshot = service.scan()
-    monkeypatch.setattr(routes, "get_after_close_service", lambda: service)
+    monkeypatch.setattr(routes, "get_after_close_service", lambda **_kwargs: service)
     client = TestClient(app)
 
     latest = client.get("/api/v1/after-close/snapshots/latest")
@@ -364,7 +364,7 @@ def test_after_close_cli_contract_supports_csv_export() -> None:
     assert score.score_version_cmd == "status"
 
 
-def test_after_close_submit_only_coalesces_active_jobs() -> None:
+def test_after_close_submit_uses_versioned_singleflight_key(monkeypatch) -> None:
     from quantmaster.after_close.jobs import TASK_TYPE, AfterCloseJobs
 
     class _Runtime:
@@ -380,30 +380,45 @@ def test_after_close_submit_only_coalesces_active_jobs() -> None:
             ]
             self.submissions = []
 
-        def register(self, *_args) -> None:
+        def register(self, *_args, **_kwargs) -> None:
             return None
 
-        def list(self, _limit, *, job_type=""):
-            return [item for item in self.items if item["type"] == job_type]
-
         def submit(self, job_type, spec, **options):
+            for item in self.items:
+                if (
+                    item["type"] == job_type
+                    and item["status"] in {"queued", "running", "cancelling", "interrupted"}
+                    and item["spec"] == spec
+                    and item.get("input_fingerprint") == options.get("input_fingerprint")
+                    and item.get("algorithm_version") == options.get("algorithm_version")
+                ):
+                    return item, False
             self.submissions.append((job_type, spec, options))
             created = {
                 "id": f"new-{len(self.submissions)}",
                 "type": job_type,
                 "status": "queued",
                 "spec": spec,
+                "input_fingerprint": options.get("input_fingerprint"),
+                "algorithm_version": options.get("algorithm_version"),
             }
             self.items.insert(0, created)
             return created, True
 
     runtime = _Runtime()
     jobs = AfterCloseJobs(runtime)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        AfterCloseJobs,
+        "input_fingerprint",
+        staticmethod(lambda **_kwargs: ("after-close-generation-v1", "score-v1")),
+    )
 
     replacement, created = jobs.submit()
     assert created is True
     assert replacement["id"] == "new-1"
-    assert runtime.submissions[0][2]["idempotency_key"] == ""
+    assert runtime.submissions[0][2]["input_fingerprint"] == "after-close-generation-v1"
+    assert runtime.submissions[0][2]["algorithm_version"] == "score-v1"
+    assert runtime.submissions[0][2]["max_attempts"] == 2
 
     duplicate, duplicate_created = jobs.submit()
     assert duplicate_created is False

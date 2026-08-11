@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from quantmaster.ai.crawler import AICrawler, NewsStore
+from quantmaster.ai.news_contracts import BUILTIN_SOURCES
+from quantmaster.ai.news_jobs import get_news_jobs
 from quantmaster.ai.news_sources import NewsSourceStore
 from quantmaster.credentials import CredentialError
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter(prefix="/api/v1/news")
@@ -125,10 +130,100 @@ def _epoch(value: str | None, *, end: bool = False) -> float | None:
     return parsed.timestamp()
 
 
+def _local_snapshot(callable_):
+    """Run a news page read without turning an absent/locked cache into writes.
+
+    Read-only stores intentionally open SQLite with ``mode=ro`` and a 250 ms
+    lock budget.  A cold install or a writer that owns the database is therefore
+    a recoverable resource state, not a reason to initialise or migrate from a
+    page request.
+    """
+    try:
+        return callable_()
+    except (FileNotFoundError, sqlite3.OperationalError) as exc:
+        raise OperationProblem(
+            503,
+            make_problem(
+                "snapshot_unavailable",
+                severity="warning",
+                source="资讯快照",
+                title="资讯本地快照暂不可用",
+                message="尚未发布可读取的资讯快照，或写入任务暂时占用数据库。",
+                action="可稍后重试；如为首次启动，请在后台完成一次资讯采集。",
+                blocking=False,
+                can_continue=True,
+                resource="news",
+            ),
+        ) from exc
+
+
+def _cold_builtin_sources() -> list[dict[str, Any]]:
+    """Expose the immutable bundled source catalog on a first-run GET.
+
+    This is configuration metadata, not a fabricated news snapshot.  It lets
+    the page render a clear cold state without creating ``news.sqlite`` from a
+    reader process; the first submitted crawl or explicit source edit remains
+    responsible for initialising the writable store.
+    """
+
+    factor_source_ids = {
+        "csrc", "sse", "szse", "pboc", "nbs_release", "nbs_interpretation", "ndrc",
+    }
+    return [
+        {
+            **dict(item),
+            "enabled": bool(item.get("enabled", True)),
+            "built_in": True,
+            "needs_credentials": bool(item.get("needs_credentials", False)),
+            "factor_eligible": str(item.get("id") or "") in factor_source_ids,
+            "health": "cold",
+            "watermark": "",
+            "pending_watermark": "",
+            "last_status": "",
+            "last_success_at": "",
+            "last_error": "",
+            "auth_configured": False,
+            "parser": {},
+        }
+        for item in BUILTIN_SOURCES
+    ]
+
+
+def _snapshot_etag(
+    request: Request, response: Response, payload: dict[str, Any], parameters: dict[str, Any],
+) -> dict[str, Any] | Response:
+    """Set a stable conditional-read token for a published read model."""
+
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    snapshot_id = str(meta.get("snapshot_id") or "") if isinstance(meta, dict) else ""
+    if not snapshot_id:
+        return payload
+    canonical = strict_json_dumps(parameters, sort_keys=True)
+    etag = '"' + hashlib.sha256(
+        f"{snapshot_id}\n{canonical}".encode("utf-8"),
+    ).hexdigest() + '"'
+    response.headers["ETag"] = etag
+    requested = str(request.headers.get("if-none-match") or "")
+    if requested == "*" or etag in {value.strip() for value in requested.split(",")}:
+        return Response(status_code=304, headers={"ETag": etag})
+    return payload
+
+
 @router.get("/sources")
 def sources_list(request: Request) -> dict:
     _require_local(request)
-    return {"items": NewsSourceStore().list(), "groups": ["fast", "official", "periodic"]}
+    try:
+        items = NewsSourceStore(read_only=True).list()
+        cold = False
+    except (FileNotFoundError, sqlite3.OperationalError):
+        items = _cold_builtin_sources()
+        cold = True
+    return {
+        "items": items,
+        "groups": ["fast", "official", "periodic"],
+        "cold": cold,
+        "stale_reasons": ["尚未建立本地资讯来源状态"] if cold else [],
+    }
 
 
 @router.post("/sources")
@@ -191,29 +286,37 @@ def source_test(source_id: str, request: Request) -> dict:
         raise _error(exc) from exc
 
 
-@router.post("/sources/{source_id}/run")
+@router.post("/sources/{source_id}/run", status_code=202)
 def source_run(source_id: str, request: Request, skip_llm: bool = False) -> dict:
     _require_csrf(request)
     try:
         if NewsSourceStore().get(source_id) is None:
             raise KeyError("资讯来源不存在")
-        return AICrawler().run(sources=[source_id], skip_llm=skip_llm)
+        return _submit_crawl(
+            CrawlRequest(sources=[source_id], limit=30, skip_llm=skip_llm),
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
 
-@router.get("/stats")
-def news_stats(request: Request, days: int = 30) -> dict:
+@router.get("/stats", response_model=None)
+def news_stats(request: Request, response: Response, days: int = 30) -> dict | Response:
     _require_local(request)
-    return NewsStore().stats(days=max(1, min(days, 3650)))
+    value = _local_snapshot(
+        lambda: NewsStore(read_only=True).stats(days=max(1, min(days, 3650))),
+    )
+    return _snapshot_etag(request, response, value, {"days": max(1, min(days, 3650))})
 
 
-@router.get("/event-focus")
-def news_event_focus(request: Request, days: int = 7) -> dict:
+@router.get("/event-focus", response_model=None)
+def news_event_focus(
+    request: Request, response: Response, days: int = 7,
+) -> dict | Response:
     _require_local(request)
     if days not in {1, 3, 7, 30}:
         raise HTTPException(422, "事件聚焦窗口仅支持 1、3、7、30 日")
-    return NewsStore().event_focus(days)
+    value = _local_snapshot(lambda: NewsStore(read_only=True).event_focus(days))
+    return _snapshot_etag(request, response, value, {"days": days})
 
 
 @router.get("")
@@ -224,23 +327,38 @@ def news_query(
     date_to: str = "", sort: Literal["recent", "importance"] = "recent",
 ) -> dict:
     _require_local(request)
-    return NewsStore().query(
+    return _local_snapshot(lambda: NewsStore(read_only=True).query(
         limit=limit, cursor=cursor, q=q, source=source, group_name=group,
         event_type=event_type, sentiment=sentiment, scope=scope, symbol=symbol,
         status=status, date_from=_epoch(date_from), date_to=_epoch(date_to, end=True), sort=sort,
+    ))
+
+
+def _submit_crawl(value: CrawlRequest) -> dict[str, Any]:
+    """Submit remote work; never run a crawler in an ASGI request."""
+
+    jobs = get_news_jobs()
+    job, created = jobs.submit(
+        sources=value.sources,
+        group=value.group,
+        limit=value.limit,
+        skip_llm=value.skip_llm,
     )
+    public = jobs.public(job)
+    public["created"] = bool(created)
+    public["coalesced"] = bool(job.get("coalesced"))
+    return public
 
 
-@router.post("/crawl")
+@router.post("/crawl", status_code=202)
 def news_crawl(request: Request, value: CrawlRequest | None = None,
                skip_llm: bool | None = None) -> dict:
     _require_csrf(request)
     try:
         value = value or CrawlRequest()
-        return AICrawler().run(
-            sources=value.sources, group=value.group, limit=value.limit,
-            skip_llm=value.skip_llm if skip_llm is None else skip_llm,
-        )
+        if skip_llm is not None:
+            value = value.model_copy(update={"skip_llm": skip_llm})
+        return _submit_crawl(value)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -312,7 +430,7 @@ def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> Streamin
 @router.get("/{item_id}")
 def news_detail(item_id: int, request: Request) -> dict:
     _require_local(request)
-    item = NewsStore().detail(item_id)
+    item = _local_snapshot(lambda: NewsStore(read_only=True).detail(item_id))
     if item is None:
         raise HTTPException(404, "资讯不存在")
     return item

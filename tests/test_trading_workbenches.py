@@ -237,6 +237,7 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
 
     service = type("Service", (), {"store": Store()})()
     monkeypatch.setattr(trading, "_service", lambda: service)
+    monkeypatch.setattr(trading, "_read_backtests", lambda: service.store)
 
     response = TestClient(app).get("/api/v1/backtests/export-strict/export")
 
@@ -433,7 +434,7 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
         provenance=({"source": "fixture"},),
     )
     monkeypatch.setattr(
-        "quantmaster.data.load_panel", lambda *_args, **_kwargs: recent_envelope,
+        "quantmaster.data.refresh_panel", lambda *_args, **_kwargs: recent_envelope,
     )
     changed_strategy = same_strategy.model_copy(update={"top_n": 2})
     changed = service.update_account(account["id"], strategy=changed_strategy)
@@ -1334,6 +1335,7 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     strategy = _ROUTE_STRATEGY
     backtest_service = _RouteBacktestService()
     monkeypatch.setattr(trading, "_service", lambda: backtest_service)
+    monkeypatch.setattr(trading, "_read_backtests", lambda: backtest_service.store)
     worker = _RouteBacktestWorker()
     monkeypatch.setattr(trading, "get_backtest_worker", lambda: worker)
     request = object()
@@ -1391,7 +1393,8 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     assert queued_export.value.status_code == 409
 
     paper_service = _RoutePaperService()
-    monkeypatch.setattr(trading, "get_paper_service", lambda: paper_service)
+    monkeypatch.setattr(trading, "get_paper_service", lambda **_kwargs: paper_service)
+    monkeypatch.setattr(trading, "_read_paper_service", lambda: paper_service)
     paper_spec = PaperAccountSpec.model_validate(
         {
             "name": "auto route",

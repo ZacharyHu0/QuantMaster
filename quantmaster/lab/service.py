@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
@@ -25,7 +24,6 @@ from quantmaster.lab.dataset import (
     dataset_repair_plan,
     load_csi800_membership,
     load_local_dataset,
-    readiness,
 )
 from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import DataPolicy, FactorSpec
@@ -143,25 +141,18 @@ def _ledger_weight_context(
 
 
 class LabService:
-    def __init__(self, store: LabStore | None = None):
-        self.store = store or LabStore()
-        self.store.sync_catalog(curated_catalog())
+    def __init__(self, store: LabStore | None = None, *, read_only: bool = False):
+        self.store = store or LabStore(read_only=read_only)
+        # Catalog seeding is a runtime-worker startup responsibility.  A
+        # read-only HTTP service deliberately observes the last published
+        # ledger as-is and never opens a write transaction just to draw a tab.
+        if not self.store.read_only:
+            self.store.sync_catalog(curated_catalog())
 
     def capabilities(self) -> dict[str, Any]:
-        from quantmaster.lab.ml import capabilities as ml_capabilities
+        from quantmaster.lab.capabilities import read_published_capabilities
 
-        return {
-            **readiness(),
-            "models": ml_capabilities(),
-            "catalog_size": 48,
-            "safe_dsl": True,
-            "arbitrary_python": False,
-            "restricted_python": True,
-            "python_mining_enabled": bool(get_config().lab.ai_python_mining_enabled),
-            "python_mining_limits": {"llm_calls": 3, "candidates": 24, "finalists": 3},
-            "optuna": bool(importlib.util.find_spec("optuna")),
-            "research_protocol": "756/20/252",
-        }
+        return read_published_capabilities()
 
     def overview(self) -> dict[str, Any]:
         cfg = get_config().lab
@@ -178,20 +169,62 @@ class LabService:
                 "weekly_days": cfg.weekly_days,
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
             },
-            "recent_jobs": self.store.jobs(8),
-            "recent_experiments": self.store.list_experiments(6),
-            "recent_studies": self.store.studies(6),
+            "recent_jobs": self.store.jobs(8, summary=True),
+            "recent_experiments": self.store.list_experiments(6, summary=True),
+            "recent_studies": self.store.studies(6, summary=True),
         }
 
     def dashboard(self) -> dict[str, Any]:
         """One compact first-paint payload; large results stay on detail routes."""
         cfg = get_config().lab
-        admission = self.preflight("validate", {
-            "universe": cfg.universe, "start": cfg.start,
-            "end": market_date().isoformat(),
-        })
         snapshot_record = self.store.latest_snapshot(cfg.universe) or {}
         snapshot_payload = dict(snapshot_record.get("payload") or {})
+        if self.store.read_only:
+            # ``run_preflight`` inspects every local bar and persists a
+            # convenience cache.  That belongs to an explicit command or the
+            # runtime worker, not to first paint.  Reuse published evidence
+            # when present and otherwise state the honest degraded condition.
+            published_preflight = snapshot_payload.get("preflight")
+            admission = (
+                dict(published_preflight)
+                if isinstance(published_preflight, dict)
+                else {
+                    "operation": "validate",
+                    "runnable": bool(snapshot_payload.get("production_eligible")),
+                    "state": (
+                        "ready" if snapshot_payload.get("production_eligible")
+                        else "degraded" if snapshot_record else "unavailable"
+                    ),
+                    "resource_class": "cpu",
+                    "data_policy": cfg.data_policy,
+                    "blockers": ([] if snapshot_record else [{
+                        "code": "SNAPSHOT_UNAVAILABLE",
+                        "message": "没有已发布的本地研究快照",
+                        "action": "通过后台任务准备数据后重试",
+                        "context": {},
+                    }]),
+                    "warnings": ([{
+                        "code": "EVIDENCE_STALE",
+                        "message": "当前展示的是已发布快照；完整预检将在后台更新",
+                        "action": "如需正式操作，请执行显式预检或刷新任务",
+                        "context": {},
+                    }] if snapshot_record else []),
+                    "dataset": {
+                        key: snapshot_payload.get(key)
+                        for key in (
+                            "universe", "start", "end", "as_of", "state",
+                            "symbol_count", "research_quality", "production_eligible",
+                        )
+                        if key in snapshot_payload
+                    },
+                    "compute": {},
+                }
+            )
+        else:
+            admission = self.preflight("validate", {
+                "universe": cfg.universe, "start": cfg.start,
+                "end": market_date().isoformat(),
+            })
         snapshot = {
             "id": snapshot_record.get("id", ""),
             "created_at": snapshot_record.get("created_at", ""),
@@ -211,7 +244,7 @@ class LabService:
             "snapshot": snapshot,
             "jobs": self.store.jobs(12, summary=True),
             "experiments": self.store.list_experiments(8, summary=True),
-            "studies": self.store.studies(6),
+            "studies": self.store.studies(6, summary=True),
             "research": {
                 "universe": cfg.universe, "start": cfg.start,
                 "horizons": cfg.horizons, "data_policy": cfg.data_policy,
@@ -580,7 +613,7 @@ class LabService:
         self, universe: str, start: str, end: str,
         progress=None, data_policy: str | None = None,
     ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None, dict]:
-        from quantmaster.data import load_panel
+        from quantmaster.data import refresh_panel
         from quantmaster.data.universe import load_universe
 
         policy = DataPolicy(data_policy or get_config().lab.data_policy)
@@ -609,7 +642,7 @@ class LabService:
                     f"行情 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
                 )
 
-        market_envelope = load_panel(symbols, start, end, progress=on_symbol)
+        market_envelope = refresh_panel(symbols, start, end, progress=on_symbol)
         panel = market_envelope.require_data()
         snapshot = create_snapshot(
             universe,
@@ -639,7 +672,7 @@ class LabService:
         """Explicitly repair planned local gaps through one user-selected provider."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        from quantmaster.data import RefreshMode, load_history
+        from quantmaster.data import RefreshMode, refresh_history
         from quantmaster.lab.dataset import clear_local_dataset_caches
 
         del data_policy
@@ -688,10 +721,10 @@ class LabService:
         def repair(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             if cancelled and cancelled():
                 raise InterruptedError("数据补齐已取消")
-            market_envelope = load_history(
+            market_envelope = refresh_history(
                 str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
-                refresh=RefreshMode.INCREMENTAL, priority="interactive",
-                provider=selected,
+                mode=RefreshMode.INCREMENTAL, work_class="interactive",
+                source_name=selected,
             )
             market_envelope.require_data()
             return str(item["symbol"]), market_envelope.quality.to_dict()

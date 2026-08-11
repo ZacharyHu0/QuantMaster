@@ -871,6 +871,15 @@ def test_builtin_registry_groups_outputs_and_exposes_curated_48():
     assert registry.resolve("cross_momentum_20d").lookback_sessions == 20
 
 
+def test_version_pinned_news_sentiment_is_never_silently_reinterpreted():
+    registry = built_in_registry()
+
+    assert registry.resolve("news_sentiment").version == "2.0.0"
+    assert registry.resolve("news_sentiment", version="2.0.0").version == "2.0.0"
+    with pytest.raises(KeyError, match="news_sentiment@1.0.0"):
+        registry.resolve("news_sentiment", version="1.0.0")
+
+
 def test_lake_merges_versioned_wide_partitions_and_builds_tensor():
     lake = ResearchLake()
     registry = built_in_registry()

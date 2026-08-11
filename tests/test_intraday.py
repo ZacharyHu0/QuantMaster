@@ -100,11 +100,11 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     store = IntradayBarStore("5m", root=tmp_path / "intraday")
-    first = registry.load_intraday(
+    first = registry.refresh_intraday(
         "600000.SH", "2024-01-02 09:30", "2024-01-02 09:45", "5m", store=store)
-    second = registry.load_intraday(
+    second = registry.refresh_intraday(
         "600000.SH", "2024-01-02 09:30", "2024-01-02 09:45", "5m", store=store)
-    whole_day = registry.load_intraday(
+    whole_day = registry.refresh_intraday(
         "600000.SH", "2024-01-02", "2024-01-02", "5m", store=store)
     assert len(first.data) == len(second.data) == 4
     assert len(whole_day.data) == 4
@@ -136,7 +136,7 @@ def test_multisymbol_intraday_panel(monkeypatch):
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     updates = []
-    panel_envelope = registry.load_bar_panel(
+    panel_envelope = registry.refresh_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02 09:30", "2024-01-02 09:40", "5m",
         progress=lambda *args: updates.append(args),
     )
@@ -149,7 +149,7 @@ def test_multisymbol_intraday_panel(monkeypatch):
     assert {(item[2], item[3]) for item in updates} == {
         ("600000.SH", True), ("000001.SZ", True),
     }
-    close_envelope = registry.load_bar_panel(
+    close_envelope = registry.refresh_bar_panel(
         ["600000.SH", "000001.SZ"], "2024-01-02 09:30", "2024-01-02 09:40",
         "5m", field="close")
     close = close_envelope.data

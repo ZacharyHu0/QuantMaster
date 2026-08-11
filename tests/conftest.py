@@ -168,7 +168,11 @@ def isolated_config(tmp_path, request, _minimal_security_master):
     from quantmaster.rotation.etf_research import reset_etf_research_service
     from quantmaster.rotation.service import reset_rotation_runtime_for_tests
     from quantmaster.runtime.sqlite import reset_sqlite_runtime_for_tests
+    from quantmaster.runtime.supervisor import reset_worker_supervisor_for_tests
 
+    previous_supervisor = os.environ.get("QM_DISABLE_WORKER_SUPERVISOR")
+    os.environ["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
+    reset_worker_supervisor_for_tests()
     reset_data_repair_manager_for_tests()
     reset_rotation_runtime_for_tests()
     shutdown_etf_research_jobs()
@@ -187,6 +191,11 @@ def isolated_config(tmp_path, request, _minimal_security_master):
     yield cfg
     reset_data_repair_manager_for_tests()
     reset_rotation_runtime_for_tests()
+    reset_worker_supervisor_for_tests()
+    if previous_supervisor is None:
+        os.environ.pop("QM_DISABLE_WORKER_SUPERVISOR", None)
+    else:
+        os.environ["QM_DISABLE_WORKER_SUPERVISOR"] = previous_supervisor
     set_config(None)
     reset_sqlite_runtime_for_tests()
 

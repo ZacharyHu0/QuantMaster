@@ -191,17 +191,34 @@ def _validate_source_dict(value: dict[str, Any], *, creating: bool = False) -> d
 class NewsSourceStore:
     """来源配置、抓取运行记录和 HTTP 条件缓存。"""
 
-    def __init__(self, path: Path | None = None, credentials: CredentialStore | None = None):
+    def __init__(
+        self,
+        path: Path | None = None,
+        credentials: CredentialStore | None = None,
+        *,
+        read_only: bool = False,
+    ):
         self.path = path or get_config().data_root / "news.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.credentials = credentials or CredentialStore()
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A page reader must not wake the OS keyring merely to render whether a
+        # source was previously configured.  The persisted secret_state is the
+        # complete read contract for that view.
+        self.credentials = credentials if self.read_only else (credentials or CredentialStore())
         self.raw_root = self.path.parent / "news_raw"
-        self._migrate()
-        self._seed_builtins()
-        self._backfill_raw_manifest()
+        if not self.read_only:
+            self._migrate()
+            self._seed_builtins()
+            self._backfill_raw_manifest()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         with self._conn() as conn:

@@ -206,6 +206,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     from quantmaster.data.registry import RefreshMode
 
     manager = DataRefreshManager()
+    manager.initialize()
     symbols = ["600000.SH", "000001.SZ"]
     monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: symbols)
     monkeypatch.setattr(manager, "_start", lambda job_id: None)
@@ -231,7 +232,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
             provenance=({"source": "fixture"},),
         )
 
-    monkeypatch.setattr("quantmaster.data.maintenance.load_history", fake_load)
+    monkeypatch.setattr("quantmaster.data.maintenance.refresh_history", fake_load)
     job = manager.create("market")
     assert job["status"] == "queued"
     assert manager.latest()["id"] == job["id"]
@@ -240,8 +241,8 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     completed = manager.get(job["id"])
     assert completed["status"] == "completed"
     assert [item[0] for item in calls] == symbols
-    assert all(item[3]["refresh"] == RefreshMode.INCREMENTAL for item in calls)
-    assert all(item[3]["priority"] == "maintenance" for item in calls)
+    assert all(item[3]["mode"] == RefreshMode.INCREMENTAL for item in calls)
+    assert all(item[3]["work_class"] == "maintenance" for item in calls)
 
     # 已结束任务中的失败项续跑时只重排失败标的，不重复成功标的。
     with manager._conn() as conn:
@@ -267,7 +268,11 @@ def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, t
 
     manager = DataRefreshManager()
     isolated_config.data.root = str(tmp_path / "switched")
+    # Web/status construction is inert after a root change; only the
+    # runtime-worker startup path is allowed to publish the task schema.
     assert manager.latest() is None
+    assert not (isolated_config.data_root / "data_refresh.sqlite").exists()
+    manager.initialize()
     assert (isolated_config.data_root / "data_refresh.sqlite").exists()
 
 
@@ -276,6 +281,8 @@ def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, mo
 
     first = DataRefreshManager()
     second = DataRefreshManager()
+    first.initialize()
+    second.initialize()
     monkeypatch.setattr(first, "_resolve_symbols", lambda *args: ["600000.SH"])
     monkeypatch.setattr(first, "_start", lambda job_id: None)
     job = first.create("market")
@@ -286,13 +293,11 @@ def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, mo
         )
 
     second._initialized_roots.clear()
-    with second._conn():
-        pass
+    second.initialize()
     assert second.get(job["id"])["status"] == "running"
 
     with first._conn() as conn:
         conn.execute("UPDATE refresh_jobs SET lease_expires=0 WHERE id=?", (job["id"],))
     second._initialized_roots.clear()
-    with second._conn():
-        pass
+    second.initialize()
     assert second.get(job["id"])["status"] == "interrupted"

@@ -131,6 +131,36 @@ _REQUEST_PRIORITY: ContextVar[int] = ContextVar(
     "quantmaster_data_priority", default=_PRIORITIES["normal"])
 _BYPASS_ENDPOINT_CACHE: ContextVar[bool] = ContextVar(
     "quantmaster_bypass_endpoint_cache", default=False)
+_REMOTE_IO_ALLOWED: ContextVar[bool] = ContextVar(
+    "quantmaster_remote_io_allowed", default=True,
+)
+
+
+class LocalOnlyDataAccessError(RuntimeError):
+    """Raised when a page-read request attempts a provider operation.
+
+    A stale local snapshot is an acceptable page result; turning that snapshot
+    into a 45-second upstream wait is not.  This boundary lives below every
+    provider adapter so an accidental direct Tushare/AkShare call cannot evade
+    the registry's local-read policy.
+    """
+
+
+@contextmanager
+def local_only_data_access():
+    """Forbid provider I/O for the lifetime of a Web read request."""
+
+    token = _REMOTE_IO_ALLOWED.set(False)
+    try:
+        yield
+    finally:
+        _REMOTE_IO_ALLOWED.reset(token)
+
+
+def remote_io_allowed() -> bool:
+    """Whether the current execution context may contact a data provider."""
+
+    return _REMOTE_IO_ALLOWED.get()
 
 
 @contextmanager
@@ -160,6 +190,7 @@ def endpoint_cache_bypassed() -> bool:
 class _ScheduledCall:
     priority: int
     sequence: int
+    lane: str = field(compare=False)
     key: str = field(compare=False)
     func: Callable[[], Any] = field(compare=False)
     future: Future = field(compare=False)
@@ -178,71 +209,120 @@ class _ScheduledCall:
 
 
 class ProviderScheduler:
-    """按真实上游隔离并发，同时让前台请求优先于批量研究。"""
+    """Use fixed provider-family pools with one global network budget.
 
-    DEFAULT_WORKERS: ClassVar[dict[str, int]] = {
-        "akshare:eastmoney": 1,
-        "akshare:eastmoney-concept": 1,
-        "akshare:eastmoney-reference": 1,
-        "akshare:eastmoney-spot": 1,
-        "akshare:sina": 1,
-        "akshare:sina-reference": 1,
-        "akshare:bond-reference": 1,
-        "akshare:csindex": 1,
-        "akshare:other": 1,
-        "yahoo": 1,
-        "tushare": 4,
-        "tushare:fx-reference": 1,
-        "ths:concept": 1,
-        "free-stockdb": 16,
-        "free-stockdb-online": 1,
+    A provider library can ignore Python-level timeouts (notably while stuck
+    in a socket read).  We cannot safely kill that library thread in-process,
+    so the scheduler puts a hard ceiling around the damage.  Crucially, lanes
+    are accounting labels, not executor identities: creating a new endpoint
+    must not create another permanent thread.  Production uses exactly eight
+    worker threads across Tushare (2), other external market providers (2),
+    and local StockDB access (4).
+    """
+
+    MAX_NETWORK_CONCURRENCY: ClassVar[int] = 8
+    MAX_CALL_SECONDS: ClassVar[float] = 30.0
+
+    FAMILY_WORKERS: ClassVar[dict[str, int]] = {
+        "tushare": 2,
+        "external": 2,
+        "stockdb": 4,
     }
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._queues: dict[str, queue.PriorityQueue] = {}
+        self._lanes: set[str] = set()
+        self._active_lanes: set[str] = set()
         self._inflight: dict[tuple[str, str], _ScheduledCall] = {}
         self._timeout_counts: dict[str, int] = {}
         self._sequence = count()
+        self._network_slots = threading.BoundedSemaphore(self.MAX_NETWORK_CONCURRENCY)
+        self._active_network = 0
 
-    def _ensure_lane(self, lane: str) -> queue.PriorityQueue:
+    @staticmethod
+    def _family(lane: str) -> str:
+        value = str(lane).casefold()
+        if value.startswith("tushare"):
+            return "tushare"
+        if value.startswith(("free-stockdb", "stockdb")):
+            return "stockdb"
+        # AkShare, THS and Yahoo are all external/interruptible sources.  A
+        # conservative shared two-call pool keeps a newly added source from
+        # bypassing the external provider budget.
+        return "external"
+
+    def _ensure_family(self, family: str) -> queue.PriorityQueue:
         with self._lock:
-            existing = self._queues.get(lane)
+            existing = self._queues.get(family)
             if existing is not None:
                 return existing
             work: queue.PriorityQueue = queue.PriorityQueue()
-            self._queues[lane] = work
-            workers = self.DEFAULT_WORKERS.get(lane, 2)
+            self._queues[family] = work
+            workers = self.FAMILY_WORKERS[family]
             for index in range(workers):
                 threading.Thread(
                     target=self._worker,
-                    args=(lane, work),
-                    name=f"data-{lane.replace(':', '-')}-{index + 1}",
+                    args=(family, work),
+                    name=f"data-provider-{family}-{index + 1}",
                     daemon=True,
                 ).start()
             return work
 
-    def _worker(self, lane: str, work: queue.PriorityQueue) -> None:
+    def _worker(self, family: str, work: queue.PriorityQueue) -> None:
         while True:
             item: _ScheduledCall = work.get()
+            owns_lane = False
+            rescheduled = False
             try:
+                if item.expired.is_set() or time.monotonic() >= item.deadline:
+                    item.future.set_exception(self._expire(item.lane, item))
+                    continue
+                # A lane is a concrete upstream resource and therefore gets
+                # at most one in-flight call.  The family workers remain
+                # shared: a duplicate lane yields back to the priority queue
+                # instead of holding an external-provider thread hostage.
+                with self._lock:
+                    if item.lane in self._active_lanes:
+                        item.sequence = next(self._sequence)
+                        work.put(item)
+                        rescheduled = True
+                    else:
+                        self._active_lanes.add(item.lane)
+                        owns_lane = True
+                if rescheduled:
+                    time.sleep(0.001)
+                    continue
                 if not item.future.set_running_or_notify_cancel():
                     continue
-                if item.expired.is_set() or time.monotonic() >= item.deadline:
-                    item.future.set_exception(self._expire(lane, item))
+                remaining = item.deadline - time.monotonic()
+                if remaining <= 0 or not self._network_slots.acquire(timeout=remaining):
+                    item.future.set_exception(self._expire(item.lane, item))
                     continue
+                with self._lock:
+                    self._active_network += 1
                 try:
-                    result = item.func()
-                    if item.expired.is_set() or time.monotonic() >= item.deadline:
-                        item.future.set_exception(self._expire(lane, item))
-                    else:
-                        item.future.set_result(result)
-                except BaseException as exc:
-                    item.future.set_exception(exc)
+                    try:
+                        if item.expired.is_set() or time.monotonic() >= item.deadline:
+                            item.future.set_exception(self._expire(item.lane, item))
+                            continue
+                        result = item.func()
+                        if item.expired.is_set() or time.monotonic() >= item.deadline:
+                            item.future.set_exception(self._expire(item.lane, item))
+                        else:
+                            item.future.set_result(result)
+                    except BaseException as exc:
+                        item.future.set_exception(exc)
+                finally:
+                    with self._lock:
+                        self._active_network -= 1
+                    self._network_slots.release()
             finally:
                 with self._lock:
-                    if self._inflight.get((lane, item.key)) is item:
-                        self._inflight.pop((lane, item.key), None)
+                    if owns_lane:
+                        self._active_lanes.discard(item.lane)
+                    if not rescheduled and self._inflight.get((item.lane, item.key)) is item:
+                        self._inflight.pop((item.lane, item.key), None)
                 work.task_done()
 
     def _expire(self, lane: str, item: _ScheduledCall) -> ProviderTimeoutError:
@@ -255,15 +335,17 @@ class ProviderScheduler:
     def call(
         self, lane: str, key: str, func: Callable[[], T], *, timeout: float | None = None,
     ) -> T:
-        timeout_seconds = min(300.0, max(0.01, float(
+        timeout_seconds = min(self.MAX_CALL_SECONDS, max(0.01, float(
             get_config().data.provider_timeout if timeout is None else timeout
         )))
-        work = self._ensure_lane(lane)
+        lane = str(lane)
+        work = self._ensure_family(self._family(lane))
         with self._lock:
+            self._lanes.add(lane)
             item = self._inflight.get((lane, key))
             if item is None:
                 item = _ScheduledCall(
-                    _REQUEST_PRIORITY.get(), next(self._sequence), key, func, Future(),
+                    _REQUEST_PRIORITY.get(), next(self._sequence), lane, key, func, Future(),
                     time.monotonic() + timeout_seconds, timeout_seconds,
                 )
                 self._inflight[(lane, key)] = item
@@ -284,8 +366,9 @@ class ProviderScheduler:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            lanes = sorted(set(self._queues) | set(self._timeout_counts))
+            lanes = sorted(self._lanes | set(self._timeout_counts))
             inflight = list(self._inflight.items())
+            active_network = self._active_network
             lane_status = {}
             for lane in lanes:
                 items = [item for (item_lane, _key), item in inflight if item_lane == lane]
@@ -297,6 +380,9 @@ class ProviderScheduler:
                 }
         return {
             "timeout_seconds": float(get_config().data.provider_timeout),
+            "hard_timeout_seconds": self.MAX_CALL_SECONDS,
+            "network_concurrency_limit": self.MAX_NETWORK_CONCURRENCY,
+            "network_active": active_network,
             "timeout_count": sum(item["timeout_count"] for item in lane_status.values()),
             "lanes": lane_status,
         }
@@ -613,6 +699,10 @@ def provider_call[T](
     empty_opens: bool = False,
 ) -> T:
     """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
+    if not remote_io_allowed():
+        raise LocalOnlyDataAccessError(
+            f"页面读取禁止访问上游数据源: {lane}；请读取本地快照或提交刷新任务"
+        )
     PROVIDER_HEALTH.check_available(lane, probe=probe)
 
     def scheduled() -> T:

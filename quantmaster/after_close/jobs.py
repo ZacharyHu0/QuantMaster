@@ -3,11 +3,13 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from quantmaster.after_close.models import SCORE_VERSION
 from quantmaster.after_close.service import get_after_close_service
+from quantmaster.after_close.store import AfterCloseStore
 from quantmaster.automation.runtime import get_runtime
 from quantmaster.config import get_config
+from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.jobs import (
-    ACTIVE_STATUSES,
     JobContext,
     JobOutcome,
     UnifiedJobRuntime,
@@ -18,41 +20,98 @@ from quantmaster.trading_sessions import market_date
 TASK_TYPE = "after_close.scan"
 
 
+def run_after_close_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+    """Pure, spawn-safe handler for the heavy after-close calculation.
+
+    The callable intentionally reconstructs its service in the compute child.
+    The parent ``UnifiedJobRuntime`` keeps the lease and commits the terminal
+    state, while this function can only use the fenced context for progress and
+    immutable artifacts.
+    """
+
+    try:
+        snapshot = get_after_close_service().scan(
+            as_of=str(spec.get("as_of") or ""),
+            force=bool(spec.get("force")),
+            progress=context.progress,
+            cancelled=context.cancelled,
+        )
+    except InterruptedError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        AfterCloseJobs._notify_failure(context.job_id, exc)
+        raise
+    artifact = context.write_artifact(
+        "after_close.snapshot",
+        snapshot.to_dict(),
+        {
+            "schema_version": snapshot.schema_version,
+            "lineage": {
+                "snapshot_id": snapshot.snapshot_id,
+                "input_hash": snapshot.input_hash,
+                "score_version": snapshot.score_version,
+            },
+        },
+    )
+    AfterCloseJobs._notify_success(context.job_id, snapshot)
+    return JobOutcome("completed", "盘后研究快照已发布", artifact["id"])
+
+
 class AfterCloseJobs:
     def __init__(self, runtime: UnifiedJobRuntime | None = None):
         self.runtime = runtime or UnifiedJobRuntime(
             UnifiedJobStore(get_config().data_root / "jobs.sqlite"), max_workers=1,
         )
-        self._submit_lock = threading.Lock()
-        self.runtime.register(TASK_TYPE, self._handle)
+        self.runtime.register(
+            TASK_TYPE,
+            self._handle,
+            process_entrypoint="quantmaster.after_close.jobs:run_after_close_job",
+        )
 
     def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+        return run_after_close_job(context, spec)
+
+    @staticmethod
+    def input_fingerprint(*, as_of: str, force: bool) -> tuple[str, str]:
+        """Use catalog generations before admitting a costly after-close scan."""
+
+        if force:
+            # A deliberate force/rebuild request is maintenance work; it must
+            # not be silently satisfied from a previous normal artifact.
+            try:
+                return "", AfterCloseStore().active_score_version()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return "", SCORE_VERSION
         try:
-            snapshot = get_after_close_service().scan(
-                as_of=str(spec.get("as_of") or ""),
-                force=bool(spec.get("force")),
-                progress=context.progress,
-                cancelled=context.cancelled,
+            catalog = DerivedArtifactCatalog()
+            generations = [
+                *catalog.source_generations("stockdb.ingest.stock"),
+                *catalog.source_generations("instrument_catalog"),
+                *catalog.source_generations("index_membership.csi800"),
+            ]
+            if not generations:
+                return "", AfterCloseStore().active_score_version()
+            cfg = get_config().data
+            score_version = AfterCloseStore().active_score_version()
+            target = str(as_of or market_date().isoformat())
+            return (
+                catalog.input_fingerprint(
+                    schema_version=2,
+                    algorithm_version=score_version,
+                    parameters={
+                        "task": TASK_TYPE,
+                        "as_of": target,
+                        "include_bj": bool(cfg.after_close_include_bj),
+                        "min_listing_sessions": int(cfg.after_close_min_listing_sessions),
+                        "min_avg_amount": float(cfg.after_close_min_avg_amount),
+                        "candidate_limit": int(cfg.after_close_candidate_limit),
+                    },
+                    source_generations=generations,
+                ),
+                score_version,
             )
-        except InterruptedError:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            self._notify_failure(context.job_id, exc)
-            raise
-        artifact = context.write_artifact(
-            "after_close.snapshot",
-            snapshot.to_dict(),
-            {
-                "schema_version": snapshot.schema_version,
-                "lineage": {
-                    "snapshot_id": snapshot.snapshot_id,
-                    "input_hash": snapshot.input_hash,
-                    "score_version": snapshot.score_version,
-                },
-            },
-        )
-        self._notify_success(context.job_id, snapshot)
-        return JobOutcome("completed", "盘后研究快照已发布", artifact["id"])
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return "", SCORE_VERSION
 
     @staticmethod
     def _notify_success(job_id: str, snapshot) -> None:
@@ -104,21 +163,15 @@ class AfterCloseJobs:
 
     def submit(self, *, as_of: str = "", force: bool = False) -> tuple[dict, bool]:
         spec = {"as_of": as_of, "force": bool(force)}
-        # 只合并仍在执行的同规格扫描。持久幂等键会永久绑定首个任务，导致
-        # 当天一次失败后，页面后续点击始终取回旧失败任务，甚至跨交易日也
-        # 无法创建新扫描。盘后快照自身已有输入哈希保证结果不可变，因此任务
-        # 层只需要防止并发重复提交，终态任务必须允许重新运行。
-        with self._submit_lock:
-            for existing in self.runtime.store.list(1000, job_type=TASK_TYPE):
-                if (
-                    existing.get("status") in ACTIVE_STATUSES
-                    and existing.get("spec") == spec
-                ):
-                    return existing, False
-            return self.runtime.submit(
-                TASK_TYPE, spec, idempotency_key="",
-                deadline_seconds=3600, max_attempts=3,
-            )
+        fingerprint, score_version = self.input_fingerprint(as_of=as_of, force=force)
+        return self.runtime.submit(
+            TASK_TYPE,
+            spec,
+            input_fingerprint=fingerprint,
+            algorithm_version=score_version,
+            deadline_seconds=3600,
+            max_attempts=2,
+        )
 
     def list(self, limit: int = 50) -> list[dict]:
         return self.runtime.store.list(limit, job_type=TASK_TYPE)

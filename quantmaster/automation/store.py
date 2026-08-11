@@ -49,14 +49,24 @@ _LEGACY_NEWS_SCHEDULES_V6 = {
 
 
 class AutomationStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "automation.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._migrate()
-        self.ensure_defaults()
+        self.read_only = bool(read_only)
+        # The automation page is a reader of the worker-owned ledger.  Do not
+        # seed defaults or run migrations just because a Web generation opens
+        # its overview tab.
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._migrate()
+            self.ensure_defaults()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         def schema_v6(conn: sqlite3.Connection) -> None:

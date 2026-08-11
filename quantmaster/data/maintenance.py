@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from quantmaster.config import get_config
-from quantmaster.data.registry import RefreshMode, load_history
+from quantmaster.data.registry import RefreshMode, refresh_history
 from quantmaster.data.storage import BarStore
 from quantmaster.runtime.jobs import WorkerIdentity, lease_deadline
 from quantmaster.runtime.sqlite import connect_sqlite
@@ -63,27 +64,52 @@ class DataRefreshManager:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._threads: dict[str, threading.Thread] = {}
+        self._dispatcher: threading.Thread | None = None
         self._initialized_roots: set[str] = set()
         self.identity = WorkerIdentity.create("data-refresh")
         self._stop = threading.Event()
         self._accepting = True
-        self._migrate()
+
+    @staticmethod
+    def _owns_runtime() -> bool:
+        """Only the supervisor/non-reload process may execute refresh jobs."""
+
+        return os.environ.get("QM_WEB_PROCESS") != "1"
 
     @staticmethod
     def _path() -> Path:
         return get_config().data_root / "data_refresh.sqlite"
 
     def _conn(self) -> sqlite3.Connection:
+        """Open a worker/write connection without implicitly migrating it."""
+
+        return connect_sqlite(self._path())
+
+    def _read_conn(self) -> sqlite3.Connection:
+        """Open a bounded, genuinely read-only Web/status connection."""
+
+        return connect_sqlite(
+            self._path(), timeout=0.25, row_factory=True, read_only=True,
+        )
+
+    def initialize(self) -> None:
+        """Create or migrate the refresh ledger in the runtime-worker only.
+
+        Importing this module is intentionally inert.  A reloadable Web child
+        may import the manager for status reads, but it must never create a
+        SQLite file, run DDL, or recover leases merely because a page opened.
+        """
+
         path = self._path()
-        conn = connect_sqlite(path)
-        # data.root 可以热切换；每次连接都保证新目录具备任务表。
-        conn.execute(self._SCHEMA)
-        conn.execute(self._FAILURE_SCHEMA)
-        conn.execute(self._EVENT_SCHEMA)
         root_key = str(path.resolve())
         with self._lock:
-            first_for_root = root_key not in self._initialized_roots
-            if first_for_root:
+            with self._conn() as conn:
+                conn.execute(self._SCHEMA)
+                conn.execute(self._FAILURE_SCHEMA)
+                conn.execute(self._EVENT_SCHEMA)
+                first_for_root = root_key not in self._initialized_roots
+                if not first_for_root:
+                    return
                 columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(refresh_jobs)").fetchall()
                 }
@@ -121,11 +147,27 @@ class DataRefreshManager:
                 )
                 conn.commit()
                 self._initialized_roots.add(root_key)
-        return conn
 
     def _migrate(self) -> None:
-        with self._conn():
-            pass
+        """Backward-compatible explicit migration entrypoint for workers/tests."""
+
+        self.initialize()
+
+    def _require_published_schema(self) -> None:
+        """Fail fast instead of creating a task ledger from a Web request."""
+
+        path = self._path()
+        if not path.is_file():
+            raise RuntimeError("后台刷新账本尚未初始化")
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='refresh_jobs'",
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.Error) as exc:
+            raise RuntimeError("后台刷新账本暂不可读") from exc
+        if row is None:
+            raise RuntimeError("后台刷新账本尚未初始化")
 
     @staticmethod
     def _resolve_symbols(scope: RefreshScope, universe: str, start: str, end: str) -> list[str]:
@@ -190,36 +232,51 @@ class DataRefreshManager:
         self, scope: RefreshScope, universe: str = "", start: str = "",
     ) -> dict:
         preview, symbols = self._plan(scope, universe, start)
+        self._require_published_schema()
+        coalesced_id = ""
+        job_id = ""
         with self._lock, self._conn() as conn:
             if not self._accepting:
                 raise RuntimeError("行情刷新执行器正在停止，暂不接受新任务")
             conn.execute("BEGIN IMMEDIATE")
             active = conn.execute(
-                "SELECT id FROM refresh_jobs "
-                "WHERE status IN ('queued','running','cancelling') LIMIT 1"
+                "SELECT id FROM refresh_jobs WHERE scope=? AND universe_name=? "
+                "AND start_date=? AND end_date=? "
+                "AND status IN ('queued','running','cancelling') LIMIT 1",
+                (scope, universe, preview["start"], preview["end"]),
             ).fetchone()
             if active:
-                raise ValueError(f"已有行情刷新任务正在运行：{active[0]}")
-            job_id = uuid.uuid4().hex
-            now = time.time()
-            conn.execute(
-                "INSERT INTO refresh_jobs "
-                "(id,status,scope,universe_name,start_date,end_date,symbols_json,"
-                "original_symbols_json,total,created_at,updated_at) "
-                "VALUES (?,'queued',?,?,?,?,?,?,?,?,?)",
-                (job_id, scope, universe, preview["start"], preview["end"],
-                 json.dumps(symbols, ensure_ascii=False), json.dumps(symbols, ensure_ascii=False),
-                 len(symbols), now, now),
-            )
-            conn.execute(
-                "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, 1, json.dumps({"type": "queued"}), now),
-            )
-        self._start(job_id)
-        return self.get(job_id)
+                coalesced_id = str(active[0])
+            else:
+                job_id = uuid.uuid4().hex
+                now = time.time()
+                conn.execute(
+                    "INSERT INTO refresh_jobs "
+                    "(id,status,scope,universe_name,start_date,end_date,symbols_json,"
+                    "original_symbols_json,total,created_at,updated_at) "
+                    "VALUES (?,'queued',?,?,?,?,?,?,?,?,?)",
+                    (job_id, scope, universe, preview["start"], preview["end"],
+                     json.dumps(symbols, ensure_ascii=False), json.dumps(symbols, ensure_ascii=False),
+                     len(symbols), now, now),
+                )
+                conn.execute(
+                    "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
+                    "VALUES (?,?,?,?)",
+                    (job_id, 1, json.dumps({"type": "queued"}), now),
+                )
+        if coalesced_id:
+            result = self.get(coalesced_id)
+            result.update(created=False, coalesced=True)
+            return result
+        if self._owns_runtime():
+            self._start(job_id)
+        result = self.get(job_id)
+        result.update(created=True, coalesced=False)
+        return result
 
     def _start(self, job_id: str) -> None:
+        if not self._owns_runtime():
+            return
         with self._lock:
             current = self._threads.get(job_id)
             if current and current.is_alive():
@@ -228,6 +285,22 @@ class DataRefreshManager:
                 target=self._run, args=(job_id,), name=f"data-refresh-{job_id[:8]}", daemon=True)
             self._threads[job_id] = thread
             thread.start()
+
+    @staticmethod
+    def _publish_market_snapshot() -> None:
+        """Advance the immutable market projection after a refresh commits.
+
+        This runs only in the runtime-worker execution path.  A publication
+        failure is deliberately non-destructive: the preceding current
+        snapshot stays readable and the completed refresh remains auditable.
+        """
+
+        try:
+            from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
+
+            publish_market_overview_snapshot()
+        except (OSError, RuntimeError, ValueError, TypeError):
+            logger.warning("数据刷新后发布市场快照失败", exc_info=True)
 
     def _run(self, job_id: str) -> None:
         now = time.time()
@@ -357,6 +430,7 @@ class DataRefreshManager:
                             "failed": int(failed),
                         }), time.time()),
                     )
+                self._publish_market_snapshot()
                 return
 
             symbol = str(symbols[index])
@@ -372,9 +446,9 @@ class DataRefreshManager:
                 return
             error = ""
             try:
-                market_envelope = load_history(
-                    symbol, start, end, store=store, refresh=RefreshMode.INCREMENTAL,
-                    priority="maintenance",
+                market_envelope = refresh_history(
+                    symbol, start, end, store=store, mode=RefreshMode.INCREMENTAL,
+                    work_class="maintenance",
                 )
                 market_envelope.require_data()
                 if market_envelope.quality.status != "verified":
@@ -407,23 +481,25 @@ class DataRefreshManager:
                 return
 
     def get(self, job_id: str) -> dict:
-        with self._conn() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM refresh_jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            raise KeyError(job_id)
-        item = dict(row)
-        item.pop("symbols_json", None)
-        item.pop("original_symbols_json", None)
-        item.pop("owner", None)
-        item.pop("lease_expires", None)
-        legacy_failures = json.loads(item.pop("failures_json", "[]"))
-        with self._conn() as conn:
-            failures = conn.execute(
-                "SELECT symbol,error FROM refresh_failures WHERE job_id=? AND attempt=? "
-                "ORDER BY id DESC LIMIT 200", (job_id, int(item["attempt"])),
-            ).fetchall()
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM refresh_jobs WHERE id=?", (job_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(job_id)
+                item = dict(row)
+                item.pop("symbols_json", None)
+                item.pop("original_symbols_json", None)
+                item.pop("owner", None)
+                item.pop("lease_expires", None)
+                legacy_failures = json.loads(item.pop("failures_json", "[]"))
+                failures = conn.execute(
+                    "SELECT symbol,error FROM refresh_failures WHERE job_id=? AND attempt=? "
+                    "ORDER BY id DESC LIMIT 200", (job_id, int(item["attempt"])),
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError) as exc:
+            raise KeyError(job_id) from exc
         item["failures"] = [
             {"symbol": row[0], "error": row[1]} for row in reversed(failures)
         ] or legacy_failures[-200:]
@@ -432,30 +508,40 @@ class DataRefreshManager:
         return item
 
     def latest(self) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return None
         return self.get(str(row[0])) if row else None
 
     def list(self, limit: int = 50) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(int(limit), 200)),),
-            ).fetchall()
+        try:
+            with self._read_conn() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT ?",
+                    (max(1, min(int(limit), 200)),),
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         return [self.get(str(row[0])) for row in rows]
 
     @property
     def active(self) -> bool:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM refresh_jobs "
-                "WHERE status IN ('queued','running','cancelling') LIMIT 1"
-            ).fetchone()
+        try:
+            with self._read_conn() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM refresh_jobs "
+                    "WHERE status IN ('queued','running','cancelling') LIMIT 1"
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return False
         return row is not None
 
     def cancel(self, job_id: str) -> dict:
+        self._require_published_schema()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -483,6 +569,7 @@ class DataRefreshManager:
         return self.get(job_id)
 
     def resume(self, job_id: str) -> dict:
+        self._require_published_schema()
         with self._lock, self._conn() as conn:
             if not self._accepting:
                 raise RuntimeError("行情刷新执行器正在停止，暂不能续跑")
@@ -540,12 +627,15 @@ class DataRefreshManager:
         return self.get(job_id)
 
     def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT seq,attempt,event_json,created_at FROM refresh_events "
-                "WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?",
-                (job_id, max(0, after), max(1, min(limit, 2000))),
-            ).fetchall()
+        try:
+            with self._read_conn() as conn:
+                rows = conn.execute(
+                    "SELECT seq,attempt,event_json,created_at FROM refresh_events "
+                    "WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?",
+                    (job_id, max(0, after), max(1, min(limit, 2000))),
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         return [{
             "seq": row[0], "attempt": row[1], "created_at": row[3],
             **json.loads(row[2]),
@@ -553,11 +643,36 @@ class DataRefreshManager:
 
     def start(self) -> None:
         with self._lock:
-            if any(thread.is_alive() for thread in self._threads.values()):
-                self._accepting = True
-                return
             self._stop.clear()
             self._accepting = True
+            if not self._owns_runtime():
+                return
+            self.initialize()
+            if self._dispatcher is not None and self._dispatcher.is_alive():
+                return
+            self._dispatcher = threading.Thread(
+                target=self._dispatch,
+                name="data-refresh-dispatcher",
+                daemon=True,
+            )
+            self._dispatcher.start()
+
+    def _dispatch(self) -> None:
+        """Claim durable queued work from the supervisor, never from a Web child."""
+
+        while not self._stop.wait(0.35):
+            try:
+                with self._conn() as conn:
+                    rows = conn.execute(
+                        "SELECT id FROM refresh_jobs WHERE status IN ('queued','interrupted') "
+                        "AND cancel_requested=0 ORDER BY created_at LIMIT 4"
+                    ).fetchall()
+                for row in rows:
+                    if self._stop.is_set():
+                        return
+                    self._start(str(row[0]))
+            except (OSError, sqlite3.Error):
+                logger.warning("行情刷新调度器读取任务失败", exc_info=True)
 
     def shutdown(self, timeout: float = 10.0) -> None:
         with self._lock:
@@ -567,6 +682,11 @@ class DataRefreshManager:
         per_thread = max(0.05, timeout / max(1, len(threads)))
         for thread in threads:
             thread.join(timeout=per_thread)
+        dispatcher = self._dispatcher
+        if dispatcher is not None:
+            dispatcher.join(timeout=min(1.0, timeout))
+        if str(self._path().resolve()) not in self._initialized_roots:
+            return
         with self._conn() as conn:
             conn.execute(
                 "UPDATE refresh_jobs SET status='interrupted',owner='',lease_expires=0,"

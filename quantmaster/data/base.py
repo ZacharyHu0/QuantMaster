@@ -42,6 +42,33 @@ class MarketDataUnavailable(RuntimeError):
         self.provenance = provenance
 
 
+class DataEvidenceNotReady(MarketDataUnavailable):
+    """A formal action was requested before its local evidence was complete.
+
+    This is deliberately distinct from a transport/cache failure: callers can
+    show a preview, queue a refresh, or wait for an ingest to be accepted, but
+    they must not make the gate itself perform any of those operations.
+    """
+
+
+@dataclass(frozen=True)
+class DataEligibility:
+    """Pure admission result derived only from an existing quality envelope."""
+
+    preview_allowed: bool
+    analysis_allowed: bool
+    formal_allowed: bool
+    reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "preview_allowed": self.preview_allowed,
+            "analysis_allowed": self.analysis_allowed,
+            "formal_allowed": self.formal_allowed,
+            "reasons": list(self.reasons),
+        }
+
+
 @dataclass(frozen=True)
 class BarDataQuality:
     """Machine-readable truth boundary for one market-data result."""
@@ -82,6 +109,27 @@ class BarDataQuality:
         """Whether the result may enter formal history without another quality gate."""
         return self.status == "verified" and not self.stale and not self.partial
 
+    @property
+    def preview_eligible(self) -> bool:
+        """Whether the bytes may be shown with an explicit quality marker."""
+        return self.status != "unavailable"
+
+    def assess_eligibility(self) -> DataEligibility:
+        """Return admission levels without I/O, mutation, retries or waiting."""
+        reasons = list(self.issues)
+        if self.stale:
+            reasons.append("本地快照已过期")
+        if self.partial:
+            reasons.append("本地快照覆盖不完整")
+        if self.status == "unavailable" and not reasons:
+            reasons.append("没有可用本地快照")
+        return DataEligibility(
+            preview_allowed=self.preview_eligible,
+            analysis_allowed=self.analysis_eligible,
+            formal_allowed=self.formal_eligible,
+            reasons=tuple(dict.fromkeys(str(item) for item in reasons if item)),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
@@ -104,6 +152,8 @@ class BarDataQuality:
             "missing_symbols": list(self.missing_symbols),
             "analysis_eligible": self.analysis_eligible,
             "formal_eligible": self.formal_eligible,
+            "preview_eligible": self.preview_eligible,
+            "eligibility": self.assess_eligibility().to_dict(),
         }
 
 
@@ -119,6 +169,15 @@ class BarDataEnvelope[TMarketData]:
         """Return usable data, failing closed for structurally unavailable evidence."""
         if not self.quality.analysis_eligible:
             raise MarketDataUnavailable(self.quality, self.provenance)
+        return self.data
+
+    def assess_eligibility(self) -> DataEligibility:
+        return self.quality.assess_eligibility()
+
+    def require_formal_data(self) -> TMarketData:
+        """Fail fast for a formal action; never try to acquire missing evidence."""
+        if not self.quality.formal_eligible:
+            raise DataEvidenceNotReady(self.quality, self.provenance)
         return self.data
 
 

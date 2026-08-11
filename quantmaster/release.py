@@ -4,14 +4,102 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.6.22"
-RELEASE_DATE = "2026-08-11"
+VERSION = "1.8.0"
+RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "全局页面可用性根治",
+                "items": (
+                    (
+                        "Web 代次重载改为有界蓝绿切换：新代次就绪后再排空旧代次，"
+                        "Windows 使用独立 Job Object 清理超时进程树，并持续记录代次心跳与饱和告警。"
+                    ),
+                    (
+                        "每个 Web 代次通过私有排空事件停止，不再向共享 Windows 控制台广播 Ctrl+C；"
+                        "手动和代码重载默认在 2 秒静默窗口、5 秒最小间隔内切换，独立 Worker 不会被误中断。"
+                    ),
+                    (
+                        "页面型市场读取只返回已发布的本地不可变快照；快照陈旧时继续展示内容并标记状态，"
+                        "冷启动明确返回 snapshot_unavailable，不再无限等待或把页面读取升级为在线刷新。"
+                    ),
+                    (
+                        "市场总览复用已校验的快照指针、内存载荷和预编码 JSON；并发读不会重复哈希、"
+                        "解码或序列化大面板，发布新快照时仍原子失效并切换。"
+                    ),
+                    (
+                        "liveness/readiness 改为事件循环内的纯内存探针；数据根目录仅由 runtime-worker"
+                        "显式创建，冷启动健康检查不会再悄悄创建目录或把未就绪状态伪装为可用。"
+                    ),
+                ),
+            },
+            {
+                "title": "刷新任务与资源边界",
+                "items": (
+                    (
+                        "数据刷新、取消和重试经本机 Worker IPC 执行，Web 进程只读状态并提交命令；"
+                        "Worker 不可用会快速返回结构化错误，而不会阻塞页面请求。"
+                    ),
+                    (
+                        "Worker Supervisor 发布启动失败诊断并以有界退避自动拉起替代进程；"
+                        "SQLite 首次迁移在写锁内复查版本，避免并发快照构建触发 schema 竞态。"
+                    ),
+                    (
+                        "全局配置加载采用代次安全提交，慢速凭据/配置加载不能覆盖刚切换的数据根；"
+                        "本机命令管道不可用时 Worker 保持快照与读取服务，并明确报告写操作不可用。"
+                    ),
+                    (
+                        "Provider 调度收敛为固定的 Tushare、外部来源和 StockDB 线程池，并设全局网络并发上限；"
+                        "相同上游 lane 串行化，避免超时请求堆积为无限线程。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.7.0",
+        "date": "2026-08-11",
+        "sections": (
+            {
+                "title": "全板块增量刷新运行时",
+                "items": (
+                    (
+                        "市场、行业、题材、ETF、盘后扫描与资讯刷新统一采用版本化输入指纹、"
+                        "单飞任务和内容寻址产物；相同本地输入会复用已完成结果，不再重复全量计算。"
+                    ),
+                    (
+                        "Web 进程只提交和读取任务，独立 Supervisor 负责租约、心跳和 Windows 子进程计算；"
+                        "快照读取与 CPU/远程刷新彻底隔离。"
+                    ),
+                    (
+                        "轮动列表改为 SQL 索引分页与不可变快照指针，题材聚合使用批量稀疏矩阵；"
+                        "ETF 元数据读路径取消长文件锁等待。"
+                    ),
+                ),
+            },
+            {
+                "title": "快照可观测性与资讯读模型",
+                "items": (
+                    (
+                        "请求与 DAG 节点记录耗时、缓存命中、输入输出规模和远程调用；"
+                        "新增离线刷新 benchmark 与硬性 no-op 回归预算。"
+                    ),
+                    (
+                        "资讯采集改为后台统一 job，stats 与 event-focus 在写入/标注后物化；"
+                        "页面 GET 只读已发布统计快照，支持 ETag、cold 状态和后台进度。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.6.22",
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "资讯影响时间归属修复",
@@ -30,7 +118,7 @@ RELEASES = (
     },
     {
         "version": "1.6.21",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "ETF 资金证据覆盖门禁",
@@ -48,7 +136,7 @@ RELEASES = (
     },
     {
         "version": "1.6.20",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "ETF 资金证据统一",
@@ -67,7 +155,7 @@ RELEASES = (
     },
     {
         "version": "1.6.19",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "2026-08-10 行情传播与证据门禁修复",
@@ -110,7 +198,7 @@ RELEASES = (
     },
     {
         "version": "1.6.17",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "ETF 研究首屏稳定性修复",
@@ -129,7 +217,7 @@ RELEASES = (
     },
     {
         "version": "1.6.16",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "市场温度历史情绪口径修复",
@@ -148,7 +236,7 @@ RELEASES = (
     },
     {
         "version": "1.6.15",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "ETF 未收盘日期回退修复",
@@ -171,7 +259,7 @@ RELEASES = (
     },
     {
         "version": "1.6.14",
-        "date": RELEASE_DATE,
+        "date": "2026-08-11",
         "sections": (
             {
                 "title": "资讯证据时间披露",

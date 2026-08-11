@@ -572,13 +572,13 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
             lists[list_name] = [item for item in lists[list_name] if item["symbol"] != symbol]
         route.fulfill(json=lists)
 
-    empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
+    empty_market = {"groups": {}}
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/v1/market/overview/stream*",
-            lambda route: route.fulfill(status=200, content_type="application/x-ndjson", body=empty_market),
+            "**/api/v1/market/overview",
+            lambda route: route.fulfill(status=200, json=empty_market),
         )
         page.route("**/api/v1/market/history/**", history_handler)
         page.route("**/api/v1/portfolio/lists**", asset_handler)
@@ -701,17 +701,13 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
 
 def test_kline_cache_and_stale_view_protection(live_server):
     url, _ = live_server
-    empty_market = '{"type":"result","data":{"groups":{}},"request_id":"test"}\n'
+    empty_market = {"groups": {}}
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/v1/market/overview/stream*",
-            lambda route: route.fulfill(
-                status=200,
-                content_type="application/x-ndjson",
-                body=empty_market,
-            ),
+            "**/api/v1/market/overview",
+            lambda route: route.fulfill(status=200, json=empty_market),
         )
         page.goto(url)
         result = page.evaluate(
@@ -890,38 +886,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
             ["2026-07-21", 60.0],
         ],
     }
-    stream = (
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "type": "progress",
-                        "progress": 10,
-                        "phase": "读取本地市场缓存",
-                        "detail": "贵州茅台",
-                        "partial": {
-                            "kind": "market_item",
-                            "group": "我的股票",
-                            "item": personal,
-                        },
-                        "request_id": "market-test",
-                    },
-                    ensure_ascii=False,
-                ),
-                json.dumps(
-                    {
-                        "type": "result",
-                        "data": {
-                            "groups": {"我的股票": [personal], "A股指数": [index]},
-                        },
-                        "request_id": "market-test",
-                    },
-                    ensure_ascii=False,
-                ),
-            ]
-        )
-        + "\n"
-    )
+    market_snapshot = {"groups": {"我的股票": [personal], "A股指数": [index]}}
     kline = [
         [f"2026-06-{day:02d}", price, price + 0.2, price - 0.3, price + 0.5, 1000 + day]
         for day, price in enumerate([100.0] + [10.0 + index * 0.1 for index in range(27)], 1)
@@ -942,8 +907,8 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.route(
-            "**/api/v1/market/overview/stream*",
-            lambda route: route.fulfill(status=200, content_type="application/x-ndjson", body=stream),
+            "**/api/v1/market/overview",
+            lambda route: route.fulfill(status=200, json=market_snapshot),
         )
         page.route(
             "**/api/v1/market/history/**",

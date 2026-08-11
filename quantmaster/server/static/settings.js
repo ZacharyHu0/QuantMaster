@@ -926,10 +926,11 @@
     }
     resetDataRefreshPreview();
     try {
-      const latest = await request('/api/v1/data/refresh/latest');
-      if (latest.job) {
-        renderDataRefresh(latest.job);
-        if (['running', 'cancelling'].includes(latest.job.status)) pollDataRefresh(latest.job.id);
+      const latest = await request('/api/v1/jobs?domain=data&limit=1');
+      const job = latest.items?.[0];
+      if (job) {
+        renderDataRefresh(job);
+        if (['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
       }
     } catch (_) { /* 首次使用时没有任务是正常状态。 */ }
   }
@@ -981,7 +982,7 @@
   async function pollDataRefresh(id) {
     clearTimeout(state.dataRefreshTimer);
     try {
-      const task = await request(`/api/v1/data/refresh/${id}`);
+      const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}`);
       renderDataRefresh(task);
       if (['running', 'cancelling'].includes(task.status)) {
         state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
@@ -1040,7 +1041,7 @@
   document.getElementById('data-refresh-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.jobId;
     if (!id) return;
-    const task = await request(`/api/v1/data/refresh/${id}/cancel`, {method: 'POST'});
+    const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, {method: 'POST'});
     renderDataRefresh(task);
     pollDataRefresh(id);
   });
@@ -1050,7 +1051,7 @@
     if (!id) return;
     event.target.disabled = true;
     try {
-      const task = await request(`/api/v1/data/refresh/${id}/resume`, {method: 'POST'});
+      const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}/retry`, {method: 'POST'});
       renderDataRefresh(task);
       pollDataRefresh(id);
     } finally { event.target.disabled = false; }

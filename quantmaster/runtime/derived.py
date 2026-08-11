@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import time
 from collections.abc import Iterable, Mapping
@@ -54,19 +55,31 @@ class DerivedArtifactCatalog:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, root: str | Path | None = None):
+    def __init__(self, root: str | Path | None = None, *, read_only: bool = False):
         self.root = (
             Path(root) if root is not None else get_config().data_root / "derived"
         ).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
         self.artifacts_root = self.root / "artifacts"
-        self.artifacts_root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "catalog.sqlite"
+        # A snapshot reader must never create the derived directory or migrate
+        # the catalog.  An absent pointer is a real cold-start state, not a
+        # reason for a Web request to acquire the writer lock.
+        if self.read_only:
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.artifacts_root.mkdir(parents=True, exist_ok=True)
         with self._conn() as connection:
             migrate_schema(connection, ((1, self._v1),))
 
     def _conn(self):
-        return connect_sqlite(self.path, policy="authoritative", row_factory=True)
+        return connect_sqlite(
+            self.path,
+            policy="authoritative",
+            row_factory=True,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     @staticmethod
     def _v1(connection) -> None:
@@ -288,8 +301,11 @@ class DerivedArtifactCatalog:
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY source,partition_key"
-        with self._conn() as connection:
-            rows = connection.execute(query, tuple(params)).fetchall()
+        try:
+            with self._conn() as connection:
+                rows = connection.execute(query, tuple(params)).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         return [dict(row) for row in rows]
 
     def _artifact_target(self, artifact_id: str, suffix: str) -> Path:
@@ -518,26 +534,68 @@ class DerivedArtifactCatalog:
     ) -> dict[str, Any]:
         """Transactionally switch a current snapshot pointer after verification."""
 
-        artifact = self.artifact(artifact_id)
+        return self.publish_snapshots(domain, {snapshot_type: artifact_id})[str(snapshot_type)]
+
+    def publish_snapshots(
+        self,
+        domain: str,
+        snapshots: Mapping[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        """Atomically advance a coherent set of current snapshot pointers.
+
+        Artifact files are verified before the short catalog transaction.  A
+        process crash can therefore leave an unreferenced immutable object,
+        but it cannot expose a mix of old/new pointers to page readers.
+        """
+
+        verified = {
+            str(snapshot_type): self.artifact(str(artifact_id))
+            for snapshot_type, artifact_id in snapshots.items()
+            if str(snapshot_type) and str(artifact_id)
+        }
+        if not verified:
+            return {}
         now = time.time()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
+            connection.executemany(
                 "INSERT INTO current_snapshots(domain,snapshot_type,artifact_id,updated_at) "
                 "VALUES(?,?,?,?) ON CONFLICT(domain,snapshot_type) DO UPDATE SET "
                 "artifact_id=excluded.artifact_id,updated_at=excluded.updated_at",
-                (str(domain), str(snapshot_type), str(artifact_id), now),
+                [
+                    (str(domain), snapshot_type, str(artifact["artifact_id"]), now)
+                    for snapshot_type, artifact in verified.items()
+                ],
             )
-        return artifact
+        return verified
 
-    def current_snapshot(self, domain: str, snapshot_type: str) -> dict[str, Any] | None:
-        with self._conn() as connection:
-            row = connection.execute(
-                "SELECT artifact_id,updated_at FROM current_snapshots "
-                "WHERE domain=? AND snapshot_type=?",
-                (str(domain), str(snapshot_type)),
-            ).fetchone()
+    def current_snapshot_pointer(self, domain: str, snapshot_type: str) -> dict[str, Any] | None:
+        """Read only a published pointer, without opening or hashing its artifact.
+
+        Web hot paths use this to cheaply decide whether an immutable in-memory
+        projection is still current.  Integrity verification remains mandatory
+        when an artifact is first loaded; it is intentionally not repeated for
+        every request that serves the same content-addressed object.
+        """
+
+        try:
+            with self._conn() as connection:
+                row = connection.execute(
+                    "SELECT artifact_id,updated_at FROM current_snapshots "
+                    "WHERE domain=? AND snapshot_type=?",
+                    (str(domain), str(snapshot_type)),
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return None
         if row is None:
             return None
-        artifact = self.artifact(str(row["artifact_id"]))
-        return {"domain": str(domain), "snapshot_type": str(snapshot_type), **dict(row), "artifact": artifact}
+        return {"domain": str(domain), "snapshot_type": str(snapshot_type), **dict(row)}
+
+    def current_snapshot(self, domain: str, snapshot_type: str) -> dict[str, Any] | None:
+        """Return the published pointer with one integrity-checked artifact."""
+
+        pointer = self.current_snapshot_pointer(domain, snapshot_type)
+        if pointer is None:
+            return None
+        artifact = self.artifact(str(pointer["artifact_id"]))
+        return {**pointer, "artifact": artifact}

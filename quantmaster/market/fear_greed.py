@@ -188,6 +188,22 @@ def _unavailable() -> dict[str, object]:
     }
 
 
+def read_cnn_fear_greed() -> dict[str, object]:
+    """Return only the last local CNN snapshot; never make an HTTP request."""
+
+    with _CACHE_LOCK:
+        cached = _read_cache(_cache_path())
+    if cached is None:
+        return _unavailable()
+    if _cache_is_fresh(cached):
+        return dict(cached)
+    return {
+        **cached,
+        "status": "stale",
+        "warning": "CNN 指数快照已过期；后台刷新完成前正在展示最近一次本地结果。",
+    }
+
+
 def load_cnn_fear_greed(*, force: bool = False) -> dict[str, object]:
     """读取 CNN 当前指数；短缓存优先，失败时安全降级到最近成功值。"""
     path = _cache_path()

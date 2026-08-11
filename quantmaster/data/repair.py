@@ -96,8 +96,9 @@ def quarantine_file(
 class DataRepairManager:
     """Persistent repair scheduler with leases, backoff, budgets and audit events."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(self, path: str | Path | None = None, *, read_only: bool = False) -> None:
         self._explicit_path = Path(path) if path is not None else None
+        self.read_only = bool(read_only)
         self.identity = WorkerIdentity.create("data-repair")
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -105,15 +106,22 @@ class DataRepairManager:
         self._workers: list[threading.Thread] = []
         self._handlers: dict[str, RepairHandler] = {}
         self._initialized: set[str] = set()
-        self._register_builtin_handlers()
-        self._ensure_schema()
+        if not self.read_only:
+            self._register_builtin_handlers()
+            self._ensure_schema()
 
     def _path(self) -> Path:
         return self._explicit_path or get_config().data_root / "data_repairs.sqlite"
 
     def _conn(self) -> sqlite3.Connection:
-        connection = connect_sqlite(self._path(), row_factory=True)
-        self._initialize(connection)
+        connection = connect_sqlite(
+            self._path(),
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
+        if not self.read_only:
+            self._initialize(connection)
         return connection
 
     def _ensure_schema(self) -> None:
@@ -519,7 +527,7 @@ class DataRepairManager:
 
     @staticmethod
     def _repair_bar(item: dict[str, Any]) -> dict[str, Any]:
-        from quantmaster.data.registry import RefreshMode, load_history
+        from quantmaster.data.registry import RefreshMode, refresh_history
         from quantmaster.data.storage import BarStore
 
         spec = item["spec"]
@@ -533,9 +541,9 @@ class DataRepairManager:
             quarantine = quarantine_file(
                 target, category="bars", target=symbol, reason=str(item["reason"]),
             )
-            market_envelope = load_history(
-                symbol, start, end, store=store, refresh=RefreshMode.FULL,
-                priority="maintenance",
+            market_envelope = refresh_history(
+                symbol, start, end, store=store, mode=RefreshMode.FULL,
+                work_class="maintenance",
             )
             frame = market_envelope.require_data()
             result = store.read(symbol, enqueue_repair=False)

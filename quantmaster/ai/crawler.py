@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
 import re
@@ -24,6 +25,7 @@ from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,9 @@ SECTOR_ALIASES = {
     "化工": "基础化工", "商业贸易": "商贸零售", "休闲服务": "社会服务",
     "电气设备": "电力设备", "纺织服装": "纺织服饰",
 }
+
+_DASHBOARD_WINDOWS = (1, 3, 7, 30)
+_DASHBOARD_ALGORITHM_VERSION = "QM_NEWS_DASHBOARD_V1"
 
 
 def _id_chunks(values: list[int], size: int = 400) -> Iterator[list[int]]:
@@ -239,10 +244,12 @@ class NewsStore:
 
     ANALYSIS_VERSION = 2
 
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "news.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.sources = NewsSourceStore(self.path)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.sources = NewsSourceStore(self.path, read_only=self.read_only)
         from quantmaster.data.industry import (
             IndustrySnapshotIntegrityError,
             LegacyIndustrySnapshotError,
@@ -261,11 +268,17 @@ class NewsStore:
             # damaged projection must not make the news corpus unreadable.
             logger.warning("行业映射不可用于资讯标签增强，继续使用原始 symbols/sectors: %s", exc)
             self._industry_map = {}
-        self._migrate()
-        self.claims = NewsClaimStore(self.path)
+        if not self.read_only:
+            self._migrate()
+        self.claims = NewsClaimStore(self.path, read_only=self.read_only)
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, timeout=5.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 5.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
 
     def _replace_dimensions(
         self,
@@ -327,6 +340,130 @@ class NewsStore:
                 industry_map=self._industry_map,
                 normalize_sectors=_normalize_sectors,
             )
+
+    def _dashboard_input_fingerprint(self) -> str:
+        """Version the materialised read models from small SQLite metadata only."""
+
+        with self._conn() as conn:
+            news = conn.execute(
+                "SELECT COUNT(*) AS row_count,COALESCE(MAX(id),0) AS max_id,"
+                "COALESCE(MAX(last_seen_at),0) AS last_seen,"
+                "COALESCE(MAX(content_version_at),0) AS content_version,"
+                "COALESCE(MAX(analysis_updated_at),0) AS analysis_version "
+                "FROM news"
+            ).fetchone()
+            sources = conn.execute(
+                "SELECT COUNT(*) AS row_count,COALESCE(MAX(updated_at),'') AS updated_at "
+                "FROM news_sources"
+            ).fetchone()
+        payload = {
+            "schema_version": 1,
+            "algorithm_version": _DASHBOARD_ALGORITHM_VERSION,
+            "news": dict(news) if news else {},
+            "sources": dict(sources) if sources else {},
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _dashboard_snapshot_id(
+        kind: str, window_days: int, fingerprint: str, payload_json: str,
+    ) -> str:
+        value = "|".join((
+            _DASHBOARD_ALGORITHM_VERSION, str(kind), str(window_days),
+            str(fingerprint), payload_json,
+        ))
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _materialized_dashboard(self, kind: str, window_days: int) -> dict[str, Any]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT input_fingerprint,snapshot_id,payload_json,generated_at "
+                "FROM news_dashboard_materializations WHERE kind=? AND window_days=?",
+                (str(kind), int(window_days)),
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError(f"资讯 {kind}/{window_days} 尚未物化")
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise FileNotFoundError(f"资讯 {kind}/{window_days} 物化快照已损坏") from exc
+        if not isinstance(payload, dict):
+            raise FileNotFoundError(f"资讯 {kind}/{window_days} 物化快照格式无效")
+        value = dict(payload)
+        value["meta"] = {
+            "snapshot_id": str(row["snapshot_id"]),
+            "schema_version": 1,
+            "algorithm_version": _DASHBOARD_ALGORITHM_VERSION,
+            "input_fingerprint": str(row["input_fingerprint"]),
+            "as_of": datetime.fromtimestamp(
+                float(row["generated_at"]), UTC,
+            ).date().isoformat(),
+            "generated_at": datetime.fromtimestamp(
+                float(row["generated_at"]), UTC,
+            ).isoformat(),
+            "stale": False,
+            "stale_reasons": [],
+            "quality": {},
+        }
+        return value
+
+    def publish_dashboard_materializations(self) -> dict[str, Any]:
+        """Publish all read-only news dashboard payloads in one transaction.
+
+        Aggregation and evidence checks belong to the ingest/annotation worker.
+        A reader sees either the previous complete set or the new complete set;
+        it never rebuilds a window because a user opened the page.
+        """
+
+        if self.read_only:
+            raise RuntimeError("只读资讯存储不能发布物化快照")
+        fingerprint = self._dashboard_input_fingerprint()
+        generated_at = time.time()
+        payloads: list[tuple[str, int, dict[str, Any]]] = []
+        for window_days in _DASHBOARD_WINDOWS:
+            payloads.append(("stats", window_days, self._stats_dynamic(window_days)))
+            payloads.append(("event_focus", window_days, self._event_focus_dynamic(window_days)))
+        published: dict[str, str] = {}
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for kind, window_days, payload in payloads:
+                payload_json = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), default=str,
+                )
+                snapshot_id = self._dashboard_snapshot_id(
+                    kind, window_days, fingerprint, payload_json,
+                )
+                conn.execute(
+                    "INSERT INTO news_dashboard_materializations("
+                    "kind,window_days,input_fingerprint,snapshot_id,payload_json,generated_at) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(kind,window_days) DO UPDATE SET "
+                    "input_fingerprint=excluded.input_fingerprint,"
+                    "snapshot_id=excluded.snapshot_id,payload_json=excluded.payload_json,"
+                    "generated_at=excluded.generated_at",
+                    (kind, window_days, fingerprint, snapshot_id, payload_json, generated_at),
+                )
+                published[f"{kind}:{window_days}"] = snapshot_id
+        # Expose a genuine generation to other DAG nodes without hashing news
+        # bodies or walking evidence files.  The catalog itself preserves the
+        # generation on a no-op materialisation with the same fingerprint.
+        try:
+            from quantmaster.runtime.derived import DerivedArtifactCatalog
+
+            DerivedArtifactCatalog(self.path.parent / "derived").advance_source_generation(
+                "news.dashboard", "all", fingerprint,
+                coverage_end=datetime.fromtimestamp(generated_at, UTC).date().isoformat(),
+            )
+        except (OSError, RuntimeError, sqlite3.Error):
+            logger.warning("资讯 dashboard generation 推进失败", exc_info=True)
+        return {
+            "input_fingerprint": fingerprint,
+            "generated_at": generated_at,
+            "snapshots": published,
+        }
 
     def _decode(self, row: sqlite3.Row) -> dict:
         value = dict(row)
@@ -1283,7 +1420,7 @@ class NewsStore:
         })
         return snapshot
 
-    def stats(self, days: int = 30) -> dict:
+    def _stats_dynamic(self, days: int = 30) -> dict:
         now = time.time()
         cutoff = now - max(1, min(days, 3650)) * 86400
         news_config = get_config().news
@@ -1390,9 +1527,9 @@ class NewsStore:
         top_symbols = sorted(
             symbol_counts.items(), key=lambda item: (-item[1], item[0]),
         )[:24]
-        from quantmaster.data import load_stock_names
+        from quantmaster.data import read_stock_names
 
-        symbol_names = load_stock_names([symbol for symbol, _count in top_symbols])
+        symbol_names = read_stock_names([symbol for symbol, _count in top_symbols])
         data["top_symbols"] = [
             {
                 "symbol": symbol,
@@ -1403,7 +1540,7 @@ class NewsStore:
         ]
         return data
 
-    def event_focus(self, days: int = 7) -> dict:
+    def _event_focus_dynamic(self, days: int = 7) -> dict:
         """Return short-cycle symbol mentions using the same quality gates as stats."""
         window_days = int(days)
         if window_days not in {1, 3, 7, 30}:
@@ -1418,10 +1555,10 @@ class NewsStore:
                 until=now,
                 minimum_confidence=minimum,
             )
-        from quantmaster.data import load_stock_names
+        from quantmaster.data import read_stock_names
 
         symbols = [str(row["symbol"]) for row in rows]
-        symbol_names = load_stock_names(symbols)
+        symbol_names = read_stock_names(symbols)
         return {
             "days": window_days,
             "top_symbols": [
@@ -1433,6 +1570,20 @@ class NewsStore:
                 for row, symbol in zip(rows, symbols, strict=True)
             ],
         }
+
+    def stats(self, days: int = 30) -> dict:
+        window_days = max(1, min(int(days), 3650))
+        if self.read_only:
+            return self._materialized_dashboard("stats", window_days)
+        return self._stats_dynamic(window_days)
+
+    def event_focus(self, days: int = 7) -> dict:
+        window_days = int(days)
+        if window_days not in _DASHBOARD_WINDOWS:
+            raise ValueError("事件聚焦窗口仅支持 1、3、7、30 日")
+        if self.read_only:
+            return self._materialized_dashboard("event_focus", window_days)
+        return self._event_focus_dynamic(window_days)
 
 
 @contextmanager
@@ -1873,6 +2024,13 @@ class AICrawler:
             "in_progress": queue["in_progress"],
             "recovered_leases": recovered_leases,
         }
+        try:
+            self.store.publish_dashboard_materializations()
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+            # The prior complete read model deliberately remains current when
+            # a writer cannot publish a replacement.  Do not turn a completed
+            # annotation batch into a false database failure.
+            logger.warning("资讯 dashboard 物化发布失败", exc_info=True)
         yield {"type": "complete", **result}
 
     def enrich_pending(
@@ -1995,6 +2153,11 @@ class AICrawler:
         can_annotate = self._client is not None or bool(llm_cfg.api_key or llm_cfg.base_url)
         if (not skip_llm and get_config().news.annotation_enabled and can_annotate):
             annotation = self.enrich_pending()
+        else:
+            try:
+                self.store.publish_dashboard_materializations()
+            except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+                logger.warning("资讯 dashboard 物化发布失败", exc_info=True)
         new_ids = [int(item["id"]) for item in self.store.after_id(before_id)]
         return {
             "fetched": fetched_count,

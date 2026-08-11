@@ -66,6 +66,35 @@
     return window.QuantMasterManagement.request(path, options);
   }
 
+  const refreshActiveStates = new Set(['queued', 'running', 'cancelling', 'interrupted']);
+
+  async function waitForRefreshJob(initial, onProgress = () => {}) {
+    let job = initial;
+    let after = 0;
+    while (refreshActiveStates.has(String(job?.status || ''))) {
+      let latestEvent = null;
+      try {
+        const events = await api(
+          `/api/v1/jobs/${encodeURIComponent(job.id)}/events?after=${after}&limit=100`,
+          {cache: 'no-store'},
+        );
+        const items = Array.isArray(events?.items) ? events.items : [];
+        if (items.length) {
+          after = Math.max(after, ...items.map(item => Number(item.seq || 0)));
+          latestEvent = items.at(-1);
+        }
+      } catch (_) { /* status polling remains the recovery path. */ }
+      onProgress(job, latestEvent);
+      await new Promise(resolve => window.setTimeout(resolve, 650));
+      job = await api(`/api/v1/jobs/${encodeURIComponent(job.id)}`, {cache: 'no-store'});
+    }
+    onProgress(job);
+    if (!['completed', 'completed_with_warnings'].includes(String(job?.status || ''))) {
+      throw new Error(job?.detail || job?.error || '资讯刷新未完成');
+    }
+    return job;
+  }
+
   function elapsedText() {
     const seconds = Math.max(0, Math.floor((performance.now() - state.annotationStartedAt) / 1000));
     if (seconds < 60) return `已用时 ${seconds} 秒`;
@@ -675,11 +704,19 @@
 
   sourceForm.querySelector('[data-source-run]').onclick = async () => {
     if (!state.selectedSource) return;
+    const button = sourceForm.querySelector('[data-source-run]');
+    button.disabled = true;
     try {
-      const result = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
+      const submitted = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
+      report(submitted.coalesced ? '已关联到进行中的来源采集' : '来源采集已在后台启动', null, 'success');
+      const completed = await waitForRefreshJob(submitted, job => {
+        button.textContent = `采集中 ${Math.max(0, Number(job.progress || 0))}%`;
+      });
+      const result = completed.result || {};
       report(`采集完成：新增 ${result.saved || 0} 条`, null, 'success');
       await Promise.all([loadSources(), loadFeed(), loadStats(), loadEventFocus()]);
     } catch (error) { report('来源采集失败', error); }
+    finally { button.disabled = false; button.textContent = '立即采集'; }
   };
 
   sourceForm.querySelector('[data-source-clear-token]').onclick = () => {
@@ -754,7 +791,12 @@
     button.disabled = true;
     button.textContent = '同步中…';
     try {
-      const result = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
+      const submitted = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
+      report(submitted.coalesced ? '已关联到进行中的资讯刷新' : '资讯刷新已在后台启动', null, 'success');
+      const completed = await waitForRefreshJob(submitted, job => {
+        button.textContent = `同步中 ${Math.max(0, Number(job.progress || 0))}%`;
+      });
+      const result = completed.result || {};
       report(`同步完成：抓取 ${result.fetched || 0} 条，新增 ${result.saved || 0} 条`, null, 'success');
       await Promise.all([loadFeed(), loadStats(), loadEventFocus(), loadSources()]);
     } catch (error) { report('同步失败', error); }

@@ -244,6 +244,17 @@ def test_stock_analysis_v1_api_is_idempotent_progressive_and_retryable(tmp_path,
         lambda: jobs,
     )
     monkeypatch.setattr("quantmaster.server.jobs.get_stock_analysis_jobs", lambda: jobs)
+    # Web reads now use a dedicated read-only ledger and never fall back to
+    # the in-memory job manager.  Point that reader at this isolated fixture
+    # ledger just as a production Web generation would use its published one.
+    monkeypatch.setattr(
+        "quantmaster.server.jobs._read_unified_store",
+        lambda: UnifiedJobStore(tmp_path / "jobs.sqlite", read_only=True),
+    )
+    monkeypatch.setattr(
+        "quantmaster.analysis.stock_jobs._read_store",
+        lambda: UnifiedJobStore(tmp_path / "jobs.sqlite", read_only=True),
+    )
     client = TestClient(app)
     token = client.get("/api/v1/session").json()["csrf_token"]
     headers = {"X-CSRF-Token": token, "Idempotency-Key": "api-stock-request"}

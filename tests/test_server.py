@@ -2,6 +2,7 @@
 
 import ast
 import html
+import inspect
 import json
 import re
 import sys
@@ -16,7 +17,7 @@ from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.data.universe import UniverseSnapshot
 from quantmaster.release import RELEASE_DATE
 from quantmaster.runtime.process import run_process
-from quantmaster.server.app import app
+from quantmaster.server.app import app, liveness, readiness
 
 client = TestClient(app)
 _csrf = client.get("/api/v1/session").json()["csrf_token"]
@@ -77,7 +78,7 @@ class TestBasics:
         def fail_load(*_args, **_kwargs):
             raise TypeError("Cannot compare tz-naive and tz-aware timestamps")
 
-        monkeypatch.setattr("quantmaster.data.load_bars", fail_load)
+        monkeypatch.setattr("quantmaster.data.read_bars", fail_load)
 
         response = client.get("/api/v1/market/history/DX-Y.NYB.US")
 
@@ -100,7 +101,7 @@ class TestBasics:
                 frame, start=start, end=end, symbols=(symbol,),
             )
 
-        monkeypatch.setattr("quantmaster.data.load_bars", fake_load)
+        monkeypatch.setattr("quantmaster.data.read_bars", fake_load)
         response = client.get(
             "/api/v1/market/history/600519.SH?frequency=1d&end=2026-08-08",
         )
@@ -120,7 +121,7 @@ class TestBasics:
 
     def test_market_history_unavailable_preserves_truth_contract(self, monkeypatch):
         monkeypatch.setattr(
-            "quantmaster.data.load_bars",
+            "quantmaster.data.read_bars",
             lambda *_args, **_kwargs: _unavailable_market_data(
                 pd.DataFrame(), symbols=("600519.SH",),
             ),
@@ -140,18 +141,58 @@ class TestBasics:
         ]
 
     def test_liveness_is_store_free_and_diagnostics_are_separate(self, monkeypatch):
+        # These probes must stay on the event loop: a synchronous FastAPI
+        # handler queues behind the default threadpool under load, turning the
+        # watchdog's constant-time probe into a false availability failure.
+        assert inspect.iscoroutinefunction(liveness)
+        assert inspect.iscoroutinefunction(readiness)
         monkeypatch.setattr(
             "quantmaster.server.problems.collect_health_report",
             lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe stores")),
         )
         live = client.get("/api/v1/health/live")
         assert live.status_code == 200
-        assert live.json() == {
+        assert {
+            key: live.json()[key]
+            for key in ("status", "version", "release_date")
+        } == {
             "status": "ok", "version": __version__, "release_date": RELEASE_DATE,
         }
+        assert live.json()["web_threads"] >= 1
+        assert live.json()["thread_status"] in {"ok", "warning"}
         ready = client.get("/api/v1/health/ready")
         assert ready.status_code == 200
         assert ready.json()["status"] == "ready"
+
+    def test_readiness_does_not_create_a_cold_data_root(
+        self, isolated_config, tmp_path, monkeypatch,
+    ):
+        """A health probe is a pure observation, never a hidden bootstrap."""
+        cold_root = tmp_path / "cold-data-root"
+        isolated_config.data.root = str(cold_root)
+        assert not cold_root.exists()
+
+        # The route must use the in-memory state installed by the controlled
+        # configuration switch, not re-read config or create a directory.
+        from quantmaster.config import set_config
+
+        set_config(isolated_config)
+        monkeypatch.setattr(
+            "quantmaster.config.get_config",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("readiness must use its cached configuration state")
+            ),
+        )
+
+        ready = client.get("/api/v1/health/ready")
+
+        assert ready.status_code == 200
+        assert ready.json() == {
+            "status": "not_ready",
+            "version": __version__,
+            "data_root": str(cold_root),
+        }
+        assert not cold_root.exists()
 
     def test_local_boundary_csrf_and_security_headers(self):
         anonymous = TestClient(app)
@@ -739,6 +780,41 @@ class TestBasics:
         )
         assert invalid.status_code == 422
 
+    def test_page_reads_never_bootstrap_news_or_portfolio_databases(self, isolated_config):
+        """A cold page request is a bounded local read, never a schema bootstrap."""
+        data_root = isolated_config.data_root
+        news_db = data_root / "news.sqlite"
+        assets_db = data_root / "asset_lists.sqlite"
+        ledger_db = data_root / "ledger_default.sqlite"
+        decisions_db = data_root / "decisions.sqlite"
+        assert not news_db.exists()
+        assert not assets_db.exists()
+        assert not ledger_db.exists()
+        assert not decisions_db.exists()
+
+        news = client.get("/api/v1/news")
+        assert news.status_code == 503
+        assert news.json()["problem"]["code"] == "snapshot_unavailable"
+        assert not news_db.exists()
+
+        assets = client.get("/api/v1/portfolio/lists")
+        assert assets.status_code == 200
+        assert assets.json()["favorites"] == []
+        assert assets.json()["following"] == []
+        assert assets.json()["holdings"] == []
+        assert not assets_db.exists()
+        assert not ledger_db.exists()
+
+        trades = client.get("/api/v1/portfolio/ledger/trades")
+        assert trades.status_code == 200
+        assert trades.json() == {"trades": []}
+        assert not ledger_db.exists()
+
+        decisions = client.get("/api/v1/research/selection/history")
+        assert decisions.status_code == 200
+        assert decisions.json() == {"snapshots": []}
+        assert not decisions_db.exists()
+
     def test_decision_follow_up_uses_t1_open_and_freezes_at_horizon(self):
         from quantmaster.decision import decision_follow_up
 
@@ -861,13 +937,47 @@ class TestBasics:
         assert [item["return"] for item in validation["picks"]] == [0.2, -0.1, 0.0]
         assert validation["average_return"] == 0.033333
 
+    def test_selection_history_marks_untrusted_legacy_snapshot_as_preview(self):
+        from quantmaster.decision import DecisionStore
+
+        report = {
+            "signal_date": "2026-08-03",
+            "holding_horizon_days": 3,
+            "profile": "risk_adjusted",
+            "policy_hash": "legacy-preview",
+            "model_version": "hybrid-v2:test",
+            "picks": [],
+        }
+        store = DecisionStore()
+        store.save(
+            report,
+            "demo",
+            panel={
+                "close": pd.DataFrame(
+                    [[10.0]], index=pd.to_datetime(["2026-08-03"]), columns=["600000.SH"],
+                ),
+            },
+        )
+        with store._conn() as connection:
+            connection.execute("UPDATE selection_snapshots SET payload_sha256='' ")
+
+        response = client.get("/api/v1/research/selection/history", params={
+            "universe": "demo", "profile": "risk_adjusted", "horizon": 3,
+        })
+
+        assert response.status_code == 200, response.text
+        snapshot = response.json()["snapshots"][0]
+        assert snapshot["snapshot"]["state"] == "degraded"
+        assert snapshot["eligibility"]["preview_allowed"] is True
+        assert snapshot["eligibility"]["formal_allowed"] is False
+
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
         from quantmaster.server import app as app_module
 
         dates = pd.bdate_range("2026-07-20", periods=3)
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
         monkeypatch.setattr(
-            "quantmaster.data.load_history",
+            "quantmaster.data.refresh_history",
             lambda *args, **kwargs: _verified_market_data(
                 frame,
                 start=str(dates[0].date()),
@@ -903,6 +1013,63 @@ class TestBasics:
         assert indexes["000698.SH"] == "科创100"
         assert indexes["399006.SZ"] == "创业板指"
         assert indexes["399673.SZ"] == "创业板50"
+
+    def test_market_overview_route_reads_only_a_published_snapshot(self, monkeypatch, isolated_config):
+        from quantmaster.market import overview_snapshot
+        from quantmaster.runtime.derived import DerivedArtifactCatalog
+        from quantmaster.server import app as app_module
+
+        payload = {
+            "meta": {"as_of": "2026-08-10", "stale": False, "stale_reasons": []},
+            "groups": {"A股指数": []},
+            "data_quality": {"status": "verified", "issues": []},
+        }
+        root = isolated_config.data_root / "market-test-derived"
+
+        def catalog_factory(*_args, **kwargs):
+            return DerivedArtifactCatalog(root, read_only=bool(kwargs.get("read_only")))
+
+        monkeypatch.setattr(overview_snapshot, "DerivedArtifactCatalog", catalog_factory)
+        monkeypatch.setattr(app_module, "_market_overview_data", lambda **_kwargs: payload)
+        published = overview_snapshot.publish_market_overview_snapshot()
+        assert published["id"]
+        cached = overview_snapshot.read_market_overview_snapshot()
+        wire_payload, wire = overview_snapshot.read_market_overview_snapshot_wire()
+        assert cached["snapshot"]["id"] == published["id"]
+        assert wire_payload is cached
+        assert wire.startswith(b'{"data":')
+
+        def must_not_rebuild(**_kwargs):
+            raise AssertionError("页面 GET 不得扫描 BarStore 或重建市场快照")
+
+        monkeypatch.setattr(app_module, "_market_overview_data", must_not_rebuild)
+        response = TestClient(app).get("/api/v1/market/overview")
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["data"] == payload
+        assert body["snapshot"]["id"] == published["id"]
+        assert body["snapshot"]["state"] == "fresh"
+        assert response.headers["etag"]
+        assert response.headers["content-type"].startswith("application/json")
+
+    def test_market_overview_reports_structured_cold_snapshot_state(self, monkeypatch, isolated_config):
+        from quantmaster.market import overview_snapshot
+        from quantmaster.runtime.derived import DerivedArtifactCatalog
+
+        root = isolated_config.data_root / "market-cold-derived"
+        monkeypatch.setattr(
+            overview_snapshot,
+            "DerivedArtifactCatalog",
+            lambda *_args, **kwargs: DerivedArtifactCatalog(
+                root, read_only=bool(kwargs.get("read_only")),
+            ),
+        )
+
+        response = TestClient(app).get("/api/v1/market/overview")
+
+        assert response.status_code == 503
+        assert response.json()["problem"]["code"] == "snapshot_unavailable"
 
     def test_market_overview_emits_local_cache_before_failed_sync(self, monkeypatch):
         from quantmaster.data.storage import BarStore
@@ -992,8 +1159,8 @@ class TestBasics:
                 symbols=tuple(args[0]),
             )
 
-        monkeypatch.setattr("quantmaster.data.load_panel", load_panel_with_progress)
-        monkeypatch.setattr("quantmaster.data.load_stock_names", lambda values: names)
+        monkeypatch.setattr("quantmaster.data.read_panel", load_panel_with_progress)
+        monkeypatch.setattr("quantmaster.data.read_stock_names", lambda values: names)
         monkeypatch.setattr(
             "quantmaster.data.industry.load_industry_analysis_context",
             lambda **_kwargs: (mapping, {
@@ -1079,7 +1246,7 @@ class TestBasics:
             ),
         )
         monkeypatch.setattr(
-            "quantmaster.data.load_panel",
+            "quantmaster.data.read_panel",
             lambda *_args, **_kwargs: _unavailable_market_data(
                 {}, symbols=tuple(symbols),
             ),

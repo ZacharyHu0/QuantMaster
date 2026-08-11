@@ -18,9 +18,9 @@ from quantmaster.rotation.service import (
 )
 from quantmaster.rotation.store import (
     RotationIntegrityError,
-    RotationJobStore,
     RotationStore,
 )
+from quantmaster.runtime.jobs import JobOutcome, UnifiedJobStore
 from quantmaster.runtime.sqlite import connect_sqlite
 
 
@@ -210,7 +210,7 @@ def test_legacy_etf_metadata_history_without_manifest_fails_closed(tmp_path):
 
 def test_rotation_overview_cache_invalidates_on_snapshot_id(tmp_path, monkeypatch):
     store = RotationStore(tmp_path / "rotation")
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
 
     def payload(kind, snapshot_id):
         data = {"as_of": "2026-08-04", "items": []}
@@ -388,64 +388,60 @@ def test_market_style_confirmation_path_uses_compact_chart_layout():
     assert ".rotation-style-heading[data-tone=\"weak\"]" in stylesheet
 
 
-def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_path):
-    jobs = RotationJobStore(tmp_path / "jobs.sqlite")
-    created = jobs.create({"scope": "all", "mode": "incremental", "source": "local"})
-    duplicate = jobs.create({"scope": "all", "mode": "incremental", "source": "local"})
+def test_rotation_jobs_use_the_unified_lease_ledger(tmp_path):
+    jobs = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    spec = {"scope": "all", "mode": "incremental", "source": "local"}
+    created, created_new = jobs.submit("rotation.refresh", spec, input_fingerprint="v1")
+    duplicate, duplicate_new = jobs.submit("rotation.refresh", spec, input_fingerprint="v1")
+    assert created_new is True
+    assert duplicate_new is False
     assert duplicate["id"] == created["id"]
 
-    claimed = jobs.claim("worker-one", lease_seconds=5)
-    assert claimed and claimed["status"] == "running"
-    assert jobs.claim("worker-two") is None
+    assert jobs.claim(created["id"], "worker-one", lease_seconds=5)
+    claimed = jobs.get(created["id"])
     jobs.progress(
         claimed["id"], "worker-one", claimed["lease_token"], 50, "计算中", "一半",
     )
-    jobs.complete(
-        claimed["id"], "worker-one", claimed["lease_token"], {"snapshot_id": "done"},
+    jobs.finish(
+        claimed["id"], "worker-one", JobOutcome("completed", "done"),
+        lease_token=claimed["lease_token"],
     )
     completed = jobs.get(claimed["id"])
-    assert completed and completed["spec"] == created["spec"]
-    assert completed["result"] == {"snapshot_id": "done"}
+    assert completed["spec"] == created["spec"]
+    assert completed["status"] == "completed"
 
     retried = jobs.retry(claimed["id"])
-    assert retried["id"] != claimed["id"]
+    assert retried["id"] == claimed["id"]
     assert retried["spec"] == claimed["spec"]
-    assert any(event["type"] == "retry_of" for event in jobs.events(retried["id"]))
+    assert any(event["type"] == "job_retried" for event in jobs.events(retried["id"]))
 
 
-def test_rotation_worker_shutdown_releases_lease_without_cancelling_job(
-    tmp_path, monkeypatch,
-):
-    jobs = RotationJobStore(tmp_path / "jobs.sqlite")
+def test_rotation_worker_pause_interrupts_owned_job_without_cancelling_job(tmp_path):
+    jobs = UnifiedJobStore(tmp_path / "jobs.sqlite")
     service = RotationService(RotationStore(tmp_path / "rotation"), jobs)
-    worker = RotationWorker(service)
-    created = jobs.create({"scope": "themes", "mode": "incremental", "source": "auto"})
-    claimed = jobs.claim(worker.identity.value)
-    assert claimed and claimed["id"] == created["id"]
-
-    def interrupted_build(_spec, *, progress, cancelled, job_id=""):
-        del progress, job_id
-        assert cancelled()
-        raise InterruptedError("worker stopping")
-
-    monkeypatch.setattr(service, "build", interrupted_build)
-    worker._stop.set()
-    worker._run_job(claimed)
+    worker = RotationWorker(service, isolated=False)
+    created, _ = jobs.submit(
+        "rotation.refresh",
+        {"scope": "themes", "mode": "incremental", "source": "auto"},
+    )
+    assert jobs.claim(created["id"], worker.identity.value)
+    worker.stop()
 
     handed_off = jobs.get(created["id"])
-    assert handed_off and handed_off["status"] == "running"
+    assert handed_off["status"] == "interrupted"
     assert handed_off["cancel_requested"] is False
-    assert handed_off["lease_expires_at"] == 0
-    assert jobs.events(created["id"])[-1]["type"] == "lease_released"
-    reclaimed = jobs.claim("worker-next")
-    assert reclaimed and reclaimed["id"] == created["id"]
+    assert handed_off["lease_expires"] == 0
+    assert jobs.events(created["id"])[-1]["type"] == "job_interrupted"
+    assert jobs.claim(created["id"], "worker-next")
+    reclaimed = jobs.get(created["id"])
     assert reclaimed["attempt"] == 2
+    worker.shutdown()
 
 
 def test_rotation_schedule_marks_success_only_after_fresh_completion(tmp_path):
     store = RotationStore(tmp_path / "rotation")
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
-    worker = RotationWorker(service)
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    worker = RotationWorker(service, isolated=False)
     spec = RotationJobSpec(scope="close", source="auto")
     date_key = str(pd.Timestamp.now(tz="Asia/Shanghai").date())
 
@@ -463,7 +459,7 @@ def test_rotation_schedule_marks_success_only_after_fresh_completion(tmp_path):
 
 def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, monkeypatch):
     store = RotationStore(tmp_path / "rotation")
-    jobs = RotationJobStore(tmp_path / "rotation-jobs.sqlite")
+    jobs = UnifiedJobStore(tmp_path / "rotation-jobs.sqlite")
     service = RotationService(store, jobs)
     close, amount = _market()
     names = {symbol: f"股票{index}" for index, symbol in enumerate(close.columns)}
@@ -587,15 +583,14 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert updates[-1][0] == 96
     assert trend_calls == [len(close)]
 
-    close_fingerprint, _ = service.input_fingerprint(
+    close_fingerprints = service.snapshot_input_fingerprints(
         RotationJobSpec(scope="close", source="local"),
     )
-    assert result["input_fingerprint"] == close_fingerprint
     assert all(
-        service.snapshot_header(kind)["meta"].get("input_fingerprint") == close_fingerprint
+        service.snapshot_header(kind)["meta"].get("input_fingerprint")
+        == close_fingerprints[kind]
         for kind in ("temperature", "structure", "industries", "themes", "taxonomy")
     )
-
     close_result = service.build(
         RotationJobSpec(scope="close", source="local"),
         progress=lambda *_: None,
@@ -612,7 +607,7 @@ def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues
     tmp_path, monkeypatch,
 ):
     store = RotationStore(tmp_path / "rotation")
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
     close, amount = _market()
     names = {symbol: f"股票{index}" for index, symbol in enumerate(close.columns)}
     monkeypatch.setattr(
@@ -662,21 +657,22 @@ def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues
 
 
 def test_rotation_job_cancel_queued_is_terminal(tmp_path):
-    jobs = RotationJobStore(tmp_path / "jobs.sqlite")
-    created = jobs.create({"scope": "etf", "mode": "incremental", "source": "local"})
+    jobs = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    created, _ = jobs.submit(
+        "rotation.refresh", {"scope": "etf", "mode": "incremental", "source": "local"},
+    )
     cancelled = jobs.cancel(created["id"])
     assert cancelled["status"] == "cancelled"
-    assert jobs.claim("worker") is None
+    assert not jobs.claim(created["id"], "worker")
     assert jobs.get(created["id"])["cancel_requested"] is True
-    assert jobs.events(created["id"])[-1]["type"] == "cancel_requested"
-    assert time.time() >= cancelled["updated_at"]
+    assert jobs.events(created["id"])[-1]["type"] == "job_cancel_requested"
 
 
 def test_rotation_overview_reports_dimensions_without_fabricating_zero_coverage(
     tmp_path,
 ):
     store = RotationStore(tmp_path / "rotation")
-    service = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite"))
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
     meta = {
         "snapshot_id": "sample",
         "as_of": "2026-07-30",
@@ -726,7 +722,7 @@ def test_rotation_snapshot_hash_failure_is_exposed_as_corrupt(tmp_path):
 
     with pytest.raises(RotationIntegrityError, match="哈希不匹配"):
         store.snapshot("temperature")
-    public = RotationService(store, RotationJobStore(tmp_path / "jobs.sqlite")).snapshot(
+    public = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite")).snapshot(
         "temperature"
     )
     assert public["meta"]["quality"]["status"] == "corrupt"
@@ -745,7 +741,7 @@ def test_rotation_etf_file_corruption_is_not_treated_as_empty(tmp_path):
 def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkeypatch):
     service = RotationService(
         RotationStore(tmp_path / "rotation"),
-        RotationJobStore(tmp_path / "jobs.sqlite"),
+        UnifiedJobStore(tmp_path / "jobs.sqlite"),
     )
 
     class Morning:
@@ -754,13 +750,13 @@ def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkey
             return pd.Timestamp("2026-07-30 10:00:00", tz="Asia/Shanghai")
 
     monkeypatch.setattr("quantmaster.rotation.service.datetime", Morning)
-    ordinary = RotationWorker(service)
+    ordinary = RotationWorker(service, isolated=False)
     monkeypatch.setattr(ordinary, "_run", lambda: ordinary._stop.wait())
     ordinary.start()
     assert service.jobs.list() == []
     ordinary.stop()
 
-    bootstrap = RotationWorker(service)
+    bootstrap = RotationWorker(service, isolated=False)
     monkeypatch.setattr(bootstrap, "_run", lambda: bootstrap._stop.wait())
     bootstrap.start(bootstrap_local=True)
     specs = [item["spec"] for item in service.jobs.list()]

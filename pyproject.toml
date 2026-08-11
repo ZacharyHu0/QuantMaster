@@ -89,6 +89,9 @@ version = {attr = "quantmaster.__version__"}
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -p no:xonsh -p no:cacheprovider"
+markers = [
+    "full: deterministic benchmark or complete-suite validation",
+]
 
 [tool.coverage.run]
 branch = true

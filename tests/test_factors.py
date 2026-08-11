@@ -174,7 +174,7 @@ class TestCacheReplaceSemantics:
         with store._conn() as conn:
             conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
 
-        registry.load_history("600000.SH", "2024-07-01", "2024-12-31", store=store)
+        registry.refresh_history("600000.SH", "2024-07-01", "2024-12-31", store=store)
         # 只请求尾部重叠窗口，不再反复重拉半年历史。
         assert FakeSource.calls[0][0] == "2024-06-24"
         # 价格列整体校准成新基准：不存在 100 与 80 的接缝跳空。
@@ -210,7 +210,7 @@ class TestCacheReplaceSemantics:
                 return df
 
         monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FullSource]})
-        envelope = registry.load_history(
+        envelope = registry.refresh_history(
             "600000.SH", "2024-01-02", "2024-06-28", store=store,
         )
         df = envelope.data
@@ -248,7 +248,7 @@ class TestCacheReplaceSemantics:
         with store._conn() as conn:
             conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
 
-        result = registry.load_history(
+        result = registry.refresh_history(
             "600000.SH", "2024-01-02", "2024-12-31", store=store)
         data = result.data
         cached = store.get("600000.SH")
@@ -291,7 +291,7 @@ class TestCacheReplaceSemantics:
         monkeypatch.setattr(
             registry, "_factories", lambda: {Market.CN: [SparseSource, BrokenFallback]})
         with pytest.raises(RuntimeError, match="响应内部过于稀疏"):
-            registry.load_history(
+            registry.refresh_history(
                 "600000.SH", "2024-01-02", "2024-06-28", store=store)
         assert store.get("600000.SH") is None
 

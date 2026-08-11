@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.data.free_stockdb_contracts import StockDBIngestSnapshot
 from quantmaster.data.free_stockdb_ingest import (
     STOCKDB_INGEST_SCHEMA_VERSION,
@@ -468,11 +469,27 @@ class EtfResearchService:
         instruments: InstrumentStore | None = None,
         ingest_store: StockDBIngestStore | None = None,
         store: EtfResearchStore | None = None,
+        read_only: bool = False,
     ):
-        self.source = source or FreeStockDBSource()
-        self.instruments = instruments or InstrumentStore()
+        self.read_only = bool(read_only)
+        # The published snapshot routes need only the immutable JSON artifact.
+        # Do not construct provider clients or bootstrap the security master
+        # while rendering those routes in a disposable Web process.
+        self.source = source if source is not None else (
+            None if self.read_only else FreeStockDBSource()
+        )
+        self.instruments = instruments if instruments is not None else (
+            None if self.read_only else InstrumentStore()
+        )
         self.ingest_store = ingest_store or StockDBIngestStore()
         self.store = store or EtfResearchStore()
+        # A caller that supplies a research store is constructing an isolated
+        # service (tests, maintenance replay, or a worker sandbox).  Keep its
+        # local metadata evidence in that same data-root family instead of
+        # accidentally reading the process-global rotation cache.
+        self._rotation_evidence_root = (
+            self.store.root.parent / "rotation" if store is not None else None
+        )
         self._profile_capabilities: dict[str, Any] = {}
         self._profile_metadata_frame = pd.DataFrame()
         self._detail_history_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -481,6 +498,19 @@ class EtfResearchService:
         self._previews: dict[str, EtfResearchSnapshot] = {}
         self._preview_daily: dict[str, pd.DataFrame] = {}
         self._preview_factors: dict[str, pd.DataFrame] = {}
+
+    def _rotation_evidence_store(self) -> Any:
+        """Resolve metadata evidence without leaking across explicit stores."""
+        from quantmaster.rotation.store import RotationStore
+
+        if self._rotation_evidence_root is None:
+            return RotationStore()
+        try:
+            return RotationStore(root=self._rotation_evidence_root)
+        except TypeError:
+            # Lightweight test evidence stores intentionally expose only the
+            # read methods and do not accept a root argument.
+            return RotationStore()
 
     @staticmethod
     def _research_tier(value: str) -> EtfResearchTier:
@@ -719,8 +749,6 @@ class EtfResearchService:
     ) -> list[EtfProfile]:
         """Build an explicitly incomplete local denominator for exploratory analysis."""
 
-        from quantmaster.rotation.store import RotationStore
-
         def clean(*values: Any) -> str:
             for raw in values:
                 if raw is None:
@@ -834,7 +862,7 @@ class EtfResearchService:
         metadata = pd.DataFrame()
         observations = pd.DataFrame()
         try:
-            metadata_store = RotationStore()
+            metadata_store = self._rotation_evidence_store()
             metadata = (
                 metadata_store.etf_metadata_history()
                 if hasattr(metadata_store, "etf_metadata_history")
@@ -1223,7 +1251,7 @@ class EtfResearchService:
         except ImportError:
             cached = pd.DataFrame()
         else:
-            metadata_store = RotationStore()
+            metadata_store = self._rotation_evidence_store()
             cached = (
                 metadata_store.etf_metadata_history()
                 if hasattr(metadata_store, "etf_metadata_history")
@@ -1659,21 +1687,15 @@ class EtfResearchService:
             )
         return sorted(result, key=lambda item: item.symbol)
 
-    @staticmethod
-    def _direct_share_observations() -> pd.DataFrame:
+    def _direct_share_observations(self) -> pd.DataFrame:
         try:
-            from quantmaster.rotation.store import RotationStore
-
-            return RotationStore().etf_observations()
+            return self._rotation_evidence_store().etf_observations()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             return pd.DataFrame()
 
-    @staticmethod
-    def _direct_metadata() -> pd.DataFrame:
+    def _direct_metadata(self) -> pd.DataFrame:
         try:
-            from quantmaster.rotation.store import RotationStore
-
-            return RotationStore().etf_metadata()
+            return self._rotation_evidence_store().etf_metadata()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             return pd.DataFrame()
 
@@ -1994,9 +2016,25 @@ class EtfResearchService:
                 cache_hit = not frame.empty
             except (OSError, ValueError):
                 frame = pd.DataFrame()
+        if frame.empty and not remote_io_allowed():
+            # A trend-tab read may show its last local minute snapshot, but it
+            # must never turn into a FreeStockDB request.  The explicit scan
+            # job owns network acquisition and later atomically publishes it.
+            return {
+                "symbol": canonical,
+                "date": session,
+                "status": "missing",
+                "source": "local-cache",
+                "cache_hit": cache_hit,
+                "metrics": {"rows": 0, "complete_session": False, "scoring_input": False},
+                "series": [],
+                "issue": "snapshot_unavailable",
+            }
         if frame.empty:
             start = f"{session} 09:30:00"
             end = f"{session} 15:00:00"
+            if self.source is None:
+                raise RuntimeError("ETF 分钟数据仅可由后台刷新任务获取")
             frame = session_only(
                 self.source.intraday_many([canonical], start, end, "1m")
             )
@@ -3030,17 +3068,23 @@ class EtfResearchService:
 
 _lock = threading.Lock()
 _instance: EtfResearchService | None = None
+_read_instance: EtfResearchService | None = None
 
 
-def get_etf_research_service() -> EtfResearchService:
-    global _instance
+def get_etf_research_service(*, read_only: bool = False) -> EtfResearchService:
+    global _instance, _read_instance
     with _lock:
+        if read_only:
+            if _read_instance is None:
+                _read_instance = EtfResearchService(read_only=True)
+            return _read_instance
         if _instance is None:
             _instance = EtfResearchService()
         return _instance
 
 
 def reset_etf_research_service() -> None:
-    global _instance
+    global _instance, _read_instance
     with _lock:
         _instance = None
+        _read_instance = None

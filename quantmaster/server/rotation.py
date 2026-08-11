@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -153,76 +154,101 @@ def _iso_time(value: Any) -> str:
     return str(value or "")
 
 
+def _snapshot_etag(
+    request: Request,
+    response: Response,
+    payload: dict[str, Any],
+) -> dict[str, Any] | Response:
+    """Attach a deterministic read-side validator without inspecting data rows."""
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    snapshot_id = str(meta.get("snapshot_id") or "")
+    if not snapshot_id:
+        return payload
+    canonical_query = strict_json_dumps(
+        sorted((str(key), str(value)) for key, value in request.query_params.multi_items()),
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(f"{snapshot_id}\n{canonical_query}".encode("utf-8")).hexdigest()
+    etag = f'"{digest}"'
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
+    requested = str(request.headers.get("if-none-match") or "")
+    if requested == "*" or etag in {value.strip() for value in requested.split(",")}:
+        return Response(status_code=304, headers={"ETag": etag})
+    return payload
+
+
 def public_rotation_job(value: dict[str, Any]) -> dict[str, Any]:
-    job_id = str(value.get("id") or "")
-    status = str(value.get("status") or "unknown")
-    result = value.get("result") if isinstance(value.get("result"), dict) else {}
-    failure_reason = str(value.get("error") or "")[:1000]
-    return {
+    worker = get_rotation_worker()
+    public = worker.runtime.public(value)
+    result: dict[str, Any] = {}
+    artifact_id = str(value.get("result_artifact_id") or "")
+    if artifact_id:
+        try:
+            artifact = worker.runtime.store.artifact(artifact_id)
+        except (KeyError, RuntimeError, ValueError):
+            artifact = None
+        if isinstance(artifact, dict) and isinstance(artifact.get("payload"), dict):
+            result = dict(artifact["payload"])
+    public.update({
         "domain": "rotation",
-        "id": job_id,
-        "type": "rotation.refresh",
-        "status": status,
-        "created": bool(value.get("created")),
-        "coalesced": bool(value.get("coalesced")),
-        "input_fingerprint": str(value.get("input_fingerprint") or ""),
-        "algorithm_version": str(value.get("algorithm_version") or ""),
-        "progress": max(0, min(100, int(value.get("progress") or 0))),
-        "phase": str(value.get("phase") or ""),
-        "detail": str(value.get("detail") or value.get("error") or "")[:1000],
-        "attempt": max(1, int(value.get("attempt") or 1)),
         "as_of": str((value.get("spec") or {}).get("as_of") or ""),
         "completed_as_of": str(result.get("as_of") or result.get("actual_as_of") or ""),
         "expected_as_of": str(result.get("expected_as_of") or ""),
-        "failure_reason": failure_reason,
-        "cancel_requested": bool(value.get("cancel_requested")),
-        "created_at": _iso_time(value.get("created_at")),
-        "updated_at": _iso_time(value.get("updated_at") or value.get("created_at")),
-        "can_cancel": status in {"queued", "running", "cancelling"},
-        "can_retry": status in {"completed", "failed", "cancelled"},
-        "result": value.get("result"),
-        "links": {
-            "self": f"/api/v1/jobs/{job_id}",
-            "events": f"/api/v1/jobs/{job_id}/events",
-            "cancel": f"/api/v1/jobs/{job_id}/cancel",
-            "retry": f"/api/v1/jobs/{job_id}/retry",
-        },
-    }
+        "failure_reason": str(value.get("detail") or "")[:1000]
+        if str(value.get("status") or "") in {"failed", "cancelled", "interrupted"} else "",
+        "result": result or None,
+    })
+    return public
 
 
 def get_rotation_job(job_id: str) -> dict[str, Any]:
-    value = get_rotation_service().jobs.get(job_id)
-    if value is None:
+    try:
+        value = get_rotation_worker().runtime.store.get(job_id)
+    except KeyError:
+        raise KeyError(job_id)
+    if str(value.get("type") or "") != "rotation.refresh":
         raise KeyError(job_id)
     return value
 
 
 def list_rotation_jobs(limit: int) -> list[dict[str, Any]]:
-    return get_rotation_service().jobs.list(limit)
+    return [
+        value for value in get_rotation_worker().runtime.store.list(max(limit * 4, limit))
+        if str(value.get("type") or "") == "rotation.refresh"
+    ][:limit]
 
 
 def rotation_job_events(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
-    return get_rotation_service().jobs.events(job_id, after, limit)
+    get_rotation_job(job_id)
+    return get_rotation_worker().runtime.store.events(job_id, after, limit)
 
 
 def cancel_rotation_job(job_id: str) -> dict[str, Any]:
-    return get_rotation_service().jobs.cancel(job_id)
+    get_rotation_job(job_id)
+    return get_rotation_worker().runtime.store.cancel(job_id)
 
 
 def retry_rotation_job(job_id: str) -> dict[str, Any]:
-    value = get_rotation_service().jobs.retry(job_id)
+    get_rotation_job(job_id)
+    value = get_rotation_worker().runtime.retry(job_id)
     get_rotation_worker().start()
     return value
 
 
 @router.get("/market/temperature")
-def market_temperature() -> dict[str, Any]:
-    return get_rotation_service().snapshot("temperature")
+def market_temperature(request: Request, response: Response) -> Any:
+    return _snapshot_etag(
+        request, response, get_rotation_service(read_only=True).snapshot("temperature"),
+    )
 
 
 @router.get("/market/structure")
-def market_structure() -> dict[str, Any]:
-    return get_rotation_service().snapshot("structure")
+def market_structure(request: Request, response: Response) -> Any:
+    return _snapshot_etag(
+        request, response, get_rotation_service(read_only=True).snapshot("structure"),
+    )
 
 
 @router.post("/market/analytics/refresh", status_code=202)
@@ -234,18 +260,20 @@ def refresh_market_analytics(value: RotationRefreshRequest) -> dict[str, Any]:
 
 
 @router.get("/rotation/overview")
-def rotation_overview() -> dict[str, Any]:
-    return get_rotation_service().overview()
+def rotation_overview(request: Request, response: Response) -> Any:
+    return _snapshot_etag(request, response, get_rotation_service(read_only=True).overview())
 
 
 @router.get("/rotation/industries")
 def rotation_industries(
+    request: Request,
+    response: Response,
     level: Literal["all", "L1", "L2"] = "all",
     query: str = Query("", max_length=80),
     window: int = 5,
-) -> dict[str, Any]:
+) -> Any:
     window = _rotation_window(window)
-    service = get_rotation_service()
+    service = get_rotation_service(read_only=True)
     selected_l2 = set(service.store.preferences()["l2_codes"])
     _header, values, _pagination_meta = service.store.snapshot_items_page(
         "industries",
@@ -260,20 +288,26 @@ def rotation_industries(
     items = [_materialize_group_score(item, window) for item in values]
     data = dict(snapshot.get("data") or {})
     data.update({"items": items, "window": window})
-    return {"meta": snapshot["meta"], "data": data}
+    return _snapshot_etag(request, response, {"meta": snapshot["meta"], "data": data})
 
 
 @router.get("/rotation/industries/{code}")
-def rotation_industry_detail(code: str, window: int = 5) -> dict[str, Any]:
+def rotation_industry_detail(
+    code: str, request: Request, response: Response, window: int = 5,
+) -> Any:
     window = _rotation_window(window)
-    result = get_rotation_service().detail("industries", code)
+    result = get_rotation_service(read_only=True).detail("industries", code)
     if result is None:
         raise HTTPException(404, f"行业不存在或尚未达到覆盖门槛: {code}")
-    return {"meta": result["meta"], "data": _materialize_group_score(result["data"], window)}
+    return _snapshot_etag(request, response, {
+        "meta": result["meta"], "data": _materialize_group_score(result["data"], window),
+    })
 
 
 @router.get("/rotation/themes")
 def rotation_themes(
+    request: Request,
+    response: Response,
     query: str = Query("", max_length=80),
     limit: int | None = Query(None, ge=1, le=500),
     page: int | None = Query(None, ge=1),
@@ -283,9 +317,9 @@ def rotation_themes(
     sort: Literal["change", "score", "excess", "amount", "coverage", "name"] = "change",
     order: Literal["asc", "desc"] = "desc",
     window: int = 5,
-) -> dict[str, Any]:
+) -> Any:
     window = _rotation_window(window)
-    service = get_rotation_service()
+    service = get_rotation_service(read_only=True)
     snapshot = service.snapshot_header("themes")
     data = dict(snapshot.get("data") or {})
     _focus_header, focus_values, _focus_page = service.store.snapshot_items_page(
@@ -315,7 +349,7 @@ def rotation_themes(
                 "window": window,
             }
         )
-        return {"meta": snapshot["meta"], "data": data}
+        return _snapshot_etag(request, response, {"meta": snapshot["meta"], "data": data})
     _header, values, pagination = service.store.snapshot_items_page(
         "themes", query=query, stage=stage, grade=grade, sort=sort, order=order,
         window=window, page=page or 1, page_size=_page_size(page_size),
@@ -325,20 +359,26 @@ def rotation_themes(
         "pagination": pagination,
         "window": window,
     })
-    return {"meta": snapshot["meta"], "data": data}
+    return _snapshot_etag(request, response, {"meta": snapshot["meta"], "data": data})
 
 
 @router.get("/rotation/themes/{code}")
-def rotation_theme_detail(code: str, window: int = 5) -> dict[str, Any]:
+def rotation_theme_detail(
+    code: str, request: Request, response: Response, window: int = 5,
+) -> Any:
     window = _rotation_window(window)
-    result = get_rotation_service().detail("themes", code)
+    result = get_rotation_service(read_only=True).detail("themes", code)
     if result is None:
         raise HTTPException(404, f"题材不存在或尚未达到覆盖门槛: {code}")
-    return {"meta": result["meta"], "data": _materialize_group_score(result["data"], window)}
+    return _snapshot_etag(request, response, {
+        "meta": result["meta"], "data": _materialize_group_score(result["data"], window),
+    })
 
 
 @router.get("/rotation/etf-flows/items")
 def rotation_etf_flow_items(
+    request: Request,
+    response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     query: str = Query("", max_length=80),
@@ -346,22 +386,22 @@ def rotation_etf_flow_items(
     sort: Literal["flow", "daily", "streak", "name"] = "flow",
     order: Literal["asc", "desc"] = "desc",
     window: int = 5,
-) -> dict[str, Any]:
+) -> Any:
     window = _rotation_window(window)
-    service = get_rotation_service()
+    service = get_rotation_service(read_only=True)
     snapshot = service.snapshot_header("etf_flows")
     _header, values, pagination = service.store.snapshot_items_page(
         "etf_flows", query=query, category=category, sort=sort, order=order,
         window=window, page=page, page_size=_page_size(page_size),
     )
-    return {
+    return _snapshot_etag(request, response, {
         "meta": snapshot["meta"],
         "data": {
             "items": values,
             "pagination": pagination,
             "categories": service.store.snapshot_item_categories("etf_flows"),
         },
-    }
+    })
 
 
 def _compact_etf_funds(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -463,7 +503,7 @@ def rotation_etfs(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    service = get_etf_research_service()
+    service = get_etf_research_service(read_only=True)
     snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         return {
@@ -823,7 +863,7 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
     generated_ns = int(generated_at.value) if pd.notna(generated_at) else -1
     factor_path = service.store.root / "evidence" / "adjustment_factors.parquet"
     try:
-        rotation_store = RotationStore()
+        rotation_store = RotationStore(read_only=True)
     except (OSError, RuntimeError, TypeError, ValueError):
         rotation_store = None
     evidence_paths = {
@@ -928,7 +968,7 @@ def rotation_etf_overview(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    service = get_etf_research_service()
+    service = get_etf_research_service(read_only=True)
     snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     refresh = (
         _etf_refresh_hint(service, snapshot)
@@ -994,7 +1034,7 @@ def rotation_etf_sector_detail(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    service = get_etf_research_service()
+    service = get_etf_research_service(read_only=True)
     snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF V2 研究快照")
@@ -1133,7 +1173,7 @@ def rotation_etf_sector_detail(
 def rotation_etf_snapshots(limit: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    return {"items": get_etf_research_service().store.history(limit)}
+    return {"items": get_etf_research_service(read_only=True).store.history(limit)}
 
 
 @router.get("/rotation/etfs/snapshots/{snapshot_id}/coverage")
@@ -1143,7 +1183,7 @@ def rotation_etf_snapshot_coverage(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().resolve_snapshot(snapshot_id, tier=tier)
+    snapshot = get_etf_research_service(read_only=True).resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "ETF 研究快照不存在")
     semantic_counts: dict[str, int] = {}
@@ -1189,7 +1229,7 @@ def rotation_etf_export(
 ) -> Response:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    snapshot = get_etf_research_service().resolve_snapshot(snapshot_id, tier=tier)
+    snapshot = get_etf_research_service(read_only=True).resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "ETF 研究快照不存在")
     if format == "json":
@@ -1256,42 +1296,6 @@ def rotation_etf_scan(body: EtfScanBody, request: Request) -> dict[str, Any]:
     return {**get_etf_research_jobs().public(job), "created": created}
 
 
-@router.get("/rotation/etfs/jobs/{job_id}")
-def rotation_etf_job(job_id: str) -> dict[str, Any]:
-    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
-
-    try:
-        return get_etf_research_jobs().public(get_etf_research_jobs().get(job_id))
-    except KeyError:
-        raise HTTPException(404, "ETF 研究任务不存在") from None
-
-
-@router.post("/rotation/etfs/jobs/{job_id}/cancel")
-def rotation_etf_job_cancel(job_id: str, request: Request) -> dict[str, Any]:
-    require_csrf(request)
-    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
-
-    try:
-        jobs = get_etf_research_jobs()
-        return jobs.public(jobs.cancel(job_id))
-    except KeyError:
-        raise HTTPException(404, "ETF 研究任务不存在") from None
-
-
-@router.post("/rotation/etfs/jobs/{job_id}/retry", status_code=202)
-def rotation_etf_job_retry(job_id: str, request: Request) -> dict[str, Any]:
-    require_csrf(request)
-    from quantmaster.rotation.etf_jobs import get_etf_research_jobs
-
-    try:
-        jobs = get_etf_research_jobs()
-        return jobs.public(jobs.retry(job_id))
-    except KeyError:
-        raise HTTPException(404, "ETF 研究任务不存在") from None
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(409, str(exc)) from None
-
-
 @router.get("/rotation/etfs/{symbol}/intraday")
 def rotation_etf_intraday(
     symbol: str,
@@ -1300,7 +1304,7 @@ def rotation_etf_intraday(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    service = get_etf_research_service()
+    service = get_etf_research_service(read_only=True)
     snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
@@ -1331,7 +1335,7 @@ def rotation_etf_detail(
 ) -> dict[str, Any]:
     from quantmaster.rotation.etf_research import get_etf_research_service
 
-    service = get_etf_research_service()
+    service = get_etf_research_service(read_only=True)
     snapshot = service.resolve_snapshot(snapshot_id, tier=tier)
     if snapshot is None:
         raise HTTPException(404, "尚无 ETF 研究快照")
@@ -1408,7 +1412,7 @@ def rotation_etf_detail(
 
 @router.get("/rotation/etf-flows")
 def rotation_etf_flows(include_items: bool = True) -> dict[str, Any]:
-    snapshot = get_rotation_service().snapshot("etf_flows")
+    snapshot = get_rotation_service(read_only=True).snapshot("etf_flows")
     if include_items:
         return snapshot
     data = dict(snapshot.get("data") or {})
@@ -1419,12 +1423,12 @@ def rotation_etf_flows(include_items: bool = True) -> dict[str, Any]:
 
 @router.get("/rotation/taxonomy/industries")
 def rotation_taxonomy() -> dict[str, Any]:
-    return get_rotation_service().taxonomy()
+    return get_rotation_service(read_only=True).taxonomy()
 
 
 @router.get("/rotation/preferences")
 def rotation_preferences() -> dict[str, Any]:
-    return {"data": get_rotation_service().store.preferences()}
+    return {"data": get_rotation_service(read_only=True).store.preferences()}
 
 
 @router.put("/rotation/preferences")

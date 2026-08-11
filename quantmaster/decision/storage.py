@@ -58,14 +58,21 @@ def _frame_sha256(frame: pd.DataFrame) -> str:
 
 
 class DecisionStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = Path(path) if path else get_config().data_root / "decisions.sqlite"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.evidence_root = self.path.parent / "decision_evidence"
-        self._migrate()
+        if not self.read_only:
+            self._migrate()
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     @staticmethod
     def _validate_panel_cutoff(
@@ -423,6 +430,114 @@ class DecisionStore:
                 self._validate_panel_cutoff(panel, signal_date)
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
+            result.append(report)
+        return result
+
+    @staticmethod
+    def _preview_state(report: dict[str, Any], issue: str) -> dict[str, Any]:
+        """Mark an unrecoverable legacy/corrupt snapshot without reinterpreting it.
+
+        ``history`` remains the strict formal-read API and raises for any
+        missing evidence.  Browser history pages instead use this explicit
+        preview shape, so a single old row never blanks the entire workspace.
+        """
+
+        value = dict(report)
+        snapshot = dict(value.get("snapshot") or {})
+        issues = list(snapshot.get("issues") or ())
+        if issue not in issues:
+            issues.append(issue)
+        snapshot.update({"state": "degraded", "issues": issues})
+        value["snapshot"] = snapshot
+        value["eligibility"] = {
+            "preview_allowed": True,
+            "analysis_allowed": False,
+            "formal_allowed": False,
+            "reasons": issues,
+        }
+        value["formal_allowed"] = False
+        return value
+
+    def preview_history(
+        self,
+        universe: str | None = None,
+        limit: int = 30,
+        profile: str | None = None,
+        horizon: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return page-safe local history, marking bad legacy rows as previews.
+
+        This method performs no schema creation, migration or recovery when
+        constructed with ``read_only=True``.  A missing local database simply
+        means there is no published decision snapshot yet.
+        """
+
+        if limit < 1:
+            return []
+        filters: list[str] = []
+        values: list[Any] = []
+        if universe:
+            filters.append("universe=?")
+            values.append(universe)
+        if profile:
+            filters.append("profile=?")
+            values.append(profile)
+        if horizon is not None:
+            filters.append("horizon=?")
+            values.append(int(horizon))
+        query = "SELECT payload,payload_sha256 FROM selection_snapshots "
+        if filters:
+            query += "WHERE " + " AND ".join(filters) + " "
+        query += "ORDER BY signal_date DESC, created_at DESC LIMIT ?"
+        values.append(limit)
+        try:
+            with self._conn() as conn:
+                rows = conn.execute(query, tuple(values)).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
+        result: list[dict[str, Any]] = []
+        for raw_payload, payload_sha256 in rows:
+            try:
+                report = json.loads(str(raw_payload))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result.append(self._preview_state(
+                    {"picks": []}, "历史决策快照无法解析，不能作为正式证据",
+                ))
+                continue
+            if (
+                not payload_sha256
+                or hashlib.sha256(str(raw_payload).encode("utf-8")).hexdigest()
+                != str(payload_sha256)
+            ):
+                result.append(self._preview_state(
+                    report, "历史决策缺少可信哈希或已被改写，仅可预览",
+                ))
+                continue
+            evidence = report.get("market_input_evidence")
+            if not isinstance(evidence, dict):
+                result.append(self._preview_state(
+                    report, "历史决策缺少可恢复行情证据，仅可预览",
+                ))
+                continue
+            try:
+                panel = self.load_market_input(evidence)
+                self._validate_panel_cutoff(panel, str(report.get("signal_date") or ""))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                result.append(self._preview_state(
+                    report, "历史决策的行情证据不可恢复，仅可预览",
+                ))
+                continue
+            snapshot = dict(report.get("snapshot") or {})
+            snapshot.setdefault("state", "fresh")
+            snapshot.setdefault("issues", [])
+            report["snapshot"] = snapshot
+            report["eligibility"] = {
+                "preview_allowed": True,
+                "analysis_allowed": True,
+                "formal_allowed": True,
+                "reasons": [],
+            }
+            report["formal_allowed"] = True
             result.append(report)
         return result
 

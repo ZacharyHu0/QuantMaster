@@ -506,10 +506,19 @@ class ConfigManager:
         self._lock = threading.RLock()
         self._fingerprint_key: bytes | None = None
 
-    def _settings_check_fingerprint_key(self) -> bytes:
-        """Load a per-installation HMAC key, falling back to an in-memory key if unavailable."""
+    def _settings_check_fingerprint_key(self, *, create: bool = True) -> bytes | None:
+        """Return the HMAC key without touching keyring during a page read.
+
+        A public settings GET may report an existing check as stale when this
+        process has not yet opened its credential store.  That is safer than
+        hidden credential writes (or a Windows keyring stall) on the request
+        path.  Explicit diagnostic actions pass ``create=True`` and establish
+        the key as needed.
+        """
         if self._fingerprint_key is not None:
             return self._fingerprint_key
+        if not create:
+            return None
         target = CredentialStore.settings_check_fingerprint_target()
         try:
             value = self.credentials.get(target)
@@ -542,7 +551,10 @@ class ConfigManager:
 
     def public(self) -> dict[str, Any]:
         raw = _read_yaml(self.path)
-        cfg = self.load()
+        # Never read a keyring-backed secret while rendering a page.  The
+        # document carries only non-secret fields, and declared keyring state
+        # remains visible below without testing the credential backend.
+        cfg = load_config(self.path, load_secrets=False)
         document = document_from_config(cfg)
         doc = document.model_dump()
         meta = raw.get("_secrets") or {}
@@ -558,6 +570,7 @@ class ConfigManager:
                 "checks": self.check_results(
                     document,
                     {"llm": cfg.llm.api_key, "tushare": cfg.data.tushare_token},
+                    allow_keyring_write=False,
                 ),
             }
         )
@@ -578,16 +591,27 @@ class ConfigManager:
         self,
         document: SettingsDocument,
         secrets: dict[str, str],
+        *,
+        allow_keyring_write: bool = True,
     ) -> dict[str, dict[str, Any]]:
         """Return persisted safe results with staleness computed from current settings."""
         with self._lock:
             stored = self._read_check_state()["checks"]
         if not stored:
             return {}
-        secret_fingerprints = _setting_secret_fingerprints(
-            secrets,
-            self._settings_check_fingerprint_key(),
-        )
+        key = self._settings_check_fingerprint_key(create=allow_keyring_write)
+        if key is None:
+            # Preserve the last safe result but never present it as current
+            # until an explicit settings check has opened the credential store.
+            return {
+                kind: {**copy.deepcopy(item.get("result") or {}), "stale": True,
+                       "stale_reason": "credential_fingerprint_not_loaded"}
+                for kind, item in stored.items()
+                if kind in SETTINGS_CHECK_KINDS
+                and isinstance(item, dict)
+                and isinstance(item.get("result"), dict)
+            }
+        secret_fingerprints = _setting_secret_fingerprints(secrets, key)
         public: dict[str, dict[str, Any]] = {}
         for kind, item in stored.items():
             if kind not in SETTINGS_CHECK_KINDS or not isinstance(item, dict):
@@ -645,7 +669,13 @@ class ConfigManager:
     def _secret_public(name: str, runtime_value: str, metadata: dict) -> dict[str, Any]:
         item = metadata.get(name) or {}
         state = item.get("state") or ("environment-or-yaml" if runtime_value else "unset")
-        return {"configured": bool(runtime_value), "state": state}
+        return {
+            # Keyring availability is a diagnostic concern, not something a
+            # page read is allowed to probe.  A declared keyring slot is shown
+            # as configured and explicit checks will report if it is unusable.
+            "configured": bool(runtime_value) or state == "keyring",
+            "state": state,
+        }
 
     def validate(self, value: SettingsDocument | dict[str, Any]) -> dict[str, Any]:
         doc = value if isinstance(value, SettingsDocument) else SettingsDocument.model_validate(value)

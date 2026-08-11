@@ -30,9 +30,18 @@ class StockDBExperimentalOnline:
     _remote_slots = threading.BoundedSemaphore(2)
 
     def __init__(self, source: FreeStockDBSource | None = None, root: str | Path | None = None):
-        self.source = source or FreeStockDBSource()
+        # A status-only page must not even bootstrap a provider adapter.  The
+        # adapter is created lazily at the explicit experimental action that
+        # needs it.
+        self._source = source
         self.root = Path(root or (get_config().data_root / "stockdb-experimental")).resolve()
         self._lock = self._file_guard
+
+    @property
+    def source(self) -> FreeStockDBSource:
+        if self._source is None:
+            self._source = FreeStockDBSource()
+        return self._source
 
     def _read_state(self, name: str, default: dict[str, Any]) -> dict[str, Any]:
         try:

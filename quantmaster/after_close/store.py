@@ -23,8 +23,11 @@ class AfterCloseIntegrityError(RuntimeError):
 
 
 class AfterCloseStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "after_close.sqlite"
+        self.read_only = bool(read_only)
+        if self.read_only:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as connection:
             connection.executescript("""
@@ -52,9 +55,19 @@ class AfterCloseStore:
             """)
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, timeout=20.0, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            timeout=0.25 if self.read_only else 20.0,
+            row_factory=True,
+            read_only=self.read_only,
+        )
+
+    def _require_writer(self) -> None:
+        if self.read_only:
+            raise RuntimeError("盘后快照只读视图不能写入")
 
     def publish(self, snapshot: AfterCloseSnapshot) -> dict[str, Any]:
+        self._require_writer()
         payload = snapshot.to_dict()
         encoded = strict_json_dumps(payload, sort_keys=True)
         digest = content_hash(payload)
@@ -96,6 +109,7 @@ class AfterCloseStore:
         as_of_date: str = "",
         coverage: dict | None = None,
     ) -> None:
+        self._require_writer()
         with self._conn() as connection:
             connection.execute(
                 "INSERT INTO attempts(status,as_of_date,reasons_json,coverage_json,created_at) "
@@ -165,6 +179,7 @@ class AfterCloseStore:
         return [dict(row) for row in rows]
 
     def save_labels(self, snapshot_id: str, horizon: int, payload: dict[str, Any]) -> None:
+        self._require_writer()
         with self._conn() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO labels(snapshot_id,horizon,payload_json,calculated_at) "
@@ -194,6 +209,7 @@ class AfterCloseStore:
         return value if value in {SCORE_VERSION, SHADOW_SCORE_VERSION} else SCORE_VERSION
 
     def set_active_score_version(self, version: str) -> dict[str, Any]:
+        self._require_writer()
         if version not in {SCORE_VERSION, SHADOW_SCORE_VERSION}:
             raise ValueError(f"未知盘后评分版本: {version}")
         current = self.active_score_version()

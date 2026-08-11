@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -188,3 +189,89 @@ def get_runtime_metrics() -> RuntimeMetrics:
         if _METRICS is None or _METRICS.path != path:
             _METRICS = RuntimeMetrics(path)
         return _METRICS
+
+
+class RuntimeMetricsRecorder:
+    """Bounded asynchronous ingress for Web-request metrics.
+
+    A page request never opens the metrics SQLite database.  If the queue is
+    full during a fault, losing an observability sample is preferable to
+    delaying the page that reports the fault.
+    """
+
+    MAX_PENDING = 2_048
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(self.MAX_PENDING)
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def _ensure_worker(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run,
+                name="runtime-metrics-writer",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def record_request(self, **values: Any) -> None:
+        # A reloadable Web generation must not create a metrics writer thread
+        # or open SQLite after serving a request.  The supervisor-owned
+        # runtime-worker records its own node metrics; when that worker is not
+        # available it is explicitly safe to lose a request sample rather
+        # than let observability recreate the page-freeze failure mode.
+        if os.environ.get("QM_WEB_PROCESS") == "1":
+            return
+        try:
+            self._queue.put_nowait({"kind": "request", **values})
+        except queue.Full:
+            return
+        self._ensure_worker()
+
+    def record_node(self, node: str, **values: Any) -> None:
+        if os.environ.get("QM_WEB_PROCESS") == "1":
+            return
+        try:
+            self._queue.put_nowait({"kind": "node", "node": node, **values})
+        except queue.Full:
+            return
+        self._ensure_worker()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            try:
+                metrics = get_runtime_metrics()
+                kind = item.pop("kind", "")
+                if kind == "request":
+                    metrics.record_request(**item)
+                elif kind == "node":
+                    node = str(item.pop("node"))
+                    metrics.record_node(node, **item)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                # Same availability rule as RuntimeMetrics: observation cannot
+                # be allowed to recursively create an availability incident.
+                continue
+
+    def shutdown(self) -> None:
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            return
+
+
+_RECORDER: RuntimeMetricsRecorder | None = None
+_RECORDER_LOCK = threading.Lock()
+
+
+def get_runtime_metrics_recorder() -> RuntimeMetricsRecorder:
+    global _RECORDER
+    with _RECORDER_LOCK:
+        if _RECORDER is None:
+            _RECORDER = RuntimeMetricsRecorder()
+        return _RECORDER

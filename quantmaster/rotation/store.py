@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import builtins
 import hashlib
 import json
 import logging
@@ -203,10 +202,10 @@ def _metadata_observation_id(symbol: str, observed_at: str) -> str:
 class RotationStore:
     """Keep rebuildable analytics separate from user-selected L2 preferences."""
 
-    def __init__(self, root: str | Path | None = None):
+    def __init__(self, root: str | Path | None = None, *, read_only: bool = False):
         base = Path(root) if root is not None else get_config().data_root / "rotation"
         self.root = base.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
         self.cache_path = self.root / "cache.sqlite"
         self.preferences_path = self.root / "preferences.sqlite"
         self.etf_path = self.root / "etf_observations.parquet"
@@ -215,14 +214,33 @@ class RotationStore:
         self.etf_metadata_history_manifest_path = (
             self.root / "etf_metadata_history.manifest.json"
         )
-        self.derived = DerivedArtifactCatalog(self.root.parent / "derived")
-        self._initialize()
+        self.derived = DerivedArtifactCatalog(
+            self.root.parent / "derived", read_only=self.read_only,
+        )
+        # The runtime worker owns schema migration and preference seeding.  A
+        # page reader observes only a published cache and treats an absent
+        # ledger as cold rather than creating it under the HTTP request.
+        if not self.read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._initialize()
 
     def _cache(self) -> sqlite3.Connection:
-        return connect_sqlite(self.cache_path, policy="cache", row_factory=True)
+        return connect_sqlite(
+            self.cache_path,
+            policy="cache",
+            row_factory=True,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     def _preferences(self) -> sqlite3.Connection:
-        return connect_sqlite(self.preferences_path, policy="authoritative", row_factory=True)
+        return connect_sqlite(
+            self.preferences_path,
+            policy="authoritative",
+            row_factory=True,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     @staticmethod
     def _cache_v1(connection: sqlite3.Connection) -> None:
@@ -408,7 +426,7 @@ class RotationStore:
         rows: list[tuple[Any, ...]] = []
         item_rows: list[tuple[Any, ...]] = []
         detail_rows: list[tuple[Any, ...]] = []
-        derived_artifacts: list[tuple[str, str]] = []
+        derived_artifacts: list[tuple[str, str, str, str]] = []
         for kind, raw_payload in payloads.items():
             payload = dict(raw_payload)
             meta = dict(payload.get("meta") or {})
@@ -492,7 +510,12 @@ class RotationStore:
                             str(kind), snapshot_id, str(key).upper(), strict_json_dumps(value),
                         ))
             artifact = self.derived.put_json(compact, schema_version="2")
-            derived_artifacts.append((str(kind), str(artifact["artifact_id"])))
+            derived_artifacts.append((
+                str(kind),
+                str(artifact["artifact_id"]),
+                str(meta.get("input_fingerprint") or ""),
+                str(meta.get("algorithm_version") or ""),
+            ))
 
         item_columns = (
             "kind,snapshot_id,item_key,position,name,level,stage,grade,category,benchmark,"
@@ -529,17 +552,31 @@ class RotationStore:
                     "VALUES(?,?,?,?)",
                     detail_rows,
                 )
-        # The immutable object is fsync'ed before it is registered.  Only after
-        # the indexed cache commits do we advance the current snapshot pointer.
-        for kind, artifact_id in derived_artifacts:
-            self.derived.publish_snapshot("rotation", kind, artifact_id)
+        # The immutable objects are fsync'ed before they are registered.  Only
+        # after the indexed cache commits do we advance all affected current
+        # pointers in one catalog transaction.
+        self.derived.publish_snapshots(
+            "rotation", {kind: artifact_id for kind, artifact_id, _fp, _algo in derived_artifacts},
+        )
+        for kind, artifact_id, input_fingerprint, algorithm_version in derived_artifacts:
+            if input_fingerprint and algorithm_version:
+                self.derived.record_node(
+                    f"rotation.{kind}",
+                    "current",
+                    input_fingerprint,
+                    algorithm_version,
+                    output_artifact_id=artifact_id,
+                )
 
     def snapshot(self, kind: str) -> dict[str, Any] | None:
-        with self._cache() as connection:
-            row = connection.execute(
-                "SELECT snapshot_id,payload_json,content_sha256,items_indexed,details_indexed "
-                "FROM snapshots WHERE kind=?", (kind,),
-            ).fetchone()
+        try:
+            with self._cache() as connection:
+                row = connection.execute(
+                    "SELECT snapshot_id,payload_json,content_sha256,items_indexed,details_indexed "
+                    "FROM snapshots WHERE kind=?", (kind,),
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return None
         if row is None:
             return None
         text = str(row["payload_json"])
@@ -552,21 +589,27 @@ class RotationStore:
         if not isinstance(value, dict):
             raise RotationIntegrityError(f"{kind} 快照根节点不是对象")
         if bool(row["items_indexed"]):
-            with self._cache() as connection:
-                items = connection.execute(
-                    "SELECT payload_json FROM snapshot_items WHERE kind=? AND snapshot_id=? "
-                    "ORDER BY position,item_key",
-                    (kind, str(row["snapshot_id"])),
-                ).fetchall()
+            try:
+                with self._cache() as connection:
+                    items = connection.execute(
+                        "SELECT payload_json FROM snapshot_items WHERE kind=? AND snapshot_id=? "
+                        "ORDER BY position,item_key",
+                        (kind, str(row["snapshot_id"])),
+                    ).fetchall()
+            except (FileNotFoundError, sqlite3.OperationalError):
+                items = []
             value.setdefault("data", {})["items"] = [
                 json.loads(str(item["payload_json"])) for item in items
             ]
         if bool(row["details_indexed"]):
-            with self._cache() as connection:
-                details = connection.execute(
-                    "SELECT item_key,payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=?",
-                    (kind, str(row["snapshot_id"])),
-                ).fetchall()
+            try:
+                with self._cache() as connection:
+                    details = connection.execute(
+                        "SELECT item_key,payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=?",
+                        (kind, str(row["snapshot_id"])),
+                    ).fetchall()
+            except (FileNotFoundError, sqlite3.OperationalError):
+                details = []
             value.setdefault("data", {})["details"] = {
                 str(item["item_key"]): json.loads(str(item["payload_json"]))
                 for item in details
@@ -576,10 +619,13 @@ class RotationStore:
     def snapshot_header(self, kind: str) -> dict[str, Any] | None:
         """Read only a current compact header, never its list/detail rows."""
 
-        with self._cache() as connection:
-            row = connection.execute(
-                "SELECT payload_json,content_sha256 FROM snapshots WHERE kind=?", (kind,),
-            ).fetchone()
+        try:
+            with self._cache() as connection:
+                row = connection.execute(
+                    "SELECT payload_json,content_sha256 FROM snapshots WHERE kind=?", (kind,),
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return None
         if row is None:
             return None
         text = str(row["payload_json"])
@@ -598,11 +644,14 @@ class RotationStore:
         if header is None:
             return None
         snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
-        with self._cache() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=? AND item_key=?",
-                (str(kind), snapshot_id, str(item_key).upper()),
-            ).fetchone()
+        try:
+            with self._cache() as connection:
+                row = connection.execute(
+                    "SELECT payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=? AND item_key=?",
+                    (str(kind), snapshot_id, str(item_key).upper()),
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return None
         if row is None:
             return None
         try:
@@ -697,17 +746,23 @@ class RotationStore:
             )
         selected_page = max(1, int(page))
         selected_size = max(1, min(500, int(page_size)))
-        with self._cache() as connection:
-            total = int(connection.execute(
-                "SELECT COUNT(*) FROM snapshot_items" + where, tuple(params),
-            ).fetchone()[0])
-            pages = max(1, (total + selected_size - 1) // selected_size)
-            current = min(selected_page, pages)
-            offset = (current - 1) * selected_size
-            rows = connection.execute(
-                "SELECT payload_json FROM snapshot_items" + where + " ORDER BY " + order_by + " LIMIT ? OFFSET ?",
-                (*params, selected_size, offset),
-            ).fetchall()
+        try:
+            with self._cache() as connection:
+                total = int(connection.execute(
+                    "SELECT COUNT(*) FROM snapshot_items" + where, tuple(params),
+                ).fetchone()[0])
+                pages = max(1, (total + selected_size - 1) // selected_size)
+                current = min(selected_page, pages)
+                offset = (current - 1) * selected_size
+                rows = connection.execute(
+                    "SELECT payload_json FROM snapshot_items" + where + " ORDER BY " + order_by + " LIMIT ? OFFSET ?",
+                    (*params, selected_size, offset),
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return header, [], {
+                "page": 1, "page_size": selected_size, "total": 0,
+                "pages": 1, "has_previous": False, "has_next": False,
+            }
         try:
             values = [json.loads(str(row["payload_json"])) for row in rows]
         except json.JSONDecodeError as exc:
@@ -726,26 +781,35 @@ class RotationStore:
         if header is None:
             return []
         snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
-        with self._cache() as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT category FROM snapshot_items WHERE kind=? AND snapshot_id=? "
-                "AND category<>'' ORDER BY category COLLATE NOCASE",
-                (str(kind), snapshot_id),
-            ).fetchall()
+        try:
+            with self._cache() as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT category FROM snapshot_items WHERE kind=? AND snapshot_id=? "
+                    "AND category<>'' ORDER BY category COLLATE NOCASE",
+                    (str(kind), snapshot_id),
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         return [str(row["category"]) for row in rows]
 
     def snapshots(self) -> list[dict[str, Any]]:
-        with self._cache() as connection:
-            rows = connection.execute(
-                "SELECT kind,snapshot_id,as_of,generated_at FROM snapshots ORDER BY kind"
-            ).fetchall()
+        try:
+            with self._cache() as connection:
+                rows = connection.execute(
+                    "SELECT kind,snapshot_id,as_of,generated_at FROM snapshots ORDER BY kind"
+                ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         return [dict(row) for row in rows]
 
     def preferences(self) -> dict[str, Any]:
-        with self._preferences() as connection:
-            row = connection.execute(
-                "SELECT payload_json,updated_at FROM preferences WHERE id=1"
-            ).fetchone()
+        try:
+            with self._preferences() as connection:
+                row = connection.execute(
+                    "SELECT payload_json,updated_at FROM preferences WHERE id=1"
+                ).fetchone()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            row = None
         value = json.loads(str(row["payload_json"])) if row else {}
         return {
             "l2_codes": [str(code) for code in value.get("l2_codes") or []],
@@ -795,16 +859,19 @@ class RotationStore:
         self.derived.advance_source_generation("rotation.taxonomy", "all", identity)
 
     def taxonomy_nodes(self, level: str | None = None) -> list[dict[str, Any]]:
-        with self._cache() as connection:
-            if level:
-                rows = connection.execute(
-                    "SELECT payload_json FROM taxonomy_nodes WHERE level=? ORDER BY code",
-                    (str(level).upper(),),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT payload_json FROM taxonomy_nodes ORDER BY level,code"
-                ).fetchall()
+        try:
+            with self._cache() as connection:
+                if level:
+                    rows = connection.execute(
+                        "SELECT payload_json FROM taxonomy_nodes WHERE level=? ORDER BY code",
+                        (str(level).upper(),),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        "SELECT payload_json FROM taxonomy_nodes ORDER BY level,code"
+                    ).fetchall()
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return []
         result = []
         for row in rows:
             try:
@@ -1384,373 +1451,3 @@ class RotationStore:
             self._quarantine_legacy_etf_metadata_history()
             return pd.DataFrame()
         return self._read_verified_etf_metadata_history()
-
-
-class RotationJobStore:
-    """Durable immutable job specs with lease-based claims and an event stream."""
-
-    def __init__(self, path: str | Path | None = None):
-        self.path = (
-            Path(path) if path is not None
-            else get_config().data_root / "rotation" / "jobs.sqlite"
-        ).resolve()
-        with self._connect() as connection:
-            migrate_schema(connection, ((1, self._v1), (2, self._v2)))
-
-    def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, policy="authoritative", row_factory=True)
-
-    @staticmethod
-    def _v1(connection: sqlite3.Connection) -> None:
-        connection.executescript(
-            """
-            CREATE TABLE jobs (
-                id TEXT PRIMARY KEY,
-                spec_json TEXT NOT NULL,
-                logical_hash TEXT NOT NULL,
-                status TEXT NOT NULL,
-                progress INTEGER NOT NULL DEFAULT 0,
-                phase TEXT NOT NULL DEFAULT '',
-                detail TEXT NOT NULL DEFAULT '',
-                attempt INTEGER NOT NULL DEFAULT 1,
-                worker_owner TEXT NOT NULL DEFAULT '',
-                lease_expires_at REAL NOT NULL DEFAULT 0,
-                heartbeat_at REAL NOT NULL DEFAULT 0,
-                cancel_requested INTEGER NOT NULL DEFAULT 0,
-                result_json TEXT NOT NULL DEFAULT '',
-                error TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX idx_rotation_jobs_claim
-                ON jobs(status,lease_expires_at,created_at);
-            CREATE INDEX idx_rotation_jobs_hash
-                ON jobs(logical_hash,status,created_at);
-            CREATE TABLE events (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                event_json TEXT NOT NULL,
-                created_at REAL NOT NULL
-            );
-            CREATE INDEX idx_rotation_job_events ON events(job_id,seq);
-            """
-        )
-
-    @staticmethod
-    def _v2(connection: sqlite3.Connection) -> None:
-        columns = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
-        }
-        additions = {
-            "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
-            "algorithm_version": "TEXT NOT NULL DEFAULT ''",
-            "lease_token": "TEXT NOT NULL DEFAULT ''",
-            "max_attempts": "INTEGER NOT NULL DEFAULT 2",
-        }
-        for name, declaration in additions.items():
-            if name not in columns:
-                connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_rotation_jobs_singleflight "
-            "ON jobs(logical_hash,status,lease_expires_at,created_at)"
-        )
-
-    @staticmethod
-    def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        value = dict(row)
-        value["cancel_requested"] = bool(value["cancel_requested"])
-        try:
-            value["spec"] = json.loads(value.pop("spec_json"))
-        except json.JSONDecodeError:
-            value["spec"] = {}
-        result_text = value.pop("result_json")
-        try:
-            value["result"] = json.loads(result_text) if result_text else None
-        except json.JSONDecodeError:
-            value["result"] = None
-        return value
-
-    def _event(self, connection: sqlite3.Connection, job_id: str, value: dict[str, Any]) -> None:
-        connection.execute(
-            "INSERT INTO events(job_id,event_json,created_at) VALUES(?,?,?)",
-            (job_id, strict_json_dumps(value), time.time()),
-        )
-
-    def create(
-        self,
-        spec: dict[str, Any],
-        *,
-        input_fingerprint: str = "",
-        algorithm_version: str = "",
-    ) -> dict[str, Any]:
-        text = strict_json_dumps(spec, sort_keys=True)
-        logical_hash = _hash_text(strict_json_dumps({
-            "task_type": "rotation.refresh",
-            "canonical_spec": json.loads(text),
-            "input_fingerprint": str(input_fingerprint),
-            "algorithm_version": str(algorithm_version),
-        }, sort_keys=True))
-        now = time.time()
-        with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT * FROM jobs WHERE logical_hash=? AND status IN ('queued','running',"
-                "'cancelling') ORDER BY created_at DESC LIMIT 1",
-                (logical_hash,),
-            ).fetchone()
-            if existing is not None:
-                value = self._row(existing) or {}
-                value["created"] = False
-                value["coalesced"] = True
-                return value
-            job_id = uuid.uuid4().hex
-            connection.execute(
-                "INSERT INTO jobs(id,spec_json,logical_hash,input_fingerprint,algorithm_version,"
-                "status,progress,phase,detail,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    job_id, text, logical_hash, str(input_fingerprint), str(algorithm_version),
-                    "queued", 0, "等待执行", "", now, now,
-                ),
-            )
-            self._event(connection, job_id, {
-                "type": "queued", "phase": "等待执行",
-                "input_fingerprint": str(input_fingerprint),
-            })
-            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        value = self._row(row) or {}
-        value["created"] = True
-        value["coalesced"] = False
-        return value
-
-    def get(self, job_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        return self._row(row)
-
-    def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (max(1, min(limit, 200)),),
-            ).fetchall()
-        return [value for row in rows if (value := self._row(row)) is not None]
-
-    def claim(self, owner: str, lease_seconds: float = 45.0) -> dict[str, Any] | None:
-        now = time.time()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            exhausted = connection.execute(
-                "SELECT id,attempt FROM jobs WHERE status IN ('running','cancelling') "
-                "AND lease_expires_at<? AND attempt>=max_attempts",
-                (now,),
-            ).fetchall()
-            for expired in exhausted:
-                connection.execute(
-                    "UPDATE jobs SET status='failed',phase='执行失败',"
-                    "detail='worker lease expired after maximum attempts',"
-                    "error='worker lease expired after maximum attempts',"
-                    "lease_expires_at=0,lease_token='',updated_at=? WHERE id=?",
-                    (now, str(expired["id"])),
-                )
-                self._event(connection, str(expired["id"]), {
-                    "type": "failed", "reason": "lease attempts exhausted",
-                })
-            row = connection.execute(
-                "SELECT * FROM jobs WHERE status='queued' OR "
-                "(status IN ('running','cancelling') AND lease_expires_at<? AND attempt<max_attempts) "
-                "ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,created_at LIMIT 1",
-                (now,),
-            ).fetchone()
-            if row is None:
-                connection.rollback()
-                return None
-            attempt = int(row["attempt"]) + (0 if row["status"] == "queued" else 1)
-            status = "cancelling" if bool(row["cancel_requested"]) else "running"
-            lease_token = uuid.uuid4().hex
-            connection.execute(
-                "UPDATE jobs SET status=?,attempt=?,worker_owner=?,lease_token=?,lease_expires_at=?,"
-                "heartbeat_at=?,updated_at=? WHERE id=?",
-                (status, attempt, owner, lease_token, now + lease_seconds, now, now, row["id"]),
-            )
-            self._event(connection, str(row["id"]), {
-                "type": "claimed", "owner": owner, "attempt": attempt,
-            })
-            connection.commit()
-        return self.get(str(row["id"]))
-
-    def heartbeat(
-        self, job_id: str, owner: str, lease_token: str, lease_seconds: float = 45.0,
-    ) -> bool:
-        now = time.time()
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET heartbeat_at=?,lease_expires_at=?,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (now, now + lease_seconds, now, job_id, owner, str(lease_token)),
-            )
-        return cursor.rowcount == 1
-
-    def release_for_handoff(self, job_id: str, owner: str, lease_token: str) -> bool:
-        """Expire an owned lease without changing the durable task outcome."""
-        now = time.time()
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET lease_expires_at=0,heartbeat_at=?,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (now, now, job_id, owner, str(lease_token)),
-            )
-            if cursor.rowcount:
-                self._event(connection, job_id, {
-                    "type": "lease_released",
-                    "owner": owner,
-                    "reason": "worker_shutdown",
-                })
-        return cursor.rowcount == 1
-
-    def progress(
-        self,
-        job_id: str,
-        owner: str,
-        lease_token: str,
-        progress: int,
-        phase: str,
-        detail: str = "",
-    ) -> None:
-        now = time.time()
-        value = max(0, min(99, int(progress)))
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET progress=?,phase=?,detail=?,heartbeat_at=?,"
-                "lease_expires_at=?,updated_at=? WHERE id=? AND worker_owner=? "
-                "AND lease_token=? AND status IN ('running','cancelling')",
-                (
-                    value, str(phase)[:200], str(detail)[:1000], now, now + 45, now,
-                    job_id, owner, str(lease_token),
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("任务租约已失效")
-            self._event(connection, job_id, {
-                "type": "progress", "progress": value, "phase": phase, "detail": detail,
-            })
-
-    def is_cancel_requested(
-        self, job_id: str, owner: str = "", lease_token: str = "",
-    ) -> bool:
-        with self._connect() as connection:
-            if owner:
-                if not lease_token:
-                    raise RuntimeError("任务检查取消状态必须携带 lease token")
-                row = connection.execute(
-                    "SELECT cancel_requested FROM jobs WHERE id=? AND worker_owner=? AND lease_token=?",
-                    (job_id, owner, str(lease_token)),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT cancel_requested FROM jobs WHERE id=?", (job_id,),
-                ).fetchone()
-        return bool(row and row["cancel_requested"])
-
-    def complete(
-        self, job_id: str, owner: str, lease_token: str, result: dict[str, Any],
-    ) -> None:
-        now = time.time()
-        outcome = str(result.get("outcome") or "updated")
-        phase = {
-            "updated": "分析已更新",
-            "partial": "部分更新完成",
-            "unchanged": "数据未推进",
-        }.get(outcome, "分析已完成")
-        detail = "；".join(str(item) for item in result.get("warnings") or [])[:1000]
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET status='completed',progress=100,phase=?,"
-                "detail=?,result_json=?,error='',lease_expires_at=0,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (phase, detail, strict_json_dumps(result), now, job_id, owner, str(lease_token)),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("任务租约已失效")
-            self._event(connection, job_id, {"type": "completed", "result": result})
-
-    def fail(
-        self,
-        job_id: str,
-        owner: str,
-        lease_token: str,
-        error: str,
-        *,
-        cancelled: bool = False,
-    ) -> None:
-        now = time.time()
-        status = "cancelled" if cancelled else "failed"
-        phase = "已取消" if cancelled else "执行失败"
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE jobs SET status=?,phase=?,detail=?,error=?,lease_expires_at=0,"
-                "updated_at=? WHERE id=? AND worker_owner=? AND lease_token=? "
-                "AND status IN ('running','cancelling')",
-                (
-                    status, phase, str(error)[:1000], str(error)[:1000], now,
-                    job_id, owner, str(lease_token),
-                ),
-            )
-            if cursor.rowcount:
-                self._event(connection, job_id, {"type": status, "error": str(error)[:1000]})
-
-    def cancel(self, job_id: str) -> dict[str, Any]:
-        now = time.time()
-        with self._connect() as connection:
-            row = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            status = str(row["status"])
-            if status in TERMINAL_JOB_STATUSES:
-                return self.get(job_id) or {}
-            next_status = "cancelled" if status == "queued" else "cancelling"
-            connection.execute(
-                "UPDATE jobs SET cancel_requested=1,status=?,phase=?,updated_at=? WHERE id=?",
-                (next_status, "已取消" if next_status == "cancelled" else "正在安全停止", now, job_id),
-            )
-            self._event(connection, job_id, {"type": "cancel_requested"})
-        return self.get(job_id) or {}
-
-    def retry(self, job_id: str) -> dict[str, Any]:
-        current = self.get(job_id)
-        if current is None:
-            raise KeyError(job_id)
-        if current["status"] not in TERMINAL_JOB_STATUSES:
-            raise ValueError("当前任务尚未结束，不能重试")
-        created = self.create(
-            current["spec"],
-            input_fingerprint=str(current.get("input_fingerprint") or ""),
-            algorithm_version=str(current.get("algorithm_version") or ""),
-        )
-        with self._connect() as connection:
-            self._event(connection, str(created["id"]), {"type": "retry_of", "job_id": job_id})
-            self._event(connection, job_id, {"type": "retried_as", "job_id": created["id"]})
-        return created
-
-    def events(
-        self, job_id: str, after: int = 0, limit: int = 500,
-    ) -> builtins.list[dict[str, Any]]:
-        if self.get(job_id) is None:
-            raise KeyError(job_id)
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT seq,event_json,created_at FROM events WHERE job_id=? AND seq>? "
-                "ORDER BY seq LIMIT ?",
-                (job_id, max(0, int(after)), max(1, min(int(limit), 2000))),
-            ).fetchall()
-        result = []
-        for row in rows:
-            try:
-                value = json.loads(str(row["event_json"]))
-            except json.JSONDecodeError:
-                value = {"type": "invalid_event"}
-            result.append({"seq": int(row["seq"]), "created_at": row["created_at"], **value})
-        return result

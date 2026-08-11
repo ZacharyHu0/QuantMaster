@@ -7,7 +7,9 @@ from typing import Literal
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import Field, field_validator
 
-from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
+import sqlite3
+
+from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs, read_stock_analysis
 from quantmaster.runtime.contracts import ContractModel
 
 router = APIRouter(prefix="/api/v1/market/stock-analyses", tags=["market"])
@@ -50,6 +52,8 @@ def create_stock_analysis(
 @router.get("/{analysis_id}")
 def get_stock_analysis(analysis_id: str) -> dict:
     try:
-        return get_stock_analysis_jobs().analysis(analysis_id)
+        return read_stock_analysis(analysis_id)
+    except (FileNotFoundError, sqlite3.Error):
+        raise HTTPException(503, "个股分析快照暂不可读") from None
     except KeyError:
         raise HTTPException(404, "个股分析不存在") from None

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Literal, cast
 
@@ -30,8 +31,8 @@ from pydantic import Field
 
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
-from quantmaster.config import get_config
-from quantmaster.data.base import MarketDataUnavailable
+from quantmaster.config import get_config, get_config_readiness
+from quantmaster.data.base import DataEvidenceNotReady, MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
 from quantmaster.runtime.contracts import ContractModel
@@ -41,6 +42,38 @@ from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.trading_sessions import market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
+
+# HTTP workers are allowed only a small, fixed number of synchronous escape
+# hatches (currently NDJSON progress generation). Normal page reads stay on
+# local stores; a saturated slot fails explicitly instead of creating another
+# unbounded thread.
+WEB_BLOCKING_TOKENS = 16
+WEB_THREAD_WARNING = 64
+_web_blocking_slots = threading.BoundedSemaphore(WEB_BLOCKING_TOKENS)
+_web_stream_lock = threading.Lock()
+_web_stream_executor: ThreadPoolExecutor | None = None
+
+
+def _submit_web_stream(task: Callable[[], None]) -> None:
+    """Submit a bounded Web escape-hatch task, recreating after a lifespan restart."""
+
+    global _web_stream_executor
+    with _web_stream_lock:
+        if _web_stream_executor is None:
+            _web_stream_executor = ThreadPoolExecutor(
+                max_workers=WEB_BLOCKING_TOKENS,
+                thread_name_prefix="qm-web-stream",
+            )
+        _web_stream_executor.submit(task)
+
+
+def _shutdown_web_stream_executor() -> None:
+    global _web_stream_executor
+    with _web_stream_lock:
+        executor = _web_stream_executor
+        _web_stream_executor = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _default_close_data_end(as_of: str | None = None) -> str:
@@ -72,114 +105,30 @@ def _configure_reload_worker_logging() -> bool:
 async def lifespan(_: FastAPI):
     reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
     _configure_reload_worker_logging()
-    from quantmaster.after_close.jobs import (
-        get_after_close_jobs,
-        shutdown_after_close_jobs,
-    )
-    from quantmaster.analysis.stock_jobs import (
-        get_stock_analysis_jobs,
-        shutdown_stock_analysis_jobs,
-    )
-    from quantmaster.automation.runtime import get_runtime
-    from quantmaster.backtest.paper_automation import get_paper_automation_worker
-    from quantmaster.backtest.workbench import get_backtest_worker
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.data.instruments import InstrumentStore
-    from quantmaster.data.maintenance import data_refresh_manager
-    from quantmaster.data.repair import get_data_repair_manager
-    from quantmaster.lab.worker import get_worker
     from quantmaster.logging_config import current_log_path
-    from quantmaster.research.jobs import get_research_job_manager
-    from quantmaster.rotation.etf_jobs import (
-        get_etf_research_jobs,
-        shutdown_etf_research_jobs,
-    )
-    from quantmaster.rotation.service import get_rotation_worker
-    from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
+    from quantmaster.runtime.worker import get_runtime_worker
+    from quantmaster.runtime.supervisor import get_worker_supervisor
     from quantmaster.server.management import capture_runtime_baseline
 
     capture_runtime_baseline()
-    # Startup must stay deterministic and bounded.  InstrumentStore installs the
-    # bundled offline snapshot; external catalog refreshes are explicit maintenance
-    # operations so a stopped app cannot leave network/database threads behind.
-    InstrumentStore()
+    supervisor_state = "reload-attached"
+    previous_web_process = os.environ.get("QM_WEB_PROCESS")
     if reload_worker:
+        # The reload supervisor owns all persistent workers.  A Web generation
+        # only serves HTTP and attaches to the already-running local StockDB
+        # sidecar, so it can be discarded even if a prior generation was stuck.
         free_stockdb_runtime.attach_to_supervisor()
     else:
         free_stockdb_runtime.start()
-    runtime = get_runtime()
-    runtime.start()
-    worker = get_worker()
-    backtest_worker = get_backtest_worker()
-    research_worker = get_research_job_manager()
-    rotation_worker = get_rotation_worker()
-    repair_worker = get_data_repair_manager()
-    stock_analysis_worker = get_stock_analysis_jobs()
-    after_close_worker = get_after_close_jobs()
-    etf_research_worker = get_etf_research_jobs()
-
-    def drain_workers() -> None:
-        # The data root can be hot-switched, which replaces this singleton.
-        # Always resolve the current worker instead of stopping the startup copy.
-        get_paper_automation_worker().stop()
-        rotation_worker.stop()
-        repair_worker.shutdown()
-        data_refresh_manager.shutdown()
-        research_worker.shutdown()
-        backtest_worker.stop()
-        worker.stop()
-        runtime.stop()
-        stock_analysis_worker.pause()
-        after_close_worker.pause()
-        etf_research_worker.pause()
-
-    def resume_workers() -> None:
-        stock_analysis_worker.resume()
-        after_close_worker.resume()
-        etf_research_worker.resume()
-        runtime.start()
-        research_worker.start()
-        data_refresh_manager.start()
-        repair_worker.start()
-        backtest_worker.start()
-        get_paper_automation_worker().start()
-        rotation_worker.start()
-        if get_config().lab.enabled:
-            worker.start()
-
-    unregister_maintenance = maintenance_barrier.register(
-        MaintenanceParticipant(
-            name=f"web-background-components:{uuid.uuid4().hex}",
-            drain=drain_workers,
-            resume=resume_workers,
-            idle=lambda: (
-                not data_refresh_manager.active
-                and rotation_worker.idle
-                and get_paper_automation_worker().idle
-                and stock_analysis_worker.idle
-                and after_close_worker.idle
-                and etf_research_worker.idle
-            ),
-        )
-    )
-    research_worker.start()
-    stock_analysis_worker.start()
-    after_close_worker.start()
-    etf_research_worker.start()
-    free_stockdb_runtime.start_event_bridge()
-    data_refresh_manager.start()
-    repair_worker.start()
-    backtest_worker.start()
-    get_paper_automation_worker().start()
-    rotation_worker.start(bootstrap_local=True)
-    if get_config().lab.enabled:
-        worker.start()
+        supervisor_state = get_worker_supervisor().start(bootstrap_rotation=True)
+        if supervisor_state == "disabled":
+            # Deterministic test/maintenance fallback.  Normal desktop use
+            # always has a separate worker Supervisor process.
+            get_runtime_worker().start(bootstrap_rotation=True)
+        else:
+            os.environ["QM_WEB_PROCESS"] = "1"
     cfg = get_config()
-    runtime_status = runtime.status()
-    worker_status = worker.status()
-    channels = (
-        ",".join(name for name, active in runtime_status.get("channels", {}).items() if active) or "disabled"
-    )
     log_path = current_log_path()
     logger.info(
         "QuantMaster %s 已就绪 · http://%s:%s",
@@ -188,27 +137,30 @@ async def lifespan(_: FastAPI):
         cfg.server.port,
     )
     logger.info(
-        "自动化 %s · Bot %s · Lab %s · 完整日志 %s",
-        runtime_status.get("status", "unknown"),
-        channels,
-        worker_status.get("status", "unknown"),
+        "Web 代次 %s · 后台 runtime-worker %s · 完整日志 %s",
+        os.environ.get("QM_WEB_GENERATION", "0"),
+        "由重载监督器托管" if reload_worker else (
+            "本地测试/维护回退" if supervisor_state == "disabled" else "独立 Worker Supervisor 托管"
+        ),
         str(log_path) if log_path else "仅终端",
     )
     try:
         yield
     finally:
-        free_stockdb_runtime.stop_event_bridge()
-        drain_workers()
         if not reload_worker:
+            if supervisor_state == "disabled":
+                get_runtime_worker().stop()
+            else:
+                get_worker_supervisor().stop()
             free_stockdb_runtime.stop()
-        unregister_maintenance()
+        if previous_web_process is None:
+            os.environ.pop("QM_WEB_PROCESS", None)
+        else:
+            os.environ["QM_WEB_PROCESS"] = previous_web_process
+        _shutdown_web_stream_executor()
         from quantmaster.ai.llm import close_llm_http_clients
 
         close_llm_http_clients()
-        # 飞书 outbox 已在 drain_workers 中停止，不会在此处重新创建分析单例。
-        shutdown_stock_analysis_jobs()
-        shutdown_after_close_jobs()
-        shutdown_etf_research_jobs()
         logger.info("QuantMaster 已停止")
 
 
@@ -303,10 +255,40 @@ async def market_data_unavailable(request: Request, exc: MarketDataUnavailable):
     )
 
 
+@app.exception_handler(DataEvidenceNotReady)
+async def evidence_not_ready(request: Request, exc: DataEvidenceNotReady):
+    """Formal gates are pure and fail fast; they never start a provider call."""
+    problem = make_problem(
+        "evidence_not_ready",
+        severity="warning",
+        source="数据证据",
+        title="正式操作缺少合格证据",
+        message="；".join(exc.quality.assess_eligibility().reasons)
+        or "当前本地快照尚未通过正式验收",
+        action="可先查看带标记的本地结果，并通过数据刷新任务补齐证据后再执行正式操作。",
+        blocking=True,
+        can_continue=False,
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": problem["message"],
+            "problem": problem,
+            "code": "evidence_not_ready",
+            "data_quality": exc.quality.to_dict(),
+            "eligibility": exc.quality.assess_eligibility().to_dict(),
+            "provenance": list(exc.provenance),
+            "refresh": {"status": "available", "resource": "bars"},
+            "error_id": _request_id(request),
+        },
+    )
+
+
 @app.middleware("http")
 async def request_context_and_migration_lock(request: Request, call_next):
     """Apply the local security boundary, request context and migration lock."""
     from quantmaster.data.migration import migration_manager
+    from quantmaster.data.resilience import local_only_data_access
     from quantmaster.runtime.maintenance import maintenance_barrier
     from quantmaster.server.security import (
         SecurityViolation,
@@ -356,7 +338,19 @@ async def request_context_and_migration_lock(request: Request, call_next):
                 },
             )
         else:
-            response = await call_next(request)
+            # HTTP handlers are a local snapshot/read-command boundary.  The
+            # sole exception is the explicit operator provider probe; refresh
+            # jobs execute in their own background context after this request
+            # has returned.  This keeps a page cache miss from silently
+            # becoming an upstream timeout.
+            provider_probe = (
+                request.method == "POST"
+                and path.startswith("/api/v1/diagnostics/providers/")
+                and path.endswith("/probe")
+            )
+            access = nullcontext() if provider_probe else local_only_data_access()
+            with access:
+                response = await call_next(request)
     except SecurityViolation as exc:
         problem = make_problem(
             exc.code,
@@ -369,6 +363,14 @@ async def request_context_and_migration_lock(request: Request, call_next):
         response = JSONResponse(
             status_code=exc.status_code,
             content={"detail": str(exc.detail), "problem": problem, "error_id": request_id},
+        )
+    except OperationProblem as exc:
+        # Starlette's exception handlers sit inside this request middleware.
+        # Preserve a deliberate cold/degraded operation contract instead of
+        # accidentally turning it into a generic 500 at the outer boundary.
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content=exc.response(request_id),
         )
     except HTTPException as exc:
         problem = make_problem(
@@ -407,14 +409,15 @@ async def request_context_and_migration_lock(request: Request, call_next):
             },
         )
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-QM-Worker-Generation"] = os.environ.get("QM_WEB_GENERATION", "0")
     duration_ms = (time.perf_counter() - started) * 1000
     response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
     try:
         route = getattr(request.scope.get("route"), "path", None) or path
-        get_runtime_metrics = __import__(
-            "quantmaster.runtime.metrics", fromlist=["get_runtime_metrics"],
-        ).get_runtime_metrics
-        get_runtime_metrics().record_request(
+        get_runtime_metrics_recorder = __import__(
+            "quantmaster.runtime.metrics", fromlist=["get_runtime_metrics_recorder"],
+        ).get_runtime_metrics_recorder
+        get_runtime_metrics_recorder().record_request(
             route=str(route),
             method=request.method,
             status_code=response.status_code,
@@ -575,7 +578,23 @@ def _progress_stream(
         finally:
             events.put(None)
 
-    threading.Thread(target=run, daemon=True).start()
+    if not _web_blocking_slots.acquire(blocking=False):
+        raise HTTPException(
+            503,
+            "web_blocking_capacity_exhausted：当前页面任务过多，请稍后重试",
+        )
+
+    def bounded_run() -> None:
+        try:
+            run()
+        finally:
+            _web_blocking_slots.release()
+
+    try:
+        _submit_web_stream(bounded_run)
+    except Exception:
+        _web_blocking_slots.release()
+        raise
 
     def generate() -> Iterator[str]:
         while True:
@@ -667,20 +686,26 @@ def create_browser_session(request: Request, response: Response) -> dict:
 
 
 @app.get("/api/v1/health/live")
-def liveness() -> dict:
+async def liveness() -> dict:
     """Constant-time process liveness; deliberately performs no store access."""
-    return {"status": "ok", "version": __version__, "release_date": RELEASE_DATE}
+    threads = threading.active_count()
+    return {
+        "status": "ok",
+        "version": __version__,
+        "release_date": RELEASE_DATE,
+        "web_threads": threads,
+        "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
+    }
 
 
 @app.get("/api/v1/health/ready")
-def readiness() -> dict:
-    """Check only the minimum local path needed to accept work."""
-    root = get_config().data_root
-    ready = root.is_dir()
+async def readiness() -> dict:
+    """Return a cached local readiness state without touching stores."""
+    state = get_config_readiness()
     return {
-        "status": "ready" if ready else "not_ready",
+        "status": state["status"],
         "version": __version__,
-        "data_root": str(root),
+        "data_root": state["data_root"],
     }
 
 
@@ -688,7 +713,9 @@ def readiness() -> dict:
 def diagnostic_report() -> dict:
     from quantmaster.server.diagnostics import diagnostics
 
-    return diagnostics()
+    # The runtime-worker refreshes this cache.  A diagnostic GET must never
+    # construct stores or contend for SQLite while the page is already slow.
+    return diagnostics(wait_for_first=False, refresh=False)
 
 
 @app.post("/api/v1/diagnostics/providers/{lane}/probe")
@@ -729,7 +756,7 @@ PERSONAL_MARKET_GROUP = "我的股票"
 
 def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
     """合并自选、关注与持有，保留来源分类并优先使用用户填写的名称。"""
-    from quantmaster.data import load_stock_names
+    from quantmaster.data import read_stock_names
     from quantmaster.portfolio import AssetListStore, Ledger
 
     symbols: dict[str, str] = {}
@@ -739,7 +766,7 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
         name = str(value or "").strip()
         return "" if name.upper() == symbol else name
 
-    lists = AssetListStore().all()
+    lists = AssetListStore(read_only=True).all()
     for list_name in ("favorites", "following"):
         for item in lists.get(list_name, []):
             symbol = str(item["symbol"]).upper()
@@ -749,7 +776,7 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
                 symbols[symbol] = name
             memberships.setdefault(symbol, []).append(list_name)
 
-    for position in Ledger().positions():
+    for position in Ledger(read_only=True).positions():
         if position.shares <= 0:
             continue
         symbol = str(position.symbol).upper()
@@ -758,7 +785,7 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
 
     missing = [symbol for symbol, name in symbols.items() if not usable_name(name, symbol)]
     if missing:
-        cached_names = load_stock_names(missing)
+        cached_names = read_stock_names(missing)
         for symbol in missing:
             symbols[symbol] = usable_name(cached_names.get(symbol), symbol) or symbol
     return symbols, memberships
@@ -1011,7 +1038,35 @@ def _market_overview_response(
         else "degraded" if degraded_total or stale_total or missing_total
         else "verified"
     )
+    lineage = [
+        {
+            "group": group,
+            "symbol": item.get("symbol"),
+            "as_of": item.get("as_of"),
+            "checked_at": item.get("checked_at"),
+        }
+        for group, values in sorted(result.items())
+        for item in values
+    ]
+    snapshot_id = hashlib.sha256(
+        strict_json_dumps(lineage, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24] if lineage else ""
+    stale_reasons = list((
+        f"{missing_total} 个标的不可用" if missing_total else "",
+        f"{stale_total} 个标的使用陈旧缓存" if stale_total else "",
+    ))
     return {
+        "meta": {
+            "snapshot_id": snapshot_id,
+            "schema_version": 2,
+            "algorithm_version": "QM_MARKET_OVERVIEW_V2",
+            "input_fingerprint": snapshot_id,
+            "as_of": max((str(item.get("as_of") or "") for values in result.values() for item in values), default=""),
+            "generated_at": max((str(item.get("checked_at") or "") for values in result.values() for item in values), default=""),
+            "stale": bool(stale_total or missing_total),
+            "stale_reasons": [value for value in stale_reasons if value],
+            "quality": {"status": quality_status},
+        },
         "groups": result,
         "group_counts": {group: len(symbols) for group, symbols in groups.items()},
         "group_statuses": group_statuses,
@@ -1031,13 +1086,45 @@ def _market_overview_response(
     }
 
 
+def _market_snapshot_etag(
+    request: Request,
+    response: Response,
+    payload: dict,
+    *,
+    encoded: bytes | None = None,
+) -> Any:
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    snapshot_id = str(snapshot.get("id") or meta.get("snapshot_id") or "")
+    if not snapshot_id:
+        return payload
+    canonical_query = strict_json_dumps(
+        sorted((str(key), str(value)) for key, value in request.query_params.multi_items()),
+        sort_keys=True,
+    )
+    etag = '"' + hashlib.sha256(
+        f"{snapshot_id}\n{canonical_query}".encode("utf-8")
+    ).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+    }
+    requested = str(request.headers.get("if-none-match") or "")
+    if requested == "*" or etag in {value.strip() for value in requested.split(",")}:
+        return Response(status_code=304, headers=headers)
+    if encoded is not None:
+        return Response(content=encoded, media_type="application/json", headers=headers)
+    response.headers.update(headers)
+    return payload
+
+
 def _market_overview_data(
     start: str | None = None,
     progress: ProgressEmitter | None = None,
     refresh: Literal["auto", "incremental", "local"] = "auto",
 ) -> dict:
     """个人股票与全球参考市场概览：返回近一年走势并优先发送本地缓存。"""
-    from quantmaster.data import load_history
+    from quantmaster.data import refresh_history
     from quantmaster.data.storage import BarStore
     from quantmaster.data.yfinance_source import GLOBAL_REFS
 
@@ -1078,13 +1165,13 @@ def _market_overview_data(
     yahoo_symbols = set(GLOBAL_REFS)
 
     def one(group: str, symbol: str, name: str):
-        envelope = load_history(
+        envelope = refresh_history(
             symbol,
             start_value,
             end_value,
             store=store,
-            refresh=refresh,
-            priority="interactive",
+            mode=refresh,
+            work_class="interactive",
         )
         return group, symbol, name, envelope.require_data(), envelope.quality.to_dict()
 
@@ -1191,83 +1278,31 @@ def _market_overview_data(
 
 @app.get("/api/v1/market/overview")
 def market_overview(
-    start: str | None = None,
-) -> dict:
-    """Read the latest local market cards; this endpoint never synchronizes."""
-    return _market_overview_data(start, refresh="local")
+    request: Request,
+    response: Response,
+) -> Any:
+    """Read one published local market snapshot; never rebuild or synchronize."""
+    from quantmaster.market.overview_snapshot import read_market_overview_snapshot_wire
 
-
-@app.post("/api/v1/market/overview/refresh", status_code=202)
-def refresh_market_overview() -> dict:
-    """Queue the explicit market-card source refresh without blocking a GET."""
-
-    from quantmaster.data.maintenance import data_refresh_manager
-
-    active = next((
-        job for job in data_refresh_manager.list(20)
-        if str(job.get("scope") or "") == "market"
-        and str(job.get("status") or "") in {"queued", "running", "cancelling"}
-    ), None)
-    created = active is None
-    if active is None:
-        try:
-            active = data_refresh_manager.create("market")
-        except ValueError:
-            active = next((
-                job for job in data_refresh_manager.list(20)
-                if str(job.get("scope") or "") == "market"
-                and str(job.get("status") or "") in {"queued", "running", "cancelling"}
-            ), None)
-            if active is None:
-                raise
-            created = False
-    job_id = str(active["id"])
-    return {
-        "id": job_id,
-        "type": "market.overview.refresh",
-        "domain": "market",
-        "status": str(active.get("status") or "queued"),
-        "created": created,
-        "coalesced": not created,
-        "input_fingerprint": "",
-        "links": {
-            "self": f"/api/v1/jobs/data/{job_id}",
-            "events": f"/api/v1/jobs/data/{job_id}/events",
-            "cancel": f"/api/v1/jobs/data/{job_id}/cancel",
-            "retry": f"/api/v1/jobs/data/{job_id}/retry",
-        },
-    }
+    payload, encoded = read_market_overview_snapshot_wire()
+    return _market_snapshot_etag(
+        request, response, payload, encoded=encoded,
+    )
 
 
 @app.get("/api/v1/market/fear-greed")
-def market_fear_greed(refresh: bool = False) -> dict:
-    """CNN Fear & Greed；作为全球背景参考，不伪装成 A 股本地指标。"""
-    from quantmaster.market import load_cnn_fear_greed
+def market_fear_greed() -> dict:
+    """Read the last local CNN snapshot; network refresh is a background action."""
+    from quantmaster.market import read_cnn_fear_greed
 
-    return load_cnn_fear_greed(force=refresh)
-
-
-@app.get("/api/v1/market/overview/stream")
-def market_overview_stream(
-    request: Request,
-    start: str | None = None,
-) -> StreamingResponse:
-    """Local-only market card stream; refreshes use the explicit POST endpoint."""
-
-    def task(emit: ProgressEmitter) -> dict:
-        emit(1, "准备市场清单", "读取已发布本地缓存")
-        result = _market_overview_data(start, emit, "local")
-        emit(100, "市场数据已就绪", "正在绘制行情卡片")
-        return result
-
-    return _progress_stream(task, _request_id(request))
+    return read_cnn_fear_greed()
 
 
 @app.get("/api/v1/market/history/{symbol}")
 def market_history(
     symbol: str, start: str | None = None, end: str | None = None, frequency: str = "1d"
 ) -> dict:
-    from quantmaster.data import load_bars
+    from quantmaster.data import read_bars
     from quantmaster.data.base import validate_frequency, validate_symbol
 
     end = end or (
@@ -1288,7 +1323,7 @@ def market_history(
         start = str(start_stamp.date())
     started = time.perf_counter()
     try:
-        market_envelope = load_bars(symbol, start, end, frequency=frequency)
+        market_envelope = read_bars(symbol, start, end, frequency=frequency)
         df = market_envelope.require_data()
     except MarketDataUnavailable:
         raise
@@ -1342,7 +1377,7 @@ class RegimeRequest(ContractModel):
 @app.post("/api/v1/market/regime")
 def market_regime(req: RegimeRequest) -> dict:
     """当前/过去/未来市场状态，以及行业板块强弱。"""
-    from quantmaster.data import load_panel
+    from quantmaster.data import read_panel
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.market import analyze_market, analyze_sectors
@@ -1352,9 +1387,7 @@ def market_regime(req: RegimeRequest) -> dict:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
         )
-        market_envelope = load_panel(
-            list(universe_snapshot.symbols), req.start, end, priority="formal",
-        )
+        market_envelope = read_panel(list(universe_snapshot.symbols), req.start, end)
         panel = market_envelope.require_data()
         report = analyze_market(panel)
         past = report.pop("past").tail(req.history)
@@ -1398,7 +1431,7 @@ class SelectionRequest(ContractModel):
 @app.post("/api/v1/research/selection/daily")
 def selection_daily(req: SelectionRequest) -> dict:
     """收盘后生成适合次日执行的 1–30 日预测选股决策。"""
-    from quantmaster.data import load_panel, load_stock_names
+    from quantmaster.data import read_panel, read_stock_names
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import hybrid_daily_selection, resolve_policy
@@ -1415,15 +1448,13 @@ def selection_daily(req: SelectionRequest) -> dict:
             req.universe, as_of=end if req.end else None,
         )
         symbols = list(universe_snapshot.symbols)
-        market_envelope = load_panel(
-            symbols, req.start, end, priority="formal",
-        )
+        market_envelope = read_panel(symbols, req.start, end)
         panel = market_envelope.require_data()
         mapping, industry_evidence = (
             load_industry_analysis_context(as_of=end if req.end else None)
             if req.include_industry else ({}, None)
         )
-        names = load_stock_names(symbols)
+        names = read_stock_names(symbols)
         policy = resolve_policy(
             req.universe,
             req.horizon,
@@ -1529,12 +1560,12 @@ def selection_history(
     profile: str | None = None,
     horizon: int | None = None,
 ) -> dict:
-    from quantmaster.data import load_stock_names
+    from quantmaster.data import read_stock_names
     from quantmaster.decision import DecisionStore, enrich_decision_snapshots
 
     if horizon is not None and horizon not in {1, 3, 5, 7, 10, 20, 30}:
         raise HTTPException(422, "horizon 只支持 1、3、5、7、10、20、30")
-    snapshots = DecisionStore().history(
+    snapshots = DecisionStore(read_only=True).preview_history(
         universe,
         min(max(limit, 1), 200),
         profile=profile,
@@ -1548,7 +1579,7 @@ def selection_history(
             if pick.get("symbol")
         )
     )
-    names = load_stock_names(symbols) if symbols else {}
+    names = read_stock_names(symbols) if symbols else {}
     for snapshot in snapshots:
         for pick in snapshot.get("picks", []):
             if not pick.get("name") or pick.get("name") == "名称待同步":
@@ -1588,7 +1619,7 @@ def _decision_dashboard_data(
     req: DecisionDashboardRequest,
     progress: ProgressEmitter | None = None,
 ) -> dict:
-    from quantmaster.data import load_panel, load_stock_names
+    from quantmaster.data import read_panel, read_stock_names
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import (
@@ -1619,20 +1650,20 @@ def _decision_dashboard_data(
             progress(
                 5 + round(58 * completed / max(1, total)),
                 "同步候选行情",
-                f"{completed}/{total} · {symbol} · {'已就绪' if success else '已跳过'}",
+                f"{completed}/{total} · {symbol} · {'已读取本地快照' if success else '本地暂无数据'}",
                 {
                     "kind": "decision_symbol",
                     "symbol": symbol,
                     "success": success,
                     "completed": completed,
                     "total": total,
+                    "read_mode": "local_only",
                 },
                 "info" if success else "warning",
             )
 
-    market_envelope = load_panel(
+    market_envelope = read_panel(
         symbols, req.start, end, progress=on_symbol if progress else None,
-        priority="formal",
     )
     panel = market_envelope.require_data()
     if progress:
@@ -1640,7 +1671,7 @@ def _decision_dashboard_data(
     mapping, industry_evidence = load_industry_analysis_context(
         as_of=end if req.end else None,
     )
-    names = load_stock_names(symbols)
+    names = read_stock_names(symbols)
     if progress:
         progress(78, "计算牛熊与趋势", "汇总 MACD、资金量和市场宽度")
     market = analyze_market(panel)
@@ -1795,14 +1826,14 @@ def factors_list() -> dict:
     from quantmaster.factors.fundamental import list_fundamental_factors
     from quantmaster.factors.library import list_factors
     from quantmaster.lab.models import factor_name_key
-    from quantmaster.lab.store import LabStore
+    from quantmaster.lab.store import read_runtime_factors
 
     factors = list_factors() + list_fundamental_factors() + list_news_factors()
     for item in factors:
         item.setdefault("source", "builtin")
     known_names = {factor_name_key(item["name"]) for item in factors}
     try:
-        for item in LabStore().runtime_factors():
+        for item in read_runtime_factors():
             key = factor_name_key(item["name"])
             if key in known_names:
                 continue
@@ -1825,7 +1856,7 @@ class FactorTestRequest(ContractModel):
 
 @app.post("/api/v1/research/factors/test")
 def factors_test(req: FactorTestRequest) -> dict:
-    from quantmaster.data import load_panel
+    from quantmaster.data import read_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors import analyze_factor, compute_factor
     from quantmaster.factors.fundamental import resolve_factor
@@ -1837,7 +1868,7 @@ def factors_test(req: FactorTestRequest) -> dict:
         )
         symbols = list(universe_snapshot.symbols)
         factor = resolve_factor(req.expression, symbols, req.start, end)
-        market_envelope = load_panel(symbols, req.start, end)
+        market_envelope = read_panel(symbols, req.start, end)
         panel = market_envelope.require_data()
         values = compute_factor(factor, panel)
         neutralized = False
@@ -1883,7 +1914,7 @@ class ValidateRequest(ContractModel):
 def factors_validate(req: ValidateRequest) -> dict:
     """样本外验证：split 前训练、split 后验证，外加滚动分段稳定性。"""
     from quantmaster.backtest import train_test_ic, walk_forward_ic
-    from quantmaster.data import load_panel
+    from quantmaster.data import read_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.fundamental import resolve_factor
 
@@ -1894,7 +1925,7 @@ def factors_validate(req: ValidateRequest) -> dict:
         )
         symbols = list(universe_snapshot.symbols)
         factor = resolve_factor(req.expression, symbols, req.start, end)
-        market_envelope = load_panel(symbols, req.start, end)
+        market_envelope = read_panel(symbols, req.start, end)
         panel = market_envelope.require_data()
         result = train_test_ic(factor, panel, split=req.split)
         segments = walk_forward_ic(factor, panel, n_splits=req.n_splits)
@@ -1929,7 +1960,7 @@ class MineRequest(ContractModel):
 
 @app.post("/api/v1/research/mining/genetic")
 def mine_genetic(req: MineRequest) -> dict:
-    from quantmaster.data import load_panel
+    from quantmaster.data import read_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import GeneticMiner
 
@@ -1938,7 +1969,7 @@ def mine_genetic(req: MineRequest) -> dict:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
         )
-        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        market_envelope = read_panel(list(universe_snapshot.symbols), req.start, end)
         panel = market_envelope.require_data()
         miner = GeneticMiner(population=req.population, generations=req.generations, seed=req.seed)
         mined = miner.mine(panel, top_n=req.top_n, progress=False)
@@ -1963,7 +1994,7 @@ class MineLLMRequest(ContractModel):
 
 @app.post("/api/v1/research/mining/llm")
 def mine_llm(req: MineLLMRequest) -> dict:
-    from quantmaster.data import load_panel
+    from quantmaster.data import read_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import LLMFactorMiner
 
@@ -1972,7 +2003,7 @@ def mine_llm(req: MineLLMRequest) -> dict:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
         )
-        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        market_envelope = read_panel(list(universe_snapshot.symbols), req.start, end)
         panel = market_envelope.require_data()
         miner = LLMFactorMiner()
         mined = miner.mine(panel, n=req.n, rounds=req.rounds)
@@ -2016,8 +2047,8 @@ def _asset_lists_payload() -> dict:
     from quantmaster.data.storage import BarStore
     from quantmaster.portfolio import AssetListStore, Ledger
 
-    lists = AssetListStore().all()
-    store = BarStore()
+    lists = AssetListStore(read_only=True).all()
+    store = BarStore(read_only=True)
     quote_cache: dict[str, dict] = {}
 
     def quote(symbol: str) -> dict:
@@ -2030,7 +2061,7 @@ def _asset_lists_payload() -> dict:
         payload[list_name] = [{**item, **quote(item["symbol"])} for item in items]
 
     holdings = []
-    for position in Ledger().positions():
+    for position in Ledger(read_only=True).positions():
         if position.shares <= 0:
             continue
         item = {"symbol": position.symbol, **quote(position.symbol)}
@@ -2127,25 +2158,25 @@ def ledger_add_cashflow(flow: CashflowIn) -> dict:
 def ledger_get_report() -> dict:
     from quantmaster.portfolio import Ledger, ledger_report
 
-    return ledger_report(Ledger())
+    return ledger_report(Ledger(read_only=True))
 
 
 @app.get("/api/v1/portfolio/ledger/trades")
 def ledger_get_trades() -> dict:
     from quantmaster.portfolio import Ledger
 
-    df = Ledger().trades()
+    df = Ledger(read_only=True).trades()
     return {"trades": df.to_dict(orient="records")}
 
 
 @app.get("/api/v1/portfolio/ledger/nav")
 def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     """实盘每日净值（TWR）与基准对比。行情走本地缓存，缺失标的按最近成交价估值。"""
-    from quantmaster.data import load_history
+    from quantmaster.data import read_history
     from quantmaster.data.storage import BarStore
     from quantmaster.portfolio import Ledger, daily_nav, nav_warnings, nav_with_benchmark
 
-    ledger = Ledger()
+    ledger = Ledger(read_only=True)
     trades = ledger.trades()
     if trades.empty:
         return {
@@ -2166,7 +2197,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
     market_provenance: dict[str, list[dict]] = {}
     for symbol in symbols:
         try:
-            envelope = load_history(symbol, start, end, store=store)
+            envelope = read_history(symbol, start, end, store=store)
             prices[symbol] = envelope.require_data()["close"]
             market_quality[symbol] = envelope.quality.to_dict()
             market_provenance[symbol] = list(envelope.provenance)
@@ -2192,7 +2223,7 @@ def ledger_get_nav(benchmark: str = "000300.SH") -> dict:
         }
     payload = {"dates": [], "twr": [], "benchmark": [], "excess_annual": 0.0}
     try:
-        benchmark_envelope = load_history(benchmark, start, end, store=store)
+        benchmark_envelope = read_history(benchmark, start, end, store=store)
         bench = benchmark_envelope.require_data()["close"]
         market_quality[benchmark] = benchmark_envelope.quality.to_dict()
         market_provenance[benchmark] = list(benchmark_envelope.provenance)

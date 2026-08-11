@@ -33,7 +33,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert operations["trading_calendar"]["ready"] is False
     assert "rotation_snapshots" in operations
     assert operations["database_schemas"]["news"] == {
-        "status": "ok", "current": 7, "expected": 7,
+        "status": "ok", "current": 8, "expected": 8,
     }
     assert operations["database_schemas"]["paper"] == {
         "status": "ok", "current": 4, "expected": 4,

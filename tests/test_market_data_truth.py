@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from quantmaster.data import registry
 from quantmaster.data.base import (
-    OHLCV_COLUMNS,
     BarDataEnvelope,
     DataSource,
     Market,
@@ -32,7 +30,7 @@ def _bars(index: pd.DatetimeIndex, value: float = 10.0) -> pd.DataFrame:
     )
 
 
-def test_stockdb_prices_use_tushare_only_to_fill_missing_contract_evidence(monkeypatch):
+def test_stockdb_frame_without_batch_manifest_is_preview_only(monkeypatch):
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
     local = _bars(dates)
     local["amount"] = 10_000_000.0
@@ -40,60 +38,26 @@ def test_stockdb_prices_use_tushare_only_to_fill_missing_contract_evidence(monke
         unit_status="unverified_vendor_contract",
         adjustment_status="unverified_vendor_contract",
     )
-    witness = local.copy()
-    witness.attrs.clear()
-    monkeypatch.setattr(
-        registry,
-        "get_config",
-        lambda: SimpleNamespace(data=SimpleNamespace(tushare_token="token")),
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.instruments.InstrumentStore.get",
-        lambda _self, _symbol: SimpleNamespace(
-            asset_type="stock",
-            list_date="",
-            delist_date="",
-            currency="CNY",
-        ),
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.tushare_source.TushareSource.daily",
-        lambda _self, _symbol, _start, _end: witness,
-    )
     monkeypatch.setattr(
         registry,
         "_local_sessions",
         lambda _start, _end: (dates, "tushare:SSE"),
     )
-
-    verified, evidence = registry._supplement_stockdb_contract(
-        "600000.SH", "2026-07-01", "2026-08-07", local, priority="normal",
+    quality = registry._assess_daily_frame(
+        local,
+        "2026-07-01",
+        "2026-08-07",
+        symbol="600000.SH",
+        source="free-stockdb",
     )
-    quality = registry._apply_stockdb_contract_quality(
-        registry._assess_daily_frame(
-            verified,
-            "2026-07-01",
-            "2026-08-07",
-            symbol="600000.SH",
-            source="free-stockdb",
-        )
-    )
-
-    verified_values = verified.copy()
-    verified_values.attrs.clear()
-    local_values = local.copy()
-    local_values.attrs.clear()
-    pd.testing.assert_frame_equal(verified_values, local_values)
-    assert evidence["price_source"] == "free-stockdb"
-    assert verified.attrs["unit_status"].startswith("verified:")
-    assert quality.status == "verified"
-    assert quality.sources == (
-        "free-stockdb", "tushare:daily+adj_factor-contract-v2",
-    )
-    assert quality.adjustment == "qfq_verified:tushare-adj-factor-v2"
+    assert quality.status == "degraded"
+    assert quality.analysis_eligible is True
+    assert quality.formal_eligible is False
+    assert any("单位" in issue for issue in quality.issues)
+    assert any("复权" in issue for issue in quality.issues)
 
 
-def test_stockdb_contract_supplement_failure_stays_degraded(monkeypatch):
+def test_stockdb_frame_assessment_never_calls_tushare(monkeypatch):
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
     local = _bars(dates)
     local.attrs.update(
@@ -101,25 +65,8 @@ def test_stockdb_contract_supplement_failure_stays_degraded(monkeypatch):
         adjustment_status="unverified_vendor_contract",
     )
     monkeypatch.setattr(
-        registry,
-        "get_config",
-        lambda: SimpleNamespace(data=SimpleNamespace(tushare_token="token")),
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.instruments.InstrumentStore.get",
-        lambda _self, _symbol: SimpleNamespace(
-            asset_type="stock",
-            list_date="",
-            delist_date="",
-            currency="CNY",
-        ),
-    )
-
-    def fail_remote(*_args, **_kwargs):
-        raise RuntimeError("remote unavailable")
-
-    monkeypatch.setattr(
-        "quantmaster.data.tushare_source.TushareSource.daily", fail_remote,
+        "quantmaster.data.tushare_source.TushareSource.daily",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应补证")),
     )
     monkeypatch.setattr(
         registry,
@@ -127,18 +74,14 @@ def test_stockdb_contract_supplement_failure_stays_degraded(monkeypatch):
         lambda _start, _end: (dates, "tushare:SSE"),
     )
 
-    unchanged, evidence = registry._supplement_stockdb_contract(
-        "600000.SH", "2026-07-01", "2026-08-07", local, priority="normal",
-    )
     quality = registry._assess_daily_frame(
-        unchanged,
+        local,
         "2026-07-01",
         "2026-08-07",
         symbol="600000.SH",
         source="free-stockdb",
     )
 
-    assert evidence is None
     assert quality.status == "degraded"
     assert quality.analysis_eligible is True
     assert quality.formal_eligible is False
@@ -146,13 +89,7 @@ def test_stockdb_contract_supplement_failure_stays_degraded(monkeypatch):
     assert any("复权" in issue for issue in quality.issues)
 
 
-@pytest.mark.parametrize(
-    "bad_witness",
-    ["missing_tail", "mismatched_tail", "missing_amount"],
-)
-def test_stockdb_contract_requires_every_date_and_field_to_match(
-    monkeypatch, bad_witness,
-):
+def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
     dates = pd.bdate_range("2026-03-23", periods=100)
     local = _bars(dates)
     local["amount"] = 10_000_000.0
@@ -160,80 +97,45 @@ def test_stockdb_contract_requires_every_date_and_field_to_match(
         unit_status="unverified_vendor_contract",
         adjustment_status="unverified_vendor_contract",
     )
-    witness = local.copy()
-    witness.attrs.clear()
-    if bad_witness == "missing_tail":
-        witness = witness.iloc[:-5]
-    elif bad_witness == "mismatched_tail":
-        witness.loc[dates[-2:], ["open", "high", "low", "close"]] *= 10
-    elif bad_witness == "missing_amount":
-        witness = witness.drop(columns="amount")
-    monkeypatch.setattr(
-        registry,
-        "get_config",
-        lambda: SimpleNamespace(data=SimpleNamespace(tushare_token="token")),
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.instruments.InstrumentStore.get",
-        lambda _self, _symbol: SimpleNamespace(asset_type="stock"),
-    )
     monkeypatch.setattr(
         "quantmaster.data.tushare_source.TushareSource.daily",
-        lambda _self, _symbol, _start, _end: witness,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应补证")),
     )
-
-    unchanged, evidence = registry._supplement_stockdb_contract(
-        "600000.SH",
-        str(dates[0].date()),
-        str(dates[-1].date()),
-        local,
-        priority="normal",
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda _start, _end: (dates, "tushare:SSE"),
     )
+    quality = registry._assess_daily_frame(
+        local, str(dates[0].date()), str(dates[-1].date()),
+        symbol="600000.SH", source="free-stockdb",
+    )
+    assert quality.status == "degraded"
+    assert quality.formal_eligible is False
 
-    assert evidence is None
-    assert unchanged.attrs["unit_status"] == "unverified_vendor_contract"
-    assert unchanged.attrs["adjustment_status"] == "unverified_vendor_contract"
 
-
-def test_stockdb_contract_fills_only_missing_amount_from_witness(monkeypatch):
+def test_stockdb_missing_amount_stays_explicitly_degraded(monkeypatch):
     dates = pd.bdate_range("2026-03-23", periods=20)
     local = _bars(dates)
     local.attrs.update(
         unit_status="unverified_vendor_contract",
         adjustment_status="unverified_vendor_contract",
     )
-    witness = local.copy()
-    witness["amount"] = 10_000_000.0
-    witness.attrs.clear()
-    monkeypatch.setattr(
-        registry,
-        "get_config",
-        lambda: SimpleNamespace(data=SimpleNamespace(tushare_token="token")),
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.instruments.InstrumentStore.get",
-        lambda _self, _symbol: SimpleNamespace(asset_type="stock"),
-    )
     monkeypatch.setattr(
         "quantmaster.data.tushare_source.TushareSource.daily",
-        lambda _self, _symbol, _start, _end: witness,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应补证")),
     )
-
-    supplemented, evidence = registry._supplement_stockdb_contract(
-        "600000.SH",
-        str(dates[0].date()),
-        str(dates[-1].date()),
-        local,
-        priority="normal",
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda _start, _end: (dates, "tushare:SSE"),
     )
-
-    assert evidence is not None
-    assert evidence["filled_fields"] == ["amount"]
-    assert evidence["field_sources"]["amount"] == "tushare:daily"
-    assert supplemented["amount"].eq(10_000_000.0).all()
-    pd.testing.assert_frame_equal(
-        supplemented[OHLCV_COLUMNS], local[OHLCV_COLUMNS], check_freq=False,
+    quality = registry._assess_daily_frame(
+        local, str(dates[0].date()), str(dates[-1].date()),
+        symbol="600000.SH", source="free-stockdb",
     )
+    assert quality.status == "degraded"
+    assert quality.formal_eligible is False
 
 
 def test_degraded_stockdb_candidate_falls_through_to_verified_provider(
@@ -271,21 +173,19 @@ def test_degraded_stockdb_candidate_falls_through_to_verified_provider(
     )
     monkeypatch.setattr(
         registry,
-        "_supplement_stockdb_contract",
-        lambda *_args, **_kwargs: (local, None),
-    )
-    monkeypatch.setattr(
-        registry,
         "_local_sessions",
         lambda _start, _end: (dates, "tushare:SSE"),
     )
     monkeypatch.setattr(
-        "quantmaster.data.instruments.InstrumentStore.get",
-        lambda _self, _symbol: SimpleNamespace(
-            asset_type="stock",
-            currency="CNY",
-            list_date="",
-            delist_date="",
+        registry,
+        "_unit_contract",
+        lambda _symbol: (
+            (
+                ("open", "CNY/share"), ("high", "CNY/share"),
+                ("low", "CNY/share"), ("close", "CNY/share"),
+                ("volume", "share"), ("amount", "CNY"),
+            ),
+            "",
         ),
     )
     store = BarStore(root=tmp_path / "bars")
@@ -305,11 +205,10 @@ def test_degraded_stockdb_candidate_falls_through_to_verified_provider(
     assert json.loads(store.metadata("600000.SH")["quality_json"])["status"] == "verified"
 
 
-def test_stockdb_native_batch_path_also_supplements_contract_evidence(
+def test_stockdb_native_batch_path_never_supplements_contract_evidence(
     isolated_config, monkeypatch,
 ):
     isolated_config.data.primary_provider = "free-stockdb"
-    isolated_config.data.tushare_token = "token"
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
     local = _bars(dates)
     local["amount"] = 10_000_000.0
@@ -317,9 +216,6 @@ def test_stockdb_native_batch_path_also_supplements_contract_evidence(
         unit_status="unverified_vendor_contract",
         adjustment_status="unverified_vendor_contract",
     )
-    witness = local.copy()
-    witness.attrs.clear()
-    witness_calls: list[str] = []
 
     monkeypatch.setattr(FreeStockDBSource, "native_batch_available", lambda _self: True)
     monkeypatch.setattr(
@@ -330,12 +226,9 @@ def test_stockdb_native_batch_path_also_supplements_contract_evidence(
         },
     )
 
-    def remote_witness(_self, symbol, _start, _end):
-        witness_calls.append(symbol)
-        return witness.copy()
-
     monkeypatch.setattr(
-        "quantmaster.data.tushare_source.TushareSource.daily", remote_witness,
+        "quantmaster.data.tushare_source.TushareSource.daily",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应逐股票补证")),
     )
     monkeypatch.setattr(
         registry,
@@ -343,13 +236,12 @@ def test_stockdb_native_batch_path_also_supplements_contract_evidence(
         lambda _start, _end: (dates, "tushare:SSE"),
     )
 
-    result = registry.load_bar_panel(
+    result = registry.refresh_bar_panel(
         ["600000.SH"], "2026-07-01", "2026-08-07",
     )
 
-    assert result.quality.status == "verified", result.quality.issues
-    assert result.quality.adjustment == "qfq_verified:tushare-adj-factor-v2"
-    assert witness_calls == ["600000.SH"]
+    assert result.quality.status == "degraded", result.quality.issues
+    assert result.quality.formal_eligible is False
     pd.testing.assert_series_equal(
         result.data["close"]["600000.SH"],
         local["close"],
@@ -379,7 +271,7 @@ def test_dense_short_tail_cannot_claim_a_long_requested_range(tmp_path, monkeypa
         registry, "_factories", lambda: {Market.CN: [ShortTail, Complete]},
     )
 
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-03-29", store=store,
     )
 
@@ -411,7 +303,7 @@ def test_duplicate_daily_keys_are_rejected_before_cache_write(tmp_path, monkeypa
         registry, "_factories", lambda: {Market.CN: [Duplicate, Complete]},
     )
 
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH", "2024-01-02", "2024-03-29", store=store,
     )
 
@@ -447,12 +339,12 @@ def test_failed_refresh_returns_computable_cache_with_persisted_degraded_quality
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Broken]})
 
-    result = registry.load_history(
+    result = registry.refresh_history(
         "600000.SH",
         "2024-01-02",
         "2024-03-29",
         store=store,
-        refresh="full",
+        mode="full",
     )
 
     assert not result.data.empty
@@ -478,7 +370,7 @@ def test_panel_envelope_discloses_missing_requested_symbols(tmp_path, monkeypatc
         ),
     )
 
-    result = registry.load_bar_panel(
+    result = registry.refresh_bar_panel(
         ["600000.SH", "000001.SZ"],
         "2024-03-29",
         "2024-03-29",
@@ -727,7 +619,7 @@ def test_spot_uses_oldest_row_timestamp_and_rejects_mixed_freshness(monkeypatch)
         lambda _symbol: (registry.BarDataQuality("degraded", "", "").units, ""),
     )
 
-    result = registry.load_spot(["600000.SH", "000001.SZ"])
+    result = registry.refresh_spot(["600000.SH", "000001.SZ"])
 
     assert result.quality.status == "unavailable"
     assert result.quality.stale is True
@@ -823,7 +715,7 @@ def test_all_sources_empty_raises_structured_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [Empty]})
 
     with pytest.raises(MarketDataUnavailable) as caught:
-        registry.load_history("600000.SH", "2026-08-03", "2026-08-07", store=store)
+        registry.refresh_history("600000.SH", "2026-08-03", "2026-08-07", store=store)
 
     assert caught.value.quality.status == "unavailable"
     assert caught.value.quality.missing_symbols == ("600000.SH",)

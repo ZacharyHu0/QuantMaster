@@ -67,8 +67,15 @@ def _collision_safe_factor_name(
 
 
 class LabStore:
-    def __init__(self, path: str | Path | None = None):
+    def __init__(self, path: str | Path | None = None, *, read_only: bool = False):
         self.path = Path(path) if path else get_config().data_root / "lab.sqlite"
+        self.read_only = bool(read_only)
+        # A Web read is allowed to inspect an already published Lab ledger,
+        # but it must never turn the first visit to the Lab tab into a schema
+        # migration, a backup, or a curated-catalog write.  The runtime worker
+        # owns those lifecycle operations at startup.
+        if self.read_only:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._backup_before_migration()
         self._migrate()
@@ -95,7 +102,12 @@ class LabStore:
             raise
 
     def _conn(self) -> sqlite3.Connection:
-        return connect_sqlite(self.path, row_factory=True)
+        return connect_sqlite(
+            self.path,
+            row_factory=True,
+            timeout=0.25 if self.read_only else 30.0,
+            read_only=self.read_only,
+        )
 
     def _migrate(self) -> None:
         def schema_v8(conn: sqlite3.Connection) -> None:
@@ -347,6 +359,8 @@ class LabStore:
         return value
 
     def sync_catalog(self, specs: list[FactorSpec]) -> int:
+        if self.read_only:
+            return 0
         created = 0
         for spec in specs:
             _factor, version, was_created = self.create_factor(
@@ -532,7 +546,6 @@ class LabStore:
                 "source": "quant_lab",
             })
         return result
-
     @staticmethod
     def _version_from_conn(conn: sqlite3.Connection, version_id: str) -> dict | None:
         row = conn.execute(
@@ -810,29 +823,69 @@ class LabStore:
                         cursor_row["created_at"], cursor_row["created_at"], cursor_row["id"],
                     ])
             where = "WHERE " + " AND ".join(clauses) if clauses else ""
+            if summary:
+                # A dashboard only needs scalar facts.  Do not read or decode an
+                # experiment's potentially large training artifacts just to render
+                # a row in a table.
+                columns = """
+                    id,name,method,dataset_id,status,created_at,updated_at,
+                    json_extract(config_json, '$.universe') AS config_universe,
+                    json_extract(config_json, '$.start') AS config_start,
+                    json_extract(config_json, '$.end') AS config_end,
+                    json_extract(config_json, '$.horizon') AS config_horizon,
+                    json_extract(config_json, '$.sequence_length') AS config_sequence_length,
+                    json_extract(result_json, '$.metrics.correlation') AS result_correlation,
+                    json_extract(result_json, '$.version_id') AS result_version_id,
+                    json_extract(result_json, '$.version_status') AS result_version_status,
+                    json_extract(result_json, '$.device') AS result_device,
+                    json_extract(result_json, '$.telemetry.effective_device') AS telemetry_device,
+                    json_extract(result_json, '$.telemetry.samples_per_second') AS telemetry_samples_per_second,
+                    json_extract(result_json, '$.telemetry.peak_gpu_memory_mb') AS telemetry_peak_gpu_memory_mb,
+                    json_extract(result_json, '$.train_samples') AS result_train_samples,
+                    json_extract(result_json, '$.validation_samples') AS result_validation_samples
+                """
+            else:
+                columns = "*"
             rows = conn.execute(
-                f"SELECT * FROM experiments {where} "
+                f"SELECT {columns} FROM experiments {where} "
                 "ORDER BY created_at DESC,id DESC LIMIT ?",
                 (*params, max(1, min(limit, 500))),
             ).fetchall()
-        result = [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
-        if summary:
-            for value in result:
-                config = value.get("config_json") or {}
-                result_value = value.get("result_json") or {}
-                value["config_json"] = {
-                    key: config.get(key)
-                    for key in ("universe", "start", "end", "horizon", "sequence_length")
-                    if key in config
-                }
-                value["result_json"] = {
-                    key: result_value.get(key)
-                    for key in (
-                        "metrics", "version_id", "version_status", "telemetry",
-                        "train_samples", "validation_samples", "device",
-                    )
-                    if key in result_value
-                }
+        if not summary:
+            return [self._decode(row, ("config_json", "result_json")) or {} for row in rows]
+        result: list[dict] = []
+        for row in rows:
+            value = dict(row)
+            config = {
+                key: value.pop(f"config_{key}")
+                for key in ("universe", "start", "end", "horizon", "sequence_length")
+                if value.get(f"config_{key}") is not None
+            }
+            correlation = value.pop("result_correlation")
+            telemetry = {
+                output: value.pop(column)
+                for output, column in (
+                    ("effective_device", "telemetry_device"),
+                    ("samples_per_second", "telemetry_samples_per_second"),
+                    ("peak_gpu_memory_mb", "telemetry_peak_gpu_memory_mb"),
+                )
+                if value.get(column) is not None
+            }
+            result_value = {
+                key: value.pop(f"result_{key}")
+                for key in (
+                    "version_id", "version_status", "device", "train_samples",
+                    "validation_samples",
+                )
+                if value.get(f"result_{key}") is not None
+            }
+            if correlation is not None:
+                result_value["metrics"] = {"correlation": correlation}
+            if telemetry:
+                result_value["telemetry"] = telemetry
+            value["config_json"] = config
+            value["result_json"] = result_value
+            result.append(value)
         return result
 
     @staticmethod
@@ -1022,12 +1075,52 @@ class LabStore:
             value["result"] = value.pop("result_json")
         return value
 
-    def studies(self, limit: int = 50) -> list[dict]:
+    def studies(self, limit: int = 50, *, summary: bool = False) -> list[dict]:
         with self._conn() as conn:
+            if summary:
+                # Study result payloads may hold every trial.  Keep that evidence
+                # on the detail route so a page switch never deserializes it.
+                columns = """
+                    id,job_id,experiment_id,config_hash,status,storage_url,created_at,updated_at,
+                    json_extract(config_json, '$.universe') AS config_universe,
+                    json_extract(config_json, '$.start') AS config_start,
+                    json_extract(config_json, '$.end') AS config_end,
+                    json_extract(config_json, '$.budget_hours') AS config_budget_hours,
+                    json_extract(config_json, '$.protocol.fold_test_days') AS config_fold_test_days,
+                    json_extract(result_json, '$.version_id') AS result_version_id,
+                    json_extract(result_json, '$.candidate') AS result_candidate,
+                    json_array_length(COALESCE(json_extract(result_json, '$.trials'), '[]')) AS result_trial_count,
+                    CASE WHEN json_type(result_json, '$.sealed_metrics') IS NULL THEN 0 ELSE 1 END AS result_sealed
+                """
+            else:
+                columns = "*"
             rows = conn.execute(
-                "SELECT * FROM optimization_studies ORDER BY updated_at DESC LIMIT ?",
+                f"SELECT {columns} FROM optimization_studies ORDER BY updated_at DESC LIMIT ?",
                 (max(1, min(limit, 500)),),
             ).fetchall()
+        if summary:
+            result: list[dict] = []
+            for row in rows:
+                value = dict(row)
+                config = {
+                    key: value.pop(f"config_{key}")
+                    for key in ("universe", "start", "end", "budget_hours")
+                    if value.get(f"config_{key}") is not None
+                }
+                fold_days = value.pop("config_fold_test_days")
+                if fold_days is not None:
+                    config["protocol"] = {"fold_test_days": fold_days}
+                trial_count = int(value.pop("result_trial_count") or 0)
+                value["config"] = config
+                value["result"] = {
+                    key: value.pop(f"result_{key}")
+                    for key in ("version_id", "candidate")
+                    if value.get(f"result_{key}") is not None
+                }
+                value["result"]["trial_count"] = trial_count
+                value["result"]["sealed"] = bool(value.pop("result_sealed"))
+                result.append(value)
+            return result
         result = []
         for row in rows:
             value = self._decode(row, ("config_json", "result_json")) or {}
@@ -1688,6 +1781,21 @@ class LabStore:
             }
         return value
 
+    @staticmethod
+    def _summary_job(row: sqlite3.Row) -> dict[str, Any]:
+        """Return a stable job-list shape without touching JSON artifact blobs."""
+        value = dict(row)
+        value.update({
+            "params": {}, "result": {}, "preflight": {}, "error_info": {}, "telemetry": {},
+        })
+        if value.get("error") and not value.get("error_code"):
+            value["error_code"] = "LEGACY_FAILURE"
+            value["error_info"] = {
+                "code": "LEGACY_FAILURE", "message": value["error"],
+                "action": "查看历史任务详情", "retryable": True, "context": {},
+            }
+        return value
+
     def job(self, job_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM lab_jobs WHERE id=?", (job_id,)).fetchone()
@@ -1726,20 +1834,26 @@ class LabStore:
                         cursor_row["created_at"], cursor_row["created_at"], cursor_row["id"],
                     ])
             where = "WHERE " + " AND ".join(clauses) if clauses else ""
+            columns = (
+                "id,kind,status,dataset_id,resource_class,progress,phase,detail,error,"
+                "error_code,cancel_requested,worker,created_at,started_at,heartbeat_at,finished_at"
+                if summary else "*"
+            )
             rows = conn.execute(
-                f"SELECT * FROM lab_jobs {where} "
+                f"SELECT {columns} FROM lab_jobs {where} "
                 "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
                 (*params, max(1, min(limit, 500)), max(0, int(offset))),
             ).fetchall()
         result = []
         for row in rows:
+            if summary:
+                result.append(self._summary_job(row))
+                continue
             value = self._decode(
                 row,
                 ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
             ) or {}
             self._public_job(value)
-            if summary:
-                value["result"] = {}
             result.append(value)
         return result
 
@@ -2198,3 +2312,43 @@ class LabStore:
             "mining_runs": mining_runs,
             "strategy_statuses": strategy_statuses,
         }
+
+
+def read_runtime_factors(path: str | Path | None = None) -> list[dict]:
+    """Read published Quant Lab factors without bootstrapping its ledger.
+
+    The regular factor page may be opened before Quant Lab has ever run.  It
+    uses a real read-only SQLite connection and treats an absent or pre-schema
+    ledger as an empty optional catalog, never entering LabStore's
+    backup/migration path.
+    """
+
+    database = Path(path) if path else get_config().data_root / "lab.sqlite"
+    try:
+        with connect_sqlite(database, timeout=0.25, row_factory=True, read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT d.slug,d.name,d.category,v.status,v.source,v.spec_json "
+                "FROM factor_definitions d JOIN factor_versions v ON v.factor_id=d.id "
+                "AND v.version=(SELECT MAX(v2.version) FROM factor_versions v2 "
+                "WHERE v2.factor_id=d.id) WHERE d.kind='expression' "
+                "ORDER BY d.name_key,d.slug"
+            ).fetchall()
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return []
+    result: list[dict] = []
+    for row in rows:
+        try:
+            spec = json.loads(str(row["spec_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if str(row["source"] or "") == "builtin" or not spec.get("expression"):
+            continue
+        result.append({
+            "name": str(row["name"] or ""),
+            "slug": str(row["slug"] or ""),
+            "description": spec.get("description") or spec.get("rationale") or "",
+            "category": str(row["category"] or ""),
+            "status": str(row["status"] or ""),
+            "source": "quant_lab",
+        })
+    return result

@@ -21,7 +21,7 @@ from quantmaster.ai.news_contracts import (
     read_raw_evidence,
 )
 
-NEWS_SCHEMA_VERSION = 7
+NEWS_SCHEMA_VERSION = 8
 
 _NEWS_COLUMNS = {
     "importance_score": "REAL DEFAULT 0",
@@ -189,6 +189,16 @@ def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None
             "ALTER TABLE news_revisions ADD COLUMN "
             "evidence_binding_hash TEXT NOT NULL DEFAULT ''"
         )
+    # The workbench reads these compact payloads directly.  They are rebuilt
+    # by the writer after ingest/annotation, never lazily by a Web GET, so a
+    # page view cannot re-run evidence verification and window aggregation.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS news_dashboard_materializations ("
+        "kind TEXT NOT NULL,window_days INTEGER NOT NULL,"
+        "input_fingerprint TEXT NOT NULL,snapshot_id TEXT NOT NULL,"
+        "payload_json TEXT NOT NULL,generated_at REAL NOT NULL,"
+        "PRIMARY KEY(kind,window_days))"
+    )
     if legacy:
         return
     statements = (
@@ -213,6 +223,8 @@ def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None
         "ON news_analysis_symbols(symbol,news_id)",
         "CREATE INDEX IF NOT EXISTS idx_news_sector_value_v4 "
         "ON news_analysis_sectors(sector,news_id)",
+        "CREATE INDEX IF NOT EXISTS idx_news_dashboard_generated_v8 "
+        "ON news_dashboard_materializations(generated_at DESC)",
     )
     for statement in statements:
         connection.execute(statement)

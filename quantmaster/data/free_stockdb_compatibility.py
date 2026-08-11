@@ -41,9 +41,14 @@ def quantmaster_indicators(bars: pd.DataFrame) -> pd.DataFrame:
 
 
 class StockDBCompatibilityStore:
-    def __init__(self, root: str | Path | None = None):
+    def __init__(self, root: str | Path | None = None, *, read_only: bool = False):
         self.root = Path(root or (get_config().data_root / "free-stockdb-compatibility"))
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        # Diagnostic and page readers must never create a data root merely by
+        # checking whether a compatibility profile exists.  The worker owns
+        # directory creation and publication.
+        if not self.read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
 
     def path(self, artifact_id: str) -> Path:
         return self.root / f"{artifact_id}.json"
@@ -58,6 +63,8 @@ class StockDBCompatibilityStore:
         return profile if profile.artifact_id == artifact_id else None
 
     def publish(self, profile: StockDBCompatibilityProfile) -> StockDBCompatibilityProfile:
+        if self.read_only:
+            raise RuntimeError("只读兼容性存储不能发布验收结果")
         target = self.path(profile.artifact_id)
         fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=self.root)
         try:

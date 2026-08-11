@@ -1443,7 +1443,7 @@
         button.textContent = `${Math.round(Number(job.progress || 0))}% ${job.phase || '读取本地库'}`;
         if (jobBox) jobBox.querySelector('[data-etf-job-status]').textContent = `${job.progress || 0}% · ${job.phase || '扫描中'} · ${job.detail || ''}`;
         await new Promise(resolve => setTimeout(resolve,800));
-        job = await api(`/api/v1/rotation/etfs/jobs/${encodeURIComponent(job.id)}`);
+        job = await api(`/api/v1/jobs/${encodeURIComponent(job.id)}`);
         etfLastJob = job;
         if (cancel) cancel.hidden = !job.can_cancel;
       }
@@ -1470,7 +1470,7 @@
     if (!etfLastJob?.id) return;
     button.disabled = true;
     try {
-      etfLastJob = await api(`/api/v1/rotation/etfs/jobs/${encodeURIComponent(etfLastJob.id)}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      etfLastJob = await api(`/api/v1/jobs/${encodeURIComponent(etfLastJob.id)}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
       document.querySelector('#rotation-etf-job [data-etf-job-status]').textContent = '正在安全取消，已完成的缓存块会保留';
     } catch (error) { reportLocalError('ETF 研究','取消请求失败',error); }
     finally { button.disabled = false; }
@@ -1480,7 +1480,7 @@
     if (!etfLastJob?.id) return;
     button.disabled = true;
     try {
-      etfLastJob = await api(`/api/v1/rotation/etfs/jobs/${encodeURIComponent(etfLastJob.id)}/retry`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      etfLastJob = await api(`/api/v1/jobs/${encodeURIComponent(etfLastJob.id)}/retry`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
       button.hidden = true;
       await scanEtfResearch(document.querySelector('[data-etf-research-scan]'),etfLastJob,etfLastJob?.tier || 'production');
     } catch (error) { reportLocalError('ETF 研究','恢复任务失败',error); }

@@ -257,7 +257,7 @@
 
   async function pollJob() {
     if (!state.jobId) return;
-    const job = await api(`/api/v1/jobs/after_close/${encodeURIComponent(state.jobId)}`);
+    const job = await api(`/api/v1/jobs/${encodeURIComponent(state.jobId)}`);
     progress(job);
     if (['completed','completed_with_warnings'].includes(job.status)) {
       state.jobId = ''; clearTimeout(state.poll); state.poll = null;
@@ -309,7 +309,7 @@
     });
   });
   document.querySelector('[data-after-close-cancel]').addEventListener('click', async () => {
-    if (state.jobId) await post(`/api/v1/jobs/after_close/${encodeURIComponent(state.jobId)}/cancel`, {});
+    if (state.jobId) await post(`/api/v1/jobs/${encodeURIComponent(state.jobId)}/cancel`, {});
   });
   document.getElementById('after-close-history').addEventListener('change', event => void load(event.target.value));
   document.getElementById('after-close-levels').addEventListener('click', event => {

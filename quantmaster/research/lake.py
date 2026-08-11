@@ -73,14 +73,20 @@ def _as_date(value: str | pd.Timestamp) -> str:
 class ResearchLake:
     """Atomic Parquet partitions plus a transactional lineage catalog."""
 
-    def __init__(self, root: str | Path | None = None):
+    def __init__(self, root: str | Path | None = None, *, read_only: bool = False):
         base = Path(root) if root is not None else get_config().data_root / "research_lake"
         self.root = base.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
         self.meta_root = self.root / "_meta"
-        self.meta_root.mkdir(parents=True, exist_ok=True)
-        self.catalog = ResearchCatalog(self.meta_root / "catalog.sqlite")
-        self.recover_partition_writes()
+        if not self.read_only:
+            self.meta_root.mkdir(parents=True, exist_ok=True)
+        self.catalog = ResearchCatalog(
+            self.meta_root / "catalog.sqlite", read_only=self.read_only,
+        )
+        if not self.read_only:
+            self.recover_partition_writes()
 
     def _resolved_relative(self, value: str) -> Path:
         path = (self.root / value).resolve()

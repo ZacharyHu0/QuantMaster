@@ -4,9 +4,10 @@ import threading
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.rotation.etf_models import ETF_RESEARCH_MODEL_VERSION
 from quantmaster.rotation.etf_research import get_etf_research_service
+from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.jobs import (
-    ACTIVE_STATUSES,
     JobContext,
     JobOutcome,
     UnifiedJobRuntime,
@@ -29,8 +30,73 @@ class EtfResearchJobs:
             UnifiedJobStore(get_config().data_root / "jobs.sqlite"),
             max_workers=1,
         )
-        self._submit_lock = threading.Lock()
-        self.runtime.register(TASK_TYPE, self._handle)
+        self.runtime.register(
+            TASK_TYPE,
+            self._handle,
+            process_entrypoint="quantmaster.rotation.etf_jobs:EtfResearchJobs._handle",
+        )
+
+    @staticmethod
+    def input_fingerprint(*, as_of: str, tier: str) -> str:
+        """Read only compact local generations when deciding whether to scan.
+
+        ETF research used to submit every click into a provider-first worker.
+        This key covers the immutable StockDB ingest plus local share/metadata
+        generations, so an already-published local input can be returned as a
+        completed ``unchanged`` task before any provider or Parquet read.
+        """
+
+        try:
+            target, _source = get_etf_research_service()._research_target(as_of)
+            target_date = str(target.date())
+            catalog = DerivedArtifactCatalog()
+            generations = [
+                *catalog.source_generations("stockdb.ingest.etf"),
+                *catalog.source_generations("rotation.etf_observations"),
+                *catalog.source_generations("rotation.etf_metadata"),
+            ]
+            # Never manufacture a cache hit when a pre-migration installation
+            # has not populated the shared generation catalog yet.
+            if not generations:
+                return ""
+            return catalog.input_fingerprint(
+                schema_version=3,
+                algorithm_version=ETF_RESEARCH_MODEL_VERSION,
+                parameters={
+                    "task": TASK_TYPE,
+                    "tier": tier,
+                    "requested_as_of": str(as_of or ""),
+                    "target_as_of": target_date,
+                },
+                source_generations=generations,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            # Correctness beats an optimistic hit: an unavailable catalog
+            # simply causes a normal submit, never reuse of unknown evidence.
+            return ""
+
+    @staticmethod
+    def _local_evidence_ready(*, as_of: str) -> bool:
+        """Whether local share and metadata evidence covers the target day."""
+
+        try:
+            from quantmaster.rotation.store import RotationStore
+
+            target, _source = get_etf_research_service()._research_target(as_of)
+            target_date = str(target.date())
+            store = RotationStore()
+            shares = store.source_generations("rotation.etf_observations")
+            metadata = store.source_generations("rotation.etf_metadata")
+            return bool(
+                store.etf_path.is_file()
+                and metadata
+                and any(
+                    str(item.get("coverage_end") or "")[:10] >= target_date
+                    for item in shares
+                )
+            )
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
+            return False
 
     @staticmethod
     def _handle(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
@@ -42,23 +108,28 @@ class EtfResearchJobs:
                 from quantmaster.rotation.provider import RotationProvider, RotationProviderCallError
                 from quantmaster.rotation.store import RotationStore
 
-                context.progress(2, "同步 ETF 研究证据", "元数据与最近 25 个交易日份额")
-                try:
-                    result = RotationProvider(RotationStore()).sync_etf_observations(
-                        context.progress,
-                        context.cancelled,
-                    )
-                    warnings.extend(str(value) for value in result.get("issues") or ())
-                except InterruptedError:
-                    raise
-                except (
-                    RotationProviderCallError,
-                    OSError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
-                ) as exc:  # 可选证据失败允许降级；编程错误仍应显式暴露
-                    warnings.append(f"元数据或份额同步失败，使用本地缓存：{str(exc)[:180]}")
+                if EtfResearchJobs._local_evidence_ready(
+                    as_of=str(spec.get("as_of") or ""),
+                ):
+                    context.progress(2, "复用本地 ETF 研究证据", "份额和元数据 generation 已覆盖目标交易日")
+                else:
+                    context.progress(2, "同步 ETF 研究证据", "本地份额或元数据缺失/过期")
+                    try:
+                        result = RotationProvider(RotationStore()).sync_etf_observations(
+                            context.progress,
+                            context.cancelled,
+                        )
+                        warnings.extend(str(value) for value in result.get("issues") or ())
+                    except InterruptedError:
+                        raise
+                    except (
+                        RotationProviderCallError,
+                        OSError,
+                        RuntimeError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:  # 可选证据失败允许降级；编程错误仍应显式暴露
+                        warnings.append(f"元数据或份额同步失败，使用本地缓存：{str(exc)[:180]}")
             else:
                 context.progress(2, "读取 ETF sandbox 证据", "仅使用已存在的本地元数据与份额")
             snapshot = service.scan(
@@ -104,17 +175,14 @@ class EtfResearchJobs:
     ) -> tuple[dict[str, Any], bool]:
         selected_tier = _research_tier(tier)
         spec = {"as_of": as_of, "tier": selected_tier}
-        with self._submit_lock:
-            for existing in self.runtime.store.list(1000, job_type=TASK_TYPE):
-                if existing.get("status") in ACTIVE_STATUSES and existing.get("spec") == spec:
-                    return existing, False
-            return self.runtime.submit(
-                TASK_TYPE,
-                spec,
-                idempotency_key="",
-                deadline_seconds=3600,
-                max_attempts=2,
-            )
+        return self.runtime.submit(
+            TASK_TYPE,
+            spec,
+            input_fingerprint=self.input_fingerprint(as_of=as_of, tier=selected_tier),
+            algorithm_version=ETF_RESEARCH_MODEL_VERSION,
+            deadline_seconds=3600,
+            max_attempts=2,
+        )
 
     def get(self, job_id: str) -> dict[str, Any]:
         value = self.runtime.store.get(job_id)

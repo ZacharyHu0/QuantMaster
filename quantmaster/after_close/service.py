@@ -95,10 +95,17 @@ class AfterCloseService:
         instruments: InstrumentStore | None = None,
         store: AfterCloseStore | None = None,
         ingest: StockDBIngestService | None = None,
+        read_only: bool = False,
     ):
+        self.read_only = bool(read_only)
+        self.store = store or AfterCloseStore(read_only=self.read_only)
+        if self.read_only:
+            self.source = source
+            self.instruments = instruments
+            self.ingest = ingest
+            return
         self.source = source or FreeStockDBSource()
         self.instruments = instruments or InstrumentStore()
-        self.store = store or AfterCloseStore()
         self.ingest = ingest or StockDBIngestService(self.source)
 
     def _universe(self, include_bj: bool) -> list[Instrument]:
@@ -1232,20 +1239,27 @@ class AfterCloseService:
 
 _lock = threading.Lock()
 _instance: AfterCloseService | None = None
+_read_instance: AfterCloseService | None = None
 
 
-def get_after_close_service() -> AfterCloseService:
-    global _instance
+def get_after_close_service(*, read_only: bool = False) -> AfterCloseService:
+    global _instance, _read_instance
     with _lock:
+        if read_only:
+            expected = get_config().data_root / "after_close.sqlite"
+            if _read_instance is None or _read_instance.store.path != expected:
+                _read_instance = AfterCloseService(read_only=True)
+            return _read_instance
         if _instance is None:
             _instance = AfterCloseService()
         return _instance
 
 
 def reset_after_close_service() -> None:
-    global _instance
+    global _instance, _read_instance
     with _lock:
         _instance = None
+        _read_instance = None
 
 
 def reset_after_close_service_for_tests() -> None:

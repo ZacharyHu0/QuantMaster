@@ -647,8 +647,10 @@ def test_news_stats_event_focus_includes_names_and_more_symbols(tmp_path, monkey
     store = NewsStore(tmp_path / "news.sqlite")
     symbols = [f"{index:06d}.SZ" for index in range(1, 21)]
     monkeypatch.setattr(
-        "quantmaster.data.load_stock_names",
-        lambda values: {symbol: f"标的{index:02d}" for index, symbol in enumerate(values, 1)},
+        "quantmaster.data.read_stock_names",
+        lambda values, **_kwargs: {
+            symbol: f"标的{index:02d}" for index, symbol in enumerate(values, 1)
+        },
     )
     store.save([
             official_news(store,
@@ -703,8 +705,8 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
     now = 2_000_000_000.0
     monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
     monkeypatch.setattr(
-        "quantmaster.data.load_stock_names",
-        lambda values: {symbol: f"名称-{symbol}" for symbol in values},
+        "quantmaster.data.read_stock_names",
+        lambda values, **_kwargs: {symbol: f"名称-{symbol}" for symbol in values},
     )
     store = NewsStore(tmp_path / "news.sqlite")
     store._industry_map = {}
@@ -1008,7 +1010,8 @@ def test_v4_importance_and_live_source_weight_are_not_promoted_to_pit_factor(tmp
 
 def test_news_event_focus_is_sorted_and_limited_to_24(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "quantmaster.data.load_stock_names", lambda values: dict.fromkeys(values, "测试标的"),
+        "quantmaster.data.read_stock_names",
+        lambda values, **_kwargs: dict.fromkeys(values, "测试标的"),
     )
     store = NewsStore(tmp_path / "news.sqlite")
     store._industry_map = {}
@@ -1628,9 +1631,29 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     monkeypatch.setattr(news_module, "_require_csrf", lambda request: None)
     monkeypatch.setattr(news_module, "_require_local", lambda request: None)
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(news_module, "NewsSourceStore", lambda: _RouteNewsSources(calls))
-    monkeypatch.setattr(news_module, "NewsStore", lambda: _RouteNewsStore(calls))
+    monkeypatch.setattr(
+        news_module, "NewsSourceStore", lambda *args, **kwargs: _RouteNewsSources(calls),
+    )
+    monkeypatch.setattr(
+        news_module, "NewsStore", lambda *args, **kwargs: _RouteNewsStore(calls),
+    )
     monkeypatch.setattr(news_module, "AICrawler", lambda: _RouteNewsCrawler(calls))
+
+    class RouteNewsJobs:
+        def submit(self, **kwargs):
+            calls.append(("news_submit", kwargs))
+            return {
+                "id": "job-news", "type": "news.crawl", "status": "queued",
+                "created": True, "coalesced": False, **kwargs,
+            }, True
+
+        def public(self, value):
+            return {
+                **value,
+                "links": {"self": "/api/v1/jobs/job-news"},
+            }
+
+    monkeypatch.setattr(news_module, "get_news_jobs", lambda: RouteNewsJobs())
     request = object()
     source = news_module.SourceValue.model_validate(source_value())
 
@@ -1652,7 +1675,9 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     assert updated["enabled"] is False
     assert news_module.source_delete("source-1", request) == {"deleted": "source-1"}
     assert news_module.source_test("source-1", request)["items"][0]["content"] == "body"
-    assert news_module.source_run("source-1", request, skip_llm=True)["skip_llm"] is True
+    source_job = news_module.source_run("source-1", request, skip_llm=True)
+    assert source_job["type"] == "news.crawl"
+    assert source_job["skip_llm"] is True
 
     with pytest.raises(news_module.HTTPException) as missing_source:
         news_module.source_test("missing", request)
@@ -1674,8 +1699,8 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     assert public_error == "资讯请求执行失败，请查看本机日志"
     assert "secret-value" not in public_error
 
-    assert news_module.news_stats(request, days=9999) == {"days": 3650}
-    assert news_module.news_event_focus(request, days=7) == {
+    assert news_module.news_stats(request, news_module.Response(), days=9999) == {"days": 3650}
+    assert news_module.news_event_focus(request, news_module.Response(), days=7) == {
         "days": 7, "top_symbols": [],
     }
     assert TestClient(app).get("/api/v1/news/event-focus?days=2").status_code == 422
@@ -1700,12 +1725,15 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     with pytest.raises(news_module.HTTPException, match="日期格式"):
         news_module._epoch("not-a-date")
 
-    assert news_module.news_crawl(
+    fast_job = news_module.news_crawl(
         request,
         news_module.CrawlRequest(group="fast", limit=2),
         skip_llm=True,
-    )["group"] == "fast"
+    )
+    assert fast_job["group"] == "fast"
+    assert fast_job["skip_llm"] is True
     assert news_module.news_crawl(request, None, skip_llm=None)["limit"] == 30
+    assert not any(name == "run" for name, _value in calls)
     assert news_module.news_reanalyze(
         news_module.ReanalyzeRequest(mode="dead_letter", batch_size=3), request,
     )["mode"] == "dead_letter"
@@ -1723,3 +1751,46 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     with pytest.raises(news_module.HTTPException) as missing_item:
         news_module.news_detail(404, request)
     assert missing_item.value.status_code == 404
+
+
+def test_news_read_only_dashboard_uses_published_materialization(tmp_path, monkeypatch):
+    """The workbench GET contract must not re-run formal aggregation SQL."""
+
+    path = tmp_path / "news.sqlite"
+    writer = NewsStore(path)
+    published = writer.publish_dashboard_materializations()
+    assert published["snapshots"]["stats:30"]
+
+    def should_not_aggregate(*_args, **_kwargs):
+        raise AssertionError("GET 不能重新聚合资讯")
+
+    monkeypatch.setattr("quantmaster.ai.crawler.aggregate_news_stats", should_not_aggregate)
+    monkeypatch.setattr("quantmaster.ai.crawler.aggregate_news_event_focus", should_not_aggregate)
+    reader = NewsStore(path, read_only=True)
+    stats = reader.stats(30)
+    focus = reader.event_focus(7)
+
+    assert stats["meta"]["snapshot_id"] == published["snapshots"]["stats:30"]
+    assert stats["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V1"
+    assert focus["meta"]["snapshot_id"] == published["snapshots"]["event_focus:7"]
+
+
+def test_news_crawl_submission_uses_versioned_unified_singleflight(tmp_path, monkeypatch):
+    from quantmaster.ai.news_jobs import NewsJobs
+    from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
+
+    runtime = UnifiedJobRuntime(
+        UnifiedJobStore(tmp_path / "jobs.sqlite"), dispatch=False,
+    )
+    monkeypatch.setattr("quantmaster.ai.news_jobs._input_fingerprint", lambda _spec: "news-v1")
+    jobs = NewsJobs(runtime)
+    first, created = jobs.submit(group="fast", limit=20)
+    second, second_created = jobs.submit(group="fast", limit=20)
+
+    assert created is True
+    assert second_created is False
+    assert first["id"] == second["id"]
+    public = jobs.public(second)
+    assert public["type"] == "news.crawl"
+    assert public["input_fingerprint"] == "news-v1"
+    assert public["links"]["self"] == f"/api/v1/jobs/{first['id']}"

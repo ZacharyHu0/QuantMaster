@@ -12,9 +12,31 @@ from quantmaster.after_close.jobs import get_after_close_jobs
 from quantmaster.after_close.service import get_after_close_service
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.security import require_csrf, require_local
 
 router = APIRouter(prefix="/api/v1/after-close", tags=["after-close"])
+
+
+def _published_service():
+    """Open the published ledger without bootstrapping a scan runtime."""
+
+    service = get_after_close_service(read_only=True)
+    if service.store.path.is_file():
+        return service
+    raise OperationProblem(
+        503,
+        make_problem(
+            "snapshot_unavailable",
+            severity="warning",
+            source="盘后研究快照",
+            title="尚无已发布盘后研究快照",
+            message="后台 worker 尚未产出可展示的本地盘后研究结果。",
+            action="继续浏览其他页面或提交一次盘后扫描任务后重试。",
+            blocking=True,
+            can_continue=True,
+        ),
+    )
 
 
 class ScanBody(ContractModel):
@@ -30,7 +52,7 @@ class CopyBody(ContractModel):
 @router.get("/snapshots/latest")
 def latest(request: Request) -> dict:
     require_local(request)
-    service = get_after_close_service()
+    service = _published_service()
     snapshot = service.store.public_latest()
     return {
         "snapshot": snapshot,
@@ -41,19 +63,19 @@ def latest(request: Request) -> dict:
 @router.get("/snapshots")
 def history(request: Request, limit: int = Query(30, ge=1, le=500)) -> dict:
     require_local(request)
-    return {"items": get_after_close_service().store.history(limit)}
+    return {"items": _published_service().store.history(limit)}
 
 
 @router.get("/health")
 def strategy_health(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
     require_local(request)
-    return get_after_close_service().store.health(limit)
+    return _published_service().store.health(limit)
 
 
 @router.get("/snapshots/{snapshot_id}")
 def detail(snapshot_id: str, request: Request) -> dict:
     require_local(request)
-    service = get_after_close_service()
+    service = _published_service()
     snapshot = service.store.get(snapshot_id)
     if snapshot is None:
         raise HTTPException(404, "盘后快照不存在")
@@ -76,7 +98,7 @@ def export_snapshot(
     format: Literal["json", "csv"] = "json",
 ) -> Response:
     require_local(request)
-    snapshot = get_after_close_service().store.get(snapshot_id)
+    snapshot = _published_service().store.get(snapshot_id)
     if snapshot is None:
         raise HTTPException(404, "盘后快照不存在")
     if format == "json":
@@ -111,7 +133,7 @@ def copy_candidates(body: CopyBody, request: Request) -> dict:
     require_csrf(request)
     from quantmaster.data.universe import save_universe
 
-    latest_value = get_after_close_service().store.latest()
+    latest_value = _published_service().store.latest()
     if latest_value is None:
         raise HTTPException(409, "尚无盘后研究快照")
     allowed = {item.symbol for item in latest_value.candidates}

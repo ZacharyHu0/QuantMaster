@@ -35,6 +35,34 @@ class FakeCredentials:
         self.values.pop(target, None)
 
 
+def test_runtime_status_read_does_not_construct_background_workers(monkeypatch):
+    from quantmaster.server import management
+
+    class SettingsProjection:
+        @staticmethod
+        def public():
+            return {"config_revision": "fixture"}
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("runtime status GET constructed a background worker")
+
+    monkeypatch.setattr(management, "settings_manager", SettingsProjection())
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker.runtime_worker_status",
+        lambda: {"status": "running", "available": True},
+    )
+    monkeypatch.setattr("quantmaster.automation.runtime.get_runtime", forbidden)
+    monkeypatch.setattr("quantmaster.lab.worker.get_worker", forbidden)
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.free_stockdb_runtime.status", forbidden,
+    )
+
+    result = management._runtime_status()
+
+    assert result["config_revision"] == "fixture"
+    assert result["worker"]["available"] is True
+
+
 def _update(manager, **extra):
     base = document_from_config(manager.load()).model_dump()
     return SettingsUpdate.model_validate({**base, **extra})
@@ -398,7 +426,7 @@ def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypa
     monkeypatch.setattr(free_stockdb_runtime, "status", lambda: dict(status))
     monkeypatch.setattr(
         free_stockdb_runtime,
-        "check_vendor_notice",
+        "cached_vendor_notice",
         lambda: {"status": "ok", "data_date": "2026-08-06", "version": "3.0.0"},
     )
     accepted = iter((True, False))
@@ -492,6 +520,9 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
         def latest(self):
             return {"id": "job-1", "status": "interrupted"}
 
+        def list(self, limit):
+            return [self.latest()]
+
         def get(self, job_id):
             return {"id": job_id, "status": "interrupted"}
 
@@ -501,7 +532,26 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
         def resume(self, job_id):
             return {"id": job_id, "status": "running"}
 
-    monkeypatch.setattr(maintenance, "data_refresh_manager", FakeRefreshManager())
+    manager = FakeRefreshManager()
+    monkeypatch.setattr(maintenance, "data_refresh_manager", manager)
+    monkeypatch.setattr("quantmaster.server.jobs.data_refresh_manager", manager)
+
+    def worker_command(operation, payload, **_kwargs):
+        if operation == "data.refresh.preview":
+            return manager.preview(payload["scope"], payload["universe"], payload["start"])
+        if operation == "data.refresh.create":
+            return manager.create(payload["scope"], payload["universe"], payload["start"])
+        if operation == "data.refresh.cancel":
+            return manager.cancel(payload["job_id"])
+        if operation == "data.refresh.retry":
+            return manager.resume(payload["job_id"])
+        raise AssertionError(f"unexpected worker command: {operation}")
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", worker_command)
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker.runtime_worker_status",
+        lambda: {"available": True, "status": "running", "age_seconds": 0.0},
+    )
     client = TestClient(app)
     assert client.post(
         "/api/v1/data/refresh/preview", json={"scope": "market"}).status_code == 403
@@ -514,13 +564,34 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
     )
     assert preview.status_code == 200
     assert preview.json()["total"] == 2
-    assert client.post(
+    created = client.post(
         "/api/v1/data/refresh", json={"scope": "market"}, headers=headers,
-    ).json()["status"] == "running"
-    assert client.get("/api/v1/data/refresh/latest").json()["job"]["status"] == "interrupted"
-    assert client.post(
-        "/api/v1/data/refresh/job-1/resume", headers=headers,
-    ).json()["status"] == "running"
+    )
+    assert created.status_code == 202
+    assert created.json()["status"] == "running"
+    assert created.json()["links"]["self"] == "/api/v1/jobs/job-1"
+    assert client.get("/api/v1/jobs", params={"domain": "data", "limit": 1}).json()["items"][0]["status"] == "interrupted"
+    assert client.post("/api/v1/jobs/job-1/retry", headers=headers).json()["status"] == "running"
+
+
+def test_data_refresh_fails_fast_when_runtime_worker_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker.runtime_worker_status",
+        lambda: {
+            "available": False,
+            "status": "unavailable",
+            "reason": "runtime-worker 心跳已过期",
+        },
+    )
+    client = TestClient(app)
+    headers = {"X-CSRF-Token": client.get("/api/v1/session").json()["csrf_token"]}
+
+    response = client.post(
+        "/api/v1/data/refresh", json={"scope": "market"}, headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["problem"]["code"] == "worker_unavailable"
 
 
 def test_automation_channel_credentials_require_local_csrf():

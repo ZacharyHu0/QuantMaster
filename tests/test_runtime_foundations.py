@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
@@ -86,6 +87,43 @@ def test_concurrent_first_connections_enable_wal_once_without_locking(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM writes").fetchone()[0] == 24
 
 
+def test_slow_config_load_cannot_overwrite_a_new_explicit_data_root(monkeypatch, tmp_path):
+    """A background first-load must not race a runtime data-root switch."""
+
+    import quantmaster.config as config_module
+
+    previous = config_module.get_config()
+    load_started = threading.Event()
+    release_load = threading.Event()
+    loaded = config_module.Config()
+    loaded.data.root = str(tmp_path / "stale-default")
+
+    def slow_load():
+        load_started.set()
+        assert release_load.wait(timeout=5)
+        return loaded
+
+    monkeypatch.setattr(config_module, "load_config", slow_load)
+    config_module.set_config(None)
+    result: list[object] = []
+    thread = threading.Thread(target=lambda: result.append(config_module.get_config()))
+    thread.start()
+    try:
+        assert load_started.wait(timeout=5)
+        explicit = config_module.Config()
+        explicit.data.root = str(tmp_path / "explicit-root")
+        config_module.set_config(explicit)
+        release_load.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result == [explicit]
+        assert config_module.get_config() is explicit
+    finally:
+        release_load.set()
+        thread.join(timeout=1)
+        config_module.set_config(previous)
+
+
 def test_schema_migration_rolls_back_version_and_content_together(tmp_path):
     path = tmp_path / "migrations.sqlite"
     with connect_sqlite(path) as connection:
@@ -104,6 +142,26 @@ def test_schema_migration_rolls_back_version_and_content_together(tmp_path):
             migrate_schema(connection, [(2, broken)])
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM values_v1").fetchone()[0] == 0
+
+
+def test_concurrent_first_schema_migrations_recheck_version_under_writer_lock(tmp_path):
+    path = tmp_path / "concurrent-migrations.sqlite"
+    gate = threading.Barrier(2)
+
+    def initialize() -> int:
+        with connect_sqlite(path) as connection:
+            gate.wait(timeout=5)
+            return migrate_schema(connection, [
+                (1, lambda conn: conn.execute("CREATE TABLE snapshot_state (id INTEGER)")),
+            ])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(lambda _: initialize(), range(2))) == [1, 1]
+    with connect_sqlite(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='snapshot_state'"
+        ).fetchone()[0] == "snapshot_state"
 
 
 def test_maintenance_barrier_drains_freezes_and_resumes_in_reverse_order():

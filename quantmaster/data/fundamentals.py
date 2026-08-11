@@ -375,7 +375,7 @@ def fundamental_panel(
     - roe 为季度数据，先经 quarterly_to_daily() 加发布滞后再对齐
       （默认按 A 股披露截止日区分报告期：季报 31 / 半年报 62 / 年报 120 天）；
     - 优先读本地 parquet 缓存，缺失或过期才触网；单标的失败仅
-      logger.warning 并跳过，不影响其余标的（与行情 load_panel 风格一致）。
+      logger.warning 并跳过，不影响其余标的（与行情 refresh_panel 风格一致）。
     """
     store = store or fundamental_store()
     fields = list(dict.fromkeys(fields))

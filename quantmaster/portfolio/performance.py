@@ -57,7 +57,7 @@ def _fetch_prices(
     symbols: list[str], lookback_days: int = 10,
 ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
     """取最新收盘价，同时保留每个价格的质量、来源与实际观测日。"""
-    from quantmaster.data import load_history
+    from quantmaster.data import refresh_history
 
     end = pd.Timestamp(market_date())
     start = end - pd.Timedelta(days=lookback_days)
@@ -65,7 +65,7 @@ def _fetch_prices(
     contracts: dict[str, dict[str, Any]] = {}
     for symbol in symbols:
         try:
-            envelope = load_history(symbol, str(start.date()), str(end.date()))
+            envelope = refresh_history(symbol, str(start.date()), str(end.date()))
             df = envelope.require_data()
             if not df.empty:
                 prices[symbol] = float(df["close"].iloc[-1])

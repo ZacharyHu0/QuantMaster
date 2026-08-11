@@ -65,12 +65,16 @@ class ResearchEngine:
         lake: ResearchLake | None = None,
         registry: ProviderRegistry | None = None,
         adapter: TushareResearchAdapter | CompositeResearchAdapter | None = None,
+        *,
+        read_only: bool = False,
     ):
-        self.lake = lake or ResearchLake()
+        self.read_only = bool(read_only)
+        self.lake = lake or ResearchLake(read_only=self.read_only)
         self.registry = registry or built_in_registry()
         self.adapter = adapter or CompositeResearchAdapter(self.lake.catalog)
-        for item in self.registry.select():
-            self.lake.catalog.register_spec(item)
+        if not self.read_only:
+            for item in self.registry.select():
+                self.lake.catalog.register_spec(item)
 
     def catalog(self) -> dict[str, Any]:
         return {
@@ -372,11 +376,13 @@ class ResearchEngine:
         if task.kind != "compute":
             raise ValueError(f"未知计划任务: {task.kind}")
         provider = self.registry.provider(task.dataset_id)
-        selected_specs = [
-            self.registry.resolve(ref.id) for ref in plan.selected_specs
-            if ref.asset_class == task.asset_class
-            and self.registry.resolve(ref.id).provider_id == provider.id
-        ]
+        selected_specs = []
+        for ref in plan.selected_specs:
+            if ref.asset_class != task.asset_class:
+                continue
+            spec = self.registry.resolve(ref.id, version=ref.version)
+            if spec.provider_id == provider.id:
+                selected_specs.append(spec)
         if not selected_specs:
             return []
         inputs, input_hashes = self._provider_inputs(
