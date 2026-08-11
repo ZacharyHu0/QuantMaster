@@ -85,6 +85,13 @@ class PaperAutomationWorker:
     def wake(self) -> None:
         self._wake.set()
 
+    def requeue_market_data(self, run_date: str) -> int:
+        """Re-arm only accounts whose last attempt lacked market evidence."""
+        changed = self.service.store.requeue_market_data_failures(str(run_date))
+        if changed:
+            self.wake()
+        return changed
+
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
         self._wake.set()
@@ -151,6 +158,13 @@ class PaperAutomationWorker:
                     )
             except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
                 message = str(exc)[:500]
+                failure_code = (
+                    "market_data_unavailable"
+                    if "行情证据不可用" in message
+                    or "收盘行情" in message
+                    or "待撮合行情证据" in message
+                    else "execution_error"
+                )
                 self.service.store.set_warning(account_id, message)
                 self.service.store.fail_auto_run(
                     run_date,
@@ -158,6 +172,7 @@ class PaperAutomationWorker:
                     self.identity.value,
                     token,
                     message,
+                    failure_code=failure_code,
                 )
                 logger.warning("每日模拟交易未完成 account=%s: %s", account_id, exc)
                 results.append(

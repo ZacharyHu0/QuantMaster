@@ -359,6 +359,11 @@ class NewsSourceStore:
                      int(item["is_official"]), int(item.get("needs_credentials", False)),
                      now, now),
                 )
+                conn.execute(
+                    "UPDATE news_sources SET max_age_hours=?,updated_at=? "
+                    "WHERE id=? AND built_in=1 AND max_age_hours<=0",
+                    (float(item["max_age_hours"]), now, item["id"]),
+                )
             conn.execute(
                 "UPDATE news_sources SET max_age_hours=336,updated_at=? "
                 "WHERE id='ndrc' AND built_in=1 AND max_age_hours=1080 "
@@ -413,7 +418,8 @@ class NewsSourceStore:
             result["built_in"]
             and result["is_official"]
             and result["id"] in {
-                "sse", "pboc", "nbs_release", "nbs_interpretation", "ndrc",
+                "csrc", "sse", "szse", "pboc", "nbs_release",
+                "nbs_interpretation", "ndrc",
             }
         )
         result["parser"] = json.loads(result.get("parser") or "{}")

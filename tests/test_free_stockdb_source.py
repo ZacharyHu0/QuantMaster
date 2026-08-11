@@ -4,7 +4,11 @@ import pandas as pd
 import pytest
 
 import quantmaster.data.free_stockdb_source as free_stockdb
-from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource, FreeStockDBSource
+from quantmaster.data.free_stockdb_source import (
+    FreeStockDBOnlineSource,
+    FreeStockDBProviderError,
+    FreeStockDBSource,
+)
 
 
 class _FakeReader:
@@ -70,6 +74,18 @@ def test_free_stockdb_sdk_supplies_daily_and_minute_bars(monkeypatch) -> None:
     assert client.calls[0]["fq"] == "qfq"
     assert client.calls[1]["frequency"] == "5m"
     assert client.calls[1]["fq"] is None
+
+
+def test_free_stockdb_native_error_is_normalized_for_source_fallback(monkeypatch) -> None:
+    class VendorTimeout(Exception):
+        pass
+
+    source, client = _source(monkeypatch)
+    client.get_data = lambda **_kwargs: (_ for _ in ()).throw(VendorTimeout("Connect timeout"))
+    monkeypatch.setattr(source, "_sdk_provider_errors", lambda _client: (VendorTimeout,))
+
+    with pytest.raises(FreeStockDBProviderError, match="Connect timeout"):
+        source.daily_cross_section(["600519.SH"], "2026-08-10", "2026-08-10")
 
 
 def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None:

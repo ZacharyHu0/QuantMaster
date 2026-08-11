@@ -567,13 +567,23 @@ def aggregate_news_stats(
     minimum_confidence: float,
     now: float,
     halflife_days: float,
+    knowledge_until: float | None = None,
 ) -> list[dict[str, Any]]:
+    """Aggregate events by publication time and evidence visibility separately.
+
+    ``until`` is the event/publication cutoff.  ``knowledge_until`` controls when
+    the raw article, content version, and analysis must have become visible.  It
+    defaults to ``until`` to preserve strict point-in-time callers.
+    """
+    visible_until = until if knowledge_until is None else float(knowledge_until)
+    if not math.isfinite(visible_until) or visible_until <= 0:
+        raise ValueError("资讯证据可见截止时间必须是有效时间戳")
     connection.create_function("qm_news_decay", 3, _decay_weight, deterministic=True)
     register_news_raw_verifier(connection)
     rows = connection.execute(
         _NEWS_STATS_SQL,
         (
-            cutoff, until, until, until, until, minimum_confidence,
+            cutoff, until, visible_until, visible_until, visible_until, minimum_confidence,
             now, halflife_days,
         ),
     ).fetchall()

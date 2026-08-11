@@ -8,6 +8,7 @@ import time
 import pytest
 
 from quantmaster.runtime.jobs import (
+    JobLeaseLost,
     JobOutcome,
     UnifiedJobRuntime,
     UnifiedJobStore,
@@ -115,7 +116,7 @@ def test_unified_runtime_cancel_and_expired_lease_recovery(tmp_path):
     )
     recovered_runtime.start()
     recovered = _wait(recovery_store, recovery_job["id"], {"completed"})
-    assert recovered["attempt"] == 1
+    assert recovered["attempt"] == 2
     assert any(event["type"] == "job_interrupted" for event in recovery_store.events(recovery_job["id"]))
     recovered_runtime.stop()
 
@@ -199,8 +200,8 @@ def test_retry_queued_before_previous_worker_cleanup_is_rescheduled(tmp_path):
     allow_cleanup = threading.Event()
     original_finish = store.finish
 
-    def finish_then_pause(job_id, owner, outcome):
-        finished = original_finish(job_id, owner, outcome)
+    def finish_then_pause(job_id, owner, outcome, *, lease_token):
+        finished = original_finish(job_id, owner, outcome, lease_token=lease_token)
         if outcome.status == "failed":
             failed_persisted.set()
             assert allow_cleanup.wait(2)
@@ -238,3 +239,62 @@ def test_unified_runtime_converts_unexpected_value_error_to_terminal_failure(tmp
     assert "invalid immutable specification" in failed["detail"]
     assert failed["owner"] == ""
     runtime.stop()
+
+
+def test_unified_store_singleflight_lease_token_and_external_artifact(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    first, created = store.submit(
+        "rotation.refresh",
+        {"scope": "themes", "mode": "incremental"},
+        input_fingerprint="input-v1",
+        algorithm_version="algo-v2",
+    )
+    duplicate, duplicate_created = store.submit(
+        "rotation.refresh",
+        {"scope": "themes", "mode": "incremental"},
+        input_fingerprint="input-v1",
+        algorithm_version="algo-v2",
+    )
+    changed, changed_created = store.submit(
+        "rotation.refresh",
+        {"scope": "themes", "mode": "incremental"},
+        input_fingerprint="input-v2",
+        algorithm_version="algo-v2",
+    )
+    assert created and not duplicate_created and changed_created
+    assert duplicate["id"] == first["id"]
+    assert duplicate["coalesced"] is True
+    assert changed["id"] != first["id"]
+
+    assert store.claim(first["id"], "worker-old", lease_seconds=5)
+    old = store.get(first["id"])
+    old_token = old["lease_token"]
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE runtime_jobs SET lease_expires=0 WHERE id=?", (first["id"],),
+        )
+    store.recover_expired()
+    assert store.claim(first["id"], "worker-new", lease_seconds=5)
+    new = store.get(first["id"])
+    assert new["lease_token"] != old_token
+    with pytest.raises(JobLeaseLost):
+        store.progress(first["id"], "worker-old", old_token, 50, "old", "late")
+    with pytest.raises(JobLeaseLost):
+        store.write_artifact(
+            first["id"], "late", {"value": "old"},
+            owner="worker-old", lease_token=old_token,
+        )
+    with pytest.raises(JobLeaseLost):
+        store.finish(
+            first["id"], "worker-old", JobOutcome("completed"), lease_token=old_token,
+        )
+
+    payload = {"schema_version": "1.0", "blob": "x" * (129 * 1024)}
+    artifact = store.write_artifact(
+        first["id"], "large.result", payload,
+        owner="worker-new", lease_token=new["lease_token"],
+    )
+    assert artifact["external"] is True
+    restored = store.artifact(artifact["id"])
+    assert restored["payload"] == payload
+    assert restored["payload_json"] == ""

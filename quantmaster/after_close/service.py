@@ -25,12 +25,18 @@ from quantmaster.data.free_stockdb_ingest import StockDBIngestRejected, StockDBI
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.research.contracts import content_hash
-from quantmaster.trading_sessions import expected_session, market_date
+from quantmaster.trading_sessions import (
+    SessionExpectation,
+    expected_session,
+    market_date,
+    resolve_session_target,
+)
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
 REQUIRED_FIELDS = ("open", "high", "low", "close", "volume")
+_MIN_SYMBOL_COVERAGE = 0.98
 OPTIONAL_FIELDS = (
     "amount",
     "float_mv",
@@ -104,6 +110,35 @@ class AfterCloseService:
             and item.exchange in ({"SH", "SZ", "BJ"} if include_bj else {"SH", "SZ"})
         ]
 
+    def _fallback_source_session(self, symbols: list[str]) -> SessionExpectation:
+        """Use a local StockDB observation when no calendar is configured.
+
+        This is deliberately a data-derived fallback: the wall clock only
+        bounds the probe and is never published as the target session.
+        """
+        upper = market_date() - timedelta(days=1)
+        lower = upper - timedelta(days=14)
+        try:
+            probe = self.source.daily_cross_section(
+                symbols[: min(20, len(symbols))], lower.isoformat(), upper.isoformat(),
+            )
+            if probe is not None and not probe.empty and "date" in probe:
+                latest = pd.to_datetime(probe["date"], errors="coerce").dropna()
+                if not latest.empty:
+                    session = latest.max().date().isoformat()
+                    return SessionExpectation(
+                        session=session,
+                        source="free-stockdb-observed",
+                        ready=True,
+                        reason="由本地 StockDB 已返回交易日证据确定",
+                    )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.info("无法从本地 StockDB 探测最近交易日", exc_info=True)
+        return SessionExpectation(
+            source="unavailable", ready=False,
+            reason="请配置 Tushare 交易日历或先完成一次全市场日线同步",
+        )
+
     @staticmethod
     def _field_coverage(frame: pd.DataFrame, latest: pd.DataFrame) -> dict[str, Any]:
         return {
@@ -167,8 +202,10 @@ class AfterCloseService:
         expected_count: int,
         *,
         expected_symbols: list[str] | None = None,
+        expected_session_value: str = "",
     ) -> tuple[str, dict[str, Any]]:
         reasons: list[str] = []
+        warnings: list[str] = []
         if frame.empty:
             raise DataGateRejected(
                 ["free-stockdb 没有返回日频截面"],
@@ -231,14 +268,30 @@ class AfterCloseService:
             invalid_volume = int((~nonnegative_volume).sum())
         required_ratio = float(valid_required.mean()) if len(valid_required) else 0.0
         levels = Counter(str(item.get("level") or "") for item in boards)
-        expectation = expected_session()
-        if symbol_ratio < 1.0:
-            reasons.append(
-                f"最新截面仅覆盖 {observed}/{denominator} 只应交易证券；"
-                "缺失标的没有停牌/退市证据"
+        expectation = (
+            SessionExpectation(
+                session=expected_session_value,
+                source="scan-target",
+                ready=bool(expected_session_value),
+                reason="本次扫描目标日",
             )
+            if expected_session_value
+            else expected_session()
+        )
+        if symbol_ratio < 1.0:
+            message = (
+                f"最新截面仅覆盖 {observed}/{denominator} 只应交易证券；"
+                f"缺失 {denominator - observed} 只保留缺失标记"
+            )
+            if symbol_ratio >= _MIN_SYMBOL_COVERAGE:
+                warnings.append(message)
+            else:
+                reasons.append(message + "；缺失标的没有停牌/退市证据")
         if suspension_error:
-            reasons.append(suspension_error)
+            if symbol_ratio >= _MIN_SYMBOL_COVERAGE:
+                warnings.append(suspension_error)
+            else:
+                reasons.append(suspension_error)
         if missing_required:
             reasons.append("日线必需字段缺失：" + "、".join(missing_required))
         if required_ratio < 1.0:
@@ -265,6 +318,8 @@ class AfterCloseService:
             "expected_symbols": denominator,
             "observed_symbols": observed,
             "symbol_ratio": round(symbol_ratio, 6),
+            "missing_symbols": sorted(missing_symbols),
+            "warnings": warnings,
             "excused_suspended_symbols": sorted(excused_suspensions),
             "suspension_evidence": suspension_evidence,
             "required_ohlcv_ratio": round(required_ratio, 6),
@@ -697,7 +752,16 @@ class AfterCloseService:
             raise RuntimeError("证券主数据中没有可扫描的 A 股普通股")
         symbols = [item.symbol for item in instruments]
         instrument_map = {item.symbol: item for item in instruments}
-        target = date.fromisoformat(as_of) if as_of else market_date()
+        expectation = resolve_session_target(as_of) if as_of else expected_session()
+        if not expectation.ready and not as_of:
+            expectation = self._fallback_source_session(symbols)
+        if not expectation.ready or not expectation.session:
+            raise DataGateRejected(
+                [expectation.reason or "无法确认最近已完成交易日"],
+                {"expected_session": expectation.as_dict()},
+                as_of,
+            )
+        target = date.fromisoformat(expectation.session)
         start = target - timedelta(
             days=max(
                 cfg.free_stockdb_stock_initial_lookback_days,
@@ -715,6 +779,7 @@ class AfterCloseService:
                     taxonomy,
                     len(symbols),
                     expected_symbols=symbols,
+                    expected_session_value=target.isoformat(),
                 ),
                 progress=progress,
                 cancelled=cancelled,
@@ -770,6 +835,7 @@ class AfterCloseService:
                 boards,
                 len(symbols),
                 expected_symbols=symbols,
+                expected_session_value=target.isoformat(),
             )
         progress(62, "计算板块优先级", "聚合申万层级与概念板块")
         try:

@@ -334,33 +334,63 @@ def classify_etf_profile(
 def adjusted_daily_metrics(
     frame: pd.DataFrame,
     factors: pd.DataFrame | None = None,
+    *,
+    prepared: bool = False,
 ) -> dict[str, Any]:
     """Calculate returns from verified adjustment evidence and never guess long position."""
 
     if frame is None or frame.empty:
         return {"sessions": 0, "adjustment_status": "missing", "history": []}
-    values = frame.copy()
-    values["date"] = pd.to_datetime(values.get("date"), errors="coerce")
-    values = values.dropna(subset=["date"]).sort_values("date").drop_duplicates("date", keep="last")
-    raw_close = pd.to_numeric(values.get("close"), errors="coerce")
-    amount = pd.to_numeric(values.get("amount"), errors="coerce")
-    research = pd.Series(np.nan, index=values.index, dtype=float)
+    if prepared:
+        values = frame
+    else:
+        values = frame.copy()
+        values["date"] = pd.to_datetime(values.get("date"), errors="coerce")
+        values = (
+            values.dropna(subset=["date"])
+            .sort_values("date")
+            .drop_duplicates("date", keep="last")
+        )
+    if values.empty:
+        return {"sessions": 0, "adjustment_status": "missing", "history": []}
+    dates = values["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    raw_close = pd.to_numeric(values.get("close"), errors="coerce").to_numpy(dtype=float)
+    amount = pd.to_numeric(values.get("amount"), errors="coerce").to_numpy(dtype=float)
+    research = np.full(len(values), np.nan, dtype=float)
     adjustment_status = "unavailable"
     adjustment_source = ""
     factor_coverage = 0.0
 
-    factor_frame = factors.copy() if factors is not None and not factors.empty else pd.DataFrame()
+    factor_frame = factors if prepared and factors is not None else (
+        factors.copy() if factors is not None and not factors.empty else pd.DataFrame()
+    )
     if factor_frame.empty and "adj_factor" in values:
         factor_frame = values[["date", "adj_factor"]].copy()
     if not factor_frame.empty:
-        factor_frame["date"] = pd.to_datetime(factor_frame.get("date"), errors="coerce")
-        factor_frame["adj_factor"] = pd.to_numeric(factor_frame.get("adj_factor"), errors="coerce")
-        factor_frame = factor_frame.dropna(subset=["date", "adj_factor"]).drop_duplicates("date", keep="last")
-        aligned = values[["date"]].merge(factor_frame, on="date", how="left")["adj_factor"]
-        factor_coverage = float(aligned.notna().mean()) if len(aligned) else 0.0
-        if factor_coverage >= 0.95 and aligned.notna().any():
-            aligned.index = values.index
-            latest_factor = float(aligned.dropna().iloc[-1])
+        if not prepared or factors is None or factors.empty:
+            factor_frame["date"] = pd.to_datetime(factor_frame.get("date"), errors="coerce")
+            factor_frame["adj_factor"] = pd.to_numeric(
+                factor_frame.get("adj_factor"), errors="coerce"
+            )
+            factor_frame = (
+                factor_frame.dropna(subset=["date", "adj_factor"])
+                .sort_values("date")
+                .drop_duplicates("date", keep="last")
+            )
+        factor_dates = factor_frame["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+        factor_values = pd.to_numeric(
+            factor_frame.get("adj_factor"), errors="coerce"
+        ).to_numpy(dtype=float)
+        aligned = np.full(len(values), np.nan, dtype=float)
+        if len(factor_dates):
+            positions = np.searchsorted(factor_dates, dates)
+            matched = positions < len(factor_dates)
+            matched[matched] &= factor_dates[positions[matched]] == dates[matched]
+            aligned[matched] = factor_values[positions[matched]]
+        finite_factors = np.isfinite(aligned)
+        factor_coverage = float(finite_factors.mean()) if len(aligned) else 0.0
+        if factor_coverage >= 0.95 and finite_factors.any():
+            latest_factor = float(aligned[np.flatnonzero(finite_factors)[-1]])
             if latest_factor > 0:
                 research = raw_close * aligned / latest_factor
                 sources = {
@@ -377,99 +407,121 @@ def adjusted_daily_metrics(
 
     verified_adjustment = adjustment_status in {"official", "verified_local"}
     if not verified_adjustment and "pct_chg" in values:
-        pct = pd.to_numeric(values.get("pct_chg"), errors="coerce") / 100.0
-        valid_pct = pct.notna() & np.isfinite(pct) & pct.gt(-1.0)
-        invalid_positions = np.flatnonzero(~valid_pct.to_numpy())
+        pct = pd.to_numeric(values.get("pct_chg"), errors="coerce").to_numpy(dtype=float) / 100.0
+        valid_pct = np.isfinite(pct) & (pct > -1.0)
+        invalid_positions = np.flatnonzero(~valid_pct)
         suffix_start = int(invalid_positions[-1] + 1) if len(invalid_positions) else 0
-        pct_suffix = pct.iloc[suffix_start:]
-        raw_tail = raw_close.tail(65)
-        raw_tail_returns = raw_tail.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+        pct_suffix = pct[suffix_start:]
+        raw_tail = raw_close[-65:]
+        raw_tail_returns = np.divide(
+            raw_tail[1:],
+            raw_tail[:-1],
+            out=np.full(max(0, len(raw_tail) - 1), np.nan),
+            where=raw_tail[:-1] != 0,
+        ) - 1.0
+        finite_tail_returns = raw_tail_returns[np.isfinite(raw_tail_returns)]
         raw_short_safe = bool(
             len(raw_tail) >= 61
-            and raw_tail.notna().all()
-            and raw_tail.gt(0).all()
-            and len(raw_tail_returns) >= 60
-            and raw_tail_returns.abs().max() <= 0.35
+            and np.isfinite(raw_tail).all()
+            and (raw_tail > 0).all()
+            and len(finite_tail_returns) >= 60
+            and np.max(np.abs(finite_tail_returns)) <= 0.35
         )
         if len(pct_suffix) < 61 and raw_short_safe:
-            research.loc[raw_tail.index] = raw_tail
+            research[-len(raw_tail) :] = raw_tail
             adjustment_status = "raw_short_fallback"
             adjustment_source = "stockdb:raw_close_continuity_guard"
-        elif len(pct_suffix) >= 2 and raw_close.notna().any():
-            chained = (1.0 + pct_suffix).cumprod()
-            chained = chained / chained.iloc[-1] * float(raw_close.dropna().iloc[-1])
-            research.loc[pct_suffix.index] = chained
+        elif len(pct_suffix) >= 2 and np.isfinite(raw_close).any():
+            chained = np.cumprod(1.0 + pct_suffix)
+            chained = chained / chained[-1] * float(raw_close[np.flatnonzero(np.isfinite(raw_close))[-1]])
+            research[suffix_start:] = chained
             adjustment_status = "return_chain"
             adjustment_source = "tushare:pct_chg"
 
-    research = pd.to_numeric(research, errors="coerce")
-    valid = pd.DataFrame(
-        {"date": values["date"], "price": research, "amount": amount, "raw_close": raw_close}
-    ).dropna(subset=["price"])
-    prices = valid["price"].reset_index(drop=True)
-    returns = prices.pct_change().replace([np.inf, -np.inf], np.nan)
+    valid_mask = np.isfinite(research)
+    valid_dates = dates[valid_mask]
+    prices = research[valid_mask]
+    valid_amount = amount[valid_mask]
+    returns = np.full(len(prices), np.nan, dtype=float)
+    if len(prices) > 1:
+        returns[1:] = np.divide(
+            prices[1:],
+            prices[:-1],
+            out=np.full(len(prices) - 1, np.nan),
+            where=prices[:-1] != 0,
+        ) - 1.0
+        returns[~np.isfinite(returns)] = np.nan
 
     def period_return(sessions: int) -> float | None:
-        if len(prices) < sessions + 1 or float(prices.iloc[-sessions - 1]) == 0:
+        if len(prices) < sessions + 1 or float(prices[-sessions - 1]) == 0:
             return None
-        return float(prices.iloc[-1] / prices.iloc[-sessions - 1] - 1)
+        return float(prices[-1] / prices[-sessions - 1] - 1)
 
     def moving_average(sessions: int) -> float | None:
         if len(prices) < sessions:
             return None
-        return float(prices.tail(sessions).mean())
+        return float(np.mean(prices[-sessions:]))
 
     def position(sessions: int, *, long_term: bool = False) -> float | None:
         if len(prices) < sessions or (
             long_term and adjustment_status not in {"official", "verified_local"}
         ):
             return None
-        window = prices.tail(sessions)
-        low, high = float(window.min()), float(window.max())
+        window = prices[-sessions:]
+        low, high = float(np.min(window)), float(np.max(window))
         if high <= low:
             return None
-        return float((prices.iloc[-1] - low) / (high - low) * 100)
+        return float((prices[-1] - low) / (high - low) * 100)
 
     ma20, ma60 = moving_average(20), moving_average(60)
     ma20_slope = None
     if len(prices) >= 25:
-        prior_ma20 = float(prices.iloc[-25:-5].mean())
+        prior_ma20 = float(np.mean(prices[-25:-5]))
         if prior_ma20:
             ma20_slope = float(ma20 / prior_ma20 - 1) if ma20 is not None else None
-    latest5 = amount.tail(5).mean() if amount.notna().sum() >= 5 else np.nan
-    previous20 = amount.iloc[-25:-5].mean() if amount.notna().sum() >= 25 else np.nan
+    finite_amount_count = int(np.isfinite(amount).sum())
+    latest5 = np.nanmean(amount[-5:]) if finite_amount_count >= 5 else np.nan
+    previous20 = np.nanmean(amount[-25:-5]) if finite_amount_count >= 25 else np.nan
     amount_ratio = (
         float(latest5 / previous20)
         if pd.notna(latest5) and pd.notna(previous20) and float(previous20) > 0
         else None
     )
-    avg_amount20 = float(amount.tail(20).mean()) if amount.notna().any() else None
+    avg_amount20 = float(np.nanmean(amount[-20:])) if finite_amount_count else None
     position250 = position(250, long_term=True)
     drawdown250 = None
     if position250 is not None:
-        high250 = float(prices.tail(250).max())
-        drawdown250 = float(prices.iloc[-1] / high250 - 1) if high250 else None
+        high250 = float(np.max(prices[-250:]))
+        drawdown250 = float(prices[-1] / high250 - 1) if high250 else None
 
     history = [
         {
-            "date": row.date.date().isoformat(),
-            "price": float(row.price),
-            "amount": float(row.amount) if pd.notna(row.amount) else None,
+            "date": str(value.astype("datetime64[D]")),
+            "price": float(price),
+            "amount": float(turnover) if np.isfinite(turnover) else None,
         }
-        for row in valid.tail(260).itertuples(index=False)
+        for value, price, turnover in zip(
+            valid_dates[-260:], prices[-260:], valid_amount[-260:], strict=True
+        )
     ]
-    latest_raw = raw_close.dropna()
+    latest_raw = raw_close[np.isfinite(raw_close)]
+    finite_returns = returns[np.isfinite(returns)]
+    volatility = None
+    if len(finite_returns):
+        tail_returns = returns[-20:]
+        tail_returns = tail_returns[np.isfinite(tail_returns)]
+        volatility = float(np.std(tail_returns, ddof=1)) if len(tail_returns) > 1 else float("nan")
     return {
         "sessions": len(prices),
-        "close": float(latest_raw.iloc[-1]) if not latest_raw.empty else None,
-        "research_price": float(prices.iloc[-1]) if len(prices) else None,
+        "close": float(latest_raw[-1]) if len(latest_raw) else None,
+        "research_price": float(prices[-1]) if len(prices) else None,
         "return_5d": period_return(5),
         "return_20d": period_return(20),
         "return_60d": period_return(60),
         "ma20": ma20,
         "ma60": ma60,
         "ma20_slope": ma20_slope,
-        "above_ma20": bool(ma20 is not None and len(prices) and prices.iloc[-1] > ma20),
+        "above_ma20": bool(ma20 is not None and len(prices) and prices[-1] > ma20),
         "ma20_above_ma60": bool(ma20 is not None and ma60 is not None and ma20 > ma60),
         "position_20d": position(20),
         "position_60d": position(60),
@@ -477,7 +529,7 @@ def adjusted_daily_metrics(
         "drawdown_250d": drawdown250,
         "avg_amount_20d": avg_amount20,
         "amount_ratio_5v20": amount_ratio,
-        "volatility_20d": float(returns.tail(20).std()) if returns.notna().any() else None,
+        "volatility_20d": volatility,
         "adjustment_status": adjustment_status,
         "adjustment_source": adjustment_source,
         "adjustment_coverage": round(factor_coverage, 6),
@@ -491,6 +543,8 @@ def fund_evidence(
     as_of_date: str,
     session_dates: Sequence[str],
     fallback_price: float | None,
+    session_index: Mapping[str, int] | None = None,
+    prepared: bool = False,
 ) -> dict[str, Any]:
     """Describe primary-market share changes without mistaking gaps for daily evidence."""
 
@@ -512,26 +566,33 @@ def fund_evidence(
     }
     if observations is None or observations.empty:
         return empty
-    frame = observations.copy()
-    frame["trade_date"] = pd.to_datetime(frame.get("trade_date"), errors="coerce")
-    frame["shares"] = pd.to_numeric(frame.get("shares"), errors="coerce")
-    frame = frame.dropna(subset=["trade_date", "shares"]).sort_values("trade_date")
-    frame = frame[frame["trade_date"].dt.date <= pd.Timestamp(as_of_date).date()]
-    frame = frame.drop_duplicates("trade_date", keep="last")
+    if prepared:
+        frame = observations
+    else:
+        frame = observations.copy()
+        frame["trade_date"] = pd.to_datetime(frame.get("trade_date"), errors="coerce")
+        frame["shares"] = pd.to_numeric(frame.get("shares"), errors="coerce")
+        frame = frame.dropna(subset=["trade_date", "shares"]).sort_values("trade_date")
+        frame = frame[frame["trade_date"].dt.date <= pd.Timestamp(as_of_date).date()]
+        frame = frame.drop_duplicates("trade_date", keep="last")
     if frame.empty:
         return empty
     latest_date = frame.iloc[-1]["trade_date"].date().isoformat()
-    sessions = sorted(
-        {
-            pd.Timestamp(value).date().isoformat()
-            for value in session_dates
-            if pd.notna(pd.to_datetime(value, errors="coerce"))
-        }
-    )
-    session_index = {value: index for index, value in enumerate(sessions)}
+    resolved_session_index = dict(session_index) if session_index is not None else {
+        value: index
+        for index, value in enumerate(
+            sorted(
+                {
+                    pd.Timestamp(value).date().isoformat()
+                    for value in session_dates
+                    if pd.notna(pd.to_datetime(value, errors="coerce"))
+                }
+            )
+        )
+    }
     lag = (
-        session_index[as_of_date] - session_index[latest_date]
-        if (as_of_date in session_index and latest_date in session_index)
+        resolved_session_index[as_of_date] - resolved_session_index[latest_date]
+        if (as_of_date in resolved_session_index and latest_date in resolved_session_index)
         else max(0, (pd.Timestamp(as_of_date) - pd.Timestamp(latest_date)).days)
     )
     source = str(frame.iloc[-1].get("share_source") or frame.iloc[-1].get("source") or "tushare:fund_share")
@@ -558,8 +619,8 @@ def fund_evidence(
         }
     prior_share = float(frame.iloc[-2]["shares"])
     prior_date = frame.iloc[-2]["trade_date"].date().isoformat()
-    if prior_date in session_index and latest_date in session_index:
-        period_sessions = session_index[latest_date] - session_index[prior_date]
+    if prior_date in resolved_session_index and latest_date in resolved_session_index:
+        period_sessions = resolved_session_index[latest_date] - resolved_session_index[prior_date]
     else:
         period_sessions = max(1, int(np.busday_count(prior_date, latest_date)))
     if period_sessions <= 0:
@@ -583,17 +644,18 @@ def fund_evidence(
     ).dropna()
     estimated_flow = float(delta * price.iloc[0]) if not price.empty else None
     unchanged = 0
-    records = frame[["trade_date", "shares"]].to_dict("records")
-    for index in range(len(records) - 1, 0, -1):
-        current_date = records[index]["trade_date"].date().isoformat()
-        previous_date = records[index - 1]["trade_date"].date().isoformat()
+    share_dates = frame["trade_date"].to_numpy(dtype="datetime64[D]", copy=False)
+    share_values = frame["shares"].to_numpy(dtype=float, copy=False)
+    for index in range(len(frame) - 1, 0, -1):
+        current_date = str(share_dates[index])
+        previous_date = str(share_dates[index - 1])
         if (
-            current_date not in session_index
-            or previous_date not in session_index
-            or session_index[current_date] - session_index[previous_date] != 1
+            current_date not in resolved_session_index
+            or previous_date not in resolved_session_index
+            or resolved_session_index[current_date] - resolved_session_index[previous_date] != 1
             or not np.isclose(
-                records[index]["shares"],
-                records[index - 1]["shares"],
+                share_values[index],
+                share_values[index - 1],
                 rtol=1e-10,
                 atol=1e-6,
             )

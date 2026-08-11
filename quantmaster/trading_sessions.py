@@ -141,3 +141,28 @@ _resolver = SessionExpectationResolver()
 
 def expected_session(now: datetime | None = None) -> SessionExpectation:
     return _resolver.resolve(now)
+
+
+def resolve_session_target(
+    as_of: str = "", now: datetime | None = None,
+) -> SessionExpectation:
+    """Resolve an explicit or default close-data target.
+
+    Close-data consumers must pass an explicit session when they are handling
+    a validated StockDB event.  Interactive/default callers use the shared
+    completed-session resolver; they must never derive a target from the
+    host's calendar date alone.
+    """
+    value = str(as_of or "").strip()
+    if value:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("交易日目标必须使用 YYYY-MM-DD 格式") from exc
+        return SessionExpectation(
+            session=parsed.isoformat(),
+            source="explicit",
+            ready=True,
+            reason="调用方明确指定交易日",
+        )
+    return expected_session(now)

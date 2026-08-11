@@ -733,7 +733,7 @@ def _bar_envelope(
         event for event in provenance
         if isinstance(event.get("quality"), dict)
         and str(event["quality"].get("status") or "") == "verified"
-        and "tushare:daily+adj_factor-contract-v1" in {
+        and "tushare:daily+adj_factor-contract-v2" in {
             str(value) for value in event["quality"].get("sources") or ()
         }
     ]
@@ -859,6 +859,13 @@ def _supplement_stockdb_contract(
     """Verify StockDB prices with remote contract evidence without replacing them."""
     if not get_config().data.tushare_token or guess_market(symbol) != Market.CN:
         return frame, None
+    existing_evidence = frame.attrs.get("contract_evidence") if hasattr(frame, "attrs") else None
+    if (
+        isinstance(existing_evidence, dict)
+        and str(frame.attrs.get("unit_status") or "").endswith("daily-contract-v2")
+        and str(frame.attrs.get("adjustment_status") or "").endswith("adj-factor-v2")
+    ):
+        return frame, existing_evidence
     try:
         from quantmaster.data.instruments import InstrumentStore
         from quantmaster.data.tushare_source import TushareSource
@@ -874,16 +881,14 @@ def _supplement_stockdb_contract(
         remote = witness.sort_index()
         local_dates = pd.DatetimeIndex(local.index).normalize().tz_localize(None)
         remote_dates = pd.DatetimeIndex(remote.index).normalize().tz_localize(None)
-        if (
-            not local_dates.is_unique
-            or not remote_dates.is_unique
-            or not local_dates.equals(remote_dates)
-        ):
-            missing = local_dates.difference(remote_dates)
-            extra = remote_dates.difference(local_dates)
+        if not local_dates.is_unique or not remote_dates.is_unique:
+            raise RuntimeError("Tushare 证据包含重复交易日，无法建立日期依据")
+        missing = local_dates.difference(remote_dates)
+        extra = remote_dates.difference(local_dates)
+        if len(missing):
             raise RuntimeError(
-                "Tushare 证据日期必须与 StockDB 逐日完全一致："
-                f"缺 {len(missing)} 日，多 {len(extra)} 日"
+                "Tushare 证据缺少 StockDB 已返回交易日，无法建立日期依据："
+                f"缺 {len(missing)} 日"
             )
         local = local.copy()
         remote = remote.copy()
@@ -892,6 +897,16 @@ def _supplement_stockdb_contract(
         common = local.index
         checks: dict[str, dict[str, object]] = {}
         contract_columns = [*OHLCV_COLUMNS]
+        missing_local_columns = [column for column in contract_columns if column not in local]
+        if missing_local_columns:
+            raise RuntimeError(
+                "StockDB 证据缺少必需字段：" + ",".join(missing_local_columns)
+            )
+        missing_remote_columns = [column for column in contract_columns if column not in remote]
+        if missing_remote_columns:
+            raise RuntimeError(
+                "Tushare 证据缺少必需字段：" + ",".join(missing_remote_columns)
+            )
         if "amount" not in remote:
             raise RuntimeError("Tushare 证据缺少 StockDB amount 单位核对字段")
         filled_fields: list[str] = []
@@ -902,35 +917,78 @@ def _supplement_stockdb_contract(
             local["amount"] = pd.to_numeric(remote["amount"], errors="coerce")
             filled_fields.append("amount")
         contract_columns.append("amount")
+        price_columns = [
+            column for column in ("open", "high", "low", "close")
+            if column in local and column in remote
+        ]
+        price_ratios: list[float] = []
+        for column in price_columns:
+            left = pd.to_numeric(local.loc[common, column], errors="coerce")
+            right = pd.to_numeric(remote.loc[common, column], errors="coerce")
+            finite = left.map(math.isfinite) & right.map(math.isfinite)
+            positive = finite & left.gt(0) & right.gt(0)
+            if not bool(positive.all()):
+                raise RuntimeError(f"Tushare {column} 不是逐日有限正价格观测")
+            price_ratios.extend(
+                (right.loc[positive] / left.loc[positive]).astype(float).tolist()
+            )
+        if not price_ratios:
+            raise RuntimeError("Tushare 证据没有可用于复权比例核对的 OHLC 观测")
+        ratio_series = pd.Series(price_ratios, dtype=float)
+        scale = float(ratio_series.median())
+        stable_rows = (ratio_series / scale - 1.0).abs() <= 0.005
+        if not bool(stable_rows.all()):
+            raise RuntimeError("StockDB/Tushare OHLC 复权比例不稳定")
+        scale = float(ratio_series.loc[stable_rows].median())
         for column in contract_columns:
             left = pd.to_numeric(local.loc[common, column], errors="coerce")
             right = pd.to_numeric(remote.loc[common, column], errors="coerce")
             finite = left.map(math.isfinite) & right.map(math.isfinite)
             if not bool(finite.all()):
                 raise RuntimeError(f"Tushare {column} 不是逐日有限可比观测")
-            tolerance = 0.01 if column in {"volume", "amount"} else 0.005
-            matching_rows = (left - right).abs().le(right.abs() * tolerance)
-            matching = float(matching_rows.mean())
-            if not bool(matching_rows.all()):
-                raise RuntimeError(
-                    f"StockDB/Tushare {column} 逐日单位或复权交叉核对仅 "
-                    f"{matching:.1%} 一致"
+            if column in price_columns:
+                aligned_right = right / scale
+                tolerance = 0.005
+                matching_rows = (left - aligned_right).abs().le(
+                    left.abs().clip(lower=1e-12) * tolerance
                 )
+                if float(matching_rows.mean()) < 0.8:
+                    raise RuntimeError(
+                        f"StockDB/Tushare {column} 复权比例核对仅 "
+                        f"{float(matching_rows.mean()):.1%} 一致"
+                    )
+                mode = "stable_price_scale_cross_checked"
+            else:
+                tolerance = 0.01
+                matching_rows = (left - right).abs().le(right.abs().clip(lower=1e-12) * tolerance)
+                if not bool(matching_rows.all()):
+                    matching = float(matching_rows.mean())
+                    raise RuntimeError(
+                        f"StockDB/Tushare {column} 逐日单位核对仅 "
+                        f"{matching:.1%} 一致"
+                    )
+            matching = float(matching_rows.mean())
             checks[column] = {
                 "rows": int(finite.sum()),
                 "matching_ratio": round(matching, 6),
-                "mode": "filled_missing_field" if column in filled_fields else "cross_checked",
+                "mode": (
+                    "filled_missing_field" if column in filled_fields
+                    else mode if column in price_columns
+                    else "unit_cross_checked"
+                ),
             }
         verified = local.copy()
         verified.attrs.update(frame.attrs)
         verified.attrs.update({
-            "unit_status": "verified:tushare-daily-contract-v1",
-            "adjustment_status": "verified:tushare-adj-factor-v1",
+            "unit_status": "verified:tushare-daily-contract-v2",
+            "adjustment_status": "verified:tushare-adj-factor-v2",
             "contract_evidence": {
                 "price_source": "free-stockdb",
-                "contract_source": "tushare:daily+adj_factor",
+                "contract_source": "tushare:daily+adj_factor-v2",
                 "requested_start": start,
                 "requested_end": end,
+                "price_scale": round(scale, 12),
+                "extra_remote_dates": [value.isoformat() for value in extra],
                 "checks": checks,
                 "filled_fields": filled_fields,
                 "field_sources": {
@@ -958,9 +1016,9 @@ def _apply_stockdb_contract_quality(quality: BarDataQuality) -> BarDataQuality:
     return replace(
         quality,
         status=status,
-        sources=("free-stockdb", "tushare:daily+adj_factor-contract-v1"),
+        sources=("free-stockdb", "tushare:daily+adj_factor-contract-v2"),
         issues=issues,
-        adjustment="qfq_verified:tushare-adj-factor-v1",
+        adjustment="qfq_verified:tushare-adj-factor-v2",
         units=(
             ("open", "CNY/share"), ("high", "CNY/share"),
             ("low", "CNY/share"), ("close", "CNY/share"),
@@ -1025,7 +1083,7 @@ def _full_refresh(
             )
             storage_source = source.name
             if contract_evidence is not None:
-                storage_source = "stockdb-price+tushare-contract-v1"
+                storage_source = "stockdb-price+tushare-contract-v2"
                 quality = _apply_stockdb_contract_quality(quality)
             if quality.status == "verified":
                 return persist(frame, quality, storage_source)
@@ -1100,7 +1158,7 @@ def _fetch_segment(
         )
         storage_source = source.name
         if contract_evidence is not None:
-            storage_source = "stockdb-price+tushare-contract-v1"
+            storage_source = "stockdb-price+tushare-contract-v2"
             quality = _apply_stockdb_contract_quality(quality)
         return evidence, quality, storage_source
 
@@ -1586,6 +1644,16 @@ def _load_history_locked(
     cfg = get_config()
     cached = store.get(symbol)
     mode = _mode(use_cache, refresh)
+    if mode != RefreshMode.FULL and priority == "formal" and cached is not None and not cached.empty:
+        # Formal consumers may not silently promote an incremental cache whose
+        # source chain has a gap or lacks the v2 StockDB/Tushare witness.  A
+        # full request below writes one covering lineage event; legacy bytes
+        # remain readable only as a degraded preview until that succeeds.
+        cached_quality = _bar_envelope(
+            cached, symbol=symbol, start=start, end=end, store=store, frequency="1d",
+        ).quality
+        if not cached_quality.formal_eligible:
+            mode = RefreshMode.FULL
     if mode == RefreshMode.FULL:
         fetch_start, fetch_end = start, end
         if cached is not None and not cached.empty:
@@ -1980,7 +2048,7 @@ def _load_bar_panel_frame(
                         )
                         if contract_evidence is not None:
                             quality = _apply_stockdb_contract_quality(quality)
-                            source_name = "stockdb-price+tushare-contract-v1"
+                            source_name = "stockdb-price+tushare-contract-v2"
                         if quality.status != "verified":
                             return None
                         with daily_store.lock(symbol):

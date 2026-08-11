@@ -35,10 +35,10 @@ from quantmaster.config import get_config
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.trading_sessions import SHANGHAI, market_date
+from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
-PAPER_SCHEMA_VERSION = 3
+PAPER_SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
@@ -175,6 +175,7 @@ class PaperStore:
                     lease_owner TEXT NOT NULL DEFAULT '', lease_expires REAL NOT NULL DEFAULT 0,
                     lease_token TEXT NOT NULL DEFAULT '', heartbeat_at REAL NOT NULL DEFAULT 0,
                     result_json TEXT NOT NULL DEFAULT '{}', last_error TEXT NOT NULL DEFAULT '',
+                    failure_code TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(run_date,account_id),
                     FOREIGN KEY(account_id) REFERENCES paper_accounts(id));
@@ -195,6 +196,8 @@ class PaperStore:
                 conn.execute("ALTER TABLE paper_auto_runs ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''")
             if "heartbeat_at" not in run_columns:
                 conn.execute("ALTER TABLE paper_auto_runs ADD COLUMN heartbeat_at REAL NOT NULL DEFAULT 0")
+            if "failure_code" not in run_columns:
+                conn.execute("ALTER TABLE paper_auto_runs ADD COLUMN failure_code TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 "UPDATE paper_accounts SET strategy_warning=warning "
                 "WHERE strategy_warning='' AND runtime_warning='' AND warning<>''"
@@ -207,10 +210,22 @@ class PaperStore:
                     "ALTER TABLE paper_accounts ADD COLUMN strategy_effective_after TEXT NOT NULL DEFAULT ''"
                 )
 
+        def schema_v4(conn: sqlite3.Connection) -> None:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(paper_auto_runs)")}
+            if "failure_code" not in columns:
+                conn.execute(
+                    "ALTER TABLE paper_auto_runs ADD COLUMN failure_code TEXT NOT NULL DEFAULT ''"
+                )
+            _migrate_swing_accounts(conn)
+
         with self._conn() as conn:
             migrate_schema(
                 conn,
-                ((1, schema_v1), (2, schema_v2), (PAPER_SCHEMA_VERSION, _migrate_swing_accounts)),
+                (
+                    (1, schema_v1),
+                    (2, schema_v2),
+                    (PAPER_SCHEMA_VERSION, schema_v4),
+                ),
             )
 
     @staticmethod
@@ -551,7 +566,8 @@ class PaperStore:
                 "ON CONFLICT(run_date,account_id) DO UPDATE SET status='running',"
                 "attempts=excluded.attempts,next_retry_at=0,lease_owner=excluded.lease_owner,"
                 "lease_expires=excluded.lease_expires,lease_token=excluded.lease_token,"
-                "heartbeat_at=excluded.heartbeat_at,last_error='',updated_at=excluded.updated_at",
+                "heartbeat_at=excluded.heartbeat_at,last_error='',failure_code='',"
+                "updated_at=excluded.updated_at",
                 (
                     run_date,
                     account_id,
@@ -608,7 +624,7 @@ class PaperStore:
         with self._conn() as conn:
             changed = conn.execute(
                 "UPDATE paper_auto_runs SET status='completed',next_retry_at=0,lease_owner='',"
-                "lease_expires=0,lease_token='',result_json=?,last_error='',updated_at=? "
+                "lease_expires=0,lease_token='',result_json=?,last_error='',failure_code='',updated_at=? "
                 "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
                 "AND lease_token=? AND lease_expires>?",
                 (canonical_json(result), utc_now(), run_date, account_id, owner, token, current),
@@ -623,6 +639,7 @@ class PaperStore:
         token: str,
         error: str,
         *,
+        failure_code: str = "",
         now: float | None = None,
     ) -> bool:
         current = time.time() if now is None else float(now)
@@ -640,13 +657,14 @@ class PaperStore:
             next_retry = 0 if exhausted else current + delays[min(attempts - 1, len(delays) - 1)]
             changed = conn.execute(
                 "UPDATE paper_auto_runs SET status=?,next_retry_at=?,lease_owner='',"
-                "lease_expires=0,lease_token='',last_error=?,updated_at=? "
+                "lease_expires=0,lease_token='',last_error=?,failure_code=?,updated_at=? "
                 "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
                 "AND lease_token=?",
                 (
                     "manual_recovery" if exhausted else "failed",
                     next_retry,
                     error[:500],
+                    str(failure_code or "")[:80],
                     utc_now(),
                     run_date,
                     account_id,
@@ -660,11 +678,41 @@ class PaperStore:
         with self._conn() as conn:
             changed = conn.execute(
                 "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
-                "last_error='',updated_at=? WHERE run_date=? AND account_id=? "
+                "last_error='',failure_code='',updated_at=? WHERE run_date=? AND account_id=? "
                 "AND status='manual_recovery'",
                 (utc_now(), run_date, account_id),
             ).rowcount
         return bool(changed)
+
+    def requeue_market_data_failures(
+        self,
+        run_date: str,
+        account_id: str | None = None,
+    ) -> int:
+        """Re-arm only runs blocked by unavailable close-data evidence.
+
+        Strategy, execution, and other business failures remain untouched.  A
+        StockDB success event can therefore safely wake this path without
+        erasing an operator decision or retrying an unrelated defect.
+        """
+        clauses = [
+            "run_date=?",
+            "failure_code='market_data_unavailable'",
+            "status IN ('failed','manual_recovery')",
+        ]
+        params: list[object] = [run_date]
+        if account_id:
+            clauses.append("account_id=?")
+            params.append(account_id)
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
+                "lease_owner='',lease_expires=0,lease_token='',heartbeat_at=0,"
+                "last_error='',failure_code='',updated_at=? WHERE "
+                + " AND ".join(clauses),
+                [utc_now(), *params],
+            ).rowcount
+        return int(changed)
 
     def latest_auto_run(self, account_id: str) -> dict | None:
         with self._conn() as conn:
@@ -1149,9 +1197,22 @@ class PaperService:
         if panel is None:
             from quantmaster.data import load_panel
 
-            end = pd.Timestamp(market_date())
+            expectation = resolve_session_target()
+            if not expectation.ready or not expectation.session:
+                # Offline/read-only installations still use a date before the
+                # wall clock; the formal envelope below remains authoritative.
+                fallback = (pd.Timestamp(market_date()) - pd.Timedelta(days=1)).date().isoformat()
+                expectation = expectation.__class__(
+                    session=fallback,
+                    source="bounded-probe",
+                    ready=True,
+                    reason="交易日历不可用，使用非当天探测日期并继续通过行情门禁校验",
+                )
+            end = pd.Timestamp(expectation.session)
             start = end - pd.Timedelta(days=lookback_days)
-            market_envelope = load_panel(symbols, str(start.date()), str(end.date()))
+            market_envelope = load_panel(
+                symbols, str(start.date()), str(end.date()), priority="formal",
+            )
             panel = market_envelope.require_data()
             market_quality = market_envelope.quality
         close = panel.get("close")
@@ -1168,7 +1229,7 @@ class PaperService:
             message = "行情证据未通过正式提案门禁：" + "；".join(market_quality.issues)
             self.store.set_warning(account_id, message, pause=True)
             raise ValueError(message)
-        if loaded_live and (pd.Timestamp(market_date()) - latest_date.normalize()).days > 7:
+        if loaded_live and (pd.Timestamp(end).normalize() - latest_date.normalize()).days > 7:
             message = f"最新行情停留在 {latest_date.date()}，账户已暂停以避免使用过期数据。"
             self.store.set_warning(account_id, message, pause=True)
             raise ValueError(message)

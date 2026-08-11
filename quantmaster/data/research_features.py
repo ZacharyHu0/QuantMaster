@@ -69,8 +69,8 @@ def registered_features(
     if bundle.membership is not None:
         add("membership", bundle.membership.astype(float), "market_context_v1",
             "当日 PIT 指数成分", "strict")
-    add("news_sentiment", bundle.signal.get("news_sentiment"), "news_v1",
-        "按首次见闻时间对齐的新闻情绪", "strict")
+    add("news_sentiment", bundle.signal.get("news_sentiment"), "news_v2",
+        "处理完成后按资讯发布时间回填的新闻情绪", "research_only")
     return values, descriptors
 
 

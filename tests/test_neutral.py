@@ -180,6 +180,7 @@ class TestIndustryMapCache:
         self, isolated_config, monkeypatch,
     ):
         from quantmaster.data import industry as mod
+        from quantmaster.data.industry import LegacyIndustrySnapshotError
 
         (isolated_config.data_root / "industry_map.json").write_text(
             '{"updated_at": 1, "mapping": {"600519.SH": "食品饮料"}}',
@@ -189,6 +190,8 @@ class TestIndustryMapCache:
             mod, "fetch_industry_map", lambda: (_ for _ in ()).throw(OSError("offline")),
         )
 
+        with pytest.raises(LegacyIndustrySnapshotError, match="旧格式"):
+            load_cached_industry_map()
         mapping, evidence = load_industry_analysis_context()
         historical, historical_evidence = load_industry_analysis_context(
             as_of="2026-08-08",

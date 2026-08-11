@@ -488,8 +488,20 @@ class RotationProvider:
         except Exception as exc:  # AKShare/requests provider boundary
             raise ThemeSourceUnavailable(f"东方财富 {label} 调用失败：{_compact_error(exc)}") from exc
 
-    def sync_market_history(self, progress, cancelled, *, rebuild: bool = False) -> dict[str, Any]:
+    def sync_market_history(
+        self,
+        progress,
+        cancelled,
+        *,
+        rebuild: bool = False,
+        as_of: str = "",
+    ) -> dict[str, Any]:
         """Materialize three years of date-partitioned full-market stock bars."""
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_instrument_catalog_snapshot,
+        )
+        from quantmaster.data.instruments import refresh_authoritative_instrument_catalog
         from quantmaster.research.contracts import ArtifactKind, AssetClass, Frequency
         from quantmaster.research.engine import ResearchEngine
         from quantmaster.research.lake import ResearchLake
@@ -499,9 +511,32 @@ class RotationProvider:
         # the daily endpoint legitimately has no completed bar yet.  Planning to
         # the same completed-session boundary used by snapshot freshness avoids
         # turning that expected empty response into a provider circuit failure.
-        end = _expected_market_session()
+        end = (
+            _expected_market_session(as_of=as_of)
+            if as_of
+            else _expected_market_session()
+        )
         if not end:
             raise RuntimeError("无法确认最近完成交易日；请配置 Tushare 日历或先同步全市场日线")
+        catalog_snapshot_id = ""
+        try:
+            catalog, _symbols, _evidence = load_instrument_catalog_snapshot(
+                as_of=end, market="CN", asset_type="stock",
+            )
+            catalog_snapshot_id = catalog.snapshot_id
+        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError):
+            target = pd.Timestamp(end).date()
+            current = market_now()
+            if current >= daily_signal_cutoff(target):
+                progress(1, "冻结证券目录", f"补齐 {end} 全市场横截面分母")
+                refresh_authoritative_instrument_catalog(
+                    source=self.source,
+                    store=self.instrument_store,
+                )
+                catalog, _symbols, _evidence = load_instrument_catalog_snapshot(
+                    as_of=end, market="CN", asset_type="stock",
+                )
+                catalog_snapshot_id = catalog.snapshot_id
         start = (pd.Timestamp(end) - pd.DateOffset(years=3, days=20)).date().isoformat()
         lake = ResearchLake()
         existing = lake.catalog.partitions(
@@ -526,6 +561,7 @@ class RotationProvider:
                 "partitions": len(existing),
                 "tasks": 0,
                 "expected_as_of": max(plan.target_dates, default=""),
+                "catalog_snapshot_id": catalog_snapshot_id,
                 "failed_tasks": [],
                 "issues": [],
             }
@@ -547,6 +583,7 @@ class RotationProvider:
             "tasks": len(plan.tasks),
             "run_id": result["run_id"],
             "expected_as_of": max(plan.target_dates, default=""),
+            "catalog_snapshot_id": catalog_snapshot_id,
             "failed_tasks": result.get("failed_tasks", []),
             "issues": [
                 f"{item['trade_date']} 行情同步失败：{item['error']}"
@@ -779,9 +816,11 @@ class RotationProvider:
         progress,
         cancelled,
         previous_items: list[dict[str, Any]],
+        *,
+        as_of: str = "",
     ) -> dict[str, Any]:  # pragma: no cover - 网络
         """Use the permission-gated Tushare DC catalog as the second provider."""
-        end = pd.Timestamp(market_date())
+        end = pd.Timestamp(as_of) if as_of else pd.Timestamp(market_date())
         start = end - pd.Timedelta(days=14)
         sessions = list(self.source.trade_calendar(str(start.date()), str(end.date())))
         if not sessions:
@@ -1135,7 +1174,9 @@ class RotationProvider:
             "issues": audit_issues,
         }
 
-    def sync_themes(self, progress, cancelled) -> dict[str, Any]:  # pragma: no cover - 网络
+    def sync_themes(
+        self, progress, cancelled, *, as_of: str = "",
+    ) -> dict[str, Any]:  # pragma: no cover - 网络
         """Refresh one coherent concept taxonomy through configured fallbacks."""
         previous_items = self.store.themes()
         free_stockdb_error: ThemeSourceUnavailable | None = None
@@ -1175,6 +1216,7 @@ class RotationProvider:
                         progress,
                         cancelled,
                         previous_items,
+                        as_of=as_of,
                     )
                 except InterruptedError:
                     raise
@@ -1198,17 +1240,61 @@ class RotationProvider:
                     f"同花顺 {str(ths_error)[:90]}"
                 ) from ths_error
 
-    def sync_etf_observations(self, progress, cancelled) -> dict[str, Any]:
+    def sync_etf_observations(
+        self, progress, cancelled, *, as_of: str = "",
+    ) -> dict[str, Any]:
         """Keep legacy broad history and maintain a 25-session all-market share panel."""
         from quantmaster.rotation.etf_v2 import classify_etf_profile
+        from quantmaster.rotation.service import _expected_market_session
 
         previous = self.store.etf_observations()
         issues: list[str] = []
         acquired_at = market_now().isoformat()
-        end = pd.Timestamp(market_date())
+        end_value = as_of or _expected_market_session()
+        calendar_error: BaseException | None = None
+        if not end_value:
+            # The shared resolver may be unavailable in an offline/local-only
+            # installation.  Derive the ceiling from an actual provider calendar
+            # rather than using the wall-clock date as a synthetic session.
+            probe_end = market_date().isoformat()
+            probe_start = (
+                pd.Timestamp(market_date()) - pd.Timedelta(days=45)
+            ).date().isoformat()
+            local_calendar = getattr(self.local_source, "trade_calendar", None)
+            using_local_calendar = callable(local_calendar)
+            calendar_reader = local_calendar
+            if not using_local_calendar:
+                calendar_reader = self.source.trade_calendar
+            try:
+                observed = calendar_reader(probe_start, probe_end)
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                calendar_error = exc
+                observed = []
+            if len(observed) == 0 and using_local_calendar:
+                try:
+                    observed = self.source.trade_calendar(probe_start, probe_end)
+                except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                    calendar_error = exc
+                    observed = []
+            candidates = pd.to_datetime(pd.Index(observed), errors="coerce")
+            candidates = candidates[~candidates.isna()]
+            eligible = [stamp for stamp in candidates if stamp.date() <= market_date()]
+            if eligible:
+                end_value = max(stamp.date().isoformat() for stamp in eligible)
+        # Capture the local directory before remote metadata enhancement can
+        # fail, but bind its effective date to a completed-session hint (or a
+        # bounded prior day), never to today's wall-clock date.
+        metadata_end = pd.Timestamp(
+            as_of or end_value or (market_date() - pd.Timedelta(days=1)).isoformat()
+        ).normalize()
+        local_basic = self._local_etf_metadata(previous, metadata_end)
+        end = pd.Timestamp(end_value) if end_value else pd.NaT
+        if end is pd.NaT or pd.isna(end):
+            if calendar_error is not None:
+                raise calendar_error
+            raise RuntimeError("无法确认 ETF 观察的最近完成交易日")
         history_start = end - pd.DateOffset(years=3, days=20)
         recent_start = end - pd.Timedelta(days=45 if previous.empty else 20)
-        local_basic = self._local_etf_metadata(previous, end)
         if not local_basic.empty:
             progress(3, "读取本地 ETF 元数据", f"stockdb 证券主表 {len(local_basic)} 只")
         calendar: list[str] = []

@@ -801,7 +801,7 @@ def test_daily_panel_primes_uncached_symbols_with_one_local_batch(
     assert calls == [["600000.SH", "000001.SZ"]]
     assert list(panel.data.columns) == ["600000.SH", "000001.SZ"]
     assert store.metadata("600000.SH")["last_source"] == (
-        "stockdb-price+tushare-contract-v1"
+        "stockdb-price+tushare-contract-v2"
     )
     assert store.metadata("000001.SZ")["last_source"] == "fallback"
 

@@ -1343,7 +1343,7 @@
       button.textContent = `${activeJob.phase || '等待执行'} · ${activeJob.progress || 0}%`;
       while (activeJob && !['completed','failed','cancelled'].includes(activeJob.status)) {
         await new Promise(resolve => setTimeout(resolve,1200));
-        activeJob = await api(`/api/v1/jobs/rotation/${activeJob.id}`);
+        activeJob = await api(`/api/v1/jobs/${activeJob.id}`);
         button.textContent = `${activeJob.phase || '正在分析'} · ${activeJob.progress || 0}%`;
       }
       if (activeJob?.status === 'completed') {
@@ -1399,7 +1399,7 @@
     const button = document.querySelector(`[data-rotation-refresh="${scope}"]`)
       || document.querySelector('[data-rotation-refresh]');
     if (!button) return;
-    api(`/api/v1/jobs/rotation/${encodeURIComponent(saved.id)}`)
+    api(`/api/v1/jobs/${encodeURIComponent(saved.id)}`)
       .then(job => monitorRefresh(job,scope,button))
       .catch(() => clearActiveJob());
   }

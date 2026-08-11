@@ -38,9 +38,24 @@ from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
+
+
+def _default_close_data_end(as_of: str | None = None) -> str:
+    """Resolve a close-data endpoint's default without using today's wall date."""
+    if as_of:
+        return str(as_of)
+    expectation = resolve_session_target()
+    if not expectation.ready or not expectation.session:
+        # Keep read-only endpoints usable in an offline/test installation. The
+        # previous Shanghai date is only a bounded probe; each formal loader
+        # still verifies the target and rejects a holiday or missing session.
+        fallback = (pd.Timestamp(market_date()) - pd.Timedelta(days=1)).date().isoformat()
+        logger.warning("交易日历不可用，使用非当天探测日期 %s：%s", fallback, expectation.reason)
+        return fallback
+    return expectation.session
 
 
 def _configure_reload_worker_logging() -> bool:
@@ -299,6 +314,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
         enforce_request_security,
     )
 
+    started = time.perf_counter()
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
@@ -391,6 +407,23 @@ async def request_context_and_migration_lock(request: Request, call_next):
             },
         )
     response.headers["X-Request-ID"] = request_id
+    duration_ms = (time.perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
+    try:
+        route = getattr(request.scope.get("route"), "path", None) or path
+        get_runtime_metrics = __import__(
+            "quantmaster.runtime.metrics", fromlist=["get_runtime_metrics"],
+        ).get_runtime_metrics
+        get_runtime_metrics().record_request(
+            route=str(route),
+            method=request.method,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            response_bytes=int(response.headers.get("content-length") or 0),
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        # Observability must never turn a successful page read into a failure.
+        pass
     if path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
     apply_security_headers(response)
@@ -904,17 +937,111 @@ def _sync_reference_market(
     return result, failures
 
 
+def _market_overview_response(
+    groups: dict[str, dict[str, str]],
+    items: dict[tuple[str, str], dict],
+    failures: dict[tuple[str, str], dict],
+    store,
+    total: int,
+) -> dict:
+    """Assemble a market response strictly from already available cards."""
+
+    result = {
+        group: [items[(group, symbol)] for symbol in symbols if (group, symbol) in items]
+        for group, symbols in groups.items()
+    }
+    unavailable = []
+    group_statuses = {}
+    for group, symbols in groups.items():
+        stale = sum(
+            str(items[(group, symbol)].get("freshness")) == "stale"
+            for symbol in symbols
+            if (group, symbol) in items
+        )
+        missing = [symbol for symbol in symbols if (group, symbol) not in items]
+        for symbol in missing:
+            missing_issue = failures.get((group, symbol), {})
+            meta = store.metadata(symbol) or {}
+            checked_at = float(meta.get("checked_at") or 0)
+            unavailable.append(
+                {
+                    "group": group,
+                    "symbol": symbol,
+                    "name": symbols[symbol],
+                    "status": "unavailable",
+                    "error_code": missing_issue.get("error_code", "no_usable_data"),
+                    "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
+                    "source_attempts": missing_issue.get("source_attempts", []),
+                    "last_success_at": (
+                        pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
+                    ),
+                }
+            )
+        group_statuses[group] = {
+            "configured": len(symbols),
+            "ready": len(result[group]) - stale,
+            "stale": stale,
+            "unavailable": len(missing),
+            "issues": [
+                {
+                    "symbol": symbol,
+                    "error_code": status_issue.get("error_code", "unavailable"),
+                    "message": status_issue.get("message", "数据源未返回可用行情"),
+                }
+                for symbol in symbols
+                if (status_issue := failures.get((group, symbol)))
+            ],
+        }
+    item_qualities = [
+        item.get("data_quality") or {}
+        for values in result.values()
+        for item in values
+    ]
+    stale_total = sum(int(str(value["stale"])) for value in group_statuses.values())
+    degraded_total = sum(
+        str(value.get("status") or "degraded") != "verified"
+        or bool(value.get("stale"))
+        or bool(value.get("partial"))
+        for value in item_qualities
+    )
+    missing_total = len(unavailable)
+    ready_total = sum(len(value) for value in result.values())
+    quality_status = (
+        "unavailable" if total and not ready_total
+        else "degraded" if degraded_total or stale_total or missing_total
+        else "verified"
+    )
+    return {
+        "groups": result,
+        "group_counts": {group: len(symbols) for group, symbols in groups.items()},
+        "group_statuses": group_statuses,
+        "unavailable_items": unavailable,
+        "data_quality": {
+            "status": quality_status,
+            "stale": bool(stale_total),
+            "partial": bool(stale_total or missing_total),
+            "issues": [item for item in [
+                f"{missing_total} 个标的不可用" if missing_total else "",
+                f"{stale_total} 个标的使用陈旧缓存" if stale_total else "",
+                f"{degraded_total} 个标的证据未完全验证" if degraded_total else "",
+            ] if item],
+            "requested_count": total,
+            "observed_count": ready_total,
+        },
+    }
+
+
 def _market_overview_data(
     start: str | None = None,
     progress: ProgressEmitter | None = None,
-    refresh: Literal["auto", "incremental"] = "auto",
+    refresh: Literal["auto", "incremental", "local"] = "auto",
 ) -> dict:
     """个人股票与全球参考市场概览：返回近一年走势并优先发送本地缓存。"""
     from quantmaster.data import load_history
     from quantmaster.data.storage import BarStore
     from quantmaster.data.yfinance_source import GLOBAL_REFS
 
-    end = pd.Timestamp(market_date())
+    end = pd.Timestamp(_default_close_data_end())
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
     start_value, end_value = str(start_ts.date()), str(end.date())
     personal_symbols, personal_memberships = _personal_market_symbols()
@@ -944,6 +1071,9 @@ def _market_overview_data(
                     f"{name} · 已显示本地数据",
                     {"kind": "market_item", "stage": "cache", "group": group, "item": item},
                 )
+
+    if refresh == "local":
+        return _market_overview_response(groups, items, failures, store, total)
 
     yahoo_symbols = set(GLOBAL_REFS)
 
@@ -1056,98 +1186,57 @@ def _market_overview_data(
                     "info" if item else "warning",
                 )
 
-    result = {
-        group: [items[(group, symbol)] for symbol in symbols if (group, symbol) in items]
-        for group, symbols in groups.items()
-    }
-    unavailable = []
-    group_statuses = {}
-    for group, symbols in groups.items():
-        stale = sum(
-            str(items[(group, symbol)].get("freshness")) == "stale"
-            for symbol in symbols
-            if (group, symbol) in items
-        )
-        missing = [symbol for symbol in symbols if (group, symbol) not in items]
-        for symbol in missing:
-            missing_issue = failures.get((group, symbol), {})
-            meta = store.metadata(symbol) or {}
-            checked_at = float(meta.get("checked_at") or 0)
-            unavailable.append(
-                {
-                    "group": group,
-                    "symbol": symbol,
-                    "name": symbols[symbol],
-                    "status": "unavailable",
-                    "error_code": missing_issue.get("error_code", "no_usable_data"),
-                    "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
-                    "source_attempts": missing_issue.get("source_attempts", []),
-                    "last_success_at": (
-                        pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
-                    ),
-                }
-            )
-        group_statuses[group] = {
-            "configured": len(symbols),
-            "ready": len(result[group]) - stale,
-            "stale": stale,
-            "unavailable": len(missing),
-            "issues": [
-                {
-                    "symbol": symbol,
-                    "error_code": status_issue.get("error_code", "unavailable"),
-                    "message": status_issue.get("message", "数据源未返回可用行情"),
-                }
-                for symbol in symbols
-                if (status_issue := failures.get((group, symbol)))
-            ],
-        }
-    item_qualities = [
-        item.get("data_quality") or {}
-        for values in result.values()
-        for item in values
-    ]
-    stale_total = sum(int(str(value["stale"])) for value in group_statuses.values())
-    degraded_total = sum(
-        str(value.get("status") or "degraded") != "verified"
-        or bool(value.get("stale"))
-        or bool(value.get("partial"))
-        for value in item_qualities
-    )
-    missing_total = len(unavailable)
-    ready_total = sum(len(value) for value in result.values())
-    quality_status = (
-        "unavailable" if total and not ready_total
-        else "degraded" if degraded_total or stale_total or missing_total
-        else "verified"
-    )
-    return {
-        "groups": result,
-        "group_counts": {group: len(symbols) for group, symbols in groups.items()},
-        "group_statuses": group_statuses,
-        "unavailable_items": unavailable,
-        "data_quality": {
-            "status": quality_status,
-            "stale": bool(stale_total),
-            "partial": bool(stale_total or missing_total),
-            "issues": [item for item in [
-                f"{missing_total} 个标的不可用" if missing_total else "",
-                f"{stale_total} 个标的使用陈旧缓存" if stale_total else "",
-                f"{degraded_total} 个标的证据未完全验证" if degraded_total else "",
-            ] if item],
-            "requested_count": total,
-            "observed_count": ready_total,
-        },
-    }
+    return _market_overview_response(groups, items, failures, store, total)
 
 
 @app.get("/api/v1/market/overview")
 def market_overview(
     start: str | None = None,
-    refresh: Literal["auto", "incremental"] = "auto",
 ) -> dict:
-    """个人股票与全球参考市场概览。"""
-    return _market_overview_data(start, refresh=refresh)
+    """Read the latest local market cards; this endpoint never synchronizes."""
+    return _market_overview_data(start, refresh="local")
+
+
+@app.post("/api/v1/market/overview/refresh", status_code=202)
+def refresh_market_overview() -> dict:
+    """Queue the explicit market-card source refresh without blocking a GET."""
+
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    active = next((
+        job for job in data_refresh_manager.list(20)
+        if str(job.get("scope") or "") == "market"
+        and str(job.get("status") or "") in {"queued", "running", "cancelling"}
+    ), None)
+    created = active is None
+    if active is None:
+        try:
+            active = data_refresh_manager.create("market")
+        except ValueError:
+            active = next((
+                job for job in data_refresh_manager.list(20)
+                if str(job.get("scope") or "") == "market"
+                and str(job.get("status") or "") in {"queued", "running", "cancelling"}
+            ), None)
+            if active is None:
+                raise
+            created = False
+    job_id = str(active["id"])
+    return {
+        "id": job_id,
+        "type": "market.overview.refresh",
+        "domain": "market",
+        "status": str(active.get("status") or "queued"),
+        "created": created,
+        "coalesced": not created,
+        "input_fingerprint": "",
+        "links": {
+            "self": f"/api/v1/jobs/data/{job_id}",
+            "events": f"/api/v1/jobs/data/{job_id}/events",
+            "cancel": f"/api/v1/jobs/data/{job_id}/cancel",
+            "retry": f"/api/v1/jobs/data/{job_id}/retry",
+        },
+    }
 
 
 @app.get("/api/v1/market/fear-greed")
@@ -1162,13 +1251,12 @@ def market_fear_greed(refresh: bool = False) -> dict:
 def market_overview_stream(
     request: Request,
     start: str | None = None,
-    refresh: Literal["auto", "incremental"] = "auto",
 ) -> StreamingResponse:
-    """市场概览流式进度；每完成一个标的就发送一行 NDJSON。"""
+    """Local-only market card stream; refreshes use the explicit POST endpoint."""
 
     def task(emit: ProgressEmitter) -> dict:
-        emit(1, "准备市场清单", "检查本地缓存与数据源")
-        result = _market_overview_data(start, emit, refresh)
+        emit(1, "准备市场清单", "读取已发布本地缓存")
+        result = _market_overview_data(start, emit, "local")
         emit(100, "市场数据已就绪", "正在绘制行情卡片")
         return result
 
@@ -1182,7 +1270,9 @@ def market_history(
     from quantmaster.data import load_bars
     from quantmaster.data.base import validate_frequency, validate_symbol
 
-    end = end or market_date().isoformat()
+    end = end or (
+        _default_close_data_end() if frequency == "1d" else market_date().isoformat()
+    )
     try:
         symbol = validate_symbol(symbol)
         frequency = validate_frequency(frequency)
@@ -1257,12 +1347,14 @@ def market_regime(req: RegimeRequest) -> dict:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.market import analyze_market, analyze_sectors
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
         )
-        market_envelope = load_panel(list(universe_snapshot.symbols), req.start, end)
+        market_envelope = load_panel(
+            list(universe_snapshot.symbols), req.start, end, priority="formal",
+        )
         panel = market_envelope.require_data()
         report = analyze_market(panel)
         past = report.pop("past").tail(req.history)
@@ -1311,7 +1403,7 @@ def selection_daily(req: SelectionRequest) -> dict:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import hybrid_daily_selection, resolve_policy
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         if req.end and req.policy_mode == "live":
             raise ValueError(
@@ -1323,7 +1415,9 @@ def selection_daily(req: SelectionRequest) -> dict:
             req.universe, as_of=end if req.end else None,
         )
         symbols = list(universe_snapshot.symbols)
-        market_envelope = load_panel(symbols, req.start, end)
+        market_envelope = load_panel(
+            symbols, req.start, end, priority="formal",
+        )
         panel = market_envelope.require_data()
         mapping, industry_evidence = (
             load_industry_analysis_context(as_of=end if req.end else None)
@@ -1506,7 +1600,7 @@ def _decision_dashboard_data(
     )
     from quantmaster.market import analyze_market, analyze_sectors
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     if req.end and req.policy_mode == "live":
         raise ValueError(
             "显式历史截止日不能使用 live 模式；请选择 historical_replay 或 retrospective"
@@ -1538,6 +1632,7 @@ def _decision_dashboard_data(
 
     market_envelope = load_panel(
         symbols, req.start, end, progress=on_symbol if progress else None,
+        priority="formal",
     )
     panel = market_envelope.require_data()
     if progress:
@@ -1735,7 +1830,7 @@ def factors_test(req: FactorTestRequest) -> dict:
     from quantmaster.factors import analyze_factor, compute_factor
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
@@ -1792,7 +1887,7 @@ def factors_validate(req: ValidateRequest) -> dict:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
@@ -1838,7 +1933,7 @@ def mine_genetic(req: MineRequest) -> dict:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import GeneticMiner
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,
@@ -1872,7 +1967,7 @@ def mine_llm(req: MineLLMRequest) -> dict:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.mining import LLMFactorMiner
 
-    end = req.end or market_date().isoformat()
+    end = _default_close_data_end(req.end)
     try:
         universe_snapshot = load_universe_analysis_snapshot(
             req.universe, as_of=end if req.end else None,

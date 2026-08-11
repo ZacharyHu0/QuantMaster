@@ -245,11 +245,17 @@ class NewsStore:
         self.sources = NewsSourceStore(self.path)
         from quantmaster.data.industry import (
             IndustrySnapshotIntegrityError,
+            LegacyIndustrySnapshotError,
             load_cached_industry_map,
         )
 
         try:
             self._industry_map = load_cached_industry_map()
+        except LegacyIndustrySnapshotError:
+            # Expected after upgrading a personal installation from the mutable
+            # pre-v2 cache.  It remains unavailable to formal news dimensions
+            # until a verified current snapshot replaces it.
+            self._industry_map = {}
         except (IndustrySnapshotIntegrityError, OSError, TypeError, ValueError) as exc:
             # Industry labels are optional analysis enrichment.  A legacy or
             # damaged projection must not make the news corpus unreadable.
@@ -995,6 +1001,11 @@ class NewsStore:
 
     def factor_rows(self, start_epoch: float | None = None,
                     end_epoch: float | None = None) -> list[dict]:
+        """Return completed formal analyses in the requested publication window.
+
+        Processing timestamps remain part of the evidence contract, but never move
+        an event out of the window in which it was published.
+        """
         clauses = [
             "n.analysis_status='complete'",
             "n.content_scope IN ('full_text','full_article','feed_summary')",
@@ -1042,12 +1053,6 @@ class NewsStore:
         if end_epoch is not None:
             clauses.append("n.published_at_epoch<=?")
             params.append(end_epoch)
-            clauses.append("n.first_seen_at>0 AND n.first_seen_at<=?")
-            params.append(end_epoch)
-            clauses.append("n.content_version_at>0 AND n.content_version_at<=?")
-            params.append(end_epoch)
-            clauses.append("n.analysis_updated_at>0 AND n.analysis_updated_at<=?")
-            params.append(end_epoch)
         with self._conn() as conn:
             register_news_raw_verifier(conn)
             rows = conn.execute(
@@ -1059,7 +1064,7 @@ class NewsStore:
                 "COALESCE(s.group_name,'') AS source_group,n.content_scope "
                 "FROM news n LEFT JOIN news_sources s ON s.id=n.source_id WHERE "
                 + " AND ".join(clauses)
-                + " ORDER BY MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at),n.id",
+                + " ORDER BY n.published_at_epoch,n.id",
                 params,
             ).fetchall()
         result = []
@@ -1073,17 +1078,21 @@ class NewsStore:
 
     def sandbox_factor_rows(self, start_epoch: float | None = None,
                             end_epoch: float | None = None) -> list[dict]:
-        """Return PIT-visible built-in rows for explicitly non-production research.
+        """Return completed built-in rows for explicitly non-production research.
 
         This path deliberately permits provider excerpts and pending ingest windows so
         recent news can be explored before the formal evidence window is complete.  It
         does *not* relax :meth:`factor_rows`: every returned row carries the exact
-        reasons that keep it out of the production contract, and all three availability
-        timestamps are still bounded by ``end_epoch`` to prevent look-ahead.
+        reasons that keep it out of the production contract. ``start_epoch`` and
+        ``end_epoch`` always describe the event publication window; later processing
+        does not rewrite that window.
         """
         published_epoch_sql = (
-            "COALESCE(NULLIF(n.published_at_epoch,0),"
-            "CAST(strftime('%s',n.published_at) AS REAL))"
+            "CASE WHEN n.published_at_epoch>0 THEN n.published_at_epoch "
+            "WHEN substr(n.published_at,-1,1)='Z' "
+            "OR substr(n.published_at,-6,1) IN ('+','-') "
+            "THEN CAST(strftime('%s',n.published_at) AS REAL) "
+            "ELSE CAST(strftime('%s',n.published_at,'-8 hours') AS REAL) END"
         )
         importance_sql = (
             "COALESCE(NULLIF(n.factor_importance_score,0),n.importance_score)"
@@ -1110,13 +1119,8 @@ class NewsStore:
             clauses.append(f"{published_epoch_sql}>=?")
             params.append(start_epoch)
         if end_epoch is not None:
-            clauses.extend([
-                f"{published_epoch_sql}<=?",
-                "n.first_seen_at<=?",
-                "n.content_version_at<=?",
-                "n.analysis_updated_at<=?",
-            ])
-            params.extend([end_epoch, end_epoch, end_epoch, end_epoch])
+            clauses.append(f"{published_epoch_sql}<=?")
+            params.append(end_epoch)
 
         formal_ids = {
             int(row["id"])
@@ -1143,8 +1147,7 @@ class NewsStore:
                 "AS ingest_window_complete FROM news n "
                 "LEFT JOIN news_sources s ON s.id=n.source_id WHERE "
                 + " AND ".join(clauses)
-                + " ORDER BY MAX(n.first_seen_at,n.content_version_at,"
-                "n.analysis_updated_at),n.id",
+                + f" ORDER BY {published_epoch_sql},n.id",
                 params,
             ).fetchall()
         result = []
@@ -1183,10 +1186,8 @@ class NewsStore:
         with self._conn() as conn:
             register_news_raw_verifier(conn)
             row = conn.execute(
-                "SELECT MIN(MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at)) "
-                "AS first_seen_at,"
-                "MAX(MAX(n.first_seen_at,n.content_version_at,n.analysis_updated_at)) "
-                "AS last_seen_at,COUNT(*) AS event_count "
+                "SELECT MIN(n.published_at_epoch) AS first_published_at,"
+                "MAX(n.published_at_epoch) AS last_published_at,COUNT(*) AS event_count "
                 "FROM news n LEFT JOIN news_sources s ON s.id=n.source_id "
                 "WHERE n.analysis_status='complete' AND n.first_seen_at>0 "
                 "AND n.content_version_at>0 AND n.analysis_updated_at>0 "
@@ -1228,16 +1229,26 @@ class NewsStore:
             ).fetchone()
         value = dict(row) if row else {}
         return {
-            "first_seen_at": float(value.get("first_seen_at") or 0),
-            "last_seen_at": float(value.get("last_seen_at") or 0),
+            "first_published_at": float(value.get("first_published_at") or 0),
+            "last_published_at": float(value.get("last_published_at") or 0),
             "event_count": int(value.get("event_count") or 0),
         }
 
-    def market_sentiment(self, *, as_of: float, days: int = 30) -> dict[str, Any]:
-        """Return a quality-weighted market proxy bounded at the requested time."""
+    def market_sentiment(
+        self, *, as_of: float, days: int = 30, knowledge_as_of: float | None = None,
+    ) -> dict[str, Any]:
+        """Return a quality-weighted market proxy with explicit event/PIT cutoffs.
+
+        By default evidence is required to have been visible by ``as_of``.  An
+        operational snapshot may pass its generation time as ``knowledge_as_of``
+        while keeping the publication window bounded by ``as_of``.
+        """
         reference = float(as_of)
         if not math.isfinite(reference) or reference <= 0:
             raise ValueError("情绪代理时点必须是有效时间戳")
+        visible_until = reference if knowledge_as_of is None else float(knowledge_as_of)
+        if not math.isfinite(visible_until) or visible_until <= 0:
+            raise ValueError("资讯证据可见时点必须是有效时间戳")
         window_days = max(1, min(int(days), 3650))
         cutoff = reference - window_days * 86400
         news_config = get_config().news
@@ -1251,6 +1262,7 @@ class NewsStore:
                 minimum_confidence=minimum,
                 now=reference,
                 halflife_days=halflife_days,
+                knowledge_until=visible_until,
             )
         market_row: dict[str, Any] = next(
             (row for row in aggregate_rows if str(row.get("item_type") or "") == "market"),
@@ -1263,6 +1275,7 @@ class NewsStore:
         )
         snapshot.update({
             "as_of_epoch": reference,
+            "knowledge_as_of_epoch": visible_until,
             "lookback_days": window_days,
             "halflife_days": halflife_days,
             "minimum_confidence": minimum,
@@ -1555,8 +1568,6 @@ class AICrawler:
                             *, preview: bool = False) -> FetchBatch:
         selected_limit = min(limit or source["item_limit"], source["item_limit"])
         if source["kind"] == "builtin":
-            if preview:
-                raise ValueError("内置来源请使用来源测试接口")
             batch = fetch_builtin_source(source, self.source_store, limit=selected_limit)
         else:
             value = dict(source)

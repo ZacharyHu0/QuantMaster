@@ -19,6 +19,7 @@ from quantmaster.data.instrument_snapshots import (
     freeze_suspension_snapshot,
     load_instrument_catalog_snapshot,
     load_suspension_snapshot,
+    snapshot_symbols,
     tushare_catalog_partition_evidence,
     tushare_catalog_request_params,
     tushare_suspension_request_evidence,
@@ -162,6 +163,82 @@ def test_catalog_snapshot_is_content_addressed_and_recoverable(isolated_config):
     assert restored_symbols == symbols
 
 
+def test_next_day_observation_reconstructs_previous_session_membership(isolated_config):
+    _records, outcomes = _complete_catalog()
+    stock_p = next(
+        item for item in outcomes
+        if item["endpoint"] == "stock_basic" and item["partition_value"] == "P"
+    )
+    stock_p["raw_records"] = []
+    acquired = _after_close()
+    observation_date = (acquired + timedelta(hours=8)).date()
+    target = observation_date - timedelta(days=1)
+    stock_d = next(
+        item for item in outcomes
+        if item["endpoint"] == "stock_basic" and item["partition_value"] == "D"
+    )
+    stock_d["raw_records"][0]["delist_date"] = observation_date.strftime("%Y%m%d")
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+
+    loaded, symbols, evidence = load_instrument_catalog_snapshot(
+        as_of=target.isoformat(), market="CN", asset_type="stock",
+    )
+
+    assert loaded.snapshot_id == snapshot.snapshot_id
+    assert "430001.BJ" in symbols
+    assert len(symbols) == 3001
+    assert evidence["acquired_at"] == snapshot.acquired_at
+    assert evidence["membership_as_of"] == target.isoformat()
+    assert evidence["observation_active_as_of"] == observation_date.isoformat()
+    assert evidence["membership_reconstructed"] is True
+    restored, restored_symbols = verify_instrument_catalog_evidence(evidence)
+    assert restored.snapshot_id == snapshot.snapshot_id
+    assert restored_symbols == symbols
+    with pytest.raises(InstrumentCatalogEvidenceError, match="成员日期契约"):
+        verify_instrument_catalog_evidence({
+            **evidence,
+            "membership_as_of": observation_date.isoformat(),
+        })
+
+
+def test_historical_reconstruction_rejects_ambiguous_delisted_lifecycle(isolated_config):
+    _records, outcomes = _complete_catalog()
+    stock_p = next(
+        item for item in outcomes
+        if item["endpoint"] == "stock_basic" and item["partition_value"] == "P"
+    )
+    stock_p["raw_records"] = []
+    stock_d = next(
+        item for item in outcomes
+        if item["endpoint"] == "stock_basic" and item["partition_value"] == "D"
+    )
+    stock_d["raw_records"][0]["delist_date"] = ""
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+    acquired = _after_close()
+    observation_date = (acquired + timedelta(hours=8)).date()
+    freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+
+    with pytest.raises(InstrumentCatalogEvidenceError, match="缺少历史可用的 delist_date"):
+        load_instrument_catalog_snapshot(
+            as_of=(observation_date - timedelta(days=1)).isoformat(),
+            market="CN",
+            asset_type="stock",
+        )
+
+
 def test_clean_one_stock_response_cannot_self_certify_complete():
     records, outcomes = _complete_catalog(stock_count=1)
     with pytest.raises(InstrumentCatalogEvidenceError, match="完整性下界"):
@@ -206,6 +283,118 @@ def test_required_catalog_partition_cannot_use_empty_success_as_completeness():
             request_outcomes=outcomes,
             acquired_at=_after_close(),
         )
+
+
+def test_empty_suspended_partitions_do_not_block_current_active_universe():
+    _records, outcomes = _complete_catalog()
+    for item in outcomes:
+        if (
+            item["endpoint"] in {"stock_basic", "hk_basic"}
+            and item["partition_value"] == "P"
+        ):
+            item["raw_records"] = []
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=_after_close(),
+    )
+
+    assert snapshot.manifest["active_asset_counts"]["CN:stock"] == 3000
+
+
+def test_current_listed_row_without_list_date_is_observation_day_only():
+    records, outcomes = _complete_catalog()
+    fund_l = next(
+        item for item in outcomes
+        if item["endpoint"] == "fund_basic" and item["partition_value"] == "L"
+    )
+    fund_l["raw_records"][0]["list_date"] = ""
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+    acquired = _after_close()
+    observation_date = (acquired + timedelta(hours=8)).date()
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+
+    current = snapshot_symbols(
+        snapshot,
+        market="CN",
+        asset_type="etf",
+        as_of=observation_date.isoformat(),
+    )
+    assert "510000.SH" in current
+    with pytest.raises(InstrumentCatalogEvidenceError, match="历史可用"):
+        snapshot_symbols(
+            snapshot,
+            market="CN",
+            asset_type="etf",
+            as_of=(observation_date - timedelta(days=1)).isoformat(),
+        )
+
+
+def test_current_missing_list_date_still_respects_expired_delist_date():
+    _records, outcomes = _complete_catalog(etf_count=101)
+    fund_l = next(
+        item for item in outcomes
+        if item["endpoint"] == "fund_basic" and item["partition_value"] == "L"
+    )
+    fund_l["raw_records"][0]["list_date"] = ""
+    fund_l["raw_records"][0]["delist_date"] = "20200101"
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+    acquired = _after_close()
+    observation_date = (acquired + timedelta(hours=8)).date()
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+
+    current = snapshot_symbols(
+        snapshot,
+        market="CN",
+        asset_type="etf",
+        as_of=observation_date.isoformat(),
+    )
+    assert "510000.SH" not in current
+    assert len(current) == 100
+
+
+def test_future_listed_fund_is_frozen_but_excluded_before_list_date():
+    _records, outcomes = _complete_catalog(etf_count=101)
+    fund_l = next(
+        item for item in outcomes
+        if item["endpoint"] == "fund_basic" and item["partition_value"] == "L"
+    )
+    fund_l["raw_records"][0]["list_date"] = "20990101"
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+    acquired = _after_close()
+    observation_date = (acquired + timedelta(hours=8)).date()
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+
+    current = snapshot_symbols(
+        snapshot,
+        market="CN",
+        asset_type="etf",
+        as_of=observation_date.isoformat(),
+    )
+    assert "510000.SH" not in current
+    assert len(current) == 100
 
 
 def test_synthetic_outcomes_cannot_certify_unbound_catalog_records():
@@ -262,7 +451,7 @@ def test_historical_delisted_rows_cannot_fill_active_completeness_floor():
         )
 
 
-def test_delisted_partition_requires_bound_lifecycle_end_date():
+def test_delisted_partition_without_dates_can_prove_current_inactivity():
     _records, outcomes = _complete_catalog()
     stock_d = next(
         item for item in outcomes
@@ -270,14 +459,83 @@ def test_delisted_partition_requires_bound_lifecycle_end_date():
     )
     stock_d["raw_records"][0]["delist_date"] = ""
     records, outcomes = _rebuild_catalog_outcomes(outcomes)
-    with pytest.raises(InstrumentCatalogEvidenceError, match="D 分区缺少 delist_date"):
-        freeze_instrument_catalog(
-            records,
-            source="tushare:catalog",
-            query=TUSHARE_CATALOG_QUERY,
-            request_outcomes=outcomes,
-            acquired_at=_after_close(),
-        )
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=_after_close(),
+    )
+
+    assert snapshot.manifest["active_asset_counts"]["CN:stock"] == 3000
+
+
+def test_delisted_row_without_list_date_can_prove_current_inactivity():
+    _records, outcomes = _complete_catalog()
+    hk_d = next(
+        item for item in outcomes
+        if item["endpoint"] == "hk_basic" and item["partition_value"] == "D"
+    )
+    hk_d["raw_records"][0]["list_date"] = ""
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=_after_close(),
+    )
+
+    assert snapshot.manifest["active_asset_counts"]["CN:stock"] == 3000
+
+
+def test_auxiliary_hk_lifecycle_gaps_do_not_block_cn_denominator():
+    _records, outcomes = _complete_catalog()
+    hk_l = next(
+        item for item in outcomes
+        if item["endpoint"] == "hk_basic" and item["partition_value"] == "L"
+    )
+    hk_l["raw_records"][0]["delist_date"] = "20200101"
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=_after_close(),
+    )
+
+    assert snapshot.manifest["active_asset_counts"]["CN:stock"] == 3000
+
+
+def test_cn_listed_partition_excludes_an_expired_delist_date():
+    _records, outcomes = _complete_catalog(stock_count=3001)
+    stock_l = next(
+        item for item in outcomes
+        if item["endpoint"] == "stock_basic" and item["partition_value"] == "L"
+    )
+    stock_l["raw_records"][0]["delist_date"] = "20200101"
+    records, outcomes = _rebuild_catalog_outcomes(outcomes)
+
+    acquired = _after_close()
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=outcomes,
+        acquired_at=acquired,
+    )
+    symbols = snapshot_symbols(
+        snapshot,
+        market="CN",
+        asset_type="stock",
+        as_of=(acquired + timedelta(hours=8)).date().isoformat(),
+    )
+
+    assert "600000.SH" not in symbols
+    assert len(symbols) == 3000
 
 
 def test_tushare_catalog_preserves_partition_evidence_and_delisted_fund_fields():
@@ -308,15 +566,26 @@ def test_tushare_catalog_preserves_partition_evidence_and_delisted_fund_fields()
                 ])
             if endpoint == "index_basic":
                 return pd.DataFrame(columns=["ts_code", "name", "fullname", "market"])
+            if endpoint == "hk_basic" and params["list_status"] == "L":
+                # The live endpoint can omit its optional ``symbol`` column
+                # even when the request fields include it.  ``ts_code`` is
+                # sufficient to recover QuantMaster's canonical identity.
+                return pd.DataFrame([{
+                    "ts_code": "00001.HK", "name": "长和", "fullname": "长江和记实业",
+                    "enname": "CK Hutchison", "list_status": "L",
+                    "list_date": "20150318", "delist_date": "",
+                }])
             return pd.DataFrame(columns=[
-                "ts_code", "symbol", "name", "fullname", "enname", "list_status",
+                "ts_code", "name", "fullname", "enname", "list_status",
                 "list_date", "delist_date",
             ])
 
     records, outcomes = Source().instrument_catalog()
     fund = next(item for item in records if item["symbol"] == "510300.SH")
+    hk_stock = next(item for item in records if item["symbol"] == "00001.HK")
     assert fund["status"] == "D"
     assert fund["delist_date"] == "2026-08-01"
+    assert hk_stock["provider_symbol"] == "00001.HK"
     assert {
         (item["endpoint"], item["partition_key"], item["partition_value"])
         for item in outcomes
@@ -414,12 +683,23 @@ def test_suspension_snapshot_is_immutable_and_tamper_evident():
         load_suspension_snapshot(trade_date)
 
 
-def test_suspension_snapshot_rejects_next_shanghai_day_observation(isolated_config):
+def test_suspension_snapshot_accepts_next_day_exact_trade_date_response(isolated_config):
     payload = _suspension_payload(
         "2026-08-07", "2026-08-07T17:00:00+00:00", [],
     )
 
-    with pytest.raises(InstrumentCatalogEvidenceError, match="目标日收盘后"):
+    frozen = freeze_suspension_snapshot(payload)
+
+    assert frozen["trade_date"] == "2026-08-07"
+    assert frozen["acquired_at"] == "2026-08-07T17:00:00+00:00"
+
+
+def test_suspension_snapshot_rejects_target_day_preclose_observation(isolated_config):
+    payload = _suspension_payload(
+        "2026-08-07", "2026-08-07T06:59:59+00:00", [],
+    )
+
+    with pytest.raises(InstrumentCatalogEvidenceError, match="早于目标日收盘"):
         freeze_suspension_snapshot(payload)
 
 

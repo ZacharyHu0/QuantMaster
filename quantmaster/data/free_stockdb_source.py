@@ -49,6 +49,10 @@ _SDK_THREAD_CLIENTS = threading.local()
 _SDK_RUNTIME_GENERATION = 0
 
 
+class FreeStockDBProviderError(RuntimeError):
+    """Normalize optional native SDK failures at the source boundary."""
+
+
 def _sdk_runtime_generation() -> int:
     with _SDK_CACHE_LOCK:
         return _SDK_RUNTIME_GENERATION
@@ -261,12 +265,29 @@ class FreeStockDBSource(DataSource):
         # builds for the richer after-close cross section explicitly.
         if fields is not None:
             arguments["fields"] = fields
-        return provider_call(
-            self.name,
-            key,
-            lambda: client.get_data(**arguments),
-            probe=probe,
-        )
+        try:
+            return provider_call(
+                self.name,
+                key,
+                lambda: client.get_data(**arguments),
+                probe=probe,
+            )
+        except self._sdk_provider_errors(client) as exc:
+            raise FreeStockDBProviderError(
+                str(exc).strip() or "free-stockdb 原生 SDK 调用失败",
+            ) from exc
+
+    @staticmethod
+    def _sdk_provider_errors(client: Any) -> tuple[type[Exception], ...]:
+        """Discover the optional extension's common base error without importing it."""
+        module = sys.modules.get(client.__class__.__module__)
+        error_type = getattr(module, "StockdbError", None) if module is not None else None
+        if (
+            isinstance(error_type, type)
+            and issubclass(error_type, Exception)
+        ):
+            return (error_type,)
+        return ()
 
     def sdk_version(self) -> str:
         """Return a deterministic vendor version or the SDK content fingerprint."""

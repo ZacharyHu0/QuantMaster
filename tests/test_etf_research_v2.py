@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,7 @@ from quantmaster.rotation.etf_v2 import (
     fund_evidence,
     normalize_index_name,
 )
+from quantmaster.server.rotation import _etf_overview_payload, _etf_refresh_hint
 from tests.catalog_evidence_helpers import bound_tushare_catalog
 
 
@@ -356,6 +358,30 @@ def test_adjustment_evidence_removes_split_jump_and_guards_long_position():
     assert rejected["return_20d"] is None
 
 
+def test_prepared_daily_metrics_match_the_normalized_public_path():
+    dates = pd.bdate_range("2025-07-01", periods=260)
+    daily = pd.DataFrame(
+        {
+            "date": dates,
+            "close": np.linspace(4.0, 4.8, len(dates)),
+            "pct_chg": pd.Series(np.linspace(4.0, 4.8, len(dates))).pct_change().fillna(0) * 100,
+            "amount": np.linspace(80_000_000, 120_000_000, len(dates)),
+        }
+    )
+    factors = pd.DataFrame(
+        {
+            "date": dates,
+            "adj_factor": np.where(np.arange(len(dates)) < 130, 1.0, 1.2),
+            "source": "free-stockdb:cum-factor-events",
+        }
+    )
+
+    normalized = adjusted_daily_metrics(daily, factors)
+    prepared = adjusted_daily_metrics(daily, factors, prepared=True)
+
+    assert prepared == normalized
+
+
 def test_stockdb_sparse_adjustment_events_expand_to_verified_daily_factors(tmp_path):
     dates = pd.bdate_range("2025-07-01", periods=260)
     economic = np.linspace(100.0, 130.0, len(dates))
@@ -490,6 +516,48 @@ def test_stockdb_empty_adjustment_table_cannot_be_authoritative(tmp_path, monkey
     assert factors.empty
     assert capability["status"] == "unavailable"
     assert capability["coverage"] == 0.0
+
+
+def test_adjustment_refresh_does_not_wait_for_remote_fund_adj(
+    tmp_path, monkeypatch, isolated_config,
+):
+    dates = pd.bdate_range("2026-07-01", periods=20)
+    daily = pd.DataFrame(
+        {"symbol": "510300.SH", "date": dates, "close": np.linspace(4.0, 4.2, 20)}
+    )
+
+    class EmptyLocalFactors:
+        def adjustment_factors(self, *_args):
+            return pd.DataFrame(columns=["symbol", "date", "adj_factor"])
+
+    remote_calls = 0
+
+    def fail_remote(*_args, **_kwargs):
+        nonlocal remote_calls
+        remote_calls += 1
+        raise AssertionError("foreground ETF research must not call remote fund_adj")
+
+    from quantmaster.data.tushare_source import TushareSource
+
+    isolated_config.data.tushare_token = "configured-token"
+    monkeypatch.setattr(TushareSource, "_call", fail_remote)
+    service = EtfResearchService(
+        source=EmptyLocalFactors(),
+        instruments=object(),
+        ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "research"),
+    )
+
+    factors, capability = service._adjustment_factors(
+        daily,
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+    )
+
+    assert factors.empty
+    assert remote_calls == 0
+    assert capability["status"] == "unavailable"
+    assert "不串行等待远程 fund_adj" in capability["reason"]
 
 
 def test_historical_adjustment_rejects_late_or_invalid_factor_evidence(
@@ -708,7 +776,7 @@ def test_fund_basic_is_official_directory_without_claiming_etf_basic_enhancement
     assert service._profile_capabilities["enhanced_covered_symbols"] == 0
 
 
-def test_live_profiles_reject_partial_mutable_master_without_catalog_artifact(
+def test_current_profiles_degrade_to_local_master_without_catalog_artifact(
     tmp_path, monkeypatch,
 ):
     class EmptyRotationStore:
@@ -747,8 +815,104 @@ def test_live_profiles_reject_partial_mutable_master_without_catalog_artifact(
         store=EtfResearchStore(tmp_path / "research"),
     )
 
+    profiles = service.profiles()
+
+    assert [item.symbol for item in profiles] == ["510300.SH"]
+    assert service._profile_capabilities["status"] == "degraded"
+    assert service._profile_capabilities["publication_allowed"] is True
+    assert service._profile_capabilities["denominator"]["complete_market_denominator"] is False
+    assert service._profile_capabilities["denominator"]["formal_eligible"] is True
+    assert "stockdb 与本地缓存" in service._profile_capabilities["reason"]
+
     with pytest.raises(RuntimeError, match="没有完整、可复验"):
-        service.profiles()
+        service.profiles(as_of="2026-08-09")
+
+
+def test_default_research_target_prefers_validated_stockdb_session(monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.market_date",
+        lambda: pd.Timestamp("2026-08-11").date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.free_stockdb_runtime.status",
+        lambda: {"validated_session": "2026-08-10"},
+    )
+
+    target, source = EtfResearchService._research_target()
+
+    assert target == pd.Timestamp("2026-08-10")
+    assert source == "free-stockdb:validated-session"
+
+
+def test_etf_overview_compacts_local_denominator_members():
+    snapshot = SimpleNamespace(
+        sectors=(),
+        queues={},
+        candidate_queues={},
+        freshness={},
+        capabilities={
+            "metadata": {
+                "status": "degraded",
+                "denominator": {
+                    "observed_symbols": 2,
+                    "coverage": 1.0,
+                    "members": [{"symbol": "510300.SH"}, {"symbol": "159919.SZ"}],
+                },
+            }
+        },
+    )
+
+    payload = _etf_overview_payload(snapshot, "equity")
+
+    denominator = payload["capabilities"]["metadata"]["denominator"]
+    assert denominator["member_count"] == 2
+    assert "members" not in denominator
+    assert len(snapshot.capabilities["metadata"]["denominator"]["members"]) == 2
+
+
+def test_etf_refresh_hint_reuses_unchanged_file_hashes_without_loading_frames(
+    tmp_path,
+    monkeypatch,
+):
+    factor_path = tmp_path / "research" / "evidence" / "adjustment_factors.parquet"
+    share_path = tmp_path / "rotation" / "etf_observations.parquet"
+    metadata_path = tmp_path / "rotation" / "etf_metadata.parquet"
+    for path in (factor_path, share_path, metadata_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"immutable-local-evidence")
+
+    class LocalRotationStore:
+        etf_path = share_path
+        etf_metadata_path = metadata_path
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", LocalRotationStore)
+    latest_input = SimpleNamespace(
+        assets=("etf",),
+        content_hashes={"etf_daily": "daily-hash"},
+        ingest_id="sdi_latest",
+        as_of_date="2026-08-10",
+    )
+    service = SimpleNamespace(
+        ingest_store=SimpleNamespace(history=lambda _limit: [latest_input]),
+        store=SimpleNamespace(root=tmp_path / "research"),
+        _direct_share_observations=lambda: pytest.fail("不应读取份额明细"),
+        _direct_metadata=lambda: pytest.fail("不应读取元数据明细"),
+    )
+    snapshot = SimpleNamespace(
+        generated_at="2030-01-01T00:00:00+00:00",
+        evidence_hashes={
+            "行情": content_hash(latest_input.content_hashes),
+            "份额": "share-hash",
+            "复权": "factor-hash",
+            "元数据源": "metadata-source-hash",
+        },
+    )
+
+    hint = _etf_refresh_hint(service, snapshot)
+
+    assert hint["recommended"] is False
+    assert hint["input_as_of"] == "2026-08-10"
+    assert "已使用最新" in hint["reason"]
 
 
 def test_duplicate_same_index_product_does_not_change_sector_trend_input():
@@ -919,6 +1083,34 @@ def test_share_evidence_distinguishes_zero_change_nonzero_stale_and_missing():
     assert changed["estimated_flow"] == 200_000_000
     assert stale["status"] == "stale" and stale["share_delta"] is None
     assert missing["status"] == "missing" and missing["share_delta"] is None
+
+
+def test_prepared_share_evidence_reuses_one_session_index():
+    sessions = ["2026-08-05", "2026-08-06", "2026-08-07"]
+    frame = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(sessions),
+            "shares": [1_000_000_000.0, 1_000_000_000.0, 1_100_000_000.0],
+            "close": [2.0, 2.0, 2.0],
+            "share_source": "tushare:etf_share_size",
+        }
+    )
+
+    class ExplodingSessions:
+        def __iter__(self):
+            raise AssertionError("prepared path must not parse the shared calendar again")
+
+    result = fund_evidence(
+        frame,
+        as_of_date=sessions[-1],
+        session_dates=ExplodingSessions(),
+        session_index={value: index for index, value in enumerate(sessions)},
+        fallback_price=2.0,
+        prepared=True,
+    )
+
+    assert result["status"] == "confirmed_change"
+    assert result["share_delta"] == 100_000_000
 
 
 def test_share_gap_is_labeled_as_multi_session_total_and_breaks_unchanged_streak():

@@ -54,7 +54,7 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert 'src="/static/rotation.js"' in page.text
 
 
-def test_manual_rotation_refresh_allows_one_tushare_recovery_probe(monkeypatch):
+def test_manual_rotation_refresh_does_not_reset_provider_circuit(monkeypatch):
     from quantmaster.rotation.service import get_rotation_worker
 
     client = _client()
@@ -78,7 +78,7 @@ def test_manual_rotation_refresh_allows_one_tushare_recovery_probe(monkeypatch):
     )
 
     assert response.status_code == 202
-    assert calls == ["tushare"]
+    assert calls == []
 
 
 def test_rotation_preferences_validate_known_l2_codes():
@@ -142,7 +142,8 @@ def test_rotation_refresh_returns_unified_job_contract(monkeypatch):
     )
     assert response.status_code == 202
     assert response.json()["domain"] == "rotation"
-    assert response.json()["links"]["self"].startswith("/api/v1/jobs/rotation/")
+    assert response.json()["links"]["self"].startswith("/api/v1/jobs/")
+    assert response.json()["type"] == "rotation.refresh"
 
     close = _client().post(
         "/api/v1/market/analytics/refresh",

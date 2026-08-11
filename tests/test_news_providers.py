@@ -11,20 +11,24 @@ import httpx
 import pandas as pd
 import pytest
 
-from quantmaster.ai.crawler import NewsItem, NewsStore
+from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
 from quantmaster.ai.news_contracts import (
     BUILTIN_SOURCES,
     FetchBatch,
+    FetchedArticle,
     NewsContractError,
     evaluate_freshness,
     read_raw_evidence,
 )
 from quantmaster.ai.news_providers import (
     fetch_builtin_source,
+    fetch_csrc,
+    fetch_eastmoney_fast,
     fetch_ndrc,
     fetch_pboc,
     fetch_sina_live,
     fetch_sse,
+    fetch_szse,
 )
 from quantmaster.ai.news_sources import (
     NewsSourceStore,
@@ -41,7 +45,9 @@ def _source(source_id: str) -> dict:
 
 def _official_url(source_id: str, suffix: str) -> str:
     hosts = {
+        "csrc": "www.csrc.gov.cn",
         "sse": "www.sse.com.cn",
+        "szse": "www.szse.cn",
         "pboc": "www.pbc.gov.cn",
         "nbs_release": "www.stats.gov.cn",
         "nbs_interpretation": "www.stats.gov.cn",
@@ -101,13 +107,15 @@ def test_builtin_groups_have_real_enabled_definitions(tmp_path):
         group: [item["id"] for item in store.list(enabled=True, group_name=group)]
         for group in ("fast", "official", "periodic")
     }
-    assert grouped["fast"] == ["sina_live"]
-    assert {"sse", "pboc"} <= set(grouped["official"])
+    assert grouped["fast"] == ["sina_live", "eastmoney_fast"]
+    assert {"csrc", "sse", "szse", "pboc"} <= set(grouped["official"])
     assert {"nbs_release", "nbs_interpretation", "ndrc"} <= set(grouped["periodic"])
     enabled = {item["id"] for item in store.list(enabled=True)}
-    assert {"eastmoney_fast", "csrc", "szse"}.isdisjoint(enabled)
+    assert {"eastmoney_fast", "csrc", "szse"} <= enabled
     assert all(float(item["max_age_hours"]) > 0 for item in BUILTIN_SOURCES)
     assert (store.get("sse") or {})["factor_eligible"] is True
+    assert (store.get("csrc") or {})["factor_eligible"] is True
+    assert (store.get("szse") or {})["factor_eligible"] is True
     assert (store.get("nbs_release") or {})["factor_eligible"] is True
     jin10 = store.get("jin10_authorized") or {}
     assert jin10["enabled"] is False
@@ -115,6 +123,159 @@ def test_builtin_groups_have_real_enabled_definitions(tmp_path):
     assert jin10["url"] == "https://open.jin10.com/"
     with pytest.raises(ValueError, match="授权适配器"):
         store.update("jin10_authorized", {"enabled": True})
+
+
+def test_restored_legacy_builtin_toggles_persist_across_store_reopen(tmp_path):
+    database = tmp_path / "news.sqlite"
+    store = NewsSourceStore(database)
+    restored = ("eastmoney_fast", "csrc", "szse")
+    for source_id in restored:
+        store.update(source_id, {"enabled": False})
+    assert all(not (store.get(source_id) or {})["enabled"] for source_id in restored)
+
+    reopened = NewsSourceStore(database)
+    for source_id in restored:
+        reopened.update(source_id, {"enabled": True})
+
+    reopened_again = NewsSourceStore(database)
+    assert all((reopened_again.get(source_id) or {})["enabled"] for source_id in restored)
+
+
+def test_builtin_source_preview_uses_provider_without_binding_evidence(monkeypatch):
+    source = {
+        **_source("sina_live"),
+        "item_limit": 50,
+    }
+    article = NewsItem(
+        source="sina_live", title="测试快讯", content="测试正文",
+        published_at="2026-08-10T09:00:00+08:00",
+    )
+    bound: list[object] = []
+
+    class SourceStore:
+        def bind_articles(self, items):
+            bound.extend(items)
+
+    monkeypatch.setattr(
+        "quantmaster.ai.crawler.fetch_builtin_source",
+        lambda value, store, *, limit: FetchBatch(
+            source_id=value["id"],
+            articles=[FetchedArticle(
+                source=article.source, title=article.title, content=article.content,
+                published_at=article.published_at,
+            )],
+        ),
+    )
+    crawler = AICrawler.__new__(AICrawler)
+    crawler.source_store = SourceStore()
+
+    preview = crawler._fetch_source(source, limit=3, preview=True)
+
+    assert [item.title for item in preview] == ["测试快讯"]
+    assert bound == []
+
+
+def test_eastmoney_current_trace_contract_and_watermark(monkeypatch):
+    payload = {
+        "code": "1",
+        "data": {
+            "sortEnd": "cursor-2",
+            "fastNewsList": [
+                {
+                    "code": "new-2", "title": "东方财富最新快讯",
+                    "summary": "具有明确时间和内容的最新快讯。",
+                    "showTime": "2026-08-09 10:02:00",
+                },
+                {
+                    "code": "old-1", "title": "旧水位快讯",
+                    "summary": "旧水位内容。", "showTime": "2026-08-09 10:01:00",
+                },
+            ],
+        },
+    }
+    requested: list[str] = []
+
+    def fake_fetch(source, url, store):
+        requested.append(url)
+        return json.dumps(payload).encode(), url, "news_raw/eastmoney_fast/feed.gz"
+
+    monkeypatch.setattr("quantmaster.ai.news_providers._fetch_bytes", fake_fetch)
+    monkeypatch.setattr("quantmaster.ai.news_providers.time.time", lambda: 1786241400.0)
+
+    batch = fetch_eastmoney_fast(_source("eastmoney_fast"), object(), "old-1", 30)
+
+    assert "req_trace=quantmaster" in requested[0]
+    assert [item.provider_item_id for item in batch.articles] == ["new-2"]
+    assert batch.articles[0].content_scope == "provider_excerpt"
+    assert batch.watermark == "new-2"
+    assert batch.complete is True
+
+
+def test_csrc_current_json_contract_preserves_full_official_content(monkeypatch):
+    payload = {
+        "data": {
+            "results": [{
+                "manuscriptId": "7649538",
+                "title": "证监会当前要闻标题",
+                "content": "证监会当前要闻的完整正文，具有足够上下文并可由原始响应独立复核。" * 2,
+                "url": "//www.csrc.gov.cn/csrc/c100028/c7649538/content.shtml",
+                "publishedTimeStr": "2026-08-09 09:30:00",
+            }],
+        },
+    }
+
+    def fake_fetch(source, url, store):
+        headers = source["parser"]["headers"]
+        assert headers["Referer"].endswith("/c100028/common_xq_list.shtml")
+        assert headers["X-Requested-With"] == "XMLHttpRequest"
+        return (
+            json.dumps(payload, ensure_ascii=False).encode(), url,
+            "news_raw/csrc/listing.gz",
+        )
+
+    monkeypatch.setattr("quantmaster.ai.news_providers._fetch_bytes", fake_fetch)
+    monkeypatch.setattr("quantmaster.ai.news_providers.time.time", lambda: 1786241400.0)
+
+    batch = fetch_csrc(_source("csrc"), object(), "", 30)
+
+    assert [item.provider_item_id for item in batch.articles] == ["7649538"]
+    assert batch.articles[0].content_scope == "full_article"
+    assert batch.articles[0].is_official is True
+    assert batch.articles[0].url == (
+        "https://www.csrc.gov.cn/csrc/c100028/c7649538/content.shtml"
+    )
+    assert batch.complete is True
+
+
+def test_szse_current_listing_scripts_bind_verified_detail(monkeypatch):
+    body = "深交所通知公告的完整正文，具有足够上下文并可由详情原始响应独立复核。" * 3
+    listing = b"""
+        <li><div class="title"><script>
+        var curHref = './t20260809_621999.html';
+        //var curTitle = 'commented title';
+        var curTitle = '\\u6df1\\u4ea4\\u6240\\u5f53\\u524d\\u901a\\u77e5\\u516c\\u544a';
+        </script><span class="time">2026-08-09</span></div></li>
+    """
+    detail = (
+        '<div class="news-detail-con"><div class="des-content">'
+        f'{body}</div></div><span>时间：2026-08-09</span>'
+    ).encode()
+
+    def fake_fetch(source, url, store):
+        if url == source["url"]:
+            return listing, url, "news_raw/szse/listing.gz"
+        return detail, url, "news_raw/szse/detail.gz"
+
+    monkeypatch.setattr("quantmaster.ai.news_providers._fetch_bytes", fake_fetch)
+    monkeypatch.setattr("quantmaster.ai.news_providers.time.time", lambda: 1786241400.0)
+
+    batch = fetch_szse(_source("szse"), object(), "", 30)
+
+    assert [item.title for item in batch.articles] == ["深交所当前通知公告"]
+    assert batch.articles[0].content == body
+    assert batch.articles[0].content_scope == "full_article"
+    assert batch.articles[0].raw_cache_key == "news_raw/szse/detail.gz"
+    assert batch.complete is True
 
 
 def test_public_hostname_accepts_clash_fake_ip_without_allowing_literal(monkeypatch):
@@ -1454,7 +1615,7 @@ def test_v3_title_identity_migration_preserves_archive_and_removes_constraint(tm
     assert store.market_sentiment(as_of=time.time() + 10, days=1)["event_count"] == 0
 
 
-def test_historical_factors_exclude_analysis_completed_after_as_of(tmp_path):
+def test_historical_factors_backfill_analysis_to_publication_window(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     now = time.time()
     first_seen = now - 7200
@@ -1480,12 +1641,14 @@ def test_historical_factors_exclude_analysis_completed_after_as_of(tmp_path):
         importance_score=100,
     )
     assert store.update_analysis(item_id, analyzed)
-    assert store.factor_rows(end_epoch=as_of) == []
+    historical = store.factor_rows(end_epoch=as_of)
+    assert len(historical) == 1
+    assert historical[0]["sentiment"] == 0.8
     assert store.market_sentiment(as_of=as_of, days=1)["event_count"] == 0
     assert len(store.factor_rows(end_epoch=now + 10)) == 1
 
 
-def test_historical_factor_fails_closed_after_future_content_revision(tmp_path):
+def test_historical_factor_uses_latest_analysis_at_original_publication_time(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     now = time.time()
     first_seen = now - 7200
@@ -1525,7 +1688,9 @@ def test_historical_factor_fails_closed_after_future_content_revision(tmp_path):
         importance_score=100,
     )
     assert store.update_analysis(item_id, reanalyzed)
-    assert store.factor_rows(end_epoch=as_of) == []
+    historical = store.factor_rows(end_epoch=as_of)
+    assert len(historical) == 1
+    assert historical[0]["sentiment"] == -0.7
     current = store.factor_rows(end_epoch=now + 10)
     assert len(current) == 1
     assert current[0]["sentiment"] == -0.7

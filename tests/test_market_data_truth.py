@@ -88,9 +88,9 @@ def test_stockdb_prices_use_tushare_only_to_fill_missing_contract_evidence(monke
     assert verified.attrs["unit_status"].startswith("verified:")
     assert quality.status == "verified"
     assert quality.sources == (
-        "free-stockdb", "tushare:daily+adj_factor-contract-v1",
+        "free-stockdb", "tushare:daily+adj_factor-contract-v2",
     )
-    assert quality.adjustment == "qfq_verified:tushare-adj-factor-v1"
+    assert quality.adjustment == "qfq_verified:tushare-adj-factor-v2"
 
 
 def test_stockdb_contract_supplement_failure_stays_degraded(monkeypatch):
@@ -348,7 +348,7 @@ def test_stockdb_native_batch_path_also_supplements_contract_evidence(
     )
 
     assert result.quality.status == "verified", result.quality.issues
-    assert result.quality.adjustment == "qfq_verified:tushare-adj-factor-v1"
+    assert result.quality.adjustment == "qfq_verified:tushare-adj-factor-v2"
     assert witness_calls == ["600000.SH"]
     pd.testing.assert_series_equal(
         result.data["close"]["600000.SH"],

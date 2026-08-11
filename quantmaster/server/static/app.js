@@ -2003,10 +2003,10 @@ function queueMarketReload() {
     marketReloadPending = true;
     return;
   }
-  void loadMarket('auto');
+  void loadMarket();
 }
 
-async function loadMarket(refresh = 'auto') {
+async function loadMarket() {
   if (marketLoading) return;
   marketLoading = true;
   disposeMarketSparks();
@@ -2018,16 +2018,9 @@ async function loadMarket(refresh = 'auto') {
   const container = document.getElementById('mkt-groups');
   const tracker = createLoadProgress(container, '准备市场数据', 'market');
   const renderer = createMarketStreamRenderer(tracker.results, {'A股指数':majorIndexes});
-  void loadMarketFearGreed(refresh === 'incremental');
+  void loadMarketFearGreed(false);
   try {
-    const data = await streamJson(`/api/v1/market/overview/stream?refresh=${encodeURIComponent(refresh)}`, {}, event => {
-      tracker.update(event);
-      const partial = event.partial;
-      if (partial?.kind === 'market_item') {
-        tracker.reveal();
-        renderer.add(partial.group, partial.item);
-      }
-    });
+    const data = await api('/api/v1/market/overview');
     renderer.addAll(data);
     if (renderer.count) tracker.reveal();
     tracker.finish(`已加载 ${renderer.count} 个行情标的，可点击查看 K 线`);
@@ -2042,15 +2035,39 @@ async function loadMarket(refresh = 'auto') {
     marketLoading = false;
     if (marketReloadPending) {
       marketReloadPending = false;
-      queueMicrotask(() => loadMarket('auto'));
+      queueMicrotask(() => loadMarket());
     }
   }
 }
+
+async function waitForMarketRefresh(job) {
+  const target = String(job?.links?.self || '');
+  if (!target) return;
+  const deadline = Date.now() + 30 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const current = await api(target);
+    const status = String(current.status || '');
+    if (['completed','completed_with_errors','failed','cancelled'].includes(status)) {
+      if (status.startsWith('completed')) {
+        invalidateKlineSeriesCache();
+        await loadMarket();
+      }
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
 document.getElementById('mkt-refresh').onsubmit = async e => {
-  e.preventDefault(); busy(e.target, true, '同步中…');
-  invalidateKlineSeriesCache();
-  await loadMarket('incremental');
-  busy(e.target, false);
+  e.preventDefault(); busy(e.target, true, '已提交…');
+  try {
+    const job = await post('/api/v1/market/overview/refresh', {});
+    const button = e.target.querySelector('button.primary');
+    if (button) button.textContent = job.coalesced ? '正在复用同步…' : '后台同步中…';
+    void waitForMarketRefresh(job).finally(() => busy(e.target, false));
+  } catch (error) {
+    busy(e.target, false);
+    throw error;
+  }
 };
 function klineFrequencyName(frequency) {
   return frequency === '1d' ? '日线' : frequency.replace('m', ' 分钟');

@@ -9,9 +9,11 @@ import logging
 import os
 import socket
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
+import zlib
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -36,6 +38,7 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 DEFAULT_LEASE_SECONDS = 30.0
+INLINE_ARTIFACT_LIMIT = 128 * 1024
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,11 @@ class UnifiedJobStore:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else get_config().data_root / "jobs.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Keep bulky result/checkpoint bodies out of the hot SQLite ledger.
+        # The manifest remains transactional in SQLite, while the immutable
+        # body is content-addressed beneath the same data root.
+        self.artifacts_root = self.path.parent / "derived" / "job-artifacts"
+        self.artifacts_root.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
     def _conn(self):
@@ -109,10 +117,13 @@ class UnifiedJobStore:
                 CREATE TABLE IF NOT EXISTS runtime_jobs (
                     id TEXT PRIMARY KEY, type TEXT NOT NULL, spec_json TEXT NOT NULL,
                     spec_hash TEXT NOT NULL, idempotency_key TEXT NOT NULL DEFAULT '',
+                    input_fingerprint TEXT NOT NULL DEFAULT '',
+                    algorithm_version TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
                     phase TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
-                    attempt INTEGER NOT NULL DEFAULT 1, max_attempts INTEGER NOT NULL DEFAULT 3,
+                    attempt INTEGER NOT NULL DEFAULT 1, max_attempts INTEGER NOT NULL DEFAULT 2,
                     owner TEXT NOT NULL DEFAULT '', lease_expires REAL NOT NULL DEFAULT 0,
+                    lease_token TEXT NOT NULL DEFAULT '',
                     heartbeat_at REAL NOT NULL DEFAULT 0,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
                     deadline_seconds REAL NOT NULL DEFAULT 300,
@@ -132,6 +143,7 @@ class UnifiedJobStore:
                     id TEXT PRIMARY KEY, job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
                     kind TEXT NOT NULL, schema_version TEXT NOT NULL,
                     payload_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    external_path TEXT NOT NULL DEFAULT '', payload_bytes INTEGER NOT NULL DEFAULT 0,
                     lineage_json TEXT NOT NULL, checkpoint_key TEXT NOT NULL DEFAULT '',
                     spec_hash TEXT NOT NULL, created_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES runtime_jobs(id) ON DELETE CASCADE);
@@ -146,6 +158,35 @@ class UnifiedJobStore:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     UNIQUE(artifact_id,status));
             """)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(runtime_jobs)").fetchall()
+            }
+            for name, declaration in {
+                "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
+                "algorithm_version": "TEXT NOT NULL DEFAULT ''",
+                "lease_token": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE runtime_jobs ADD COLUMN {name} {declaration}"
+                    )
+            artifact_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(runtime_job_artifacts)").fetchall()
+            }
+            for name, declaration in {
+                "external_path": "TEXT NOT NULL DEFAULT ''",
+                "payload_bytes": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in artifact_columns:
+                    connection.execute(
+                        f"ALTER TABLE runtime_job_artifacts ADD COLUMN {name} {declaration}"
+                    )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_job_singleflight "
+                "ON runtime_jobs(type,spec_hash,input_fingerprint,algorithm_version,status,created_at)"
+            )
 
     @staticmethod
     def _decode_job(row: Any) -> dict[str, Any] | None:
@@ -182,13 +223,17 @@ class UnifiedJobStore:
         spec: Mapping[str, Any],
         *,
         idempotency_key: str = "",
+        input_fingerprint: str = "",
+        algorithm_version: str = "",
         deadline_seconds: float = 300,
-        max_attempts: int = 3,
+        max_attempts: int = 2,
     ) -> tuple[dict[str, Any], bool]:
         normalized = dict(spec)
         spec_json = _canonical(normalized)
         spec_hash = hashlib.sha256(spec_json.encode("utf-8")).hexdigest()
         key = str(idempotency_key or "").strip()[:200]
+        fingerprint = str(input_fingerprint or "")[:200]
+        algorithm = str(algorithm_version or "")[:120]
         now = _utc_now()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -201,18 +246,39 @@ class UnifiedJobStore:
                     existing = self._decode_job(row)
                     if existing and existing["spec_hash"] != spec_hash:
                         raise ValueError("Idempotency-Key 已绑定到不同任务规格")
-                    return existing or {}, False
+                    value = existing or {}
+                    value["created"] = False
+                    value["coalesced"] = True
+                    return value, False
+            # Singleflight is deliberately independent from a client supplied
+            # idempotency key.  A scheduler, a manual click and startup
+            # recovery with the same canonical input must share one job.
+            existing_row = connection.execute(
+                "SELECT * FROM runtime_jobs WHERE type=? AND spec_hash=? "
+                "AND input_fingerprint=? AND algorithm_version=? "
+                "AND status IN ('queued','running','cancelling','interrupted') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(job_type), spec_hash, fingerprint, algorithm),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._decode_job(existing_row) or {}
+                existing["created"] = False
+                existing["coalesced"] = True
+                return existing, False
             job_id = f"job_{uuid.uuid4().hex}"
             connection.execute(
                 "INSERT INTO runtime_jobs "
-                "(id,type,spec_json,spec_hash,idempotency_key,status,attempt,max_attempts,"
-                "deadline_seconds,created_at,updated_at) VALUES (?,?,?,?,?,'queued',1,?,?,?,?)",
+                "(id,type,spec_json,spec_hash,idempotency_key,input_fingerprint,algorithm_version,"
+                "status,attempt,max_attempts,deadline_seconds,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'queued',1,?,?,?,?)",
                 (
                     job_id,
                     str(job_type),
                     spec_json,
                     spec_hash,
                     key,
+                    fingerprint,
+                    algorithm,
                     max(1, min(10, int(max_attempts))),
                     max(1.0, min(3600.0, float(deadline_seconds))),
                     now,
@@ -224,13 +290,21 @@ class UnifiedJobStore:
                 job_id,
                 1,
                 "job_queued",
-                {"task_type": job_type, "spec_hash": spec_hash},
+                {
+                    "task_type": job_type,
+                    "spec_hash": spec_hash,
+                    "input_fingerprint": fingerprint,
+                    "algorithm_version": algorithm,
+                },
             )
             row = connection.execute(
                 "SELECT * FROM runtime_jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
-        return self._decode_job(row) or {}, True
+        value = self._decode_job(row) or {}
+        value["created"] = True
+        value["coalesced"] = False
+        return value, True
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self._conn() as connection:
@@ -277,13 +351,30 @@ class UnifiedJobStore:
             for row in rows
         ]
 
-    def append_event(self, job_id: str, event_type: str, payload: Any) -> int:
+    def append_event(
+        self,
+        job_id: str,
+        event_type: str,
+        payload: Any,
+        *,
+        owner: str = "",
+        lease_token: str = "",
+    ) -> int:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT attempt FROM runtime_jobs WHERE id=?",
-                (job_id,),
-            ).fetchone()
+            if owner:
+                if not lease_token:
+                    raise JobLeaseLost(job_id)
+                row = connection.execute(
+                    "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
+                    "AND status IN ('running','cancelling')",
+                    (job_id, owner, str(lease_token)),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT attempt FROM runtime_jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
             if row is None:
                 raise KeyError(job_id)
             return self._append_event_conn(
@@ -300,13 +391,29 @@ class UnifiedJobStore:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT id,attempt FROM runtime_jobs WHERE status IN ('running','cancelling') "
+                "SELECT id,attempt,max_attempts FROM runtime_jobs WHERE status IN ('running','cancelling') "
                 "AND lease_expires<=?",
                 (now,),
             ).fetchall()
             for row in rows:
+                if int(row["attempt"]) >= int(row["max_attempts"]):
+                    connection.execute(
+                        "UPDATE runtime_jobs SET status='failed',owner='',lease_token='',lease_expires=0,"
+                        "phase='执行失败',detail='worker lease expired after maximum attempts',"
+                        "finished_at=?,updated_at=? WHERE id=?",
+                        (_utc_now(), _utc_now(), row["id"]),
+                    )
+                    self._append_event_conn(
+                        connection,
+                        row["id"],
+                        int(row["attempt"]),
+                        "job_terminal",
+                        {"status": "failed", "detail": "worker lease expired after maximum attempts"},
+                    )
+                    recovered.append(str(row["id"]))
+                    continue
                 connection.execute(
-                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_expires=0,"
+                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
                     "phase='等待恢复',detail='worker lease expired',updated_at=? WHERE id=?",
                     (_utc_now(), row["id"]),
                 )
@@ -324,27 +431,47 @@ class UnifiedJobStore:
         now = time.time()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status,attempt,max_attempts FROM runtime_jobs WHERE id=?", (job_id,),
+            ).fetchone()
+            if current is None:
+                return False
+            status = str(current["status"])
+            attempt = int(current["attempt"])
+            if status not in {"queued", "interrupted"}:
+                return False
+            next_attempt = attempt + (1 if status == "interrupted" else 0)
+            if next_attempt > int(current["max_attempts"]):
+                connection.execute(
+                    "UPDATE runtime_jobs SET status='failed',phase='执行失败',"
+                    "detail='worker lease expired after maximum attempts',owner='',lease_token='',"
+                    "lease_expires=0,finished_at=?,updated_at=? WHERE id=?",
+                    (_utc_now(), _utc_now(), job_id),
+                )
+                self._append_event_conn(
+                    connection, job_id, attempt, "job_terminal",
+                    {"status": "failed", "detail": "worker lease expired after maximum attempts"},
+                )
+                return False
+            token = uuid.uuid4().hex
             cursor = connection.execute(
-                "UPDATE runtime_jobs SET status='running',owner=?,lease_expires=?,"
+                "UPDATE runtime_jobs SET status='running',attempt=?,owner=?,lease_token=?,lease_expires=?,"
                 "heartbeat_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,"
                 "phase='开始执行',detail='',updated_at=? WHERE id=? "
                 "AND status IN ('queued','interrupted') AND lease_expires<=?",
-                (owner, lease_deadline(lease_seconds), now, _utc_now(), _utc_now(), job_id, now),
+                (
+                    next_attempt, owner, token, lease_deadline(lease_seconds), now,
+                    _utc_now(), _utc_now(), job_id, now,
+                ),
             )
             if cursor.rowcount != 1:
                 return False
-            attempt = int(
-                connection.execute(
-                    "SELECT attempt FROM runtime_jobs WHERE id=?",
-                    (job_id,),
-                ).fetchone()[0]
-            )
             self._append_event_conn(
                 connection,
                 job_id,
-                attempt,
+                next_attempt,
                 "job_started",
-                {"owner": owner},
+                {"owner": owner, "lease_token": token},
             )
         return True
 
@@ -352,14 +479,16 @@ class UnifiedJobStore:
         self,
         job_id: str,
         owner: str,
+        lease_token: str,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> bool:
         now = time.time()
         with self._conn() as connection:
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET lease_expires=?,heartbeat_at=?,updated_at=? "
-                "WHERE id=? AND owner=? AND status IN ('running','cancelling')",
-                (lease_deadline(lease_seconds), now, _utc_now(), job_id, owner),
+                "WHERE id=? AND owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (lease_deadline(lease_seconds), now, _utc_now(), job_id, owner, str(lease_token)),
             )
         return cursor.rowcount == 1
 
@@ -367,6 +496,7 @@ class UnifiedJobStore:
         self,
         job_id: str,
         owner: str,
+        lease_token: str,
         progress: int,
         phase: str,
         detail: str = "",
@@ -374,7 +504,8 @@ class UnifiedJobStore:
         with self._conn() as connection:
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET progress=?,phase=?,detail=?,updated_at=? "
-                "WHERE id=? AND owner=? AND status IN ('running','cancelling')",
+                "WHERE id=? AND owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
                 (
                     max(0, min(100, int(progress))),
                     str(phase)[:200],
@@ -382,6 +513,7 @@ class UnifiedJobStore:
                     _utc_now(),
                     job_id,
                     owner,
+                    str(lease_token),
                 ),
             )
         if cursor.rowcount != 1:
@@ -415,14 +547,22 @@ class UnifiedJobStore:
             )
         return self.get(job_id)
 
-    def cancelled(self, job_id: str, owner: str = "") -> bool:
+    def cancelled(
+        self, job_id: str, owner: str = "", lease_token: str = "",
+    ) -> bool:
         with self._conn() as connection:
             if owner:
+                if not lease_token:
+                    raise JobLeaseLost(job_id)
                 row = connection.execute(
-                    "SELECT cancel_requested,owner FROM runtime_jobs WHERE id=?",
+                    "SELECT cancel_requested,owner,lease_token FROM runtime_jobs WHERE id=?",
                     (job_id,),
                 ).fetchone()
-                if row is None or str(row["owner"]) != owner:
+                if (
+                    row is None
+                    or str(row["owner"]) != owner
+                    or str(row["lease_token"]) != str(lease_token)
+                ):
                     raise JobLeaseLost(job_id)
             else:
                 row = connection.execute(
@@ -438,6 +578,8 @@ class UnifiedJobStore:
         job_id: str,
         owner: str,
         outcome: JobOutcome,
+        *,
+        lease_token: str,
     ) -> dict[str, Any]:
         allowed = {*TERMINAL_STATUSES, "interrupted"}
         if outcome.status not in allowed:
@@ -445,8 +587,9 @@ class UnifiedJobStore:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=?",
-                (job_id, owner),
+                "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (job_id, owner, str(lease_token)),
             ).fetchone()
             if row is None:
                 raise JobLeaseLost(job_id)
@@ -454,8 +597,8 @@ class UnifiedJobStore:
             progress = 100 if outcome.status in {"completed", "completed_with_errors"} else None
             connection.execute(
                 "UPDATE runtime_jobs SET status=?,progress=COALESCE(?,progress),phase=?,detail=?,"
-                "result_artifact_id=?,owner='',lease_expires=0,finished_at=?,updated_at=? "
-                "WHERE id=? AND owner=?",
+                "result_artifact_id=?,owner='',lease_token='',lease_expires=0,finished_at=?,updated_at=? "
+                "WHERE id=? AND owner=? AND lease_token=?",
                 (
                     outcome.status,
                     progress,
@@ -466,6 +609,7 @@ class UnifiedJobStore:
                     _utc_now(),
                     job_id,
                     owner,
+                    str(lease_token),
                 ),
             )
             self._append_event_conn(
@@ -487,7 +631,7 @@ class UnifiedJobStore:
             ).fetchall()
             for row in rows:
                 connection.execute(
-                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_expires=0,"
+                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
                     "phase='等待恢复',updated_at=? WHERE id=? AND owner=?",
                     (_utc_now(), row["id"], owner),
                 )
@@ -517,7 +661,7 @@ class UnifiedJobStore:
                 raise ValueError("任务已达到最大尝试次数")
             connection.execute(
                 "UPDATE runtime_jobs SET status='queued',progress=0,phase='等待重试',detail='',"
-                "attempt=?,owner='',lease_expires=0,heartbeat_at=0,cancel_requested=0,"
+                "attempt=?,owner='',lease_token='',lease_expires=0,heartbeat_at=0,cancel_requested=0,"
                 "result_artifact_id='',finished_at='',updated_at=? WHERE id=?",
                 (attempt, _utc_now(), job_id),
             )
@@ -530,6 +674,49 @@ class UnifiedJobStore:
             )
         return self.get(job_id)
 
+    def _external_artifact_path(self, digest: str) -> Path:
+        return self.artifacts_root / str(digest)[:2] / f"{digest}.json.z"
+
+    def _write_external_artifact(self, payload: bytes, digest: str) -> str:
+        """Durably publish a compressed content-addressed artifact body."""
+
+        target = self._external_artifact_path(digest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            try:
+                restored = zlib.decompress(target.read_bytes())
+            except (OSError, zlib.error) as exc:
+                raise ArtifactIntegrityError("已存在外置任务产物不可读取") from exc
+            if hashlib.sha256(restored).hexdigest() != digest:
+                raise ArtifactIntegrityError("已存在外置任务产物哈希不匹配")
+        else:
+            fd, temporary = tempfile.mkstemp(
+                prefix=".job-artifact-", suffix=".json.z.tmp", dir=target.parent,
+            )
+            temp = Path(temporary)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(zlib.compress(payload, level=6))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                restored = zlib.decompress(temp.read_bytes())
+                if hashlib.sha256(restored).hexdigest() != digest:
+                    raise ArtifactIntegrityError("外置任务产物写入哈希不匹配")
+                os.replace(temp, target)
+            finally:
+                temp.unlink(missing_ok=True)
+        return str(target.relative_to(self.path.parent)).replace("\\", "/")
+
+    def _read_external_artifact(self, relative_path: str, digest: str) -> Any:
+        path = self.path.parent / str(relative_path)
+        try:
+            raw = zlib.decompress(path.read_bytes())
+            if hashlib.sha256(raw).hexdigest() != str(digest):
+                raise ArtifactIntegrityError("外置任务产物哈希不匹配")
+            return json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, zlib.error) as exc:
+            raise ArtifactIntegrityError("外置任务产物不可读取") from exc
+
     def write_artifact(
         self,
         job_id: str,
@@ -538,10 +725,12 @@ class UnifiedJobStore:
         metadata: Mapping[str, Any] | None = None,
         *,
         checkpoint_key: str = "",
+        owner: str = "",
+        lease_token: str = "",
     ) -> dict[str, Any]:
-        job = self.get(job_id)
-        body = json.loads(_canonical(payload))
-        digest = _content_hash(body)
+        encoded = _canonical(payload).encode("utf-8")
+        body = json.loads(encoded.decode("utf-8"))
+        digest = hashlib.sha256(encoded).hexdigest()
         values = dict(metadata or {})
         declared = str(values.get("content_hash") or "")
         if declared and declared != digest:
@@ -550,9 +739,33 @@ class UnifiedJobStore:
         lineage = values.get("lineage") or {}
         if not isinstance(lineage, Mapping):
             raise ValueError("产物血缘必须是 JSON 对象")
-        schema = str(values.get("schema_version") or body.get("schema_version") or "1.0")
+        schema = str(
+            values.get("schema_version")
+            or (body.get("schema_version") if isinstance(body, Mapping) else "")
+            or "1.0"
+        )
+        external_path = ""
+        if len(encoded) > INLINE_ARTIFACT_LIMIT:
+            external_path = self._write_external_artifact(encoded, digest)
+        inline_payload = "" if external_path else encoded.decode("utf-8")
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if owner:
+                if not lease_token:
+                    raise JobLeaseLost(job_id)
+                job = connection.execute(
+                    "SELECT attempt,spec_hash FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
+                    "AND status IN ('running','cancelling')",
+                    (job_id, owner, str(lease_token)),
+                ).fetchone()
+                if job is None:
+                    raise JobLeaseLost(job_id)
+            else:
+                job = connection.execute(
+                    "SELECT attempt,spec_hash FROM runtime_jobs WHERE id=?", (job_id,),
+                ).fetchone()
+                if job is None:
+                    raise KeyError(job_id)
             if checkpoint_key:
                 connection.execute(
                     "DELETE FROM runtime_job_artifacts WHERE job_id=? AND attempt=? AND checkpoint_key=?",
@@ -560,16 +773,19 @@ class UnifiedJobStore:
                 )
             connection.execute(
                 "INSERT INTO runtime_job_artifacts "
-                "(id,job_id,attempt,kind,schema_version,payload_json,content_hash,lineage_json,"
-                "checkpoint_key,spec_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "(id,job_id,attempt,kind,schema_version,payload_json,content_hash,external_path,"
+                "payload_bytes,lineage_json,checkpoint_key,spec_hash,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     artifact_id,
                     job_id,
                     int(job["attempt"]),
                     str(kind)[:200],
                     schema[:50],
-                    _canonical(body),
+                    inline_payload,
                     digest,
+                    external_path,
+                    len(encoded),
                     _canonical(lineage),
                     checkpoint_key[:200],
                     job["spec_hash"],
@@ -581,6 +797,7 @@ class UnifiedJobStore:
             "kind": str(kind),
             "schema_version": schema,
             "content_hash": digest,
+            "external": bool(external_path),
             "lineage": lineage,
         }
 
@@ -611,7 +828,12 @@ class UnifiedJobStore:
             raise KeyError(artifact_id)
         value = dict(row)
         try:
-            payload = json.loads(value["payload_json"])
+            if str(value.get("external_path") or ""):
+                payload = self._read_external_artifact(
+                    str(value["external_path"]), str(value["content_hash"]),
+                )
+            else:
+                payload = json.loads(value["payload_json"])
             lineage = json.loads(value["lineage_json"])
             if _content_hash(payload) != value["content_hash"]:
                 raise ArtifactIntegrityError("产物内容哈希校验失败")
@@ -680,22 +902,33 @@ class JobContext:
         self.job_id = str(job["id"])
         self.spec_hash = str(job["spec_hash"])
         self.attempt = int(job["attempt"])
+        self._lease_token = str(job.get("lease_token") or "")
+        if not self._lease_token:
+            raise JobLeaseLost(self.job_id)
         self.deadline_seconds = float(job["deadline_seconds"])
         self._deadline_at = time.monotonic() + self.deadline_seconds
         self._lease_alive = lease_alive
 
     def emit(self, event_type: str, payload: Mapping[str, Any] | None = None) -> int:
         self.ensure_active()
-        return self.store.append_event(self.job_id, event_type, dict(payload or {}))
+        return self.store.append_event(
+            self.job_id, event_type, dict(payload or {}),
+            owner=self.runtime.identity.value, lease_token=self._lease_token,
+        )
 
     def progress(self, value: int, phase: str, detail: str = "") -> None:
         self.ensure_active()
-        self.store.progress(self.job_id, self.runtime.identity.value, value, phase, detail)
+        self.store.progress(
+            self.job_id, self.runtime.identity.value, self._lease_token,
+            value, phase, detail,
+        )
 
     def cancelled(self) -> bool:
         if not self._lease_alive.is_set() or self.runtime.stopping:
             return True
-        return self.store.cancelled(self.job_id, self.runtime.identity.value)
+        return self.store.cancelled(
+            self.job_id, self.runtime.identity.value, self._lease_token,
+        )
 
     def ensure_active(self) -> None:
         if time.monotonic() >= self._deadline_at:
@@ -706,7 +939,9 @@ class JobContext:
             raise JobLeaseLost(self.job_id)
         if self.runtime.stopping:
             raise InterruptedError("worker stopped")
-        if self.store.cancelled(self.job_id, self.runtime.identity.value):
+        if self.store.cancelled(
+            self.job_id, self.runtime.identity.value, self._lease_token,
+        ):
             raise InterruptedError("job cancelled")
 
     def write_artifact(
@@ -716,7 +951,10 @@ class JobContext:
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
         self.ensure_active()
-        return self.store.write_artifact(self.job_id, kind, payload, metadata)
+        return self.store.write_artifact(
+            self.job_id, kind, payload, metadata,
+            owner=self.runtime.identity.value, lease_token=self._lease_token,
+        )
 
     def load_checkpoint(self, key: str, spec_hash: str) -> dict[str, Any] | None:
         self.ensure_active()
@@ -735,6 +973,8 @@ class JobContext:
                 "lineage": {"spec_hash": spec_hash, "checkpoint_key": key},
             },
             checkpoint_key=key,
+            owner=self.runtime.identity.value,
+            lease_token=self._lease_token,
         )
 
 
@@ -800,8 +1040,10 @@ class UnifiedJobRuntime:
         spec: Mapping[str, Any],
         *,
         idempotency_key: str = "",
+        input_fingerprint: str = "",
+        algorithm_version: str = "",
         deadline_seconds: float = 300,
-        max_attempts: int = 3,
+        max_attempts: int = 2,
     ) -> tuple[dict[str, Any], bool]:
         if self.stopping:
             raise RuntimeError("任务运行时正在维护或已经停止")
@@ -811,6 +1053,8 @@ class UnifiedJobRuntime:
             job_type,
             spec,
             idempotency_key=idempotency_key,
+            input_fingerprint=input_fingerprint,
+            algorithm_version=algorithm_version,
             deadline_seconds=deadline_seconds,
             max_attempts=max_attempts,
         )
@@ -833,11 +1077,12 @@ class UnifiedJobRuntime:
     def _heartbeat(
         self,
         job_id: str,
+        lease_token: str,
         stopped: threading.Event,
         lease_alive: threading.Event,
     ) -> None:
         while not stopped.wait(5.0):
-            if self.store.heartbeat(job_id, self.identity.value):
+            if self.store.heartbeat(job_id, self.identity.value, lease_token):
                 continue
             lease_alive.clear()
             return
@@ -854,17 +1099,21 @@ class UnifiedJobRuntime:
             if not self.store.claim(job_id, self.identity.value):
                 return
             job = self.store.get(job_id)
+            lease_token = str(job.get("lease_token") or "")
+            if not lease_token:
+                return
             handler = self._handlers.get(str(job["type"]))
             if handler is None:
                 self.store.finish(
                     job_id,
                     self.identity.value,
                     JobOutcome("failed", f"任务类型未注册：{job['type']}"),
+                    lease_token=lease_token,
                 )
                 return
             heartbeat = threading.Thread(
                 target=self._heartbeat,
-                args=(job_id, heartbeat_stop, lease_alive),
+                args=(job_id, lease_token, heartbeat_stop, lease_alive),
                 name=f"unified-heartbeat-{job_id[-8:]}",
                 daemon=True,
             )
@@ -897,7 +1146,9 @@ class UnifiedJobRuntime:
                     job.get("type"),
                 )
                 outcome = JobOutcome("failed", str(exc)[:1000])
-            self.store.finish(job_id, self.identity.value, outcome)
+            self.store.finish(
+                job_id, self.identity.value, outcome, lease_token=lease_token,
+            )
             if (
                 outcome.status == "failed"
                 and int(job["attempt"]) < int(job["max_attempts"])
@@ -980,6 +1231,10 @@ class UnifiedJobRuntime:
             "id": job["id"],
             "type": job["type"],
             "status": job["status"],
+            "created": bool(job.get("created")),
+            "coalesced": bool(job.get("coalesced")),
+            "input_fingerprint": str(job.get("input_fingerprint") or ""),
+            "algorithm_version": str(job.get("algorithm_version") or ""),
             "progress": progress,
             "phase": job.get("phase") or "",
             "detail": job.get("detail") or "",

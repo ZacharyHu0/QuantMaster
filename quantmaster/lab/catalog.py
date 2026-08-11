@@ -61,7 +61,7 @@ def curated_catalog() -> list[FactorSpec]:
         category="情绪与事件",
         required_features=("news_sentiment",),
         rationale="结构化财经快讯可能在短周期内改变风险偏好。",
-        tags=("builtin", "alternative", "point-in-time"),
+        tags=("builtin", "alternative", "publication-aligned"),
     ))
     if len(result) != 48:
         raise RuntimeError(f"精选因子目录应为 48 项，实际 {len(result)} 项")

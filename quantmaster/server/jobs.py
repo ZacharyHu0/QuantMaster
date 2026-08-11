@@ -52,7 +52,12 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
     return {
         "domain": domain,
         "id": job_id,
+        "type": str(value.get("type") or f"{domain}.job"),
         "status": status,
+        "created": bool(value.get("created")),
+        "coalesced": bool(value.get("coalesced")),
+        "input_fingerprint": str(value.get("input_fingerprint") or ""),
+        "algorithm_version": str(value.get("algorithm_version") or ""),
         "progress": max(0, min(100, int(value.get("progress") or 0))),
         "phase": str(value.get("phase") or value.get("current_task") or ""),
         "detail": str(value.get("detail") or value.get("error") or "")[:1000],
@@ -65,10 +70,10 @@ def _public_job(domain: JobDomain, value: dict[str, Any]) -> dict[str, Any]:
         "can_cancel": status in _ACTIVE,
         "can_retry": status in _RETRYABLE and not legacy_read_only,
         "links": {
-            "self": f"/api/v1/jobs/{domain}/{job_id}",
-            "events": f"/api/v1/jobs/{domain}/{job_id}/events",
-            "cancel": f"/api/v1/jobs/{domain}/{job_id}/cancel",
-            "retry": f"/api/v1/jobs/{domain}/{job_id}/retry",
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+            "cancel": f"/api/v1/jobs/{job_id}/cancel",
+            "retry": f"/api/v1/jobs/{job_id}/retry",
         },
     }
 
@@ -225,6 +230,31 @@ def _not_found(exc: KeyError) -> HTTPException:
     return HTTPException(404, f"任务不存在: {exc.args[0] if exc.args else ''}")
 
 
+def _find_domain_job(job_id: str) -> tuple[JobDomain, dict[str, Any]]:
+    """Resolve a task ID once, without exposing domain-specific polling URLs.
+
+    Domains still own their storage adapters during the migration, but callers
+    have one durable task URL.  This also keeps new UI code from guessing
+    whether an ETF, after-close or rotation job uses a separate ledger.
+    """
+
+    for domain in _DOMAINS:
+        try:
+            value = _get(domain, job_id)
+        except KeyError:
+            continue
+        if value is not None:
+            return domain, value
+    raise KeyError(job_id)
+
+
+def _stock_analysis_job(job_id: str) -> dict[str, Any] | None:
+    try:
+        return get_stock_analysis_jobs().public_job(job_id)
+    except KeyError:
+        return None
+
+
 @router.get("")
 def list_jobs(
     domain: JobDomain | None = None,
@@ -248,17 +278,29 @@ def get_registered_job_events(
     limit: int = Query(500, ge=1, le=2000),
 ) -> dict[str, Any]:
     try:
-        return {"id": job_id, "items": get_stock_analysis_jobs().events(job_id, after, limit)}
+        domain, _value = _find_domain_job(job_id)
+        return {"domain": domain, "id": job_id, "items": _events(domain, job_id, after, limit)}
     except KeyError as exc:
-        raise _not_found(exc) from None
+        stock = _stock_analysis_job(job_id)
+        if stock is None:
+            raise _not_found(exc) from None
+        return {
+            "domain": str(stock.get("domain") or "market"),
+            "id": job_id,
+            "items": get_stock_analysis_jobs().events(job_id, after, limit),
+        }
 
 
 @router.post("/{job_id}/cancel")
 def cancel_registered_job(job_id: str) -> dict[str, Any]:
     try:
-        return get_stock_analysis_jobs().cancel(job_id)
+        domain, _value = _find_domain_job(job_id)
+        return _public_job(domain, _cancel(domain, job_id))
     except KeyError as exc:
-        raise _not_found(exc) from None
+        stock = _stock_analysis_job(job_id)
+        if stock is None:
+            raise _not_found(exc) from None
+        return get_stock_analysis_jobs().cancel(job_id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from None
 
@@ -266,9 +308,13 @@ def cancel_registered_job(job_id: str) -> dict[str, Any]:
 @router.post("/{job_id}/retry", status_code=202)
 def retry_registered_job(job_id: str) -> dict[str, Any]:
     try:
-        return get_stock_analysis_jobs().retry(job_id)
+        domain, _value = _find_domain_job(job_id)
+        return _public_job(domain, _retry(domain, job_id))
     except KeyError as exc:
-        raise _not_found(exc) from None
+        stock = _stock_analysis_job(job_id)
+        if stock is None:
+            raise _not_found(exc) from None
+        return get_stock_analysis_jobs().retry(job_id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from None
 
@@ -317,6 +363,10 @@ def retry_job(domain: JobDomain, job_id: str) -> dict[str, Any]:
 @router.get("/{job_id}")
 def get_registered_job(job_id: str) -> dict[str, Any]:
     try:
-        return get_stock_analysis_jobs().public_job(job_id)
+        domain, value = _find_domain_job(job_id)
+        return _public_job(domain, value)
     except KeyError as exc:
-        raise _not_found(exc) from None
+        stock = _stock_analysis_job(job_id)
+        if stock is None:
+            raise _not_found(exc) from None
+        return stock

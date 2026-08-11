@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
+import numbers
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BufferedRandom
@@ -21,13 +22,34 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 logger = logging.getLogger(__name__)
-ETF_METADATA_HISTORY_SCHEMA_VERSION = "1.0"
+ETF_METADATA_HISTORY_SCHEMA_VERSION = "2.0"
+_ETF_METADATA_CONTENT_FIELDS = (
+    "symbol", "name", "benchmark", "benchmark_code", "index_name",
+    "benchmark_level", "benchmark_type", "index_provider", "index_type",
+    "fund_type", "invest_type", "mgr_name", "custod_name", "mgt_fee",
+    "etf_type", "exchange", "asset_type", "status", "list_date",
+    "delist_date", "category", "asset_class", "sector_id", "sector_name",
+    "normalized_index", "classification_source", "classification_confidence",
+    "metadata_source", "updated_at", "directory_member_source",
+    "directory_member_observed_at", "effective_date", "observed_at",
+    "directory_source", "directory_acquired_at", "directory_cutoff_at",
+    "directory_freshness", "directory_master_record_count",
+    "directory_master_batch_record_count", "directory_expected_symbols",
+    "directory_observed_symbols", "directory_quality_reason",
+    "directory_catalog_snapshot_id", "directory_catalog_records_sha256",
+    "directory_catalog_file_sha256", "directory_catalog_file_size",
+    "directory_catalog_file_mtime_ns", "directory_catalog_relative_path",
+    "directory_catalog_as_of", "directory_catalog_expected_count",
+    "directory_master_snapshot_sha256", "directory_snapshot_id",
+    "directory_attestation_sha256", "directory_complete", "market",
+)
 _ETF_METADATA_DERIVED_COLUMNS = frozenset(
     {"observation_id", "observation_content_sha256", "observation_integrity"}
 )
@@ -39,7 +61,7 @@ class RotationIntegrityError(RuntimeError):
 
 
 @contextmanager
-def _etf_metadata_file_lock(path: Path, timeout: float = 30.0) -> Iterator[None]:
+def _etf_metadata_file_lock(path: Path, timeout: float = 0.2) -> Iterator[None]:
     """Serialize the parquet/manifest pair across worker processes."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +152,17 @@ def _canonical_metadata_value(value: Any) -> Any:
         else:
             if converted is not value:
                 return _canonical_metadata_value(converted)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        try:
+            if pd.isna(value):
+                return None
+            return format(float(value), ".17g")
+        except (TypeError, ValueError, OverflowError):
+            return str(value)
     try:
         if pd.isna(value):
             return None
@@ -147,10 +180,8 @@ def _canonical_metadata_value(value: Any) -> Any:
 
 def _metadata_content_hash(row: dict[str, Any]) -> str:
     payload = {}
-    for key, value in sorted(row.items()):
-        if key in _ETF_METADATA_DERIVED_COLUMNS:
-            continue
-        normalized = _canonical_metadata_value(value)
+    for key in _ETF_METADATA_CONTENT_FIELDS:
+        normalized = _canonical_metadata_value(row.get(key))
         if normalized is not None:
             payload[str(key)] = normalized
     return _hash_text(strict_json_dumps(payload, sort_keys=True))
@@ -184,6 +215,7 @@ class RotationStore:
         self.etf_metadata_history_manifest_path = (
             self.root / "etf_metadata_history.manifest.json"
         )
+        self.derived = DerivedArtifactCatalog(self.root.parent / "derived")
         self._initialize()
 
     def _cache(self) -> sqlite3.Connection:
@@ -271,33 +303,279 @@ class RotationStore:
             """
         )
 
+    @staticmethod
+    def _cache_v3(connection: sqlite3.Connection) -> None:
+        """Split large list snapshots into compact headers and indexed rows."""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(snapshots)").fetchall()
+        }
+        if "items_indexed" not in columns:
+            connection.execute(
+                "ALTER TABLE snapshots ADD COLUMN items_indexed INTEGER NOT NULL DEFAULT 0"
+            )
+        if "details_indexed" not in columns:
+            connection.execute(
+                "ALTER TABLE snapshots ADD COLUMN details_indexed INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.executescript(
+            """
+            CREATE TABLE snapshot_items (
+                kind TEXT NOT NULL,
+                snapshot_id TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                level TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL DEFAULT '',
+                grade TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                benchmark TEXT NOT NULL DEFAULT '',
+                primary_industry_name TEXT NOT NULL DEFAULT '',
+                score_1 REAL, score_3 REAL, score_5 REAL, score_20 REAL,
+                change_1 REAL, change_3 REAL, change_5 REAL, change_20 REAL,
+                excess_1 REAL, excess_3 REAL, excess_5 REAL, excess_20 REAL,
+                amount_1 REAL, amount_3 REAL, amount_5 REAL, amount_20 REAL,
+                advance_1 REAL, advance_3 REAL, advance_5 REAL, advance_20 REAL,
+                focus_1 INTEGER NOT NULL DEFAULT 0,
+                focus_3 INTEGER NOT NULL DEFAULT 0,
+                focus_5 INTEGER NOT NULL DEFAULT 0,
+                focus_20 INTEGER NOT NULL DEFAULT 0,
+                coverage REAL,
+                flow REAL,
+                streak REAL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY(kind, snapshot_id, item_key)
+            );
+            CREATE INDEX idx_rotation_snapshot_items_lookup
+                ON snapshot_items(kind, snapshot_id, level, stage, grade, category, item_key);
+            CREATE INDEX idx_rotation_snapshot_items_theme_sort
+                ON snapshot_items(kind, snapshot_id, change_5 DESC, score_5 DESC, item_key);
+            CREATE TABLE snapshot_details (
+                kind TEXT NOT NULL,
+                snapshot_id TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY(kind, snapshot_id, item_key)
+            );
+            """
+        )
+
+    @staticmethod
+    def _cache_v4(connection: sqlite3.Connection) -> None:
+        """Store every ETF flow window instead of reusing the five-day value."""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(snapshot_items)").fetchall()
+        }
+        for name in ("flow_1", "flow_3", "flow_5", "flow_20", "daily_flow"):
+            if name not in columns:
+                connection.execute(f"ALTER TABLE snapshot_items ADD COLUMN {name} REAL")
+
+    @staticmethod
+    def _cache_v5(connection: sqlite3.Connection) -> None:
+        """Persist window-specific grades for SQL-side grade filtering."""
+
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(snapshot_items)").fetchall()
+        }
+        for name in ("grade_1", "grade_3", "grade_5", "grade_20"):
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE snapshot_items ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                )
+
     def _initialize(self) -> None:
         with self._cache() as connection:
-            migrate_schema(connection, ((1, self._cache_v1), (2, self._cache_v2)))
+            migrate_schema(connection, (
+                (1, self._cache_v1), (2, self._cache_v2), (3, self._cache_v3),
+                (4, self._cache_v4), (5, self._cache_v5),
+            ))
         with self._preferences() as connection:
             migrate_schema(connection, ((1, self._preferences_v1),))
 
     def save_snapshots(self, payloads: dict[str, dict[str, Any]]) -> None:
-        """Commit a coherent set of computed views in one cache transaction."""
-        rows = []
-        for kind, payload in payloads.items():
-            text = strict_json_dumps(payload)
-            meta = payload.get("meta") or {}
+        """Commit a coherent set of views with list rows outside the JSON header.
+
+        Internal aggregate readers can still call :meth:`snapshot`, while list
+        APIs call :meth:`snapshot_items_page` and deserialize only the requested
+        rows.  The header and all list/detail rows are replaced atomically.
+        """
+
+        rows: list[tuple[Any, ...]] = []
+        item_rows: list[tuple[Any, ...]] = []
+        detail_rows: list[tuple[Any, ...]] = []
+        derived_artifacts: list[tuple[str, str]] = []
+        for kind, raw_payload in payloads.items():
+            payload = dict(raw_payload)
+            meta = dict(payload.get("meta") or {})
+            data = dict(payload.get("data") or {})
+            snapshot_id = str(meta.get("snapshot_id") or "")
+            items = data.pop("items", None)
+            details = data.pop("details", None)
+            compact = {"meta": meta, "data": data}
+            text = strict_json_dumps(compact)
             rows.append((
-                str(kind), str(meta.get("snapshot_id") or ""), str(meta.get("as_of") or ""),
+                str(kind), snapshot_id, str(meta.get("as_of") or ""),
                 str(meta.get("generated_at") or ""), text, _hash_text(text),
+                int(isinstance(items, list)), int(isinstance(details, dict)),
             ))
+            if isinstance(items, list):
+                for position, raw_item in enumerate(items):
+                    if not isinstance(raw_item, dict):
+                        continue
+                    item = dict(raw_item)
+                    item_key = str(item.get("code") or item.get("symbol") or "").upper()
+                    if not item_key:
+                        raise RotationIntegrityError(f"{kind} 快照列表存在无标识项目")
+                    signals = item.get("signals") if isinstance(item.get("signals"), dict) else {}
+                    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
+                    primary = item.get("primary_industry")
+                    primary_name = (
+                        str(primary.get("name") or "") if isinstance(primary, dict) else ""
+                    )
+
+                    def number(value: Any) -> float | None:
+                        try:
+                            return float(value)
+                        except (TypeError, ValueError):
+                            return None
+
+                    window_values: list[float | None] = []
+                    grade_values: list[str] = []
+                    focus_values: list[int] = []
+                    for window in (1, 3, 5, 20):
+                        signal = signals.get(str(window)) if isinstance(signals, dict) else {}
+                        score = scores.get(str(window)) if isinstance(scores, dict) else {}
+                        signal = signal if isinstance(signal, dict) else {}
+                        score = score if isinstance(score, dict) else {}
+                        change = number(signal.get("rotation_change_pp"))
+                        excess = number(signal.get("excess_return"))
+                        amount = number(signal.get("amount_activity"))
+                        advance = number(signal.get("advance_ratio"))
+                        window_values.extend((
+                            number(score.get("score", item.get("rotation_score"))),
+                            change, excess, amount, advance,
+                        ))
+                        grade_values.append(str(score.get("grade") or item.get("grade") or ""))
+                        focus_values.append(sum((
+                            change is not None and change > 0,
+                            excess is not None and excess > 0,
+                            advance is not None and advance >= 0.5,
+                            amount is not None and amount > 0,
+                            str(score.get("grade") or item.get("grade") or "") in {"A", "B"},
+                        )))
+                    flows = item.get("flows") if isinstance(item.get("flows"), dict) else {}
+                    flow_values = [
+                        number(flows.get(str(window))) if isinstance(flows, dict) else None
+                        for window in (1, 3, 5, 20)
+                    ]
+                    selected_flow = flow_values[2]
+                    item_rows.append((
+                        str(kind), snapshot_id, item_key, position,
+                        str(item.get("name") or ""), str(item.get("level") or ""),
+                        str(item.get("stage") or ""), str(item.get("grade") or ""),
+                        str(item.get("category") or ""), str(item.get("benchmark") or ""),
+                        primary_name, *window_values, *grade_values, *focus_values,
+                        number(item.get("coverage")), *flow_values,
+                        number(item.get("flow")),
+                        number(selected_flow if selected_flow is not None else item.get("flow")),
+                        number(item.get("flow_streak_sessions")), strict_json_dumps(item),
+                    ))
+            if isinstance(details, dict):
+                for key, value in details.items():
+                    if isinstance(value, dict):
+                        detail_rows.append((
+                            str(kind), snapshot_id, str(key).upper(), strict_json_dumps(value),
+                        ))
+            artifact = self.derived.put_json(compact, schema_version="2")
+            derived_artifacts.append((str(kind), str(artifact["artifact_id"])))
+
+        item_columns = (
+            "kind,snapshot_id,item_key,position,name,level,stage,grade,category,benchmark,"
+            "primary_industry_name,score_1,change_1,excess_1,amount_1,advance_1,score_3,"
+            "change_3,excess_3,amount_3,advance_3,score_5,change_5,excess_5,amount_5,"
+            "advance_5,score_20,change_20,excess_20,amount_20,advance_20,grade_1,grade_3,"
+            "grade_5,grade_20,focus_1,focus_3,"
+            "focus_5,focus_20,coverage,flow_1,flow_3,flow_5,flow_20,daily_flow,flow,streak,payload_json"
+        )
         with self._cache() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for kind, *_rest in rows:
+                connection.execute("DELETE FROM snapshot_items WHERE kind=?", (kind,))
+                connection.execute("DELETE FROM snapshot_details WHERE kind=?", (kind,))
             connection.executemany(
                 "INSERT INTO snapshots(kind,snapshot_id,as_of,generated_at,payload_json,"
-                "content_sha256) VALUES(?,?,?,?,?,?) ON CONFLICT(kind) DO UPDATE SET "
+                "content_sha256,items_indexed,details_indexed) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(kind) DO UPDATE SET "
                 "snapshot_id=excluded.snapshot_id,as_of=excluded.as_of,"
                 "generated_at=excluded.generated_at,payload_json=excluded.payload_json,"
-                "content_sha256=excluded.content_sha256",
+                "content_sha256=excluded.content_sha256,items_indexed=excluded.items_indexed,"
+                "details_indexed=excluded.details_indexed",
                 rows,
             )
+            if item_rows:
+                connection.executemany(
+                    "INSERT INTO snapshot_items(" + item_columns + ") VALUES("
+                    + ",".join("?" for _ in range(48)) + ")",
+                    item_rows,
+                )
+            if detail_rows:
+                connection.executemany(
+                    "INSERT INTO snapshot_details(kind,snapshot_id,item_key,payload_json) "
+                    "VALUES(?,?,?,?)",
+                    detail_rows,
+                )
+        # The immutable object is fsync'ed before it is registered.  Only after
+        # the indexed cache commits do we advance the current snapshot pointer.
+        for kind, artifact_id in derived_artifacts:
+            self.derived.publish_snapshot("rotation", kind, artifact_id)
 
     def snapshot(self, kind: str) -> dict[str, Any] | None:
+        with self._cache() as connection:
+            row = connection.execute(
+                "SELECT snapshot_id,payload_json,content_sha256,items_indexed,details_indexed "
+                "FROM snapshots WHERE kind=?", (kind,),
+            ).fetchone()
+        if row is None:
+            return None
+        text = str(row["payload_json"])
+        if _hash_text(text) != str(row["content_sha256"]):
+            raise RotationIntegrityError(f"{kind} 快照内容哈希不匹配")
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RotationIntegrityError(f"{kind} 快照不是有效 JSON") from exc
+        if not isinstance(value, dict):
+            raise RotationIntegrityError(f"{kind} 快照根节点不是对象")
+        if bool(row["items_indexed"]):
+            with self._cache() as connection:
+                items = connection.execute(
+                    "SELECT payload_json FROM snapshot_items WHERE kind=? AND snapshot_id=? "
+                    "ORDER BY position,item_key",
+                    (kind, str(row["snapshot_id"])),
+                ).fetchall()
+            value.setdefault("data", {})["items"] = [
+                json.loads(str(item["payload_json"])) for item in items
+            ]
+        if bool(row["details_indexed"]):
+            with self._cache() as connection:
+                details = connection.execute(
+                    "SELECT item_key,payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=?",
+                    (kind, str(row["snapshot_id"])),
+                ).fetchall()
+            value.setdefault("data", {})["details"] = {
+                str(item["item_key"]): json.loads(str(item["payload_json"]))
+                for item in details
+            }
+        return value
+
+    def snapshot_header(self, kind: str) -> dict[str, Any] | None:
+        """Read only a current compact header, never its list/detail rows."""
+
         with self._cache() as connection:
             row = connection.execute(
                 "SELECT payload_json,content_sha256 FROM snapshots WHERE kind=?", (kind,),
@@ -314,6 +592,147 @@ class RotationStore:
         if not isinstance(value, dict):
             raise RotationIntegrityError(f"{kind} 快照根节点不是对象")
         return value
+
+    def snapshot_detail(self, kind: str, item_key: str) -> dict[str, Any] | None:
+        header = self.snapshot_header(kind)
+        if header is None:
+            return None
+        snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
+        with self._cache() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM snapshot_details WHERE kind=? AND snapshot_id=? AND item_key=?",
+                (str(kind), snapshot_id, str(item_key).upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(str(row["payload_json"]))
+        except json.JSONDecodeError as exc:
+            raise RotationIntegrityError(f"{kind} 明细快照不是有效 JSON") from exc
+
+    def snapshot_items_page(
+        self,
+        kind: str,
+        *,
+        query: str = "",
+        level: str = "",
+        allowed_keys: set[str] | None = None,
+        include_l1: bool = False,
+        stage: str = "",
+        grade: str = "",
+        category: str = "",
+        sort: str = "position",
+        order: str = "asc",
+        window: int = 5,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
+        """Filter/sort/page in SQLite, parsing only the selected response rows."""
+
+        selected_window = int(window)
+        if selected_window not in {1, 3, 5, 20}:
+            raise ValueError("轮动观察窗口仅支持 1、3、5、20 日")
+        header = self.snapshot_header(kind)
+        if header is None:
+            return None, [], {"page": 1, "page_size": page_size, "total": 0, "pages": 1}
+        snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
+        clauses = ["kind=?", "snapshot_id=?"]
+        params: list[Any] = [str(kind), snapshot_id]
+        needle = str(query).strip().casefold()
+        if needle:
+            clauses.append(
+                "(lower(name) LIKE ? OR lower(item_key) LIKE ? OR lower(primary_industry_name) LIKE ? OR lower(benchmark) LIKE ?)"
+            )
+            like = f"%{needle}%"
+            params.extend((like, like, like, like))
+        if level:
+            clauses.append("level=?")
+            params.append(str(level))
+        if allowed_keys is not None:
+            keys = sorted({str(value).upper() for value in allowed_keys})
+            if not keys:
+                if include_l1:
+                    clauses.append("level='L1'")
+                else:
+                    return header, [], {"page": 1, "page_size": page_size, "total": 0, "pages": 1}
+            elif include_l1:
+                clauses.append("(level='L1' OR item_key IN (" + ",".join("?" for _ in keys) + "))")
+                params.extend(keys)
+            else:
+                clauses.append("item_key IN (" + ",".join("?" for _ in keys) + ")")
+                params.extend(keys)
+        for column, value in (("stage", stage), ("category", category)):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(str(value))
+        if grade:
+            clauses.append(f"grade_{selected_window}=?")
+            params.append(str(grade))
+        where = " WHERE " + " AND ".join(clauses)
+        columns = {
+            "position": "position",
+            "name": "name COLLATE NOCASE",
+            "score": f"score_{selected_window}",
+            "change": f"change_{selected_window}",
+            "excess": f"excess_{selected_window}",
+            "amount": f"amount_{selected_window}",
+            "coverage": "coverage",
+            "flow": f"flow_{selected_window}",
+            "daily": "daily_flow",
+            "streak": "streak",
+            "focus": f"focus_{selected_window}",
+        }
+        selected = columns.get(str(sort), "position")
+        direction = "DESC" if str(order).lower() == "desc" else "ASC"
+        if str(sort) == "focus":
+            order_by = (
+                f"focus_{selected_window} DESC, score_{selected_window} DESC, "
+                f"change_{selected_window} DESC, excess_{selected_window} DESC, "
+                "coverage DESC, name COLLATE NOCASE ASC, item_key ASC"
+            )
+        else:
+            order_by = (
+                f"CASE WHEN {selected} IS NULL THEN 1 ELSE 0 END ASC, "
+                f"{selected} {direction}, item_key ASC"
+            )
+        selected_page = max(1, int(page))
+        selected_size = max(1, min(500, int(page_size)))
+        with self._cache() as connection:
+            total = int(connection.execute(
+                "SELECT COUNT(*) FROM snapshot_items" + where, tuple(params),
+            ).fetchone()[0])
+            pages = max(1, (total + selected_size - 1) // selected_size)
+            current = min(selected_page, pages)
+            offset = (current - 1) * selected_size
+            rows = connection.execute(
+                "SELECT payload_json FROM snapshot_items" + where + " ORDER BY " + order_by + " LIMIT ? OFFSET ?",
+                (*params, selected_size, offset),
+            ).fetchall()
+        try:
+            values = [json.loads(str(row["payload_json"])) for row in rows]
+        except json.JSONDecodeError as exc:
+            raise RotationIntegrityError(f"{kind} 列表索引不是有效 JSON") from exc
+        return header, values, {
+            "page": current,
+            "page_size": selected_size,
+            "total": total,
+            "pages": pages,
+            "has_previous": current > 1,
+            "has_next": current < pages,
+        }
+
+    def snapshot_item_categories(self, kind: str) -> list[str]:
+        header = self.snapshot_header(kind)
+        if header is None:
+            return []
+        snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
+        with self._cache() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT category FROM snapshot_items WHERE kind=? AND snapshot_id=? "
+                "AND category<>'' ORDER BY category COLLATE NOCASE",
+                (str(kind), snapshot_id),
+            ).fetchall()
+        return [str(row["category"]) for row in rows]
 
     def snapshots(self) -> list[dict[str, Any]]:
         with self._cache() as connection:
@@ -370,6 +789,10 @@ class RotationStore:
                 "VALUES(?,?,?,?,?)",
                 rows,
             )
+        identity = _hash_text(strict_json_dumps([
+            json.loads(value[3]) for value in sorted(rows, key=lambda value: value[0])
+        ], sort_keys=True))
+        self.derived.advance_source_generation("rotation.taxonomy", "all", identity)
 
     def taxonomy_nodes(self, level: str | None = None) -> list[dict[str, Any]]:
         with self._cache() as connection:
@@ -406,6 +829,19 @@ class RotationStore:
                 "INSERT INTO theme_catalog(code,name,payload_json,observed_at) VALUES(?,?,?,?)",
                 rows,
             )
+        identity = _hash_text(strict_json_dumps([
+            json.loads(value[2]) for value in sorted(rows, key=lambda value: value[0])
+        ], sort_keys=True))
+        coverage = sorted({
+            str(theme.get(key) or "")[:10]
+            for theme in themes for key in ("as_of", "observed_at", "effective_date")
+            if str(theme.get(key) or "")[:10]
+        })
+        self.derived.advance_source_generation(
+            "rotation.themes", "all", identity,
+            coverage_start=coverage[0] if coverage else "",
+            coverage_end=coverage[-1] if coverage else "",
+        )
 
     def themes(self) -> list[dict[str, Any]]:
         with self._cache() as connection:
@@ -542,6 +978,19 @@ class RotationStore:
                 (len(rows), strict_json_dumps(issues), observed_at, run_id),
             )
             connection.commit()
+        identity = _hash_text(strict_json_dumps([
+            json.loads(value[2]) for value in sorted(rows, key=lambda value: value[0])
+        ], sort_keys=True))
+        coverage = sorted({
+            str(theme.get(key) or "")[:10]
+            for theme in themes for key in ("as_of", "observed_at", "effective_date")
+            if str(theme.get(key) or "")[:10]
+        })
+        self.derived.advance_source_generation(
+            "rotation.themes", "all", identity,
+            coverage_start=coverage[0] if coverage else "",
+            coverage_end=coverage[-1] if coverage else "",
+        )
 
     def reuse_published_theme_sync(self, run_id: str, issues: list[str]) -> None:
         """Close a resumed staging run without rewriting its published catalog.
@@ -598,8 +1047,46 @@ class RotationStore:
             with temp.open("rb+") as stream:
                 os.fsync(stream.fileno())
             os.replace(temp, self.etf_path)
+            coverage_column = next((
+                value for value in ("trade_date", "date", "as_of") if value in frame.columns
+            ), "")
+            coverage = frame[coverage_column].astype(str) if coverage_column else pd.Series(dtype=str)
+            self.derived.advance_source_generation(
+                "rotation.etf_observations",
+                "all",
+                _hash_file(self.etf_path),
+                coverage_start=str(coverage.min() if not coverage.empty else ""),
+                coverage_end=str(coverage.max() if not coverage.empty else ""),
+            )
         finally:
             temp.unlink(missing_ok=True)
+
+    def source_generations(self, source: str = "") -> list[dict[str, Any]]:
+        """Expose compact generation rows for refresh fingerprint construction."""
+
+        return self.derived.source_generations(source)
+
+    def mark_source_coverage(self, source: str, coverage_end: str) -> None:
+        """Record a successful freshness probe without manufacturing a generation.
+
+        Providers occasionally confirm that an unchanged taxonomy or ETF
+        directory is still current.  That must suppress another remote call on
+        the next refresh, but it must *not* invalidate every dependent
+        snapshot: the content identity and generation remain unchanged.
+        """
+
+        target = str(coverage_end or "")[:10]
+        if not target:
+            return
+        for row in self.derived.source_generations(str(source)):
+            previous_end = str(row.get("coverage_end") or "")[:10]
+            self.derived.advance_source_generation(
+                str(row["source"]),
+                str(row["partition_key"]),
+                str(row["content_id"]),
+                coverage_start=str(row.get("coverage_start") or "")[:10],
+                coverage_end=max(previous_end, target),
+            )
 
     def etf_observations(self) -> pd.DataFrame:
         if not self.etf_path.is_file():
@@ -619,11 +1106,7 @@ class RotationStore:
             self.root / ".etf_metadata_history.lock"
         ):
             current = self._prepare_etf_metadata_observations(frame)
-            history = (
-                self._read_verified_etf_metadata_history()
-                if self.etf_metadata_history_path.is_file()
-                else pd.DataFrame()
-            )
+            history = self._read_etf_metadata_history_locked()
             combined = pd.concat((history, current), ignore_index=True, sort=False)
             conflicts = (
                 combined.groupby("observation_id")["observation_content_sha256"].nunique()
@@ -648,11 +1131,38 @@ class RotationStore:
             )
             if set(combined["observation_id"].astype(str)) != previous_ids:
                 self._write_etf_metadata_history(combined)
-            self._write_etf_metadata_frame(
-                self.etf_metadata_path,
-                current,
-                ".etf_metadata.",
-            )
+            current_changed = True
+            if self.etf_metadata_path.is_file():
+                try:
+                    existing = self._prepare_etf_metadata_observations(
+                        pd.read_parquet(self.etf_metadata_path)
+                    )
+                    existing_ids = existing[[
+                        "observation_id", "observation_content_sha256",
+                    ]].sort_values("observation_id").reset_index(drop=True)
+                    current_ids = current[[
+                        "observation_id", "observation_content_sha256",
+                    ]].sort_values("observation_id").reset_index(drop=True)
+                    current_changed = not existing_ids.equals(current_ids)
+                except (OSError, ValueError, KeyError):
+                    # A corrupt current file must be replaced by the verified
+                    # observation we just received; it must not become an
+                    # implicit no-op.
+                    current_changed = True
+            if current_changed:
+                self._write_etf_metadata_frame(
+                    self.etf_metadata_path,
+                    current,
+                    ".etf_metadata.",
+                )
+            if self.etf_metadata_path.is_file():
+                self.derived.advance_source_generation(
+                    "rotation.etf_metadata",
+                    "current",
+                    _hash_file(self.etf_metadata_path),
+                    coverage_start=str(current["observed_at"].min() or ""),
+                    coverage_end=str(current["observed_at"].max() or ""),
+                )
 
     @staticmethod
     def _prepare_etf_metadata_observations(frame: pd.DataFrame) -> pd.DataFrame:
@@ -810,6 +1320,30 @@ class RotationStore:
             raise RotationIntegrityError("ETF 元数据历史逻辑哈希与 manifest 不匹配")
         return history
 
+    def _quarantine_legacy_etf_metadata_history(self) -> None:
+        """Move an obsolete, rebuildable history aside without decoding it."""
+        manifest_path = self.etf_metadata_history_manifest_path
+        if not manifest_path.is_file():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        if manifest.get("schema_version") == ETF_METADATA_HISTORY_SCHEMA_VERSION:
+            return
+        stamp = str(time.time_ns())
+        quarantine = self.root / "quarantine" / f"etf_metadata_history-{stamp}"
+        quarantine.mkdir(parents=True, exist_ok=True)
+        for path in (
+            self.etf_metadata_history_path,
+            self.etf_metadata_history_manifest_path,
+        ):
+            if path.is_file():
+                path.replace(quarantine / path.name)
+        logger.warning(
+            "ETF 元数据历史契约已淘汰，已隔离并等待 v2 重建：%s", quarantine,
+        )
+
     def etf_metadata(self) -> pd.DataFrame:
         if not self.etf_metadata_path.is_file():
             return pd.DataFrame()
@@ -820,12 +1354,36 @@ class RotationStore:
             raise RotationIntegrityError("ETF 元数据文件损坏，拒绝按空目录继续分类") from exc
 
     def etf_metadata_history(self) -> pd.DataFrame:
+        # Published parquet/manifest replacements are atomic.  A reader never
+        # queues behind a writer; it only retries the tiny manifest/file swap
+        # window for at most 200ms, then reports an explicit integrity error.
+        deadline = time.monotonic() + 0.2
+        while True:
+            try:
+                return self._read_etf_metadata_history_locked()
+            except RotationIntegrityError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+
+    def _read_etf_metadata_history_locked(self) -> pd.DataFrame:
         if not self.etf_metadata_history_path.is_file():
             return pd.DataFrame()
-        with _ETF_METADATA_LOCK, _etf_metadata_file_lock(
-            self.root / ".etf_metadata_history.lock"
+        try:
+            manifest = json.loads(
+                self.etf_metadata_history_manifest_path.read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            manifest = None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            manifest = None
+        if (
+            isinstance(manifest, dict)
+            and manifest.get("schema_version") != ETF_METADATA_HISTORY_SCHEMA_VERSION
         ):
-            return self._read_verified_etf_metadata_history()
+            self._quarantine_legacy_etf_metadata_history()
+            return pd.DataFrame()
+        return self._read_verified_etf_metadata_history()
 
 
 class RotationJobStore:
@@ -837,7 +1395,7 @@ class RotationJobStore:
             else get_config().data_root / "rotation" / "jobs.sqlite"
         ).resolve()
         with self._connect() as connection:
-            migrate_schema(connection, ((1, self._v1),))
+            migrate_schema(connection, ((1, self._v1), (2, self._v2)))
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(self.path, policy="authoritative", row_factory=True)
@@ -879,6 +1437,26 @@ class RotationJobStore:
         )
 
     @staticmethod
+    def _v2(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        additions = {
+            "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "algorithm_version": "TEXT NOT NULL DEFAULT ''",
+            "lease_token": "TEXT NOT NULL DEFAULT ''",
+            "max_attempts": "INTEGER NOT NULL DEFAULT 2",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rotation_jobs_singleflight "
+            "ON jobs(logical_hash,status,lease_expires_at,created_at)"
+        )
+
+    @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
@@ -901,9 +1479,20 @@ class RotationJobStore:
             (job_id, strict_json_dumps(value), time.time()),
         )
 
-    def create(self, spec: dict[str, Any]) -> dict[str, Any]:
+    def create(
+        self,
+        spec: dict[str, Any],
+        *,
+        input_fingerprint: str = "",
+        algorithm_version: str = "",
+    ) -> dict[str, Any]:
         text = strict_json_dumps(spec, sort_keys=True)
-        logical_hash = _hash_text(text)
+        logical_hash = _hash_text(strict_json_dumps({
+            "task_type": "rotation.refresh",
+            "canonical_spec": json.loads(text),
+            "input_fingerprint": str(input_fingerprint),
+            "algorithm_version": str(algorithm_version),
+        }, sort_keys=True))
         now = time.time()
         with self._connect() as connection:
             existing = connection.execute(
@@ -912,16 +1501,28 @@ class RotationJobStore:
                 (logical_hash,),
             ).fetchone()
             if existing is not None:
-                return self._row(existing) or {}
+                value = self._row(existing) or {}
+                value["created"] = False
+                value["coalesced"] = True
+                return value
             job_id = uuid.uuid4().hex
             connection.execute(
-                "INSERT INTO jobs(id,spec_json,logical_hash,status,progress,phase,detail,"
-                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (job_id, text, logical_hash, "queued", 0, "等待执行", "", now, now),
+                "INSERT INTO jobs(id,spec_json,logical_hash,input_fingerprint,algorithm_version,"
+                "status,progress,phase,detail,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job_id, text, logical_hash, str(input_fingerprint), str(algorithm_version),
+                    "queued", 0, "等待执行", "", now, now,
+                ),
             )
-            self._event(connection, job_id, {"type": "queued", "phase": "等待执行"})
+            self._event(connection, job_id, {
+                "type": "queued", "phase": "等待执行",
+                "input_fingerprint": str(input_fingerprint),
+            })
             row = connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        return self._row(row) or {}
+        value = self._row(row) or {}
+        value["created"] = True
+        value["coalesced"] = False
+        return value
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -939,9 +1540,25 @@ class RotationJobStore:
         now = time.time()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            exhausted = connection.execute(
+                "SELECT id,attempt FROM jobs WHERE status IN ('running','cancelling') "
+                "AND lease_expires_at<? AND attempt>=max_attempts",
+                (now,),
+            ).fetchall()
+            for expired in exhausted:
+                connection.execute(
+                    "UPDATE jobs SET status='failed',phase='执行失败',"
+                    "detail='worker lease expired after maximum attempts',"
+                    "error='worker lease expired after maximum attempts',"
+                    "lease_expires_at=0,lease_token='',updated_at=? WHERE id=?",
+                    (now, str(expired["id"])),
+                )
+                self._event(connection, str(expired["id"]), {
+                    "type": "failed", "reason": "lease attempts exhausted",
+                })
             row = connection.execute(
                 "SELECT * FROM jobs WHERE status='queued' OR "
-                "(status IN ('running','cancelling') AND lease_expires_at<?) "
+                "(status IN ('running','cancelling') AND lease_expires_at<? AND attempt<max_attempts) "
                 "ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END,created_at LIMIT 1",
                 (now,),
             ).fetchone()
@@ -950,10 +1567,11 @@ class RotationJobStore:
                 return None
             attempt = int(row["attempt"]) + (0 if row["status"] == "queued" else 1)
             status = "cancelling" if bool(row["cancel_requested"]) else "running"
+            lease_token = uuid.uuid4().hex
             connection.execute(
-                "UPDATE jobs SET status=?,attempt=?,worker_owner=?,lease_expires_at=?,"
+                "UPDATE jobs SET status=?,attempt=?,worker_owner=?,lease_token=?,lease_expires_at=?,"
                 "heartbeat_at=?,updated_at=? WHERE id=?",
-                (status, attempt, owner, now + lease_seconds, now, now, row["id"]),
+                (status, attempt, owner, lease_token, now + lease_seconds, now, now, row["id"]),
             )
             self._event(connection, str(row["id"]), {
                 "type": "claimed", "owner": owner, "attempt": attempt,
@@ -961,24 +1579,28 @@ class RotationJobStore:
             connection.commit()
         return self.get(str(row["id"]))
 
-    def heartbeat(self, job_id: str, owner: str, lease_seconds: float = 45.0) -> bool:
+    def heartbeat(
+        self, job_id: str, owner: str, lease_token: str, lease_seconds: float = 45.0,
+    ) -> bool:
         now = time.time()
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE jobs SET heartbeat_at=?,lease_expires_at=?,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
-                (now, now + lease_seconds, now, job_id, owner),
+                "WHERE id=? AND worker_owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (now, now + lease_seconds, now, job_id, owner, str(lease_token)),
             )
         return cursor.rowcount == 1
 
-    def release_for_handoff(self, job_id: str, owner: str) -> bool:
+    def release_for_handoff(self, job_id: str, owner: str, lease_token: str) -> bool:
         """Expire an owned lease without changing the durable task outcome."""
         now = time.time()
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE jobs SET lease_expires_at=0,heartbeat_at=?,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
-                (now, now, job_id, owner),
+                "WHERE id=? AND worker_owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (now, now, job_id, owner, str(lease_token)),
             )
             if cursor.rowcount:
                 self._event(connection, job_id, {
@@ -989,7 +1611,13 @@ class RotationJobStore:
         return cursor.rowcount == 1
 
     def progress(
-        self, job_id: str, owner: str, progress: int, phase: str, detail: str = "",
+        self,
+        job_id: str,
+        owner: str,
+        lease_token: str,
+        progress: int,
+        phase: str,
+        detail: str = "",
     ) -> None:
         now = time.time()
         value = max(0, min(99, int(progress)))
@@ -997,8 +1625,11 @@ class RotationJobStore:
             cursor = connection.execute(
                 "UPDATE jobs SET progress=?,phase=?,detail=?,heartbeat_at=?,"
                 "lease_expires_at=?,updated_at=? WHERE id=? AND worker_owner=? "
-                "AND status IN ('running','cancelling')",
-                (value, str(phase)[:200], str(detail)[:1000], now, now + 45, now, job_id, owner),
+                "AND lease_token=? AND status IN ('running','cancelling')",
+                (
+                    value, str(phase)[:200], str(detail)[:1000], now, now + 45, now,
+                    job_id, owner, str(lease_token),
+                ),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("任务租约已失效")
@@ -1006,12 +1637,16 @@ class RotationJobStore:
                 "type": "progress", "progress": value, "phase": phase, "detail": detail,
             })
 
-    def is_cancel_requested(self, job_id: str, owner: str = "") -> bool:
+    def is_cancel_requested(
+        self, job_id: str, owner: str = "", lease_token: str = "",
+    ) -> bool:
         with self._connect() as connection:
             if owner:
+                if not lease_token:
+                    raise RuntimeError("任务检查取消状态必须携带 lease token")
                 row = connection.execute(
-                    "SELECT cancel_requested FROM jobs WHERE id=? AND worker_owner=?",
-                    (job_id, owner),
+                    "SELECT cancel_requested FROM jobs WHERE id=? AND worker_owner=? AND lease_token=?",
+                    (job_id, owner, str(lease_token)),
                 ).fetchone()
             else:
                 row = connection.execute(
@@ -1019,7 +1654,9 @@ class RotationJobStore:
                 ).fetchone()
         return bool(row and row["cancel_requested"])
 
-    def complete(self, job_id: str, owner: str, result: dict[str, Any]) -> None:
+    def complete(
+        self, job_id: str, owner: str, lease_token: str, result: dict[str, Any],
+    ) -> None:
         now = time.time()
         outcome = str(result.get("outcome") or "updated")
         phase = {
@@ -1032,22 +1669,35 @@ class RotationJobStore:
             cursor = connection.execute(
                 "UPDATE jobs SET status='completed',progress=100,phase=?,"
                 "detail=?,result_json=?,error='',lease_expires_at=0,updated_at=? "
-                "WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
-                (phase, detail, strict_json_dumps(result), now, job_id, owner),
+                "WHERE id=? AND worker_owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (phase, detail, strict_json_dumps(result), now, job_id, owner, str(lease_token)),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("任务租约已失效")
             self._event(connection, job_id, {"type": "completed", "result": result})
 
-    def fail(self, job_id: str, owner: str, error: str, *, cancelled: bool = False) -> None:
+    def fail(
+        self,
+        job_id: str,
+        owner: str,
+        lease_token: str,
+        error: str,
+        *,
+        cancelled: bool = False,
+    ) -> None:
         now = time.time()
         status = "cancelled" if cancelled else "failed"
         phase = "已取消" if cancelled else "执行失败"
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE jobs SET status=?,phase=?,detail=?,error=?,lease_expires_at=0,"
-                "updated_at=? WHERE id=? AND worker_owner=? AND status IN ('running','cancelling')",
-                (status, phase, str(error)[:1000], str(error)[:1000], now, job_id, owner),
+                "updated_at=? WHERE id=? AND worker_owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling')",
+                (
+                    status, phase, str(error)[:1000], str(error)[:1000], now,
+                    job_id, owner, str(lease_token),
+                ),
             )
             if cursor.rowcount:
                 self._event(connection, job_id, {"type": status, "error": str(error)[:1000]})
@@ -1075,7 +1725,11 @@ class RotationJobStore:
             raise KeyError(job_id)
         if current["status"] not in TERMINAL_JOB_STATUSES:
             raise ValueError("当前任务尚未结束，不能重试")
-        created = self.create(current["spec"])
+        created = self.create(
+            current["spec"],
+            input_fingerprint=str(current.get("input_fingerprint") or ""),
+            algorithm_version=str(current.get("algorithm_version") or ""),
+        )
         with self._connect() as connection:
             self._event(connection, str(created["id"]), {"type": "retry_of", "job_id": job_id})
             self._event(connection, job_id, {"type": "retried_as", "job_id": created["id"]})

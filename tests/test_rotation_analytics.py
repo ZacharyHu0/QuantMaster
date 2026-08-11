@@ -525,3 +525,21 @@ def test_etf_capital_evidence_rejects_thin_consecutive_coverage():
     assert evidence["available"] is False
     assert evidence["fund_count"] == 19
     assert "连续份额快照" in evidence["note"]
+
+
+def test_etf_capital_evidence_rejects_thin_current_universe_coverage():
+    frame = _etf_evidence_frame(funds=20)
+    target = pd.Timestamp(frame["trade_date"].max())
+
+    evidence = compute_etf_capital_evidence(
+        frame,
+        as_of=target,
+        expected_funds=30,
+        minimum_coverage=0.80,
+    )
+
+    assert evidence["available"] is False
+    assert evidence["fund_count"] == 20
+    assert evidence["expected_funds"] == 30
+    assert evidence["coverage"] == pytest.approx(2 / 3)
+    assert "低于 80% 发布门槛" in evidence["note"]

@@ -8,11 +8,13 @@ audit and lets the API expose honest partial-coverage states.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 ALGORITHM_VERSION = "QM_ROTATION_V7"
 ROTATION_WINDOWS = (1, 3, 5, 20)
@@ -306,8 +308,10 @@ def compute_market_temperature(
         }
         for field_name in (
             "as_of", "window_sessions", "reference_windows", "fund_count",
+            "expected_funds", "coverage", "minimum_coverage",
             "net_subscription_rate", "net_subscription_rate_pct", "event_count",
             "signed_score", "halflife_days", "lookback_days",
+            "knowledge_as_of_epoch",
         ):
             if field_name in payload:
                 item[field_name] = payload[field_name]
@@ -752,6 +756,273 @@ def _amount_activity(
     return _number(ratios.median(), 4)
 
 
+@dataclass(frozen=True)
+class _GroupRow:
+    """One valid group and its sparse membership row."""
+
+    code: str
+    raw: dict[str, Any]
+    symbols: list[str]
+    symbol_positions: np.ndarray
+    member_count: int
+    index: int
+
+
+@dataclass(frozen=True)
+class _GroupAggregation:
+    """Batch aggregates shared by all industry/theme groups.
+
+    The previous implementation repeatedly selected ``date × member`` DataFrame
+    slices inside each group/window/history loop.  For a ~1,000-theme catalog
+    that converts one market matrix into hundreds of thousands of pandas
+    index operations.  This kernel builds a CSR membership matrix once and
+    performs all count/ratio/amount reductions as dense NumPy outputs.
+    """
+
+    rows: dict[str, _GroupRow]
+    eligible: np.ndarray
+    strong_ratio: np.ndarray
+    positive_ratio: np.ndarray
+    weak_ratio: np.ndarray
+    window_returns: dict[int, tuple[np.ndarray, np.ndarray]]
+    window_amount_activity: dict[int, np.ndarray]
+    score_current: np.ndarray
+    returns_current: np.ndarray
+    liquidity_current: np.ndarray
+    close_observations: np.ndarray
+
+
+def _dense_sparse_product(matrix: sparse.csr_matrix, values: np.ndarray) -> np.ndarray:
+    """Return date × group counts without leaking sparse implementation types."""
+
+    result = matrix @ values.T
+    if sparse.issparse(result):
+        result = result.toarray()
+    return np.asarray(result, dtype=float).T
+
+
+def _group_median_and_advance(
+    membership: np.ndarray,
+    member_counts: np.ndarray,
+    values: np.ndarray,
+    *,
+    minimum_members: int,
+    minimum_coverage: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Median and positive breadth for every group at one window endpoint."""
+
+    valid = np.isfinite(values)
+    counts = membership @ valid.astype(np.int16)
+    # Membership masks are compact bool arrays (~5MB for 1k×5k) and replace
+    # thousands of pandas .loc selections.  ``nanmedian`` keeps the legacy
+    # statistic and its exact no-lookahead semantics.
+    masked = np.where(membership, values[None, :], np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        medians = np.nanmedian(masked, axis=1)
+    positives = membership @ ((values > 0) & valid).astype(np.int16)
+    coverage = np.divide(
+        counts, member_counts, out=np.zeros_like(counts, dtype=float), where=member_counts > 0,
+    )
+    publishable = (counts >= minimum_members) & (coverage >= minimum_coverage)
+    medians = np.where(publishable, medians, np.nan)
+    advances = np.divide(
+        positives, counts, out=np.full_like(counts, np.nan, dtype=float), where=counts > 0,
+    )
+    advances = np.where(publishable, advances, np.nan)
+    return medians, advances
+
+
+def _group_amount_activity_batch(
+    amount_values: np.ndarray | None,
+    membership: np.ndarray,
+    member_counts: np.ndarray,
+    *,
+    current_position: int,
+    window: int,
+    minimum_coverage: float,
+) -> np.ndarray:
+    """Compute the legacy recent-N/prior-20 amount evidence for all groups."""
+
+    unavailable = np.full(len(member_counts), np.nan, dtype=float)
+    if amount_values is None:
+        return unavailable
+    recent_start = current_position - window + 1
+    baseline_end = recent_start
+    baseline_start = baseline_end - 20
+    if recent_start < 0 or baseline_start < 0:
+        return unavailable
+    recent = amount_values[recent_start:current_position + 1]
+    baseline = amount_values[baseline_start:baseline_end]
+    recent_count = np.isfinite(recent).sum(axis=0)
+    baseline_count = np.isfinite(baseline).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        recent_mean = np.nanmean(recent, axis=0)
+        baseline_mean = np.nanmean(baseline, axis=0)
+        ratios = recent_mean / baseline_mean - 1.0
+    valid = (
+        (recent_count >= max(1, math.ceil(window * 0.70)))
+        & (baseline_count >= 14)
+        & np.isfinite(ratios)
+        & (baseline_mean > EPS)
+    )
+    counts = membership @ valid.astype(np.int16)
+    masked = np.where(membership, ratios[None, :], np.nan)
+    masked[:, ~valid] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        values = np.nanmedian(masked, axis=1)
+    coverage = np.divide(
+        counts, member_counts, out=np.zeros_like(counts, dtype=float), where=member_counts > 0,
+    )
+    return np.where((counts >= 8) & (coverage >= minimum_coverage), values, np.nan)
+
+
+def _build_group_aggregation(
+    groups: dict[str, dict[str, Any]],
+    trend: TrendMatrices,
+    masks: dict[str, pd.DataFrame],
+    amount: pd.DataFrame | None,
+    *,
+    current_position: int,
+    minimum_members: int,
+    minimum_coverage: float,
+) -> _GroupAggregation:
+    """Build one CSR group×symbol matrix and all reusable endpoint arrays."""
+
+    columns = [str(value) for value in trend.close.columns]
+    positions = {symbol: index for index, symbol in enumerate(columns)}
+    raw_rows: list[tuple[str, dict[str, Any], list[str], int, np.ndarray]] = []
+    sparse_rows: list[int] = []
+    sparse_columns: list[int] = []
+    for code, raw in groups.items():
+        members = sorted(set(raw.get("members") or []))
+        symbols = [symbol for symbol in members if symbol in positions]
+        member_count = len(members)
+        if member_count < minimum_members or not symbols:
+            continue
+        row_index = len(raw_rows)
+        symbol_positions = np.asarray([positions[symbol] for symbol in symbols], dtype=int)
+        raw_rows.append((str(code), raw, symbols, member_count, symbol_positions))
+        sparse_rows.extend([row_index] * len(symbol_positions))
+        sparse_columns.extend(symbol_positions.tolist())
+    group_count = len(raw_rows)
+    symbol_count = len(columns)
+    if not group_count:
+        empty = np.empty((len(trend.close), 0), dtype=float)
+        return _GroupAggregation(
+            rows={}, eligible=empty, strong_ratio=empty, positive_ratio=empty,
+            weak_ratio=empty, window_returns={}, window_amount_activity={},
+            score_current=np.asarray([], dtype=float), returns_current=np.asarray([], dtype=float),
+            liquidity_current=np.asarray([], dtype=float), close_observations=np.asarray([], dtype=int),
+        )
+    membership_csr = sparse.csr_matrix(
+        (np.ones(len(sparse_rows), dtype=np.int8), (sparse_rows, sparse_columns)),
+        shape=(group_count, symbol_count),
+    )
+    membership = membership_csr.toarray().astype(bool, copy=False)
+    member_counts = np.asarray([row[3] for row in raw_rows], dtype=float)
+    eligible_values = trend.eligible.to_numpy(dtype=bool)
+    strong_values = masks["strong_up"].to_numpy(dtype=bool)
+    positive_values = (
+        masks["strong_up"].to_numpy(dtype=bool) | masks["up"].to_numpy(dtype=bool)
+    )
+    weak_values = masks["weak"].to_numpy(dtype=bool)
+    eligible = _dense_sparse_product(membership_csr, eligible_values.astype(np.int16))
+    strong_counts = _dense_sparse_product(membership_csr, strong_values.astype(np.int16))
+    positive_counts = _dense_sparse_product(membership_csr, positive_values.astype(np.int16))
+    weak_counts = _dense_sparse_product(membership_csr, weak_values.astype(np.int16))
+
+    def ratios(values: np.ndarray) -> np.ndarray:
+        return np.divide(
+            100.0 * values, eligible,
+            out=np.full(values.shape, np.nan, dtype=float), where=eligible > 0,
+        )
+
+    close_values = trend.close.to_numpy(dtype=float)
+    window_returns: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for window in ROTATION_WINDOWS:
+        previous_position = current_position - window
+        if previous_position < 0:
+            continue
+        with np.errstate(invalid="ignore", divide="ignore"):
+            period = close_values[current_position] / close_values[previous_position] - 1.0
+        period[~np.isfinite(period)] = np.nan
+        window_returns[window] = _group_median_and_advance(
+            membership, member_counts, period,
+            minimum_members=minimum_members, minimum_coverage=minimum_coverage,
+        )
+    amount_values = amount.to_numpy(dtype=float) if amount is not None and not amount.empty else None
+    window_amount_activity = {
+        window: _group_amount_activity_batch(
+            amount_values, membership, member_counts,
+            current_position=current_position, window=window,
+            minimum_coverage=minimum_coverage,
+        )
+        for window in ROTATION_WINDOWS
+    }
+    liquidity = np.full(symbol_count, -math.inf, dtype=float)
+    if amount_values is not None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            liquidity_values = np.nanmedian(amount_values[max(0, current_position - 19):current_position + 1], axis=0)
+        liquidity[np.isfinite(liquidity_values)] = liquidity_values[np.isfinite(liquidity_values)]
+    rows = {
+        code: _GroupRow(code, raw, symbols, symbol_positions, member_count, index)
+        for index, (code, raw, symbols, member_count, symbol_positions) in enumerate(raw_rows)
+    }
+    return _GroupAggregation(
+        rows=rows,
+        eligible=eligible,
+        strong_ratio=ratios(strong_counts),
+        positive_ratio=ratios(positive_counts),
+        weak_ratio=ratios(weak_counts),
+        window_returns=window_returns,
+        window_amount_activity=window_amount_activity,
+        score_current=trend.score.iloc[current_position].to_numpy(dtype=float),
+        returns_current=trend.returns.iloc[current_position].to_numpy(dtype=float),
+        liquidity_current=liquidity,
+        close_observations=trend.close.notna().sum(axis=0).to_numpy(dtype=int),
+    )
+
+
+def _representatives_from_group_aggregation(
+    row: _GroupRow,
+    aggregation: _GroupAggregation,
+    names: dict[str, str],
+) -> list[dict[str, Any]]:
+    lookup = {
+        int(position): symbol for symbol, position in zip(row.symbols, row.symbol_positions)
+    }
+    candidates = [
+        int(position) for position in row.symbol_positions
+        if np.isfinite(aggregation.score_current[position])
+        and "ST" not in names.get(lookup[int(position)], "").upper()
+        and int(aggregation.close_observations[position]) >= 60
+    ]
+    if not candidates:
+        return []
+    # The input positions preserve the old sorted-symbol candidate order, so
+    # Python's stable sort keeps legacy tie behaviour exactly.
+    ranked = sorted(
+        candidates,
+        key=lambda position: (
+            float(aggregation.liquidity_current[position]),
+            float(aggregation.score_current[position]),
+        ),
+        reverse=True,
+    )[:3]
+    return [
+        {
+            "symbol": lookup[position],
+            "name": names.get(lookup[position], lookup[position]),
+            "trend_score": _number(aggregation.score_current[position], 4),
+            "return_1d": _number(aggregation.returns_current[position], 4),
+        }
+        for position in ranked
+    ]
+
+
 def _midrank_percentile(value: Any, reference: list[Any]) -> float | None:
     """Return a tie-aware cross-sectional percentile without forcing thin cohorts."""
     current = _number(value, 8)
@@ -988,23 +1259,29 @@ def analyze_group_rotation(
         amount_clean = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
     items: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
-    for code, raw in groups.items():
-        symbols = sorted(set(raw.get("members") or []).intersection(trend.close.columns))
-        member_count = len(set(raw.get("members") or []))
-        if member_count < minimum_members or not symbols:
-            continue
-        eligible_now = trend.eligible.loc[current_date, symbols]
-        eligible_count = int(eligible_now.sum())
+    aggregation = _build_group_aggregation(
+        groups, trend, masks, amount_clean,
+        current_position=current_position,
+        minimum_members=minimum_members,
+        minimum_coverage=minimum_coverage,
+    )
+    history_length = max(20, min(int(history), 520))
+    history_start = max(0, current_position - history_length + 1)
+    for code, group_row in aggregation.rows.items():
+        raw = group_row.raw
+        member_count = group_row.member_count
+        group_index = group_row.index
+        eligible_count = int(aggregation.eligible[current_position, group_index])
         coverage = eligible_count / member_count if member_count else 0.0
         if eligible_count < minimum_members or coverage < minimum_coverage:
             continue
-        strong_now = 100.0 * float(masks["strong_up"].loc[current_date, symbols].sum()) / eligible_count
-        positive_now = 100.0 * float(positive_mask.loc[current_date, symbols].sum()) / eligible_count
-        weak_now = 100.0 * float(masks["weak"].loc[current_date, symbols].sum()) / eligible_count
+        strong_now = float(aggregation.strong_ratio[current_position, group_index])
+        positive_now = float(aggregation.positive_ratio[current_position, group_index])
+        weak_now = float(aggregation.weak_ratio[current_position, group_index])
         signals: dict[str, dict[str, Any]] = {}
         for window in ROTATION_WINDOWS:
-            previous_date = window_dates.get(window)
-            if previous_date is None:
+            previous_position = current_position - window
+            if previous_position < 0:
                 signals[str(window)] = {
                     "strong_change_pp": None,
                     "positive_change_pp": None,
@@ -1016,21 +1293,12 @@ def analyze_group_rotation(
                     "amount_activity": None,
                 }
                 continue
-            eligible_before = int(trend.eligible.loc[previous_date, symbols].sum())
+            eligible_before = int(aggregation.eligible[previous_position, group_index])
             previous_coverage = eligible_before / member_count if member_count else 0.0
             if eligible_before >= minimum_members and previous_coverage >= minimum_coverage:
-                strong_before = (
-                    100.0 * float(masks["strong_up"].loc[previous_date, symbols].sum())
-                    / eligible_before
-                )
-                positive_before = (
-                    100.0 * float(positive_mask.loc[previous_date, symbols].sum())
-                    / eligible_before
-                )
-                weak_before = (
-                    100.0 * float(masks["weak"].loc[previous_date, symbols].sum())
-                    / eligible_before
-                )
+                strong_before = float(aggregation.strong_ratio[previous_position, group_index])
+                positive_before = float(aggregation.positive_ratio[previous_position, group_index])
+                weak_before = float(aggregation.weak_ratio[previous_position, group_index])
                 strong_change = strong_now - strong_before
                 positive_change = positive_now - positive_before
                 weak_change = weak_now - weak_before
@@ -1038,18 +1306,12 @@ def analyze_group_rotation(
                 strong_change = None
                 positive_change = None
                 weak_change = None
-            period_returns = (
-                trend.close.loc[current_date, symbols]
-                / trend.close.loc[previous_date, symbols]
-                - 1.0
-            ).replace([np.inf, -np.inf], np.nan).dropna()
-            return_coverage = len(period_returns) / member_count if member_count else 0.0
-            if len(period_returns) >= minimum_members and return_coverage >= minimum_coverage:
-                member_return = _number(period_returns.median(), 4)
-                advance_ratio = _number((period_returns > 0).mean(), 4)
-            else:
-                member_return = None
-                advance_ratio = None
+            median_values, advance_values = aggregation.window_returns.get(
+                window,
+                (np.full(len(aggregation.rows), np.nan), np.full(len(aggregation.rows), np.nan)),
+            )
+            member_return = _number(median_values[group_index], 4)
+            advance_ratio = _number(advance_values[group_index], 4)
             market_return = universe_returns.get(window)
             strong_change_value = _number(strong_change, 2)
             positive_change_value = _number(positive_change, 2)
@@ -1071,12 +1333,8 @@ def analyze_group_rotation(
                     4,
                 ),
                 "advance_ratio": advance_ratio,
-                "amount_activity": _amount_activity(
-                    amount_clean,
-                    symbols,
-                    current_position=current_position,
-                    window=window,
-                    member_count=member_count,
+                "amount_activity": _number(
+                    aggregation.window_amount_activity[window][group_index], 4,
                 ),
             }
         three_day = signals["3"]
@@ -1088,34 +1346,28 @@ def analyze_group_rotation(
             float(delta_positive or 0.0),
             float(delta_weak or 0.0),
         )
-        day_returns = trend.returns.loc[current_date, symbols]
-        valid_returns = int(day_returns.notna().sum())
+        day_returns = aggregation.returns_current[group_row.symbol_positions]
+        valid_returns = int(np.isfinite(day_returns).sum())
         advance_ratio = (
-            float((day_returns > 0).sum() / valid_returns) if valid_returns else 0.0
+            float(((day_returns > 0) & np.isfinite(day_returns)).sum() / valid_returns)
+            if valid_returns else 0.0
         )
         history_rows = []
-        history_length = max(20, min(int(history), 520))
-        history_start = max(0, current_position - history_length + 1)
         for position in range(history_start, current_position + 1):
             date_value = trend.close.index[position]
-            valid = int(trend.eligible.loc[date_value, symbols].sum())
+            valid = int(aggregation.eligible[position, group_index])
             if not valid:
                 continue
-            strong_ratio = 100 * masks["strong_up"].loc[date_value, symbols].sum() / valid
-            positive_ratio = 100 * positive_mask.loc[date_value, symbols].sum() / valid
-            weak_ratio = 100 * masks["weak"].loc[date_value, symbols].sum() / valid
+            strong_ratio = float(aggregation.strong_ratio[position, group_index])
+            positive_ratio = float(aggregation.positive_ratio[position, group_index])
+            weak_ratio = float(aggregation.weak_ratio[position, group_index])
             stage_key: str | None = None
             if position >= 3:
-                previous_date = trend.close.index[position - 3]
-                previous_valid = int(trend.eligible.loc[previous_date, symbols].sum())
+                previous_valid = int(aggregation.eligible[position - 3, group_index])
                 previous_coverage = previous_valid / member_count if member_count else 0.0
                 if previous_valid >= minimum_members and previous_coverage >= minimum_coverage:
-                    previous_positive = (
-                        100 * positive_mask.loc[previous_date, symbols].sum() / previous_valid
-                    )
-                    previous_weak = (
-                        100 * masks["weak"].loc[previous_date, symbols].sum() / previous_valid
-                    )
+                    previous_positive = float(aggregation.positive_ratio[position - 3, group_index])
+                    previous_weak = float(aggregation.weak_ratio[position - 3, group_index])
                     stage_key = _stage(
                         float(positive_ratio), float(weak_ratio),
                         float(positive_ratio - previous_positive),
@@ -1153,7 +1405,9 @@ def analyze_group_rotation(
             "stage": stage,
             "stage_label": STAGE_LABELS[stage],
             "stage_sessions": stage_sessions,
-            "representatives": _representatives(symbols, trend, current_date, names, amount_clean),
+            "representatives": _representatives_from_group_aggregation(
+                group_row, aggregation, names,
+            ),
         }
         items.append(item)
         histories[str(code)] = history_rows
@@ -1230,12 +1484,38 @@ def compute_etf_capital_evidence(
     lookback: int = 252,
     min_history: int = 60,
     min_funds: int = 20,
+    expected_funds: int | None = None,
+    minimum_coverage: float = 0.80,
 ) -> dict[str, Any]:
-    """Score broad-ETF subscriptions without scale or look-ahead leakage."""
+    """Score broad-ETF subscriptions without scale or look-ahead leakage.
+
+    When the current ETF directory size is known, a score is publishable only
+    when the consecutive share/price cohort clears ``minimum_coverage``.  A
+    thin latest response can otherwise look numerically valid while being
+    incomparable with the previous session's broad ETF cohort.
+    """
     target = pd.to_datetime(as_of, errors="coerce")
     target_text = _date(target) if pd.notna(target) else ""
+    try:
+        expected_count = max(0, int(expected_funds or 0))
+    except (TypeError, ValueError):
+        expected_count = 0
+    try:
+        coverage_threshold = float(minimum_coverage)
+    except (TypeError, ValueError):
+        coverage_threshold = 0.80
+    coverage_threshold = max(0.0, min(1.0, coverage_threshold))
 
-    def unavailable(note: str, *, observed_as_of: str = "") -> dict[str, Any]:
+    def unavailable(
+        note: str,
+        *,
+        observed_as_of: str = "",
+        fund_count: int = 0,
+    ) -> dict[str, Any]:
+        coverage = (
+            min(1.0, float(fund_count) / expected_count)
+            if expected_count else None
+        )
         return {
             "available": False,
             "score": None,
@@ -1243,7 +1523,10 @@ def compute_etf_capital_evidence(
             "note": note,
             "window_sessions": int(window),
             "reference_windows": 0,
-            "fund_count": 0,
+            "fund_count": int(fund_count),
+            "expected_funds": expected_count or None,
+            "coverage": coverage,
+            "minimum_coverage": coverage_threshold if expected_count else None,
             "net_subscription_rate": None,
             "net_subscription_rate_pct": None,
         }
@@ -1317,9 +1600,22 @@ def compute_etf_capital_evidence(
             **unavailable(
                 f"目标行情日需至少 {min_funds} 只 ETF 的连续份额快照",
                 observed_as_of=target_text,
+                fund_count=fund_count,
             ),
             "fund_count": fund_count,
         }
+
+    if expected_count:
+        coverage = min(1.0, float(fund_count) / expected_count)
+        if coverage < coverage_threshold:
+            return unavailable(
+                (
+                    f"目标行情日 ETF 份额/价格覆盖 {fund_count}/{expected_count} "
+                    f"（{coverage * 100:.1f}%），低于 {coverage_threshold * 100:.0f}% 发布门槛"
+                ),
+                observed_as_of=target_text,
+                fund_count=fund_count,
+            )
 
     reference = rolling_rate.loc[:target].dropna().tail(max(1, int(lookback)))
     if len(reference) < int(min_history):
@@ -1327,6 +1623,7 @@ def compute_etf_capital_evidence(
             **unavailable(
                 f"ETF 资金历史仅有 {len(reference)} 个有效窗口，至少需要 {min_history} 个",
                 observed_as_of=target_text,
+                fund_count=fund_count,
             ),
             "reference_windows": len(reference),
             "fund_count": fund_count,
@@ -1349,6 +1646,12 @@ def compute_etf_capital_evidence(
         "window_sessions": int(window),
         "reference_windows": len(reference),
         "fund_count": fund_count,
+        "expected_funds": expected_count or None,
+        "coverage": (
+            min(1.0, float(fund_count) / expected_count)
+            if expected_count else None
+        ),
+        "minimum_coverage": coverage_threshold if expected_count else None,
         "net_subscription_rate": _number(current_rate, 6),
         "net_subscription_rate_pct": rate_pct,
     }

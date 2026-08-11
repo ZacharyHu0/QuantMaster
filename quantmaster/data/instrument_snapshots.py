@@ -23,6 +23,7 @@ SCHEMA_VERSION = 2
 SUSPENSION_SCHEMA_VERSION = 2
 SUSPENSION_CONTRACT = "tushare-suspend_d-trade-date-v1"
 SUSPENSION_SOURCE = "tushare:suspend_d"
+MEMBERSHIP_CONTRACT = "tushare-lifecycle-membership-v1"
 TUSHARE_CATALOG_QUERY: dict[str, Any] = {
     "stock_basic": {"list_status": ["L", "D", "P"]},
     "fund_basic": {"market": "E", "status": ["L", "D"]},
@@ -36,6 +37,13 @@ TUSHARE_CATALOG_REQUESTS = tuple(
     + [("hk_basic", "list_status", status) for status in ("L", "D", "P")]
 )
 TUSHARE_MINIMUM_ASSET_COUNTS = {"CN:stock": 3000, "CN:etf": 100}
+# Suspended-listing partitions do not contribute to the current active
+# denominator.  Preserve and hash a successful empty response instead of
+# inventing a member solely to make the partition non-empty.
+TUSHARE_EMPTY_PARTITIONS = {
+    ("stock_basic", "list_status", "P"),
+    ("hk_basic", "list_status", "P"),
+}
 
 
 def tushare_catalog_request_params(
@@ -96,6 +104,7 @@ class InstrumentCatalogSnapshot:
 
     def evidence(self, *, market: str, asset_type: str, as_of: str) -> dict[str, Any]:
         symbols = snapshot_symbols(self, market=market, asset_type=asset_type, as_of=as_of)
+        observation_as_of = str(self.manifest["active_as_of"])
         return {
             "schema_version": SCHEMA_VERSION,
             "snapshot_id": self.snapshot_id,
@@ -103,6 +112,10 @@ class InstrumentCatalogSnapshot:
             "records_sha256": self.manifest["records_sha256"],
             "acquired_at": self.acquired_at,
             "as_of": as_of,
+            "membership_as_of": as_of,
+            "observation_active_as_of": observation_as_of,
+            "membership_reconstructed": as_of != observation_as_of,
+            "membership_contract": MEMBERSHIP_CONTRACT,
             "source": self.source,
             "query": self.manifest["query"],
             "expected_count": len(symbols),
@@ -252,7 +265,11 @@ def _tushare_partition_required_columns(endpoint: str) -> set[str]:
         "stock_basic": {"ts_code", "list_status", "list_date", "delist_date"},
         "fund_basic": {"ts_code", "name", "fund_type", "status", "list_date", "delist_date"},
         "index_basic": {"ts_code", "name", "market"},
-        "hk_basic": {"ts_code", "symbol", "name", "list_status", "list_date", "delist_date"},
+        # ``hk_basic`` does not consistently return its optional ``symbol``
+        # field even when it is requested.  ``ts_code`` is the provider's
+        # stable identity and the normalizer already derives the five-digit
+        # display code from it when ``symbol`` is absent.
+        "hk_basic": {"ts_code", "name", "list_status", "list_date", "delist_date"},
     }
     try:
         return required[endpoint]
@@ -464,7 +481,10 @@ def _validate_request_outcomes(
     for key, item in keyed.items():
         if item.get("status") != "success":
             raise InstrumentCatalogEvidenceError(f"Tushare 目录子请求未成功: {key}")
-        if int(item.get("raw_record_count") or 0) <= 0:
+        if (
+            int(item.get("raw_record_count") or 0) <= 0
+            and key not in TUSHARE_EMPTY_PARTITIONS
+        ):
             raise InstrumentCatalogEvidenceError(
                 f"Tushare 目录子请求为空且没有独立空集基线: {key}"
             )
@@ -517,13 +537,17 @@ def _active_counts(records: Iterable[dict[str, Any]], *, as_of: date) -> dict[st
         if str(row.get("status") or "").upper() != "L":
             continue
         listed = _parse_lifecycle_date(row.get("list_date"), field="list_date", symbol=symbol)
-        if listed is None:
-            raise InstrumentCatalogEvidenceError(
-                f"证券目录 {symbol} 缺少合法 list_date"
-            )
         delisted = _parse_lifecycle_date(
             row.get("delist_date"), field="delist_date", symbol=symbol,
         )
+        if listed is None:
+            # A same-day authoritative L partition proves current membership
+            # even when the provider omits a newly listed fund's list_date.
+            # The raw omission remains frozen and historical readers still
+            # reject this row outside the observation date.
+            if delisted is None or as_of <= delisted:
+                active.append(row)
+            continue
         if listed <= as_of and (delisted is None or as_of <= delisted):
             active.append(row)
     return _counts(active)
@@ -533,8 +557,11 @@ def _validate_lifecycle_contracts(
     records: Iterable[dict[str, Any]], *, observed_as_of: date,
 ) -> None:
     for row in records:
-        asset_type = str(row.get("asset_type") or "").lower()
-        if asset_type == "index":
+        key = (
+            f"{str(row.get('market') or '').upper()}:"
+            f"{str(row.get('asset_type') or '').lower()}"
+        )
+        if key not in TUSHARE_MINIMUM_ASSET_COUNTS:
             continue
         symbol = str(row.get("symbol") or "")
         status = str(row.get("status") or "").upper()
@@ -548,29 +575,15 @@ def _validate_lifecycle_contracts(
         delisted = _parse_lifecycle_date(
             row.get("delist_date"), field="delist_date", symbol=symbol,
         )
-        if listed is None:
+        if listed is not None and delisted is not None and listed > delisted:
             raise InstrumentCatalogEvidenceError(
-                f"证券目录 {symbol} 缺少合法 list_date"
+                f"证券目录 {symbol} 的生命周期日期先后矛盾"
             )
         if status == "D":
-            if delisted is None:
-                raise InstrumentCatalogEvidenceError(
-                    f"证券目录 {symbol} 的 D 分区缺少 delist_date"
-                )
-            if not listed <= delisted <= observed_as_of:
+            if delisted is not None and delisted > observed_as_of:
                 raise InstrumentCatalogEvidenceError(
                     f"证券目录 {symbol} 的 D 生命周期与观测日不一致"
                 )
-        elif delisted is not None:
-            raise InstrumentCatalogEvidenceError(
-                f"证券目录 {symbol} 的 {status} 分区不应含 delist_date"
-            )
-        if status in {"L", "P"} and listed > observed_as_of:
-            raise InstrumentCatalogEvidenceError(
-                f"证券目录 {symbol} 的 {status} 分区尚未到 list_date"
-            )
-
-
 def _validate_completeness(
     records: list[dict[str, Any]], source: str, root: Path, *, active_as_of: date,
 ) -> None:
@@ -756,29 +769,93 @@ def snapshot_symbols(
             ) from exc
 
     target = date.fromisoformat(as_of)
+    observation = date.fromisoformat(str(snapshot.manifest["active_as_of"]))
+    if target > observation:
+        raise InstrumentCatalogEvidenceError(
+            f"证券目录观测日 {observation} 早于目标日 {target}，不能推导未来成员"
+        )
     result: set[str] = set()
     for row in snapshot.records:
         if str(row["market"]).upper() != market.upper():
             continue
         if str(row["asset_type"]).lower() != asset_type.lower():
             continue
-        if str(row.get("status") or "").upper() not in {"L", "LISTED", "ACTIVE"}:
+        status = str(row.get("status") or "").upper()
+        if status not in {"L", "LISTED", "ACTIVE", "D", "DELISTED", "P", "SUSPENDED"}:
             continue
         listed = parse_date(row.get("list_date"), field="list_date", symbol=str(row["symbol"]))
-        if listed is None:
-            raise InstrumentCatalogEvidenceError(
-                f"证券目录 {row['symbol']} 缺少合法 list_date"
-            )
         delisted = parse_date(
             row.get("delist_date"), field="delist_date", symbol=str(row["symbol"]),
         )
-        if listed <= target and (delisted is None or target <= delisted):
+        if status in {"L", "LISTED", "ACTIVE"}:
+            if listed is None:
+                if target == observation:
+                    if delisted is None or target <= delisted:
+                        result.add(str(row["symbol"]))
+                    continue
+                raise InstrumentCatalogEvidenceError(
+                    f"证券目录 {row['symbol']} 缺少历史可用的 list_date"
+                )
+            if listed <= target and (delisted is None or target <= delisted):
+                result.add(str(row["symbol"]))
+            continue
+
+        # The provider's D/P partitions describe state at acquisition time.
+        # They are not current members, but a complete lifecycle can prove that
+        # the instrument existed on an earlier target date.  Never re-date the
+        # observation itself: evidence retains the real acquired_at and records
+        # the requested membership_as_of separately.
+        if target == observation:
+            continue
+        if status in {"D", "DELISTED"}:
+            if delisted is None:
+                raise InstrumentCatalogEvidenceError(
+                    f"证券目录 {row['symbol']} 缺少历史可用的 delist_date"
+                )
+            if target > delisted:
+                continue
+        elif delisted is not None and target > delisted:
+            continue
+        if listed is None:
+            raise InstrumentCatalogEvidenceError(
+                f"证券目录 {row['symbol']} 缺少历史可用的 list_date"
+            )
+        if listed <= target:
             result.add(str(row["symbol"]))
     if not result:
         raise InstrumentCatalogEvidenceError(
             f"证券目录在 {as_of} 没有 {market}:{asset_type} expected 成员"
         )
     return result
+
+
+def _select_catalog_membership(
+    candidates: list[tuple[datetime, InstrumentCatalogSnapshot]],
+    *,
+    target: date,
+    market: str,
+    asset_type: str,
+    newest_first: bool,
+) -> tuple[InstrumentCatalogSnapshot, set[str], dict[str, Any]]:
+    failures: list[str] = []
+    for _acquired, snapshot in sorted(
+        candidates, key=lambda item: item[0], reverse=newest_first,
+    ):
+        try:
+            symbols = snapshot_symbols(
+                snapshot, market=market, asset_type=asset_type, as_of=target.isoformat(),
+            )
+        except InstrumentCatalogEvidenceError as exc:
+            failures.append(str(exc))
+            continue
+        evidence = snapshot.evidence(
+            market=market, asset_type=asset_type, as_of=target.isoformat(),
+        )
+        return snapshot, symbols, evidence
+    detail = failures[0] if failures else "生命周期证据不足"
+    raise InstrumentCatalogEvidenceError(
+        f"没有可推导 {target.isoformat()} 成员的证券目录快照：{detail}"
+    )
 
 
 def load_instrument_catalog_snapshot(
@@ -815,7 +892,11 @@ def load_instrument_catalog_snapshot(
         acquired = _parse_acquired(snapshot.acquired_at)
         local = acquired.astimezone(cutoff.tzinfo)
         if as_of:
-            eligible = local.date() == target and local >= cutoff
+            # A later full L/D/P observation may prove earlier membership from
+            # lifecycle dates.  It must be acquired after the target close and
+            # keeps its real acquisition timestamp; it is never relabelled as a
+            # target-day observation.
+            eligible = local >= cutoff
         else:
             eligible = local <= now.astimezone(cutoff.tzinfo)
             eligible = eligible and local >= daily_signal_cutoff(local.date())
@@ -825,14 +906,29 @@ def load_instrument_catalog_snapshot(
     if not candidates:
         scope = f"as_of={target.isoformat()}" if as_of else "current"
         raise InstrumentCatalogEvidenceError(f"没有满足截止时间与新鲜度的证券目录快照: {scope}")
-    snapshot = max(candidates, key=lambda item: item[0])[1]
-    symbols = snapshot_symbols(
-        snapshot, market=market, asset_type=asset_type, as_of=target.isoformat(),
+    if as_of:
+        # Prefer observations acquired on the requested session itself.  A
+        # later catalog can reconstruct lifecycle membership, but it must not
+        # overwrite a target-day metadata snapshot with a late backfill of an
+        # older effective date when a same-day closing observation exists.
+        same_day = [
+            item
+            for item in candidates
+            if item[0].astimezone(cutoff.tzinfo).date() == target
+        ]
+        if same_day:
+            candidates = same_day
+    return _select_catalog_membership(
+        candidates,
+        target=target,
+        market=market,
+        asset_type=asset_type,
+        # For an explicit historical target, use the newest verified
+        # post-close observation that can reconstruct that target.  Choosing
+        # the oldest candidate would silently retain a pre-close directory and
+        # miss same-day metadata updates.
+        newest_first=True,
     )
-    evidence = snapshot.evidence(
-        market=market, asset_type=asset_type, as_of=target.isoformat(),
-    )
-    return snapshot, symbols, evidence
 
 
 def verify_instrument_catalog_evidence(
@@ -859,6 +955,14 @@ def verify_instrument_catalog_evidence(
     if snapshot.file_mtime_ns != int(evidence.get("file_mtime_ns") or 0):
         raise InstrumentCatalogEvidenceError("证券目录 evidence 文件身份已变化")
     as_of = str(evidence.get("as_of") or "")
+    expected_membership = {
+        "membership_as_of": as_of,
+        "observation_active_as_of": str(snapshot.manifest["active_as_of"]),
+        "membership_reconstructed": as_of != str(snapshot.manifest["active_as_of"]),
+        "membership_contract": MEMBERSHIP_CONTRACT,
+    }
+    if any(evidence.get(key) != value for key, value in expected_membership.items()):
+        raise InstrumentCatalogEvidenceError("证券目录 evidence 成员日期契约不匹配")
     symbols = snapshot_symbols(
         snapshot, market=market, asset_type=asset_type, as_of=as_of,
     )
@@ -972,8 +1076,10 @@ def _validate_suspension_payload(payload: dict[str, Any]) -> tuple[dict[str, Any
     acquired = _parse_acquired(str(payload.get("acquired_at") or ""))
     cutoff = daily_signal_cutoff(target_date)
     acquired_local = acquired.astimezone(cutoff.tzinfo)
-    if acquired_local.date() != target_date or acquired_local < cutoff:
-        raise InstrumentCatalogEvidenceError("suspend_d 证据不是目标日收盘后完整快照")
+    if acquired_local < cutoff:
+        raise InstrumentCatalogEvidenceError(
+            "suspend_d 证据早于目标日收盘，不能证明完整停牌集合"
+        )
     return core, acquired
 
 

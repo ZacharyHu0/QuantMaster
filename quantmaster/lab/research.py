@@ -64,7 +64,7 @@ class FeatureSetSpec:
 
     def __post_init__(self) -> None:
         allowed = {
-            "price_volume_v2", "market_context_v1", "pit_fundamental_v1", "news_v1",
+            "price_volume_v2", "market_context_v1", "pit_fundamental_v1", "news_v2",
         }
         if not self.groups or set(self.groups) - allowed:
             raise ValueError("特征组包含未知版本")

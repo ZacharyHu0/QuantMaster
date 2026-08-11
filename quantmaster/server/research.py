@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -13,9 +14,16 @@ from quantmaster.research.engine import ResearchEngine
 from quantmaster.research.jobs import get_research_job_manager
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.server.management import _require_csrf, _require_local
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import market_date, resolve_session_target
 
 router = APIRouter(prefix="/api/v1/research/data", tags=["research-data"])
+
+
+def _default_close_data_end() -> str:
+    expectation = resolve_session_target()
+    if expectation.ready and expectation.session:
+        return expectation.session
+    return (market_date() - timedelta(days=1)).isoformat()
 
 
 class ResearchPlanRequest(ContractModel):
@@ -31,7 +39,7 @@ class ResearchPlanRequest(ContractModel):
 
     def make_plan(self, engine: ResearchEngine):
         return engine.plan(
-            self.start, self.end or market_date().isoformat(),
+            self.start, self.end or _default_close_data_end(),
             asset_classes=tuple(AssetClass(item) for item in self.assets),
             datasets=tuple(self.datasets) or None, spec_ids=tuple(self.specs) or None,
             mode=self.mode, backend=KernelBackend(self.backend),
@@ -67,7 +75,7 @@ def research_capabilities(request: Request) -> dict:
 def preview_research_partition(request: Request, value: ResearchPreviewRequest) -> dict:
     """Return an explicit sandbox preview without writing a Research Lake partition."""
     _require_csrf(request)
-    trade_date = value.trade_date or market_date().isoformat()
+    trade_date = value.trade_date or _default_close_data_end()
     try:
         frame = ResearchEngine().preview_date(value.dataset_id, trade_date)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -172,7 +180,7 @@ def materialize_bar_store(request: Request, value: MaterializeRequest) -> dict:
     engine = ResearchEngine()
     try:
         records = engine.lake.materialize_bar_store(
-            value.symbols or None, value.start, value.end or market_date().isoformat(),
+            value.symbols or None, value.start, value.end or _default_close_data_end(),
             asset_class=AssetClass(value.asset),
         )
     except (ValueError, RuntimeError) as exc:

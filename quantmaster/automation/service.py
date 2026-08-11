@@ -27,7 +27,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
 
@@ -782,6 +782,7 @@ class AutomationService:
         *,
         actor: str = "scheduler",
         idempotency_key: str = "",
+        as_of: str = "",
     ) -> dict:
         if name not in ALLOWED_TASKS:
             raise ValueError("任务不在允许列表中")
@@ -797,7 +798,7 @@ class AutomationService:
         }
         job, created = self.jobs.submit(
             f"automation.{name}",
-            {"name": name, "actor": actor},
+            {"name": name, "actor": actor, "as_of": str(as_of or "")},
             idempotency_key=idempotency_key,
             deadline_seconds=deadlines[name],
             max_attempts=3,
@@ -817,7 +818,12 @@ class AutomationService:
             raise ValueError("持久任务规格包含未知自动化任务")
         context.progress(5, "准备自动化任务", name)
         try:
-            result = getattr(self, f"_task_{name}")()
+            task = getattr(self, f"_task_{name}")
+            result = (
+                task(as_of=str(spec.get("as_of") or ""))
+                if name == "daily_close_pipeline"
+                else task()
+            )
             context.ensure_active()
             context.progress(90, "保存任务结果", name)
             self._after_task_success(context.job_id, name, result)
@@ -1117,7 +1123,7 @@ class AutomationService:
 
         return AICrawler().recover_dead_letters(limit=20, batch_size=5)
 
-    def _task_daily_close_pipeline(self) -> dict:
+    def _task_daily_close_pipeline(self, *, as_of: str = "") -> dict:
         from quantmaster.data import load_panel, load_stock_names
         from quantmaster.data.industry import load_industry_analysis_context
         from quantmaster.data.universe import load_universe_analysis_snapshot
@@ -1125,17 +1131,47 @@ class AutomationService:
         from quantmaster.market.regime import analyze_market
 
         cfg = get_config().automation
-        end = pd.Timestamp(market_date())
+        expectation = resolve_session_target(as_of)
+        if not expectation.ready or not expectation.session:
+            if as_of:
+                return {
+                    "status": "skipped",
+                    "reason": expectation.reason or "无法确认最近完成交易日",
+                    "calendar": expectation.as_dict(),
+                }
+            fallback = (pd.Timestamp(market_date()) - pd.Timedelta(days=1)).date().isoformat()
+            expectation = expectation.__class__(
+                session=fallback,
+                source="bounded-probe",
+                ready=True,
+                reason="交易日历不可用，使用非当天探测日期并继续通过行情门禁校验",
+            )
+        end = pd.Timestamp(expectation.session)
         start = end - pd.Timedelta(days=500)
-        universe_snapshot = load_universe_analysis_snapshot(cfg.primary_universe)
+        if as_of:
+            universe_snapshot = load_universe_analysis_snapshot(
+                cfg.primary_universe, as_of=str(end.date()),
+            )
+        else:
+            # Keep the bounded-probe compatibility path usable with lightweight
+            # providers that predate the optional ``as_of`` keyword.  The formal
+            # market-data gate below still decides whether anything is persisted.
+            universe_snapshot = load_universe_analysis_snapshot(cfg.primary_universe)
         symbols = list(universe_snapshot.symbols)
-        market_envelope = load_panel(symbols, str(start.date()), str(end.date()))
+        market_envelope = load_panel(
+            symbols, str(start.date()), str(end.date()), priority="formal",
+        )
         panel = market_envelope.require_data()
         market_formal = market_envelope.quality.formal_eligible
         latest = pd.Timestamp(panel["close"].dropna(how="all").index[-1]).normalize()
         if latest < end:
             return {"status": "skipped", "reason": "无新 K 线", "latest": str(latest.date())}
-        industry_map, industry_evidence = load_industry_analysis_context()
+        if as_of:
+            industry_map, industry_evidence = load_industry_analysis_context(
+                as_of=str(end.date()),
+            )
+        else:
+            industry_map, industry_evidence = load_industry_analysis_context()
         formal_eligible = (
             market_formal
             and universe_snapshot.formal_eligible

@@ -76,15 +76,33 @@ BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
         "is_official": False, "item_limit": 50, "max_age_hours": 6,
     },
     {
+        "id": "eastmoney_fast", "name": "东方财富快讯", "kind": "builtin",
+        "group_name": "fast",
+        "url": "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
+        "is_official": False, "item_limit": 50, "max_age_hours": 6,
+    },
+    {
         "id": "jin10_authorized", "name": "金十开放平台（需授权）", "kind": "builtin",
         "group_name": "fast", "url": "https://open.jin10.com/",
         "is_official": False, "item_limit": 50, "max_age_hours": 6,
         "enabled": False, "needs_credentials": True,
     },
     {
+        "id": "csrc", "name": "中国证监会要闻", "kind": "builtin",
+        "group_name": "official",
+        "url": "https://www.csrc.gov.cn/searchList/a1a078ee0bc54721ab6b148884c784a8",
+        "is_official": True, "max_age_hours": 336,
+    },
+    {
         "id": "sse", "name": "上海证券交易所公告", "kind": "builtin",
         "group_name": "official", "url": "https://www.sse.com.cn/disclosure/announcement/general/index.shtml",
         "is_official": True, "max_age_hours": 168,
+    },
+    {
+        "id": "szse", "name": "深圳证券交易所通知公告", "kind": "builtin",
+        "group_name": "official",
+        "url": "https://www.szse.cn/disclosure/notice/general/index.html",
+        "is_official": True, "max_age_hours": 336,
     },
     {
         "id": "pboc", "name": "中国人民银行新闻", "kind": "builtin",
@@ -115,7 +133,9 @@ BUILTIN_SOURCE_IDS = frozenset(item["id"] for item in BUILTIN_SOURCES)
 # remains on the source's frozen host set.  Additions require an explicit source
 # contract change after the real provider topology has been verified.
 BUILTIN_OFFICIAL_ALLOWED_HOSTS: dict[str, frozenset[str]] = {
+    "csrc": frozenset({"www.csrc.gov.cn"}),
     "sse": frozenset({"www.sse.com.cn"}),
+    "szse": frozenset({"www.szse.cn"}),
     "pboc": frozenset({"www.pbc.gov.cn"}),
     "nbs_release": frozenset({"www.stats.gov.cn"}),
     "nbs_interpretation": frozenset({"www.stats.gov.cn"}),

@@ -156,14 +156,25 @@ def _iso_time(value: Any) -> str:
 def public_rotation_job(value: dict[str, Any]) -> dict[str, Any]:
     job_id = str(value.get("id") or "")
     status = str(value.get("status") or "unknown")
+    result = value.get("result") if isinstance(value.get("result"), dict) else {}
+    failure_reason = str(value.get("error") or "")[:1000]
     return {
         "domain": "rotation",
         "id": job_id,
+        "type": "rotation.refresh",
         "status": status,
+        "created": bool(value.get("created")),
+        "coalesced": bool(value.get("coalesced")),
+        "input_fingerprint": str(value.get("input_fingerprint") or ""),
+        "algorithm_version": str(value.get("algorithm_version") or ""),
         "progress": max(0, min(100, int(value.get("progress") or 0))),
         "phase": str(value.get("phase") or ""),
         "detail": str(value.get("detail") or value.get("error") or "")[:1000],
         "attempt": max(1, int(value.get("attempt") or 1)),
+        "as_of": str((value.get("spec") or {}).get("as_of") or ""),
+        "completed_as_of": str(result.get("as_of") or result.get("actual_as_of") or ""),
+        "expected_as_of": str(result.get("expected_as_of") or ""),
+        "failure_reason": failure_reason,
         "cancel_requested": bool(value.get("cancel_requested")),
         "created_at": _iso_time(value.get("created_at")),
         "updated_at": _iso_time(value.get("updated_at") or value.get("created_at")),
@@ -171,10 +182,10 @@ def public_rotation_job(value: dict[str, Any]) -> dict[str, Any]:
         "can_retry": status in {"completed", "failed", "cancelled"},
         "result": value.get("result"),
         "links": {
-            "self": f"/api/v1/jobs/rotation/{job_id}",
-            "events": f"/api/v1/jobs/rotation/{job_id}/events",
-            "cancel": f"/api/v1/jobs/rotation/{job_id}/cancel",
-            "retry": f"/api/v1/jobs/rotation/{job_id}/retry",
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+            "cancel": f"/api/v1/jobs/{job_id}/cancel",
+            "retry": f"/api/v1/jobs/{job_id}/retry",
         },
     }
 
@@ -216,13 +227,6 @@ def market_structure() -> dict[str, Any]:
 
 @router.post("/market/analytics/refresh", status_code=202)
 def refresh_market_analytics(value: RotationRefreshRequest) -> dict[str, Any]:
-    if value.source == "auto":
-        # A button click is an explicit operator recovery attempt.  Let the first
-        # Tushare call enter the circuit's half-open probe instead of repeatedly
-        # rebuilding a stale snapshot throughout the previous cooldown window.
-        from quantmaster.data.resilience import PROVIDER_HEALTH
-
-        PROVIDER_HEALTH.reset("tushare")
     worker = get_rotation_worker()
     worker.start()
     job = worker.submit(RotationJobSpec.model_validate(value.model_dump(mode="json")))
@@ -242,22 +246,19 @@ def rotation_industries(
 ) -> dict[str, Any]:
     window = _rotation_window(window)
     service = get_rotation_service()
-    snapshot = service.snapshot("industries")
-    values = [_materialize_group_score(item, window) for item in snapshot.get("data", {}).get("items") or []]
     selected_l2 = set(service.store.preferences()["l2_codes"])
-    needle = query.strip().casefold()
-    items = [
-        item
-        for item in values
-        if (str(item.get("level")) == "L1" or str(item.get("code") or "").upper() in selected_l2)
-        if (level == "all" or str(item.get("level")) == level)
-        and (
-            not needle
-            or needle in str(item.get("name") or "").casefold()
-            or needle in str(item.get("code") or "").casefold()
-        )
-    ]
-    data = {key: value for key, value in snapshot.get("data", {}).items() if key != "details"}
+    _header, values, _pagination_meta = service.store.snapshot_items_page(
+        "industries",
+        query=query,
+        level="" if level == "all" else level,
+        allowed_keys=selected_l2,
+        include_l1=True,
+        page=1,
+        page_size=100,
+    )
+    snapshot = service.snapshot_header("industries")
+    items = [_materialize_group_score(item, window) for item in values]
+    data = dict(snapshot.get("data") or {})
     data.update({"items": items, "window": window})
     return {"meta": snapshot["meta"], "data": data}
 
@@ -285,25 +286,14 @@ def rotation_themes(
 ) -> dict[str, Any]:
     window = _rotation_window(window)
     service = get_rotation_service()
-    snapshot = service.snapshot("themes")
-    values = [_materialize_group_score(item, window) for item in snapshot.get("data", {}).get("items") or []]
-    needle = query.strip().casefold()
-    items = [
-        item
-        for item in values
-        if (
-            not needle
-            or needle in str(item.get("name") or "").casefold()
-            or needle in str(item.get("code") or "").casefold()
-            or needle in str((item.get("primary_industry") or {}).get("name") or "").casefold()
-        )
-        and (not stage or str(item.get("stage") or "") == stage)
-        and (not grade or str(item.get("grade") or "") == grade)
-    ]
-    data = {key: value for key, value in snapshot.get("data", {}).items() if key != "details"}
+    snapshot = service.snapshot_header("themes")
+    data = dict(snapshot.get("data") or {})
+    _focus_header, focus_values, _focus_page = service.store.snapshot_items_page(
+        "themes", sort="focus", order="desc", window=window, page=1, page_size=4,
+    )
     data.update(
         {
-            "focus_items": _theme_focus_items(values, window),
+            "focus_items": _theme_focus_items(focus_values, window),
             "focus_definition": {
                 "criteria": [{"id": criterion, "label": label} for criterion, label in _THEME_FOCUS_CRITERIA],
                 "limit": 4,
@@ -313,33 +303,28 @@ def rotation_themes(
     )
     if page is None and page_size is None:
         selected_limit = limit or int(service.store.preferences()["theme_limit"])
+        _header, values, pagination = service.store.snapshot_items_page(
+            "themes", query=query, stage=stage, grade=grade, sort="position", order="asc",
+            window=window, page=1, page_size=selected_limit,
+        )
         data.update(
             {
-                "items": items[:selected_limit],
-                "total": len(items),
+                "items": [_materialize_group_score(item, window) for item in values],
+                "total": pagination["total"],
                 "limit": selected_limit,
                 "window": window,
             }
         )
         return {"meta": snapshot["meta"], "data": data}
-
-    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
-        signal = (item.get("signals") or {}).get(str(window), {})
-        if sort == "name":
-            return (str(item.get("name") or "").casefold(), str(item.get("code") or ""))
-        fields = {
-            "score": item.get("rotation_score"),
-            "excess": signal.get("excess_return"),
-            "amount": signal.get("amount_activity"),
-            "coverage": item.get("coverage"),
-            "change": signal.get("rotation_change_pp"),
-        }
-        return (_number(fields[sort]), str(item.get("name") or ""), str(item.get("code") or ""))
-
-    reverse = order == "desc"
-    items.sort(key=sort_key, reverse=reverse)
-    visible, pagination = _pagination(items, page or 1, _page_size(page_size))
-    data.update({"items": visible, "pagination": pagination, "window": window})
+    _header, values, pagination = service.store.snapshot_items_page(
+        "themes", query=query, stage=stage, grade=grade, sort=sort, order=order,
+        window=window, page=page or 1, page_size=_page_size(page_size),
+    )
+    data.update({
+        "items": [_materialize_group_score(item, window) for item in values],
+        "pagination": pagination,
+        "window": window,
+    })
     return {"meta": snapshot["meta"], "data": data}
 
 
@@ -363,41 +348,18 @@ def rotation_etf_flow_items(
     window: int = 5,
 ) -> dict[str, Any]:
     window = _rotation_window(window)
-    snapshot = get_rotation_service().snapshot("etf_flows")
-    values = list(snapshot.get("data", {}).get("items") or [])
-    needle = query.strip().casefold()
-    items = [
-        item
-        for item in values
-        if (
-            not needle
-            or needle in str(item.get("name") or "").casefold()
-            or needle in str(item.get("symbol") or "").casefold()
-            or needle in str(item.get("benchmark") or "").casefold()
-        )
-        and (not category or str(item.get("category") or "") == category)
-    ]
-
-    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
-        if sort == "name":
-            return (str(item.get("name") or "").casefold(), str(item.get("symbol") or ""))
-        value = (
-            item.get("flows", {}).get(str(window))
-            if sort == "flow"
-            else item.get("flow")
-            if sort == "daily"
-            else item.get("flow_streak_sessions")
-        )
-        return (_number(value), str(item.get("name") or ""), str(item.get("symbol") or ""))
-
-    items.sort(key=sort_key, reverse=order == "desc")
-    visible, pagination = _pagination(items, page, _page_size(page_size))
+    service = get_rotation_service()
+    snapshot = service.snapshot_header("etf_flows")
+    _header, values, pagination = service.store.snapshot_items_page(
+        "etf_flows", query=query, category=category, sort=sort, order=order,
+        window=window, page=page, page_size=_page_size(page_size),
+    )
     return {
         "meta": snapshot["meta"],
         "data": {
-            "items": visible,
+            "items": values,
             "pagination": pagination,
-            "categories": sorted({str(item.get("category") or "未分类") for item in values}),
+            "categories": service.store.snapshot_item_categories("etf_flows"),
         },
     }
 
@@ -589,6 +551,16 @@ def rotation_etfs(
 
 
 def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
+    capabilities = dict(snapshot.capabilities)
+    metadata_capability = dict(capabilities.get("metadata") or {})
+    denominator = dict(metadata_capability.get("denominator") or {})
+    if denominator:
+        members = denominator.pop("members", ())
+        denominator["member_count"] = int(
+            denominator.get("observed_symbols") or len(members)
+        )
+        metadata_capability["denominator"] = denominator
+        capabilities["metadata"] = metadata_capability
     selected = [item for item in snapshot.sectors if asset == "all" or item.get("asset_class") == asset]
     selected_ids = {item["sector_id"] for item in selected}
     queues = {
@@ -792,7 +764,7 @@ def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
     )
     return {
         "freshness": snapshot.freshness,
-        "capabilities": snapshot.capabilities,
+        "capabilities": capabilities,
         "summaries": summaries,
         "sectors": compact,
         "queues": queues,
@@ -812,6 +784,7 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
 
     from quantmaster.research.contracts import content_hash
     from quantmaster.rotation.etf_research import _frame_hash
+    from quantmaster.rotation.store import RotationStore
 
     local_inputs = [
         item
@@ -830,20 +803,65 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
             "input_as_of": "",
             "reason": "尚无可用于补算的本地 ETF 行情输入",
         }
-    direct = service._direct_share_observations()
-    if not direct.empty and "trade_date" in direct:
-        direct = direct.copy()
-        direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
-        direct = direct[direct["trade_date"].dt.date <= pd.Timestamp(latest_input.as_of_date).date()]
-    metadata = service._direct_metadata()
+    current_hashes = {"行情": content_hash(latest_input.content_hashes)}
+    if snapshot is None:
+        fingerprint = content_hash(
+            {
+                "input": latest_input.ingest_id,
+                "as_of": latest_input.as_of_date,
+                "evidence": current_hashes,
+            }
+        )
+        return {
+            "recommended": True,
+            "input_id": fingerprint,
+            "input_as_of": latest_input.as_of_date,
+            "reason": "本地证据已变化（行情），进入页面时仅补算一次",
+        }
+
+    generated_at = pd.to_datetime(snapshot.generated_at, errors="coerce", utc=True)
+    generated_ns = int(generated_at.value) if pd.notna(generated_at) else -1
     factor_path = service.store.root / "evidence" / "adjustment_factors.parquet"
     try:
-        factors = pd.read_parquet(factor_path) if factor_path.is_file() else pd.DataFrame()
-    except (OSError, ValueError):
-        factors = pd.DataFrame()
-    current_hashes = {
-        "行情": content_hash(latest_input.content_hashes),
-        "份额": _frame_hash(
+        rotation_store = RotationStore()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        rotation_store = None
+    evidence_paths = {
+        "份额": getattr(rotation_store, "etf_path", None),
+        "复权": factor_path,
+        "元数据源": getattr(rotation_store, "etf_metadata_path", None),
+    }
+    fallback_labels: set[str] = set()
+    for label, path in evidence_paths.items():
+        if path is None:
+            fallback_labels.add(label)
+            continue
+        try:
+            stat = path.stat()
+        except (FileNotFoundError, OSError):
+            fallback_labels.add(label)
+            continue
+        previous_hash = snapshot.evidence_hashes.get(label, "")
+        if previous_hash and generated_ns >= 0 and stat.st_mtime_ns <= generated_ns:
+            # The immutable snapshot was created after this artifact. Its canonical hash
+            # remains valid, so a GET need not sort and hash up to millions of local rows.
+            current_hashes[label] = previous_hash
+        else:
+            # A changed filesystem identity requests one recomputation. The scan calculates
+            # the canonical hash and reuses the snapshot if the rewritten content is equal.
+            current_hashes[label] = content_hash(
+                {"path": str(path), "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
+            )
+
+    if "份额" in fallback_labels:
+        direct = service._direct_share_observations()
+        if not direct.empty and "trade_date" in direct:
+            direct = direct.copy()
+            direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
+            direct = direct[
+                direct["trade_date"].dt.date <= pd.Timestamp(latest_input.as_of_date).date()
+            ]
+        current_hashes["份额"] = _frame_hash(
             direct,
             (
                 "symbol",
@@ -855,9 +873,12 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
                 "share_source",
                 "source",
             ),
-        ),
-        "复权": _frame_hash(factors, ("symbol", "date", "adj_factor", "source")),
-        "元数据": _frame_hash(
+        )
+    if "复权" in fallback_labels:
+        current_hashes["复权"] = snapshot.evidence_hashes.get("复权", content_hash([]))
+    if "元数据源" in fallback_labels:
+        metadata = service._direct_metadata()
+        current_hashes["元数据源"] = _frame_hash(
             metadata,
             (
                 "symbol",
@@ -873,10 +894,7 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
                 "mgt_fee",
                 "metadata_source",
             ),
-        ),
-    }
-    if metadata.empty and snapshot is not None:
-        current_hashes["元数据"] = snapshot.evidence_hashes.get("元数据", current_hashes["元数据"])
+        )
     changed = [
         label
         for label, value in current_hashes.items()

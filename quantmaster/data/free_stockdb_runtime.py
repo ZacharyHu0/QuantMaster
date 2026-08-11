@@ -35,8 +35,10 @@ _AUTO_MAX_ATTEMPTS = 3
 _AUTO_RETRY_SECONDS = 15 * 60
 _UPDATER_TIMEOUT_SECONDS = 30 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
+_DATA_STABILITY_SECONDS = 10
+_DATA_QUIESCENCE_POLL_SECONDS = 5
 _OWNER_STALE_SECONDS = 120
-_VENDOR_STARTUP_URL = b"http://a.123128.xyz/\x00"
+_MIN_UPDATE_SYMBOL_COVERAGE = 0.98
 
 
 class _RuntimeControl:
@@ -223,49 +225,6 @@ class FreeStockDBRuntime:
     def _paths(cls) -> tuple[Path, Path, Path]:
         root = cls._root()
         return root, root / "stockdb.exe", root / "数据更新.exe"
-
-    @staticmethod
-    def _patch_vendor_browser_launch(payload: bytes) -> bytes:
-        """Disable only the vendor's unconditional startup-page launch.
-
-        Current free-stockdb Windows builds contain one separate, hard-coded HTTP
-        homepage passed to ``ShellExecuteA`` during startup.  The HTTPS version
-        endpoint and the rest of the executable remain untouched, so QuantMaster
-        can still surface upstream update notices.
-        """
-        occurrences = payload.count(_VENDOR_STARTUP_URL)
-        if occurrences != 1:
-            raise RuntimeError(
-                "无法可靠识别 free-stockdb 启动页入口"
-                f"（期望 1 处，实际 {occurrences} 处）"
-            )
-        replacement = b"\x00" + (b" " * (len(_VENDOR_STARTUP_URL) - 1))
-        return payload.replace(_VENDOR_STARTUP_URL, replacement, 1)
-
-    @classmethod
-    def _headless_executable(cls, executable: Path) -> Path:
-        """Return a content-addressed managed copy that cannot open the homepage."""
-        payload = executable.read_bytes()
-        patched = cls._patch_vendor_browser_launch(payload)
-        digest = hashlib.sha256(payload).hexdigest()[:16]
-        target = executable.parent / f".quantmaster-stockdb-headless-{digest}.exe"
-        try:
-            if target.read_bytes() == patched:
-                return target
-        except OSError:
-            pass
-        temporary = target.with_name(
-            f"{target.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-        )
-        try:
-            temporary.write_bytes(patched)
-            temporary.replace(target)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return target
 
     @classmethod
     def _owner_marker_path(cls) -> Path:
@@ -507,6 +466,20 @@ class FreeStockDBRuntime:
     def _is_managed(self) -> bool:
         return self._daemon_started or self._process is not None
 
+    @staticmethod
+    def _launch_service_process(
+        executable: Path, config_path: Path, root: Path,
+    ) -> subprocess.Popen[bytes]:
+        command = [str(executable), "-d", str(config_path), "-s", "start"]
+        return subprocess.Popen(
+            command, cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    @staticmethod
+    def _executable_digest(executable: Path) -> str:
+        return hashlib.sha256(executable.read_bytes()).hexdigest()
+
     def _start_service(self) -> bool:
         root, executable, _ = self._paths()
         config_path = root / "stockdb.conf"
@@ -516,18 +489,8 @@ class FreeStockDBRuntime:
             return False
         if self._stop.is_set():
             return False
-        managed_executable: Path | None = None
-        patch_error = ""
-        if executable.is_file():
-            try:
-                managed_executable = self._headless_executable(executable)
-            except (OSError, RuntimeError) as exc:
-                patch_error = str(exc)
-                logger.error("free-stockdb 无弹窗托管副本创建失败：%s", exc)
         if self._listening():
-            if self._process is None and managed_executable is not None and self._recover_managed_orphan(
-                executable, managed_executable,
-            ):
+            if self._process is None and self._recover_managed_orphan(executable):
                 logger.info("free-stockdb 孤儿进程已回收，准备重新托管")
             else:
                 self._set_status("running", "本地服务已运行", managed=self._is_managed())
@@ -536,39 +499,44 @@ class FreeStockDBRuntime:
             self._set_status("missing", f"等待完整发行包：{root}", managed=False)
             logger.warning("free-stockdb 未就绪，等待完整发行包：%s", root)
             return False
-        if managed_executable is None:
-            self._set_status(
-                "error", f"无法创建 free-stockdb 无弹窗托管副本：{patch_error}", managed=False,
-            )
-            return False
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        self._process = subprocess.Popen(
-            # daemon 模式仍会无条件 ShellExecute 供应商主页，因此使用从原始发行包
-            # 派生的内容寻址副本；副本只清空该启动页常量，不修改版本检测能力。
-            [str(managed_executable), "-d", str(config_path), "-s", "start"],
-            cwd=root, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
-        launcher = self._process
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not self._stop.is_set():
-            if self._listening():
-                self._daemon_started = True
-                self._record_process_owner(managed_executable)
-                self._set_status("running", "本地服务由 QuantMaster 托管", managed=True)
-                logger.info("free-stockdb 已启动 · %s:%s", *endpoint)
-                return True
-            # daemon 启动器可能在后台服务开始监听前正常退出，不能据此提前失败。
-            self._stop.wait(0.25)
-        code = launcher.poll()
-        if code is None:
-            self._terminate_process(launcher, timeout=3)
-        self._process = None
+        code: int | None = None
+        for launch_attempt in range(2):
+            try:
+                source_digest = self._executable_digest(executable)
+                self._process = self._launch_service_process(executable, config_path, root)
+            except (OSError, RuntimeError) as exc:
+                logger.error("free-stockdb 托管启动失败", exc_info=True)
+                self._set_status(
+                    "error", f"本地服务启动失败：{type(exc).__name__}", managed=False,
+                )
+                return False
+            launcher = self._process
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not self._stop.is_set():
+                if self._listening():
+                    self._daemon_started = True
+                    self._record_process_owner(executable)
+                    self._set_status("running", "本地服务由 QuantMaster 托管", managed=True)
+                    logger.info("free-stockdb 已启动 · %s:%s", *endpoint)
+                    return True
+                # daemon 启动器可能在后台服务开始监听前正常退出，不能据此提前失败。
+                self._stop.wait(0.25)
+            code = launcher.poll()
+            if code is None:
+                self._terminate_process(launcher, timeout=3)
+            self._process = None
+            try:
+                replaced = self._executable_digest(executable) != source_digest
+            except OSError:
+                replaced = False
+            if launch_attempt == 0 and replaced and not self._stop.is_set():
+                logger.info("free-stockdb 引导程序已替换平台运行版，正在重新启动")
+                continue
+            break
         self._daemon_started = False
         self._clear_process_owner()
-        self._set_status("error", "本地服务未能在 10 秒内就绪", exit_code=code)
-        logger.warning("free-stockdb 启动后未能在 10 秒内就绪")
+        self._set_status("error", "本地服务未能在受控启动窗口内就绪", exit_code=code)
+        logger.warning("free-stockdb 启动后未能在受控启动窗口内就绪")
         return False
 
     @staticmethod
@@ -590,25 +558,6 @@ class FreeStockDBRuntime:
         process = self._process
         if not self._daemon_started and process is None:
             return not self._listening()
-        root, executable, _ = self._paths()
-        config_path = root / "stockdb.conf"
-        managed_executable: Path | None = None
-        if executable.is_file():
-            try:
-                managed_executable = self._headless_executable(executable)
-            except (OSError, RuntimeError):
-                logger.error("free-stockdb 无弹窗停止程序创建失败", exc_info=True)
-        if self._daemon_started and managed_executable is not None and config_path.is_file():
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            try:
-                subprocess.run(
-                    [str(managed_executable), "-d", str(config_path), "-s", "stop"],
-                    cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, creationflags=creationflags,
-                    check=False, timeout=10,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                logger.warning("free-stockdb 后台服务停止命令失败", exc_info=True)
         if process is not None and process.poll() is None:
             self._terminate_process(process)
         self._process = None
@@ -650,6 +599,91 @@ class FreeStockDBRuntime:
             with self._lock:
                 if self._updater_process is process:
                     self._updater_process = None
+
+    @staticmethod
+    def _data_roots(root: Path) -> tuple[Path, ...]:
+        return tuple(
+            base for base in (
+                root / "data", root / "data1", root / "mydb", root / "数据库",
+            ) if base.is_dir()
+        )
+
+    @classmethod
+    def _data_fingerprint(cls, root: Path) -> tuple[tuple[str, int, int], ...]:
+        """Return a cheap fingerprint for vendor data files, including child writes."""
+        bases = cls._data_roots(root)
+        if not bases:
+            return ()
+        rows: list[tuple[str, int, int]] = []
+        for base in bases:
+            try:
+                for path in base.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    try:
+                        stat = path.stat()
+                    except OSError:
+                        continue
+                    rows.append((
+                        str(path.relative_to(root)),
+                        int(stat.st_size),
+                        int(stat.st_mtime_ns),
+                    ))
+            except OSError:
+                continue
+        return tuple(sorted(rows))
+
+    def _wait_for_data_quiescent(
+        self,
+        root: Path,
+        *,
+        timeout_seconds: float = _TARGET_CHECK_SECONDS,
+        stable_seconds: float = _DATA_STABILITY_SECONDS,
+    ) -> bool:
+        """Wait until the updater and any detached child stop changing data files."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        previous = self._data_fingerprint(root)
+        if not previous and not self._data_roots(root):
+            return True
+        stable_since = time.monotonic()
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now - stable_since >= max(0.0, float(stable_seconds)):
+                return True
+            if now >= deadline:
+                return False
+            if self._stop.wait(min(_DATA_QUIESCENCE_POLL_SECONDS, max(0.01, deadline - now))):
+                return False
+            current = self._data_fingerprint(root)
+            if current != previous:
+                previous = current
+                stable_since = time.monotonic()
+        return False
+
+    def _validate_until_ready(
+        self,
+        target: str,
+        root: Path,
+        *,
+        timeout_seconds: float = _TARGET_CHECK_SECONDS,
+    ) -> dict[str, Any]:
+        """Recheck a just-written target every five seconds for up to five minutes."""
+        validation = self._validate_data(target)
+        if validation.get("accepted"):
+            return validation
+        # A test fixture or an installation without a vendor data directory has
+        # no asynchronous writer to wait for; keep the failure immediate there.
+        if not self._data_fingerprint(root) and not self._data_roots(root):
+            return validation
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if self._stop.wait(min(_DATA_QUIESCENCE_POLL_SECONDS, max(0.01, remaining))):
+                break
+            validation = self._validate_data(target)
+            if validation.get("accepted"):
+                return validation
+        return validation
 
     def _marker_path(self) -> Path:
         return self._root() / ".quantmaster-update.json"
@@ -774,16 +808,20 @@ class FreeStockDBRuntime:
     def _target_session(self, *, force_notice: bool = False) -> tuple[str, str]:
         notice = self.check_vendor_notice(force=force_notice)
         vendor_date = self._valid_date(notice.get("data_date"))
-        if vendor_date:
-            return vendor_date, "free-stockdb-vendor"
         try:
-            from quantmaster.trading_sessions import expected_session
+            from quantmaster.trading_sessions import resolve_session_target
 
-            expectation = expected_session()
-            if expectation.ready and self._valid_date(expectation.session):
+            expectation = resolve_session_target()
+            if expectation.ready and expectation.session:
+                if vendor_date and vendor_date == expectation.session:
+                    return vendor_date, "free-stockdb-vendor"
                 return expectation.session, expectation.source
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
+        if vendor_date:
+            logger.warning(
+                "忽略没有已完成交易日证据约束的 vendor data_date=%s", vendor_date,
+            )
         return "", "unavailable"
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:
@@ -806,7 +844,9 @@ class FreeStockDBRuntime:
             "observed_symbols": 0,
             "symbol_ratio": 0.0,
             "required_ohlcv_ratio": 0.0,
+            "accepted": False,
             "complete": False,
+            "warnings": [],
             "issues": [],
         }
         if not target_session or not symbols:
@@ -821,8 +861,11 @@ class FreeStockDBRuntime:
                 frames.append(source.daily_cross_section(
                     symbols[offset:offset + 300], start, target_session,
                 ))
-        except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            result["issues"] = [f"读取 free-stockdb 验证截面失败：{str(exc)[:300]}"]
+        except Exception as exc:
+            logger.warning("读取 free-stockdb 验证截面失败", exc_info=True)
+            result["issues"] = [
+                f"读取 free-stockdb 验证截面失败：{type(exc).__name__}: {str(exc)[:240]}"
+            ]
             return result
         frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if frame.empty:
@@ -855,6 +898,7 @@ class FreeStockDBRuntime:
                 suspension_error = f"Tushare suspend_d 停牌证据不可用：{str(exc)[:240]}"
         expected_trading = set(symbols) - excused_suspensions
         observed = len(observed_symbols & expected_trading)
+        unresolved_missing = expected_trading - observed_symbols
         symbol_ratio = observed / len(expected_trading) if expected_trading else 1.0
         required = ["open", "high", "low", "close", "volume"]
         valid_required = pd.Series(False, index=latest.index)
@@ -875,21 +919,38 @@ class FreeStockDBRuntime:
             invalid_ohlc = int((~(positive_prices & ohlc_consistent)).sum())
             invalid_volume = int((~nonnegative_volume).sum())
         required_ratio = float(valid_required.mean()) if len(valid_required) else 0.0
+        warnings = []
         issues = []
         if symbol_ratio < 1.0:
-            issues.append(
-                f"目标日截面仅覆盖 {observed}/{len(expected_trading)} 只应交易证券；"
-                "其余缺失标的没有停牌/退市证据"
+            warnings.append(
+                f"目标日 stockdb 截面覆盖 {observed}/{len(expected_trading)} 只应交易证券；"
+                f"{len(unresolved_missing)} 只缺口将交由后续混合数据源补齐，"
+                "未补齐部分保留缺失标记"
             )
         if suspension_error:
-            issues.append(suspension_error)
+            warnings.append(f"{suspension_error}；不阻断本次更新验收")
+        if result["actual_session"] != target_session:
+            issues.append(
+                f"free-stockdb 最新交易日为 {result['actual_session'] or '未知'}，"
+                f"尚未到达目标日 {target_session}"
+            )
+        if observed <= 0:
+            issues.append("目标日 stockdb 截面没有可用证券")
+        if symbol_ratio < _MIN_UPDATE_SYMBOL_COVERAGE:
+            issues.append(
+                f"目标日证券覆盖率 {symbol_ratio:.1%} 低于更新验收线 "
+                f"{_MIN_UPDATE_SYMBOL_COVERAGE:.0%}"
+            )
         if required_ratio < 1.0:
             issues.append(f"目标日完整 OHLCV 比例仅 {required_ratio:.1%}")
+        accepted = not issues
         result.update({
             "catalog_symbols": len(symbols),
             "expected_trading_symbols": len(expected_trading),
             "observed_symbols": observed,
             "symbol_ratio": round(symbol_ratio, 6),
+            "missing_symbol_count": len(unresolved_missing),
+            "missing_symbol_sample": sorted(unresolved_missing)[:50],
             "excused_suspended_symbols": sorted(excused_suspensions),
             "suspension_evidence": suspension_evidence,
             "required_ohlcv_ratio": round(required_ratio, 6),
@@ -898,7 +959,9 @@ class FreeStockDBRuntime:
                 "price_or_ohlc_rows": invalid_ohlc,
                 "negative_volume_rows": invalid_volume,
             },
-            "complete": not issues,
+            "accepted": accepted,
+            "complete": accepted and symbol_ratio == 1.0 and not suspension_error,
+            "warnings": warnings,
             "issues": issues,
         })
         return result
@@ -909,16 +972,32 @@ class FreeStockDBRuntime:
         except (OSError, sqlite3.Error):
             logger.warning("free-stockdb 更新事件写入失败", exc_info=True)
 
+    @staticmethod
+    def _market_session_available(target: str, validation: dict[str, Any]) -> bool:
+        """Return whether a strict hybrid market refresh can consume this session."""
+        try:
+            target_date = date.fromisoformat(target)
+            actual_date = date.fromisoformat(str(validation.get("actual_session") or ""))
+            observed = int(validation.get("observed_symbols") or 0)
+            ohlcv_ratio = float(validation.get("required_ohlcv_ratio") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return actual_date >= target_date and observed > 0 and ohlcv_ratio == 1.0
+
     def _finish_success(
         self, *, target: str, validation: dict[str, Any], code: int,
         attempt: int, trigger: str,
     ) -> bool:
+        warnings = [str(value) for value in validation.get("warnings") or () if value]
+        message = f"数据已验证至 {target}，本地服务已恢复"
+        if warnings:
+            message = f"{message}；{warnings[0]}（可继续扫描或稍后重试）"
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
         self._record_update(code, target, validation, attempt)
         self._set_status(
-            "running", f"数据已验证至 {target}，本地服务已恢复",
+            "running", message,
             phase="completed", update_result="success", exit_code=code,
             trigger=trigger, target_session=target,
             actual_session=str(validation.get("actual_session") or ""),
@@ -947,6 +1026,11 @@ class FreeStockDBRuntime:
         attempt: int, trigger: str, message: str, allow_retry: bool = True,
     ) -> bool:
         automatic = trigger in {"schedule", "retry"}
+        if self._market_session_available(target, validation):
+            self._emit_update_event("market_session_available", target, {
+                "target_session": target, "validation": validation,
+                "trigger": trigger, "message": message,
+            })
         if automatic and allow_retry and attempt < _AUTO_MAX_ATTEMPTS and not self._stop.is_set():
             self._retry_target = target
             self._retry_attempt = attempt + 1
@@ -1004,7 +1088,8 @@ class FreeStockDBRuntime:
             (target_session, "retry") if target_session else self._target_session(force_notice=True)
         )
         blank_validation: dict[str, Any] = {
-            "target_session": target, "actual_session": "", "complete": False, "issues": [],
+            "target_session": target, "actual_session": "", "accepted": False,
+            "complete": False, "warnings": [], "issues": [],
         }
         if not target:
             blank_validation["issues"] = ["无法从官方动态或可信交易日历确定目标交易日"]
@@ -1021,7 +1106,7 @@ class FreeStockDBRuntime:
                 managed=self._is_managed(),
         )
         preflight = self._validate_data(target)
-        if preflight.get("complete"):
+        if preflight.get("accepted"):
             return self._finish_success(
                 target=target, validation=preflight, code=0, attempt=attempt, trigger=trigger,
             )
@@ -1060,6 +1145,13 @@ class FreeStockDBRuntime:
         except OSError as exc:
             updater_error = f"原生更新器启动失败：{str(exc)[:300]}"
             logger.error("free-stockdb 自动更新失败：%s", exc)
+        if not self._stop.is_set() and not self._wait_for_data_quiescent(root):
+            message = updater_error or "更新器退出后数据目录仍在写入，未提前重启本地服务"
+            logger.error(message)
+            return self._finish_failure(
+                target=target, validation=preflight, code=code, attempt=attempt,
+                trigger=trigger, message=message,
+            )
         restored = False
         if not self._stop.is_set():
             self._set_status(
@@ -1090,8 +1182,8 @@ class FreeStockDBRuntime:
             max_attempts=_AUTO_MAX_ATTEMPTS if trigger != "manual" else 1,
                     next_retry_at="", validation=preflight, managed=self._is_managed(),
         )
-        validation = self._validate_data(target)
-        if validation.get("complete"):
+        validation = self._validate_until_ready(target, root)
+        if validation.get("accepted"):
             return self._finish_success(
                 target=target, validation=validation, code=code,
                 attempt=attempt, trigger=trigger,
@@ -1204,7 +1296,7 @@ class FreeStockDBRuntime:
                 )
             else:
                 result = {"status": "failed", "message": "未知控制命令"}
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        except Exception as exc:
             logger.exception("free-stockdb 控制命令执行失败")
             result = {"status": "failed", "message": str(exc)[:500]}
         self._ensure_control().complete_command(str(command["id"]), result)
@@ -1212,37 +1304,46 @@ class FreeStockDBRuntime:
 
     def _scheduler(self) -> None:
         while not self._stop.is_set():
-            if self._process_command():
-                continue
-            timezone = ZoneInfo(get_config().automation.timezone)
-            now = datetime.now(timezone)
-            if self._next_retry_at and time.time() >= self._next_retry_at:
-                target, attempt = self._retry_target, self._retry_attempt
-                self._next_retry_at = 0.0
-                self.update_now("retry", target_session=target, attempt=attempt)
-                continue
-            cfg = get_config().data
-            scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
-            due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
-            if (
-                cfg.free_stockdb_auto_update and scheduled_today and due_for_check
-                and not self._update_lock.locked() and not self._next_retry_at
-            ):
-                force_notice = time.time() - self._last_vendor_force >= _AUTO_RETRY_SECONDS
-                self._last_target_check = time.time()
-                if force_notice:
-                    self._last_vendor_force = time.time()
-                target, _source = self._target_session(force_notice=force_notice)
-                if target and target > self._last_update_date():
-                    self.update_now("schedule", target_session=target, attempt=1)
-                    continue
             try:
+                if self._process_command():
+                    continue
+                timezone = ZoneInfo(get_config().automation.timezone)
+                now = datetime.now(timezone)
+                if self._next_retry_at and time.time() >= self._next_retry_at:
+                    target, attempt = self._retry_target, self._retry_attempt
+                    self._next_retry_at = 0.0
+                    self.update_now("retry", target_session=target, attempt=attempt)
+                    continue
+                cfg = get_config().data
+                scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
+                due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
+                if (
+                    cfg.free_stockdb_auto_update and scheduled_today and due_for_check
+                    and not self._update_lock.locked() and not self._next_retry_at
+                ):
+                    force_notice = time.time() - self._last_vendor_force >= _AUTO_RETRY_SECONDS
+                    self._last_target_check = time.time()
+                    if force_notice:
+                        self._last_vendor_force = time.time()
+                    target, _source = self._target_session(force_notice=force_notice)
+                    if target and target > self._last_update_date():
+                        self.update_now("schedule", target_session=target, attempt=1)
+                        continue
                 with self._lock:
                     heartbeat = dict(self._status)
                 heartbeat.update({"owner_pid": os.getpid(), "supervised": False})
                 self._ensure_control().write_state(heartbeat)
             except (OSError, sqlite3.Error):
                 logger.warning("free-stockdb owner 心跳写入失败", exc_info=True)
+            except Exception:
+                logger.exception("free-stockdb 后台调度失败，监督线程将在 5 秒后继续")
+                self._last_target_check = time.time()
+                self._set_status(
+                    "degraded", "free-stockdb 后台调度异常；将在 5 秒后重试",
+                    update_result="failed", managed=self._is_managed(),
+                )
+                self._stop.wait(5.0)
+                continue
             self._stop.wait(1.0)
 
     def start(self) -> bool:
@@ -1315,12 +1416,48 @@ class FreeStockDBRuntime:
         kind = str(event.get("kind") or "")
         payload = dict(event.get("payload") or {})
         cfg = get_config()
-        if kind == "update_succeeded":
-            if cfg.data.after_close_enabled and cfg.data.after_close_auto_run:
+        if kind in {"update_succeeded", "market_session_available"}:
+            target = str(payload.get("target_session") or "")
+            if (
+                kind == "update_succeeded"
+                and cfg.data.after_close_enabled
+                and cfg.data.after_close_auto_run
+            ):
                 from quantmaster.after_close.jobs import get_after_close_jobs
 
-                get_after_close_jobs().submit(force=False)
-                logger.info("free-stockdb 验收完成，已提交盘后研究扫描")
+                get_after_close_jobs().submit(as_of=target, force=False)
+                logger.info("free-stockdb 验收完成，已提交 %s 盘后研究扫描", target)
+            from quantmaster.rotation.contracts import RotationJobSpec
+            from quantmaster.rotation.service import get_rotation_worker
+
+            get_rotation_worker().submit(
+                RotationJobSpec(scope="all", source="auto", as_of=target),
+            )
+            if kind == "update_succeeded" and target and cfg.automation.enabled:
+                from quantmaster.automation.runtime import get_runtime
+
+                get_runtime().service.run_task(
+                    "daily_close_pipeline",
+                    actor="free-stockdb",
+                    as_of=target,
+                    idempotency_key=f"free-stockdb-close:{target}",
+                )
+                logger.info("free-stockdb 验收完成，已提交 %s 正式选股流水线", target)
+            if kind == "update_succeeded" and target:
+                from quantmaster.backtest.paper_automation import get_paper_automation_worker
+
+                requeued = get_paper_automation_worker().requeue_market_data(target)
+                if requeued:
+                    logger.info(
+                        "free-stockdb 验收完成，已重新唤醒 %s 个因行情证据失败的模拟账户（%s）",
+                        requeued,
+                        target,
+                    )
+            logger.info(
+                "free-stockdb %s，已提交 %s 观察刷新",
+                "验收完成" if kind == "update_succeeded" else "目标交易日数据可用",
+                target or "最近完成交易日",
+            )
             return
         if kind != "update_failed" or not (
             cfg.data.after_close_notify and cfg.automation.enabled

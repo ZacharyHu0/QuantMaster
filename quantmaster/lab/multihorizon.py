@@ -182,7 +182,7 @@ def _engineered_research_features(
             )
             yield f"fundamental_{output}", transform(raw.astype(float))
             yield f"fundamental_{output}_observed", raw.notna().astype(float)
-    if spec.include_news and "news_v1" in spec.groups:
+    if spec.include_news and "news_v2" in spec.groups:
         news = (fundamentals or {}).get("news_sentiment", close * np.nan)
         yield "news_sentiment", news.reindex_like(close)
         yield "news_sentiment_observed", news.reindex_like(close).notna().astype(float)
@@ -221,7 +221,7 @@ def _feature_cube_unlocked(
         (48 if "price_volume_v2" in feature_spec.groups else 0)
         + (8 if "market_context_v1" in feature_spec.groups else 0)
         + (10 if "pit_fundamental_v1" in feature_spec.groups else 0)
-        + (2 if feature_spec.include_news and "news_v1" in feature_spec.groups else 0)
+        + (2 if feature_spec.include_news and "news_v2" in feature_spec.groups else 0)
     )
     if not feature_count:
         raise ValueError("特征注册表为空")

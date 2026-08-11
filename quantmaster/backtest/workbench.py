@@ -24,7 +24,7 @@ from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import resolve_session_target
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +410,13 @@ class BacktestService:
         from quantmaster.runtime.problems import OperationProblem, make_problem
 
         spec = BacktestSpec.model_validate(run["config"])
-        end = spec.end or market_date().isoformat()
+        if spec.end:
+            end = spec.end
+        else:
+            expectation = resolve_session_target()
+            if not expectation.ready or not expectation.session:
+                raise ValueError(f"默认回测截止交易日不可用：{expectation.reason}")
+            end = expectation.session
         warnings: list[dict[str, str]] = []
         resolved_tier = (
             "production" if spec.research_tier == "auto" and spec.universe.lower() == "csi800"

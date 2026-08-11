@@ -537,9 +537,13 @@ class TestBasics:
         chart_script = client.get("/static/charts.js")
         chart_styles = client.get("/static/charts.css")
         settings_script = client.get("/static/settings.js")
+        after_close_script = client.get("/static/after-close.js")
+        after_close_styles = client.get("/static/after-close.css")
         assert chart_script.status_code == 200
         assert chart_styles.status_code == 200
         assert settings_script.status_code == 200
+        assert after_close_script.status_code == 200
+        assert after_close_styles.status_code == 200
         assert "function motionProfile(kind, count)" in chart_script.text
         assert "count > 1000" in chart_script.text
         assert "count > 240" in chart_script.text
@@ -554,6 +558,8 @@ class TestBasics:
         assert "freeStockDbPollFailures < 5" in settings_script.text
         assert "['failed', 'manual_required'].includes(stockdb.update_result)" in settings_script.text
         assert "stockdb.target_session" in settings_script.text
+        assert "succeededWithWarnings" in after_close_script.text
+        assert '[data-tone="warning"]' in after_close_styles.text
         help_content = client.get("/static/help-content.html")
         assert help_content.status_code == 200
         assert 'data-help-topic="start"' in help_content.text

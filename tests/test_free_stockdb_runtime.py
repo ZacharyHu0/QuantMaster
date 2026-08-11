@@ -56,31 +56,6 @@ def test_managed_endpoint_uses_configured_loopback_port(monkeypatch) -> None:
     assert FreeStockDBRuntime._endpoint() == ("localhost", 7900)
 
 
-def test_headless_copy_disables_only_unconditional_vendor_page(tmp_path) -> None:
-    executable = tmp_path / "stockdb.exe"
-    version_endpoint = b"https://a.123128.xyz/version?token=\x00"
-    original = b"prefix\x00http://a.123128.xyz/\x00middle\x00" + version_endpoint + b"suffix"
-    executable.write_bytes(original)
-
-    managed = FreeStockDBRuntime._headless_executable(executable)
-    patched = managed.read_bytes()
-
-    assert managed != executable
-    assert managed.name.startswith(".quantmaster-stockdb-headless-")
-    assert b"http://a.123128.xyz/\x00" not in patched
-    assert version_endpoint in patched
-    assert executable.read_bytes() == original
-    assert FreeStockDBRuntime._headless_executable(executable) == managed
-
-
-def test_headless_copy_refuses_unknown_vendor_binary(tmp_path) -> None:
-    executable = tmp_path / "stockdb.exe"
-    executable.write_bytes(b"unknown vendor build")
-
-    with pytest.raises(RuntimeError, match="期望 1 处，实际 0 处"):
-        FreeStockDBRuntime._headless_executable(executable)
-
-
 def test_reload_worker_attaches_without_taking_process_ownership(tmp_path, monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(runtime, "_listening", lambda: True)
@@ -97,14 +72,13 @@ def test_reload_worker_attaches_without_taking_process_ownership(tmp_path, monke
     assert runtime._thread is None
 
 
-def test_managed_service_uses_headless_daemon_copy(
+def test_managed_service_launches_original_vendor_binary(
     tmp_path, monkeypatch,
 ) -> None:
     root = tmp_path / "free-stockdb"
     root.mkdir()
     executable = root / "stockdb.exe"
     executable.write_bytes(b"placeholder")
-    managed_executable = root / ".quantmaster-stockdb-headless-test.exe"
     config_path = root / "stockdb.conf"
     config_path.write_text("server:\n\tport: 7899\n", encoding="utf-8")
     (root / "data").mkdir()
@@ -113,11 +87,13 @@ def test_managed_service_uses_headless_daemon_copy(
     listening = iter((False, True))
 
     class Process:
+        pid = 22
+
         def poll(self):
             return None
 
-    def popen(command, **kwargs):
-        calls.append((command, kwargs))
+    def launch(actual_executable, actual_config, actual_root):
+        calls.append((actual_executable, actual_config, actual_root))
         return Process()
 
     monkeypatch.setattr(
@@ -125,13 +101,10 @@ def test_managed_service_uses_headless_daemon_copy(
         lambda: (root, executable, root / "数据更新.exe"),
     )
     monkeypatch.setattr(runtime, "_listening", lambda: next(listening))
-    monkeypatch.setattr(runtime, "_headless_executable", lambda _executable: managed_executable)
-    monkeypatch.setattr("quantmaster.data.free_stockdb_runtime.subprocess.Popen", popen)
+    monkeypatch.setattr(runtime, "_launch_service_process", launch)
 
     assert runtime._start_service() is True
-    command, kwargs = calls[0]
-    assert command == [str(managed_executable), "-d", str(config_path), "-s", "start"]
-    assert kwargs["cwd"] == root
+    assert calls == [(executable, config_path, root)]
 
 
 def test_daemon_launcher_may_exit_before_service_starts(tmp_path, monkeypatch) -> None:
@@ -139,8 +112,8 @@ def test_daemon_launcher_may_exit_before_service_starts(tmp_path, monkeypatch) -
     root.mkdir()
     executable = root / "stockdb.exe"
     executable.write_bytes(b"placeholder")
-    managed_executable = root / ".quantmaster-stockdb-headless-test.exe"
-    (root / "stockdb.conf").write_text("server:\n\tport: 7899\n", encoding="utf-8")
+    config_path = root / "stockdb.conf"
+    config_path.write_text("server:\n\tport: 7899\n", encoding="utf-8")
     (root / "data").mkdir()
     runtime = FreeStockDBRuntime()
     listening = iter((False, False, True))
@@ -156,10 +129,8 @@ def test_daemon_launcher_may_exit_before_service_starts(tmp_path, monkeypatch) -
         runtime, "_paths", lambda: (root, executable, root / "数据更新.exe"),
     )
     monkeypatch.setattr(runtime, "_listening", lambda: next(listening))
-    monkeypatch.setattr(runtime, "_headless_executable", lambda _executable: managed_executable)
     monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.subprocess.Popen",
-        lambda *_args, **_kwargs: Process(),
+        runtime, "_launch_service_process", lambda *_args, **_kwargs: Process(),
     )
     monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
 
@@ -167,33 +138,77 @@ def test_daemon_launcher_may_exit_before_service_starts(tmp_path, monkeypatch) -
     assert runtime._daemon_started is True
 
 
-def test_managed_daemon_uses_native_stop_command(tmp_path, monkeypatch) -> None:
+def test_managed_service_stops_tracked_vendor_process(monkeypatch) -> None:
+    runtime = FreeStockDBRuntime()
+    runtime._daemon_started = True
+    calls: list[str] = []
+
+    class Process:
+        pid = 22
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def terminate():
+            calls.append("terminate")
+
+        @staticmethod
+        def wait(timeout=None):
+            calls.append(f"wait:{timeout}")
+            return 1
+
+        @staticmethod
+        def kill():
+            calls.append("kill")
+
+    runtime._process = Process()
+    monkeypatch.setattr(runtime, "_listening", lambda: False)
+
+    assert runtime._stop_service() is True
+    assert calls == ["terminate", "wait:15"]
+    assert runtime._daemon_started is False
+
+
+def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> None:
     root = tmp_path / "free-stockdb"
     root.mkdir()
     executable = root / "stockdb.exe"
-    executable.write_bytes(b"placeholder")
-    managed_executable = root / ".quantmaster-stockdb-headless-test.exe"
+    executable.write_bytes(b"bootstrap")
     config_path = root / "stockdb.conf"
     config_path.write_text("server:\n\tport: 7899\n", encoding="utf-8")
+    (root / "data").mkdir()
     runtime = FreeStockDBRuntime()
-    runtime._daemon_started = True
-    calls = []
+    launches = 0
+    listening = iter((False, True))
+    monotonic = iter((0.0, 11.0, 20.0, 21.0))
+
+    class Process:
+        pid = 22
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def launch(*_args):
+        nonlocal launches
+        launches += 1
+        if launches == 1:
+            executable.write_bytes(b"platform-runtime")
+        return Process()
 
     monkeypatch.setattr(
         runtime, "_paths", lambda: (root, executable, root / "数据更新.exe"),
     )
-    monkeypatch.setattr(runtime, "_listening", lambda: False)
-    monkeypatch.setattr(runtime, "_headless_executable", lambda _executable: managed_executable)
+    monkeypatch.setattr(runtime, "_listening", lambda: next(listening))
+    monkeypatch.setattr(runtime, "_launch_service_process", launch)
     monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.subprocess.run",
-        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(returncode=0),
+        "quantmaster.data.free_stockdb_runtime.time.monotonic", lambda: next(monotonic),
     )
 
-    assert runtime._stop_service() is True
-    command, kwargs = calls[0]
-    assert command == [str(managed_executable), "-d", str(config_path), "-s", "stop"]
-    assert kwargs["cwd"] == root
-    assert runtime._daemon_started is False
+    assert runtime._start_service() is True
+    assert launches == 2
 
 
 def test_vendor_notice_parser_extracts_data_date_and_version() -> None:
@@ -278,9 +293,9 @@ def test_managed_update_stops_updater_and_restores_service(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "_run_updater", lambda *_args, **_kwargs: 0)
     validations = iter((
         {"target_session": "2026-08-07", "actual_session": "2026-08-06",
-         "complete": False, "issues": ["stale"]},
+         "accepted": False, "complete": False, "warnings": [], "issues": ["stale"]},
         {"target_session": "2026-08-07", "actual_session": "2026-08-07",
-         "complete": True, "issues": []},
+         "accepted": True, "complete": True, "warnings": [], "issues": []},
     ))
     monkeypatch.setattr(runtime, "_validate_data", lambda _target: next(validations))
     monkeypatch.setattr(runtime, "_emit_update_event", lambda *_args, **_kwargs: None)
@@ -377,7 +392,8 @@ def test_zero_exit_with_stale_data_schedules_bounded_retry(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "_run_updater", lambda *_args, **_kwargs: 0)
     validation = {
         "target_session": "2026-08-07", "actual_session": "2026-08-06",
-        "complete": False, "issues": ["目标日截面为零"],
+        "accepted": False, "complete": False,
+        "warnings": [], "issues": ["目标日截面为零"],
     }
     monkeypatch.setattr(runtime, "_validate_data", lambda _target: dict(validation))
     monkeypatch.setattr(
@@ -420,6 +436,82 @@ def test_final_validation_failure_emits_one_durable_event(tmp_path, monkeypatch)
     )]
 
 
+def test_partial_target_session_finishes_with_warning_instead_of_blocking(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    monkeypatch.setenv("QM_FREE_STOCKDB_CONTROL_PATH", str(tmp_path / "control.sqlite"))
+    monkeypatch.setattr(runtime, "_marker_path", lambda: tmp_path / "update.json")
+    emitted = []
+    monkeypatch.setattr(runtime, "_emit_update_event", lambda *args: emitted.append(args))
+    validation = {
+        "target_session": "2026-08-10", "actual_session": "2026-08-10",
+        "observed_symbols": 5493, "required_ohlcv_ratio": 1.0,
+        "accepted": True, "complete": False, "issues": [],
+        "warnings": ["45 只缺口将交由后续混合数据源补齐"],
+    }
+    monkeypatch.setattr(runtime, "_validate_data", lambda _target: validation)
+
+    assert runtime.update_now("manual", target_session="2026-08-10") is True
+
+    assert runtime.status()["validated_session"] == "2026-08-10"
+    assert runtime.status()["update_result"] == "success"
+    assert "可继续扫描或稍后重试" in runtime.status()["message"]
+    assert emitted == [(
+        "update_succeeded", "2026-08-10",
+        {"target_session": "2026-08-10", "validation": validation,
+         "trigger": "manual"},
+    )]
+
+
+def test_success_event_submits_market_temperature_refresh(
+    isolated_config, monkeypatch,
+) -> None:
+    submitted = []
+    isolated_config.data.after_close_enabled = False
+    monkeypatch.setattr(
+        "quantmaster.rotation.service.get_rotation_worker",
+        lambda: SimpleNamespace(submit=lambda spec: submitted.append(spec)),
+    )
+
+    FreeStockDBRuntime()._deliver_event({
+        "kind": "update_succeeded",
+        "payload": {"target_session": "2026-08-10"},
+    })
+
+    assert len(submitted) == 1
+    assert submitted[0].scope == "all"
+    assert submitted[0].source == "auto"
+
+
+def test_partial_session_event_submits_only_market_temperature_refresh(
+    isolated_config, monkeypatch,
+) -> None:
+    submitted = []
+    after_close = []
+    isolated_config.data.after_close_enabled = True
+    isolated_config.data.after_close_auto_run = True
+    monkeypatch.setattr(
+        "quantmaster.rotation.service.get_rotation_worker",
+        lambda: SimpleNamespace(submit=lambda spec: submitted.append(spec)),
+    )
+    monkeypatch.setattr(
+        "quantmaster.after_close.jobs.get_after_close_jobs",
+        lambda: SimpleNamespace(submit=lambda **kwargs: after_close.append(kwargs)),
+    )
+
+    FreeStockDBRuntime()._deliver_event({
+        "kind": "market_session_available",
+        "payload": {"target_session": "2026-08-10"},
+    })
+
+    assert len(submitted) == 1
+    assert submitted[0].scope == "all"
+    assert submitted[0].source == "auto"
+    assert after_close == []
+
+
 def test_supervised_worker_queues_update_for_owner(tmp_path, monkeypatch) -> None:
     control_path = tmp_path / "control.sqlite"
     monkeypatch.setenv("QM_FREE_STOCKDB_CONTROL_PATH", str(control_path))
@@ -435,6 +527,60 @@ def test_supervised_worker_queues_update_for_owner(tmp_path, monkeypatch) -> Non
 
     assert owner._process_command() is True
     assert calls == ["manual"]
+
+
+def test_control_command_contains_native_sdk_failure(tmp_path, monkeypatch) -> None:
+    class NativeTimeout(Exception):
+        pass
+
+    control_path = tmp_path / "control.sqlite"
+    monkeypatch.setenv("QM_FREE_STOCKDB_CONTROL_PATH", str(control_path))
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    assert runtime.request_update("manual") is True
+    monkeypatch.setattr(
+        runtime, "update_now", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            NativeTimeout("Connect timeout")
+        ),
+    )
+
+    assert runtime._process_command() is True
+    command = runtime._ensure_control()._conn().execute(
+        "SELECT status,result_json FROM commands"
+    ).fetchone()
+    assert command["status"] == "completed"
+    assert json.loads(command["result_json"])["status"] == "failed"
+
+
+def test_scheduler_survives_unexpected_cycle_failure(
+    isolated_config, tmp_path, monkeypatch,
+) -> None:
+    class NativeTimeout(Exception):
+        pass
+
+    isolated_config.data.free_stockdb_auto_update = False
+    monkeypatch.setenv(
+        "QM_FREE_STOCKDB_CONTROL_PATH", str(tmp_path / "control.sqlite"),
+    )
+    runtime = FreeStockDBRuntime()
+    attempts = 0
+
+    def process_command():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise NativeTimeout("Connect timeout")
+        runtime._stop.set()
+        return False
+
+    monkeypatch.setattr(runtime, "_process_command", process_command)
+    monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
+
+    runtime._scheduler()
+
+    assert attempts == 2
+    assert runtime.status()["state"] == "degraded"
+    assert runtime.status()["update_result"] == "failed"
 
 
 def test_verified_quantmaster_orphan_can_be_reclaimed(tmp_path, monkeypatch) -> None:
@@ -514,12 +660,44 @@ def test_full_market_validation_uses_actual_target_rows(isolated_config, monkeyp
     monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+    assert validation["accepted"] is True
     assert validation["complete"] is True
     assert validation["actual_session"] == "2026-08-07"
     assert validation["symbol_ratio"] == 1.0
 
 
-def test_full_market_validation_rejects_stable_twenty_percent_symbol_gap(
+def test_full_market_validation_contains_native_sdk_timeout(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+
+    class NativeTimeout(Exception):
+        pass
+
+    monkeypatch.setattr(
+        InstrumentStore,
+        "list",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
+        ],
+    )
+    monkeypatch.setattr(
+        FreeStockDBSource,
+        "daily_cross_section",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(NativeTimeout("Connect timeout")),
+    )
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+
+    assert validation["accepted"] is False
+    assert validation["complete"] is False
+    assert validation["issues"] == [
+        "读取 free-stockdb 验证截面失败：NativeTimeout: Connect timeout",
+    ]
+
+
+def test_full_market_validation_rejects_coverage_below_operational_floor(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
@@ -544,9 +722,48 @@ def test_full_market_validation_rejects_stable_twenty_percent_symbol_gap(
     monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+    assert validation["accepted"] is False
     assert validation["complete"] is False
     assert validation["symbol_ratio"] == 0.8
-    assert any("没有停牌/退市证据" in issue for issue in validation["issues"])
+    assert validation["missing_symbol_count"] == 2
+    assert any("低于更新验收线 98%" in issue for issue in validation["issues"])
+    assert any("后续混合数据源补齐" in warning for warning in validation["warnings"])
+
+
+def test_full_market_validation_accepts_5493_of_5538_with_warning(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.instruments import InstrumentStore
+
+    instruments = [
+        SimpleNamespace(symbol=f"{index:06d}.SZ", status="listed", exchange="SZ")
+        for index in range(5538)
+    ]
+    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+
+    def cross_section(_self, symbols, _start, _end):
+        selected = [symbol for symbol in symbols if int(symbol[:6]) < 5493]
+        return pd.DataFrame({
+            "symbol": selected,
+            "date": [pd.Timestamp("2026-08-10")] * len(selected),
+            "open": [1.0] * len(selected), "high": [1.0] * len(selected),
+            "low": [1.0] * len(selected), "close": [1.0] * len(selected),
+            "volume": [1.0] * len(selected),
+        })
+
+    monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
+
+    validation = FreeStockDBRuntime()._validate_data("2026-08-10")
+
+    assert validation["accepted"] is True
+    assert validation["complete"] is False
+    assert validation["observed_symbols"] == 5493
+    assert validation["expected_trading_symbols"] == 5538
+    assert validation["symbol_ratio"] > 0.99
+    assert validation["missing_symbol_count"] == 45
+    assert validation["issues"] == []
+    assert any("45 只缺口" in warning for warning in validation["warnings"])
 
 
 def test_full_market_validation_accepts_only_explicit_suspension_evidence(
@@ -585,6 +802,7 @@ def test_full_market_validation_accepts_only_explicit_suspension_evidence(
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
 
+    assert validation["accepted"] is True
     assert validation["complete"] is True
     assert validation["catalog_symbols"] == 2
     assert validation["expected_trading_symbols"] == 1
@@ -630,10 +848,12 @@ def test_self_signed_suspension_payload_cannot_reduce_expected_denominator(
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
 
+    assert validation["accepted"] is False
     assert validation["complete"] is False
     assert validation["expected_trading_symbols"] == 2
     assert validation["excused_suspended_symbols"] == []
-    assert any("停牌证据不可用" in issue for issue in validation["issues"])
+    assert any("低于更新验收线 98%" in issue for issue in validation["issues"])
+    assert any("停牌证据不可用" in warning for warning in validation["warnings"])
 
 
 def test_full_market_validation_rejects_nonfinite_and_impossible_ohlcv(
@@ -660,6 +880,7 @@ def test_full_market_validation_rejects_nonfinite_and_impossible_ohlcv(
     monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", cross_section)
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
+    assert validation["accepted"] is False
     assert validation["complete"] is False
     assert validation["required_ohlcv_ratio"] == 0.0
     assert validation["invalid_ohlcv"]["nonfinite_rows"] == 1

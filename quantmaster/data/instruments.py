@@ -756,6 +756,60 @@ def instrument_diagnostics() -> dict[str, Any]:
     return InstrumentStore().diagnostics()
 
 
+def refresh_authoritative_instrument_catalog(
+    *, source: Any | None = None, store: InstrumentStore | None = None,
+) -> dict[str, Any]:
+    """Fetch, freeze, and project one authoritative Tushare catalog observation."""
+    selected_store = store or InstrumentStore()
+    if source is None:
+        from quantmaster.data.tushare_source import TushareSource
+
+        source = TushareSource()
+    from quantmaster.data.instrument_snapshots import (
+        TUSHARE_CATALOG_QUERY,
+        freeze_instrument_catalog,
+    )
+    from quantmaster.data.resilience import bypass_endpoint_cache
+
+    with bypass_endpoint_cache():
+        fetched = source.instrument_catalog()
+    try:
+        records, request_outcomes = fetched
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Tushare 证券目录缺少逐子请求完整性证据"
+        ) from exc
+    snapshot = freeze_instrument_catalog(
+        records,
+        source="tushare:catalog",
+        query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=request_outcomes,
+    )
+    observed_at = datetime.fromisoformat(snapshot.acquired_at).timestamp()
+    observed_records = [
+        {
+            **dict(item),
+            "source": "tushare:catalog",
+            "observed_at": observed_at,
+        }
+        for item in records
+    ]
+    count = selected_store.upsert(
+        observed_records,
+        source="tushare:catalog",
+        source_priority=40,
+    )
+    selected_store.update_sync_state(
+        "tushare:catalog", status="success", record_count=count,
+    )
+    return {
+        "status": "success",
+        "record_count": count,
+        "snapshot_id": snapshot.snapshot_id,
+        "acquired_at": snapshot.acquired_at,
+    }
+
+
 def _nasdaq_directory_records() -> list[dict[str, Any]]:
     import httpx
 
@@ -799,9 +853,7 @@ def refresh_instrument_master(*, force: bool = False) -> dict[str, Any]:
     store = InstrumentStore()
     states: dict[str, Any] = {}
     jobs = {
-        "tushare:catalog": lambda: __import__(
-            "quantmaster.data.tushare_source", fromlist=["TushareSource"]
-        ).TushareSource().instrument_catalog(),
+        "tushare:catalog": refresh_authoritative_instrument_catalog,
         "nasdaq:symbol_directory": _nasdaq_directory_records,
     }
     for source, fetch in jobs.items():
@@ -827,48 +879,12 @@ def refresh_instrument_master(*, force: bool = False) -> dict[str, Any]:
             continue
         try:
             if source == "tushare:catalog":
-                from quantmaster.data.resilience import bypass_endpoint_cache
-
-                with bypass_endpoint_cache():
-                    fetched = fetch()
-            else:
-                fetched = fetch()
-            request_outcomes = []
-            if source == "tushare:catalog":
-                try:
-                    records, request_outcomes = fetched
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError(
-                        "Tushare 证券目录缺少逐子请求完整性证据"
-                    ) from exc
-            else:
-                records = fetched
-            snapshot = None
-            observed_records = records
-            if source == "tushare:catalog":
-                from quantmaster.data.instrument_snapshots import (
-                    TUSHARE_CATALOG_QUERY,
-                    freeze_instrument_catalog,
-                )
-
-                snapshot = freeze_instrument_catalog(
-                    records,
-                    source=source,
-                    query=TUSHARE_CATALOG_QUERY,
-                    request_outcomes=request_outcomes,
-                )
-                observed_at = datetime.fromisoformat(snapshot.acquired_at).timestamp()
-                observed_records = [
-                    {**dict(item), "source": source, "observed_at": observed_at}
-                    for item in records
-                ]
-            count = store.upsert(observed_records, source=source, source_priority=40)
+                states[source] = fetch(store=store)
+                continue
+            records = fetch()
+            count = store.upsert(records, source=source, source_priority=40)
             store.update_sync_state(source, status="success", record_count=count)
-            states[source] = {
-                "status": "success",
-                "record_count": count,
-                **({"snapshot_id": snapshot.snapshot_id} if snapshot is not None else {}),
-            }
+            states[source] = {"status": "success", "record_count": count}
         except Exception as exc:
             store.update_sync_state(source, status="error", error=str(exc))
             states[source] = {"status": "error", "message": str(exc)}

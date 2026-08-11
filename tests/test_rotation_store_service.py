@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from quantmaster.rotation.analytics import compute_etf_capital_evidence
 from quantmaster.rotation.contracts import RotationJobSpec
-from quantmaster.rotation.service import RotationService, RotationWorker
+from quantmaster.rotation.service import (
+    RotationService,
+    RotationWorker,
+    _overlay_stockdb_etf_prices,
+)
 from quantmaster.rotation.store import (
     RotationIntegrityError,
     RotationJobStore,
@@ -28,6 +34,62 @@ def _market(days: int = 100, symbols: int = 40):
         columns=[f"{600000 + index:06d}.SH" for index in range(symbols)],
     )
     return close, close * 800_000
+
+
+def test_market_etf_evidence_overlays_stockdb_prices_for_unpriced_share_rows(
+    monkeypatch,
+):
+    observations = pd.DataFrame([
+        {
+            "trade_date": "2026-08-07", "symbol": "510300.SH",
+            "shares": 100.0, "nav": 4.0, "close": 4.0,
+        },
+        {
+            "trade_date": "2026-08-10", "symbol": "510300.SH",
+            "shares": 110.0, "nav": None, "close": None,
+        },
+    ])
+    daily = pd.DataFrame([
+        {"symbol": "510300.SH", "date": "2026-08-10", "close": 4.2},
+    ])
+    snapshot = SimpleNamespace(
+        status="complete",
+        assets={"etf": {"daily_rows": 1}},
+        content_hashes={"etf_daily": "etf-daily-digest"},
+        start_date="2026-08-01",
+        end_date="2026-08-10",
+        as_of_date="2026-08-10",
+    )
+
+    class FakeIngestStore:
+        def history(self, _limit):
+            return [snapshot]
+
+        def load_frame(self, _snapshot, name):
+            assert name == "etf_daily"
+            return daily
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestStore",
+        FakeIngestStore,
+    )
+    enriched, source = _overlay_stockdb_etf_prices(
+        observations,
+        as_of="2026-08-10",
+    )
+
+    assert source == "local:stockdb:etf_daily"
+    assert enriched.loc[1, "close"] == 4.2
+    evidence = compute_etf_capital_evidence(
+        enriched,
+        as_of="2026-08-10",
+        window=1,
+        lookback=10,
+        min_history=1,
+        min_funds=1,
+    )
+    assert evidence["available"] is True
+    assert evidence["as_of"] == "2026-08-10"
 
 
 def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp_path):
@@ -335,8 +397,12 @@ def test_rotation_jobs_keep_specs_immutable_and_recover_only_expired_leases(tmp_
     claimed = jobs.claim("worker-one", lease_seconds=5)
     assert claimed and claimed["status"] == "running"
     assert jobs.claim("worker-two") is None
-    jobs.progress(claimed["id"], "worker-one", 50, "计算中", "一半")
-    jobs.complete(claimed["id"], "worker-one", {"snapshot_id": "done"})
+    jobs.progress(
+        claimed["id"], "worker-one", claimed["lease_token"], 50, "计算中", "一半",
+    )
+    jobs.complete(
+        claimed["id"], "worker-one", claimed["lease_token"], {"snapshot_id": "done"},
+    )
     completed = jobs.get(claimed["id"])
     assert completed and completed["spec"] == created["spec"]
     assert completed["result"] == {"snapshot_id": "done"}
@@ -357,8 +423,8 @@ def test_rotation_worker_shutdown_releases_lease_without_cancelling_job(
     claimed = jobs.claim(worker.identity.value)
     assert claimed and claimed["id"] == created["id"]
 
-    def interrupted_build(_spec, *, progress, cancelled):
-        del progress
+    def interrupted_build(_spec, *, progress, cancelled, job_id=""):
+        del progress, job_id
         assert cancelled()
         raise InterruptedError("worker stopping")
 
@@ -423,16 +489,20 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
             "reference_windows": 252,
         },
     )
+    sentiment_calls: list[tuple[str, float | None]] = []
     monkeypatch.setattr(
         service_module,
         "_news_sentiment_evidence",
-        lambda as_of: {
-            "available": True,
-            "score": 53.95,
-            "as_of": as_of,
-            "note": "中性 +7.90",
-            "event_count": 120,
-        },
+        lambda as_of, **kwargs: (
+            sentiment_calls.append((as_of, kwargs.get("knowledge_as_of")))
+            or {
+                "available": True,
+                "score": 53.95,
+                "as_of": as_of,
+                "note": "中性 +7.90",
+                "event_count": 120,
+            }
+        ),
     )
 
     def load_values(*, progress, cancelled):
@@ -441,6 +511,11 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         return close, amount, names, len(close.columns), ["test:local"]
 
     service.loader.market_matrices = load_values
+    monkeypatch.setattr(
+        service_module,
+        "_expected_market_session",
+        lambda: str(close.index[-1].date()),
+    )
     industry_names = ("电子", "计算机", "机械设备", "医药生物")
     industry_map = {
         symbol: industry_names[index // 10]
@@ -476,6 +551,10 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert set(result["updated"]) == {
         "etf_flows", "industries", "structure", "taxonomy", "temperature", "themes",
     }
+    assert len(sentiment_calls) == 5
+    knowledge_cutoffs = {value for _, value in sentiment_calls}
+    assert len(knowledge_cutoffs) == 1
+    assert next(iter(knowledge_cutoffs)) is not None
     temperature = service.snapshot("temperature")
     industries = service.snapshot("industries")
     themes = service.snapshot("themes")
@@ -508,6 +587,15 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert updates[-1][0] == 96
     assert trend_calls == [len(close)]
 
+    close_fingerprint, _ = service.input_fingerprint(
+        RotationJobSpec(scope="close", source="local"),
+    )
+    assert result["input_fingerprint"] == close_fingerprint
+    assert all(
+        service.snapshot_header(kind)["meta"].get("input_fingerprint") == close_fingerprint
+        for kind in ("temperature", "structure", "industries", "themes", "taxonomy")
+    )
+
     close_result = service.build(
         RotationJobSpec(scope="close", source="local"),
         progress=lambda *_: None,
@@ -515,7 +603,9 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     )
     assert close_result["updated"] == []
     assert close_result["outcome"] == "unchanged"
-    assert trend_calls == [len(close), len(close)]
+    # A narrower task against the same published input must short-circuit
+    # before loading matrices or rebuilding trend state.
+    assert trend_calls == [len(close)]
 
 
 def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues(
@@ -675,10 +765,10 @@ def test_rotation_worker_bootstrap_is_explicit_and_close_scoped(tmp_path, monkey
     bootstrap.start(bootstrap_local=True)
     specs = [item["spec"] for item in service.jobs.list()]
     assert {
-        "scope": "close", "mode": "incremental", "source": "local",
+        "scope": "close", "mode": "incremental", "source": "local", "as_of": "",
     } in specs
     assert {
-        "scope": "themes", "mode": "incremental", "source": "auto",
+        "scope": "themes", "mode": "incremental", "source": "auto", "as_of": "",
     } in specs
     bootstrap.stop()
 

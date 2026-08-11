@@ -290,6 +290,274 @@ def fetch_sina_live(
     )
 
 
+def _finish_paginated_batch(
+    source: dict[str, Any], articles: list[FetchedArticle], watermark: str,
+    raw_keys: list[str], *, reached: bool, pending_watermark: str,
+    candidate_watermark: str, next_cursor: str,
+) -> FetchBatch:
+    pending = pending_watermark or candidate_watermark
+    if not articles and watermark and reached:
+        latest_published_at = float(source.get("_state_latest_published_at") or 0.0)
+        if pending and pending != watermark:
+            health, error_code, message = _freshness(
+                source, latest_published_at, watermark,
+            )
+            return FetchBatch(
+                source_id=source["id"], watermark=pending,
+                previous_watermark=watermark, health=health, complete=True,
+                raw_cache_keys=list(dict.fromkeys(key for key in raw_keys if key)),
+                error_code=error_code, message=message,
+                latest_published_at=latest_published_at,
+            )
+        return _unchanged_batch(source, watermark, raw_keys, latest_published_at)
+    if not articles:
+        if not watermark:
+            raise NewsContractError(
+                f"{source['name']} 返回空列表", code="empty_provider_batch",
+            )
+        return _empty_incomplete_batch(
+            source, watermark, raw_keys, pending_watermark=pending,
+            next_cursor=next_cursor, error_code="watermark_not_reached",
+            message="来源历史已耗尽但未找到 committed 水位，保留旧水位并等待重试",
+        )
+    articles.sort(
+        key=lambda item: (item.published_at_epoch, item.provider_item_id), reverse=True,
+    )
+    return _batch(
+        source, articles, watermark, raw_keys, complete=reached,
+        pending_watermark=pending, next_cursor=next_cursor,
+        incomplete_code="watermark_not_reached",
+        incomplete_message="回补达到本轮安全页数上限，尚未遇到上次水位",
+    )
+
+
+def _select_paginated_articles(
+    page_articles: list[FetchedArticle], watermark: str, pending_watermark: str,
+    candidate_watermark: str, candidate_published_at: float, seen: set[str],
+) -> tuple[list[FetchedArticle], str, float, bool]:
+    selected: list[FetchedArticle] = []
+    reached = False
+    for article in page_articles:
+        if not pending_watermark and article.published_at_epoch > candidate_published_at:
+            candidate_watermark = article.provider_item_id
+            candidate_published_at = article.published_at_epoch
+        if watermark and article.provider_item_id == watermark:
+            reached = True
+            break
+        if article.provider_item_id in seen:
+            continue
+        seen.add(article.provider_item_id)
+        selected.append(article)
+    return selected, candidate_watermark, candidate_published_at, reached
+
+
+def _parse_eastmoney_page(
+    source: dict[str, Any], content: bytes, raw_key: str, fetched_at: float,
+) -> tuple[list[FetchedArticle], str]:
+    try:
+        payload = json.loads(content)
+        data = payload["data"]
+        entries = data["fastNewsList"]
+        returned_cursor = str(data.get("sortEnd") or "")
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise NewsContractError(
+            "东方财富快讯响应结构已变化", code="eastmoney_contract",
+        ) from exc
+    if str(payload.get("code")) != "1" or not isinstance(entries, list):
+        raise NewsContractError(
+            "东方财富快讯响应状态异常", code="eastmoney_contract",
+        )
+    articles: list[FetchedArticle] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        provider_id = str(entry.get("code") or "").strip()
+        title = _clean_text(entry.get("title") or entry.get("summary"))
+        body = _clean_text(entry.get("summary") or entry.get("title"))
+        if not provider_id or not title or not body:
+            continue
+        published, published_epoch = normalize_published_at(entry.get("showTime"))
+        articles.append(FetchedArticle(
+            source=source["id"], provider_item_id=provider_id,
+            title=title[:240], content=body,
+            url="https://kuaixun.eastmoney.com/7_24.html",
+            published_at=published, published_at_epoch=published_epoch,
+            fetched_at=fetched_at, is_official=False, raw_cache_key=raw_key,
+            content_scope="provider_excerpt",
+        ))
+    return articles, returned_cursor
+
+
+def fetch_eastmoney_fast(
+    source: dict[str, Any], store: NewsSourceStore, watermark: str, limit: int,
+) -> FetchBatch:
+    """Fetch Eastmoney 7×24 pages using its current required trace contract."""
+    page_size = max(1, min(100, int(source.get("item_limit") or limit or 50)))
+    cursor = str(source.get("_state_next_cursor") or "")
+    pending_watermark = str(source.get("_state_pending_watermark") or "")
+    candidate_watermark = pending_watermark
+    candidate_published_at = -1.0
+    reached = not watermark
+    raw_keys: list[str] = []
+    articles: list[FetchedArticle] = []
+    seen: set[str] = set()
+    next_cursor = cursor
+    fetched_at = time.time()
+    for page_index in range(10):
+        query = urlencode({
+            "client": "web", "biz": "web_724", "fastColumn": "102",
+            "sortEnd": next_cursor, "pageSize": page_size, "req_trace": "quantmaster",
+        })
+        page_source = (
+            source if page_index == 0 and not next_cursor
+            else {**source, "_conditional_cache": False}
+        )
+        content, _final_url, raw_key = _fetch_bytes(
+            page_source, f"{source['url']}?{query}", store,
+        )
+        if content is None:
+            if not articles:
+                return _not_modified_batch(source, watermark)
+            break
+        raw_keys.append(raw_key)
+        page_articles, returned_cursor = _parse_eastmoney_page(
+            source, content, raw_key, fetched_at,
+        )
+        if not page_articles:
+            break
+        selected, candidate_watermark, candidate_published_at, page_reached = (
+            _select_paginated_articles(
+                page_articles, watermark, pending_watermark,
+                candidate_watermark, candidate_published_at, seen,
+            )
+        )
+        articles.extend(selected)
+        reached = reached or page_reached
+        if reached:
+            break
+        if not returned_cursor or returned_cursor == next_cursor:
+            break
+        next_cursor = returned_cursor
+    return _finish_paginated_batch(
+        source, articles, watermark, raw_keys, reached=reached,
+        pending_watermark=pending_watermark,
+        candidate_watermark=candidate_watermark, next_cursor=next_cursor,
+    )
+
+
+def _parse_csrc_page(
+    source: dict[str, Any], content: bytes, final_url: str, raw_key: str,
+    fetched_at: float,
+) -> list[FetchedArticle]:
+    try:
+        entries = json.loads(content)["data"]["results"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise NewsContractError(
+            "证监会要闻响应结构已变化", code="csrc_contract",
+        ) from exc
+    if not isinstance(entries, list):
+        raise NewsContractError(
+            "证监会要闻响应列表无效", code="csrc_contract",
+        )
+    articles: list[FetchedArticle] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        provider_id = str(entry.get("manuscriptId") or "").strip()
+        title = _clean_text(entry.get("title") or entry.get("subTitle"))
+        full_content = _clean_text(entry.get("content"))
+        body = full_content or _clean_text(entry.get("memo") or entry.get("contentHtml"))
+        article_url = urljoin(final_url, str(entry.get("url") or ""))
+        if not provider_id or not title or not body or not article_url:
+            continue
+        published, published_epoch = normalize_published_at(
+            entry.get("publishedTimeStr") or entry.get("publishedTime"),
+        )
+        articles.append(FetchedArticle(
+            source=source["id"], provider_item_id=provider_id,
+            title=title[:240], content=body, url=article_url,
+            published_at=published, published_at_epoch=published_epoch,
+            fetched_at=fetched_at, is_official=True, raw_cache_key=raw_key,
+            content_scope="full_article" if full_content else "provider_excerpt",
+        ))
+    return articles
+
+
+def fetch_csrc(
+    source: dict[str, Any], store: NewsSourceStore, watermark: str, limit: int,
+) -> FetchBatch:
+    """Fetch CSRC current releases from its first-party JSON search endpoint."""
+    parser = dict(source.get("parser") or {})
+    request_headers = dict(parser.get("headers") or {})
+    request_headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/138.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.csrc.gov.cn/csrc/c100028/common_xq_list.shtml",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+    request_source = {
+        **source,
+        "parser": {**parser, "headers": request_headers},
+    }
+    page_size = max(1, min(50, int(source.get("item_limit") or limit or 30)))
+    try:
+        page = max(1, int(source.get("_state_next_cursor") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    pending_watermark = str(source.get("_state_pending_watermark") or "")
+    candidate_watermark = pending_watermark
+    candidate_published_at = -1.0
+    reached = not watermark
+    raw_keys: list[str] = []
+    articles: list[FetchedArticle] = []
+    seen: set[str] = set()
+    fetched_at = time.time()
+    next_page = page
+    for page_index in range(10):
+        query = urlencode({
+            "_isAgg": "true", "_isJson": "true", "_pageSize": page_size,
+            "_template": "index", "_rangeTimeGte": "", "_channelName": "",
+            "page": next_page,
+        })
+        page_source = (
+            request_source if page_index == 0 and next_page == 1
+            else {**request_source, "_conditional_cache": False}
+        )
+        content, final_url, raw_key = _fetch_bytes(
+            page_source, f"{source['url']}?{query}", store,
+        )
+        if content is None:
+            if not articles:
+                return _not_modified_batch(source, watermark)
+            break
+        raw_keys.append(raw_key)
+        page_articles = _parse_csrc_page(
+            source, content, final_url, raw_key, fetched_at,
+        )
+        if not page_articles:
+            break
+        selected, candidate_watermark, candidate_published_at, page_reached = (
+            _select_paginated_articles(
+                page_articles, watermark, pending_watermark,
+                candidate_watermark, candidate_published_at, seen,
+            )
+        )
+        articles.extend(selected)
+        reached = reached or page_reached
+        if reached:
+            break
+        next_page += 1
+    return _finish_paginated_batch(
+        source, articles, watermark, raw_keys, reached=reached,
+        pending_watermark=pending_watermark,
+        candidate_watermark=candidate_watermark, next_cursor=str(next_page),
+    )
+
+
 def _extract_date(text: str, url: str) -> tuple[str, float]:
     match = re.search(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})", text)
     if not match:
@@ -478,6 +746,161 @@ def _official_html_provider(
     )
 
 
+def _parse_szse_listing(
+    source: dict[str, Any], content: bytes, final_url: str, raw_key: str,
+) -> list[FetchedArticle]:
+    soup = BeautifulSoup(content, "html.parser")
+    fetched_at = time.time()
+    articles: list[FetchedArticle] = []
+    seen: set[str] = set()
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text(" ", strip=False)
+        href_match = re.search(
+            r"(?m)^\s*var\s+curHref\s*=\s*'([^']+)'\s*;", script_text,
+        )
+        title_match = re.search(
+            r"(?m)^\s*var\s+curTitle\s*=\s*'((?:\\'|[^'])*)'\s*;", script_text,
+        )
+        if href_match is None or title_match is None or script.parent is None:
+            continue
+        time_node = script.parent.select_one("span.time")
+        if time_node is None:
+            continue
+        article_url = urljoin(final_url, href_match.group(1).strip())
+        if not re.fullmatch(
+            r"https://www\.szse\.cn/(?:www/)?disclosure/notice/"
+            r"(?:general/)?t20\d{6}_\d+\.html(?:[?#].*)?",
+            article_url,
+        ):
+            continue
+        encoded_title = title_match.group(1).replace(r"\'", "'").replace(r'\"', '"')
+        decoded_title = re.sub(
+            r"\\u([0-9A-Fa-f]{4})",
+            lambda match: chr(int(match.group(1), 16)),
+            encoded_title,
+        )
+        title = _clean_text(decoded_title)
+        if len(title) < 6 or article_url in seen:
+            continue
+        published, published_epoch = normalize_published_at(
+            time_node.get_text(" ", strip=True),
+        )
+        seen.add(article_url)
+        articles.append(FetchedArticle(
+            source=source["id"], provider_item_id=article_url,
+            title=title[:240], content=title, url=article_url,
+            published_at=published, published_at_epoch=published_epoch,
+            fetched_at=fetched_at, is_official=True, raw_cache_key=raw_key,
+            content_scope="listing_title_only",
+        ))
+    articles.sort(
+        key=lambda item: (item.published_at_epoch, item.provider_item_id), reverse=True,
+    )
+    return articles
+
+
+def _szse_detail(
+    source: dict[str, Any], store: NewsSourceStore, article: FetchedArticle,
+) -> tuple[str, str, str] | None:
+    try:
+        content, final_url, raw_key = _fetch_bytes(source, article.url, store)
+        if content is None:
+            cached = store.cached_response(source["id"], final_url)
+            if cached is None:
+                return None
+            content, raw_key = cached
+        soup = BeautifulSoup(content, "html.parser")
+        body_node = None
+        for selector in (
+            ".news-detail-con .des-content",
+            ".article-detail .des-content", ".article-detail-con .des-content",
+            ".article-detail-con", ".article-con", ".article-content",
+            "#article-content",
+        ):
+            body_node = soup.select_one(selector)
+            if body_node is not None:
+                break
+        body = _clean_text(body_node.get_text(" ", strip=True) if body_node else "")
+        page_text = _clean_text(soup.get_text(" ", strip=True))
+        date_match = re.search(r"时间\s*[：:]\s*(20\d{2}-\d{2}-\d{2})", page_text)
+        if date_match is None or len(body) < OFFICIAL_DETAIL_MIN_CHARS:
+            return None
+        _published, detail_epoch = normalize_published_at(date_match.group(1))
+        if _local_date(detail_epoch) != _local_date(article.published_at_epoch):
+            return None
+        if not raw_key.startswith("news_raw/"):
+            return None
+        return body, final_url, raw_key
+    except (
+        CredentialError,
+        NewsProviderError,
+        httpx.HTTPError,
+        sqlite3.Error,
+        OSError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def fetch_szse(
+    source: dict[str, Any], store: NewsSourceStore, watermark: str, limit: int,
+) -> FetchBatch:
+    content, final_url, listing_key = _fetch_bytes(source, source["url"], store)
+    if content is None:
+        return _not_modified_batch(source, watermark)
+    parsed_articles = _parse_szse_listing(source, content, final_url, listing_key)
+    latest_published_at = max(
+        (item.published_at_epoch for item in parsed_articles), default=0.0,
+    )
+    reached = not watermark
+    candidates: list[FetchedArticle] = []
+    for article in parsed_articles:
+        if watermark and article.provider_item_id == watermark:
+            reached = True
+            break
+        candidates.append(article)
+    item_limit = max(1, min(limit, int(source.get("item_limit") or limit)))
+    articles = candidates[:item_limit]
+    if not articles and watermark and reached:
+        return _unchanged_batch(source, watermark, [listing_key], latest_published_at)
+    raw_keys = [listing_key]
+    detail_failures = 0
+    if articles:
+        with ThreadPoolExecutor(max_workers=min(4, len(articles))) as executor:
+            futures = {
+                executor.submit(_szse_detail, source, store, article): article
+                for article in articles
+            }
+            for future in as_completed(futures):
+                article = futures[future]
+                detail = future.result()
+                if detail is None:
+                    detail_failures += 1
+                    continue
+                body, detail_url, detail_key = detail
+                article.content = body
+                article.url = detail_url
+                article.raw_cache_key = detail_key
+                article.content_scope = "full_article"
+                raw_keys.append(detail_key)
+    complete = (reached and len(candidates) <= item_limit) and detail_failures == 0
+    return _batch(
+        source, articles, watermark, raw_keys, complete=complete,
+        pending_watermark=parsed_articles[0].provider_item_id if parsed_articles else "",
+        incomplete_code=(
+            "official_detail_incomplete" if detail_failures
+            else "snapshot_window_exhausted"
+        ),
+        incomplete_message=(
+            f"{detail_failures} 条深交所正文或发布时间未通过契约；保留 committed 水位"
+            if detail_failures
+            else "深交所列表在条目上限内未出现 committed 水位；保留旧水位"
+        ),
+    )
+
+
 def fetch_sse(source: dict[str, Any], store: NewsSourceStore, watermark: str, limit: int) -> FetchBatch:
     return _official_html_provider(
         source, store, watermark, limit,
@@ -543,7 +966,10 @@ def fetch_nbs_rss(
 
 BUILTIN_PROVIDERS: dict[str, Provider] = {
     "sina_live": fetch_sina_live,
+    "eastmoney_fast": fetch_eastmoney_fast,
+    "csrc": fetch_csrc,
     "sse": fetch_sse,
+    "szse": fetch_szse,
     "pboc": fetch_pboc,
     "nbs_release": fetch_nbs_rss,
     "nbs_interpretation": fetch_nbs_rss,

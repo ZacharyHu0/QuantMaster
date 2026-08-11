@@ -73,7 +73,7 @@ def _factor_metadata(
     if tier == "sandbox":
         reasons.add("sandbox_tier")
     if not rows:
-        reasons.add("no_usable_pit_rows")
+        reasons.add("no_usable_publication_rows")
     if history_sessions < _MINIMUM_RESEARCH_SESSIONS:
         reasons.add("history_sessions_below_1038")
     if coverage < _MINIMUM_HISTORY_COVERAGE:
@@ -105,6 +105,7 @@ def _factor_metadata(
         source_values.append(source)
 
     return {
+        "alignment_contract": "publication_v2",
         "tier": tier,
         "sample_start": sample_start,
         "sample_end": sample_end,
@@ -133,7 +134,7 @@ def news_sentiment_readiness(
     minimum_sessions: int = _MINIMUM_RESEARCH_SESSIONS,
     minimum_coverage: float = _MINIMUM_HISTORY_COVERAGE,
 ) -> dict:
-    """Assess local PIT news history for research without contacting the network."""
+    """Assess local publication-aligned news history without contacting the network."""
     requested = pd.bdate_range(start, end)
     database = get_config().data_root / "news.sqlite"
     if store is None and not database.is_file():
@@ -152,8 +153,8 @@ def news_sentiment_readiness(
     coverage = (store or NewsStore(database)).factor_coverage(
         get_config().news.factor_min_confidence,
     )
-    first_epoch = float(coverage.get("first_seen_at") or 0)
-    last_epoch = float(coverage.get("last_seen_at") or 0)
+    first_epoch = float(coverage.get("first_published_at") or 0)
+    last_epoch = float(coverage.get("last_published_at") or 0)
     if not first_epoch or not last_epoch:
         available = pd.DatetimeIndex([])
         overlap = pd.DatetimeIndex([])
@@ -243,11 +244,11 @@ def quality_sentiment_panel(
 ) -> pd.DataFrame:
     """构造可回测的质量加权个股消息面因子。
 
-    资讯按首次入库、正文版本与分析完成三者中最晚的可用时点映射到其后第一个
-    收盘信号；上海 15:00 后才可用的消息只进入下一交易日。精确重复内容只保留
-    最高权重贡献。``production`` 只读取完整官方证据窗口；显式 ``sandbox``
-    可预览 PIT 可得的内置快讯，但结果携带不可晋级原因，且 fast 来源仅按 25%
-    来源权重参与。
+    资讯完成处理后按来源给出的发布时间映射到对应收盘信号；上海 15:00 后发布
+    的消息进入下一交易日。处理、抓取与正文版本时间只保留作证据审计，不改变
+    市场影响的归属日期。精确重复内容只保留最高权重贡献。``production`` 只读取
+    完整官方证据窗口；显式 ``sandbox`` 可预览内置快讯，但结果携带不可晋级原因，
+    且 fast 来源仅按 25% 来源权重参与。
     """
     selected_tier = _factor_tier(tier)
     index = pd.DatetimeIndex(reference_index).tz_localize(None).normalize().unique().sort_values()
@@ -301,26 +302,20 @@ def quality_sentiment_panel(
         base_weight = source_weight * confidence * importance / 100.0
         if confidence < minimum or base_weight <= 0:
             continue
-        availability_epoch = max(
-            float(row.get("first_seen_at") or 0),
-            float(row.get("content_version_at") or 0),
-            float(row.get("analysis_updated_at") or 0),
-        )
         published_epoch = float(row.get("published_at_epoch") or 0)
-        if availability_epoch <= 0 or published_epoch <= 0:
+        if published_epoch <= 0:
             continue
-        availability = pd.Timestamp(
-            availability_epoch, unit="s", tz="UTC",
+        publication = pd.Timestamp(
+            published_epoch, unit="s", tz="UTC",
         ).tz_convert("Asia/Shanghai")
-        local_day = availability.tz_localize(None).normalize()
-        cutoff = pd.Timestamp(daily_signal_cutoff(availability.date()))
-        side = "right" if availability > cutoff else "left"
+        local_day = publication.tz_localize(None).normalize()
+        cutoff = pd.Timestamp(daily_signal_cutoff(publication.date()))
+        side = "right" if publication > cutoff else "left"
         position = int(index.searchsorted(local_day, side=side))
         if position >= len(index):
             continue
         signal_day = index[position]
-        publication_age_days = max(0.0, (availability_epoch - published_epoch) / 86400.0)
-        weight = base_weight * (0.5 ** (publication_age_days / halflife))
+        weight = base_weight
         if weight <= 0:
             continue
         sentiment = max(-1.0, min(1.0, float(row.get("sentiment") or 0)))
@@ -376,7 +371,7 @@ class NewsSentimentFactor(Factor):
 
     name = "news_sentiment"
     description = (
-        "[消息面] 情绪×置信度×重要度×来源权重聚合，按首次获取时点对齐，默认 3 日衰减。"
+        "[消息面] 情绪×置信度×重要度×来源权重聚合，按资讯发布时间对齐，默认 3 日衰减。"
     )
 
     def __init__(

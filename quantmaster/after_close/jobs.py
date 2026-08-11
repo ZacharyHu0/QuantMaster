@@ -130,7 +130,24 @@ class AfterCloseJobs:
         return value
 
     def public(self, value: dict) -> dict:
-        return self.runtime.public(value)
+        public = self.runtime.public(value)
+        spec = value.get("spec") if isinstance(value.get("spec"), dict) else {}
+        target = str(spec.get("as_of") or "")
+        completed = ""
+        if str(value.get("status") or "") == "completed":
+            artifact = self.runtime.store.latest_artifact(
+                str(value.get("id") or ""), "after_close.snapshot",
+            )
+            payload = (artifact or {}).get("payload") if artifact else {}
+            if isinstance(payload, dict):
+                completed = str(payload.get("as_of_date") or "")
+        public.update({
+            "target_as_of": target,
+            "completed_as_of": completed,
+            "failure_reason": str(value.get("detail") or "")[:1000]
+            if str(value.get("status") or "") in {"failed", "interrupted"} else "",
+        })
+        return public
 
     def start(self) -> None:
         self.runtime.start()

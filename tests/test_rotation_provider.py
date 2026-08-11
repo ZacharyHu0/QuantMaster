@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -137,6 +139,10 @@ def test_market_history_stops_at_latest_completed_session(tmp_path, monkeypatch)
         "quantmaster.rotation.service._expected_market_session",
         lambda: "2026-08-03",
     )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        lambda **_kwargs: (SimpleNamespace(snapshot_id="catalog-existing"), set(), {}),
+    )
     monkeypatch.setattr("quantmaster.research.lake.ResearchLake", FakeLake)
     monkeypatch.setattr("quantmaster.research.engine.ResearchEngine", FakeEngine)
 
@@ -146,6 +152,80 @@ def test_market_history_stops_at_latest_completed_session(tmp_path, monkeypatch)
 
     assert observed == {"catalog_end": "2026-08-03", "plan_end": "2026-08-03"}
     assert result["expected_as_of"] == "2026-08-03"
+
+
+def test_market_history_bootstraps_next_day_catalog_before_planning(tmp_path, monkeypatch):
+    observed: dict[str, object] = {}
+    target = "2026-08-10"
+
+    class FakeCatalog:
+        @staticmethod
+        def partitions(**kwargs):
+            observed["catalog_end"] = kwargs["end"]
+            return []
+
+    class FakeLake:
+        catalog = FakeCatalog()
+
+    class FakePlan:
+        tasks = ()
+        target_dates = (target,)
+
+    class FakeEngine:
+        def __init__(self, *, lake):
+            assert isinstance(lake, FakeLake)
+
+        @staticmethod
+        def plan(start, end, **_kwargs):
+            observed["plan_end"] = end
+            return FakePlan()
+
+    catalog_reads = 0
+
+    def load_catalog(**_kwargs):
+        nonlocal catalog_reads
+        catalog_reads += 1
+        if catalog_reads > 1:
+            return SimpleNamespace(snapshot_id="catalog-current"), set(), {}
+        from quantmaster.data.instrument_snapshots import InstrumentCatalogEvidenceError
+
+        raise InstrumentCatalogEvidenceError("没有不可变证券目录快照")
+
+    def refresh_catalog(*, source, store):
+        observed["refresh_source"] = source
+        observed["refresh_store"] = store
+        return {"snapshot_id": "catalog-current"}
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.service._expected_market_session", lambda: target,
+    )
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_now",
+        lambda: datetime(2026, 8, 11, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
+        load_catalog,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instruments.refresh_authoritative_instrument_catalog",
+        refresh_catalog,
+    )
+    monkeypatch.setattr("quantmaster.research.lake.ResearchLake", FakeLake)
+    monkeypatch.setattr("quantmaster.research.engine.ResearchEngine", FakeEngine)
+
+    source = FakeTushare()
+    result = RotationProvider(
+        RotationStore(tmp_path / "rotation"), source,
+    ).sync_market_history(lambda *_args: None, lambda: False)
+
+    assert observed == {
+        "refresh_source": source,
+        "refresh_store": None,
+        "catalog_end": target,
+        "plan_end": target,
+    }
+    assert result["catalog_snapshot_id"] == "catalog-current"
 
 
 def test_provider_builds_strict_l1_l2_taxonomy(tmp_path):

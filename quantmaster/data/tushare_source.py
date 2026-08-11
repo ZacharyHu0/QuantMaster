@@ -518,7 +518,7 @@ class TushareSource(DataSource):
             fetch_partition(
                 "hk_basic", "list_status", status,
                 required_columns=(
-                    "ts_code", "symbol", "name", "list_status", "list_date", "delist_date",
+                    "ts_code", "name", "list_status", "list_date", "delist_date",
                 ),
                 list_status=status,
                 fields=(

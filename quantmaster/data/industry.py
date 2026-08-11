@@ -32,6 +32,10 @@ class IndustrySnapshotIntegrityError(RuntimeError):
     """An immutable industry artifact failed its self-hash or file identity."""
 
 
+class LegacyIndustrySnapshotError(IndustrySnapshotIntegrityError):
+    """The current projection predates the immutable snapshot contract."""
+
+
 def _cache_path() -> Path:
     return get_config().data_root / "industry_map.json"
 
@@ -182,6 +186,8 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
     if not isinstance(payload, dict):
         raise IndustrySnapshotIntegrityError(f"行业快照结构非法: {path.name}")
     expected = str(payload.get("content_sha256") or "")
+    if payload.get("schema_version") != 2 or not expected:
+        raise LegacyIndustrySnapshotError(f"行业快照为旧格式: {path.name}")
     actual = _industry_payload_hash(payload)
     if expected != actual:
         raise IndustrySnapshotIntegrityError(f"行业快照内容哈希失败: {path.name}")
@@ -413,6 +419,11 @@ def load_industry_map(
                 complete
                 and 0 <= age_seconds < CACHE_TTL_DAYS * 86400
             )
+        except LegacyIndustrySnapshotError:
+            # A pre-v2 projection is useful only as a degraded live preview.
+            # Current refresh treats it as no formal cache and replaces it only
+            # after a complete provider observation passes the new contract.
+            pass
         except IndustrySnapshotIntegrityError:
             raise
     if cached and fresh and not refresh:
@@ -427,14 +438,19 @@ def load_industry_map(
             source = "provider:unverified-completeness"
         if mapping:
             active_symbols, universe_evidence = _active_cn_universe()
-            missing_symbols = sorted(active_symbols - set(mapping))
+            observed_mapping = {
+                symbol: str(mapping[symbol])
+                for symbol in active_symbols
+                if str(mapping.get(symbol) or "")
+            }
+            missing_symbols = sorted(active_symbols - set(observed_mapping))
             complete = bool(
                 provider_complete and active_symbols and not missing_symbols
             )
             # Only a provider-declared complete snapshot may express removals.
             # Partial refreshes merge with the previous projection and stay
             # explicitly degraded in the immutable observation manifest.
-            resolved = mapping if complete else {**cached, **mapping}
+            resolved = observed_mapping if complete else {**cached, **observed_mapping}
             save_industry_map(
                 resolved,
                 snapshot_complete=bool(complete),

@@ -43,7 +43,12 @@ from quantmaster.rotation.etf_v2 import (
     fund_evidence,
 )
 from quantmaster.runtime.paths import confined_path
-from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
+from quantmaster.trading_sessions import (
+    daily_signal_cutoff,
+    market_date,
+    market_now,
+    resolve_session_target,
+)
 
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
@@ -483,6 +488,60 @@ class EtfResearchService:
         if tier not in {"production", "sandbox"}:
             raise ValueError("ETF 研究 tier 仅支持 production 或 sandbox")
         return tier  # type: ignore[return-value]
+
+    @staticmethod
+    def _research_target(as_of: str = "") -> tuple[pd.Timestamp, str]:
+        """Resolve the research ceiling from completed local stockdb evidence first."""
+
+        current_market_date = pd.Timestamp(market_date()).normalize()
+        if as_of:
+            target = pd.Timestamp(as_of).normalize()
+            if target > current_market_date:
+                raise RuntimeError(
+                    f"ETF 研究 as_of {target.date()} 晚于当前市场日 "
+                    f"{current_market_date.date()}"
+                )
+            return target, "explicit-as-of"
+
+        validated_target: pd.Timestamp | None = None
+        try:
+            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+            status = free_stockdb_runtime.status()
+            validated = pd.to_datetime(
+                status.get("validated_session"), errors="coerce",
+            )
+            if pd.notna(validated):
+                target = pd.Timestamp(validated).normalize()
+                before_target_close = (
+                    target == current_market_date
+                    and pd.Timestamp(market_now())
+                    < pd.Timestamp(daily_signal_cutoff(target.date()))
+                )
+                if target <= current_market_date and not before_target_close:
+                    validated_target = target
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            pass
+        try:
+            expectation = resolve_session_target()
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            expectation = None
+        expected_target = (
+            pd.Timestamp(expectation.session).normalize()
+            if expectation is not None and expectation.ready and expectation.session
+            else None
+        )
+        if validated_target is not None and (
+            expected_target is None or validated_target <= expected_target
+        ):
+            return validated_target, "free-stockdb:validated-session"
+        if expected_target is not None and expected_target <= current_market_date:
+            return expected_target, expectation.source
+        # An unavailable calendar is a reason to use a bounded prior-day request
+        # ceiling, never the current wall-clock date.  The published snapshot is
+        # still taken from the latest local daily bar returned below.
+        bounded = current_market_date - pd.Timedelta(days=1)
+        return bounded, "bounded-prior-day"
 
     def preview(self, snapshot_id: str = "") -> EtfResearchSnapshot | None:
         """Return an in-process sandbox preview without consulting production history."""
@@ -1034,7 +1093,7 @@ class EtfResearchService:
         )
 
         selected_tier = self._research_tier(tier)
-        target = pd.Timestamp(as_of or market_date()).normalize()
+        target, target_source = self._research_target(as_of)
         current_market_date = pd.Timestamp(market_date()).normalize()
         if target > current_market_date:
             raise RuntimeError(
@@ -1052,10 +1111,51 @@ class EtfResearchService:
                 )
             )
         except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError) as exc:
+            if not historical:
+                try:
+                    local_profiles = self._sandbox_profiles(target, historical=False)
+                except (OSError, RuntimeError, TypeError, ValueError) as local_exc:
+                    self._profile_capabilities = {
+                        "status": "unavailable",
+                        "source": "immutable-tushare-catalog + local-etf-evidence",
+                        "covered_symbols": 0,
+                        "reason": (
+                            f"正式 ETF 目录不可用：{str(exc)[:180]}；"
+                            f"本地 ETF 母集也不可用：{str(local_exc)[:180]}"
+                        ),
+                    }
+                    raise RuntimeError(
+                        f"{target.date()} 没有可用的 ETF 目录或本地母集"
+                    ) from local_exc
+                local_capabilities = dict(self._profile_capabilities)
+                denominator = dict(local_capabilities.get("denominator") or {})
+                denominator.update({
+                    "formal_eligible": True,
+                    "publication_basis": "explicit-local-denominator-degradation",
+                })
+                reason = (
+                    f"{target.date()} 的不可变 Tushare ETF 目录无法精确复验："
+                    f"{str(exc)[:180]}；已改用 stockdb 与本地缓存中已观测的场内 ETF "
+                    "母集继续生成，未覆盖产品不参与结论"
+                )
+                self._profile_capabilities = {
+                    **local_capabilities,
+                    "status": "degraded",
+                    "tier": "production",
+                    "formal_eligible": True,
+                    "publication_allowed": True,
+                    "source": local_capabilities.get("source") or "local-etf-evidence",
+                    "target_source": target_source,
+                    "denominator": denominator,
+                    "reason": reason,
+                    "catalog_error": str(exc)[:300],
+                }
+                return local_profiles
             self._profile_capabilities = {
                 "status": "unavailable",
                 "source": "immutable-tushare-catalog",
                 "covered_symbols": 0,
+                "target_source": target_source,
                 "reason": f"不可变 ETF 证券目录证据不可用：{exc}",
             }
             raise RuntimeError(
@@ -1248,6 +1348,24 @@ class EtfResearchService:
                         "as_of": str(representative["directory_catalog_as_of"]),
                         "expected_count": int(
                             representative["directory_catalog_expected_count"]
+                        ),
+                        # Reconstruct the complete membership contract as well
+                        # as the file identity.  Omitting these fields makes a
+                        # valid historical catalog look unverifiable even when
+                        # its bytes and record hash are unchanged.
+                        "membership_as_of": str(
+                            catalog_evidence.get("membership_as_of")
+                            or representative["directory_catalog_as_of"]
+                        ),
+                        "observation_active_as_of": str(
+                            catalog_evidence.get("observation_active_as_of")
+                            or representative["directory_catalog_as_of"]
+                        ),
+                        "membership_reconstructed": bool(
+                            catalog_evidence.get("membership_reconstructed", False)
+                        ),
+                        "membership_contract": str(
+                            catalog_evidence.get("membership_contract") or ""
                         ),
                     }
                     try:
@@ -1691,15 +1809,17 @@ class EtfResearchService:
                 if local_events.empty:
                     raise RuntimeError("stockdb 累计复权事件没有有限正数证据")
                 dense_frames: list[pd.DataFrame] = []
-                for symbol in missing:
-                    symbol_dates = grid[grid["symbol"].eq(symbol)][["symbol", "date"]]
-                    events = local_events[local_events["symbol"].eq(symbol)][
-                        ["date", "adj_factor"]
-                    ].sort_values("date")
-                    if events.empty:
-                        # Absence from a shared event table is not an explicit
-                        # per-product "no corporate action" response.
-                        continue
+                grid_groups = {
+                    str(symbol): group[["symbol", "date"]]
+                    for symbol, group in grid.groupby("symbol", sort=False)
+                }
+                event_groups = {
+                    str(symbol): group[["date", "adj_factor"]].sort_values("date")
+                    for symbol, group in local_events.groupby("symbol", sort=False)
+                }
+                for symbol in set(missing).intersection(event_groups):
+                    symbol_dates = grid_groups[symbol]
+                    events = event_groups[symbol]
                     dense = pd.merge_asof(
                         symbol_dates.sort_values("date"),
                         events,
@@ -1740,54 +1860,14 @@ class EtfResearchService:
                 )
 
         missing = missing_symbols(cached)
-        if missing and get_config().data.tushare_token and start and end:
-            try:
-                from quantmaster.data.tushare_source import TushareSource
-
-                source = TushareSource()
-                frames: list[pd.DataFrame] = []
-                for offset in range(0, len(missing), 2):
-                    if cancelled():
-                        raise InterruptedError("ETF 复权因子同步已取消")
-                    batch = missing[offset : offset + 2]
-                    result = source._call(
-                        "fund_adj",
-                        30,
-                        ts_code=",".join(batch),
-                        start_date=start.replace("-", ""),
-                        end_date=end.replace("-", ""),
-                        fields="ts_code,trade_date,adj_factor",
-                    ).rename(columns={"ts_code": "symbol", "trade_date": "date"})
-                    if {"symbol", "date", "adj_factor"}.issubset(result.columns):
-                        result["source"] = "tushare:fund_adj"
-                        result["acquired_at"] = acquired_now
-                        frames.append(
-                            result[["symbol", "date", "adj_factor", "source", "acquired_at"]]
-                        )
-                    progress(
-                        58 + int(9 * min(offset + len(batch), len(missing)) / max(1, len(missing))),
-                        "同步 ETF 复权证据",
-                        f"{min(offset + len(batch), len(missing))}/{len(missing)}",
-                    )
-                if frames:
-                    cached = pd.concat([cached, *frames], ignore_index=True)
-                    capability["source"] = "free-stockdb + tushare:fund_adj"
-            except InterruptedError:
-                raise
-            except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                capability.update(
-                    {
-                        "status": "partial" if not cached.empty else "unavailable",
-                        "reason": f"fund_adj 不可用：{str(exc)[:180]}",
-                    }
-                )
-        elif missing and not get_config().data.tushare_token:
+        if missing:
             capability.update(
                 {
                     "status": "partial" if not cached.empty else "unavailable",
                     "reason": (
                         f"{capability.get('reason', '本地复权证据不完整')}；"
-                        "当前进程未读取到 Tushare 凭据，保留明确降级"
+                        f"{len(missing)} 只产品使用收益率链或短周期原价降级，"
+                        "研究刷新不串行等待远程 fund_adj"
                     ),
                 }
             )
@@ -2166,8 +2246,11 @@ class EtfResearchService:
         progress = progress or (lambda *_: None)
         cancelled = cancelled or (lambda: False)
         selected_tier = self._research_tier(tier)
-        end = pd.Timestamp(as_of or market_date()).normalize()
+        end, target_source = self._research_target(as_of)
+        progress(3, "确定 ETF 研究日", f"{end.date()} · {target_source}")
         profiles = self.profiles(as_of=as_of, tier=selected_tier)
+        self._profile_capabilities.setdefault("target_source", target_source)
+        self._profile_capabilities.setdefault("target_date", end.date().isoformat())
         if not profiles:
             raise RuntimeError("证券主数据中没有沪深场内 ETF")
         start = end - pd.DateOffset(years=3, days=20)
@@ -2535,6 +2618,11 @@ class EtfResearchService:
                 direct = direct.assign(acquired_at=acquired)
             direct = direct.loc[eligible_direct]
         metadata_cache = self._profile_metadata_frame.copy()
+        # Keep a separate refresh-only fingerprint for the authoritative metadata
+        # input.  It is not used to build a historical profile (so it cannot
+        # introduce look-ahead), but it lets the UI notice a changed local source
+        # and request an explicit rescan for either current or historical views.
+        metadata_source_cache = self._direct_metadata()
         evidence_hashes = {
             "行情": content_hash(ingest.content_hashes),
             "份额": _frame_hash(
@@ -2575,10 +2663,29 @@ class EtfResearchService:
                 else content_hash([profile.to_dict() for profile in profiles])
             ),
         }
-        if selected_tier == "sandbox":
+        evidence_hashes["元数据源"] = _frame_hash(
+            metadata_source_cache,
+            (
+                "symbol",
+                "name",
+                "benchmark",
+                "benchmark_code",
+                "benchmark_type",
+                "benchmark_level",
+                "index_type",
+                "index_provider",
+                "fund_type",
+                "invest_type",
+                "mgt_fee",
+                "metadata_source",
+            ),
+        )
+        denominator = self._profile_capabilities.get("denominator") or {}
+        if denominator:
             evidence_hashes["母集"] = content_hash(
-                self._profile_capabilities.get("denominator") or {}
+                denominator
             )
+        if selected_tier == "sandbox":
             evidence_hashes["行情明细"] = _stockdb_frame_hash(daily)
         else:
             self.store.freeze_adjustments(factors, evidence_hashes["复权"])
@@ -2607,22 +2714,72 @@ class EtfResearchService:
             return existing
 
         progress(70, "计算 ETF 板块证据", "趋势、位置、活跃度分别公开")
-        daily_groups = {str(symbol): group for symbol, group in daily.groupby("symbol")}
-        factor_groups = (
-            {str(symbol): group for symbol, group in factors.groupby("symbol")} if not factors.empty else {}
+        metric_columns = [
+            column
+            for column in ("symbol", "date", "close", "pct_chg", "amount", "adj_factor")
+            if column in daily
+        ]
+        metric_daily = daily[metric_columns].copy()
+        metric_daily = (
+            metric_daily.dropna(subset=["symbol", "date"])
+            .sort_values(["symbol", "date"])
+            .drop_duplicates(["symbol", "date"], keep="last")
         )
+        for column in ("close", "pct_chg", "amount", "adj_factor"):
+            if column in metric_daily:
+                metric_daily[column] = pd.to_numeric(metric_daily[column], errors="coerce")
+        daily_groups = {
+            str(symbol): group for symbol, group in metric_daily.groupby("symbol", sort=False)
+        }
+        metric_factors = factors
+        if not factors.empty:
+            factor_columns = [
+                column for column in ("symbol", "date", "adj_factor", "source") if column in factors
+            ]
+            metric_factors = (
+                factors[factor_columns]
+                .sort_values(["symbol", "date"])
+                .drop_duplicates(["symbol", "date"], keep="last")
+            )
+        factor_groups = (
+            {
+                str(symbol): group
+                for symbol, group in metric_factors.groupby("symbol", sort=False)
+            }
+            if not metric_factors.empty
+            else {}
+        )
+        session_index = {value: index for index, value in enumerate(session_dates)}
+        direct_groups: dict[str, pd.DataFrame] = {}
+        if not direct.empty:
+            prepared_direct = direct.copy()
+            prepared_direct["shares"] = pd.to_numeric(
+                prepared_direct.get("shares"), errors="coerce"
+            )
+            prepared_direct = (
+                prepared_direct.dropna(subset=["symbol", "trade_date", "shares"])
+                .sort_values(["symbol", "trade_date"])
+                .drop_duplicates(["symbol", "trade_date"], keep="last")
+            )
+            direct_groups = {
+                str(symbol): group
+                for symbol, group in prepared_direct.groupby("symbol", sort=False)
+            }
         rows: list[dict[str, Any]] = []
         for profile in profiles:
             metric = adjusted_daily_metrics(
                 daily_groups.get(profile.symbol, pd.DataFrame()),
                 factor_groups.get(profile.symbol),
+                prepared=True,
             )
-            observations = direct[direct["symbol"].eq(profile.symbol)] if not direct.empty else pd.DataFrame()
+            observations = direct_groups.get(profile.symbol, pd.DataFrame())
             funds = fund_evidence(
                 observations,
                 as_of_date=actual,
                 session_dates=session_dates,
                 fallback_price=metric.get("close"),
+                session_index=session_index,
+                prepared=True,
             )
             total_size = None
             if not observations.empty and "total_size" in observations:
@@ -2722,11 +2879,18 @@ class EtfResearchService:
         enhanced_metadata = sum(
             item.provenance.get("metadata") == "etf_basic" for item in items
         )
+        effective_refresh_warnings = list(refresh_warnings)
+        if self._profile_capabilities.get("status") == "degraded":
+            metadata_warning = str(self._profile_capabilities.get("reason") or "").strip()
+            if metadata_warning and metadata_warning not in effective_refresh_warnings:
+                effective_refresh_warnings.append(metadata_warning)
         freshness = {
             "research": {
                 "date": actual,
                 "status": "ready" if selected_tier == "production" else "degraded",
                 "coverage": 1.0,
+                "requested_ceiling": end.date().isoformat(),
+                "source": target_source,
             },
             "market": {
                 "date": actual,
@@ -2782,16 +2946,25 @@ class EtfResearchService:
                 "scoring_input": False,
                 "reason": "仅在打开单只 ETF 趋势标签时读取并缓存",
             },
-            "refresh_warnings": list(refresh_warnings),
+            "refresh_warnings": effective_refresh_warnings,
             "publication": {
                 "tier": selected_tier,
                 "formal_eligible": selected_tier == "production",
                 "status": "ready" if selected_tier == "production" else "blocked",
                 "reason": (
-                    "已通过不可变 ETF 目录与正式完整性门"
+                    "价格研究已发布；ETF 目录按明确降级母集计算"
+                    if selected_tier == "production"
+                    and self._profile_capabilities.get("status") == "degraded"
+                    else "已通过不可变 ETF 目录与正式完整性门"
                     if selected_tier == "production"
                     else "sandbox 使用本地非完整母集，禁止发布为 production 快照"
                 ),
+            },
+            "session": {
+                "requested": str(as_of or ""),
+                "resolved": end.date().isoformat(),
+                "published": actual,
+                "source": target_source,
             },
         }
         share_status_counts = {

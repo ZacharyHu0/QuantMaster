@@ -198,11 +198,17 @@
     const failed = ['error','degraded'].includes(status?.state)
       || ['failed','manual_required'].includes(status?.update_result);
     const succeeded = status?.update_result === 'success';
+    const warnings = Array.isArray(status?.validation?.warnings)
+      ? status.validation.warnings.filter(Boolean) : [];
+    const succeededWithWarnings = succeeded && warnings.length > 0;
     const target = status?.target_session ? ` · 目标 ${status.target_session}` : '';
     const actual = status?.actual_session ? ` / 实际 ${status.actual_session}` : '';
     const validated = status?.validated_session || status?.actual_session || '';
     let message = status?.message || '正在读取扫描数据状态';
-    if (succeeded) {
+    if (succeededWithWarnings) {
+      message = status?.message
+        || `扫描数据已更新至 ${validated || '目标日'}；存在 ${warnings.length} 项覆盖警告，可继续扫描或再次更新。`;
+    } else if (succeeded) {
       message = validated
         ? `扫描数据已更新至 ${validated}，现在可以运行扫描生成最新快照。`
         : '扫描数据更新完成，现在可以运行扫描生成最新快照。';
@@ -212,7 +218,8 @@
       message = `${message}${target}${actual}`;
     }
     state.stockdbActive = active;
-    box.dataset.tone = failed ? 'error' : succeeded ? 'success' : 'progress';
+    box.dataset.tone = failed ? 'error' : succeededWithWarnings
+      ? 'warning' : succeeded ? 'success' : 'progress';
     box.querySelector('[data-after-close-source-message]').textContent = message;
     box.hidden = false;
     updateButton.textContent = active ? '正在更新扫描数据…' : '更新扫描数据';

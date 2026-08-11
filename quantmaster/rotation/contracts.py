@@ -13,6 +13,7 @@ class RotationRefreshRequest(ContractModel):
     scope: Literal["all", "close", "market", "industries", "themes", "etf"] = "all"
     mode: Literal["incremental", "rebuild"] = "incremental"
     source: Literal["auto", "local"] = "auto"
+    as_of: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
 
 
 class RotationPreferencesUpdate(ContractModel):
@@ -24,3 +25,4 @@ class RotationJobSpec(ContractModel):
     scope: Literal["all", "close", "market", "industries", "themes", "etf"] = "all"
     mode: Literal["incremental", "rebuild"] = "incremental"
     source: Literal["auto", "local"] = "auto"
+    as_of: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")

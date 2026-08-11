@@ -187,7 +187,7 @@ def test_source_crud_and_dynamic_credentials(tmp_path):
         "sina_live", "sse", "pboc",
         "nbs_release", "nbs_interpretation", "ndrc",
     }
-    assert "eastmoney_fast" not in {item["id"] for item in store.list(enabled=True)}
+    assert "eastmoney_fast" in {item["id"] for item in store.list(enabled=True)}
 
     created = store.create(source_value(
         name="鉴权 JSON", kind="json", auth_type="bearer",
@@ -272,7 +272,7 @@ def test_raw_response_cleanup(tmp_path):
     assert path.exists()
 
 
-def test_quality_factor_uses_first_seen_and_defers_after_close(tmp_path):
+def test_quality_factor_uses_publication_time_and_defers_after_close(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     first_seen = pd.Timestamp("2024-05-06 16:00", tz="Asia/Shanghai").timestamp()
     store.save([official_news(store,
@@ -294,7 +294,7 @@ def test_quality_factor_uses_first_seen_and_defers_after_close(tmp_path):
     assert -0.8 < factor.loc["2024-05-08", "600519.SH"] < 0
 
 
-def test_quality_factor_waits_for_analysis_availability_within_same_panel(tmp_path):
+def test_quality_factor_backfills_late_analysis_to_publication_day(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     published = pd.Timestamp("2024-01-02 09:00", tz="Asia/Shanghai").timestamp()
     analyzed = pd.Timestamp("2024-01-10 10:00", tz="Asia/Shanghai").timestamp()
@@ -319,7 +319,8 @@ def test_quality_factor_waits_for_analysis_availability_within_same_panel(tmp_pa
     index = pd.bdate_range("2024-01-02", "2024-01-12")
     factor = quality_sentiment_panel(index, ["600519.SH"], store=store)
 
-    assert factor.loc[:"2024-01-09", "600519.SH"].isna().all()
+    assert factor.loc["2024-01-02", "600519.SH"] == pytest.approx(0.8)
+    assert factor.loc["2024-01-03", "600519.SH"] < 0.8
     assert factor.loc["2024-01-10", "600519.SH"] > 0
 
 
@@ -412,17 +413,17 @@ def test_sandbox_factor_previews_short_incomplete_sina_without_future_analysis(t
     metadata = preview.attrs["news_factor"]
     assert metadata["tier"] == "sandbox"
     assert metadata["sample_start"] == sessions[0].strftime("%Y-%m-%d")
-    assert metadata["sample_end"] == sessions[-2].strftime("%Y-%m-%d")
-    assert metadata["sessions"] == 9
-    assert metadata["coverage"] == pytest.approx(0.9)
-    assert metadata["event_count"] == 9
+    assert metadata["sample_end"] == sessions[-1].strftime("%Y-%m-%d")
+    assert metadata["sessions"] == 10
+    assert metadata["coverage"] == pytest.approx(1.0)
+    assert metadata["event_count"] == 10
     assert metadata["formal_eligible"] is False
     assert "history_sessions_below_1038" in metadata["reasons"]
     assert metadata["sources"] == [{
         "source_id": "sina_live",
         "source_name": "新浪财经 7×24",
         "source_group": "fast",
-        "event_count": 9,
+        "event_count": 10,
         "weight_multiplier": 0.25,
         "formal_row_count": 0,
         "formal_eligible": False,
@@ -841,6 +842,50 @@ def test_market_sentiment_respects_requested_cutoff_and_quality_deduplication(tm
     assert at_close["lookback_days"] == 30
     assert after_close["event_count"] == 22
     assert after_close["score"] < at_close["score"]
+
+
+def test_market_sentiment_separates_event_cutoff_from_later_evidence_visibility(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    event_cutoff = 1_800_000_000.0
+    knowledge_cutoff = event_cutoff + 3600
+    items = [
+        official_news(
+            store,
+            title=f"盘后完成标注 {index}",
+            content=f"盘后完成标注正文 {index}",
+            sentiment=0.5,
+            confidence=1,
+            importance_score=100,
+            analysis_status="complete",
+            published_at_epoch=event_cutoff - 60,
+        )
+        for index in range(21)
+    ]
+    items.append(official_news(
+        store,
+        title="事件截止后发布",
+        content="事件截止后发布正文",
+        sentiment=-1,
+        confidence=1,
+        importance_score=100,
+        analysis_status="complete",
+        published_at_epoch=event_cutoff + 60,
+    ))
+    store.save(items)
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE news SET first_seen_at=?,content_version_at=?,analysis_updated_at=?",
+            (knowledge_cutoff, knowledge_cutoff, knowledge_cutoff),
+        )
+
+    pit = store.market_sentiment(as_of=event_cutoff, days=30)
+    operational = store.market_sentiment(
+        as_of=event_cutoff, days=30, knowledge_as_of=knowledge_cutoff,
+    )
+
+    assert pit["event_count"] == 0
+    assert operational["event_count"] == 21
+    assert operational["knowledge_as_of_epoch"] == knowledge_cutoff
 
 
 def test_holdings_context_update_cannot_rewrite_same_as_of_market_sentiment(tmp_path):

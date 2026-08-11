@@ -28,11 +28,19 @@ import sys
 
 import pandas as pd
 
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import market_date, resolve_session_target
 
 
 def _today() -> str:
     return market_date().isoformat()
+
+
+def _close_day() -> str:
+    """Default date for daily research commands, excluding today's open session."""
+    expectation = resolve_session_target()
+    if expectation.ready and expectation.session:
+        return expectation.session
+    return (market_date() - pd.Timedelta(days=1)).date().isoformat()
 
 
 def _print_json(data) -> None:
@@ -158,7 +166,7 @@ def cmd_lab(args) -> None:
     if args.lab_cmd == "benchmark":
         _print_json(service.benchmark_local(
             universe=args.universe, start=args.start,
-            end=args.end or _today(), runs=args.runs,
+            end=args.end or _close_day(), runs=args.runs,
         ))
         return
     if args.lab_cmd == "list":
@@ -186,7 +194,7 @@ def cmd_lab(args) -> None:
             {
                 "universe": args.universe,
                 "start": args.start,
-                "end": args.end or _today(),
+                "end": args.end or _close_day(),
                 "models": [item.strip() for item in args.models.split(",") if item.strip()],
                 "budget_hours": args.budget_hours,
                 "max_trials": args.max_trials,
@@ -209,13 +217,13 @@ def cmd_lab(args) -> None:
                 "version_id": args.version_id,
                 "universe": args.universe,
                 "start": args.start,
-                "end": args.end or _today(),
+                "end": args.end or _close_day(),
             },
         )
         _print_json({"job": job, "hint": "偏差审计已进入研究队列"})
         return
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     base = {"universe": args.universe, "start": args.start, "end": end}
     if args.lab_cmd == "prepare-data":
         job = service.enqueue("prepare_data", base)
@@ -266,7 +274,7 @@ def cmd_fetch(args) -> None:
     from quantmaster.data.universe import load_universe_analysis
 
     symbols = load_universe_analysis(args.universe)
-    end = args.end or _today()
+    end = args.end or _close_day()
     ok = failed = 0
     for symbol in symbols:
         try:
@@ -289,7 +297,7 @@ def cmd_regime(args) -> None:
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.market import analyze_market, analyze_sectors
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     panel = _load_panel(args.universe, args.start, end)
     report = analyze_market(panel)
     past = report.pop("past").tail(args.history)
@@ -324,7 +332,7 @@ def cmd_select(args) -> None:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     if args.end and args.policy_mode == "live":
         raise ValueError(
             "显式历史截止日不能使用 live 模式；请选择 historical_replay 或 retrospective"
@@ -548,7 +556,7 @@ def cmd_stockdb(args) -> int:
 
         from quantmaster.data.free_stockdb_compatibility import validate_runtime_profile
 
-        end = args.end or market_date().isoformat()
+        end = args.end or _close_day()
         start = args.start or (date.fromisoformat(end) - timedelta(days=300)).isoformat()
         samples = [
             {"symbol": symbol, "start": start, "end": end, "kind": kind}
@@ -695,7 +703,7 @@ def cmd_factor_test(args) -> None:
     from quantmaster.factors import analyze_factor, compute_factor
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     factor = resolve_factor(
         args.expression, load_universe_analysis(args.universe), args.start, end,
     )
@@ -725,7 +733,7 @@ def cmd_backtest(args) -> None:
     from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     panel = _load_panel(args.universe, args.start, end)
     symbols = load_universe_analysis(args.universe)
     names = [n.strip() for n in args.factor.split(",") if n.strip()]
@@ -778,7 +786,7 @@ def cmd_validate(args) -> None:
     from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors.fundamental import resolve_factor
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     factor = resolve_factor(
         args.expression, load_universe_analysis(args.universe), args.start, end,
     )
@@ -793,7 +801,7 @@ def cmd_grid(args) -> None:
     from quantmaster.backtest import grid_search
     from quantmaster.data import load_history
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     panel = _load_panel(args.universe, args.start, end)
     benchmark = None
     try:
@@ -820,7 +828,7 @@ def cmd_fund_test(args) -> None:
     from quantmaster.data.universe import load_universe_analysis
     from quantmaster.factors import analyze_factor, compute_factor, make_fundamental_factors
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     symbols = load_universe_analysis(args.universe)
     panel = _usable_market_data(
         load_panel(symbols, args.start, end), label=f"{args.universe} 面板",
@@ -838,7 +846,7 @@ def cmd_fund_test(args) -> None:
 def cmd_mine(args) -> None:
     from quantmaster.factors.mining import GeneticMiner
 
-    panel = _load_panel(args.universe, args.start, args.end or _today())
+    panel = _load_panel(args.universe, args.start, args.end or _close_day())
     miner = GeneticMiner(population=args.population, generations=args.generations, seed=args.seed)
     mined = miner.mine(panel, top_n=args.top)
     print(f"\n{'fitness':>8} {'RankIC':>8} {'ICIR':>7}  expression")
@@ -849,7 +857,7 @@ def cmd_mine(args) -> None:
 def cmd_mine_llm(args) -> None:
     from quantmaster.factors.mining import LLMFactorMiner
 
-    panel = _load_panel(args.universe, args.start, args.end or _today())
+    panel = _load_panel(args.universe, args.start, args.end or _close_day())
     mined = LLMFactorMiner().mine(panel, n=args.n, rounds=args.rounds)
     print(f"\n{'RankIC':>8} {'ICIR':>7} 达标  expression / 逻辑")
     for m in mined:
@@ -943,7 +951,7 @@ def cmd_daily(args) -> None:
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
-    end = _today()
+    end = _close_day()
     universe_snapshot = load_universe_analysis_snapshot(args.universe)
     symbols = list(universe_snapshot.symbols)
 
@@ -1098,7 +1106,7 @@ def cmd_ledger(args) -> None:
             raise SystemExit(1)
         symbols = sorted(trades["symbol"].unique())
         start = str(pd.to_datetime(trades["date"]).min().date())
-        end = _today()
+        end = _close_day()
         store = BarStore()
         prices = {}
         for symbol in symbols:
@@ -1172,7 +1180,7 @@ def cmd_data(args) -> None:
         _print_json(engine.capabilities())
         return
     if args.data_cmd == "preview":
-        trade_date = args.date or _today()
+        trade_date = args.date or _close_day()
         frame = engine.preview_date(args.dataset, trade_date)
         rows = json.loads(
             frame.head(args.limit).to_json(
@@ -1217,7 +1225,7 @@ def cmd_data(args) -> None:
         records = engine.lake.materialize_bar_store(
             symbols,
             args.start,
-            args.end or _today(),
+            args.end or _close_day(),
             asset_class=_research_assets(args.asset)[0],
         )
         _print_json(
@@ -1230,7 +1238,7 @@ def cmd_data(args) -> None:
         )
         return
 
-    end = args.end or _today()
+    end = args.end or _close_day()
     plan = engine.plan(
         args.start,
         end,
