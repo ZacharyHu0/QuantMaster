@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.11.2"
+VERSION = "1.11.3"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "覆盖率制品路径修复",
+                "items": (
+                    (
+                        "覆盖率汇总任务从统一制品目录下载并合并分片数据，修复 CI 因"
+                        "迁移输出路径后找不到 coverage 数据的问题。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.11.2",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "仓库工作流收敛",

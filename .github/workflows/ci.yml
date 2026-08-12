@@ -145,10 +145,11 @@ jobs:
         with:
           pattern: coverage-shard-*
           merge-multiple: true
+          path: .artifacts/coverage
       - name: Combine branch coverage
         run: |
           mkdir -p .artifacts/coverage
-          uv run python -m coverage combine
+          uv run python -m coverage combine .artifacts/coverage
           uv run python -m coverage report
           uv run python -m coverage xml -o .artifacts/coverage/coverage.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
