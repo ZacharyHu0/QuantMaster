@@ -98,6 +98,8 @@ class RuntimeWorker:
         from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
 
         self._lifecycle = RuntimeLifecycle("runtime-worker", self._generation)
+        self._config_revision = 0
+        self._config_generation = 0
 
     def _write_heartbeat(self) -> None:
         path = _heartbeat_path()
@@ -110,6 +112,8 @@ class RuntimeWorker:
             "started": self._started,
             "threads": threading.active_count(),
             "lifecycle": self._lifecycle.snapshot(),
+            "effective_revision": self._config_revision,
+            "config_generation": self._config_generation,
         }
         command_server = self._command_server
         value["commands_available"] = bool(
@@ -170,6 +174,36 @@ class RuntimeWorker:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
 
+    def _reconcile_settings_projection(self) -> None:
+        """Pull only the newest persisted settings state for this generation."""
+        from quantmaster.server.management import settings_manager
+        from quantmaster.settings_runtime import public_state
+
+        latest_config = public_state(settings_manager.path)
+        self._config_revision = int(latest_config["persisted_revision"])
+        self._config_generation = int(latest_config["latest_generation"])
+
+    def _apply_latest_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from quantmaster.config import load_config, set_config
+        from quantmaster.server.management import settings_manager
+        from quantmaster.settings_runtime import persisted_revision
+
+        revision = int(payload.get("revision") or 0)
+        generation = int(payload.get("generation") or 0)
+        latest = persisted_revision(settings_manager.path)
+        if revision < latest:
+            return {
+                "status": "superseded", "revision": revision,
+                "latest_revision": latest, "generation": generation,
+            }
+        set_config(load_config())
+        self._config_revision = latest
+        self._config_generation = max(self._config_generation, generation)
+        return {
+            "status": "effective", "revision": latest,
+            "generation": self._config_generation,
+        }
+
     def start(self, *, bootstrap_rotation: bool) -> bool:
         with self._lock:
             if self._started:
@@ -186,6 +220,7 @@ class RuntimeWorker:
             # readers only receive the pure ``Config.data_root`` path and
             # must report a cold snapshot instead of creating it themselves.
             get_config().ensure_data_root()
+            self._reconcile_settings_projection()
 
             from quantmaster.after_close.jobs import get_after_close_jobs
             from quantmaster.ai.news_jobs import get_news_jobs
@@ -265,6 +300,8 @@ class RuntimeWorker:
                         set_config(load_config())
                         changed = [str(value) for value in payload.get("changed_fields") or []]
                         return runtime.apply_config(changed)
+                    if operation == "settings.apply.latest":
+                        return self._apply_latest_settings(payload)
                     if operation == "settings.diagnostic.create":
                         from quantmaster.settings import SettingsDocument
 

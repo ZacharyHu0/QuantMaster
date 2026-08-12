@@ -25,6 +25,7 @@ from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.trading_sessions import market_date
 
 CONFIG_VERSION = 1
+SETTINGS_STATE_VERSION = 1
 AUTO_SNAPSHOT_LIMIT = 20
 SETTINGS_CHECK_KINDS = frozenset(
     {
@@ -123,6 +124,9 @@ class DataSettings(StrictModel):
     intraday_cache_minutes: int = Field(default=5, ge=0, le=1440)
     akshare_retries: int = Field(default=3, ge=1, le=20)
     akshare_retry_backoff: float = Field(default=0.8, ge=0.0, le=60.0)
+    provider_retry_attempts: int = Field(default=3, ge=1, le=20)
+    provider_retry_backoff: float = Field(default=0.8, ge=0.0, le=60.0)
+    provider_retry_max_backoff: float = Field(default=8.0, ge=0.0, le=300.0)
     provider_timeout: float = Field(default=45.0, ge=1.0, le=300.0)
     tushare_calls_per_minute: int = Field(default=120, ge=1, le=10_000)
     tushare_cache_days: int = Field(default=1, ge=0, le=3650)
@@ -134,6 +138,11 @@ class DataSettings(StrictModel):
     after_close_min_avg_amount: float = Field(default=30_000_000.0, ge=0, le=1e13)
     after_close_candidate_limit: int = Field(default=30, ge=5, le=200)
     after_close_notify: bool = True
+    repair_enabled: bool = True
+    repair_daily_budget: int = Field(default=100, ge=1, le=100_000)
+    repair_max_workers: int = Field(default=2, ge=1, le=16)
+    repair_retry_backoff: float = Field(default=60.0, ge=1.0, le=86_400.0)
+    repair_max_attempts: int = Field(default=5, ge=1, le=100)
 
     @field_validator("root")
     @classmethod
@@ -275,6 +284,11 @@ class LabSettings(StrictModel):
     daily_budget_hours: float = Field(default=10.0, gt=0, le=24)
     max_workers: int = Field(default=2, ge=1, le=4)
     device: Literal["auto", "cpu", "cuda", "mps"] = "auto"
+    data_policy: Literal["prefer_local"] = "prefer_local"
+    panel_cache_mb: int = Field(default=2048, ge=128, le=131_072)
+    feature_cache_gb: int = Field(default=8, ge=1, le=1024)
+    gpu_memory_fraction: float = Field(default=0.80, gt=0.0, le=1.0)
+    gpu_max_concurrent_jobs: int = Field(default=1, ge=1, le=16)
     allow_cloud_sample: bool = False
     ai_python_mining_enabled: bool = False
 
@@ -442,6 +456,11 @@ def _setting_check_fingerprint(
 def _resolve_config_path(path: str | Path | None) -> Path:
     if path is not None:
         return Path(path).expanduser().resolve()
+    configured = os.environ.get("QM_CONFIG_PATH", "").strip()
+    if configured:
+        if configured == os.devnull:
+            return Path(tempfile.gettempdir()) / f"quantmaster-null-{os.getpid()}.yaml"
+        return Path(configured).expanduser().resolve()
     for candidate in DEFAULT_CONFIG_PATHS:
         if candidate.is_file():
             return candidate.resolve()
@@ -498,6 +517,80 @@ def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
     return out
 
 
+_ENVIRONMENT_FIELDS = {
+    "llm.provider": ("QM_LLM_PROVIDER",),
+    "llm.api_key": ("QM_LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+    "llm.model": ("QM_LLM_MODEL",),
+    "llm.base_url": ("QM_LLM_BASE_URL",),
+    "llm.reasoning_effort": ("QM_LLM_REASONING_EFFORT",),
+    "llm.max_concurrency": ("QM_LLM_MAX_CONCURRENCY",),
+    "llm.queue_timeout": ("QM_LLM_QUEUE_TIMEOUT",),
+    "news.annotation_max_concurrency": ("QM_NEWS_ANNOTATION_MAX_CONCURRENCY",),
+    "data.tushare_token": ("TUSHARE_TOKEN",),
+    "data.root": ("QM_DATA_ROOT",),
+    "data.primary_provider": ("QM_DATA_PRIMARY_PROVIDER",),
+    "data.free_stockdb_sdk_path": ("QM_FREE_STOCKDB_SDK_PATH",),
+    "data.free_stockdb_url": ("QM_FREE_STOCKDB_URL",),
+    "data.free_stockdb_timeout": ("QM_FREE_STOCKDB_TIMEOUT",),
+    "data.free_stockdb_root": ("QM_FREE_STOCKDB_ROOT",),
+    "data.free_stockdb_managed": ("QM_FREE_STOCKDB_MANAGED",),
+    "data.free_stockdb_auto_update": ("QM_FREE_STOCKDB_AUTO_UPDATE",),
+    "data.free_stockdb_update_time": ("QM_FREE_STOCKDB_UPDATE_TIME",),
+    "data.free_stockdb_online_enabled": ("QM_FREE_STOCKDB_ONLINE_ENABLED",),
+    "data.free_stockdb_online_url": ("QM_FREE_STOCKDB_ONLINE_URL",),
+    "data.free_stockdb_online_timeout": ("QM_FREE_STOCKDB_ONLINE_TIMEOUT",),
+    "data.akshare_enabled": ("QM_AKSHARE_ENABLED",),
+    "data.tushare_enabled": ("QM_TUSHARE_ENABLED",),
+    "data.yfinance_enabled": ("QM_YFINANCE_ENABLED",),
+    "data.akshare_retries": ("QM_AKSHARE_RETRIES",),
+    "data.akshare_retry_backoff": ("QM_AKSHARE_RETRY_BACKOFF",),
+    "data.provider_retry_attempts": ("QM_PROVIDER_RETRY_ATTEMPTS",),
+    "data.provider_retry_backoff": ("QM_PROVIDER_RETRY_BACKOFF",),
+    "data.provider_retry_max_backoff": ("QM_PROVIDER_RETRY_MAX_BACKOFF",),
+    "data.provider_timeout": ("QM_DATA_PROVIDER_TIMEOUT",),
+    "data.tushare_calls_per_minute": ("QM_TUSHARE_CALLS_PER_MINUTE",),
+    "data.tushare_cache_days": ("QM_TUSHARE_CACHE_DAYS",),
+    "data.fundamental_cache_days": ("QM_FUNDAMENTAL_CACHE_DAYS",),
+    "data.repair_enabled": ("QM_DATA_REPAIR_ENABLED",),
+    "data.repair_daily_budget": ("QM_DATA_REPAIR_DAILY_BUDGET",),
+    "data.repair_max_workers": ("QM_DATA_REPAIR_MAX_WORKERS",),
+    "data.repair_retry_backoff": ("QM_DATA_REPAIR_RETRY_BACKOFF",),
+    "data.repair_max_attempts": ("QM_DATA_REPAIR_MAX_ATTEMPTS",),
+    "automation.enabled": ("QM_AUTOMATION_ENABLED",),
+    "automation.weixin_api_base": ("QM_WEIXIN_API_BASE",),
+    "automation.feishu_app_id": ("QM_FEISHU_APP_ID",),
+    "lab.enabled": ("QM_LAB_ENABLED",),
+    "lab.max_workers": ("QM_LAB_MAX_WORKERS",),
+    "lab.device": ("QM_LAB_DEVICE",),
+}
+
+
+def _field_sources(path: Path, effective: SettingsDocument) -> dict[str, dict[str, Any]]:
+    """Public provenance without exposing environment or sensitive values."""
+    raw = _read_yaml(path)
+    persisted_cfg = load_config(path, load_secrets=False, apply_environment=False)
+    persisted = _flatten(document_from_config(persisted_cfg).model_dump())
+    effective_values = _flatten(effective.model_dump())
+    raw_values = _flatten(_sanitize(raw))
+    sources: dict[str, dict[str, Any]] = {}
+    for field, effective_value in effective_values.items():
+        env_name = next((name for name in _ENVIRONMENT_FIELDS.get(field, ()) if name in os.environ), "")
+        source = "environment" if env_name else "yaml" if field in raw_values else "default"
+        sensitive = field in {"llm.api_key", "data.tushare_token"}
+        item: dict[str, Any] = {
+            "source": source,
+            "override": bool(env_name),
+            "environment": env_name,
+            "sensitive": sensitive,
+        }
+        if not sensitive:
+            item["persisted"] = persisted.get(field)
+            item["effective"] = effective_value
+            item["drift"] = persisted.get(field) != effective_value
+        sources[field] = item
+    return sources
+
+
 class ConfigManager:
     """版本化设置管理器；实例可在测试中注入路径和凭据后端。"""
 
@@ -517,6 +610,17 @@ class ConfigManager:
         self.credentials = credential_store or CredentialStore()
         self._lock = threading.RLock()
         self._fingerprint_key: bytes | None = None
+
+    @staticmethod
+    def _revision(raw: dict[str, Any]) -> int:
+        try:
+            return max(0, int(raw.get("_revision") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _next_revision(raw: dict[str, Any]) -> int:
+        return ConfigManager._revision(raw) + 1
 
     def _settings_check_fingerprint_key(self, *, create: bool = True) -> bytes | None:
         """Return the HMAC key without touching keyring during a page read.
@@ -566,23 +670,28 @@ class ConfigManager:
         # Never read a keyring-backed secret while rendering a page.  The
         # document carries only non-secret fields, and declared keyring state
         # remains visible below without testing the credential backend.
-        cfg = load_config(self.path, load_secrets=False)
-        document = document_from_config(cfg)
+        persisted_cfg = load_config(self.path, load_secrets=False, apply_environment=False)
+        effective_cfg = load_config(self.path, load_secrets=False)
+        document = document_from_config(persisted_cfg)
         doc = document.model_dump()
         meta = raw.get("_secrets") or {}
         doc.update(
             {
                 "managed_by_gui": bool(raw.get("managed_by_gui")),
                 "config_path": str(self.path),
-                "config_revision": _hash_config(raw or doc),
+                "config_revision": self._revision(raw),
+                "persisted_revision": self._revision(raw),
                 "secrets": {
-                    "llm": self._secret_public("llm", cfg.llm.api_key, meta),
-                    "tushare": self._secret_public("tushare", cfg.data.tushare_token, meta),
+                    "llm": self._secret_public("llm", effective_cfg.llm.api_key, meta),
+                    "tushare": self._secret_public("tushare", effective_cfg.data.tushare_token, meta),
                 },
                 "checks": self.check_results(
                     document,
-                    {"llm": cfg.llm.api_key, "tushare": cfg.data.tushare_token},
+                    {"llm": effective_cfg.llm.api_key, "tushare": effective_cfg.data.tushare_token},
                     allow_keyring_write=False,
+                ),
+                "field_sources": _field_sources(
+                    self.path, document_from_config(effective_cfg),
                 ),
             }
         )
@@ -680,13 +789,23 @@ class ConfigManager:
     @staticmethod
     def _secret_public(name: str, runtime_value: str, metadata: dict) -> dict[str, Any]:
         item = metadata.get(name) or {}
-        state = item.get("state") or ("environment-or-yaml" if runtime_value else "unset")
+        state = item.get("state") or ("environment" if runtime_value else "unset")
+        source = {
+            "keyring": "credential_store",
+            "plaintext": "yaml",
+            "cleared": "saved_clear",
+            "environment": "environment",
+            "unset": "unset",
+        }.get(state, "saved")
         return {
             # Keyring availability is a diagnostic concern, not something a
             # page read is allowed to probe.  A declared keyring slot is shown
             # as configured and explicit checks will report if it is unusable.
             "configured": bool(runtime_value) or state == "keyring",
             "state": state,
+            "source": source,
+            "present": bool(runtime_value) or state == "keyring",
+            "tail": str(runtime_value)[-4:] if runtime_value and source == "environment" else "",
         }
 
     def validate(self, value: SettingsDocument | dict[str, Any]) -> dict[str, Any]:
@@ -753,7 +872,9 @@ class ConfigManager:
         with self._lock:
             current_raw = _read_yaml(self.path)
             current_cfg = self.load()
-            current_doc = document_from_config(current_cfg)
+            current_doc = document_from_config(
+                load_config(self.path, load_secrets=False, apply_environment=False),
+            )
             if (
                 not allow_root_change
                 and Path(value.data.root).expanduser().resolve()
@@ -768,11 +889,64 @@ class ConfigManager:
             )["warnings"]
             payload = value.model_dump(exclude={"secrets", "allow_plaintext_secrets"})
             payload["managed_by_gui"] = True
+            payload["_revision"] = self._next_revision(current_raw)
             payload["_secrets"] = {}
 
             old_llm_target = CredentialStore.llm_target(current_cfg.llm.provider, current_cfg.llm.base_url)
             new_llm_target = CredentialStore.llm_target(value.llm.provider, value.llm.base_url)
-            self._apply_secret(
+            staged_targets = self._stage_secrets(
+                value=value, current_raw=current_raw, current_cfg=current_cfg,
+                payload=payload, old_llm_target=old_llm_target,
+                new_llm_target=new_llm_target, warnings=warnings,
+            )
+
+            if not current_raw.get("managed_by_gui"):
+                self._create_snapshot(
+                    current_raw or document_from_config(current_cfg).model_dump(),
+                    kind="initial",
+                    name="首次 GUI 保存前",
+                )
+            self._commit_payload(payload, staged_targets)
+            set_config(self.load())
+            try:
+                snapshot = self._create_snapshot(payload, kind="automatic")
+            except (OSError, TypeError, ValueError) as exc:
+                # YAML is already authoritative.  A secondary history failure
+                # is reported without pretending that persistence rolled back.
+                warnings.append(f"设置已保存，但历史快照创建失败：{type(exc).__name__}")
+                snapshot = {"id": ""}
+            old_flat = _flatten(current_doc.model_dump())
+            new_flat = _flatten(value.model_dump(exclude={"secrets", "allow_plaintext_secrets"}))
+            changed = sorted(
+                key for key in set(old_flat) | set(new_flat) if old_flat.get(key) != new_flat.get(key)
+            )
+            if value.secrets.llm.action != "keep":
+                changed.append("llm.api_key")
+            if value.secrets.tushare.action != "keep":
+                changed.append("data.tushare_token")
+            changed = sorted(set(changed))
+            restart = [
+                f"server.{name}"
+                for name in ("host", "port")
+                if getattr(current_doc.server, name) != getattr(value.server, name)
+            ]
+            return {
+                "status": "ok",
+                "warnings": warnings,
+                "changed_fields": changed,
+                "config_revision": int(payload["_revision"]),
+                "persisted_revision": int(payload["_revision"]),
+                "restart_required": restart,
+                "snapshot_id": snapshot["id"],
+            }
+
+    def _stage_secrets(
+        self, *, value: SettingsUpdate, current_raw: dict[str, Any], current_cfg: Config,
+        payload: dict[str, Any], old_llm_target: str, new_llm_target: str,
+        warnings: list[str],
+    ) -> list[str]:
+        staged_targets: list[str] = []
+        staged = self._apply_secret(
                 name="llm",
                 mutation=value.secrets.llm,
                 current_raw=current_raw,
@@ -785,48 +959,43 @@ class ConfigManager:
                 allow_plaintext=value.allow_plaintext_secrets,
                 warnings=warnings,
             )
-            tushare_target = CredentialStore.tushare_target()
-            self._apply_secret(
-                name="tushare",
-                mutation=value.secrets.tushare,
-                current_raw=current_raw,
-                current_value=current_cfg.data.tushare_token,
-                old_target=tushare_target,
-                new_target=tushare_target,
-                payload=payload,
-                section="data",
-                field="tushare_token",
-                allow_plaintext=value.allow_plaintext_secrets,
-                warnings=warnings,
-            )
-
-            if not current_raw.get("managed_by_gui"):
-                self._create_snapshot(
-                    current_raw or document_from_config(current_cfg).model_dump(),
-                    kind="initial",
-                    name="首次 GUI 保存前",
+        if staged:
+            staged_targets.append(staged)
+        tushare_target = CredentialStore.tushare_target()
+        try:
+            staged = self._apply_secret(
+                    name="tushare",
+                    mutation=value.secrets.tushare,
+                    current_raw=current_raw,
+                    current_value=current_cfg.data.tushare_token,
+                    old_target=tushare_target,
+                    new_target=tushare_target,
+                    payload=payload,
+                    section="data",
+                    field="tushare_token",
+                    allow_plaintext=value.allow_plaintext_secrets,
+                    warnings=warnings,
                 )
+        except CredentialError:
+            self._cleanup_staged_targets(staged_targets)
+            raise
+        if staged:
+            staged_targets.append(staged)
+        return staged_targets
+
+    def _cleanup_staged_targets(self, targets: list[str]) -> None:
+        for target in targets:
+            try:
+                self.credentials.delete(target)
+            except CredentialError:
+                pass
+
+    def _commit_payload(self, payload: dict[str, Any], staged_targets: list[str]) -> None:
+        try:
             _atomic_write(self.path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
-            set_config(self.load())
-            snapshot = self._create_snapshot(payload, kind="automatic")
-            old_flat = _flatten(current_doc.model_dump())
-            new_flat = _flatten(value.model_dump(exclude={"secrets", "allow_plaintext_secrets"}))
-            changed = sorted(
-                key for key in set(old_flat) | set(new_flat) if old_flat.get(key) != new_flat.get(key)
-            )
-            restart = [
-                f"server.{name}"
-                for name in ("host", "port")
-                if getattr(current_doc.server, name) != getattr(value.server, name)
-            ]
-            return {
-                "status": "ok",
-                "warnings": warnings,
-                "changed_fields": changed,
-                "config_revision": _hash_config(payload),
-                "restart_required": restart,
-                "snapshot_id": snapshot["id"],
-            }
+        except (OSError, TypeError, ValueError, yaml.YAMLError):
+            self._cleanup_staged_targets(staged_targets)
+            raise
 
     def _apply_secret(
         self,
@@ -842,50 +1011,55 @@ class ConfigManager:
         field: str,
         allow_plaintext: bool,
         warnings: list[str],
-    ) -> None:
+    ) -> str | None:
         old_meta = (current_raw.get("_secrets") or {}).get(name) or {}
         if mutation.action == "clear":
-            for target in {old_meta.get("target"), old_target, new_target} - {None}:
-                try:
-                    self.credentials.delete(str(target))
-                except CredentialError:
-                    pass
+            # Persist the tombstone first.  Old slots remain available to an
+            # in-flight effective generation and can be garbage-collected
+            # only after components confirm the new revision.
             payload["_secrets"][name] = {"state": "cleared", "target": new_target}
             payload[section].pop(field, None)
-            return
+            return None
 
         if mutation.action == "keep" and old_target != new_target:
             payload["_secrets"][name] = {"state": "cleared", "target": new_target}
             payload[section].pop(field, None)
             warnings.append("API 提供商或地址已改变；为避免跨服务发送旧密钥，凭据已保持为空")
-            return
+            return None
 
         secret = (mutation.value or "").strip() if mutation.action == "replace" else current_value
         if not secret:
             state = old_meta.get("state") if mutation.action == "keep" else "cleared"
             payload["_secrets"][name] = {"state": state or "cleared", "target": new_target}
             payload[section].pop(field, None)
-            return
+            return None
 
         # 已经在同一目标的 keyring 中时，keep 不需要再次写入。
         if (
             mutation.action == "keep"
             and old_meta.get("state") == "keyring"
-            and old_meta.get("target", new_target) == new_target
+            and old_target == new_target
         ):
-            payload["_secrets"][name] = {"state": "keyring", "target": new_target}
+            payload["_secrets"][name] = {
+                "state": "keyring", "target": old_meta.get("target") or new_target,
+            }
             payload[section].pop(field, None)
-            return
+            return None
         try:
-            self.credentials.set(new_target, secret)
-            payload["_secrets"][name] = {"state": "keyring", "target": new_target}
+            target = new_target
+            if mutation.action == "replace":
+                target = f"{new_target}:revision:{int(payload.get('_revision') or 0)}:{uuid.uuid4().hex[:8]}"
+            self.credentials.set(target, secret)
+            payload["_secrets"][name] = {"state": "keyring", "target": target}
             payload[section].pop(field, None)
+            return target if mutation.action == "replace" else None
         except CredentialError as exc:
             if not allow_plaintext:
                 raise CredentialError(f"{exc}；如仍要保存，请明确确认明文 YAML 风险") from exc
             payload["_secrets"][name] = {"state": "plaintext", "target": new_target}
             payload[section][field] = secret
             warnings.append(f"{name} 凭据库不可用，已按你的确认写入明文 YAML")
+            return None
 
     def update_data_root(self, target: str | Path) -> dict:
         """迁移完成后的受控切换；原样保留当前凭据元数据与明文状态。"""
@@ -900,6 +1074,7 @@ class ConfigManager:
             payload.setdefault("data", {})["root"] = str(Path(target).expanduser().resolve())
             payload["config_version"] = CONFIG_VERSION
             payload["managed_by_gui"] = True
+            payload["_revision"] = self._next_revision(current)
             self._create_snapshot(current or payload, kind="automatic", name="数据目录切换前")
             _atomic_write(self.path, yaml.safe_dump(payload, allow_unicode=True, sort_keys=False))
             set_config(self.load())
@@ -909,7 +1084,8 @@ class ConfigManager:
                 "warnings": [],
                 "restart_required": [],
                 "changed_fields": ["data.root"],
-                "config_revision": _hash_config(payload),
+                "config_revision": int(payload["_revision"]),
+                "persisted_revision": int(payload["_revision"]),
                 "snapshot_id": snap["id"],
             }
 
@@ -987,6 +1163,7 @@ class ConfigManager:
             self._create_snapshot(current, kind="automatic", name="回滚前")
             merged = doc.model_dump()
             merged["managed_by_gui"] = True
+            merged["_revision"] = self._next_revision(current)
             merged["_secrets"] = copy.deepcopy(current.get("_secrets") or {})
             for section, field in (("llm", "api_key"), ("data", "tushare_token")):
                 if isinstance(current.get(section), dict) and field in current[section]:
@@ -1001,7 +1178,8 @@ class ConfigManager:
                 "status": "ok",
                 "snapshot_id": snapshot_id,
                 "changed_fields": changed,
-                "config_revision": _hash_config(merged),
+                "config_revision": int(merged["_revision"]),
+                "persisted_revision": int(merged["_revision"]),
                 "restart_required": restart,
             }
 

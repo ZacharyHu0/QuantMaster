@@ -1947,7 +1947,7 @@
 
   window.loadQuantLab = loadQuantLab;
   window.quantLabOpenExpression = openExpression;
-  document.addEventListener('quantmaster:settings-applied', event => {
+  document.addEventListener('quantmaster:settings-persisted', event => {
     if (!(event.detail?.changed_fields || []).some(field => field.startsWith('lab.'))) return;
     refreshOverview().catch(error => {
       if (isLabActive()) showError('研究设置同步失败', error);

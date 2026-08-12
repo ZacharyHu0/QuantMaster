@@ -151,15 +151,31 @@ def capture_runtime_baseline() -> None:
 
 def _runtime_status() -> dict[str, Any]:
     from quantmaster.runtime.worker import runtime_worker_status
+    from quantmaster.settings_runtime import public_state
 
     cfg = get_config()
     configured = {"host": cfg.server.host, "port": cfg.server.port}
     running = _running_server or configured
     restart = [f"server.{name}" for name in ("host", "port") if running.get(name) != configured.get(name)]
     worker = runtime_worker_status()
+    manager_path = getattr(settings_manager, "path", None)
+    governance = (
+        public_state(manager_path, worker_available=bool(worker.get("available")))
+        if manager_path is not None
+        else {
+            "persisted_revision": settings_manager.public().get("config_revision", 0),
+            "latest_generation": 0,
+            "components": {},
+            "drift": [],
+        }
+    )
     managed_state = "running" if worker.get("available") else "unavailable"
     return {
-        "config_revision": settings_manager.public().get("config_revision", ""),
+        "config_revision": governance["persisted_revision"],
+        "persisted_revision": governance["persisted_revision"],
+        "latest_generation": governance["latest_generation"],
+        "components": governance["components"],
+        "drift": governance["drift"],
         "server": {
             "status": "restart_required" if restart else "applied",
             "running": dict(running),
@@ -200,44 +216,49 @@ def _apply_free_stockdb(changed: list[str], result: dict[str, Any]) -> dict[str,
         return {"status": "degraded", "message": "托管运行时应用失败，请重启服务"}
 
 
-def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
-    """按变更字段热应用进程内服务；配置落盘成功不因联网状态回滚。"""
+def _report_apply_component(
+    component: str, status: dict[str, Any], *, revision: int, generation: int,
+    diagnostic_code: str, recommendation: str,
+) -> None:
+    from quantmaster.settings_runtime import report_component
+
+    degraded = str(status.get("status") or "unchanged") == "degraded"
+    report_component(
+        settings_manager.path, component, revision=revision, generation=generation,
+        status="failed" if degraded else "effective",
+        error=str(status.get("message") or "") if degraded else "",
+        diagnostic_code=diagnostic_code if degraded else "",
+        recommendation=recommendation if degraded else "",
+    )
+
+
+def _apply_worker_components(
+    changed: list[str], result: dict[str, Any], apply_status: dict[str, Any],
+    *, revision: int, generation: int,
+) -> None:
     from quantmaster.lab.worker import get_worker
 
-    changed = list(result.get("changed_fields") or [])
-    apply_status: dict[str, Any] = {
-        "config": {"status": "applied"},
-        "automation": {"status": "unchanged"},
-        "lab": {"status": "unchanged"},
-        "server": {"status": "restart_required" if result.get("restart_required") else "applied"},
-    }
-    apply_status["free_stockdb"] = _apply_free_stockdb(changed, result)
     try:
         if "data.root" in changed:
             from quantmaster.automation.runtime import get_runtime
 
-            runtime = get_runtime()
-            active = runtime.start() if get_config().automation.enabled else False
+            active = get_runtime().start() if get_config().automation.enabled else False
             apply_status["automation"] = {
-                "status": "applied"
-                if active
-                else "disabled"
-                if not get_config().automation.enabled
-                else "standby"
+                "status": "applied" if active else "disabled"
+                if not get_config().automation.enabled else "standby"
             }
         elif any(field.startswith("automation.") for field in changed):
-            from quantmaster.runtime.worker_ipc import call_worker_command
+            from quantmaster.automation.runtime import get_runtime
 
-            apply_status["automation"] = call_worker_command(
-                "automation.apply_config", {"changed_fields": changed}, timeout=3.0,
-            )
-    except Exception:  # 配置已安全保存；运行态失败降级为可操作警告。
+            apply_status["automation"] = get_runtime().apply_config(changed)
+    except Exception:
         logger.warning("自动化运行时热应用失败", exc_info=True)
-        apply_status["automation"] = {
-            "status": "degraded",
-            "message": "运行时热应用失败，请重启服务",
-        }
+        apply_status["automation"] = {"status": "degraded", "message": "运行时热应用失败，请重启服务"}
         result.setdefault("warnings", []).append("自动化配置已保存，但运行时热应用失败")
+    _report_apply_component(
+        "automation", apply_status["automation"], revision=revision, generation=generation,
+        diagnostic_code="automation_apply_failed", recommendation="重试应用；持续失败时重启服务",
+    )
     try:
         worker = get_worker()
         if "data.root" in changed:
@@ -250,11 +271,114 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
             apply_status["lab"] = worker.apply_config(changed)
     except Exception:
         logger.warning("Quant Lab Worker 热应用失败", exc_info=True)
-        apply_status["lab"] = {
-            "status": "degraded",
-            "message": "Worker 热应用失败，请重启服务",
-        }
+        apply_status["lab"] = {"status": "degraded", "message": "Worker 热应用失败，请重启服务"}
         result.setdefault("warnings", []).append("Quant Lab 配置已保存，但 Worker 热应用失败")
+    _report_apply_component(
+        "lab", apply_status["lab"], revision=revision, generation=generation,
+        diagnostic_code="lab_apply_failed", recommendation="重试应用；持续失败时重启服务",
+    )
+
+
+def _report_remaining_components(
+    llm_probe: dict[str, Any] | None, apply_status: dict[str, Any],
+    *, revision: int, generation: int,
+) -> None:
+    from quantmaster.settings_runtime import report_component
+
+    if llm_probe and str(llm_probe.get("status")) == "error":
+        previous = _runtime_status().get("components", {}).get("llm", {})
+        report_component(
+            settings_manager.path, "llm", revision=revision, generation=generation,
+            status="failed", effective_revision=int(previous.get("effective_revision") or 0),
+            error=str(llm_probe.get("message") or llm_probe.get("error") or "candidate probe failed"),
+            diagnostic_code=str(llm_probe.get("diagnostic_id") or "llm_probe_failed"),
+            recommendation="修改 provider/凭据后重试应用，或回滚已保存版本",
+        )
+        apply_status["llm"] = {
+            "status": "degraded", "message": llm_probe.get("message"),
+            "diagnostic_id": llm_probe.get("diagnostic_id"),
+        }
+    else:
+        report_component(
+            settings_manager.path, "llm", revision=revision,
+            generation=generation, status="effective",
+        )
+    for component in ("data-clients", "scheduler"):
+        report_component(
+            settings_manager.path, component, revision=revision,
+            generation=generation, status="effective",
+        )
+
+
+def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
+    """按变更字段热应用进程内服务；配置落盘成功不因联网状态回滚。"""
+    from quantmaster.config import get_config as current_config
+    from quantmaster.config import set_config
+    from quantmaster.settings_runtime import report_component
+
+    changed = list(result.get("changed_fields") or [])
+    revision = int(result.get("config_revision") or 0)
+    generation = int(result.get("generation") or 0)
+    latest = int(settings_manager.public().get("config_revision") or 0)
+    if revision < latest:
+        result["apply_status"] = {"config": {"status": "superseded"}}
+        result["runtime"] = _runtime_status()
+        return result
+    # Runtime-worker owns its own process-local snapshot.  Reconcile from the
+    # persisted source before applying components; never use the stale config
+    # captured at worker startup.
+    previous_runtime_config = current_config()
+    candidate_runtime_config = settings_manager.load()
+    llm_probe: dict[str, Any] | None = None
+    if any(field.startswith("llm.") for field in changed):
+        try:
+            from quantmaster.settings import document_from_config
+            from quantmaster.settings_checks import list_llm_models
+
+            llm_probe = list_llm_models(
+                document_from_config(candidate_runtime_config).llm,
+                candidate_runtime_config.llm.api_key,
+                isolated=True,
+            )
+            if str(llm_probe.get("status") or "warning") == "error":
+                candidate_runtime_config.llm = previous_runtime_config.llm
+        except (CredentialError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("LLM candidate probe failed", exc_info=True)
+            llm_probe = {
+                "status": "error",
+                "message": "LLM 临时 client 探测失败",
+                "diagnostic_id": "llm_probe_failed",
+                "error": str(exc),
+            }
+            candidate_runtime_config.llm = previous_runtime_config.llm
+    set_config(candidate_runtime_config)
+    report_component(
+        settings_manager.path, "runtime-worker", revision=revision,
+        generation=generation, status="effective",
+    )
+    if result.get("restart_required"):
+        server_previous = _runtime_status().get("components", {}).get("server", {})
+        report_component(
+            settings_manager.path, "server", revision=revision,
+            generation=generation, status="restart_required",
+            effective_revision=int(server_previous.get("effective_revision") or 0),
+            recommendation="重启 QuantMaster 后应用监听地址变更",
+        )
+    else:
+        report_component(
+            settings_manager.path, "server", revision=revision,
+            generation=generation, status="effective",
+        )
+    apply_status: dict[str, Any] = {
+        "config": {"status": "applied"},
+        "automation": {"status": "unchanged"},
+        "lab": {"status": "unchanged"},
+        "server": {"status": "restart_required" if result.get("restart_required") else "applied"},
+    }
+    apply_status["free_stockdb"] = _apply_free_stockdb(changed, result)
+    _apply_worker_components(
+        changed, result, apply_status, revision=revision, generation=generation,
+    )
     if "data.root" in changed:
         try:
             from quantmaster.backtest.paper_automation import get_paper_automation_worker
@@ -274,6 +398,17 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
                 "message": "后台执行器恢复失败，请重启服务",
             }
             result.setdefault("warnings", []).append("数据目录已切换，但部分后台执行器需要重启服务后恢复")
+    stock_status = str(apply_status["free_stockdb"].get("status") or "unchanged")
+    report_component(
+        settings_manager.path, "free-stockdb", revision=revision, generation=generation,
+        status="failed" if stock_status == "degraded" else "effective",
+        error=str(apply_status["free_stockdb"].get("message") or "") if stock_status == "degraded" else "",
+        diagnostic_code="free_stockdb_apply_failed" if stock_status == "degraded" else "",
+        recommendation="重试应用或重启服务" if stock_status == "degraded" else "",
+    )
+    _report_remaining_components(
+        llm_probe, apply_status, revision=revision, generation=generation,
+    )
     result["apply_status"] = apply_status
     result["runtime"] = _runtime_status()
     return result
@@ -316,7 +451,12 @@ def _llm_cancellation_after_save(
 
 def _queue_runtime_apply(saved: dict[str, Any]) -> dict[str, Any]:
     from quantmaster.server.settings_jobs import get_settings_jobs
+    from quantmaster.settings_runtime import begin_apply
 
+    if not int(saved.get("generation") or 0):
+        saved["generation"] = begin_apply(
+            settings_manager.path, int(saved.get("config_revision") or 0),
+        )
     jobs = get_settings_jobs()
     task, _created = jobs.submit_apply(saved)
     return jobs.public(task)
@@ -339,6 +479,34 @@ def get_settings(request: Request, response: Response) -> dict:
 def settings_runtime(request: Request) -> dict:
     _require_local(request)
     return _runtime_status()
+
+
+@router.post("/settings/apply", status_code=202)
+def retry_settings_apply(request: Request) -> dict:
+    """Retry applying the latest persisted revision without saving again."""
+    _require_csrf(request)
+    revision = int(settings_manager.public().get("config_revision") or 0)
+    if revision <= 0:
+        raise HTTPException(409, "尚无已保存设置可应用")
+    current = SettingsDocument.model_validate({
+        key: value for key, value in settings_manager.public().items()
+        if key in SettingsDocument.model_fields
+    })
+    changed_fields = [
+        f"{group}.{field}"
+        for group, section in current.model_dump().items()
+        for field in section
+    ]
+    saved = {
+        "status": "ok",
+        "config_revision": revision,
+        "persisted_revision": revision,
+        "changed_fields": changed_fields,
+        "restart_required": [],
+        "warnings": [],
+    }
+    task = _queue_runtime_apply(saved)
+    return {"runtime_apply": task, "generation": saved["generation"], "runtime": _runtime_status()}
 
 
 @router.post("/system/reload", status_code=202)
@@ -642,11 +810,32 @@ def save_settings(request: Request, update: SettingsUpdate) -> dict:
     _require_csrf(request)
     try:
         result = settings_manager.save(update)
+        from quantmaster.settings_runtime import report_component
         result["llm_cancellation"] = _llm_cancellation_after_save(
             result,
             llm_secret_changed=update.secrets.llm.action in {"replace", "clear"},
         )
-        result["runtime_apply"] = _queue_runtime_apply(result)
+        from quantmaster.settings_runtime import begin_apply
+
+        result["generation"] = begin_apply(
+            settings_manager.path, int(result.get("config_revision") or 0),
+        )
+        try:
+            result["runtime_apply"] = _queue_runtime_apply(result)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.warning("设置已保存但后台应用通知失败", exc_info=True)
+            result["runtime_apply"] = {
+                "status": "failed", "detail": "设置已保存，但后台应用通知失败",
+                "diagnostic_code": "settings_apply_dispatch_failed",
+                "recommendation": "请重试应用或重启服务",
+            }
+            result.setdefault("warnings", []).append(str(exc)[:200])
+        report_component(
+            settings_manager.path, "web",
+            revision=int(result.get("config_revision") or 0),
+            generation=int(result.get("generation") or 0),
+            status="effective",
+        )
         result["runtime"] = _runtime_status()
     except CredentialError as exc:
         raise HTTPException(409, str(exc)) from None
@@ -673,6 +862,27 @@ def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutat
     return document, SecretMutations.model_validate(secrets_value)
 
 
+def _diagnostic_secrets(
+    document: SettingsDocument, mutations: SecretMutations,
+) -> tuple[str, str]:
+    current = settings_manager.load()
+    same_llm_target = (
+        document.llm.provider == current.llm.provider
+        and document.llm.base_url.rstrip("/") == current.llm.base_url.rstrip("/")
+    )
+    llm_secret = {
+        "replace": mutations.llm.value or "",
+        "clear": "",
+        "keep": current.llm.api_key if same_llm_target else "",
+    }[mutations.llm.action]
+    tushare_secret = {
+        "replace": mutations.tushare.value or "",
+        "clear": "",
+        "keep": current.data.tushare_token,
+    }[mutations.tushare.action]
+    return llm_secret, tushare_secret
+
+
 @router.post("/settings/check/{kind}")
 def check_setting(
     kind: Literal["llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
@@ -690,23 +900,7 @@ def check_setting(
     )
 
     document, mutations = _check_document(body or {})
-    current = settings_manager.load()
-    if mutations.llm.action == "replace":
-        llm_secret = mutations.llm.value or ""
-    elif mutations.llm.action == "clear":
-        llm_secret = ""
-    else:
-        same_llm_target = document.llm.provider == current.llm.provider and document.llm.base_url.rstrip(
-            "/"
-        ) == current.llm.base_url.rstrip("/")
-        # provider/base URL 改变时绝不把旧服务的密钥拿去探测新地址。
-        llm_secret = current.llm.api_key if same_llm_target else ""
-    if mutations.tushare.action == "replace":
-        tushare_secret = mutations.tushare.value or ""
-    elif mutations.tushare.action == "clear":
-        tushare_secret = ""
-    else:
-        tushare_secret = current.data.tushare_token
+    llm_secret, tushare_secret = _diagnostic_secrets(document, mutations)
     if kind in {"llm-models", "llm-web-search"}:
         from quantmaster.server.settings_jobs import get_settings_jobs
 

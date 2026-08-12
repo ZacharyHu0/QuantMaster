@@ -28,6 +28,10 @@
     contractMigrationTimer: null,
     contractMigrationFailures: 0,
     contractMigrationId: '',
+    persistedRevision: 0,
+    latestGeneration: 0,
+    runtimeEpoch: 0,
+    applyTask: null,
   };
   const form = document.getElementById('settings-form');
   let freeStockDbPollTimer = null;
@@ -75,6 +79,8 @@
     const el = document.getElementById('settings-save-state');
     el.className = 'dirty';
     el.querySelector('span:last-child').textContent = message;
+    const draft = document.getElementById('settings-draft-revision');
+    if (draft) draft.textContent = '草稿有未保存变化';
   }
 
   function setSaveState(kind, message) {
@@ -151,6 +157,7 @@
     });
     syncReasoningEffortOptions(true);
     document.getElementById('settings-config-path').textContent = config.config_path;
+    renderFieldSources(config.field_sources || {});
     updateSecretStates(config);
     for (const name of ['llm', 'tushare']) {
       document.getElementById(`${name}-secret`).value = '';
@@ -167,13 +174,43 @@
 
   function renderRuntime(runtime) {
     if (!runtime) return;
+    const incomingRevision = Number(runtime.persisted_revision ?? runtime.config_revision ?? 0);
+    const incomingGeneration = Number(runtime.latest_generation ?? 0);
+    if (incomingRevision < state.persistedRevision) return;
+    if (incomingRevision === state.persistedRevision && incomingGeneration < state.latestGeneration) return;
+    state.persistedRevision = incomingRevision;
+    state.latestGeneration = incomingGeneration;
     state.lastRuntime = runtime;
+    const persisted = document.getElementById('settings-persisted-revision');
+    if (persisted) persisted.textContent = `已保存 revision ${incomingRevision}`;
+    const draft = document.getElementById('settings-draft-revision');
+    if (draft && state.editRevision === state.savedRevision) draft.textContent = '草稿无变化';
+    const components = Object.values(runtime.components || {});
+    const drift = runtime.drift || components.filter(item =>
+      Number(item.effective_revision || 0) !== incomingRevision);
+    const summary = document.getElementById('settings-effective-summary');
+    if (summary) summary.textContent = drift.length ? `${drift.length} 个组件待确认或存在漂移` : '所有组件已确认当前 revision';
+    const list = document.getElementById('settings-component-list');
+    if (list) {
+      const labels = {
+        effective:'已生效', pending:'待应用', rebuilding:'正在重建', restart_required:'需要重启',
+        failed:'应用失败', unconfirmed:'未确认', superseded:'已被新版本取代',
+      };
+      list.innerHTML = components.map(item => {
+        const status = String(item.status || 'pending');
+        const appliedAt = item.last_applied_at
+          ? ` · 最近 ${new Date(Number(item.last_applied_at) * 1000).toLocaleString('zh-CN', {hour12:false})}` : '';
+        const detail = item.error || item.recommendation ||
+          `${item.apply_strategy || 'immediate'} · generation ${Number(item.generation || 0)}`;
+        return `<div class="settings-component-row"><span class="settings-component-name">${html(item.component)}</span><span class="settings-component-status ${html(status)}">${html(labels[status] || status)}</span><span class="settings-component-revision">effective ${Number(item.effective_revision || 0)} → target ${Number(item.target_revision || incomingRevision)} · generation ${Number(item.generation || 0)}</span><span class="settings-component-detail">${html(detail)}${item.diagnostic_code ? ` · ${html(item.diagnostic_code)}` : ''}${html(appliedAt)}</span></div>`;
+      }).join('');
+    }
     const note = document.getElementById('settings-runtime-note');
     const restart = runtime.server?.restart_required || [];
     note.classList.toggle('restart-required', Boolean(restart.length));
     note.textContent = restart.length
       ? `${restart.join(' / ')} 已保存，重启服务后生效`
-      : '停顿片刻或离开字段后自动生效';
+      : drift.length ? '设置已保存，等待各组件确认应用' : '当前 revision 已由所有组件确认';
     const stockdb = runtime.free_stockdb;
     const stockdbStatus = document.getElementById('free-stockdb-sidecar-status');
     if (stockdb && stockdbStatus) {
@@ -217,9 +254,32 @@
   function updateSecretStates(config) {
     for (const name of ['llm', 'tushare']) {
       const secret = config.secrets[name];
-      const label = secret.configured ? `已配置 · ${secret.state}` : `未配置 · ${secret.state}`;
+      const suffix = secret.tail ? ` · 末尾 ${secret.tail}` : '';
+      const label = `${secret.present ? '已配置' : '未配置'} · ${secret.source || secret.state}${suffix}`;
       document.getElementById(`${name}-secret-state`).textContent = label;
     }
+  }
+
+  function renderFieldSources(sources) {
+    form.querySelectorAll('[name]').forEach(input => {
+      const meta = sources[input.name];
+      if (!meta) return;
+      const label = input.closest('label');
+      if (!label) return;
+      let note = label.querySelector('.settings-source-note');
+      if (!note) {
+        note = document.createElement('small');
+        note.className = 'settings-source-note';
+        label.append(note);
+      }
+      if (meta.override) {
+        note.textContent = `当前由 ${meta.environment || '环境变量'} 覆盖；保存值不会立即生效`;
+        note.classList.add('override');
+      } else {
+        note.textContent = `来源：${meta.source || 'default'}`;
+        note.classList.remove('override');
+      }
+    });
   }
 
   async function loadSettings(force = false) {
@@ -491,6 +551,9 @@
     const stale = Boolean(data.stale || el.dataset.stalePending === 'true');
     const issueCount = diagnosticIssueCount(kind, data);
     const meta = [
+      state.editRevision > state.savedRevision
+        ? '检测草稿（未保存）' : `检测已保存 revision ${state.persistedRevision}`,
+      data.diagnostic_id ? `诊断 ${data.diagnostic_id}` : '',
       data.latency_ms != null ? `${data.latency_ms}ms` : '',
       time,
       issueCount ? `${issueCount} 项需关注` : '未发现异常',
@@ -569,18 +632,42 @@
 
   async function watchRuntimeApply(initial) {
     let task = initial;
+    const identity = `${state.persistedRevision}:${state.latestGeneration}:${task.id || ''}`;
+    state.applyTask = identity;
     while (['queued', 'running', 'cancelling'].includes(task.status)) {
       await delay(500);
       try {
         task = await request(task.links?.self || `/api/v1/jobs/${encodeURIComponent(task.id)}`);
-      } catch (_) {
+      } catch (error) {
+        if (state.applyTask === identity) setSaveState('error', `已保存 revision ${state.persistedRevision}；应用状态暂不可读取：${error.message}`);
         return;
       }
     }
-    if (task.status !== 'completed' || !task.result) return;
+    if (state.applyTask !== identity) return;
+    if (task.status !== 'completed' || !task.result) {
+      setSaveState('error', `已保存 revision ${state.persistedRevision}；后台应用${task.status === 'cancelled' ? '已取消' : '失败'}`);
+      return;
+    }
     const applied = task.result.result || task.result;
     if (applied.runtime) renderRuntime(applied.runtime);
   }
+
+  document.getElementById('settings-retry-apply')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    setSaveState('saving', `正在重试应用 revision ${state.persistedRevision}…`);
+    try {
+      const result = await request('/api/v1/settings/apply', {method: 'POST'});
+      state.latestGeneration = Number(result.generation || state.latestGeneration);
+      renderRuntime(result.runtime);
+      if (result.runtime_apply?.id) void watchRuntimeApply(result.runtime_apply);
+      setSaveState('saved', `revision ${state.persistedRevision} 已重新排队；等待组件确认`);
+    } catch (error) {
+      setSaveState('error', `revision ${state.persistedRevision} 重试应用失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   document.querySelectorAll('.check-button').forEach(button => {
     button.addEventListener('click', async () => {
@@ -673,7 +760,7 @@
     setSaveState('saving', '正在校验…');
     try {
       const validated = await request('/api/v1/settings/validate', {method: 'POST', body: plain});
-      setSaveState('saving', '正在自动保存并应用…');
+      setSaveState('saving', '正在保存设置…');
       const update = {...validated.normalized, secrets: secretPayload.secrets,
         allow_plaintext_secrets: secretPayload.allow_plaintext_secrets};
       const result = await request('/api/v1/settings', {method: 'PUT', body: update});
@@ -696,6 +783,8 @@
 
       state.lastSavedFingerprint = JSON.stringify(validated.normalized);
       state.savedRevision = revision;
+      state.persistedRevision = Number(result.persisted_revision ?? result.config_revision ?? state.persistedRevision);
+      state.latestGeneration = Number(result.generation ?? result.runtime?.latest_generation ?? state.latestGeneration);
       if (state.editRevision === revision && result.settings) fillForm(state.config);
       renderRuntime(result.runtime);
       if (result.runtime_apply?.id) void watchRuntimeApply(result.runtime_apply);
@@ -709,8 +798,8 @@
       const allWarnings = [...(result.warnings || []), ...degraded, ...cancellation];
       const warnings = allWarnings.length ? `；${allWarnings.join('；')}` : '';
       const time = new Date().toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit'});
-      setSaveState('saved', `已自动保存 ${time}${suffix}${warnings}`);
-      document.dispatchEvent(new CustomEvent('quantmaster:settings-applied', {detail: result}));
+      setSaveState('saved', `已保存 revision ${state.persistedRevision} · ${time}；应用状态待组件确认${suffix}${warnings}`);
+      document.dispatchEvent(new CustomEvent('quantmaster:settings-persisted', {detail: result}));
       if (document.querySelector('[data-settings-section="automation"].active') ||
           document.querySelector('[data-settings-section="lab"].active')) loadAutomationOverview();
     } catch (error) {
@@ -938,7 +1027,7 @@
       }
       container.innerHTML = data.snapshots.map(item => `<div class="snapshot-row">
         <div><strong>${html(item.name || ({automatic: '自动保存', initial: '初始配置'}[item.kind] || item.kind))}</strong>
-        <small>${html(new Date(item.created_at).toLocaleString('zh-CN'))} · ${html(item.kind)} · ${html((item.config_hash || '').slice(0, 10))}</small></div>
+        <small>${html(new Date(item.created_at).toLocaleString('zh-CN'))} · ${html(item.kind)}</small></div>
         <div class="snapshot-actions"><button class="ghost" type="button" data-snapshot-diff="${html(item.id)}">查看差异</button>
         ${item.kind === 'manual' ? `<button class="ghost danger" type="button" data-snapshot-delete="${html(item.id)}">删除</button>` : ''}</div></div>`).join('');
     } catch (error) {

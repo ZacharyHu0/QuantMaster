@@ -28,16 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 def _result(status: str, message: str, started: float, **details: Any) -> dict[str, Any]:
+    from quantmaster.settings_runtime import diagnostic_id
+
     return {
         "status": status,
         "message": message,
         "latency_ms": round((time.perf_counter() - started) * 1000),
         "checked_at": datetime.now(UTC).isoformat(),
+        "diagnostic_id": diagnostic_id("diag"),
         "details": details,
     }
 
 
-def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
+def list_llm_models(
+    settings: LLMSettings, api_key: str = "", *, isolated: bool = False,
+) -> dict[str, Any]:
     started = time.perf_counter()
     provider = settings.provider
     if provider in {"anthropic", "openai"} and not api_key:
@@ -76,21 +81,24 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         timeout=settings.timeout,
         max_concurrency=settings.max_concurrency,
         queue_timeout=settings.queue_timeout,
-    ))
+    ), register_health=not isolated)
     models: list[str] = []
     try:
         for _ in range(20):
             response = client.guarded_get(
                 url, headers=headers, timeout=settings.timeout, follow_redirects=False,
+                record_health=not isolated,
             )
             if response.status_code in {401, 403}:
                 error = _api_error("模型目录", response)
-                record_llm_failure(client.config, error)
+                if not isolated:
+                    record_llm_failure(client.config, error)
                 return _result("error", "API Key 无效或无权读取模型列表", started, models=[],
                                **llm_diagnostic_details(client.config, error))
             if response.status_code == 404:
                 error = _api_error("模型目录", response)
-                record_llm_failure(client.config, error)
+                if not isolated:
+                    record_llm_failure(client.config, error)
                 return _result("error", "模型列表地址不存在，请检查 API 根地址", started, models=[],
                                **llm_diagnostic_details(client.config, error))
             response.raise_for_status()
@@ -113,7 +121,8 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         return _result("success", message, started, models=models,
                        selected_present=settings.model in models)
     except LLMError as exc:
-        record_llm_failure(client.config, exc)
+        if not isolated:
+            record_llm_failure(client.config, exc)
         return _result(
             "warning", "模型目录检测失败；这不会阻止保存设置", started, models=[],
             **llm_diagnostic_details(client.config, exc),
@@ -121,7 +130,8 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
     except (httpx.HTTPError, ValueError):
         error = LLMError("模型目录响应无法解析", code="response_contract_error",
                          retryable=True, category="response_contract")
-        record_llm_failure(client.config, error)
+        if not isolated:
+            record_llm_failure(client.config, error)
         return _result("warning", "模型目录检测失败；这不会阻止保存设置", started, models=[],
                        **llm_diagnostic_details(client.config, error))
 
@@ -227,8 +237,19 @@ def check_tushare(token: str) -> dict[str, Any]:
 def check_storage(data: DataSettings) -> dict[str, Any]:
     started = time.perf_counter()
     root = Path(data.root).expanduser().resolve()
+    if not root.exists():
+        parent = root.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        writable = os.access(parent, os.W_OK)
+        return _result(
+            "success" if writable else "error",
+            "父目录可写；保存或迁移时才会创建候选目录" if writable else "父目录不可写",
+            started,
+            path=str(root),
+            exists=False,
+        )
     try:
-        root.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(prefix=".qm-write-test-", dir=root, delete=True) as handle:
             handle.write(b"quantmaster")
             handle.flush()

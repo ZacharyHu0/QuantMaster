@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -174,18 +175,43 @@ def normalize_symbol(symbol: str, *, store: InstrumentStore | None = None) -> st
     raise ValueError(message)
 
 
-def normalize_symbols(symbols: list[str]) -> list[str]:
+def _normalize_canonical_symbol(raw: str, canonical: str, store: object, direct: object) -> str:
+    if direct is not None:
+        return direct.symbol
+    if not re.fullmatch(r"\d{6}(?:\.(?:SH|SZ|BJ|CSI))?", canonical):
+        return normalize_symbol(raw, store=store)
+    if "." in canonical:
+        return canonical
+    if canonical.startswith(("4", "8", "92")):
+        return f"{canonical}.BJ"
+    if canonical.startswith(("0", "2", "3")):
+        return f"{canonical}.SZ"
+    return f"{canonical}.SH"
+
+
+def _read_only_instrument_store() -> object:
     from quantmaster.data.instruments import InstrumentStore
 
+    try:
+        return InstrumentStore(read_only=True)
+    except TypeError:
+        # Lightweight injected stores used by callers/tests can predate the
+        # optional read-only constructor contract.
+        return InstrumentStore()
+
+
+def normalize_symbols(symbols: list[str]) -> list[str]:
     raw_values = [str(symbol).strip() for symbol in symbols]
-    store = InstrumentStore()
+    store = _read_only_instrument_store()
     canonical_values = [re.sub(r"\s+", "", value).upper() for value in raw_values]
-    known = store.get_many(canonical_values)
+    try:
+        known = store.get_many(canonical_values)
+    except (FileNotFoundError, sqlite3.OperationalError):
+        known = {}
     result: list[str] = []
     seen: set[str] = set()
     for raw, canonical in zip(raw_values, canonical_values, strict=True):
-        direct = known.get(canonical)
-        normalized = direct.symbol if direct is not None else normalize_symbol(raw, store=store)
+        normalized = _normalize_canonical_symbol(raw, canonical, store, known.get(canonical))
         if normalized not in seen:
             seen.add(normalized)
             result.append(normalized)

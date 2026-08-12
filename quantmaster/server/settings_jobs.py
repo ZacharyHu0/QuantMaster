@@ -66,9 +66,20 @@ class SettingsJobs:
         context.ensure_active()
         # Import lazily to avoid server module construction in Web request
         # paths.  This code runs in runtime-worker only.
-        from quantmaster.server.management import _apply_runtime
+        from quantmaster.server.management import _apply_runtime, settings_manager
+        from quantmaster.settings_runtime import persisted_revision
 
-        applied = _apply_runtime(dict(spec.get("saved") or {}))
+        saved = dict(spec.get("saved") or {})
+        revision = int(saved.get("config_revision") or 0)
+        latest = persisted_revision(settings_manager.path)
+        if revision < latest:
+            applied = {
+                **saved,
+                "apply_status": {"config": {"status": "superseded"}},
+                "superseded_by": latest,
+            }
+        else:
+            applied = _apply_runtime(saved)
         context.ensure_active()
         context.progress(96, "记录运行时应用", "保存后台应用结果")
         artifact = context.write_artifact(
@@ -93,7 +104,7 @@ class SettingsJobs:
             from quantmaster.settings_checks import check_llm_web_search, list_llm_models
 
             if kind == "llm-models":
-                result = list_llm_models(document.llm, api_key)
+                result = list_llm_models(document.llm, api_key, isolated=True)
             elif kind == "llm-web-search":
                 result = check_llm_web_search(document.llm, api_key)
             else:

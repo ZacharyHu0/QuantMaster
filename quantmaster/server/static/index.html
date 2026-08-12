@@ -1155,7 +1155,7 @@
 <section class="tab" id="tab-settings">
   <div class="settings-heading">
     <div><span class="eyebrow">LOCAL CONTROL PLANE</span><h2>设置中心</h2>
-      <p>模型、数据、资讯、自动化与研究环境的唯一配置入口。普通设置自动保存并热应用，敏感操作单独确认。</p></div>
+      <p>模型、数据、资讯、自动化与研究环境的唯一配置入口。设置先持久化，再由各组件独立确认应用。</p></div>
     <span class="settings-path" id="settings-config-path">正在读取配置…</span>
   </div>
   <div class="settings-shell">
@@ -1209,6 +1209,16 @@
       </div>
     </nav>
     <div class="settings-content">
+      <section class="settings-governance" id="settings-governance" aria-labelledby="settings-governance-title">
+        <div class="settings-governance-summary">
+          <div><span class="eyebrow">CONFIGURATION STATE</span><h3 id="settings-governance-title">配置一致性</h3></div>
+          <div class="settings-revisions"><span id="settings-draft-revision">草稿无变化</span><strong id="settings-persisted-revision">已保存 revision 0</strong><span id="settings-effective-summary">等待运行态确认</span><button class="ghost" id="settings-retry-apply" type="button">重试应用</button></div>
+        </div>
+        <details id="settings-component-details">
+          <summary>展开组件应用状态</summary>
+          <div class="settings-component-list" id="settings-component-list" aria-live="polite"></div>
+        </details>
+      </section>
       <form id="settings-form" novalidate>
         <section class="settings-group active" data-settings-panel="llm">
           <div class="group-heading"><div><h3>模型服务</h3><p>配置推理服务、模型能力与共享并发边界。</p></div></div>
@@ -1477,7 +1487,7 @@
           <div class="field-grid"><label>Host<input name="server.host" required></label><label>Port<input name="server.port" type="number" min="1" max="65535" required></label></div>
         </section>
 
-        <div class="save-dock" role="status" aria-live="polite"><div id="settings-save-state"><span class="save-dot"></span><span>自动保存已开启</span></div><span class="autosave-note" id="settings-runtime-note">停顿片刻或离开字段后自动生效</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
+        <div class="save-dock"><div id="settings-save-state" role="status" aria-live="polite" aria-atomic="true"><span class="save-dot"></span><span>草稿无变化</span></div><span class="autosave-note" id="settings-runtime-note">应用状态以组件确认结果为准</span><label class="plaintext-confirm"><input id="plaintext-confirm" type="checkbox"> 凭据库不可用时允许明文保存</label></div>
       </form>
 
       <section class="settings-group" data-settings-panel="sources">

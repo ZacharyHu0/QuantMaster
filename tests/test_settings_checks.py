@@ -14,8 +14,20 @@ from quantmaster.settings_checks import (
     check_data_sources,
     check_lab,
     check_llm_web_search,
+    check_storage,
     list_llm_models,
 )
+
+
+def test_storage_draft_check_does_not_create_candidate_directory(tmp_path):
+    target = tmp_path / "missing" / "data"
+
+    result = check_storage(DataSettings(root=str(target)))
+
+    assert result["status"] == "success"
+    assert result["diagnostic_id"].startswith("diag-")
+    assert result["details"]["exists"] is False
+    assert not target.exists()
 
 
 class FakeClient:

@@ -1,9 +1,9 @@
 """全局配置。
 
-旧配置保持 ``默认值 < YAML < 环境变量``；首次经 GUI 保存后写入
-``managed_by_gui``，此后使用 ``默认值 < 环境变量 < YAML``，避免环境变量
-悄悄覆盖用户刚在设置中心确认的值。GUI 管理的密钥再由系统凭据库或显式
-明文状态覆盖，``cleared`` 状态会阻止环境变量令密钥意外恢复。
+所有配置统一使用 ``默认值 < YAML < 环境变量``。GUI 保存只更新 persisted
+YAML；环境变量仍是明确的运行时 override，并由设置页展示来源与漂移。GUI
+管理的密钥最后由系统凭据库或显式明文/cleared 状态覆盖，``cleared`` 会阻止
+环境变量令密钥意外恢复。
 """
 
 from __future__ import annotations
@@ -364,6 +364,7 @@ def load_config(
     path: str | Path | None = None,
     *,
     load_secrets: bool = True,
+    apply_environment: bool = True,
 ) -> Config:
     """Load configuration, optionally leaving keyring-backed secrets untouched.
 
@@ -392,15 +393,13 @@ def load_config(
     cfg.config_path = selected
     cfg.workspace_root = WORKSPACE_ROOT
     managed = bool(raw.get("managed_by_gui", False))
-    if managed:
+    _apply_dict(cfg, raw)
+    if apply_environment:
         _apply_env(cfg)
-        _apply_dict(cfg, raw)
+    if managed:
         cfg.managed_by_gui = True
         if load_secrets:
             _apply_managed_secrets(cfg, raw)
-    else:
-        _apply_dict(cfg, raw)
-        _apply_env(cfg)
     return cfg
 
 

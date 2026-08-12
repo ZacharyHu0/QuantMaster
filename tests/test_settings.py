@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 import yaml
@@ -17,6 +18,14 @@ from quantmaster.settings import (
     SettingsUpdate,
     document_from_config,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stop_settings_jobs_after_module():
+    yield
+    from quantmaster.server.settings_jobs import shutdown_settings_jobs
+
+    shutdown_settings_jobs()
 
 
 def test_news_scan_interval_settings_defaults_and_bounds():
@@ -83,6 +92,63 @@ def test_online_provider_switches_round_trip_through_settings(tmp_path):
     assert public["yfinance_enabled"] is False
 
 
+def test_monotonic_revision_and_field_source_override(tmp_path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    manager = ConfigManager(path, tmp_path / "backups", FakeCredentials())
+    first = manager.save(_update(manager))
+    second = manager.save(_update(manager))
+
+    assert first["config_revision"] == 1
+    assert second["config_revision"] == 2
+    monkeypatch.setenv("QM_LLM_MODEL", "runtime-model")
+    public = manager.public()
+    assert public["config_revision"] == 2
+    # The editable document remains the saved value.  Runtime precedence is
+    # projected separately so an ENV override cannot silently rewrite YAML.
+    assert public["llm"]["model"] == "claude-sonnet-5"
+    assert public["field_sources"]["llm.model"] == {
+        "source": "environment",
+        "override": True,
+        "environment": "QM_LLM_MODEL",
+        "sensitive": False,
+        "persisted": "claude-sonnet-5",
+        "effective": "runtime-model",
+        "drift": True,
+    }
+
+
+def test_null_config_path_uses_process_local_non_persistent_projection(monkeypatch):
+    monkeypatch.setenv("QM_CONFIG_PATH", os.devnull)
+    manager = ConfigManager()
+
+    assert manager.path.name == f"quantmaster-null-{os.getpid()}.yaml"
+    assert manager.check_state_path.name == f"quantmaster-null-{os.getpid()}.checks.json"
+
+
+def test_gui_round_trip_preserves_extended_config_fields(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    update = _update(manager)
+    update.data.provider_retry_attempts = 7
+    update.data.provider_retry_backoff = 1.5
+    update.data.provider_retry_max_backoff = 19.0
+    update.data.repair_daily_budget = 321
+    update.data.repair_max_workers = 3
+    update.lab.panel_cache_mb = 4096
+    update.lab.feature_cache_gb = 12
+    update.lab.gpu_memory_fraction = 0.65
+    manager.save(update)
+
+    reloaded = document_from_config(manager.load())
+    assert reloaded.data.provider_retry_attempts == 7
+    assert reloaded.data.provider_retry_backoff == 1.5
+    assert reloaded.data.provider_retry_max_backoff == 19.0
+    assert reloaded.data.repair_daily_budget == 321
+    assert reloaded.data.repair_max_workers == 3
+    assert reloaded.lab.panel_cache_mb == 4096
+    assert reloaded.lab.feature_cache_gb == 12
+    assert reloaded.lab.gpu_memory_fraction == 0.65
+
+
 class FakeCredentials:
     def __init__(self, available=True):
         self.available = available
@@ -102,6 +168,35 @@ class FakeCredentials:
         if not self.available:
             raise CredentialError("unavailable")
         self.values.pop(target, None)
+
+
+class FailSecondCredentials(FakeCredentials):
+    def __init__(self):
+        super().__init__()
+        self.set_count = 0
+
+    def set(self, target, value):
+        self.set_count += 1
+        if self.set_count == 2:
+            raise CredentialError("second secret failed")
+        super().set(target, value)
+
+
+def test_secret_group_failure_cleans_staged_first_secret(tmp_path):
+    path = tmp_path / "config.yaml"
+    credentials = FailSecondCredentials()
+    manager = ConfigManager(path, tmp_path / "backups", credentials)
+    update = _update(manager)
+    update.secrets.llm.action = "replace"
+    update.secrets.llm.value = "llm-new-value"
+    update.secrets.tushare.action = "replace"
+    update.secrets.tushare.value = "tushare-new-value"
+
+    with pytest.raises(CredentialError, match="second secret"):
+        manager.save(update)
+
+    assert not path.exists()
+    assert credentials.values == {}
 
 
 def test_runtime_status_read_does_not_construct_background_workers(monkeypatch):
@@ -137,7 +232,7 @@ def _update(manager, **extra):
     return SettingsUpdate.model_validate({**base, **extra})
 
 
-def test_gui_managed_config_has_priority_over_environment(tmp_path, monkeypatch):
+def test_environment_override_remains_effective_for_gui_managed_config(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"
     monkeypatch.setenv("QM_LLM_MODEL", "env-model")
     monkeypatch.setenv("QM_LLM_REASONING_EFFORT", "low")
@@ -146,8 +241,8 @@ def test_gui_managed_config_has_priority_over_environment(tmp_path, monkeypatch)
         encoding="utf-8",
     )
     managed = load_config(path)
-    assert managed.llm.model == "yaml-model"
-    assert managed.llm.reasoning_effort == "high"
+    assert managed.llm.model == "env-model"
+    assert managed.llm.reasoning_effort == "low"
 
 
 def test_reasoning_effort_is_saved_and_validated_per_provider(tmp_path):

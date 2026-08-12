@@ -594,11 +594,13 @@ class LLMClient:
         config: LLMConfig | None = None,
         *,
         concurrency_scope: Literal["global", "news"] = "global",
+        register_health: bool = True,
     ):
         self._uses_runtime_config = config is None
         self.config = config or get_config().llm
         self._concurrency_scope = concurrency_scope
-        _LLM_PROVIDER_HEALTH.register(self.config)
+        if register_health:
+            _LLM_PROVIDER_HEALTH.register(self.config)
         if not self.config.api_key and self.config.provider != "openai-compatible":
             raise LLMError(
                 "未配置 LLM API key。请设置环境变量 ANTHROPIC_API_KEY / OPENAI_API_KEY / "
@@ -646,7 +648,9 @@ class LLMClient:
                 code="queue_timeout", retryable=True,
             ) from exc
 
-    def guarded_get(self, url: str, **kwargs: Any) -> httpx.Response:
+    def guarded_get(
+        self, url: str, *, record_health: bool = True, **kwargs: Any,
+    ) -> httpx.Response:
         """Run a provider diagnostic probe under the same guard and gate."""
         from quantmaster.runtime.llm import execution_lease_cancelled, reject_http_llm_transport
 
@@ -663,7 +667,8 @@ class LLMClient:
             reject_http_llm_transport()
             if execution_lease_cancelled():
                 raise InterruptedError("LLM execution lease cancelled after diagnostic response")
-            _LLM_PROVIDER_HEALTH.success(self.config, f"llm-{uuid.uuid4().hex[:12]}")
+            if record_health:
+                _LLM_PROVIDER_HEALTH.success(self.config, f"llm-{uuid.uuid4().hex[:12]}")
             return response
         except TimeoutError as exc:
             raise LLMError(
@@ -672,7 +677,8 @@ class LLMClient:
             ) from exc
         except httpx.HTTPError as exc:
             error = _transport_error(exc, float(self.config.timeout))
-            record_llm_failure(self.config, error)
+            if record_health:
+                record_llm_failure(self.config, error)
             raise error from exc
 
     # ---- 底层请求 ----
