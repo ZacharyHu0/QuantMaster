@@ -1,5 +1,7 @@
 """LLM 客户端测试（不触网：mock httpx）。"""
 
+import threading
+
 import httpx
 import pytest
 
@@ -334,3 +336,51 @@ def test_http_pool_retires_hot_replaced_client_after_inflight_request(monkeypatc
     assert first.closed == 1
     pool.close()
     assert second.closed == 1
+
+
+def test_http_pool_close_defers_inflight_client_until_context_exit(monkeypatch):
+    clients = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.closed = 0
+            clients.append(self)
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
+    pool = _HTTPClientPool()
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    failures = []
+
+    def borrow_client():
+        try:
+            with pool.client(("openai", "https://one")):
+                entered.set()
+                assert release.wait(1)
+        except BaseException as exc:  # Assert context-manager cleanup also succeeds.
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    borrower = threading.Thread(target=borrow_client)
+    borrower.start()
+    assert entered.wait(1)
+
+    closer = threading.Thread(target=pool.close)
+    closer.start()
+    closer.join(timeout=1)
+    assert not closer.is_alive()
+    assert clients[0].closed == 0
+
+    release.set()
+    assert finished.wait(1)
+    borrower.join(timeout=1)
+    assert not borrower.is_alive()
+    assert failures == []
+    assert clients[0].closed == 1
+    pool.close()
+    assert clients[0].closed == 1

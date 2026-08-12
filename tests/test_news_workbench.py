@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
@@ -14,7 +16,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
+from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore, _claim_heartbeat
 from quantmaster.ai.llm import LLMError
 from quantmaster.ai.news_contracts import FetchBatch
 from quantmaster.ai.news_sources import (
@@ -44,6 +46,33 @@ class FakeCredentials:
 
     def delete(self, target: str) -> None:
         self.values.pop(target, None)
+
+
+def test_claim_heartbeat_retries_sqlite_lock_and_stops_cleanly() -> None:
+    retried = threading.Event()
+
+    class Claims:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def heartbeat(self, token: str, owner: str, *, lease_seconds: float) -> int:
+            assert (token, owner, lease_seconds) == ("claim-token", "worker", 1.0)
+            self.calls += 1
+            if self.calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            retried.set()
+            return 1
+
+    claims = Claims()
+    with _claim_heartbeat(claims, "claim-token", "worker", lease_seconds=1.0) as alive:
+        assert retried.wait(3)
+        assert alive.is_set()
+
+    assert claims.calls >= 2
+    assert not any(
+        thread.name == "qm-news-claim-heartbeat" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
 
 
 def source_value(**overrides) -> dict:

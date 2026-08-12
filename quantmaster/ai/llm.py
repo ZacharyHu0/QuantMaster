@@ -84,13 +84,16 @@ class _HTTPClientPool:
 
     def close(self) -> None:
         with self._lock:
-            clients = set(self._references) | self._retired
             if self._current is not None:
-                clients.add(self._current)
+                self._retired.add(self._current)
             self._current = None
             self._current_key = None
-            self._references.clear()
-            self._retired.clear()
+            clients = [
+                client
+                for client in self._retired
+                if self._references.get(client, 0) == 0
+            ]
+            self._retired.difference_update(clients)
         for client in clients:
             client.close()
 

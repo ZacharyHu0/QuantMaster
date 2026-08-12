@@ -108,6 +108,53 @@ def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
 
+def _ingest_article_manifest(
+    articles: list[FetchedArticle], source_id: str,
+) -> tuple[tuple[tuple[str, str, str, str, str], ...], str]:
+    """Freeze one batch's deduplicated article evidence for replay comparison."""
+    audit_articles: dict[str, FetchedArticle] = {}
+    for item in articles:
+        identity = str(
+            item.evidence_binding_hash
+            or hashlib.sha256(
+                f"{source_id}|{item.provider_item_id}|{item.url}".encode(),
+            ).hexdigest()
+        )
+        evidence = (
+            str(item.evidence_binding_hash or ""),
+            source_id,
+            str(item.provider_item_id or ""),
+            str(item.raw_cache_key or "").replace("\\", "/"),
+        )
+        previous = audit_articles.get(identity)
+        if previous is not None and evidence != (
+            str(previous.evidence_binding_hash or ""),
+            source_id,
+            str(previous.provider_item_id or ""),
+            str(previous.raw_cache_key or "").replace("\\", "/"),
+        ):
+            raise NewsContractError(
+                "资讯抓取批次包含身份相同但证据不同的文章关联",
+                code="ingest_batch_article_conflict",
+            )
+        audit_articles.setdefault(identity, item)
+    identities = sorted(audit_articles)
+    identity_hash = hashlib.sha256(
+        json.dumps(identities, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    manifest = tuple(
+        (
+            identity,
+            str(item.evidence_binding_hash or ""),
+            source_id,
+            str(item.provider_item_id or ""),
+            str(item.raw_cache_key or "").replace("\\", "/"),
+        )
+        for identity, item in sorted(audit_articles.items())
+    )
+    return manifest, identity_hash
+
+
 def _validate_source_dict(value: dict[str, Any], *, creating: bool = False) -> dict[str, Any]:
     result = dict(value)
     kind = str(result.get("kind") or "").strip().lower()
@@ -619,15 +666,38 @@ class NewsSourceStore:
                 (source_id,),
             )
 
+    def _ignore_empty_ingest_batch(
+        self, batch: FetchBatch, durable_batch_id: str, closes_empty_gap: bool,
+    ) -> bool:
+        if batch.articles or closes_empty_gap:
+            return False
+        # An empty non-boundary batch is normally intentionally ignored. It
+        # cannot be a valid replay of a batch that recorded article evidence.
+        if durable_batch_id:
+            with self._conn() as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM news_ingest_batches WHERE batch_id=?",
+                    (durable_batch_id,),
+                ).fetchone()
+            if exists is not None:
+                raise NewsContractError(
+                    "资讯抓取批次重放与已持久化证据不一致",
+                    code="ingest_batch_replay_conflict",
+                )
+        return True
+
     def register_ingest_batch(self, batch: FetchBatch, batch_id: str) -> str:
         """Persist an immutable provider batch and attach its durable window identity."""
+        durable_batch_id = str(batch_id or uuid.uuid4().hex)
         closes_empty_gap = bool(
             batch.complete
             and batch.previous_watermark
             and batch.watermark
             and batch.watermark != batch.previous_watermark
         )
-        if not batch.articles and not closes_empty_gap:
+        if self._ignore_empty_ingest_batch(
+            batch, durable_batch_id if batch_id else "", closes_empty_gap,
+        ):
             return ""
         source_id = str(batch.source_id or "")
         if not source_id:
@@ -653,22 +723,16 @@ class NewsSourceStore:
             separators=(",", ":"),
         )
         window_id = hashlib.sha256(window_payload.encode("utf-8")).hexdigest()
-        audit_articles: dict[str, FetchedArticle] = {}
-        for item in batch.articles:
-            identity = str(
-                item.evidence_binding_hash
-                or hashlib.sha256(
-                    f"{source_id}|{item.provider_item_id}|{item.url}".encode(),
-                ).hexdigest()
-            )
-            audit_articles.setdefault(identity, item)
-        article_identities = sorted(audit_articles)
-        identity_hash = hashlib.sha256(
-            json.dumps(article_identities, ensure_ascii=False, separators=(",", ":")).encode(
-                "utf-8",
-            )
-        ).hexdigest()
-        durable_batch_id = str(batch_id or uuid.uuid4().hex)
+        article_manifest, identity_hash = _ingest_article_manifest(batch.articles, source_id)
+        batch_metadata = (
+            window_id,
+            source_id,
+            int(batch.complete),
+            str(batch.health),
+            str(batch.error_code or ""),
+            len(article_manifest),
+            identity_hash,
+        )
         recorded_at = time.time()
         with self._conn() as conn:
             conn.execute(
@@ -686,32 +750,38 @@ class NewsSourceStore:
                 raise NewsContractError(
                     "资讯抓取窗口身份发生不可解释冲突", code="ingest_window_conflict",
                 )
-            conn.execute(
-                "INSERT INTO news_ingest_batches("
-                "batch_id,window_id,source_id,complete,health,error_code,article_count,"
-                "article_identity_hash,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    durable_batch_id, window_id, source_id, int(batch.complete),
-                    str(batch.health), str(batch.error_code or ""), len(audit_articles),
-                    identity_hash, recorded_at,
-                ),
-            )
-            conn.executemany(
-                "INSERT INTO news_ingest_batch_articles("
-                "batch_id,article_identity,evidence_binding_hash,source_id,provider_item_id,"
-                "raw_cache_key) VALUES (?,?,?,?,?,?)",
-                (
-                    (
-                        durable_batch_id,
-                        identity,
-                        str(item.evidence_binding_hash or ""),
-                        source_id,
-                        str(item.provider_item_id or ""),
-                        str(item.raw_cache_key or "").replace("\\", "/"),
+            existing_batch = conn.execute(
+                "SELECT window_id,source_id,complete,health,error_code,article_count,"
+                "article_identity_hash FROM news_ingest_batches WHERE batch_id=?",
+                (durable_batch_id,),
+            ).fetchone()
+            if existing_batch is None:
+                conn.execute(
+                    "INSERT INTO news_ingest_batches("
+                    "batch_id,window_id,source_id,complete,health,error_code,article_count,"
+                    "article_identity_hash,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (durable_batch_id, *batch_metadata, recorded_at),
+                )
+                conn.executemany(
+                    "INSERT INTO news_ingest_batch_articles("
+                    "batch_id,article_identity,evidence_binding_hash,source_id,provider_item_id,"
+                    "raw_cache_key) VALUES (?,?,?,?,?,?)",
+                    ((durable_batch_id, *article) for article in article_manifest),
+                )
+            else:
+                existing_manifest = tuple(
+                    tuple(row) for row in conn.execute(
+                        "SELECT article_identity,evidence_binding_hash,source_id,provider_item_id,"
+                        "raw_cache_key FROM news_ingest_batch_articles WHERE batch_id=? "
+                        "ORDER BY article_identity",
+                        (durable_batch_id,),
                     )
-                    for identity, item in sorted(audit_articles.items())
-                ),
-            )
+                )
+                if tuple(existing_batch) != batch_metadata or existing_manifest != article_manifest:
+                    raise NewsContractError(
+                        "资讯抓取批次重放与已持久化证据不一致",
+                        code="ingest_batch_replay_conflict",
+                    )
             if closes_empty_gap:
                 conn.execute(
                     "UPDATE news_ingest_windows SET status='complete',completed_at=?,"

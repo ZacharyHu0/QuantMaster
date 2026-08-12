@@ -109,6 +109,88 @@ def test_ingest_batch_audit_deduplicates_identical_article_identity(tmp_path):
         ).fetchone()[0] == 1
 
 
+def _replay_article(
+    *,
+    provider_item_id: str = "replay-id",
+    raw_cache_key: str = "raw/replay",
+    evidence_binding_hash: str = "replay-evidence",
+):
+    return FetchedArticle(
+        source="sina_live", provider_item_id=provider_item_id, title="重放快讯",
+        content="用于验证 durable batch 重放证据不可变性的内容。",
+        url="https://example.com/replay", published_at="2026-08-12T01:00:00+00:00",
+        published_at_epoch=1786496400.0, evidence_binding_hash=evidence_binding_hash,
+        raw_cache_key=raw_cache_key,
+    )
+
+
+def test_ingest_batch_replay_accepts_identical_metadata_and_article_evidence(tmp_path):
+    store = NewsSourceStore(tmp_path / "news.sqlite")
+    batch_id = "replay-batch"
+    first = FetchBatch(source_id="sina_live", articles=[_replay_article()], watermark="replay-id")
+    window_id = store.register_ingest_batch(first, batch_id)
+
+    replay = FetchBatch(source_id="sina_live", articles=[_replay_article()], watermark="replay-id")
+    assert store.register_ingest_batch(replay, batch_id) == window_id
+
+    with store._conn() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM news_ingest_batches WHERE batch_id=?", (batch_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM news_ingest_batch_articles WHERE batch_id=?", (batch_id,),
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("replay",),
+    [
+        pytest.param(
+            FetchBatch(
+                source_id="sina_live", articles=[_replay_article()], watermark="replay-id",
+                health="degraded",
+            ),
+            id="batch-metadata-differs",
+        ),
+        pytest.param(
+            FetchBatch(
+                source_id="sina_live", articles=[_replay_article(raw_cache_key="raw/changed")],
+                watermark="replay-id",
+            ),
+            id="article-evidence-field-differs",
+        ),
+        pytest.param(
+            FetchBatch(source_id="sina_live", articles=[], watermark="replay-id"),
+            id="article-is-missing",
+        ),
+        pytest.param(
+            FetchBatch(
+                source_id="sina_live",
+                articles=[
+                    _replay_article(),
+                    _replay_article(
+                        provider_item_id="added-id", evidence_binding_hash="added-evidence",
+                    ),
+                ],
+                watermark="replay-id",
+            ),
+            id="article-is-added",
+        ),
+    ],
+)
+def test_ingest_batch_replay_rejects_metadata_or_article_evidence_differences(tmp_path, replay):
+    store = NewsSourceStore(tmp_path / "news.sqlite")
+    batch_id = "replay-batch"
+    store.register_ingest_batch(
+        FetchBatch(source_id="sina_live", articles=[_replay_article()], watermark="replay-id"),
+        batch_id,
+    )
+
+    with pytest.raises(NewsContractError, match="已持久化证据不一致") as error:
+        store.register_ingest_batch(replay, batch_id)
+    assert error.value.code == "ingest_batch_replay_conflict"
+
+
 def _official_detail_html(source_id: str, *, published: str = "2026-08-09") -> bytes:
     body = "可独立复核的官方详情正文，包含完整语义与必要上下文。" * 4
     if source_id == "sse":
