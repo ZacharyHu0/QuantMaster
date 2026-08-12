@@ -97,5 +97,15 @@ def runtime_status() -> dict[str, Any]:
             "managed_by": "runtime-worker",
             "worker_pid": worker.get("pid"),
         },
+        "lifecycle": worker.get("lifecycle") or {
+            "state": "running" if worker.get("available") else "stopping",
+            "generation": str(worker.get("generation") or os.environ.get("QM_WEB_GENERATION", "0")),
+            "phase": "accepting" if worker.get("available") else "worker_unavailable",
+            "task_counts": {"active": 0, "converging": 0, "handoff": 0},
+            "durable_queue": {"pending": 0},
+            "deadline": {"phase": "", "remaining_seconds": 0.0},
+            "timeout_issues": [],
+            "tasks": [],
+        },
         "checked_at": datetime.now(UTC).isoformat(),
     }

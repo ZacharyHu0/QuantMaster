@@ -147,6 +147,22 @@ class AutomationService:
         # handler thread while it waits for a provider response.
         self.jobs.register("automation.contextual_chat", self._chat_handler)
         self.jobs.register("automation.conversation_compaction", self._compact_handler)
+        self._closed = False
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Close only executors owned by this service instance."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self.jobs.stop()
+        # Bot command handlers are bounded, synchronous units.  They receive a
+        # finite drain window through the runtime before this owner is closed;
+        # queued commands must never start during interpreter shutdown.
+        # Python's executor API has no bounded wait.  Cancel queued work here;
+        # the Worker Supervisor supplies the outer finite process deadline for
+        # an in-flight provider call instead of hanging interpreter shutdown.
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
     # ---------- 状态与策略 ----------
 

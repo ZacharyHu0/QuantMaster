@@ -94,16 +94,22 @@ class RuntimeWorker:
         self._heartbeat_thread: threading.Thread | None = None
         self._command_server: RuntimeCommandServer | None = None
         self._command_error = ""
+        self._generation = uuid.uuid4().hex[:12]
+        from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
+
+        self._lifecycle = RuntimeLifecycle("runtime-worker", self._generation)
 
     def _write_heartbeat(self) -> None:
         path = _heartbeat_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         value = {
             "worker_id": self._worker_id,
+            "generation": self._generation,
             "pid": os.getpid(),
             "updated_at": time.time(),
             "started": self._started,
             "threads": threading.active_count(),
+            "lifecycle": self._lifecycle.snapshot(),
         }
         command_server = self._command_server
         value["commands_available"] = bool(
@@ -143,12 +149,12 @@ class RuntimeWorker:
                 except OSError:
                     logger.warning("runtime-worker 心跳写入失败", exc_info=True)
 
-        self._heartbeat_thread = threading.Thread(
-            target=tick,
-            name="runtime-worker-heartbeat",
-            daemon=True,
+        self._heartbeat_thread = self._lifecycle.start_thread(
+            target=tick, name="runtime-worker-heartbeat",
+            phase="heartbeat", diagnostic_id="QM-LC-WORKER-HEARTBEAT",
+            shutdown_policy="signal_then_join", deadline_seconds=1.5,
+            stop=self._heartbeat_stop.set,
         )
-        self._heartbeat_thread.start()
 
     def _stop_heartbeat(self) -> None:
         self._heartbeat_stop.set()
@@ -168,6 +174,13 @@ class RuntimeWorker:
         with self._lock:
             if self._started:
                 return False
+            if self._lifecycle.snapshot()["state"] == "stopped":
+                # A deliberate in-process restart is a new generation.  It
+                # cannot reuse the stopped generation's task registry.
+                from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
+
+                self._generation = uuid.uuid4().hex[:12]
+                self._lifecycle = RuntimeLifecycle("runtime-worker", self._generation)
             self._command_error = ""
             # Directory creation is a worker-startup responsibility.  Web
             # readers only receive the pure ``Config.data_root`` path and
@@ -407,21 +420,31 @@ class RuntimeWorker:
             from quantmaster.server.diagnostics import stop_diagnostics_sampler
             from quantmaster.server.settings_jobs import shutdown_settings_jobs
 
+            # Phase 1: fence admission before touching any producer, lease or
+            # client.  Every component below owns only its process generation.
+            self._lifecycle.begin_shutdown()
             command_server, self._command_server = self._command_server, None
             if command_server is not None:
                 command_server.stop()
+            self._lifecycle.enter_phase("stop_producers", 5.0)
             self._stop_heartbeat()
             stop_diagnostics_sampler()
             free_stockdb_runtime.stop_event_bridge()
             get_cnn_fear_greed_refresher().stop()
+            # Scheduler/channel owners stop before durable workers so no
+            # heartbeat, outbox or provider retry can submit during drain.
+            get_runtime().close()
             get_paper_automation_worker().stop()
+            self._lifecycle.enter_phase("drain_atomic", 10.0)
             get_rotation_worker().shutdown()
             get_data_repair_manager().shutdown()
             data_refresh_manager.shutdown()
             get_research_job_manager().shutdown()
             get_backtest_worker().stop()
             get_worker().stop()
-            get_runtime().stop()
+            # Unified runtimes interrupt their own leases/checkpoints and
+            # leave queued work for the next durable worker generation.
+            self._lifecycle.enter_phase("persist_and_release", 10.0)
             shutdown_stock_analysis_jobs()
             shutdown_after_close_jobs()
             shutdown_etf_research_jobs()
@@ -431,12 +454,16 @@ class RuntimeWorker:
             if self._unregister_maintenance is not None:
                 self._unregister_maintenance()
                 self._unregister_maintenance = None
+            self._lifecycle.enter_phase("close_resources", 5.0)
+            self._lifecycle.converge_owned()
             self._started = False
+            self._lifecycle.finish()
             logger.info("QuantMaster runtime-worker 已停止")
 
     def status(self) -> dict[str, Any]:
         status = runtime_worker_status()
         status["in_process_started"] = self._started
+        status["lifecycle"] = self._lifecycle.snapshot()
         return status
 
 

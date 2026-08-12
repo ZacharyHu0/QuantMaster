@@ -40,6 +40,8 @@ class AutomationRuntime:
         with self._lock:
             if self.started:
                 return self.leader
+            if getattr(self.service, "_closed", False):
+                raise RuntimeError("自动化运行时 generation 已关闭")
             self.started = True
             if not get_config().automation.enabled:
                 return False
@@ -130,8 +132,17 @@ class AutomationRuntime:
     def _handle_message(self, actor, text: str) -> None:
         from quantmaster.automation.commands import BotCommandRouter
 
+        if not self.started or getattr(self.service, "_closed", False):
+            return
         router = BotCommandRouter(self.service, self.service.reply)
-        self.service.executor.submit(router.handle, actor, text)
+        try:
+            self.service.executor.submit(router.handle, actor, text)
+        except RuntimeError:
+            # Shutdown won the admission race.  The message stays in the
+            # channel/provider's durable delivery path; this generation must
+            # not revive its closed executor.
+            if self.started:
+                raise
 
     def _channel_worker(self, channel: str) -> None:
         stop_event = self._channel_stops[channel]
@@ -508,6 +519,12 @@ class AutomationRuntime:
             self._standby_thread = None
             self._standby_stop = threading.Event()
 
+    def close(self) -> None:
+        """Permanently stop this owner generation and close its executor."""
+
+        self.stop()
+        self.service.close()
+
 
 _runtime: AutomationRuntime | None = None
 _runtime_root: str = ""
@@ -516,7 +533,11 @@ _runtime_root: str = ""
 def get_runtime() -> AutomationRuntime:
     global _runtime, _runtime_root
     root = str(get_config().data_root.resolve())
-    if _runtime is None or _runtime_root != root:
+    if (
+        _runtime is None
+        or _runtime_root != root
+        or getattr(_runtime.service, "_closed", False)
+    ):
         if _runtime is not None:
             _runtime.stop()
         _runtime = AutomationRuntime()
