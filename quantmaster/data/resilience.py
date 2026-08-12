@@ -89,7 +89,9 @@ def classify_provider_failure(exc: BaseException) -> str:
     if status == 403:
         return "http_403_permission"
     if status == 429:
-        return "http_429_rate_limit"
+        # Keep the public failure family stable for existing consumers; the
+        # persisted diagnostic code records the exact HTTP cause.
+        return "rate_limit"
     if status is not None and 500 <= status <= 599:
         return f"http_{status}_upstream"
     if any(value in text for value in (

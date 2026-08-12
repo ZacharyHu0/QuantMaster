@@ -1195,7 +1195,7 @@ def test_retry_after_is_persisted_as_the_provider_recovery_deadline(isolated_con
         provider_call(lane, "retry-after", response.raise_for_status)
 
     health = PROVIDER_HEALTH.status(lane)[lane]
-    assert health["failure_class"] == "http_429_rate_limit"
+    assert health["failure_class"] == "rate_limit"
     assert health["diagnostic_code"] == "http_429"
     assert health["retry_after_at"] >= before + 74
     assert health["next_probe_at"] >= health["retry_after_at"]

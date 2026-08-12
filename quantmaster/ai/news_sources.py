@@ -947,7 +947,7 @@ class NewsSourceStore:
                 ).fetchone()[0])
             if persisted < int(batch["article_count"]):
                 raise NewsContractError(
-                    "完整资讯批次尚未全部持久化，拒绝释放正式窗口",
+                    "完整资讯批次尚有 durable queue 条目未落盘，拒绝释放正式窗口",
                     code="window_articles_not_persisted",
                 )
             remaining = conn.execute(
