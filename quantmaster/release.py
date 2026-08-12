@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.14.1"
+VERSION = "1.14.2"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "AI 与资讯任务稳定性",
+                "items": (
+                    (
+                        "应用关闭或热重载时，在途模型 HTTP 连接会等请求退出后再关闭，"
+                        "避免客户端池清理与并发请求退出互相争用。"
+                    ),
+                    (
+                        "资讯抓取批次支持按不可变证据安全重放；仅完全一致的批次视为幂等"
+                        "成功，任何元数据或文章证据差异都会明确拒绝。"
+                    ),
+                    (
+                        "补充资讯分析租约在 SQLite 短暂锁冲突后的恢复与线程退出验收，"
+                        "防止历史心跳异常回归。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.14.1",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "跨平台 CI 与服务重载",
