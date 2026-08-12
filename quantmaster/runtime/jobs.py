@@ -1361,6 +1361,9 @@ def _run_process_handler(
     """Spawn target: run pure computation while the parent owns the lease."""
 
     try:
+        from quantmaster.runtime.windows_app import initialize_windows_app_process
+
+        initialize_windows_app_process()
         os.environ["QM_COMPUTE_CHILD"] = "1"
         handler = _resolve_process_entrypoint(entrypoint)
         context = ProcessJobContext(store_path, job_id, owner, lease_token)

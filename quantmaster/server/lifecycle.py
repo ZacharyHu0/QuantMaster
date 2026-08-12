@@ -51,6 +51,10 @@ def _run_web_generation(
 
     import uvicorn
 
+    from quantmaster.runtime.windows_app import initialize_windows_app_process
+
+    initialize_windows_app_process()
+
     server = uvicorn.Server(config=config)
     watcher_stop = threading.Event()
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.11.0（2026-08-12）
+
+### Windows 应用进程归组
+- Windows 启动器、Web 服务、runtime-worker 与计算子进程共享 QuantMaster 应用身份，并由根 Job Object 统一持有，任务管理器可按一个应用树查看，关闭根进程时不再遗留后台子进程
+- PyInstaller 产物从 `quantmaster.release` 读取唯一版本源并写入 EXE 文件属性，避免安装包版本与运行时版本漂移
+
 ## v1.10.6（2026-08-12）
 
 ### 跨平台 EXE 科学计算模块修复

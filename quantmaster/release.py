@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.10.6"
+VERSION = "1.11.0"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,26 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Windows 应用进程归组",
+                "items": (
+                    (
+                        "Windows 启动器、Web 服务、runtime-worker 与计算子进程共享 QuantMaster "
+                        "应用身份，并由根 Job Object 统一持有，任务管理器可按一个应用树查看，"
+                        "关闭根进程时不再遗留后台子进程。"
+                    ),
+                    (
+                        "PyInstaller 产物从 quantmaster.release 读取唯一版本源并写入 EXE 文件"
+                        "属性，避免安装包版本与运行时版本漂移。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.10.6",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "跨平台 EXE 科学计算模块修复",

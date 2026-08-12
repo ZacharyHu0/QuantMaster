@@ -72,8 +72,10 @@ def _load_panel(universe: str, start: str, end: str):
 
 
 def cmd_serve(args) -> None:
+    from quantmaster.runtime.windows_app import initialize_windows_app_process
     from quantmaster.server.app import serve
 
+    initialize_windows_app_process(root=True)
     browser_timer = None
     if getattr(args, "open_browser", False):
         import threading

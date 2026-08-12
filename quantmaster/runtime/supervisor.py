@@ -67,6 +67,9 @@ def _publish_supervisor_status(status: str, *, detail: str = "") -> None:
 def _supervisor_main(stop_event: _StopEvent, bootstrap_rotation: bool) -> None:
     """Spawn target kept importable for Windows ``spawn`` semantics."""
 
+    from quantmaster.runtime.windows_app import initialize_windows_app_process
+
+    initialize_windows_app_process()
     os.environ["QM_WORKER_SUPERVISOR"] = "1"
     os.environ.pop("QM_WEB_PROCESS", None)
     from quantmaster.runtime.worker import get_runtime_worker
