@@ -244,9 +244,11 @@ class NewsSourceStore:
         credentials: CredentialStore | None = None,
         *,
         read_only: bool = False,
+        initialize: bool = False,
     ):
         self.path = path or get_config().data_root / "news.sqlite"
         self.read_only = bool(read_only)
+        database_exists = self.path.is_file()
         if not self.read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         # A page reader must not wake the OS keyring merely to render whether a
@@ -254,10 +256,60 @@ class NewsSourceStore:
         # complete read contract for that view.
         self.credentials = credentials if self.read_only else (credentials or CredentialStore())
         self.raw_root = self.path.parent / "news_raw"
-        if not self.read_only:
+        if not database_exists or initialize:
+            if self.read_only:
+                raise FileNotFoundError(self.path)
             self._migrate()
             self._seed_builtins()
-            self._backfill_raw_manifest()
+        else:
+            self.require_current(self.path)
+
+    @classmethod
+    def initialize_current(cls, path: Path) -> None:
+        """Initialize source tables once when the owning news database is new."""
+        cls(path, initialize=True)
+
+    @staticmethod
+    def require_current(path: Path) -> None:
+        required = {
+            "news_sources", "news_source_runs", "news_http_cache", "news_raw_manifest",
+            "news_article_evidence_manifest", "news_ingest_windows", "news_ingest_batches",
+            "news_ingest_batch_articles", "news_ingest_item_queue",
+            "news_ingest_failure_diagnostics", "news_source_state",
+        }
+        connection = connect_sqlite(path, row_factory=True, read_only=True)
+        try:
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            missing = sorted(required - tables)
+            if missing:
+                raise RuntimeError(
+                    "资讯来源数据库缺少当前表，需先执行一次性迁移：" + ",".join(missing)
+                )
+            source_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(news_sources)")
+            }
+            state_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(news_source_state)")
+            }
+            missing_columns = sorted(
+                {"max_age_hours", "needs_credentials"} - source_columns
+                | {
+                    "latest_published_at", "pending_watermark", "backfill_cursor",
+                    "evidence_bootstrap_pending",
+                } - state_columns
+            )
+            if missing_columns:
+                raise RuntimeError(
+                    "资讯来源数据库缺少当前字段，需先执行一次性迁移："
+                    + ",".join(missing_columns)
+                )
+        finally:
+            connection.close()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -461,34 +513,6 @@ class NewsSourceStore:
                 conn.execute(
                     f"UPDATE news_sources SET enabled=0 WHERE built_in=1 AND id NOT IN ({placeholders})",
                     sorted(BUILTIN_SOURCE_IDS),
-                )
-
-    def _backfill_raw_manifest(self) -> None:
-        """Adopt only verified legacy raw from authoritative built-in sources."""
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT h.source_id,h.url,h.raw_cache_key,h.fetched_at,h.status_code "
-                "FROM news_http_cache h JOIN news_sources s ON s.id=h.source_id "
-                "WHERE s.built_in=1 AND s.is_official=1 "
-                "AND h.raw_cache_key LIKE 'news_raw/%'",
-            ).fetchall()
-            for row in rows:
-                key = str(row["raw_cache_key"] or "")
-                source_id = str(row["source_id"])
-                if (
-                    not key.startswith(f"news_raw/{source_id}/")
-                    or not _official_host_allowed(source_id, str(row["url"]))
-                    or read_raw_evidence(self.path, key) is None
-                ):
-                    continue
-                conn.execute(
-                    "INSERT OR IGNORE INTO news_raw_manifest("
-                    "source_id,url,raw_cache_key,fetched_at,status_code) "
-                    "VALUES (?,?,?,?,?)",
-                    (
-                        source_id, str(row["url"]), key,
-                        float(row["fetched_at"] or 0), int(row["status_code"] or 0),
-                    ),
                 )
 
     @staticmethod

@@ -581,8 +581,8 @@ def test_sandbox_factor_can_use_legacy_analyzed_rows_without_promoting_them(tmp_
     assert preview.iloc[0, 0] == pytest.approx(0.8)
     metadata = preview.attrs["news_factor"]
     assert metadata["formal_eligible"] is False
-    assert "legacy_unfrozen_analysis_contract" in metadata["reasons"]
-    assert "legacy_unknown_content_scope" in metadata["reasons"]
+    assert "factor_importance_missing" in metadata["reasons"]
+    assert "factor_source_weight_missing" in metadata["reasons"]
 
 
 def test_news_list_truncates_body_but_detail_is_complete(tmp_path):
@@ -1014,7 +1014,7 @@ def test_source_weight_change_cannot_rewrite_prior_as_of_market_sentiment(tmp_pa
     assert [row["source_weight"] for row in rows] == [1, 1]
 
 
-def test_v4_importance_and_live_source_weight_are_not_promoted_to_pit_factor(tmp_path):
+def test_v4_contract_requires_explicit_migration_without_promoting_factor_fields(tmp_path):
     path = tmp_path / "news.sqlite"
     store = NewsStore(path)
     now = time.time()
@@ -1039,16 +1039,17 @@ def test_v4_importance_and_live_source_weight_are_not_promoted_to_pit_factor(tmp
         connection.execute("ALTER TABLE news DROP COLUMN factor_weight_at_analysis")
         connection.execute("ALTER TABLE news DROP COLUMN factor_importance_score")
 
-    migrated = NewsStore(path)
-
-    assert migrated.factor_rows(end_epoch=now + 10) == []
-    assert migrated.market_sentiment(as_of=now + 10, days=1)["event_count"] == 0
-    with migrated._conn() as connection:
+    with pytest.raises(RuntimeError, match="需先执行一次性迁移"):
+        NewsStore(path)
+    with sqlite3.connect(path) as connection:
         row = connection.execute(
-            "SELECT importance_score,factor_importance_score,"
-            "factor_weight_at_analysis,alert_importance_score FROM news"
+            "SELECT importance_score FROM news"
         ).fetchone()
-    assert tuple(row) == (100, None, None, 100)
+        version = connection.execute(
+            "SELECT value FROM news_store_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+    assert tuple(row) == (100,)
+    assert version == "4"
 
 
 def test_news_event_focus_is_sorted_and_limited_to_24(tmp_path, monkeypatch):
@@ -1809,7 +1810,7 @@ def test_news_stats_deduplicates_in_sql_and_uses_stats_index(tmp_path):
     assert any("idx_news_stats" in str(tuple(row)) for row in plan)
 
 
-def test_news_storage_backfills_dimensions_once_and_keeps_them_current(tmp_path):
+def test_news_storage_never_repairs_current_contract_on_open(tmp_path):
     path = tmp_path / "news.sqlite"
     store = NewsStore(path)
     store._industry_map = {}
@@ -1825,43 +1826,13 @@ def test_news_storage_backfills_dimensions_once_and_keeps_them_current(tmp_path)
         connection.execute("DELETE FROM news_store_meta")
         connection.execute("UPDATE news SET content_hash='' WHERE id=?", (item_id,))
 
-    migrated = NewsStore(path)
-    with migrated._conn() as connection:
-        content_hash = connection.execute(
-            "SELECT content_hash FROM news WHERE id=?", (item_id,),
-        ).fetchone()[0]
-        symbols = connection.execute(
-            "SELECT symbol FROM news_analysis_symbols WHERE news_id=?", (item_id,),
-        ).fetchall()
-        sectors = connection.execute(
-            "SELECT sector FROM news_analysis_sectors WHERE news_id=?", (item_id,),
-        ).fetchall()
-        connection.execute(
-            "UPDATE news SET content_hash='migration-ran-once' WHERE id=?", (item_id,),
-        )
-    assert content_hash
-    assert [row[0] for row in symbols] == ["600519.SH"]
-    assert "食品饮料" in {row[0] for row in sectors}
-
-    reopened = NewsStore(path)
-    with reopened._conn() as connection:
+    with pytest.raises(RuntimeError, match="需先执行一次性迁移"):
+        NewsStore(path)
+    with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT content_hash FROM news WHERE id=?", (item_id,),
-        ).fetchone()[0] == "migration-ran-once"
-
-    updated = NewsItem(
-        source="unit", title="更新维度", content="更新维度正文",
-        symbols=["000001.SZ"], sectors=["银行"], sentiment=-0.2,
-        confidence=0.8, importance_score=70,
-    )
-    assert reopened.update_analysis(item_id, updated)
-    with reopened._conn() as connection:
-        assert [row[0] for row in connection.execute(
-            "SELECT symbol FROM news_analysis_symbols WHERE news_id=?", (item_id,),
-        )] == ["000001.SZ"]
-        assert [row[0] for row in connection.execute(
-            "SELECT sector FROM news_analysis_sectors WHERE news_id=?", (item_id,),
-        )] == ["银行"]
+        ).fetchone()[0] == ""
+        assert connection.execute("SELECT COUNT(*) FROM news_store_meta").fetchone()[0] == 0
 
 
 def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch):

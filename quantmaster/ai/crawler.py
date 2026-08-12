@@ -50,11 +50,12 @@ from quantmaster.ai.news_sources import (
 from quantmaster.ai.news_storage import (
     aggregate_news_event_focus,
     aggregate_news_stats,
-    migrate_news_schema,
+    initialize_news_schema,
     news_content_hash,
     news_fingerprint,
     register_news_raw_verifier,
     replace_news_dimensions,
+    require_current_news_schema,
 )
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import WorkerIdentity
@@ -248,29 +249,28 @@ class NewsStore:
     def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "news.sqlite"
         self.read_only = bool(read_only)
+        database_exists = self.path.is_file()
         if not self.read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.sources = NewsSourceStore(self.path, read_only=self.read_only)
-        from quantmaster.data.industry import (
-            IndustrySnapshotIntegrityError,
-            LegacyIndustrySnapshotError,
-            load_cached_industry_map,
+        if not database_exists:
+            if self.read_only:
+                raise FileNotFoundError(self.path)
+            with self._conn(write_intent=True) as connection:
+                initialize_news_schema(connection)
+            with self._conn(write_intent=True) as connection:
+                NewsClaimStore.migrate(connection)
+        else:
+            with self._conn() as connection:
+                require_current_news_schema(connection)
+            NewsSourceStore.require_current(self.path)
+        self.sources = NewsSourceStore(
+            self.path, read_only=self.read_only, initialize=not database_exists,
         )
+        from quantmaster.data.industry import load_cached_industry_map
 
-        try:
-            self._industry_map = load_cached_industry_map()
-        except LegacyIndustrySnapshotError:
-            # Expected after upgrading a personal installation from the mutable
-            # pre-v2 cache.  It remains unavailable to formal news dimensions
-            # until a verified current snapshot replaces it.
-            self._industry_map = {}
-        except (IndustrySnapshotIntegrityError, OSError, TypeError, ValueError) as exc:
-            # Industry labels are optional analysis enrichment.  A legacy or
-            # damaged projection must not make the news corpus unreadable.
-            logger.warning("行业映射不可用于资讯标签增强，继续使用原始 symbols/sectors: %s", exc)
-            self._industry_map = {}
-        if not self.read_only:
-            self._migrate()
+        # A missing current projection is a natural optional state.  A damaged
+        # or obsolete projection is an explicit contract error; do not swallow it.
+        self._industry_map = load_cached_industry_map()
         self.claims = NewsClaimStore(self.path, read_only=self.read_only)
 
     def _conn(self, *, write_intent: bool = False) -> sqlite3.Connection:
@@ -332,15 +332,6 @@ class NewsStore:
     @staticmethod
     def content_hash(item: NewsItem) -> str:
         return news_content_hash(item.content, item.title)
-
-    def _migrate(self) -> None:
-        with self._conn() as conn:
-            NewsClaimStore.migrate(conn)
-            migrate_news_schema(
-                conn,
-                industry_map=self._industry_map,
-                normalize_sectors=_normalize_sectors,
-            )
 
     def _dashboard_input_fingerprint(self) -> str:
         """Version the materialised read models from small SQLite metadata only."""
@@ -1307,9 +1298,8 @@ class NewsStore:
                 "COALESCE(s.group_name,'') AS source_group,"
                 "n.is_official AS article_is_official,"
                 "COALESCE(s.is_official,0) AS source_is_official,n.content_scope,"
-                "(n.published_at_epoch<=0) AS legacy_published_epoch,"
-                "(n.factor_importance_score IS NULL) AS legacy_factor_importance,"
-                "(n.factor_weight_at_analysis IS NULL) AS legacy_source_weight,"
+                "n.factor_importance_score AS frozen_factor_importance,"
+                "n.factor_weight_at_analysis AS frozen_source_weight,"
                 "n.raw_cache_key,n.evidence_binding_hash,n.ingest_window_id,"
                 "n.ingest_batch_id,EXISTS (SELECT 1 FROM news_ingest_windows w "
                 "WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id "
@@ -1331,14 +1321,14 @@ class NewsStore:
                 reasons.append("non_official_source")
             if value.get("content_scope") == "provider_excerpt":
                 reasons.append("provider_excerpt_only")
-            if value.get("content_scope") == "unknown":
-                reasons.append("legacy_unknown_content_scope")
-            if (
-                bool(value.get("legacy_published_epoch"))
-                or bool(value.get("legacy_factor_importance"))
-                or bool(value.get("legacy_source_weight"))
-            ):
-                reasons.append("legacy_unfrozen_analysis_contract")
+            if not value.get("content_scope"):
+                reasons.append("content_scope_missing")
+            if not value.get("published_at_epoch"):
+                reasons.append("publication_time_missing")
+            if value.get("frozen_factor_importance") is None:
+                reasons.append("factor_importance_missing")
+            if value.get("frozen_source_weight") is None:
+                reasons.append("factor_source_weight_missing")
             if not value.get("raw_cache_key") or not value.get("evidence_binding_hash"):
                 reasons.append("formal_raw_evidence_missing")
             if not bool(value.get("ingest_window_complete")):

@@ -23,6 +23,10 @@ from quantmaster.ai.news_contracts import (
 
 NEWS_SCHEMA_VERSION = 8
 
+
+class NewsSchemaMigrationRequired(RuntimeError):
+    """The database is not the current contract and needs the one-shot migrator."""
+
 _NEWS_COLUMNS = {
     "importance_score": "REAL DEFAULT 0",
     # v5 separates immutable, point-in-time factor evidence from mutable
@@ -36,29 +40,29 @@ _NEWS_COLUMNS = {
     "urgency": "TEXT DEFAULT ''",
     "confidence": "REAL DEFAULT 0",
     "sectors": "TEXT DEFAULT '[]'",
-    "fingerprint": "TEXT DEFAULT ''",
+    "fingerprint": "TEXT DEFAULT NULL",
     "is_official": "INTEGER DEFAULT 0",
-    "content_scope": "TEXT DEFAULT 'unknown'",
-    "source_id": "TEXT DEFAULT ''",
-    "content_hash": "TEXT DEFAULT ''",
-    "first_seen_at": "REAL DEFAULT 0",
-    "last_seen_at": "REAL DEFAULT 0",
+    "content_scope": "TEXT DEFAULT NULL",
+    "source_id": "TEXT DEFAULT NULL",
+    "content_hash": "TEXT DEFAULT NULL",
+    "first_seen_at": "REAL DEFAULT NULL",
+    "last_seen_at": "REAL DEFAULT NULL",
     "raw_cache_key": "TEXT DEFAULT ''",
     "evidence_binding_hash": "TEXT DEFAULT ''",
     "ingest_window_id": "TEXT DEFAULT ''",
     "ingest_batch_id": "TEXT DEFAULT ''",
-    "analysis_status": "TEXT DEFAULT 'pending'",
+    "analysis_status": "TEXT DEFAULT NULL",
     "analysis_attempts": "INTEGER DEFAULT 0",
     "analysis_error": "TEXT DEFAULT ''",
-    "analysis_version": "INTEGER DEFAULT 1",
+    "analysis_version": "INTEGER DEFAULT NULL",
     "next_retry_at": "REAL DEFAULT 0",
     "parser_version": "TEXT DEFAULT '1'",
     "analysis_recovery_count": "INTEGER DEFAULT 0",
     "last_failure_code": "TEXT DEFAULT ''",
-    "analysis_updated_at": "REAL DEFAULT 0",
-    "content_version_at": "REAL DEFAULT 0",
-    "published_at_epoch": "REAL DEFAULT 0",
-    "fetched_at": "REAL DEFAULT 0",
+    "analysis_updated_at": "REAL DEFAULT NULL",
+    "content_version_at": "REAL DEFAULT NULL",
+    "published_at_epoch": "REAL DEFAULT NULL",
+    "fetched_at": "REAL DEFAULT NULL",
     "provider_item_id": "TEXT DEFAULT ''",
 }
 
@@ -81,15 +85,6 @@ def _decode_list(value: Any) -> list[str]:
     if not isinstance(decoded, list):
         return []
     return list(dict.fromkeys(str(item).strip() for item in decoded if str(item).strip()))
-
-
-def _industry_map_hash(industry_map: Mapping[str, str]) -> str:
-    payload = json.dumps(
-        sorted((str(symbol), str(sector)) for symbol, sector in industry_map.items()),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def replace_news_dimensions(
@@ -230,51 +225,6 @@ def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None
         connection.execute(statement)
 
 
-def _backfill_news_core(connection: sqlite3.Connection) -> None:
-    connection.execute("UPDATE news SET source_id=source WHERE source_id='' OR source_id IS NULL")
-    connection.execute("UPDATE news SET first_seen_at=created_at WHERE first_seen_at=0")
-    connection.execute("UPDATE news SET last_seen_at=created_at WHERE last_seen_at=0")
-    connection.execute("UPDATE news SET fetched_at=first_seen_at WHERE fetched_at=0")
-    connection.execute(
-        "UPDATE news SET content_version_at=first_seen_at WHERE content_version_at=0"
-    )
-    connection.execute(
-        "UPDATE news SET content_scope=CASE "
-        "WHEN source_id IN ('sse','pboc','ndrc') THEN 'listing_title_only' "
-        "WHEN source_id IN ('nbs_release','nbs_interpretation') "
-        "AND TRIM(COALESCE(content,''))<>TRIM(COALESCE(title,'')) THEN 'feed_summary' "
-        "WHEN source_id IN ('nbs_release','nbs_interpretation') THEN 'listing_title_only' "
-        "ELSE 'unknown' END WHERE content_scope='' OR content_scope='unknown'"
-    )
-    connection.execute(
-        "UPDATE news SET analysis_status='dead_letter' "
-        "WHERE analysis_status='failed' AND analysis_attempts>=3"
-    )
-    rows = connection.execute(
-        "SELECT id,source,title,content,url,published_at,fingerprint,summary,confidence,"
-        "symbols,analysis_status FROM news"
-    ).fetchall()
-    updates: list[tuple[str, str, str, int]] = []
-    for row in rows:
-        fingerprint = row["fingerprint"] or news_fingerprint(
-            row["source"] or "", row["title"] or "", row["url"] or "",
-            row["published_at"] or "",
-        )
-        content_hash = news_content_hash(row["content"] or "", row["title"] or "")
-        status = row["analysis_status"] or "pending"
-        has_analysis = (
-            row["summary"] or row["confidence"]
-            or row["symbols"] not in {"", "[]", None}
-        )
-        if status == "pending" and has_analysis:
-            status = "complete"
-        updates.append((fingerprint, content_hash, status, int(row["id"])))
-    connection.executemany(
-        "UPDATE news SET fingerprint=?,content_hash=?,analysis_status=? WHERE id=?",
-        updates,
-    )
-
-
 def _archive_legacy_title_identity_table(connection: sqlite3.Connection) -> None:
     """Preserve v3 tables, then copy into v4 without the lossy title identity."""
     row = connection.execute(
@@ -355,13 +305,66 @@ def _rebuild_dimensions(
         )
 
 
-def migrate_news_schema(
+def initialize_news_schema(connection: sqlite3.Connection) -> None:
+    """Create the sole current schema for a brand-new database."""
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute(
+        "CREATE TABLE news_store_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)"
+    )
+    _create_news_schema(connection, legacy=False)
+    connection.execute(
+        "INSERT INTO news_store_meta(key,value) VALUES ('schema_version',?)",
+        (str(NEWS_SCHEMA_VERSION),),
+    )
+
+
+def require_current_news_schema(connection: sqlite3.Connection) -> None:
+    """Validate without DDL, backfills, format guessing, or decoder fallback."""
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    required_tables = {
+        "news", "news_store_meta", "news_analysis_symbols",
+        "news_analysis_sectors", "news_revisions", "news_dashboard_materializations",
+    }
+    missing_tables = sorted(required_tables - tables)
+    if missing_tables:
+        raise NewsSchemaMigrationRequired(
+            "资讯数据库缺少当前表，需先执行一次性迁移：" + ",".join(missing_tables)
+        )
+    row = connection.execute(
+        "SELECT value FROM news_store_meta WHERE key='schema_version'"
+    ).fetchone()
+    try:
+        current = int(row[0]) if row else 0
+    except (TypeError, ValueError) as exc:
+        raise NewsSchemaMigrationRequired("资讯 schema_version 非法") from exc
+    if current != NEWS_SCHEMA_VERSION:
+        raise NewsSchemaMigrationRequired(
+            f"资讯数据库版本 {current} 不是当前版本 {NEWS_SCHEMA_VERSION}，需先执行一次性迁移"
+        )
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(news)")}
+    required_columns = {
+        "id", "source", "title", "content", "url", "published_at", "symbols",
+        "sectors", "event_type", "sentiment", "summary", "created_at", *_NEWS_COLUMNS,
+    }
+    missing_columns = sorted(required_columns - columns)
+    if missing_columns:
+        raise NewsSchemaMigrationRequired(
+            "资讯数据库缺少当前字段，需先执行一次性迁移：" + ",".join(missing_columns)
+        )
+
+
+def migrate_legacy_news_schema(
     connection: sqlite3.Connection,
     *,
     industry_map: Mapping[str, str],
     normalize_sectors: Callable[[list[Any]], list[str]],
 ) -> None:
-    """Migrate once, then keep normal store construction independent of row count."""
+    """Explicit one-shot migration using only facts persisted in the old database."""
     connection.execute("BEGIN IMMEDIATE")
     connection.execute(
         "CREATE TABLE IF NOT EXISTS news_store_meta ("
@@ -376,20 +379,7 @@ def migrate_news_schema(
             f"资讯数据库版本 {current} 高于当前支持版本 {NEWS_SCHEMA_VERSION}"
         )
     _create_news_schema(connection, legacy=current < NEWS_SCHEMA_VERSION)
-    expected_map_hash = _industry_map_hash(industry_map)
-    stored_map = connection.execute(
-        "SELECT value FROM news_store_meta WHERE key='industry_map_hash'"
-    ).fetchone()
     if current < NEWS_SCHEMA_VERSION:
-        _backfill_news_core(connection)
-        # The old score may safely seed the mutable alert display, but it must
-        # never be treated as historical factor evidence.  The two new formal
-        # columns intentionally remain NULL until a real v5 analysis completes.
-        connection.execute(
-            "UPDATE news SET alert_importance_score="
-            "MAX(0,MIN(100,COALESCE(importance_score,0))) "
-            "WHERE alert_importance_score=0"
-        )
         _archive_legacy_title_identity_table(connection)
         _create_news_schema(connection, legacy=False)
         _rebuild_dimensions(
@@ -402,17 +392,7 @@ def migrate_news_schema(
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(NEWS_SCHEMA_VERSION),),
         )
-    elif not stored_map or stored_map[0] != expected_map_hash:
-        _rebuild_dimensions(
-            connection,
-            industry_map=industry_map,
-            normalize_sectors=normalize_sectors,
-        )
-    connection.execute(
-        "INSERT INTO news_store_meta(key,value) VALUES ('industry_map_hash',?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (expected_map_hash,),
-    )
+    connection.commit()
 
 
 def _decay_weight(published_at_epoch: Any, now: Any, halflife_days: Any) -> float:

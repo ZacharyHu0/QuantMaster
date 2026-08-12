@@ -1210,7 +1210,7 @@ def test_future_latest_published_time_cannot_make_provider_healthy():
     assert error.value.code == "future_latest_published_at"
 
 
-def test_ndrc_news_freshness_threshold_is_not_monthly_source_length(tmp_path):
+def test_ndrc_news_freshness_threshold_is_not_rewritten_on_store_open(tmp_path):
     source = _source("ndrc")
     assert source["max_age_hours"] == 336
     now = 1786240800.0
@@ -1225,7 +1225,7 @@ def test_ndrc_news_freshness_threshold_is_not_monthly_source_length(tmp_path):
         connection.execute(
             "UPDATE news_sources SET max_age_hours=1080,updated_at=created_at WHERE id='ndrc'",
         )
-    assert (NewsSourceStore(path).get("ndrc") or {})["max_age_hours"] == 336
+    assert (NewsSourceStore(path).get("ndrc") or {})["max_age_hours"] == 1080
 
 
 def test_official_and_custom_parsers_reject_future_item_times(monkeypatch):
@@ -1592,25 +1592,8 @@ def test_legacy_unbound_raw_stays_factor_ineligible_when_304_restores_manifest(t
     with store._conn() as connection:
         connection.execute("DROP TABLE news_raw_manifest")
 
-    migrated = NewsStore(path)
-    assert migrated.factor_rows(end_epoch=now + 10) == []
-    with migrated._conn() as connection:
-        manifest = connection.execute(
-            "SELECT status_code FROM news_raw_manifest WHERE source_id='pboc' "
-            "AND raw_cache_key=?",
-            (raw_key,),
-        ).fetchone()
-        assert manifest[0] == 304
-        connection.execute("DELETE FROM news_raw_manifest")
-
-    migrated.sources.touch_not_modified("pboc", detail_url)
-    with migrated._conn() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM news_raw_manifest WHERE source_id='pboc' "
-            "AND raw_cache_key=?",
-            (raw_key,),
-        ).fetchone()[0] == 1
-    assert migrated.factor_rows(end_epoch=now + 10) == []
+    with pytest.raises(RuntimeError, match="news_raw_manifest"):
+        NewsStore(path)
 
 
 def test_v6_bootstrap_forces_200_until_current_official_window_is_bound(tmp_path):
@@ -1643,44 +1626,8 @@ def test_v6_bootstrap_forces_200_until_current_official_window_is_bound(tmp_path
         connection.execute("DROP TABLE news_raw_manifest")
         connection.execute("DROP TABLE news_article_evidence_manifest")
 
-    migrated = NewsStore(path)
-    state = migrated.sources.state("pboc")
-    assert state["watermark"] == "committed-before-v6"
-    assert state["evidence_bootstrap_pending"] == 1
-    assert migrated.sources.cache_headers("pboc", detail_url) == {}
-    assert migrated.factor_rows(end_epoch=now + 10) == []
-
-    current_raw = migrated.sources.save_response(
-        # The provider may legitimately return byte-identical content.  The
-        # fresh 200 cache status, not a changed digest, releases the 304 trap.
-        "pboc", detail_url, b"legacy unbound response",
-        httpx.Headers({"etag": "current-etag"}), 200, official=True,
-    )
-    assert current_raw == legacy_raw
-    current = NewsItem(
-        source="pboc", provider_item_id="current-bound", title="当前已绑定条目",
-        content="当前窗口重新解析的正文", url=detail_url,
-        published_at="2026-08-09T00:01:00+00:00", published_at_epoch=now - 60,
-        is_official=True, content_scope="full_article", raw_cache_key=current_raw,
-        symbols=["600002.SH"], sentiment=0.3, confidence=1,
-        importance_score=100, analysis_status="complete",
-    )
-    migrated.sources.bind_articles([current])
-    migrated.sources.register_ingest_batch(
-        FetchBatch(
-            source_id="pboc", articles=[current], watermark=current.provider_item_id,
-            complete=True,
-        ),
-        "bootstrap-current-complete",
-    )
-    assert migrated.save([current]) == 1
-    assert migrated.sources.cache_headers("pboc", detail_url) == {}
-    migrated.sources.complete_evidence_bootstrap("pboc")
-
-    assert migrated.sources.cache_headers("pboc", detail_url) == {
-        "If-None-Match": "current-etag",
-    }
-    assert [row["sentiment"] for row in migrated.factor_rows(end_epoch=now + 10)] == [0.3]
+    with pytest.raises(RuntimeError, match="news_article_evidence_manifest"):
+        NewsStore(path)
 
 
 def test_event_identity_keeps_repeat_notices_across_days_and_dedupes_reposts(tmp_path):
@@ -1898,32 +1845,13 @@ def test_v3_title_identity_migration_preserves_archive_and_removes_constraint(tm
             );
         """)
 
-    store = NewsStore(path)
-    raw_key = _official_raw(store, "pboc", "旧版正文")
-    with store._conn() as connection:
-        connection.execute(
-            "UPDATE news SET is_official=1,content_scope='full_text',raw_cache_key=?,"
-            "published_at_epoch=?,confidence=1,importance_score=100 WHERE title='旧版公告'",
-            (raw_key, time.time() - 60),
-        )
-        tables = {str(row[0]) for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'",
-        )}
-        current = dict(connection.execute("SELECT * FROM news").fetchone())
-        archived = dict(connection.execute("SELECT * FROM news_legacy_v3").fetchone())
-        table_sql = str(connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='news'",
-        ).fetchone()[0]).replace(" ", "").lower()
-        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
-    assert "news_legacy_v3" in tables
-    assert current["title"] == archived["title"] == "旧版公告"
-    assert current["content_version_at"] == 1786240800
-    assert current["analysis_status"] == "complete"
-    assert current["analysis_updated_at"] == 0
-    assert "unique(source,title,published_at)" not in table_sql
-    assert foreign_key_errors == []
-    assert store.factor_rows(end_epoch=time.time() + 10) == []
-    assert store.market_sentiment(as_of=time.time() + 10, days=1)["event_count"] == 0
+    with pytest.raises(RuntimeError, match="需先执行一次性迁移"):
+        NewsStore(path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM news").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT value FROM news_store_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "3"
 
 
 def test_historical_factors_backfill_analysis_to_publication_window(tmp_path):
