@@ -140,6 +140,63 @@ def test_web_search_check_forces_reprobe_and_returns_only_safe_sources(monkeypat
     assert "secret" not in str(result)
 
 
+def test_web_search_draft_check_uses_fully_isolated_client(monkeypatch):
+    reset = []
+    constructed = []
+    failures = []
+
+    class SearchClient:
+        def __init__(self, config, **kwargs):
+            self.config = config
+            constructed.append(kwargs)
+
+        def web_search(self, _query, **_kwargs):
+            return []
+
+        def web_search_status(self):
+            return {"supported": False}
+
+    monkeypatch.setattr("quantmaster.ai.llm.LLMClient", SearchClient)
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.reset_web_search_capability",
+        lambda config: reset.append(config),
+    )
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.record_llm_failure",
+        lambda config, error: failures.append((config, error)),
+    )
+
+    result = check_llm_web_search(
+        LLMSettings(provider="openai", model="gpt-search"),
+        "draft-secret",
+        isolated=True,
+    )
+
+    assert result["status"] == "warning"
+    assert constructed == [{"register_health": False, "isolated": True}]
+    assert reset == []
+    assert failures == []
+
+
+def test_isolated_llm_client_keeps_gate_and_capability_local():
+    from quantmaster.ai.llm import LLMClient, llm_gate_status, web_search_capability_status
+    from quantmaster.config import LLMConfig
+
+    config = LLMConfig(provider="openai", model="diagnostic", api_key="draft-secret")
+    gate_before = llm_gate_status()
+    capability_before = web_search_capability_status(config)
+    client = LLMClient(config, register_health=False, isolated=True)
+
+    client._remember_web_search(True, "diagnostic-only")
+
+    assert client._request_gate() is not client.__class__(
+        config, register_health=False, isolated=True,
+    )._request_gate()
+    assert client.web_search_status()["supported"] is True
+    assert web_search_capability_status(config) == capability_before
+    assert llm_gate_status() == gate_before
+
+
 def test_web_search_check_requires_official_provider_key():
     result = check_llm_web_search(LLMSettings(provider="openai", model="gpt-search"))
     assert result["status"] == "error"

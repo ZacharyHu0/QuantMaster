@@ -7,7 +7,9 @@ waits for a service restart, provider probe, or model request.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from quantmaster.config import get_config
@@ -29,19 +31,44 @@ class _DiagnosticCredentialVault:
     of persisting or reinterpreting the draft credential.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = 600.0,
+        max_entries: int = 32,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._lock = threading.Lock()
-        self._values: dict[str, tuple[SettingsDocument, str]] = {}
+        self._ttl_seconds = max(1.0, float(ttl_seconds))
+        self._max_entries = max(1, int(max_entries))
+        self._clock = clock
+        self._values: dict[str, tuple[float, SettingsDocument, str]] = {}
+
+    def _purge_expired(self, now: float) -> None:
+        for reference, (expires_at, _document, _api_key) in list(self._values.items()):
+            if expires_at <= now:
+                self._values.pop(reference, None)
 
     def put(self, document: SettingsDocument, api_key: str) -> str:
         reference = uuid.uuid4().hex
         with self._lock:
-            self._values[reference] = (document.model_copy(deep=True), str(api_key or ""))
+            now = self._clock()
+            self._purge_expired(now)
+            if len(self._values) >= self._max_entries:
+                raise RuntimeError("设置检测临时凭据队列已满，请稍后重试")
+            self._values[reference] = (
+                now + self._ttl_seconds,
+                document.model_copy(deep=True),
+                str(api_key or ""),
+            )
         return reference
 
     def pop(self, reference: str) -> tuple[SettingsDocument, str] | None:
         with self._lock:
-            return self._values.pop(reference, None)
+            now = self._clock()
+            self._purge_expired(now)
+            value = self._values.pop(reference, None)
+            return (value[1], value[2]) if value is not None else None
 
     def discard(self, reference: str) -> bool:
         return self.pop(reference) is not None
@@ -106,7 +133,7 @@ class SettingsJobs:
             if kind == "llm-models":
                 result = list_llm_models(document.llm, api_key, isolated=True)
             elif kind == "llm-web-search":
-                result = check_llm_web_search(document.llm, api_key)
+                result = check_llm_web_search(document.llm, api_key, isolated=True)
             else:
                 raise ValueError("未知 LLM 设置检测类型")
             # This fences a successful in-flight HTTP response before the
@@ -116,12 +143,7 @@ class SettingsJobs:
                 kind, document, {"llm": api_key, "tushare": ""}, result,
             )
             context.ensure_active()
-            artifact = context.write_artifact(
-                "settings.diagnostic.result",
-                public,
-                {"schema_version": "1.0", "lineage": {"kind": kind}},
-            )
-            return JobOutcome("completed", str(public.get("message") or "设置检测完成"), artifact["id"])
+            return JobOutcome("completed", str(public.get("message") or "设置检测完成"))
         finally:
             if reference:
                 _DIAGNOSTIC_CREDENTIALS.discard(reference)

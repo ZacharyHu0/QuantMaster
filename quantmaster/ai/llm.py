@@ -595,11 +595,15 @@ class LLMClient:
         *,
         concurrency_scope: Literal["global", "news"] = "global",
         register_health: bool = True,
+        isolated: bool = False,
     ):
         self._uses_runtime_config = config is None
         self.config = config or get_config().llm
         self._concurrency_scope = concurrency_scope
-        if register_health:
+        self._isolated = bool(isolated)
+        self._isolated_gate = _LLMRequestGate() if isolated else None
+        self._isolated_capability: dict[str, Any] | None = None
+        if register_health and not isolated:
             _LLM_PROVIDER_HEALTH.register(self.config)
         if not self.config.api_key and self.config.provider != "openai-compatible":
             raise LLMError(
@@ -616,6 +620,8 @@ class LLMClient:
         return max(1, int(config.max_concurrency))
 
     def _request_gate(self) -> _LLMRequestGate:
+        if self._isolated_gate is not None:
+            return self._isolated_gate
         if self._concurrency_scope == "news":
             return _NEWS_LLM_REQUEST_GATE
         return _LLM_REQUEST_GATE
@@ -635,9 +641,13 @@ class LLMClient:
                 self._max_concurrency(), self._queue_timeout(),
                 cancelled=execution_lease_cancelled,
             ):
-                key = (self.config.provider, self.config.base_url.rstrip("/"))
-                with _HTTP_CLIENT_POOL.client(key) as client:
-                    response = client.post(url, **kwargs)
+                if self._isolated:
+                    with httpx.Client(follow_redirects=True) as client:
+                        response = client.post(url, **kwargs)
+                else:
+                    key = (self.config.provider, self.config.base_url.rstrip("/"))
+                    with _HTTP_CLIENT_POOL.client(key) as client:
+                        response = client.post(url, **kwargs)
             reject_http_llm_transport()
             if execution_lease_cancelled():
                 raise InterruptedError("LLM execution lease cancelled after response")
@@ -780,17 +790,28 @@ class LLMClient:
         return _web_search_capability_key(self.config)
 
     def _remember_web_search(self, supported: bool, detail: str = "") -> None:
+        value = {
+            "supported": bool(supported),
+            "detail": str(detail)[:500],
+            "checked_at": datetime.now(UTC).isoformat(),
+            "checked_monotonic": time.monotonic(),
+            "provider": self.config.provider,
+        }
+        if self._isolated:
+            self._isolated_capability = value
+            return
         with _WEB_SEARCH_CAPABILITIES_LOCK:
-            _WEB_SEARCH_CAPABILITIES[self._capability_key()] = {
-                "supported": bool(supported),
-                "detail": str(detail)[:500],
-                "checked_at": datetime.now(UTC).isoformat(),
-                "checked_monotonic": time.monotonic(),
-                "provider": self.config.provider,
-            }
+            _WEB_SEARCH_CAPABILITIES[self._capability_key()] = value
 
     def web_search_status(self) -> dict[str, Any]:
         """Return the process-cached optional search capability for diagnostics."""
+        if self._isolated:
+            public = dict(self._isolated_capability or {
+                "supported": None, "detail": "尚未探测", "checked_at": "",
+                "provider": self.config.provider,
+            })
+            public.pop("checked_monotonic", None)
+            return public
         return web_search_capability_status(self.config)
 
     @staticmethod

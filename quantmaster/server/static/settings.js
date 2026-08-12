@@ -617,10 +617,23 @@
     }
     if (state.diagnosticTasks[kind] !== task.id) return;
     delete state.diagnosticTasks[kind];
-    if (task.status === 'completed' && task.result) {
-      // A result is published only after its revision/lease fence succeeds.
-      renderCheck(kind, task.result.result || task.result);
-      return;
+    if (task.status === 'completed') {
+      try {
+        // Diagnostic results live only in the dedicated redacted settings
+        // projection; they never become a general-purpose job artifact.
+        const settings = await request('/api/v1/settings');
+        const result = settings.checks?.[kind];
+        if (result) {
+          renderCheck(kind, result);
+          return;
+        }
+      } catch (error) {
+        renderCheck(kind, {
+          status: 'warning', stale: true,
+          message: `检测完成，但结果暂不可读取：${error.message}`,
+        });
+        return;
+      }
     }
     renderCheck(kind, {
       status: 'warning', stale: true,

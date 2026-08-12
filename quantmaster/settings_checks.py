@@ -136,7 +136,9 @@ def list_llm_models(
                        **llm_diagnostic_details(client.config, error))
 
 
-def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
+def check_llm_web_search(
+    settings: LLMSettings, api_key: str = "", *, isolated: bool = False,
+) -> dict[str, Any]:
     """Force a bounded native-search probe without exposing credentials or raw responses."""
     started = time.perf_counter()
     if settings.provider in {"anthropic", "openai"} and not api_key:
@@ -162,8 +164,12 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
         timeout=settings.timeout,
         max_concurrency=settings.max_concurrency,
     )
-    reset_web_search_capability(config)
-    client = LLMClient(config)
+    if not isolated:
+        reset_web_search_capability(config)
+    client = (
+        LLMClient(config, register_health=False, isolated=True)
+        if isolated else LLMClient(config)
+    )
     try:
         results = client.web_search(
             "中国证监会 官方网站 A股 最新公告",
@@ -183,7 +189,8 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
             message = "搜索响应未完整结束"
         else:
             message = "搜索能力检测失败"
-        record_llm_failure(client.config, exc)
+        if not isolated:
+            record_llm_failure(client.config, exc)
         return _result("warning", message, started, supported=None, sources=[],
                        **llm_diagnostic_details(client.config, exc))
 

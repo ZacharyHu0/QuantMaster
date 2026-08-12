@@ -15,6 +15,7 @@ from quantmaster.server.app import app
 from quantmaster.settings import (
     AutomationSettings,
     ConfigManager,
+    SettingsDocument,
     SettingsUpdate,
     document_from_config,
 )
@@ -37,6 +38,29 @@ def test_news_scan_interval_settings_defaults_and_bounds():
         AutomationSettings(fast_news_interval_minutes=4)
     with pytest.raises(ValueError):
         AutomationSettings(periodic_news_interval_minutes=1441)
+
+
+def test_diagnostic_vault_is_single_use_bounded_and_expires():
+    from quantmaster.server.settings_jobs import _DiagnosticCredentialVault
+
+    now = [100.0]
+    vault = _DiagnosticCredentialVault(
+        ttl_seconds=5, max_entries=1, clock=lambda: now[0],
+    )
+    document = SettingsDocument()
+    reference = vault.put(document, "draft-secret")
+
+    with pytest.raises(RuntimeError, match="队列已满"):
+        vault.put(document, "other-secret")
+    popped = vault.pop(reference)
+    assert popped is not None and popped[1] == "draft-secret"
+    assert vault.pop(reference) is None
+
+    expired = vault.put(document, "expiring-secret")
+    now[0] += 6
+    assert vault.pop(expired) is None
+    replacement = vault.put(document, "replacement-secret")
+    assert vault.pop(replacement) is not None
 
 
 def test_settings_page_exposes_news_scan_intervals():
