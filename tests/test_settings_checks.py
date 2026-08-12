@@ -280,3 +280,13 @@ def test_free_stockdb_connection_failure_degrades_to_warning(monkeypatch):
     assert result["free-stockdb"]["status"] == "warning"
     assert "自动降级" in result["free-stockdb"]["message"]
     assert "ConnectError" in result["free-stockdb"]["message"]
+
+
+def test_missing_optional_data_dependency_has_install_action(monkeypatch):
+    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: None)
+
+    result = check_data_sources(2)
+
+    akshare = result["details"]["sources"]["akshare"]
+    assert akshare["category"] == "missing-dependency"
+    assert "uv sync --extra data" in akshare["message"]

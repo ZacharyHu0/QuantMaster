@@ -347,8 +347,13 @@ async def request_context_and_migration_lock(request: Request, call_next):
             # becoming an upstream timeout.
             provider_probe = (
                 request.method == "POST"
-                and path.startswith("/api/v1/diagnostics/providers/")
-                and path.endswith("/probe")
+                and (
+                    (
+                        path.startswith("/api/v1/diagnostics/providers/")
+                        and path.endswith("/probe")
+                    )
+                    or path == "/api/v1/settings/check/data-sources"
+                )
             )
             access = nullcontext() if provider_probe else local_only_data_access()
             with access:

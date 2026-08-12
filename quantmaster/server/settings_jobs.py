@@ -6,13 +6,11 @@ waits for a service restart, provider probe, or model request.
 
 from __future__ import annotations
 
-import json
 import threading
 import uuid
 from typing import Any
 
 from quantmaster.config import get_config
-from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.settings import SettingsDocument
 
@@ -21,8 +19,35 @@ DIAGNOSTIC_TASK_TYPE = "settings.diagnostic"
 _TASK_TYPES = frozenset({APPLY_TASK_TYPE, DIAGNOSTIC_TASK_TYPE})
 
 
-def _temporary_credential_target(reference: str) -> str:
-    return f"settings:diagnostic:{reference}"
+class _DiagnosticCredentialVault:
+    """Keep one-shot diagnostic inputs inside the Web process.
+
+    Windows services and reload workers may not have a logon session capable of
+    writing Credential Manager entries (WinError 1312).  A diagnostic is not a
+    durable secret-bearing operation: the durable job keeps only this opaque
+    reference, and a process restart deliberately makes the job fail instead
+    of persisting or reinterpreting the draft credential.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: dict[str, tuple[SettingsDocument, str]] = {}
+
+    def put(self, document: SettingsDocument, api_key: str) -> str:
+        reference = uuid.uuid4().hex
+        with self._lock:
+            self._values[reference] = (document.model_copy(deep=True), str(api_key or ""))
+        return reference
+
+    def pop(self, reference: str) -> tuple[SettingsDocument, str] | None:
+        with self._lock:
+            return self._values.pop(reference, None)
+
+    def discard(self, reference: str) -> bool:
+        return self.pop(reference) is not None
+
+
+_DIAGNOSTIC_CREDENTIALS = _DiagnosticCredentialVault()
 
 
 class SettingsJobs:
@@ -57,17 +82,12 @@ class SettingsJobs:
     def _diagnostic(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
         context.progress(5, "准备模型检测", "读取临时凭据引用")
         context.ensure_active()
-        target = str(spec.get("credential_target") or "")
-        credentials = CredentialStore()
+        reference = str(spec.get("credential_reference") or "")
         try:
-            if not target:
-                raise ValueError("设置检测缺少临时凭据引用")
-            try:
-                secret_payload = json.loads(credentials.get(target) or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ValueError("设置检测临时凭据不可读取") from exc
-            document = SettingsDocument.model_validate(secret_payload.get("document") or {})
-            api_key = str(secret_payload.get("api_key") or "")
+            secret_payload = _DIAGNOSTIC_CREDENTIALS.pop(reference) if reference else None
+            if secret_payload is None:
+                raise ValueError("设置检测临时凭据已失效，请重新检测")
+            document, api_key = secret_payload
             kind = str(spec.get("kind") or "")
             from quantmaster.server.management import settings_manager
             from quantmaster.settings_checks import check_llm_web_search, list_llm_models
@@ -92,14 +112,8 @@ class SettingsJobs:
             )
             return JobOutcome("completed", str(public.get("message") or "设置检测完成"), artifact["id"])
         finally:
-            if target:
-                try:
-                    credentials.delete(target)
-                except CredentialError:
-                    # A failed deletion never grants the task a second chance
-                    # to access a provider; its opaque target is unusable by
-                    # normal configuration loading and is cleaned on retry.
-                    pass
+            if reference:
+                _DIAGNOSTIC_CREDENTIALS.discard(reference)
 
     def submit_apply(self, saved: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         spec = {
@@ -122,17 +136,12 @@ class SettingsJobs:
         *,
         api_key: str,
     ) -> tuple[dict[str, Any], bool]:
-        reference = uuid.uuid4().hex
-        target = _temporary_credential_target(reference)
-        # The durable spec contains only an opaque keyring reference.  Both
-        # provider configuration and a draft credential are short-lived
-        # secret-store data, never job/event/log JSON.
-        CredentialStore().set(target, json.dumps({
-            "document": document.model_dump(), "api_key": str(api_key or ""),
-        }, ensure_ascii=False, separators=(",", ":")))
+        reference = _DIAGNOSTIC_CREDENTIALS.put(document, api_key)
+        # The durable spec contains only an opaque process-local reference.
+        # Provider configuration and draft credentials never enter job/event/log JSON.
         spec = {
             "kind": str(kind),
-            "credential_target": target,
+            "credential_reference": reference,
         }
         try:
             return self.diagnostic_runtime.submit(
@@ -144,10 +153,7 @@ class SettingsJobs:
                 llm_scope="global",
             )
         except Exception:
-            try:
-                CredentialStore().delete(target)
-            except CredentialError:
-                pass
+            _DIAGNOSTIC_CREDENTIALS.discard(reference)
             raise
 
     def cleanup_cancelled_credentials(self) -> int:
@@ -156,14 +162,10 @@ class SettingsJobs:
         for job in self.apply_runtime.store.list(1000, job_type=DIAGNOSTIC_TASK_TYPE):
             if str(job.get("status") or "") not in {"cancelled", "interrupted"}:
                 continue
-            target = str((job.get("spec") or {}).get("credential_target") or "")
-            if not target:
+            reference = str((job.get("spec") or {}).get("credential_reference") or "")
+            if not reference:
                 continue
-            try:
-                CredentialStore().delete(target)
-            except CredentialError:
-                continue
-            removed += 1
+            removed += int(_DIAGNOSTIC_CREDENTIALS.discard(reference))
         return removed
 
     def runtime_for(self, job_id: str) -> UnifiedJobRuntime:

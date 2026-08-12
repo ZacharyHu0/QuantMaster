@@ -538,6 +538,37 @@ def test_settings_web_search_probe_route_enqueues_isolated_task(
     set_config(None)
 
 
+def test_data_source_settings_check_allows_explicit_provider_probe(monkeypatch, tmp_path):
+    from quantmaster.data.resilience import remote_io_allowed
+    from quantmaster.server import management
+
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+
+    def checked_probe(_timeout, _data):
+        assert remote_io_allowed() is True
+        return {
+            "status": "success", "message": "provider probe allowed",
+            "latency_ms": 1, "checked_at": "2026-08-12T00:00:00+00:00", "details": {},
+        }
+
+    monkeypatch.setattr("quantmaster.settings_checks.check_data_sources", checked_probe)
+    monkeypatch.setattr(management, "settings_manager", manager)
+    client = TestClient(app)
+    settings = client.get("/api/v1/settings").json()
+    payload = {"settings": {
+        key: settings[key]
+        for key in ("config_version", "llm", "data", "trade", "news", "server", "automation", "lab")
+    }}
+
+    response = client.post(
+        "/api/v1/settings/check/data-sources", json=payload,
+        headers={"X-CSRF-Token": settings["csrf_token"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "provider probe allowed"
+
+
 def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monkeypatch):
     from quantmaster.data import maintenance
 

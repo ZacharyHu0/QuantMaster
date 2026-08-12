@@ -172,3 +172,40 @@ def test_public_settings_avoids_keyring_and_winerror_is_normalized(tmp_path, mon
     monkeypatch.setitem(sys.modules, "keyring.errors", errors)
     with pytest.raises(CredentialError):
         CredentialStore().get("test")
+
+
+def test_settings_diagnostic_uses_process_local_one_shot_credentials(tmp_path, monkeypatch):
+    """A WinError 1312 keyring must not prevent an explicit model check."""
+    from quantmaster.server import settings_jobs
+    from quantmaster.settings import SettingsDocument
+
+    set_config(_config(tmp_path))
+    jobs = settings_jobs.SettingsJobs()
+    captured = {}
+
+    def submit(_job_type, spec, **_kwargs):
+        captured.update(spec)
+        return ({"id": "diagnostic", "type": "settings.diagnostic"}, True)
+
+    monkeypatch.setattr(jobs.diagnostic_runtime, "submit", submit)
+    monkeypatch.setattr(
+        CredentialStore,
+        "set",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("diagnostic must not write Credential Manager")
+        ),
+    )
+    document = SettingsDocument()
+
+    task, created = jobs.submit_diagnostic("llm-models", document, api_key="draft-secret")
+
+    assert created is True
+    assert task["id"] == "diagnostic"
+    assert set(captured) == {"kind", "credential_reference"}
+    secret = settings_jobs._DIAGNOSTIC_CREDENTIALS.pop(captured["credential_reference"])
+    assert secret is not None
+    restored, api_key = secret
+    assert restored == document
+    assert api_key == "draft-secret"
+    jobs.stop()
+    set_config(None)

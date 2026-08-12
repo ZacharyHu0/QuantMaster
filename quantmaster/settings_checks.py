@@ -311,7 +311,11 @@ def check_data_sources(
         futures = []
         for package, (lane, url) in probes.items():
             if importlib.util.find_spec(package) is None:
-                sources[package] = {"status": "error", "message": "依赖未安装"}
+                sources[package] = {
+                    "status": "error",
+                    "message": "可选数据依赖未安装；运行 uv sync --extra data 后重启",
+                    "category": "missing-dependency",
+                }
             else:
                 futures.append(pool.submit(probe, package, lane, url))
         for future in as_completed(futures):
