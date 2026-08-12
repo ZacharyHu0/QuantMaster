@@ -6,7 +6,12 @@ import pytest
 from conftest import make_panel
 
 from quantmaster.backtest import BacktestConfig, FactorStrategy, run_backtest
-from quantmaster.backtest.engine import price_limit
+from quantmaster.backtest.engine import (
+    _missing_production_fields,
+    _normalized_target_weights,
+    _risk_exit_reason,
+    price_limit,
+)
 from quantmaster.backtest.strategy import BuyAndHold, rebalance_mask
 from quantmaster.config import TradeConfig
 from quantmaster.factors import ExpressionFactor
@@ -18,6 +23,40 @@ def flat_panel(price: float = 10.0, days: int = 30, symbols: tuple = ("600000.SH
     df = pd.DataFrame(price, index=dates, columns=list(symbols))
     return {"open": df.copy(), "high": df.copy(), "low": df.copy(),
             "close": df.copy(), "volume": df * 1e5}
+
+
+class TestEngineDecisions:
+    def test_missing_production_fields_preserve_contract_order(self):
+        panel = flat_panel(days=3)
+        panel["up_limit"] = panel["open"].copy()
+        panel["execution_close"] = panel["close"].copy()
+
+        assert _missing_production_fields(panel) == [
+            "down_limit",
+            "suspended",
+            "adj_factor",
+            "execution_open",
+        ]
+
+    def test_target_weights_clip_negative_values_before_normalizing(self):
+        weights = pd.Series({"600000.SH": 2.0, "000001.SZ": -1.0, "600519.SH": np.nan})
+
+        normalized = _normalized_target_weights(weights)
+
+        assert normalized.to_dict() == {
+            "600000.SH": 1.0,
+            "000001.SZ": 0.0,
+            "600519.SH": 0.0,
+        }
+
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [(-0.10, "stop_loss"), (0.15, "take_profit"), (0.05, None)],
+    )
+    def test_risk_exit_reason_includes_boundaries(self, change, expected):
+        config = BacktestConfig(stop_loss=0.10, take_profit=0.15)
+
+        assert _risk_exit_reason(change, config) == expected
 
 
 class TestPriceLimit:
@@ -34,6 +73,19 @@ class TestPriceLimit:
 
 
 class TestEngineBasics:
+    def test_production_requires_real_execution_fields(self):
+        panel = flat_panel(days=3)
+        weights = pd.DataFrame(np.nan, index=panel["close"].index,
+                               columns=panel["close"].columns)
+
+        with pytest.raises(ValueError) as error:
+            run_backtest(panel, weights, BacktestConfig(research_tier="production"))
+
+        assert str(error.value) == (
+            "production 回测缺少真实成交字段：up_limit、down_limit、suspended、"
+            "adj_factor、execution_open、execution_close"
+        )
+
     def test_full_position_buy_and_costs(self):
         """满仓买入恒价股：只损失交易成本，且股数为整手。"""
         panel = flat_panel(price=10.0)
@@ -91,6 +143,20 @@ class TestEngineBasics:
         assert result.blocked_orders[0].date == str(dates[1].date())
         assert result.blocked_orders[0].reason == "limit_up"
         assert result.metrics["blocked_order_count"] >= 1
+
+    def test_missing_open_order_retries_on_following_session(self):
+        panel = flat_panel(price=10.0, days=6)
+        dates = panel["close"].index
+        panel["open"].iloc[1] = np.nan
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+
+        result = run_backtest(panel, weights)
+
+        assert result.trades[0].date == str(dates[2].date())
+        assert result.blocked_orders[0].date == str(dates[1].date())
+        assert result.blocked_orders[0].side == "rebalance"
+        assert result.blocked_orders[0].reason == "missing_open"
 
     def test_limit_down_blocks_sell(self):
         """开盘跌停卖不出：持仓保持不变。"""

@@ -119,6 +119,441 @@ def _execution_reason(
     )
 
 
+@dataclass(frozen=True)
+class _MarketData:
+    open_px: pd.DataFrame
+    close_px: pd.DataFrame
+    up_limit: pd.DataFrame | None
+    down_limit: pd.DataFrame | None
+    suspended: pd.DataFrame | None
+    adj_factor: pd.DataFrame | None
+    dates: pd.Index
+    symbols: list[str]
+
+
+@dataclass
+class _BacktestState:
+    cash: float
+    shares: dict[str, float]
+    entry_cost: dict[str, float]
+    last_close: dict[str, float] = field(default_factory=dict)
+    last_factor: dict[str, float] = field(default_factory=dict)
+    trades: list[Trade] = field(default_factory=list)
+    blocked_orders: list[BlockedOrder] = field(default_factory=list)
+    nav_values: list[float] = field(default_factory=list)
+    position_rows: list[dict] = field(default_factory=list)
+    pending: pd.Series | None = None
+
+
+def _prepare_market_data(panel: dict[str, pd.DataFrame]) -> _MarketData:
+    signal_close = panel["close"]
+    return _MarketData(
+        open_px=panel.get("execution_open", panel["open"]).reindex_like(signal_close),
+        close_px=panel.get("execution_close", signal_close).reindex_like(signal_close),
+        up_limit=panel.get("up_limit"),
+        down_limit=panel.get("down_limit"),
+        suspended=panel.get("suspended"),
+        adj_factor=panel.get("adj_factor"),
+        dates=signal_close.index,
+        symbols=list(signal_close.columns),
+    )
+
+
+def _missing_production_fields(panel: dict[str, pd.DataFrame]) -> list[str]:
+    required = (
+        "up_limit", "down_limit", "suspended", "adj_factor",
+        "execution_open", "execution_close",
+    )
+    return [name for name in required if panel.get(name) is None]
+
+
+def _validate_production_panel(
+    panel: dict[str, pd.DataFrame],
+    config: BacktestConfig,
+) -> None:
+    if config.research_tier != "production":
+        return
+    missing = _missing_production_fields(panel)
+    if missing:
+        raise ValueError("production 回测缺少真实成交字段：" + "、".join(missing))
+
+
+def _initial_state(config: BacktestConfig, symbols: list[str]) -> _BacktestState:
+    return _BacktestState(
+        cash=config.initial_capital,
+        shares={symbol: 0.0 for symbol in symbols},
+        entry_cost={symbol: 0.0 for symbol in symbols},
+    )
+
+
+def _apply_adjustment_factors(
+    state: _BacktestState,
+    factors: pd.Series,
+    symbols: list[str],
+) -> None:
+    for symbol in symbols:
+        value = factors.get(symbol, np.nan)
+        if pd.isna(value) or float(value) <= 0:
+            continue
+        previous = state.last_factor.get(symbol)
+        if previous and state.shares[symbol] > 0:
+            ratio = float(value) / previous
+            state.shares[symbol] *= ratio
+            state.entry_cost[symbol] /= ratio
+        state.last_factor[symbol] = float(value)
+
+
+def _risk_exit_reason(change: float, config: BacktestConfig) -> str | None:
+    if config.stop_loss is not None and change <= -config.stop_loss:
+        return "stop_loss"
+    if config.take_profit is not None and change >= config.take_profit:
+        return "take_profit"
+    return None
+
+
+def _previous_close_value(row: pd.Series, symbol: str) -> float | None:
+    value = row.get(symbol, np.nan)
+    return float(value) if not np.isnan(value) else None
+
+
+def _try_risk_exit(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    date,
+    date_str: str,
+    symbol: str,
+    day_open: pd.Series,
+    day_previous_close: pd.Series,
+) -> bool:
+    if state.shares[symbol] <= 0 or state.entry_cost[symbol] <= 0:
+        return False
+    price = day_open.get(symbol, np.nan)
+    if np.isnan(price) or price <= 0:
+        return False
+    reason = _risk_exit_reason(price / state.entry_cost[symbol] - 1.0, config)
+    if reason is None:
+        return False
+    blocked = _execution_reason(
+        symbol, "sell", date, float(price),
+        _previous_close_value(day_previous_close, symbol),
+        up_limit=market.up_limit,
+        down_limit=market.down_limit,
+        suspended=market.suspended,
+        config=config,
+    )
+    if blocked:
+        state.blocked_orders.append(
+            BlockedOrder(date_str, symbol, "sell", blocked, note=reason)
+        )
+        return True
+    execution_price = float(price) * (1 - config.trade.slippage)
+    amount = state.shares[symbol] * execution_price
+    cost = _sell_cost(amount, config.trade)
+    state.cash += amount - cost
+    state.trades.append(Trade(
+        date_str, symbol, "sell", round(execution_price, 4),
+        state.shares[symbol], round(amount, 2), round(cost, 2), note=reason,
+    ))
+    state.shares[symbol] = 0.0
+    state.entry_cost[symbol] = 0.0
+    return True
+
+
+def _execute_risk_exits(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    previous_close: pd.DataFrame,
+    date,
+    date_str: str,
+) -> set[str]:
+    if config.stop_loss is None and config.take_profit is None:
+        return set()
+    day_open = market.open_px.loc[date]
+    day_previous_close = previous_close.loc[date]
+    return {
+        symbol
+        for symbol in market.symbols
+        if _try_risk_exit(
+            state, market, config, date, date_str, symbol,
+            day_open, day_previous_close,
+        )
+    }
+
+
+def _portfolio_value_at_open(
+    state: _BacktestState,
+    symbols: list[str],
+    day_open: pd.Series,
+) -> float:
+    position_value = sum(
+        state.shares[symbol] * (
+            float(day_open.get(symbol))
+            if pd.notna(day_open.get(symbol)) and float(day_open.get(symbol)) > 0
+            else state.last_close.get(symbol, 0.0)
+        )
+        for symbol in symbols
+        if state.shares[symbol] > 0
+    )
+    return state.cash + position_value
+
+
+def _normalized_target_weights(pending: pd.Series) -> pd.Series:
+    weights = pending.fillna(0.0).clip(lower=0.0)
+    total_weight = float(weights.sum())
+    return weights / total_weight if total_weight > 1.0 + 1e-9 else weights
+
+
+def _build_orders(
+    state: _BacktestState,
+    symbols: list[str],
+    weights: pd.Series,
+    day_open: pd.Series,
+    portfolio_value: float,
+    date_str: str,
+) -> tuple[list[tuple[str, float]], bool]:
+    orders: list[tuple[str, float]] = []
+    retry_pending = False
+    for symbol in symbols:
+        price = day_open.get(symbol, np.nan)
+        target_weight = float(weights.get(symbol, 0.0))
+        if np.isnan(price) or price <= 0:
+            if state.shares[symbol] > 0 or target_weight > 0:
+                side = "sell" if target_weight <= 0 else "rebalance"
+                state.blocked_orders.append(
+                    BlockedOrder(date_str, symbol, side, "missing_open")
+                )
+                retry_pending = True
+            continue
+        target_value = portfolio_value * target_weight
+        orders.append((symbol, target_value - state.shares[symbol] * price))
+    orders.sort(key=lambda order: order[1])
+    return orders, retry_pending
+
+
+def _execute_sell_order(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    date,
+    date_str: str,
+    symbol: str,
+    price: float,
+    previous_close: float | None,
+    difference: float,
+) -> bool:
+    blocked = _execution_reason(
+        symbol, "sell", date, price, previous_close,
+        up_limit=market.up_limit,
+        down_limit=market.down_limit,
+        suspended=market.suspended,
+        config=config,
+    )
+    if blocked:
+        state.blocked_orders.append(BlockedOrder(date_str, symbol, "sell", blocked))
+        return True
+    sell_shares = min(state.shares[symbol], -difference / price)
+    if not config.allow_fractional and sell_shares < state.shares[symbol] - 1e-9:
+        sell_shares = int(sell_shares // config.trade.lot_size) * config.trade.lot_size
+    if sell_shares <= 0:
+        return False
+    execution_price = price * (1 - config.trade.slippage)
+    amount = sell_shares * execution_price
+    cost = _sell_cost(amount, config.trade)
+    state.cash += amount - cost
+    state.shares[symbol] -= sell_shares
+    if state.shares[symbol] <= 1e-9:
+        state.entry_cost[symbol] = 0.0
+    state.trades.append(Trade(
+        date_str, symbol, "sell", round(execution_price, 4),
+        sell_shares, round(amount, 2), round(cost, 2),
+    ))
+    return False
+
+
+def _execute_buy_order(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    date,
+    date_str: str,
+    symbol: str,
+    price: float,
+    previous_close: float | None,
+    difference: float,
+    stopped_today: set[str],
+) -> bool:
+    if symbol in stopped_today:
+        return False
+    blocked = _execution_reason(
+        symbol, "buy", date, price, previous_close,
+        up_limit=market.up_limit,
+        down_limit=market.down_limit,
+        suspended=market.suspended,
+        config=config,
+    )
+    if blocked:
+        state.blocked_orders.append(BlockedOrder(date_str, symbol, "buy", blocked))
+        return True
+    execution_price = price * (1 + config.trade.slippage)
+    budget = min(difference, state.cash)
+    buy_shares = budget / (
+        execution_price
+        * (1 + config.trade.commission_rate + config.trade.transfer_fee_rate)
+    )
+    if not config.allow_fractional:
+        buy_shares = int(buy_shares // config.trade.lot_size) * config.trade.lot_size
+    if buy_shares <= 0:
+        return False
+    amount = buy_shares * execution_price
+    cost = _buy_cost(amount, config.trade)
+    if amount + cost > state.cash + 1e-6:
+        state.blocked_orders.append(
+            BlockedOrder(date_str, symbol, "buy", "insufficient_cash")
+        )
+        return False
+    state.cash -= amount + cost
+    previous_shares = state.shares[symbol]
+    state.shares[symbol] += buy_shares
+    state.entry_cost[symbol] = (
+        previous_shares * state.entry_cost[symbol] + buy_shares * execution_price
+    ) / state.shares[symbol]
+    state.trades.append(Trade(
+        date_str, symbol, "buy", round(execution_price, 4),
+        buy_shares, round(amount, 2), round(cost, 2),
+    ))
+    return False
+
+
+def _execute_orders(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    date,
+    date_str: str,
+    day_open: pd.Series,
+    day_previous_close: pd.Series,
+    portfolio_value: float,
+    orders: list[tuple[str, float]],
+    stopped_today: set[str],
+) -> bool:
+    retry_pending = False
+    for symbol, difference in orders:
+        price = float(day_open[symbol])
+        threshold = max(portfolio_value * 5e-4, 100 * price * 0.5)
+        if abs(difference) < threshold:
+            continue
+        previous = _previous_close_value(day_previous_close, symbol)
+        if difference < 0 and state.shares[symbol] > 0:
+            retry_pending = _execute_sell_order(
+                state, market, config, date, date_str,
+                symbol, price, previous, difference,
+            ) or retry_pending
+        elif difference > 0:
+            retry_pending = _execute_buy_order(
+                state, market, config, date, date_str,
+                symbol, price, previous, difference, stopped_today,
+            ) or retry_pending
+    return retry_pending
+
+
+def _execute_pending_signal(
+    state: _BacktestState,
+    market: _MarketData,
+    config: BacktestConfig,
+    previous_close: pd.DataFrame,
+    date,
+    date_str: str,
+    stopped_today: set[str],
+) -> None:
+    if state.pending is None:
+        return
+    day_open = market.open_px.loc[date]
+    day_previous_close = previous_close.loc[date]
+    portfolio_value = _portfolio_value_at_open(state, market.symbols, day_open)
+    weights = _normalized_target_weights(state.pending)
+    orders, retry_pending = _build_orders(
+        state, market.symbols, weights, day_open, portfolio_value, date_str,
+    )
+    retry_pending = _execute_orders(
+        state, market, config, date, date_str, day_open, day_previous_close,
+        portfolio_value, orders, stopped_today,
+    ) or retry_pending
+    state.pending = weights if retry_pending else None
+
+
+def _settle_close(
+    state: _BacktestState,
+    symbols: list[str],
+    date,
+    day_close: pd.Series,
+) -> None:
+    position_value = 0.0
+    row = {"date": date}
+    for symbol in symbols:
+        price = day_close.get(symbol, np.nan)
+        if not np.isnan(price):
+            state.last_close[symbol] = float(price)
+        if state.shares[symbol] > 0:
+            value = state.shares[symbol] * state.last_close.get(symbol, 0.0)
+            position_value += value
+            row[symbol] = value
+    state.nav_values.append(state.cash + position_value)
+    state.position_rows.append(row)
+
+
+def _benchmark_nav(
+    benchmark_close: pd.Series | None,
+    dates: pd.Index,
+) -> pd.Series | None:
+    if benchmark_close is None or len(benchmark_close.dropna()) <= 2:
+        return None
+    benchmark = benchmark_close.reindex(dates).ffill()
+    return benchmark / benchmark.iloc[0]
+
+
+def _trade_participation(
+    trade: Trade,
+    average_daily_value: pd.DataFrame,
+) -> float | None:
+    timestamp = pd.Timestamp(trade.date)
+    if (
+        timestamp not in average_daily_value.index
+        or trade.symbol not in average_daily_value.columns
+    ):
+        return None
+    value = average_daily_value.at[timestamp, trade.symbol]
+    if pd.isna(value) or float(value) <= 0:
+        return None
+    return float(trade.amount) / float(value)
+
+
+def _capacity_metrics(
+    volume: pd.DataFrame | None,
+    close_px: pd.DataFrame,
+    trades: list[Trade],
+) -> dict[str, float]:
+    if volume is None or volume.empty or not trades:
+        return {}
+    average_daily_value = (
+        volume.reindex_like(close_px).mul(close_px).rolling(20, min_periods=5).mean()
+    )
+    participation = [
+        value
+        for trade in trades
+        if (value := _trade_participation(trade, average_daily_value)) is not None
+    ]
+    if not participation:
+        return {}
+    return {
+        "capacity_max_participation": round(max(participation), 6),
+        "capacity_p95_participation": round(
+            float(np.quantile(participation, 0.95)), 6
+        ),
+    }
+
+
 def run_backtest(
     panel: dict[str, pd.DataFrame],
     target_weights: pd.DataFrame,
@@ -137,270 +572,47 @@ def run_backtest(
     from quantmaster.backtest.metrics import performance_metrics
 
     config = config or BacktestConfig()
-    tcfg = config.trade
-    signal_close = panel["close"]
-    open_px = panel.get("execution_open", panel["open"]).reindex_like(signal_close)
-    close_px = panel.get("execution_close", signal_close).reindex_like(signal_close)
-    up_limit = panel.get("up_limit")
-    down_limit = panel.get("down_limit")
-    suspended = panel.get("suspended")
-    adj_factor = panel.get("adj_factor")
-    dates = signal_close.index
-    symbols = list(signal_close.columns)
+    market = _prepare_market_data(panel)
+    _validate_production_panel(panel, config)
+    target_weights = target_weights.reindex(
+        index=market.dates,
+        columns=market.symbols,
+    )
+    previous_close = market.close_px.shift(1)
+    state = _initial_state(config, market.symbols)
 
-    if config.research_tier == "production":
-        missing = [
-            name for name, value in (
-                ("up_limit", up_limit), ("down_limit", down_limit),
-                ("suspended", suspended), ("adj_factor", adj_factor),
-                ("execution_open", panel.get("execution_open")),
-                ("execution_close", panel.get("execution_close")),
-            ) if value is None
-        ]
-        if missing:
-            raise ValueError("production 回测缺少真实成交字段：" + "、".join(missing))
-
-    target_weights = target_weights.reindex(index=dates, columns=symbols)
-    prev_close = close_px.shift(1)
-
-    cash = config.initial_capital
-    shares: dict[str, float] = {s: 0.0 for s in symbols}
-    entry_cost: dict[str, float] = {s: 0.0 for s in symbols}   # 持仓的加权平均成本
-    last_close: dict[str, float] = {}   # 最近一个有效收盘价（停牌估值用）
-    last_factor: dict[str, float] = {}
-    trades: list[Trade] = []
-    blocked_orders: list[BlockedOrder] = []
-    nav_values: list[float] = []
-    position_rows: list[dict] = []
-
-    pending: pd.Series | None = None       # T 日收盘信号，T+1 开盘执行
-
-    for i, date in enumerate(dates):
+    for index, date in enumerate(market.dates):
         date_str = str(date.date())
-        stopped_today: set[str] = set()
-
-        # 用复权因子把持仓维持在总收益单位；历史回放中不会因请求结束日重写。
-        if adj_factor is not None:
-            factors = adj_factor.reindex(index=[date], columns=symbols).iloc[0]
-            for symbol in symbols:
-                value = factors.get(symbol, np.nan)
-                if pd.isna(value) or float(value) <= 0:
-                    continue
-                previous = last_factor.get(symbol)
-                if previous and shares[symbol] > 0:
-                    ratio = float(value) / previous
-                    shares[symbol] *= ratio
-                    entry_cost[symbol] /= ratio
-                last_factor[symbol] = float(value)
-
-        # ---- 开盘：止损/止盈检查（先于调仓信号执行）----
-        if config.stop_loss is not None or config.take_profit is not None:
-            day_open_sl = open_px.loc[date]
-            day_prev_close_sl = prev_close.loc[date]
-            for symbol in symbols:
-                if shares[symbol] <= 0 or entry_cost[symbol] <= 0:
-                    continue
-                px = day_open_sl.get(symbol, np.nan)
-                if np.isnan(px) or px <= 0:
-                    continue
-                change = px / entry_cost[symbol] - 1.0
-                reason = None
-                if config.stop_loss is not None and change <= -config.stop_loss:
-                    reason = "stop_loss"
-                elif config.take_profit is not None and change >= config.take_profit:
-                    reason = "take_profit"
-                if reason is None:
-                    continue
-                # 跌停无法卖出：止损单也排不上队，只能顺延。
-                # 但仍要冻结当日对该票的加仓——否则调仓信号会继续买入摊低均价，
-                # 止损线随之下移，可能永远触发不了。
-                pc = day_prev_close_sl.get(symbol, np.nan)
-                blocked = _execution_reason(
-                    symbol, "sell", date, float(px),
-                    float(pc) if not np.isnan(pc) else None,
-                    up_limit=up_limit, down_limit=down_limit,
-                    suspended=suspended, config=config,
-                )
-                if blocked:
-                    blocked_orders.append(BlockedOrder(
-                        date_str, symbol, "sell", blocked, note=reason,
-                    ))
-                    stopped_today.add(symbol)
-                    continue
-                exec_px = float(px) * (1 - tcfg.slippage)
-                amount = shares[symbol] * exec_px
-                sell_cost = _sell_cost(amount, tcfg)
-                cash += amount - sell_cost
-                trades.append(Trade(date_str, symbol, "sell", round(exec_px, 4),
-                                    shares[symbol], round(amount, 2), round(sell_cost, 2),
-                                    note=reason))
-                shares[symbol] = 0.0
-                entry_cost[symbol] = 0.0
-                stopped_today.add(symbol)   # 当日不再重新买入，避免止损即回补
-
-        # ---- 开盘：执行昨日信号 ----
-        if pending is not None:
-            day_open = open_px.loc[date]
-            day_prev_close = prev_close.loc[date]
-            portfolio_value = cash + sum(
-                shares[s] * (
-                    float(day_open.get(s))
-                    if pd.notna(day_open.get(s)) and float(day_open.get(s)) > 0
-                    else last_close.get(s, 0.0)
-                )
-                for s in symbols if shares[s] > 0
-            )
-
-            weights = pending.fillna(0.0).clip(lower=0.0)
-            total_w = float(weights.sum())
-            if total_w > 1.0 + 1e-9:
-                weights = weights / total_w
-
-            # 先卖后买（腾出资金）
-            orders: list[tuple[str, float]] = []
-            retry_pending = False
-            for symbol in symbols:
-                px = day_open.get(symbol, np.nan)
-                if np.isnan(px) or px <= 0:
-                    if shares[symbol] > 0 or float(weights.get(symbol, 0.0)) > 0:
-                        side = "sell" if float(weights.get(symbol, 0.0)) <= 0 else "rebalance"
-                        blocked_orders.append(BlockedOrder(
-                            date_str, symbol, side, "missing_open",
-                        ))
-                        retry_pending = True
-                    continue
-                target_value = portfolio_value * float(weights.get(symbol, 0.0))
-                diff_value = target_value - shares[symbol] * px
-                orders.append((symbol, diff_value))
-            orders.sort(key=lambda x: x[1])   # 卖单（负值）在前
-
-            for symbol, diff_value in orders:
-                px = float(day_open[symbol])
-                pc = day_prev_close.get(symbol, np.nan)
-                if abs(diff_value) < max(portfolio_value * 5e-4, 100 * px * 0.5):
-                    continue   # 忽略过小的调整，抑制无谓换手
-
-                if diff_value < 0 and shares[symbol] > 0:
-                    # 跌停无法卖出
-                    blocked = _execution_reason(
-                        symbol, "sell", date, px,
-                        float(pc) if not np.isnan(pc) else None,
-                        up_limit=up_limit, down_limit=down_limit,
-                        suspended=suspended, config=config,
-                    )
-                    if blocked:
-                        blocked_orders.append(BlockedOrder(
-                            date_str, symbol, "sell", blocked,
-                        ))
-                        retry_pending = True
-                        continue
-                    sell_shares = min(shares[symbol], -diff_value / px)
-                    if not config.allow_fractional:
-                        lot = tcfg.lot_size
-                        # 不足一手的零股允许一次性清仓
-                        if sell_shares < shares[symbol] - 1e-9:
-                            sell_shares = int(sell_shares // lot) * lot
-                    if sell_shares <= 0:
-                        continue
-                    exec_px = px * (1 - tcfg.slippage)
-                    amount = sell_shares * exec_px
-                    cost = _sell_cost(amount, tcfg)
-                    cash += amount - cost
-                    shares[symbol] -= sell_shares
-                    if shares[symbol] <= 1e-9:
-                        entry_cost[symbol] = 0.0   # 清仓后重置成本（部分卖出保持均价不变）
-                    trades.append(Trade(date_str, symbol, "sell", round(exec_px, 4),
-                                        sell_shares, round(amount, 2), round(cost, 2)))
-                elif diff_value > 0:
-                    if symbol in stopped_today:
-                        continue   # 当日刚止损/止盈的股票不立即回补
-                    # 涨停无法买入
-                    blocked = _execution_reason(
-                        symbol, "buy", date, px,
-                        float(pc) if not np.isnan(pc) else None,
-                        up_limit=up_limit, down_limit=down_limit,
-                        suspended=suspended, config=config,
-                    )
-                    if blocked:
-                        blocked_orders.append(BlockedOrder(
-                            date_str, symbol, "buy", blocked,
-                        ))
-                        retry_pending = True
-                        continue
-                    exec_px = px * (1 + tcfg.slippage)
-                    budget = min(diff_value, cash)
-                    buy_shares = budget / (exec_px * (1 + tcfg.commission_rate + tcfg.transfer_fee_rate))
-                    if not config.allow_fractional:
-                        buy_shares = int(buy_shares // tcfg.lot_size) * tcfg.lot_size
-                    if buy_shares <= 0:
-                        continue
-                    amount = buy_shares * exec_px
-                    cost = _buy_cost(amount, tcfg)
-                    if amount + cost > cash + 1e-6:
-                        blocked_orders.append(BlockedOrder(
-                            date_str, symbol, "buy", "insufficient_cash",
-                        ))
-                        continue
-                    cash -= amount + cost
-                    prev_shares = shares[symbol]
-                    shares[symbol] += buy_shares
-                    # 加权平均持仓成本（不含费用，止损线以成交价为基准）
-                    entry_cost[symbol] = (
-                        (prev_shares * entry_cost[symbol] + buy_shares * exec_px) / shares[symbol]
-                    )
-                    trades.append(Trade(date_str, symbol, "buy", round(exec_px, 4),
-                                        buy_shares, round(amount, 2), round(cost, 2)))
-            pending = weights if retry_pending else None
-
-        # ---- 收盘：结算市值、读取新信号 ----
-        day_close = close_px.loc[date]
-        position_value = 0.0
-        row = {"date": date}
-        for symbol in symbols:
-            px = day_close.get(symbol, np.nan)
-            if not np.isnan(px):
-                last_close[symbol] = float(px)
-            if shares[symbol] > 0:
-                # 停牌（连续缺价）按最近一个有效收盘价估值，避免市值先塌陷后跳回
-                value = shares[symbol] * last_close.get(symbol, 0.0)
-                position_value += value
-                row[symbol] = value
-        nav_values.append(cash + position_value)
-        position_rows.append(row)
-
-        signal_row = target_weights.iloc[i]
+        if market.adj_factor is not None:
+            factors = market.adj_factor.reindex(
+                index=[date], columns=market.symbols
+            ).iloc[0]
+            _apply_adjustment_factors(state, factors, market.symbols)
+        stopped_today = _execute_risk_exits(
+            state, market, config, previous_close, date, date_str
+        )
+        _execute_pending_signal(
+            state, market, config, previous_close, date, date_str, stopped_today,
+        )
+        _settle_close(state, market.symbols, date, market.close_px.loc[date])
+        signal_row = target_weights.iloc[index]
         if signal_row.notna().any():
-            pending = signal_row
+            state.pending = signal_row
 
-    nav = pd.Series(nav_values, index=dates, name="nav") / config.initial_capital
+    nav = pd.Series(
+        state.nav_values, index=market.dates, name="nav"
+    ) / config.initial_capital
     returns = nav.pct_change(fill_method=None).fillna(0.0)
-    positions = pd.DataFrame(position_rows).set_index("date").fillna(0.0)
-
-    benchmark_nav = None
-    if benchmark_close is not None and len(benchmark_close.dropna()) > 2:
-        bench = benchmark_close.reindex(dates).ffill()
-        benchmark_nav = bench / bench.iloc[0]
-
-    metrics = performance_metrics(returns, benchmark_nav=benchmark_nav, trades=trades)
-    metrics["blocked_order_count"] = len(blocked_orders)
-    volume = panel.get("volume")
-    if volume is not None and not volume.empty and trades:
-        adv = volume.reindex_like(close_px).mul(close_px).rolling(20, min_periods=5).mean()
-        participation = []
-        for trade in trades:
-            timestamp = pd.Timestamp(trade.date)
-            if timestamp in adv.index and trade.symbol in adv.columns:
-                value = adv.at[timestamp, trade.symbol]
-                if pd.notna(value) and float(value) > 0:
-                    participation.append(float(trade.amount) / float(value))
-        if participation:
-            metrics["capacity_max_participation"] = round(max(participation), 6)
-            metrics["capacity_p95_participation"] = round(
-                float(np.quantile(participation, 0.95)), 6,
-            )
+    positions = pd.DataFrame(state.position_rows).set_index("date").fillna(0.0)
+    benchmark_nav = _benchmark_nav(benchmark_close, market.dates)
+    metrics = performance_metrics(
+        returns, benchmark_nav=benchmark_nav, trades=state.trades
+    )
+    metrics["blocked_order_count"] = len(state.blocked_orders)
+    metrics.update(_capacity_metrics(panel.get("volume"), market.close_px, state.trades))
     return BacktestResult(
         nav=nav, returns=returns, positions=positions,
-        trades=trades, metrics=metrics, benchmark_nav=benchmark_nav,
-        blocked_orders=blocked_orders, initial_capital=config.initial_capital,
-        close_prices=close_px,
+        trades=state.trades, metrics=metrics, benchmark_nav=benchmark_nav,
+        blocked_orders=state.blocked_orders, initial_capital=config.initial_capital,
+        close_prices=market.close_px,
     )
