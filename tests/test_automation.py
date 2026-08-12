@@ -1204,6 +1204,10 @@ def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path
 
     monkeypatch.setattr(scheduler_module, "BackgroundScheduler", FakeScheduler)
     monkeypatch.setattr(runtime, "reload_jobs", lambda: None)
+    # This test owns only the missing-credential channel contract.  Startup
+    # catch-up can legitimately dispatch unrelated daily jobs and therefore
+    # create worker threads, which would be caught by the sentinel above.
+    monkeypatch.setattr(runtime_module.AutomationRuntime, "catch_up_daily_jobs", list)
     assert runtime._start_scheduler_locked()
     assert runtime.scheduler.job_ids == ["_lease", "_cleanup"]
 
