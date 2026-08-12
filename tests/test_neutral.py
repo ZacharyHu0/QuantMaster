@@ -11,6 +11,7 @@ from quantmaster.data.industry import (
     load_industry_analysis_context,
     load_industry_evidence,
     load_industry_map,
+    migrate_trusted_legacy_industry_map,
     save_industry_map,
 )
 from quantmaster.factors.neutral import industry_neutralize
@@ -202,6 +203,36 @@ class TestIndustryMapCache:
         assert evidence["formal_eligible"] is False
         assert historical == {}
         assert historical_evidence["formal_eligible"] is False
+
+    def test_trusted_legacy_migration_is_current_only_and_has_no_content_hash(
+        self, isolated_config, monkeypatch,
+    ):
+        from quantmaster.data import industry as mod
+
+        legacy = isolated_config.data_root / "legacy-industry.json"
+        legacy.write_text(
+            '{"updated_at": 1785119503.0, "mapping": {'
+            '"600519.SH": "食品饮料", "000001.sz": "银行"}}',
+            encoding="utf-8",
+        )
+        migrated = migrate_trusted_legacy_industry_map(
+            legacy, imported_at="2026-08-13T00:00:00+00:00",
+        )
+
+        assert "content_sha256" not in migrated
+        assert migrated["observed_at"] == "2026-07-27T02:31:43+00:00"
+        assert load_industry_map() == {
+            "600519.SH": "食品饮料", "000001.SZ": "银行",
+        }
+        evidence = load_industry_evidence()
+        assert evidence["status"] == "trusted"
+        assert evidence["content_hash"] == ""
+        mapping, context = load_industry_analysis_context()
+        assert mapping == load_industry_map()
+        assert context["formal_eligible"] is True
+        with pytest.raises(RuntimeError, match="拒绝用当前行业映射"):
+            load_industry_map(as_of="2026-07-27")
+        assert not list(mod._history_root().glob("*.json"))
 
     def test_industry_history_tamper_is_rejected(self, monkeypatch, isolated_config):
         from quantmaster.data.industry import IndustrySnapshotIntegrityError

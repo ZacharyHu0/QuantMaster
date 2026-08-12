@@ -22,6 +22,8 @@ from quantmaster.trading_sessions import daily_signal_cutoff, market_date
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_DAYS = 1
+TRUSTED_LEGACY_SCHEMA_VERSION = 3
+TRUSTED_LEGACY_SOURCE = "trusted-local-legacy-import"
 
 
 class IndustrySnapshotIncomplete(RuntimeError):
@@ -178,6 +180,42 @@ def _atomic_json(path: Path, serialized: str) -> None:
         staged.unlink(missing_ok=True)
 
 
+def _trusted_legacy_payload(payload: dict, *, history: bool) -> dict:
+    """Accept a user-trusted legacy import for *current* classification only.
+
+    This is deliberately not an immutable/PIT evidence contract.  A legacy
+    mapping normally retains one useful observation timestamp, but has no
+    complete catalog denominator and therefore must never become a historical
+    replay candidate.  The migration contains no derived content hash: the
+    operator has explicitly declared the local source trusted.
+    """
+    if history:
+        raise LegacyIndustrySnapshotError("受信任旧行业导入不能作为历史快照")
+    if payload.get("schema_version") != TRUSTED_LEGACY_SCHEMA_VERSION:
+        raise LegacyIndustrySnapshotError("行业快照为旧格式")
+    if str(payload.get("source") or "") != TRUSTED_LEGACY_SOURCE:
+        raise IndustrySnapshotIntegrityError("受信任旧行业导入来源非法")
+    try:
+        observed = datetime.fromisoformat(
+            str(payload.get("observed_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise IndustrySnapshotIntegrityError("受信任旧行业导入 observed_at 非法") from exc
+    if observed.tzinfo is None:
+        raise IndustrySnapshotIntegrityError("受信任旧行业导入 observed_at 缺少时区")
+    mapping = payload.get("mapping")
+    if not isinstance(mapping, dict) or not mapping:
+        raise IndustrySnapshotIntegrityError("受信任旧行业导入缺少映射")
+    normalized = {
+        str(symbol).upper(): str(industry).strip()
+        for symbol, industry in mapping.items()
+        if str(symbol).strip() and str(industry).strip()
+    }
+    if not normalized:
+        raise IndustrySnapshotIntegrityError("受信任旧行业导入没有有效映射")
+    return {**payload, "mapping": normalized}
+
+
 def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -185,6 +223,8 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
         raise IndustrySnapshotIntegrityError(f"行业快照不可读: {path.name}") from exc
     if not isinstance(payload, dict):
         raise IndustrySnapshotIntegrityError(f"行业快照结构非法: {path.name}")
+    if payload.get("schema_version") == TRUSTED_LEGACY_SCHEMA_VERSION:
+        return _trusted_legacy_payload(payload, history=history)
     expected = str(payload.get("content_sha256") or "")
     if payload.get("schema_version") != 2 or not expected:
         raise LegacyIndustrySnapshotError(f"行业快照为旧格式: {path.name}")
@@ -237,6 +277,71 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
             raise IndustrySnapshotIntegrityError(
                 f"行业快照映射集合与证券目录分母不一致: {path.name}"
             )
+    return payload
+
+
+def migrate_trusted_legacy_industry_map(
+    legacy_path: str | Path,
+    *,
+    imported_at: str | datetime | None = None,
+) -> dict:
+    """Migrate a user-trusted pre-v2 projection into the current-only format.
+
+    The source's ``updated_at`` remains its observation time.  No catalog
+    denominator, completion claim, history object, or content hash is invented.
+    Re-running with the same source is deterministic apart from ``imported_at``
+    and atomically replaces only the live projection.
+    """
+    source = Path(legacy_path)
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IndustrySnapshotIntegrityError(f"旧行业映射不可读: {source.name}") from exc
+    if not isinstance(raw, dict):
+        raise IndustrySnapshotIntegrityError("旧行业映射结构非法")
+    mapping = raw.get("mapping")
+    if not isinstance(mapping, dict) or not mapping:
+        raise IndustrySnapshotIntegrityError("旧行业映射缺少 mapping")
+    try:
+        observed = datetime.fromtimestamp(float(raw["updated_at"]), UTC)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+        raise IndustrySnapshotIntegrityError("旧行业映射 updated_at 非法") from exc
+    if imported_at is None:
+        imported = datetime.now(UTC)
+    elif isinstance(imported_at, datetime):
+        imported = imported_at
+    else:
+        try:
+            imported = datetime.fromisoformat(str(imported_at).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("imported_at 必须是带时区 ISO 时间") from exc
+    if imported.tzinfo is None:
+        raise ValueError("imported_at 必须包含时区")
+    normalized = {
+        str(symbol).upper(): str(industry).strip()
+        for symbol, industry in mapping.items()
+        if str(symbol).strip() and str(industry).strip()
+    }
+    if not normalized:
+        raise IndustrySnapshotIntegrityError("旧行业映射没有有效映射")
+    payload = {
+        "schema_version": TRUSTED_LEGACY_SCHEMA_VERSION,
+        "source": TRUSTED_LEGACY_SOURCE,
+        "quality": "trusted_legacy_current_only",
+        "observed_at": observed.isoformat(),
+        "effective_as_of": market_date(observed).isoformat(),
+        "imported_at": imported.astimezone(UTC).isoformat(),
+        "snapshot_complete": False,
+        "expected_symbols": None,
+        "observed_symbols": len(normalized),
+        "missing_symbols": [],
+        "universe_evidence": {},
+        "mapping": normalized,
+    }
+    _atomic_json(
+        _cache_path(),
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
     return payload
 
 
@@ -407,6 +512,12 @@ def load_industry_map(
         try:
             data = _verified_industry_payload(path)
             cached = data.get("mapping", {})
+            if data.get("schema_version") == TRUSTED_LEGACY_SCHEMA_VERSION:
+                if not refresh:
+                    return cached
+                # A deliberate refresh may still replace this import with a
+                # provider observation, but it never rewrites it as history.
+                cached = {}
             active_symbols = _active_cn_symbols()
             missing_current = active_symbols - set(cached)
             complete = bool(
@@ -514,7 +625,11 @@ def load_industry_evidence(*, as_of: str | None = None) -> dict[str, object]:
     if not isinstance(mapping, dict) or not mapping:
         raise RuntimeError("行业分类清单缺少映射内容")
     return {
-        "status": "verified" if payload.get("snapshot_complete") else "degraded",
+        "status": (
+            "trusted"
+            if payload.get("schema_version") == TRUSTED_LEGACY_SCHEMA_VERSION
+            else "verified" if payload.get("snapshot_complete") else "degraded"
+        ),
         "source": str(payload.get("source") or "unknown"),
         "observed_at": str(payload.get("observed_at") or ""),
         "effective_as_of": str(payload.get("effective_as_of") or ""),
@@ -542,7 +657,7 @@ def load_industry_analysis_context(
         evidence = load_industry_evidence(as_of=as_of)
         return mapping, {
             **evidence,
-            "formal_eligible": evidence.get("status") == "verified",
+            "formal_eligible": evidence.get("status") in {"verified", "trusted"},
             "issues": [],
         }
     except (
