@@ -1181,10 +1181,11 @@ def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path
         def __init__(self, *args, **kwargs):
             started.append((args, kwargs))
 
-    monkeypatch.setattr(runtime_module.threading, "Thread", UnexpectedThread)
-    assert runtime.start_channels()["feishu"] is False
-    assert started == []
-    assert store.bot_account("feishu")["status"] == "not_configured"
+    with monkeypatch.context() as channel_patch:
+        channel_patch.setattr(runtime_module.threading, "Thread", UnexpectedThread)
+        assert runtime.start_channels()["feishu"] is False
+        assert started == []
+        assert store.bot_account("feishu")["status"] == "not_configured"
 
     class FakeScheduler:
         def __init__(self, **_kwargs):
