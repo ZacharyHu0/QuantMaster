@@ -219,7 +219,7 @@ class ResearchCatalog:
                 cls._schema_v1(connection)
                 connection.execute(f"PRAGMA user_version={RESEARCH_SCHEMA_VERSION}")
                 connection.commit()
-            except Exception:
+            except (sqlite3.Error, OSError, TypeError, ValueError):
                 connection.rollback()
                 raise
 
