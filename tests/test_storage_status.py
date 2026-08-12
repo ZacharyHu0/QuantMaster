@@ -76,11 +76,16 @@ def test_storage_status_reports_wal_without_consuming_sidecars(
     _control_database(control)
     wal = control.with_name(f"{control.name}-wal")
     shm = control.with_name(f"{control.name}-shm")
-    wal.write_bytes(b"pending-wal")
+    wal.write_bytes(b"")
     shm.write_bytes(b"shared-memory")
     isolated_config.data.free_stockdb_root = str(root)
+    monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
     monkeypatch.setattr(
         "quantmaster.server.storage_status._owner_writer_count", lambda _root: 1,
+    )
+    monkeypatch.setattr(
+        "quantmaster.server.storage_status.connect_sqlite_diagnostic",
+        lambda _path: (_ for _ in ()).throw(AssertionError("database was opened")),
     )
     before = {path: path.read_bytes() for path in (control, wal, shm)}
 

@@ -151,7 +151,7 @@ def storage_status() -> dict[str, Any]:
     wal = control.with_name(f"{control.name}-wal")
     shm = control.with_name(f"{control.name}-shm")
     journal = control.with_name(f"{control.name}-journal")
-    wal_present = wal.is_file() and wal.stat().st_size > 0
+    wal_present = wal.is_file()
     status: dict[str, Any] = {
         "status": "ready" if data_root.is_dir() else "unavailable",
         "purpose": "核心数据与 StockDB 控制状态",
@@ -179,6 +179,11 @@ def storage_status() -> dict[str, Any]:
         status["diagnostic_code"] = "PARENT_UNAVAILABLE"
     if not control.is_file():
         status["diagnostic_code"] = "CONTROL_DB_MISSING"
+        return status
+    if status["active_writers"] and (wal_present or status["shm_present"]):
+        status["status"] = "degraded"
+        status["diagnostic_code"] = "WAL_REQUIRES_QUIESCENT_CHECK"
+        status["last_error"] = "存在活跃写入者与 SQLite sidecar；需协调写入者后复验完整状态"
         return status
     try:
         status["estimated_bytes"] = (
