@@ -512,7 +512,11 @@ class BarStore:
                                 item for item in pandas_meta.get("index_columns", [])
                                 if isinstance(item, str)
                             ]
-                            projected = list(dict.fromkeys([*columns, *index_columns]))
+                            available = set(source.schema_arrow.names)
+                            projected = [
+                                item for item in dict.fromkeys([*columns, *index_columns])
+                                if item in available
+                            ]
                             frame = source.read(
                                 columns=projected, use_threads=False,
                             ).to_pandas()

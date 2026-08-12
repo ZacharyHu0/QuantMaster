@@ -924,9 +924,10 @@ def _universe_members(symbols: list[str]) -> list[dict[str, Any]]:
     from quantmaster.data.instruments import InstrumentStore
 
     store = InstrumentStore(read_only=True)
+    instruments = store.get_many(symbols)
     result = []
     for symbol in symbols:
-        instrument = store.get(symbol)
+        instrument = instruments.get(str(symbol).strip().upper())
         result.append(
             {
                 "symbol": symbol,

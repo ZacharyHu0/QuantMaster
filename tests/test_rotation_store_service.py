@@ -11,6 +11,7 @@ import pytest
 from quantmaster.rotation.analytics import compute_etf_capital_evidence
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.service import (
+    RotationDataLoader,
     RotationService,
     RotationWorker,
     _overlay_stockdb_etf_prices,
@@ -33,6 +34,97 @@ def _market(days: int = 100, symbols: int = 40):
         columns=[f"{600000 + index:06d}.SH" for index in range(symbols)],
     )
     return close, close * 800_000
+
+
+def test_rotation_local_matrix_loader_uses_projected_batch_bar_read(monkeypatch):
+    """The BarStore fallback must read each local file once through one batch plan."""
+
+    dates = pd.bdate_range("2026-04-01", periods=50)
+    symbols = ["600000.SH", "600001.SH", "600002.SH"]
+    frames = {
+        "600000.SH": pd.DataFrame({
+            "close": range(10, 60), "amount": range(100, 150),
+        }, index=dates),
+        "600001.SH": pd.DataFrame({
+            "close": range(20, 70), "volume": range(200, 250),
+        }, index=dates),
+        # Short local history remains ineligible, matching the former per-symbol path.
+        "600002.SH": pd.DataFrame({"close": range(10)}, index=dates[:10]),
+    }
+    calls: dict[str, object] = {}
+
+    class FakeInstruments:
+        def get_many(self, requested):
+            return {
+                symbol: SimpleNamespace(
+                    asset_type="stock", market="CN", status="listed",
+                    name=f"名称-{symbol}",
+                )
+                for symbol in requested
+            }
+
+    class FakeBars:
+        def symbols(self):
+            return list(symbols)
+
+        def read_many(self, requested, columns, **kwargs):
+            calls.update({"symbols": requested, "columns": columns, **kwargs})
+            return SimpleNamespace(frames=frames)
+
+    monkeypatch.setattr(
+        RotationDataLoader, "_listed_instruments", staticmethod(lambda: (FakeInstruments(), 3)),
+    )
+    monkeypatch.setattr(RotationDataLoader, "_research_lake", lambda _self: None)
+    monkeypatch.setattr("quantmaster.rotation.service.BarStore", FakeBars)
+
+    loader = RotationDataLoader(RotationStore())
+    close, amount, names, expected_count, sources = loader.market_matrices(
+        progress=lambda *_args: None, cancelled=lambda: False,
+    )
+
+    assert calls == {
+        "symbols": symbols,
+        "columns": ["close", "amount", "volume"],
+        "max_workers": 16,
+        "enqueue_repair": False,
+    }
+    assert list(close.columns) == symbols[:2]
+    assert list(amount.columns) == symbols[:2]
+    assert amount.loc[dates[0], "600001.SH"] == 4000
+    assert names == {symbol: f"名称-{symbol}" for symbol in symbols[:2]}
+    assert expected_count == 3
+    assert sources == ["local:bar_store"]
+
+
+def test_rotation_research_lake_is_labeled_as_local_data(monkeypatch):
+    dates = pd.bdate_range("2026-07-01", periods=40)
+    close = pd.DataFrame({"600000.SH": range(10, 50)}, index=dates)
+    amount = close * 100
+
+    class FakeInstruments:
+        def get_many(self, requested):
+            return {
+                symbol: SimpleNamespace(
+                    asset_type="stock", market="CN", status="listed", name="本地样本",
+                )
+                for symbol in requested
+            }
+
+    class FakeBars:
+        def metadata_many(self):
+            return {}
+
+    monkeypatch.setattr(
+        RotationDataLoader, "_listed_instruments", staticmethod(lambda: (FakeInstruments(), 1)),
+    )
+    monkeypatch.setattr(RotationDataLoader, "_research_lake", lambda _self: (close, amount))
+    monkeypatch.setattr("quantmaster.rotation.service.BarStore", FakeBars)
+
+    _close, _amount, _names, _expected, sources = RotationDataLoader(
+        RotationStore(),
+    ).market_matrices(progress=lambda *_args: None, cancelled=lambda: False)
+
+    assert sources == ["local:research_lake"]
 
 
 def test_market_etf_evidence_overlays_stockdb_prices_for_unpriced_share_rows(

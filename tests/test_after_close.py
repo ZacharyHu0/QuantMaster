@@ -195,8 +195,8 @@ def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
     symbols = [*sorted(service.source.frame["symbol"].unique()), "000002.SZ"]
     monkeypatch.setattr(
         instrument_snapshots,
-        "load_or_fetch_suspension_snapshot",
-        lambda _source, _date: {
+        "load_suspension_snapshot",
+        lambda _date: {
             "source": "tushare:suspend_d",
             "contract": "tushare-suspend_d-trade-date-v1",
             "symbols": ["000002.SZ"],

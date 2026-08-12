@@ -9,7 +9,6 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from statistics import median
 from typing import Any
@@ -489,7 +488,7 @@ class RotationDataLoader:
             close, amount = close[selected], amount.reindex(columns=selected)
             names = {symbol: records[symbol].name or symbol for symbol in selected}
             progress(30, "读取全市场研究湖", f"已读取 {len(selected)} 只股票")
-            return close, amount, names, expected_count, ["tushare:research_lake"]
+            return close, amount, names, expected_count, ["local:research_lake"]
 
         bars = BarStore()
         symbols = [
@@ -512,43 +511,40 @@ class RotationDataLoader:
             for symbol in selected
         }
 
-        def load_one(symbol: str) -> tuple[str, pd.Series, pd.Series] | None:
-            frame = bars.get(symbol)
-            if frame is None or frame.empty or "close" not in frame:
-                return None
-            frame = frame.tail(820)
-            close = pd.to_numeric(frame["close"], errors="coerce").rename(symbol)
-            if "amount" in frame:
-                amount = pd.to_numeric(frame["amount"], errors="coerce").rename(symbol)
-            elif "volume" in frame:
-                amount = (
-                    pd.to_numeric(frame["volume"], errors="coerce") * close
-                ).rename(symbol)
-            else:
-                amount = pd.Series(index=close.index, dtype=float, name=symbol)
-            return symbol, close, amount
-
         close_series: list[pd.Series] = []
         amount_series: list[pd.Series] = []
         total = len(selected)
         progress(4, "读取本地行情", f"准备校验 {total} 只股票")
-        with ThreadPoolExecutor(max_workers=min(8, max(1, total))) as executor:
-            futures = {executor.submit(load_one, symbol): symbol for symbol in selected}
-            for completed, future in enumerate(as_completed(futures), start=1):
-                if cancelled():
-                    raise InterruptedError("板块联动刷新已取消")
-                value = future.result()
-                if value is not None:
-                    _, close, amount = value
-                    if close.notna().sum() >= 30:
-                        close_series.append(close)
-                        amount_series.append(amount)
-                if completed == total or completed % 40 == 0:
-                    progress(
-                        4 + round(25 * completed / max(1, total)),
-                        "读取本地行情",
-                        f"{completed}/{total} · 可计算 {len(close_series)}",
-                    )
+        batch = bars.read_many(
+            selected,
+            columns=["close", "amount", "volume"],
+            max_workers=16,
+            enqueue_repair=False,
+        )
+        for completed, symbol in enumerate(selected, start=1):
+            if cancelled():
+                raise InterruptedError("板块联动刷新已取消")
+            frame = batch.frames.get(symbol)
+            if frame is not None and not frame.empty and "close" in frame:
+                frame = frame.tail(820)
+                close = pd.to_numeric(frame["close"], errors="coerce").rename(symbol)
+                if "amount" in frame:
+                    amount = pd.to_numeric(frame["amount"], errors="coerce").rename(symbol)
+                elif "volume" in frame:
+                    amount = (
+                        pd.to_numeric(frame["volume"], errors="coerce") * close
+                    ).rename(symbol)
+                else:
+                    amount = pd.Series(index=close.index, dtype=float, name=symbol)
+                if close.notna().sum() >= 30:
+                    close_series.append(close)
+                    amount_series.append(amount)
+            if completed == total or completed % 40 == 0:
+                progress(
+                    4 + round(25 * completed / max(1, total)),
+                    "读取本地行情",
+                    f"{completed}/{total} · 可计算 {len(close_series)}",
+                )
         if not close_series:
             raise ValueError("本地没有至少 30 日的 A 股行情；请先在数据管理中同步行情")
         close = pd.concat(close_series, axis=1).sort_index()

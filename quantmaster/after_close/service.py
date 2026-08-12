@@ -231,22 +231,19 @@ class AfterCloseService:
         suspension_evidence: dict[str, Any] = {}
         excused_suspensions: set[str] = set()
         suspension_error = ""
-        if missing_symbols and get_config().data.tushare_token:
+        if missing_symbols:
             try:
                 from quantmaster.data.instrument_snapshots import (
-                    load_or_fetch_suspension_snapshot,
+                    load_suspension_snapshot,
                 )
-                from quantmaster.data.tushare_source import TushareSource
 
-                suspension_evidence = load_or_fetch_suspension_snapshot(
-                    TushareSource(), as_of,
-                )
+                suspension_evidence = load_suspension_snapshot(as_of)
                 excused_suspensions = missing_symbols & {
                     str(value).upper()
                     for value in suspension_evidence.get("symbols") or ()
                 }
             except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                suspension_error = f"Tushare suspend_d 停牌证据不可用：{str(exc)[:240]}"
+                suspension_error = f"本地停牌快照不可用：{str(exc)[:240]}"
         expected_trading = expected_set - excused_suspensions
         if expected_set:
             observed = len(observed_set & expected_trading)
@@ -878,7 +875,7 @@ class AfterCloseService:
         try:
             from quantmaster.data.index_membership import load_cached_csi800_members_as_of
 
-            membership = load_cached_csi800_members_as_of(actual_as_of, pull=True)
+            membership = load_cached_csi800_members_as_of(actual_as_of, pull=False)
             csi800 = {
                 "status": "available",
                 "dataset": membership["dataset"],
@@ -924,8 +921,6 @@ class AfterCloseService:
                 existing_snapshot.snapshot_id,
                 {"as_of_date": existing_snapshot.as_of_date},
             )
-            self._write_research_lake(existing_snapshot, frame, boards)
-            self.evaluate_pending(frame)
             progress(100, "盘后扫描完成", f"复用不可变快照 {snapshot_id}")
             return existing_snapshot
         sectors = [replace(item, snapshot_id=snapshot_id) for item in sectors]

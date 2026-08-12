@@ -118,6 +118,68 @@ def test_public_history_reader_enforces_local_only_without_http_middleware(tmp_p
         registry.read_history("600000.SH", "2026-08-03", "2026-08-07", store=store)
 
 
+def test_read_panel_uses_one_bounded_batch_read_and_preserves_input_order(tmp_path, monkeypatch):
+    store = BarStore(root=tmp_path / "bars")
+    dates = pd.DatetimeIndex(["2026-08-03", "2026-08-04"])
+    bars = pd.DataFrame({
+        "open": [10.0, 11.0], "high": [11.0, 12.0],
+        "low": [9.0, 10.0], "close": [10.5, 11.5],
+        "volume": [100.0, 120.0],
+    }, index=dates)
+    store.put("000001.SZ", bars)
+    store.put("600000.SH", bars * 2)
+    expected = {
+        symbol: registry.read_history(symbol, "2026-08-03", "2026-08-04", store=store)
+        for symbol in ("000001.SZ", "600000.SH", "MISSING.SH")
+    }
+    store.read_only = True
+
+    calls: list[tuple[list[str], dict]] = []
+    original_read_many = store.read_many
+
+    def read_many(symbols, *args, **kwargs):
+        calls.append((list(symbols), kwargs))
+        return original_read_many(symbols, *args, **kwargs)
+
+    monkeypatch.setattr(store, "read_many", read_many)
+    monkeypatch.setattr(
+        store,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应逐标的读取")),
+    )
+    progress: list[tuple[int, int, str, bool]] = []
+
+    panel = registry.read_panel(
+        ["000001.SZ", "600000.SH", "000001.SZ", "MISSING.SH"],
+        "2026-08-03",
+        "2026-08-04",
+        field="close",
+        store=store,
+        progress=lambda *item: progress.append(item),
+    )
+
+    assert calls == [(
+        ["000001.SZ", "600000.SH", "MISSING.SH"],
+        {
+            "start": "2026-08-03", "end": "2026-08-04",
+            "max_workers": 8, "enqueue_repair": False,
+        },
+    )]
+    assert list(panel.data.columns) == ["000001.SZ", "600000.SH"]
+    assert [item["symbol"] for item in panel.provenance] == [
+        "000001.SZ", "600000.SH", "MISSING.SH",
+    ]
+    assert [item["quality"] for item in panel.provenance] == [
+        expected[symbol].quality.to_dict()
+        for symbol in ("000001.SZ", "600000.SH", "MISSING.SH")
+    ]
+    assert progress == [
+        (1, 3, "000001.SZ", True),
+        (2, 3, "600000.SH", True),
+        (3, 3, "MISSING.SH", False),
+    ]
+
+
 def _hold_cross_process_bar_lock(root: str, start, events) -> None:
     store = BarStore(Path(root))
     start.wait(10)

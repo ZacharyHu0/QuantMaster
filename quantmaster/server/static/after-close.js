@@ -20,14 +20,17 @@
   function renderCoverage() {
     const coverage = state.snapshot?.coverage || {};
     const fields = coverage.field_coverage || {};
-    const optional = ['amount','float_mv','total_mv','pe_ttm','pb','is_st'];
+    const optional = [
+      ['amount','成交额'], ['float_mv','流通市值'], ['total_mv','总市值'],
+      ['pe_ttm','市盈率'], ['pb','市净率'], ['is_st','风险警示标记'],
+    ];
     const items = [
       ['证券覆盖', `${coverage.observed_symbols ?? 0} / ${coverage.expected_symbols ?? 0}`],
-      ['完整 OHLCV', percent(coverage.required_ohlcv_ratio)],
+      ['开盘、最高、最低、收盘和成交量完整率', percent(coverage.required_ohlcv_ratio)],
       ['申万一级', `${coverage.board_counts?.L1 ?? 0} 个`],
       ['申万二/三级', `${(coverage.board_counts?.L2 ?? 0) + (coverage.board_counts?.L3 ?? 0)} 个`],
       ['概念目录', `${coverage.board_counts?.CONCEPT ?? 0} 个`],
-      ...optional.map(key => [key, percent(fields[key]?.latest_ratio)]),
+      ...optional.map(([key, label]) => [label, percent(fields[key]?.latest_ratio)]),
     ];
     document.getElementById('after-close-coverage').innerHTML = items.map(item =>
       `<span>${esc(item[0])}<strong>${esc(item[1])}</strong></span>`).join('');
@@ -134,8 +137,8 @@
     document.getElementById('after-close-asof').innerHTML = `
       <dt>正式快照</dt><dd>${esc(snapshot.as_of_date)}</dd>
       <dt>数据状态</dt><dd>${stale ? '沿用旧快照' : '完整性通过'}</dd>
-      <dt>评分版本</dt><dd>${esc(snapshot.score_version)}</dd>
-      <dt>输入哈希</dt><dd title="${esc(snapshot.input_hash)}">${esc(snapshot.input_hash.slice(0, 12))}</dd>`;
+      <dt>评分方法</dt><dd title="${esc(snapshot.score_version)}">当前研究评分规则</dd>
+      <dt>数据身份</dt><dd title="${esc(snapshot.input_hash)}">已锁定，可复核</dd>`;
     const staleBox = document.getElementById('after-close-stale');
     if (stale) {
       const copy = staleCopy(snapshot);

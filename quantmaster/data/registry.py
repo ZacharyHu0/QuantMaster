@@ -669,8 +669,9 @@ def _bar_envelope(
     end: str,
     store: BarStore,
     frequency: str,
+    metadata: dict[str, Any] | None = None,
 ) -> BarDataEnvelope[pd.DataFrame]:
-    metadata = store.metadata(symbol) or {}
+    metadata = metadata if metadata is not None else store.metadata(symbol) or {}
     source = str(metadata.get("last_source") or "local-cache")
     stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
     if frequency == "1d":
@@ -968,7 +969,9 @@ def _full_refresh(
                 frame, start, end, symbol=symbol, source=source.name,
             )
             storage_source = source.name
-            if quality.status == "verified":
+            if quality.status == "verified" or (
+                source.name.startswith("free-stockdb") and quality.status == "degraded"
+            ):
                 return persist(frame, quality, storage_source)
             # StockDB is the configured local source of truth. Its SDK does
             # not provide an independently versioned unit/adjustment manifest,
@@ -1084,7 +1087,9 @@ def _fetch_segment(
                 ):
                     best = (source, merged, frame, fresh_latest)
                 continue
-            if evaluated[1].status == "verified":
+            if evaluated[1].status == "verified" or (
+                source.name.startswith("free-stockdb") and evaluated[1].status == "degraded"
+            ):
                 return save(source, merged, frame, evaluated)
             if _accept_local_stockdb_without_remote_upgrade(source, evaluated[1]):
                 return save(source, merged, frame, evaluated)
@@ -2296,25 +2301,44 @@ def read_panel(
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
     """Compose a daily panel from local bar files only.
 
-    The method intentionally performs no parallel provider work.  Local files
-    are read one at a time so a request cannot fan out into a thread storm;
-    callers that need a full cache rebuild must submit a refresh job instead.
+    The bounded local batch reader never contacts a provider.  Callers that
+    need a full cache rebuild must submit a refresh job instead.
     """
 
     resolved_store = _local_read_store(store, "1d") if store is not None else _default_read_bar_store()
     requested = tuple(dict.fromkeys(str(value).upper() for value in symbols))
     frames: dict[str, pd.DataFrame] = {}
     envelopes: dict[str, BarDataEnvelope[pd.DataFrame]] = {}
-    for index, symbol in enumerate(requested, start=1):
-        envelope = read_history(symbol, start, end, resolved_store)
-        envelopes[symbol] = envelope
-        if not envelope.data.empty:
-            frames[symbol] = envelope.data
-        if progress is not None:
-            try:
-                progress(index, len(requested), symbol, not envelope.data.empty)
-            except Exception:
-                logger.debug("本地面板进度回调失败", exc_info=True)
+    with local_only_data_access():
+        batch = resolved_store.read_many(
+            list(requested),
+            start=start,
+            end=end,
+            max_workers=8,
+            enqueue_repair=False,
+        )
+        metadata_by_symbol = resolved_store.metadata_many(list(requested))
+        for index, symbol in enumerate(requested, start=1):
+            frame = batch.frames.get(symbol)
+            if frame is None:
+                frame = pd.DataFrame(columns=OHLCV_COLUMNS)
+            envelope = _bar_envelope(
+                frame,
+                symbol=symbol,
+                start=start,
+                end=end,
+                store=resolved_store,
+                frequency="1d",
+                metadata=metadata_by_symbol.get(symbol, {}),
+            )
+            envelopes[symbol] = envelope
+            if not envelope.data.empty:
+                frames[symbol] = envelope.data
+            if progress is not None:
+                try:
+                    progress(index, len(requested), symbol, not envelope.data.empty)
+                except Exception:
+                    logger.debug("本地面板进度回调失败", exc_info=True)
 
     fields = sorted({column for frame in frames.values() for column in frame.columns})
     panels = {

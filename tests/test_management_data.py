@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from typing import ClassVar
 
@@ -83,6 +84,47 @@ def test_canonical_universe_symbols_use_one_batched_master_lookup(monkeypatch):
     ]
     assert Store.instances == 1
     assert Store.batches == [["600519.SH", "000001.SZ", "600519.SH"]]
+
+
+def test_universe_members_uses_one_batched_master_lookup(monkeypatch):
+    from quantmaster.data import instruments
+    from quantmaster.server import management
+
+    class Entry:
+        def __init__(self, symbol):
+            self.name = f"名称-{symbol}"
+            self.market = "cn"
+            self.exchange = "SSE"
+            self.asset_type = "stock"
+            self.status = "active"
+            self.source = "fixture"
+
+    class Store:
+        instances = 0
+        batches: ClassVar[list[list[str]]] = []
+
+        def __init__(self, *, read_only):
+            assert read_only is True
+            type(self).instances += 1
+
+        def get_many(self, symbols):
+            values = list(symbols)
+            type(self).batches.append(values)
+            return {value.upper(): Entry(value) for value in values}
+
+        def get(self, symbol):  # pragma: no cover - 不应退回单项查询
+            raise AssertionError(f"unexpected single lookup: {symbol}")
+
+    monkeypatch.setattr(instruments, "InstrumentStore", Store)
+
+    members = management._universe_members(["600519.SH", "000001.SZ", "600519.SH"])
+
+    assert Store.instances == 1
+    assert Store.batches == [["600519.SH", "000001.SZ", "600519.SH"]]
+    assert [item["symbol"] for item in members] == ["600519.SH", "000001.SZ", "600519.SH"]
+    assert [item["name"] for item in members] == [
+        "名称-600519.SH", "名称-000001.SZ", "名称-600519.SH",
+    ]
 
 
 def test_copy_migration_keeps_source_and_switches_only_after_verify(tmp_path):
@@ -240,7 +282,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     manager._run(job["id"])
     completed = manager.get(job["id"])
     assert completed["status"] == "completed"
-    assert [item[0] for item in calls] == symbols
+    assert {item[0] for item in calls} == set(symbols)
     assert all(item[3]["mode"] == RefreshMode.INCREMENTAL for item in calls)
     assert all(item[3]["work_class"] == "maintenance" for item in calls)
 
@@ -261,6 +303,62 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
             "SELECT original_symbols_json FROM refresh_jobs WHERE id=?", (job["id"],)
         ).fetchone()[0])
     assert original == symbols
+
+
+def test_incremental_refresh_job_limits_per_job_parallelism(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    symbols = [f"{index:06d}.SZ" for index in range(16)]
+    monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: symbols)
+    monkeypatch.setattr(manager, "_start", lambda job_id: None)
+    monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
+
+    active = 0
+    peak_active = 0
+    lock = threading.Lock()
+    second_worker_started = threading.Event()
+
+    def fake_load(symbol, start, end, **kwargs):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+            if active >= 2:
+                second_worker_started.set()
+        try:
+            assert second_worker_started.wait(timeout=2.0)
+            return BarDataEnvelope(
+                data=pd.DataFrame({"close": [1.0]}, index=pd.to_datetime([end])),
+                quality=BarDataQuality(
+                    status="verified",
+                    requested_start=start,
+                    requested_end=end,
+                    observed_start=end,
+                    observed_end=end,
+                    coverage_ratio=1.0,
+                    sources=("fixture",),
+                    timezone="Asia/Shanghai",
+                    adjustment="qfq",
+                    requested_symbols=(symbol,),
+                    observed_symbols=(symbol,),
+                ),
+                provenance=({"source": "fixture"},),
+            )
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("quantmaster.data.maintenance.refresh_history", fake_load)
+    job = manager.create("market")
+    manager._run(job["id"])
+
+    completed = manager.get(job["id"])
+    assert completed["status"] == "completed"
+    assert completed["next_index"] == len(symbols)
+    assert peak_active > 1
+    assert peak_active <= manager.MAX_PARALLEL_SYMBOLS
 
 
 def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, tmp_path):

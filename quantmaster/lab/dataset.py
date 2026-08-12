@@ -1189,7 +1189,12 @@ def load_local_dataset(
 
 def load_csi800_members_as_of(as_of: str, *, source=None) -> dict[str, Any]:
     """读取目标日可知的中证800成分，分别沿用两个指数最近一期快照。"""
-    return load_cached_csi800_members_as_of(as_of, source=source)
+    # Page callers pass no source and must stay local-only.  An explicitly
+    # injected source is a worker/test boundary and retains the acquisition
+    # contract used to create a new immutable membership snapshot.
+    return load_cached_csi800_members_as_of(
+        as_of, pull=source is not None, source=source,
+    )
 
 
 def _bar_manifest(symbols: Iterable[str]) -> dict[str, Any]:

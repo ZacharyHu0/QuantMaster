@@ -1392,7 +1392,7 @@
     try {
       const allowed = new Set(['all','market','industries','themes','etf']);
       const selected = allowed.has(scope) ? scope : 'all';
-      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'auto'});
+      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'local'});
       await monitorRefresh(job,selected,button,idle);
     } catch (error) {
       clearActiveJob();

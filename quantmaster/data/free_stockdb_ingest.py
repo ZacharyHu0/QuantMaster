@@ -765,7 +765,14 @@ class StockDBIngestService:
         progress_span: int = 48,
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
-        offset, batch_size = 0, 300
+        # The native SDK is optimized for broad cross-section reads.  Small
+        # 300-symbol slices multiply Python/SQLite setup costs and make a full
+        # A-share refresh needlessly chatty.  Keep one SDK call in flight (the
+        # vendor runtime is not documented as thread-safe), but start with a
+        # materially wider batch and adapt around a human-scale two-second
+        # slice budget.
+        offset, batch_size = 0, 1000
+        target_seconds = 2.5
         while offset < len(symbols):
             if cancelled():
                 raise InterruptedError("free-stockdb 摄取已取消")
@@ -779,15 +786,15 @@ class StockDBIngestService:
                     "start": start,
                     "end": end,
                     "elapsed_seconds": round(elapsed, 6),
-                    "target_seconds": 1.0,
-                    "within_target": elapsed <= 1.0,
+                    "target_seconds": target_seconds,
+                    "within_target": elapsed <= target_seconds,
                 }
             )
             offset += len(batch)
-            if elapsed > 1.0:
-                batch_size = max(100, int(batch_size * 0.75))
-            elif elapsed < 0.4:
-                batch_size = min(500, int(batch_size * 1.2))
+            if elapsed > target_seconds:
+                batch_size = max(500, int(batch_size * 0.80))
+            elif elapsed < target_seconds * 0.55:
+                batch_size = min(2000, int(batch_size * 1.25))
             progress(
                 progress_start + int(progress_span * offset / max(1, len(symbols))),
                 "读取本地数据库",
@@ -1150,7 +1157,7 @@ class StockDBIngestService:
                 and boards
                 and len(reusable.session_dates) >= history_sessions
                 and isinstance(evidence, dict)
-                and evidence.get("status") == "verified"
+                and evidence.get("status") in {"verified", "locally_validated"}
             ):
                 progress(55, "复用本地摄取", reusable.ingest_id)
                 return reusable, self._research_prices(frame, adjustment), boards, True

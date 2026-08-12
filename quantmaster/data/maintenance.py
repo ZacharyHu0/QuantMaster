@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
@@ -37,6 +38,12 @@ def market_symbols() -> list[str]:
 
 
 class DataRefreshManager:
+    # A single user-visible refresh still runs as one job, but independent
+    # symbols do not need to wait for one another.  Keep this deliberately
+    # small so a stalled provider cannot fan out into an unbounded request
+    # burst.
+    MAX_PARALLEL_SYMBOLS = 8
+
     _SCHEMA = (
         "CREATE TABLE IF NOT EXISTS refresh_jobs ("
         "id TEXT PRIMARY KEY,status TEXT NOT NULL,scope TEXT NOT NULL,"
@@ -433,50 +440,100 @@ class DataRefreshManager:
                 self._publish_market_snapshot()
                 return
 
-            symbol = str(symbols[index])
-            coverage = store.coverage(symbol)
-            start = coverage[0] if scope == "all_cached" and coverage else default_start
+            batch = [str(symbol) for symbol in symbols[
+                index:index + self.MAX_PARALLEL_SYMBOLS
+            ]]
+            plans: list[tuple[str, str]] = []
+            for symbol in batch:
+                coverage = store.coverage(symbol)
+                start = coverage[0] if scope == "all_cached" and coverage else default_start
+                plans.append((symbol, start))
             with self._conn() as conn:
                 changed = conn.execute(
                     "UPDATE refresh_jobs SET current_symbol=?,updated_at=? "
                     "WHERE id=? AND owner=?",
-                    (symbol, time.time(), job_id, self.identity.value),
+                    (
+                        f"正在并行同步 {len(plans)} 个标的",
+                        time.time(), job_id, self.identity.value,
+                    ),
                 ).rowcount
             if not changed:
                 return
-            error = ""
-            try:
-                market_envelope = refresh_history(
-                    symbol, start, end, store=store, mode=RefreshMode.INCREMENTAL,
-                    work_class="maintenance",
-                )
-                market_envelope.require_data()
-                if market_envelope.quality.status != "verified":
-                    error = "；".join(market_envelope.quality.issues) or "行情证据仍为降级状态"
-            except Exception as exc:
-                from quantmaster.logging_config import redact_sensitive_text
 
-                error = redact_sensitive_text(exc)[:300]
+            def refresh_one(symbol: str, start: str, requested_end: str = end) -> str:
+                try:
+                    market_envelope = refresh_history(
+                        symbol, start, requested_end, store=store,
+                        mode=RefreshMode.INCREMENTAL,
+                        work_class="maintenance",
+                    )
+                    market_envelope.require_data()
+                    if market_envelope.quality.status != "verified":
+                        return (
+                            "；".join(market_envelope.quality.issues)
+                            or "行情证据仍为降级状态"
+                        )
+                except Exception as exc:
+                    from quantmaster.logging_config import redact_sensitive_text
+
+                    return redact_sensitive_text(exc)[:300]
+                return ""
+
+            errors = [""] * len(plans)
+            with ThreadPoolExecutor(
+                max_workers=len(plans), thread_name_prefix=f"data-refresh-{job_id[:8]}",
+            ) as executor:
+                futures = {
+                    executor.submit(refresh_one, symbol, start): offset
+                    for offset, (symbol, start) in enumerate(plans)
+                }
+                for future in as_completed(futures):
+                    errors[futures[future]] = future.result()
+
+            # Do not commit a partial batch after losing ownership.  The
+            # durable next_index remains at the batch boundary, so resume can
+            # safely retry every uncommitted symbol.
             if not lease_alive.is_set():
                 return
             with self._conn() as conn:
-                if error:
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT status,next_index,cancel_requested FROM refresh_jobs "
+                    "WHERE id=? AND owner=?",
+                    (job_id, self.identity.value),
+                ).fetchone()
+                if current is None or int(current[1]) != index:
+                    return
+                if current[0] == "cancelling" or current[2]:
                     conn.execute(
-                        "INSERT INTO refresh_failures (job_id,attempt,symbol,error) "
-                        "VALUES (?,?,?,?)",
-                        (job_id, attempt, symbol, error),
+                        "UPDATE refresh_jobs SET status='cancelled',current_symbol='',owner='',"
+                        "lease_expires=0,updated_at=? WHERE id=? AND owner=?",
+                        (time.time(), job_id, self.identity.value),
                     )
-                    changed = conn.execute(
-                        "UPDATE refresh_jobs SET next_index=?,failed=failed+1,"
-                        "current_symbol='',updated_at=? WHERE id=? AND owner=?",
-                        (index + 1, time.time(), job_id, self.identity.value),
-                    ).rowcount
-                else:
-                    changed = conn.execute(
-                        "UPDATE refresh_jobs SET next_index=?,succeeded=succeeded+1,"
-                        "current_symbol='',updated_at=? WHERE id=? AND owner=?",
-                        (index + 1, time.time(), job_id, self.identity.value),
-                    ).rowcount
+                    conn.execute(
+                        "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
+                        "VALUES (?,?,?,?)",
+                        (job_id, attempt, json.dumps({"type": "cancelled"}), time.time()),
+                    )
+                    return
+                if current[0] != "running":
+                    return
+                for (symbol, _start), error in zip(plans, errors, strict=True):
+                    if error:
+                        conn.execute(
+                            "INSERT INTO refresh_failures (job_id,attempt,symbol,error) "
+                            "VALUES (?,?,?,?)",
+                            (job_id, attempt, symbol, error),
+                        )
+                failed = sum(bool(error) for error in errors)
+                changed = conn.execute(
+                    "UPDATE refresh_jobs SET next_index=?,succeeded=succeeded+?,failed=failed+?,"
+                    "current_symbol='',updated_at=? WHERE id=? AND owner=?",
+                    (
+                        index + len(plans), len(plans) - failed, failed, time.time(),
+                        job_id, self.identity.value,
+                    ),
+                ).rowcount
             if not changed:
                 return
 
