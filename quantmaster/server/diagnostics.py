@@ -23,6 +23,8 @@ _sampler_stop = threading.Event()
 _sampler: threading.Thread | None = None
 logger = logging.getLogger(__name__)
 _problem_history: dict[str, dict[str, Any]] = {}
+_recovered_history: list[dict[str, Any]] = []
+_MAX_RECOVERED = 20
 _SECRET_FIELD = re.compile(r"(?i)(?:token|secret|password|authorization|header|ticket|credential)")
 
 
@@ -108,18 +110,39 @@ def _decorate_problem_history(report: dict[str, Any]) -> None:
     for item in report.get("issues") or []:
         if not isinstance(item, dict):
             continue
-        key = str(item.get("id") or item.get("code") or "diagnostic")
+        dimensions = (
+            item.get("id"), item.get("event"), item.get("component"), item.get("code"),
+            item.get("item_type"), item.get("item_id"), item.get("symbol"),
+            item.get("business_date"), item.get("security_event_kind"),
+        )
+        key = "|".join(str(value or "") for value in dimensions)
         active.add(key)
         previous = _problem_history.get(key)
         if previous is None:
-            previous = {"first_seen": checked_at, "consecutive_count": 0}
-        previous["last_seen"] = checked_at
-        previous["consecutive_count"] = int(previous["consecutive_count"]) + 1
+            previous = {
+                "first_seen_at": checked_at, "suppressed_count": 0,
+                "problem": dict(item),
+            }
+        else:
+            previous["suppressed_count"] = int(previous["suppressed_count"]) + 1
+        previous["last_seen_at"] = checked_at
+        previous["first_seen"] = previous["first_seen_at"]
+        previous["last_seen"] = previous["last_seen_at"]
+        previous["consecutive_count"] = int(previous["suppressed_count"]) + 1
+        previous["affected_count"] = max(
+            int(previous.get("affected_count") or 0), len(item.get("items") or []) or 1,
+        )
         _problem_history[key] = previous
-        item.update(previous)
-        item.setdefault("correlation_id", key)
+        item.update({key: value for key, value in previous.items() if key != "problem"})
+        item.setdefault("diagnostic_id", str(item.get("correlation_id") or item.get("id") or ""))
     for key in set(_problem_history) - active:
-        _problem_history.pop(key, None)
+        history = _problem_history.pop(key)
+        recovered = dict(history.get("problem") or {})
+        recovered.update({name: value for name, value in history.items() if name != "problem"})
+        recovered.update({"state": "recovered", "recovered_at": checked_at})
+        _recovered_history.insert(0, recovered)
+    del _recovered_history[_MAX_RECOVERED:]
+    report["recent_recovered"] = [dict(item) for item in _recovered_history]
 
 
 def _redact_report(value: Any) -> Any:

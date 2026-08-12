@@ -73,11 +73,19 @@ def _wake_auto_account(account: dict) -> dict:
 
 
 def _error(exc: Exception) -> HTTPException:
-    logger.warning("交易 API 请求失败（%s）", type(exc).__name__, exc_info=True)
     if isinstance(exc, KeyError):
+        logger.info("交易资源不存在", extra={"event": "trading_request_rejected", "error_code": "not_found"})
         return HTTPException(404, "交易资源不存在")
     if isinstance(exc, ValueError):
+        logger.info(
+            "交易请求参数或状态无效",
+            extra={"event": "trading_request_rejected", "error_code": "invalid_request"},
+        )
         return HTTPException(400, "交易请求参数或状态无效")
+    logger.error(
+        "交易请求执行失败", exc_info=True,
+        extra={"event": "trading_request_failed", "error_code": "internal_error"},
+    )
     return HTTPException(500, "交易请求执行失败，请查看本机日志")
 
 
@@ -88,7 +96,10 @@ def create_backtest(spec: BacktestSpec, request: Request) -> dict:
     try:
         run = worker.service.enqueue(spec)
     except ValueError:
-        logger.warning("回测入队参数校验失败", exc_info=True)
+        logger.info(
+            "回测入队参数校验未通过",
+            extra={"event": "backtest_rejected", "error_code": "validation_error"},
+        )
         raise HTTPException(422, "回测参数无效，请检查策略、标的池和日期范围") from None
     worker.start()
     return run

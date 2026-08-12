@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
-from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.logging_config import redact_sensitive_text, redact_sensitive_value
 
 Problem = dict[str, Any]
 
@@ -32,6 +30,15 @@ def make_problem(
     suggestion: str | None = None,
     problem_id: str | None = None,
     items: list[object] | None = None,
+    event: str = "operation_problem",
+    component: str | None = None,
+    diagnostic_id: str | None = None,
+    operation_id: str | None = None,
+    item_type: str | None = None,
+    item_id: str | None = None,
+    attempt: int | None = None,
+    next_retry_at: str | None = None,
+    impact: str | None = None,
     **context: object,
 ) -> Problem:
     """Build a stable, redacted, directly displayable problem document."""
@@ -51,6 +58,8 @@ def make_problem(
         # place so callers cannot accidentally expose an exception as a hint.
         "retryable": bool(can_continue) if retryable is None else bool(retryable),
         "suggestion": _clean(suggestion if suggestion is not None else action),
+        "event": _clean(event, 80),
+        "component": _clean(component or source, 80),
     }
     if field:
         problem["field"] = _clean(field, 160)
@@ -58,16 +67,14 @@ def make_problem(
         problem["retry_after"] = max(0, int(retry_after))
     if items:
         problem["items"] = [_clean(item, 100) for item in items[:20]]
-    for key, value in context.items():
-        if value is not None:
-            problem[key] = value
-    revision_payload = {
-        key: value for key, value in problem.items()
-        if key not in {"revision", "checked_at"}
+    structured = {
+        "diagnostic_id": diagnostic_id, "operation_id": operation_id,
+        "item_type": item_type, "item_id": item_id, "attempt": attempt,
+        "next_retry_at": next_retry_at, "impact": impact,
     }
-    problem["revision"] = hashlib.sha256(
-        json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, default=str).encode()
-    ).hexdigest()[:12]
+    for key, value in {**structured, **context}.items():
+        if value is not None:
+            problem[key] = redact_sensitive_value(value, key=key)
     return problem
 
 

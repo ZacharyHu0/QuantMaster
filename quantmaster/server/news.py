@@ -108,16 +108,24 @@ class ReanalyzeRequest(StrictModel):
 def _error(exc: Exception) -> HTTPException:
     """Classify known local failures without flattening them to a misleading 400."""
     if isinstance(exc, KeyError):
+        logger.info("资讯资源不存在", extra={"event": "news_request_rejected", "error_code": "not_found"})
         return HTTPException(404, "资讯资源不存在")
     if isinstance(exc, (ValueError, TypeError)):
         return HTTPException(422, "资讯请求参数无效")
     if isinstance(exc, CredentialError):
+        logger.info(
+            "资讯凭据操作未完成",
+            extra={"event": "news_request_rejected", "error_code": "credential_error"},
+        )
         return HTTPException(409, "凭据操作失败，请检查本机凭据设置")
     if isinstance(exc, sqlite3.OperationalError):
         text = str(exc).casefold()
         if "locked" in text or "busy" in text:
             return HTTPException(503, "资讯数据库暂时繁忙，请稍后重试", headers={"Retry-After": "2"})
-    logger.exception("资讯 API 未处理异常（%s）", type(exc).__name__)
+    logger.exception(
+        "资讯 API 未处理异常（%s）", type(exc).__name__,
+        extra={"event": "news_request_failed", "error_code": "internal_error"},
+    )
     return HTTPException(500, "资讯操作未能完成，详细原因已写入服务端日志")
 
 

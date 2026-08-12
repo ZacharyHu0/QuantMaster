@@ -161,6 +161,15 @@ function normalizeProblem(value, fallback = {}) {
     retry_status:String(raw.retry_status || fallback.retry_status || ''),
     next_retry_at:String(raw.next_retry_at || fallback.next_retry_at || ''),
     response_summary:String(raw.response_summary || fallback.response_summary || ''),
+    operation_id:String(raw.operation_id || fallback.operation_id || ''),
+    item_id:String(raw.item_id || fallback.item_id || ''),
+    attempt:optionalCount(raw.attempt ?? fallback.attempt),
+    retryable:raw.retryable ?? fallback.retryable ?? null,
+    suppressed_count:optionalCount(raw.suppressed_count ?? fallback.suppressed_count),
+    affected_count:optionalCount(raw.affected_count ?? fallback.affected_count),
+    impact:String(raw.impact || fallback.impact || ''),
+    state:String(raw.state || fallback.state || 'active'),
+    recovered_at:String(raw.recovered_at || fallback.recovered_at || ''),
   };
 }
 function ingestResponseProblems(data, scope = 'operation') {
@@ -747,6 +756,10 @@ const runtimeInfo = (() => {
     if (entry.firstSeen) rows.push(`<dt>首次出现</dt><dd>${esc(entry.firstSeen)}</dd>`);
     if (entry.lastSeen) rows.push(`<dt>最近出现</dt><dd>${esc(entry.lastSeen)}</dd>`);
     if (entry.consecutiveCount !== null) rows.push(`<dt>连续次数</dt><dd>${entry.consecutiveCount} 次</dd>`);
+    if (entry.suppressedCount !== null) rows.push(`<dt>已聚合重复</dt><dd>${entry.suppressedCount} 次</dd>`);
+    if (entry.affectedCount !== null) rows.push(`<dt>影响</dt><dd>${entry.affectedCount} 项${entry.impact ? ` · ${esc(entry.impact)}` : ''}</dd>`);
+    if (entry.operationId) rows.push(`<dt>操作编号</dt><dd><code>${esc(entry.operationId)}</code></dd>`);
+    if (entry.nextRetryAt) rows.push(`<dt>下一探测</dt><dd>${esc(new Date(entry.nextRetryAt).toLocaleString('zh-CN', {hour12:false}))}</dd>`);
     return rows.length ? `<details class="runtime-diagnostics"><summary>诊断信息</summary><dl class="runtime-diagnostics-grid">${rows.join('')}</dl></details>` : '';
   }
   function render() {
@@ -792,6 +805,9 @@ const runtimeInfo = (() => {
       errorCategory:compactText(meta.errorCategory, 80), httpStatus:optionalCount(meta.httpStatus),
       retryStatus:compactText(meta.retryStatus, 100), nextRetryAt:compactText(meta.nextRetryAt, 80),
       responseSummary:compactText(meta.responseSummary, 180),
+      operationId:compactText(meta.operationId, 80), itemId:compactText(meta.itemId, 100),
+      suppressedCount:optionalCount(meta.suppressedCount), affectedCount:optionalCount(meta.affectedCount),
+      impact:compactText(meta.impact, 180), recoveredAt:compactText(meta.recoveredAt, 80),
       revision, scope:compactText(meta.scope, 80), persistent:Boolean(meta.persistent),
       iso:now.toISOString(),
       time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
@@ -815,7 +831,7 @@ const runtimeInfo = (() => {
       if (entry.persistent && entry.scope === scope && !activeKeys.has(entry.key)) entries.splice(index, 1);
     }
     normalized.forEach(problem => add(
-      problem.severity === 'error' ? 'error' : problem.severity === 'warning' ? 'warning' : 'info',
+      problem.state === 'recovered' ? 'success' : problem.severity === 'error' ? 'error' : problem.severity === 'warning' ? 'warning' : 'info',
       problem.source, problem.title, {
         detail:problem.message, action:problem.action,
         key:`persistent:${scope}:${problem.id}`, scope, persistent:true,
@@ -829,6 +845,9 @@ const runtimeInfo = (() => {
         code:problem.code, correlationId:problem.correlation_id,
         firstSeen:problem.first_seen, lastSeen:problem.last_seen,
         consecutiveCount:problem.consecutive_count,
+        operationId:problem.operation_id, itemId:problem.item_id,
+        suppressedCount:problem.suppressed_count, affectedCount:problem.affected_count,
+        impact:problem.impact, recoveredAt:problem.recovered_at,
       },
     ));
     render();
@@ -918,7 +937,10 @@ const runtimeInfo = (() => {
     const button = event.target.closest('[data-runtime-filter]');
     if (!button) return;
     activeFilter = button.dataset.runtimeFilter;
-    document.querySelectorAll('[data-runtime-filter]').forEach(item => item.classList.toggle('active', item === button));
+    document.querySelectorAll('[data-runtime-filter]').forEach(item => {
+      item.classList.toggle('active', item === button);
+      item.setAttribute('aria-pressed', String(item === button));
+    });
     render();
   });
   list.addEventListener('click', async event => {
@@ -1007,6 +1029,7 @@ async function refreshBackendHealth() {
   try {
     const data = await api('/api/v1/diagnostics', {cache:'no-store'});
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
+    runtimeInfo.sync('recovered', Array.isArray(data.recent_recovered) ? data.recent_recovered : []);
     runtimeInfo.syncRuntime(data.runtime);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {

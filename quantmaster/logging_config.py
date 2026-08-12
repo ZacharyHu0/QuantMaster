@@ -6,14 +6,19 @@
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
 import logging.handlers
 import os
 import re
+import shutil
 import sys
 import threading
 import time
 import traceback
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +26,9 @@ from types import TracebackType
 from typing import Literal
 
 LOG_FILENAME = "quantmaster.log"
-LOG_MAX_BYTES = 10 * 1024 * 1024
-LOG_BACKUP_COUNT = 4
+LOG_MAX_BYTES = 20 * 1024 * 1024
+LOG_BACKUP_COUNT = 7
+LOG_TOTAL_MAX_BYTES = 200 * 1024 * 1024
 REPEAT_WINDOW_SECONDS = 10 * 60
 MAX_REPEAT_FINGERPRINTS = 256
 MAX_CONSOLE_MESSAGE = 700
@@ -64,8 +70,17 @@ _SECRET_PATTERNS = (
     ),
     (re.compile(r"(?i)(bearer\s+)[^\s,;]+"), r"\1***"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"), "sk-***"),
+    (re.compile(r"(?i)((?:cookie|set-cookie|x-api-key)\s*[:=]\s*)[^\r\n]+"), r"\1***"),
+    (re.compile(r"(?i)([?&](?:token|api_key|apikey|key|secret|password|signature)=)[^&#\s]+"), r"\1***"),
+    (re.compile(r"(?i)(://[^:/\s]+:)[^@/\s]+(@)"), r"\1***\2"),
+)
+_SECRET_FIELD = re.compile(
+    r"(?i)(?:api.?key|authorization|cookie|app.?secret|tenant.*token|token|"
+    r"password|passwd|credential|database.?url|dsn|prompt|model.?response|response.?body)"
 )
 _CONFIG_LOCK = threading.RLock()
+_RECORD_FACTORY = logging.getLogRecordFactory()
+_factory_installed = False
 
 
 @dataclass(frozen=True)
@@ -79,8 +94,10 @@ class LoggingState:
 
 @dataclass
 class _RepeatState:
+    first_seen: float
     last_seen: float
     count: int
+    affected_items: set[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +118,45 @@ def redact_sensitive_text(value: object) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def redact_sensitive_value(value: object, *, key: str = "", depth: int = 0) -> object:
+    """Recursively redact values before any QuantMaster handler sees them."""
+    if _SECRET_FIELD.search(key):
+        return "***"
+    if depth >= 8:
+        return "<max-depth>"
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, Mapping):
+        return {
+            redact_sensitive_text(name): redact_sensitive_value(item, key=str(name), depth=depth + 1)
+            for name, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_value(item, depth=depth + 1) for item in value)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [redact_sensitive_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return f"<{type(value).__name__}:{len(value)} bytes>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_sensitive_text(value)
+
+
+def _install_redacting_record_factory() -> None:
+    global _factory_installed
+    if _factory_installed:
+        return
+
+    def factory(*args, **kwargs):
+        record = _RECORD_FACTORY(*args, **kwargs)
+        record.msg = redact_sensitive_value(record.msg)
+        record.args = redact_sensitive_value(record.args)
+        return record
+
+    logging.setLogRecordFactory(factory)
+    _factory_installed = True
 
 
 def current_logging_state() -> LoggingState:
@@ -246,13 +302,179 @@ def _display_log_path(path: Path | None) -> str:
 
 
 class RedactingFileFormatter(logging.Formatter):
-    """保留完整 traceback，同时对最终文本统一脱敏。"""
+    """Emit one redacted JSON document per record for safe aggregation."""
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         return datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds")
 
     def format(self, record: logging.LogRecord) -> str:
-        return redact_sensitive_text(super().format(record))
+        document = {
+            "timestamp": self.formatTime(record),
+            "level": _LEVEL_LABELS.get(record.levelno, record.levelname),
+            "logger": record.name,
+            "component": getattr(record, "component", _component(record.name)),
+            "event": getattr(record, "event", "log_record"),
+            "error_code": getattr(record, "error_code", ""),
+            "diagnostic_id": getattr(record, "diagnostic_id", ""),
+            "operation_id": getattr(record, "operation_id", ""),
+            "item_type": getattr(record, "item_type", ""),
+            "item_id": getattr(record, "item_id", ""),
+            "symbol": getattr(record, "symbol", ""),
+            "business_date": getattr(record, "business_date", ""),
+            "attempt": getattr(record, "attempt", None),
+            "retryable": getattr(record, "retryable", None),
+            "next_retry_at": getattr(record, "next_retry_at", ""),
+            "impact": getattr(record, "impact", ""),
+            "first_seen_at": getattr(record, "first_seen_at", ""),
+            "last_seen_at": getattr(record, "last_seen_at", ""),
+            "suppressed_count": getattr(record, "suppressed_count", 0),
+            "affected_count": getattr(record, "affected_count", 0),
+            "affected_items": getattr(record, "affected_items", []),
+            "pid": record.process,
+            "thread": record.threadName,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            exc_info = _coerce_exc_info(record.exc_info)
+            if exc_info:
+                document["traceback"] = _format_full_traceback(exc_info)
+        safe = redact_sensitive_value(document)
+        return json.dumps(safe, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+class _ProcessSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Rotate a process-owned file and enforce a bounded shared log directory."""
+
+    def __init__(self, *args, clock=time.time, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.clock = clock
+        self._repeat: dict[tuple[object, ...], _RepeatState] = {}
+        self.namer = lambda name: name + ".gz"
+        self.rotator = self._compress
+
+    @staticmethod
+    def _compress(source: str, destination: str) -> None:
+        temporary = destination + ".tmp"
+        with open(source, "rb") as raw, gzip.open(temporary, "wb") as compressed:
+            shutil.copyfileobj(raw, compressed)
+        os.replace(temporary, destination)
+        os.unlink(source)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        """Never recurse through logging when rotation or disk writes fail."""
+        try:
+            emergency = Path(self.baseFilename).parent / "emergency"
+            emergency.mkdir(parents=True, exist_ok=True)
+            path = emergency / f"quantmaster-{os.getpid()}.log"
+            message = redact_sensitive_text(record.getMessage())[:1000]
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({
+                    "timestamp": datetime.now().astimezone().isoformat(),
+                    "event": "log_write_failed", "level": record.levelname,
+                    "logger": record.name, "message": message,
+                }, ensure_ascii=False) + "\n")
+            sys.stderr.write("QuantMaster 日志写入失败；已切换脱敏应急日志\n")
+        except OSError:
+            try:
+                sys.stderr.write("QuantMaster 日志与应急日志均不可写\n")
+            except OSError:
+                pass
+
+    @staticmethod
+    def _structured_signature(record: logging.LogRecord) -> tuple[object, ...]:
+        exc_info = _coerce_exc_info(record.exc_info)
+        exc_type = ""
+        frame = ""
+        if exc_info:
+            root = _root_exception(exc_info[1])
+            exc_type = f"{type(root).__module__}.{type(root).__qualname__}"
+            frames = _frames(exc_info[1], exc_info[2])
+            deepest = frames[-1] if frames else None
+            frame = f"{deepest.filename}:{deepest.lineno}" if deepest else ""
+        error_code = getattr(record, "error_code", "")
+        return (
+            getattr(record, "event", "log_record"),
+            getattr(record, "component", _component(record.name)),
+            error_code,
+            getattr(record, "item_type", ""),
+            getattr(record, "item_id", ""),
+            getattr(record, "symbol", ""),
+            getattr(record, "business_date", ""),
+            getattr(record, "security_event_kind", ""),
+            getattr(record, "corruption_id", ""),
+            getattr(record, "source", ""),
+            getattr(record, "lane", ""),
+            exc_type,
+            frame,
+            "" if error_code else _compact_text(record.getMessage(), 300),
+            record.name,
+        )
+
+    def _summary(self, record: logging.LogRecord, state: _RepeatState) -> logging.LogRecord:
+        summary = logging.makeLogRecord({
+            "name": record.name, "levelno": record.levelno, "levelname": record.levelname,
+            "msg": "同类问题聚合摘要", "args": (), "exc_info": None,
+            "event": "problem_repeat_summary",
+            "component": getattr(record, "component", _component(record.name)),
+            "error_code": getattr(record, "error_code", ""),
+            "diagnostic_id": getattr(record, "diagnostic_id", ""),
+            "operation_id": getattr(record, "operation_id", ""),
+            "first_seen_at": datetime.fromtimestamp(state.first_seen).astimezone().isoformat(),
+            "last_seen_at": datetime.fromtimestamp(state.last_seen).astimezone().isoformat(),
+            "suppressed_count": state.count - 1,
+            "affected_count": len(state.affected_items or ()),
+            "affected_items": sorted(state.affected_items or ())[:20],
+        })
+        return summary
+
+    def emit(self, record: logging.LogRecord) -> None:
+        policy = getattr(record, "traceback_policy", "first")
+        if record.exc_info and policy == "first":
+            now = self.clock()
+            signature = self._structured_signature(record)
+            state = self._repeat.get(signature)
+            item = str(getattr(record, "item_id", "") or getattr(record, "symbol", ""))
+            if state is not None and now - state.last_seen < REPEAT_WINDOW_SECONDS:
+                state.last_seen = now
+                state.count += 1
+                if item and state.affected_items is not None:
+                    state.affected_items.add(item)
+                if state.count == 10 or state.count % 50 == 0:
+                    super().emit(self._summary(record, state))
+                return
+            if state is not None and state.count > 1:
+                super().emit(self._summary(record, state))
+            self._repeat[signature] = _RepeatState(
+                first_seen=now, last_seen=now, count=1,
+                affected_items={item} if item else set(),
+            )
+        elif getattr(record, "state", "") == "recovered":
+            signature = self._structured_signature(record)
+            state = self._repeat.pop(signature, None)
+            if state is not None and state.count > 1:
+                super().emit(self._summary(record, state))
+        super().emit(record)
+
+    def doRollover(self) -> None:
+        super().doRollover()
+        self._enforce_total_cap()
+
+    def _enforce_total_cap(self) -> None:
+        directory = Path(self.baseFilename).parent
+        candidates = sorted(
+            (path for path in directory.glob("*.log*") if path.is_file()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        total = 0
+        for path in candidates:
+            try:
+                size = path.stat().st_size
+                total += size
+                if total > LOG_TOTAL_MAX_BYTES and path != Path(self.baseFilename):
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
 
 
 class CompactConsoleHandler(logging.Handler):
@@ -308,7 +530,7 @@ class CompactConsoleHandler(logging.Handler):
         key = _fingerprint(record, exc, tb)
         state = self._repeat.get(key)
         if state is None:
-            self._repeat[key] = _RepeatState(last_seen=now, count=1)
+            self._repeat[key] = _RepeatState(first_seen=now, last_seen=now, count=1)
             return 1
         state.last_seen = now
         state.count += 1
@@ -360,6 +582,31 @@ class CompactConsoleHandler(logging.Handler):
         value.append(text, style="cyan" if path else "dim")
         self._write(value)
 
+    def _write_exception(
+        self,
+        exc_info: tuple[type[BaseException], BaseException, TracebackType | None],
+        policy: TracebackPolicy,
+        repeat_count: int,
+    ) -> None:
+        exc, tb = exc_info[1], exc_info[2]
+        if self.verbose or self.log_path is None:
+            rendered = _format_full_traceback(exc_info)
+            if self._rich_syntax is not None:
+                self._write(self._rich_syntax(
+                    rendered, "pytb", word_wrap=True,
+                    background_color="default", padding=(0, 0),
+                ))
+            else:
+                self._write(rendered)
+            return
+        show_key_frames = policy == "always" or (policy == "first" and repeat_count == 1)
+        if show_key_frames:
+            for frame in _key_frames(exc, tb):
+                self._write_detail("↳ " + _display_frame(frame), path=True)
+        log_path = _display_log_path(self.log_path)
+        if log_path and (show_key_frames or policy == "never"):
+            self._write_detail(f"完整日志 → {log_path}")
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
             message = _compact_text(record.getMessage())
@@ -377,25 +624,7 @@ class CompactConsoleHandler(logging.Handler):
             if exc_info is None:
                 return
 
-            full_terminal = self.verbose or self.log_path is None
-            if full_terminal:
-                rendered = _format_full_traceback(exc_info)
-                if self._rich_syntax is not None:
-                    self._write(self._rich_syntax(
-                        rendered, "pytb", word_wrap=True,
-                        background_color="default", padding=(0, 0),
-                    ))
-                else:
-                    self._write(rendered)
-                return
-
-            show_key_frames = policy == "always" or (policy == "first" and repeat_count == 1)
-            if show_key_frames:
-                for frame in _key_frames(exc, tb):
-                    self._write_detail("↳ " + _display_frame(frame), path=True)
-            log_path = _display_log_path(self.log_path)
-            if log_path and (show_key_frames or policy == "never"):
-                self._write_detail(f"完整日志 → {log_path}")
+            self._write_exception(exc_info, policy, repeat_count)
         except Exception:
             try:
                 self.stream.write(
@@ -442,6 +671,7 @@ def configure_logging(
     """为当前 CLI 进程配置统一日志；重复调用不会叠加自有 handler。"""
     global _state
     with _CONFIG_LOCK:
+        _install_redacting_record_factory()
         level, resolved_verbose, invalid_level = _resolve_level(verbose)
         if data_root is None:
             from quantmaster.config import get_config
@@ -453,20 +683,22 @@ def configure_logging(
                 root.removeHandler(handler)
                 handler.close()
 
-        log_path: Path | None = Path(data_root) / "logs" / LOG_FILENAME
+        role = "compute" if os.environ.get("QM_COMPUTE_CHILD") == "1" else (
+            "web" if os.environ.get("QM_WEB_PROCESS") == "1" else "runtime"
+        )
+        session = os.environ.setdefault("QM_LOG_SESSION_ID", uuid.uuid4().hex[:12])
+        filename = f"quantmaster-{role}-{session}-{os.getpid()}.log"
+        log_path: Path | None = Path(data_root) / "logs" / filename
         file_handler: logging.Handler | None = None
         file_error = ""
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.handlers.RotatingFileHandler(
+            file_handler = _ProcessSafeRotatingFileHandler(
                 log_path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT,
                 encoding="utf-8", delay=True,
             )
             file_handler.setLevel(level)
-            file_handler.setFormatter(RedactingFileFormatter(
-                "%(asctime)s %(levelname)-8s %(name)s "
-                "pid=%(process)d thread=%(threadName)s %(message)s"
-            ))
+            file_handler.setFormatter(RedactingFileFormatter())
             file_handler._quantmaster_owned = True  # type: ignore[attr-defined]
         except OSError as exc:
             file_error = _compact_text(exc)
@@ -485,8 +717,9 @@ def configure_logging(
             "apscheduler", "httpx", "httpcore", "websockets",
             "watchfiles", "python_multipart", "multipart", "yfinance",
         ):
-            logging.getLogger(name).setLevel(
-                logging.CRITICAL if name == "yfinance" else logging.WARNING)
+            normalize_third_party_logger(
+                name, logging.CRITICAL if name == "yfinance" else logging.WARNING,
+            )
         for name in ("uvicorn", "uvicorn.error", "uvicorn.asgi"):
             normalize_third_party_logger(name, logging.WARNING)
         access_logger = logging.getLogger("uvicorn.access")

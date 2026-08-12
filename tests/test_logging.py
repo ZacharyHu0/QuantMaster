@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import logging
 import threading
 
@@ -104,10 +105,10 @@ def test_configured_logging_separates_stdout_and_writes_full_file(tmp_path, caps
     assert "Traceback (most recent call last)" not in captured.err
 
     qm_logging.shutdown_logging()
-    content = (tmp_path / "logs" / "quantmaster.log").read_text(encoding="utf-8")
+    content = next((tmp_path / "logs").glob("quantmaster-*.log")).read_text(encoding="utf-8")
     assert "Traceback (most recent call last)" in content
     assert "fake_component.py" in content
-    assert "thread=MainThread" in content
+    assert '"thread":"MainThread"' in content
     assert "token=***" in content
     assert "very-secret-value" not in content
 
@@ -126,8 +127,46 @@ def test_log_file_rotates_and_configuration_is_idempotent(tmp_path, monkeypatch)
     for handler in owned:
         handler.flush()
 
-    assert (tmp_path / "logs" / "quantmaster.log").is_file()
-    assert (tmp_path / "logs" / "quantmaster.log.1").is_file()
+    log_path = next((tmp_path / "logs").glob("quantmaster-*.log"))
+    assert log_path.is_file()
+    assert log_path.with_name(log_path.name + ".1.gz").is_file()
+
+
+def test_structured_file_record_deeply_redacts_and_keeps_runtime_ids(tmp_path):
+    qm_logging.configure_logging(data_root=tmp_path)
+    logging.getLogger("httpx").warning(
+        "request %s", {"Authorization": "Bearer private", "nested": {
+            "cookie": "session=private", "url": "https://user:pass@host/x?token=private",
+        }}, extra={"event": "provider_request_failed", "error_code": "tls_failed",
+                  "diagnostic_id": "diag-1", "operation_id": "op-1"},
+    )
+    qm_logging.shutdown_logging()
+    document = json.loads(next((tmp_path / "logs").glob("quantmaster-*.log")).read_text(encoding="utf-8"))
+    assert document["event"] == "provider_request_failed"
+    assert document["error_code"] == "tls_failed"
+    assert document["diagnostic_id"] == "diag-1"
+    assert document["operation_id"] == "op-1"
+    assert "private" not in str(document)
+
+
+def test_structured_file_suppresses_repeated_tracebacks_and_keeps_items_separate(tmp_path):
+    qm_logging.configure_logging(data_root=tmp_path)
+    logger = logging.getLogger("quantmaster.data.registry")
+    for item_id in ("600000.SH", "600000.SH", "000001.SZ"):
+        try:
+            raise RuntimeError("provider unavailable")
+        except RuntimeError:
+            logger.exception(
+                "行情失败", extra={"event": "bar_load_failed", "error_code": "provider_timeout",
+                                   "item_type": "symbol", "item_id": item_id},
+            )
+    qm_logging.shutdown_logging()
+    documents = [json.loads(line) for line in next(
+        (tmp_path / "logs").glob("quantmaster-*.log")
+    ).read_text(encoding="utf-8").splitlines()]
+    assert len(documents) == 2
+    assert sum("traceback" in document for document in documents) == 2
+    assert {document["item_id"] for document in documents} == {"600000.SH", "000001.SZ"}
 
 
 def test_log_level_environment_and_verbose_precedence(tmp_path, monkeypatch, capsys):

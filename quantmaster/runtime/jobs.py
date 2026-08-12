@@ -1529,8 +1529,11 @@ def _run_process_handler(
         result_queue.put({
             "kind": "error",
             "type": exc.__class__.__name__,
-            "detail": str(exc)[:1000],
-            "traceback": traceback.format_exc(limit=20)[-6000:],
+            "detail": "计算子进程未完成；详情见诊断记录",
+            "frames": [
+                {"file": frame.filename, "line": frame.lineno, "function": frame.name}
+                for frame in traceback.extract_tb(exc.__traceback__, limit=20)
+            ],
         })
 
 
@@ -1900,11 +1903,12 @@ class UnifiedJobRuntime:
             raise JobLeaseLost(str(job["id"]))
         if error_type == "JobDeadlineExceeded":
             raise JobDeadlineExceeded(detail)
-        logger.error(
-            "Isolated job handler failed job_id=%s type=%s traceback=%s",
-            job["id"], job["type"], str(message.get("traceback") or ""),
+        frames = message.get("frames") or []
+        frame_summary = " <- ".join(
+            f"{frame.get('file')}:{frame.get('line')}:{frame.get('function')}"
+            for frame in frames if isinstance(frame, dict)
         )
-        raise RuntimeError(detail)
+        raise RuntimeError(f"{detail}; child_frames={frame_summary}")
 
     def _execute_registration(
         self,
@@ -1936,6 +1940,34 @@ class UnifiedJobRuntime:
             outcome = registration.handler(context, dict(job["spec"]))
         context.ensure_active()
         return outcome
+
+    def _execute_claimed_job(
+        self,
+        registration: _HandlerRegistration,
+        job: dict[str, Any],
+        lease_token: str,
+        lease_alive: threading.Event,
+        generation: int,
+    ) -> JobOutcome | None:
+        try:
+            return self._execute_registration(
+                registration, job, lease_token, lease_alive, generation,
+            )
+        except JobLeaseLost:
+            return None
+        except InterruptedError as exc:
+            if not lease_alive.is_set() or not self.execution_allowed(generation):
+                return None
+            return JobOutcome("cancelled", str(exc))
+        except (
+            ArithmeticError, ImportError, LookupError, OSError, RuntimeError,
+            sqlite3.Error, TypeError, ValueError,
+        ) as exc:
+            logger.exception(
+                "Unified job handler failed job_id=%s type=%s",
+                job["id"], job.get("type"),
+            )
+            return JobOutcome("failed", str(exc)[:1000])
 
     def _run(self, job_id: str, generation: int) -> None:
         key = (job_id, generation)
@@ -1972,34 +2004,11 @@ class UnifiedJobRuntime:
                 daemon=True,
             )
             heartbeat.start()
-            try:
-                outcome = self._execute_registration(
-                    registration, job, lease_token, lease_alive, generation,
-                )
-            except JobLeaseLost:
+            outcome = self._execute_claimed_job(
+                registration, job, lease_token, lease_alive, generation,
+            )
+            if outcome is None:
                 return
-            except InterruptedError as exc:
-                if not lease_alive.is_set():
-                    return
-                if not self.execution_allowed(generation):
-                    return
-                outcome = JobOutcome("cancelled", str(exc))
-            except (
-                ArithmeticError,
-                ImportError,
-                LookupError,
-                OSError,
-                RuntimeError,
-                sqlite3.Error,
-                TypeError,
-                ValueError,
-            ) as exc:
-                logger.exception(
-                    "Unified job handler failed job_id=%s type=%s",
-                    job_id,
-                    job.get("type"),
-                )
-                outcome = JobOutcome("failed", str(exc)[:1000])
             self.store.finish(
                 job_id, self.identity.value, outcome, lease_token=lease_token,
             )
