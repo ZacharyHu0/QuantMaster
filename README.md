@@ -305,6 +305,19 @@ Header 凭据只进入系统凭据库，跨域跳转和跨域详情页不会携�
 `python -m pytest --full`。Chromium 管理流程由 CI 的独立 browser lane 验证，不要求每次
 本地改动重复启动浏览器。
 
+推送前建议运行与 GitHub CI 对齐的本地门禁：
+
+```bash
+python tools/local_ci.py --all
+```
+
+默认运行 Ruff、异常/复杂度策略、mypy、核心测试和 3 个并行 full 测试分片；`--all` 额外运行 Chromium、Rust、wheel 和 PyInstaller 检查。只想快速验证核心门禁时运行 `python tools/local_ci.py`，资源有限时加 `--serial`。
+脚本始终使用仓库 `.venv` 解释器，即使 Git hook 由系统 Python 启动也不会混用环境。
+Windows 上会自动发现已安装的 Windows SDK 库目录，避免 Git hook 缺少开发者命令行环境时 Rust 链接失败。
+
+在 `main` 上提交版本时，已安装的 `.githooks/pre-commit` 会自动执行
+`python tools/local_ci.py --all`；门禁失败会阻止提交，因而不会触发 post-commit 的远端自动推送。
+
 ### 版本提交与 GitHub 自动同步
 
 克隆仓库后执行一次：

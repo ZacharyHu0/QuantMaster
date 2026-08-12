@@ -17,7 +17,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import Any, BinaryIO, Protocol
 
 from quantmaster.config import get_config
 
@@ -25,6 +27,12 @@ logger = logging.getLogger(__name__)
 WORKER_RESTART_MAX_DELAY_SECONDS = 30.0
 WORKER_RESTART_STABLE_SECONDS = 10.0
 WORKER_SUPERVISOR_MONITOR_SECONDS = 1.0
+
+
+class _StopEvent(Protocol):
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+    def set(self) -> None: ...
 
 
 def _supervisor_status_path() -> Path:
@@ -56,7 +64,7 @@ def _publish_supervisor_status(status: str, *, detail: str = "") -> None:
         temp.unlink(missing_ok=True)
 
 
-def _supervisor_main(stop_event: object, bootstrap_rotation: bool) -> None:
+def _supervisor_main(stop_event: _StopEvent, bootstrap_rotation: bool) -> None:
     """Spawn target kept importable for Windows ``spawn`` semantics."""
 
     os.environ["QM_WORKER_SUPERVISOR"] = "1"
@@ -70,7 +78,7 @@ def _supervisor_main(stop_event: object, bootstrap_rotation: bool) -> None:
         worker.start(bootstrap_rotation=bootstrap_rotation)
         state = "running"
         _publish_supervisor_status(state)
-        while not stop_event.wait(0.5):  # type: ignore[union-attr]
+        while not stop_event.wait(0.5):
             pass
     except BaseException as exc:
         state = "failed"
@@ -104,16 +112,16 @@ class WorkerSupervisor:
         self,
         root: Path | None = None,
         *,
-        target: Callable[[object, bool], None] | None = None,
+        target: Callable[[_StopEvent, bool], None] | None = None,
     ) -> None:
         self.root = Path(root) if root is not None else get_config().data_root
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.root / ".runtime-worker-supervisor.lock"
         self._context = multiprocessing.get_context("spawn")
         self._lock = threading.RLock()
-        self._stream = None
-        self._process: multiprocessing.Process | None = None
-        self._stop_event = None
+        self._stream: BinaryIO | None = None
+        self._process: BaseProcess | None = None
+        self._stop_event: _StopEvent | None = None
         self._owned = False
         self._target = target or _supervisor_main
         self._restart_attempts = 0
@@ -144,11 +152,13 @@ class WorkerSupervisor:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                windows_lock: Any = msvcrt
+                windows_lock.locking(stream.fileno(), windows_lock.LK_NBLCK, 1)
             else:
                 import fcntl
 
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                posix_lock: Any = fcntl
+                posix_lock.flock(stream.fileno(), posix_lock.LOCK_EX | posix_lock.LOCK_NB)
         except (BlockingIOError, OSError):
             stream.close()
             return False
@@ -164,11 +174,13 @@ class WorkerSupervisor:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                windows_lock: Any = msvcrt
+                windows_lock.locking(stream.fileno(), windows_lock.LK_UNLCK, 1)
             else:
                 import fcntl
 
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                posix_lock: Any = fcntl
+                posix_lock.flock(stream.fileno(), posix_lock.LOCK_UN)
         finally:
             stream.close()
 

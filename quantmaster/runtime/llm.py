@@ -232,11 +232,11 @@ class LLMExecutionCoordinator:
                 result = store.cancel_stale_llm(scope, revisions[scope], reason)
                 for key in cancellation:
                     cancellation[key] += int(result[key])
-        registered_lab_paths = {
-            str(getattr(store, "path", "").resolve())
-            for store in list(self._lab_stores)
-            if getattr(store, "path", None) is not None
-        }
+        registered_lab_paths: set[str] = set()
+        for store in list(self._lab_stores):
+            path = getattr(store, "path", None)
+            if isinstance(path, Path):
+                registered_lab_paths.add(str(path.resolve()))
         persisted_lab_path = str((get_config().data_root / "lab.sqlite").resolve())
         if persisted_lab_path not in registered_lab_paths:
             for scope in scopes:

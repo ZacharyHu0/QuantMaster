@@ -974,7 +974,7 @@ class RotationService:
         generated_at = _utc_now()
         computed: dict[str, dict[str, Any]] = {}
         need_market = scope in {"all", "close", "market", "industries", "themes"}
-        local_state = self._local_input_state() if need_market else {
+        local_state: dict[str, Any] = self._local_input_state() if need_market else {
             "generations": [], "as_of": "", "source": "not_required",
             "expected_count": 0, "available": True,
         }

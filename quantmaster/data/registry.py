@@ -63,7 +63,7 @@ _MINUTE_FREQUENCY_MINUTES = {
 # 各市场按优先级排列的数据源工厂
 _SOURCE_FACTORIES: dict[str, list] = {}
 _DEFAULT_STORE_LOCK = threading.Lock()
-_DEFAULT_BAR_STORES: dict[tuple[str, object], BarStore] = {}
+_DEFAULT_BAR_STORES: dict[tuple[str, type[BarStore], bool], BarStore] = {}
 
 
 def _default_bar_store() -> BarStore:

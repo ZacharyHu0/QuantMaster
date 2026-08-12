@@ -14,10 +14,12 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.runtime.worker_ipc import RuntimeCommandServer
 
 logger = logging.getLogger(__name__)
 WORKER_HEARTBEAT_SECONDS = 1.0
@@ -86,11 +88,11 @@ class RuntimeWorker:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._started = False
-        self._unregister_maintenance = None
+        self._unregister_maintenance: Callable[[], None] | None = None
         self._worker_id = uuid.uuid4().hex
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
-        self._command_server = None
+        self._command_server: RuntimeCommandServer | None = None
         self._command_error = ""
 
     def _write_heartbeat(self) -> None:

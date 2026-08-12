@@ -18,7 +18,7 @@ import time
 import traceback
 import uuid
 import zlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1333,7 +1333,9 @@ class ProcessJobContext:
         )
 
 
-def _resolve_process_entrypoint(value: str) -> JobHandler:
+def _resolve_process_entrypoint(
+    value: str,
+) -> Callable[[ProcessJobContext, dict[str, Any]], JobOutcome]:
     """Resolve a stable process handler without serialising service objects."""
 
     module_name, separator, qualified_name = str(value).partition(":")

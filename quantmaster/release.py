@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.10.3"
+VERSION = "1.10.4"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "本地 CI 与静态类型门禁",
+                "items": (
+                    (
+                        "新增 tools/local_ci.py，统一运行 Ruff、异常/复杂度策略、mypy、核心与"
+                        "full 分片测试，并可扩展 Chromium、Rust、wheel 和 PyInstaller 检查。"
+                    ),
+                    (
+                        "main 发布提交在 pre-commit 阶段自动运行完整本地门禁；失败会阻止提交"
+                        "和推送；门禁固定使用项目 .venv，并自动发现 Windows SDK。"
+                    ),
+                    (
+                        "为运行时任务、worker 监督器、数据缓存和轮动状态补齐精确类型契约，"
+                        "修复跨平台异常与文件锁类型来源，恢复完整 mypy 质量门禁。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.10.3",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "Linux IPC 关闭竞态修复",

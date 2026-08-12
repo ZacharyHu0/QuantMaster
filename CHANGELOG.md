@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.10.4（2026-08-12）
+
+### 本地 CI 与静态类型门禁
+- 新增 `tools/local_ci.py`，统一运行 Ruff、异常/复杂度策略、mypy、核心与 full 分片测试，并可扩展 Chromium、Rust、wheel 和 PyInstaller 检查
+- `main` 发布提交在 pre-commit 阶段自动运行完整本地门禁；失败会阻止提交和推送，门禁固定使用项目 `.venv` 并自动发现 Windows SDK
+- 为运行时任务、worker 监督器、数据缓存和轮动状态补齐精确类型契约，修复跨平台异常与文件锁类型来源，恢复完整 mypy 质量门禁
+
 ## v1.10.3（2026-08-12）
 
 ### Linux IPC 关闭竞态修复

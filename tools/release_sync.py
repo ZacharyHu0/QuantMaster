@@ -339,6 +339,24 @@ def print_errors(errors: list[str], title: str) -> int:
     return 1
 
 
+def local_ci_required(paths: set[str]) -> bool:
+    """Return whether this commit is a release push that needs local CI."""
+    return current_branch() == "main" and RELEASE_FILE in paths
+
+
+def run_local_ci() -> int:
+    """Run the same local pre-push gates used before an automatic GitHub push."""
+    command = [sys.executable, str(ROOT / "tools" / "local_ci.py"), "--all"]
+    print("[QuantMaster] main 发布提交先运行本地 CI 门禁：tools/local_ci.py --all")
+    result = subprocess.run(command, cwd=ROOT, check=False)
+    if result.returncode:
+        print(
+            "[QuantMaster] 本地 CI 未通过，提交和远端推送均已阻止。",
+            file=sys.stderr,
+        )
+    return int(result.returncode)
+
+
 def pre_commit() -> int:
     paths = staged_paths()
     if not paths:
@@ -370,6 +388,8 @@ def pre_commit() -> int:
     errors.extend(verify_previous_release_synced())
     errors.extend(verify_previous_release_tag(head_version))
     if print_errors(errors, "发布提交校验失败"):
+        return 1
+    if local_ci_required(paths) and run_local_ci():
         return 1
     print(f"[QuantMaster] 发布提交校验通过：v{staged_version}")
     return 0

@@ -14,7 +14,8 @@ import os
 import tempfile
 import threading
 from collections.abc import Callable, Mapping
-from multiprocessing.connection import AuthenticationError, Client, Listener
+from multiprocessing import AuthenticationError
+from multiprocessing.connection import Client, Listener
 from pathlib import Path
 from typing import Any
 
