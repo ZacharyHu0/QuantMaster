@@ -1876,32 +1876,66 @@ class UnifiedJobRuntime:
                 raise RuntimeError(
                     f"计算子进程未返回结果（exit_code={process.exitcode}）"
                 )
-            if message.get("kind") == "outcome":
-                return JobOutcome(
-                    str(message.get("status") or "completed"),
-                    str(message.get("detail") or ""),
-                    str(message.get("result_artifact_id") or ""),
-                )
-            detail = str(message.get("detail") or message.get("type") or "计算子进程失败")
-            if str(message.get("type") or "") == "InterruptedError":
-                raise InterruptedError(detail)
-            if str(message.get("type") or "") == "JobLeaseLost":
-                raise JobLeaseLost(str(job["id"]))
-            if str(message.get("type") or "") == "JobDeadlineExceeded":
-                raise JobDeadlineExceeded(detail)
-            logger.error(
-                "Isolated job handler failed job_id=%s type=%s traceback=%s",
-                job["id"],
-                job["type"],
-                str(message.get("traceback") or ""),
-            )
-            raise RuntimeError(detail)
+            return self._process_child_message(message, job)
         finally:
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=3.0)
             results.close()
             results.join_thread()
+
+    @staticmethod
+    def _process_child_message(message: dict[str, Any], job: dict[str, Any]) -> JobOutcome:
+        if message.get("kind") == "outcome":
+            return JobOutcome(
+                str(message.get("status") or "completed"),
+                str(message.get("detail") or ""),
+                str(message.get("result_artifact_id") or ""),
+            )
+        detail = str(message.get("detail") or message.get("type") or "计算子进程失败")
+        error_type = str(message.get("type") or "")
+        if error_type == "InterruptedError":
+            raise InterruptedError(detail)
+        if error_type == "JobLeaseLost":
+            raise JobLeaseLost(str(job["id"]))
+        if error_type == "JobDeadlineExceeded":
+            raise JobDeadlineExceeded(detail)
+        logger.error(
+            "Isolated job handler failed job_id=%s type=%s traceback=%s",
+            job["id"], job["type"], str(message.get("traceback") or ""),
+        )
+        raise RuntimeError(detail)
+
+    def _execute_registration(
+        self,
+        registration: _HandlerRegistration,
+        job: dict[str, Any],
+        lease_token: str,
+        lease_alive: threading.Event,
+        generation: int,
+    ) -> JobOutcome:
+        if registration.process_entrypoint:
+            with _CPU_JOB_GATE:
+                outcome = self._run_process_handler(
+                    registration.process_entrypoint, job, lease_token, lease_alive, generation,
+                )
+            if not lease_alive.is_set():
+                raise JobLeaseLost(str(job["id"]))
+            if self.store.cancelled(str(job["id"]), self.identity.value, lease_token):
+                raise InterruptedError("job cancelled")
+            return outcome
+        context = JobContext(self, job, lease_alive, generation)
+        if context.llm_scope:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            with get_llm_execution_coordinator().lease(
+                context, context.llm_scope, context.llm_revision,
+            ):
+                outcome = registration.handler(context, dict(job["spec"]))
+        else:
+            outcome = registration.handler(context, dict(job["spec"]))
+        context.ensure_active()
+        return outcome
 
     def _run(self, job_id: str, generation: int) -> None:
         key = (job_id, generation)
@@ -1939,34 +1973,9 @@ class UnifiedJobRuntime:
             )
             heartbeat.start()
             try:
-                if registration.process_entrypoint:
-                    # All process-isolated CPU DAGs in one Supervisor share a
-                    # single slot by default.  I/O fan-out remains inside the
-                    # handler and retains its provider-specific limits.
-                    with _CPU_JOB_GATE:
-                        outcome = self._run_process_handler(
-                            registration.process_entrypoint,
-                            job,
-                            lease_token,
-                            lease_alive,
-                            generation,
-                        )
-                    if not lease_alive.is_set():
-                        raise JobLeaseLost(job_id)
-                    if self.store.cancelled(job_id, self.identity.value, lease_token):
-                        raise InterruptedError("job cancelled")
-                else:
-                    context = JobContext(self, job, lease_alive, generation)
-                    if context.llm_scope:
-                        from quantmaster.runtime.llm import get_llm_execution_coordinator
-
-                        with get_llm_execution_coordinator().lease(
-                            context, context.llm_scope, context.llm_revision,
-                        ):
-                            outcome = registration.handler(context, dict(job["spec"]))
-                    else:
-                        outcome = registration.handler(context, dict(job["spec"]))
-                    context.ensure_active()
+                outcome = self._execute_registration(
+                    registration, job, lease_token, lease_alive, generation,
+                )
             except JobLeaseLost:
                 return
             except InterruptedError as exc:
