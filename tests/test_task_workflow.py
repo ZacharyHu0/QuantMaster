@@ -2,7 +2,14 @@
 
 from pathlib import Path
 
-from scripts.dev.tasks import Impact, select_impact, validate_ready_state
+from scripts.dev.tasks import (
+    Impact,
+    remove,
+    remove_empty_residual,
+    remove_primary_venv_link,
+    select_impact,
+    validate_ready_state,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,3 +85,80 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
 
 def test_ready_state_allows_task_changelog_updates():
     validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+
+
+def test_remove_empty_residual_is_idempotent_and_rejects_content(tmp_path):
+    target = tmp_path / "task"
+    remove_empty_residual(target)
+    target.mkdir()
+    remove_empty_residual(target)
+    assert not target.exists()
+    target.mkdir()
+    (target / "user.txt").write_text("keep", encoding="utf-8")
+    import pytest
+
+    with pytest.raises(SystemExit, match="其他内容"):
+        remove_empty_residual(target)
+    assert (target / "user.txt").is_file()
+
+
+def test_remove_primary_venv_link_rejects_regular_directory(tmp_path):
+    target = tmp_path / "task"
+    primary = tmp_path / "primary"
+    (target / ".venv").mkdir(parents=True)
+    (primary / ".venv").mkdir(parents=True)
+    import pytest
+
+    with pytest.raises(SystemExit, match="不是目录联接"):
+        remove_primary_venv_link(target, primary)
+    assert (target / ".venv").is_dir()
+
+
+def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    calls = []
+
+    class Result:
+        def __init__(self, returncode=0):
+            self.returncode = returncode
+            self.stdout = ""
+
+    def fake_git(args, **kwargs):
+        calls.append(args)
+        if args[:3] == ["show-ref", "--verify", "--quiet"]:
+            return Result(0)
+        return Result(0)
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {primary})
+    monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
+    monkeypatch.setattr(tasks, "git", fake_git)
+    remove("recovery")
+    assert not target.exists()
+    assert ["branch", "-D", "codex/recovery"] in calls
+
+
+def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {primary})
+    monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: False)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    with pytest.raises(SystemExit, match="尚未完整 squash"):
+        remove("recovery")
+    assert target.exists()

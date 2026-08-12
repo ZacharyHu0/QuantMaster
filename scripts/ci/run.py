@@ -19,17 +19,34 @@ PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 
 
+def primary_root() -> Path:
+    """Return the primary checkout even when CI runs inside a linked worktree."""
+    result = subprocess.run(
+        [
+            "git", "-c", f"safe.directory={ROOT.as_posix()}",
+            "rev-parse", "--path-format=absolute", "--git-common-dir",
+        ],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False,
+    )
+    if result.returncode:
+        return ROOT
+    common = Path(result.stdout.strip())
+    return common.parent.resolve() if common.name == ".git" else ROOT
+
+
 def project_python() -> Path:
     """Return the repository virtualenv interpreter on every supported OS."""
 
+    primary = primary_root()
     candidates = (
-        ROOT / ".venv" / "Scripts" / "python.exe",
-        ROOT / ".venv" / "bin" / "python",
+        primary / ".venv" / "Scripts" / "python.exe",
+        primary / ".venv" / "bin" / "python",
     )
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise SystemExit("[local-ci] project interpreter missing: run uv sync first")
+    raise SystemExit(f"[local-ci] project interpreter missing under {primary}: run uv sync first")
 
 
 PYTHON = project_python()

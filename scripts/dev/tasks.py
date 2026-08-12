@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import uuid
@@ -155,6 +157,60 @@ def start(slug: str) -> None:
     print(f"[task] created {branch} at {target}")
 
 
+def registered_worktrees(primary: Path) -> set[Path]:
+    return {
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in git_lines(["worktree", "list", "--porcelain"], cwd=primary)
+        if line.startswith("worktree ")
+    }
+
+
+def task_integrated(primary: Path, branch: str) -> bool:
+    """Accept ancestry, cherry-picks, or an aggregate squash already present on main."""
+    if git(["merge-base", "--is-ancestor", branch, "main"], cwd=primary, check=False).returncode == 0:
+        return True
+    outstanding = git(
+        ["log", "--cherry-pick", "--right-only", "--no-merges", "--format=%H", f"main...{branch}"],
+        cwd=primary,
+    ).stdout.strip()
+    if not outstanding:
+        return True
+    base = git(["merge-base", "main", branch], cwd=primary).stdout.strip()
+    patch = git(["diff", "--binary", base, branch], cwd=primary).stdout
+    if not patch:
+        return True
+    checked = subprocess.run(
+        ["git", "-c", f"safe.directory={primary.as_posix()}", "apply", "--reverse", "--check"],
+        cwd=primary, input=patch, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", check=False,
+    )
+    return checked.returncode == 0
+
+
+def remove_primary_venv_link(target: Path, primary: Path) -> bool:
+    """Remove only a task-local reparse point that resolves to the primary venv."""
+    link = target / ".venv"
+    if not link.exists():
+        return False
+    attributes = getattr(link.lstat(), "st_file_attributes", 0)
+    if not link.is_symlink() and not bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise SystemExit(f"{link} 不是目录联接，拒绝自动删除")
+    if link.resolve() != (primary / ".venv").resolve():
+        raise SystemExit(f"{link} 未指向主 worktree 虚拟环境，拒绝自动删除")
+    os.rmdir(link)
+    return True
+
+
+def remove_empty_residual(target: Path) -> None:
+    if not target.exists():
+        return
+    entries = list(target.iterdir())
+    if entries:
+        names = ", ".join(sorted(entry.name for entry in entries))
+        raise SystemExit(f"worktree 登记已移除，但目录仍有其他内容，拒绝删除：{names}")
+    target.rmdir()
+
+
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
@@ -199,15 +255,26 @@ def remove(slug: str) -> None:
     if target.parent != expected_parent:
         raise SystemExit("拒绝移除预期目录之外的 worktree")
     branch = f"codex/{slug}"
-    if not target.is_dir():
-        raise SystemExit(f"worktree 不存在：{target}")
-    if git(["status", "--porcelain"], cwd=target).stdout.strip():
-        raise SystemExit("worktree 不干净，拒绝移除")
-    remaining = set(git_lines(["diff", "--name-only", branch, "main"], cwd=primary))
-    if remaining - VERSION_PATHS:
+    branch_exists = git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=primary, check=False,
+    ).returncode == 0
+    registered = target in registered_worktrees(primary)
+    if not branch_exists and not registered and not target.exists():
+        print(f"[task] {branch} 已清理")
+        return
+    if branch_exists and not task_integrated(primary, branch):
         raise SystemExit(f"{branch} 尚未完整 squash 到 main，拒绝移除")
-    git(["worktree", "remove", str(target)], cwd=primary)
-    git(["branch", "-d", branch], cwd=primary)
+    if registered:
+        if git(["status", "--porcelain"], cwd=target).stdout.strip():
+            raise SystemExit("worktree 不干净，拒绝移除")
+        remove_primary_venv_link(target, primary)
+        git(["worktree", "remove", str(target)], cwd=primary)
+    else:
+        remove_primary_venv_link(target, primary)
+        remove_empty_residual(target)
+    if branch_exists:
+        git(["branch", "-D", branch], cwd=primary)
     print(f"[task] removed {branch} and {target}")
 
 
