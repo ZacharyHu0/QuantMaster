@@ -153,11 +153,11 @@ class AutomationRuntime:
                 })
                 account = self.service.store.bot_account(channel)
                 if account:
-                    resolver = (
-                        getattr(self.service.feishu, "failure_state", None)
-                        if channel == "feishu" else None
-                    )
-                    state = resolver(exc) if callable(resolver) else "degraded"
+                    state = "degraded"
+                    if channel == "feishu":
+                        classify = getattr(self.service.feishu, "failure_state", None)
+                        if callable(classify):
+                            state = classify(exc)
                     self.service.store.set_bot_status(
                         channel, account["account_id"], state,
                         f"{diagnostic['kind']}: {diagnostic['summary']}",
