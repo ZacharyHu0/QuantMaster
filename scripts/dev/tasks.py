@@ -157,16 +157,16 @@ def start(slug: str) -> None:
 
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
-    if not branch.startswith("codex/"):
-        raise SystemExit("ready 只能在 codex/<task-slug> 任务分支运行")
-    if git(["status", "--porcelain"], cwd=cwd).stdout.strip():
-        raise SystemExit("工作区不干净；请先提交任务改动")
-    if git(["merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=False).returncode:
-        raise SystemExit("任务分支落后于 origin/main；请先更新并解决冲突")
+    status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
+    behind = bool(
+        git(
+            ["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            cwd=cwd,
+            check=False,
+        ).returncode
+    )
     changed = changed_paths(cwd, staged=False, base="origin/main")
-    release_changes = RELEASE_PATHS.intersection(changed)
-    if release_changes:
-        raise SystemExit("任务分支不得修改发布元数据：" + ", ".join(sorted(release_changes)))
+    validate_ready_state(branch, status, behind, changed)
     args = [str(project_python(cwd)), "scripts/ci/run.py", "--full"]
     if ui:
         args.append("--ui")
@@ -176,6 +176,18 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
         args.append("--package")
     run(args, cwd=cwd)
     print("[task] READY: 可 squash 为一个 main release")
+
+
+def validate_ready_state(branch: str, status: str, behind: bool, changed: list[str]) -> None:
+    if not branch.startswith("codex/"):
+        raise SystemExit("ready 只能在 codex/<task-slug> 任务分支运行")
+    if status:
+        raise SystemExit("工作区不干净；请先提交任务改动")
+    if behind:
+        raise SystemExit("任务分支落后于 origin/main；请先更新并解决冲突")
+    release_changes = RELEASE_PATHS.intersection(changed)
+    if release_changes:
+        raise SystemExit("任务分支不得修改发布元数据：" + ", ".join(sorted(release_changes)))
 
 
 def remove(slug: str) -> None:

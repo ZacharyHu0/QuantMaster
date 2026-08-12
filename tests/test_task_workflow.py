@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from scripts.dev.tasks import Impact, select_impact
+from scripts.dev.tasks import Impact, select_impact, validate_ready_state
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,3 +57,20 @@ def test_impact_map_references_existing_tests():
         referenced.update(rule.get("tests", []))
     missing = sorted(path for path in referenced if not (ROOT / path).is_file())
     assert missing == []
+
+
+def test_ready_state_accepts_clean_current_task_branch():
+    validate_ready_state("codex/storage-fix", "", False, ["quantmaster/data/storage.py"])
+
+
+def test_ready_state_rejects_main_dirty_behind_and_release_changes():
+    import pytest
+
+    with pytest.raises(SystemExit, match="codex"):
+        validate_ready_state("main", "", False, [])
+    with pytest.raises(SystemExit, match="不干净"):
+        validate_ready_state("codex/task", "M file.py", False, [])
+    with pytest.raises(SystemExit, match="落后"):
+        validate_ready_state("codex/task", "", True, [])
+    with pytest.raises(SystemExit, match="发布元数据"):
+        validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])

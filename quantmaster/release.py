@@ -1,10 +1,11 @@
 """QuantMaster 发布元数据。
 
 这里是应用版本号、发布日期和前端最近 10 条更新日志的唯一运行时来源。
-每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
+每个合入 main 的 release 都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
+任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.12.0"
+VERSION = "1.12.1"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +13,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "任务工作流约束修正",
+                "items": (
+                    (
+                        "明确只有合入 main 的 release 才递增版本，任务分支 checkpoint 不得"
+                        "修改发布元数据，消除新旧约束之间的歧义。"
+                    ),
+                    (
+                        "补充 ready 对主分支、脏工作区、落后分支和发布文件改动的合同测试，"
+                        "确保集成前置条件可持续验证。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.12.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "并行任务与分层验证",
@@ -24,6 +44,11 @@ RELEASES = (
                         "新增显式影响测试映射、保守完整套件回退和历史耗时均衡分片，缩短"
                         "开发反馈，同时保持发布前完整验证。"
                     ),
+                ),
+            },
+            {
+                "title": "桌面包体积治理",
+                "items": (
                     (
                         "PyInstaller 仅收集实际需要的 SciPy FFT 兼容模块，并显式排除"
                         " Torch、Dask、pytest 和包内测试，避免完整开发环境生成超大 EXE。"

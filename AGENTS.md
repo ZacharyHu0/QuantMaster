@@ -56,9 +56,10 @@
 
 ## Release bookkeeping
 
-- Every repository modification, including documentation and test changes, must increment
-  `VERSION` in `quantmaster/release.py` using semantic versioning and set `RELEASE_DATE` to
-  the actual release date.
+- Every release commit integrated into `main`, including documentation and test-only releases,
+  must increment `VERSION` in `quantmaster/release.py` using semantic versioning and set
+  `RELEASE_DATE` to the actual release date. Checkpoint commits on task branches are exempt and
+  must not touch either release metadata file.
 - `MAJOR` is owner-controlled and must never change without a separate, explicit authorization from
   the owner. New functionality increments `MINOR`; fixes and patches increment only `PATCH`.
 - Add the matching user-facing notes to `RELEASES` in `quantmaster/release.py` and to the top
