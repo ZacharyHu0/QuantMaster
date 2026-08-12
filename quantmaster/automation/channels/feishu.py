@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Literal, get_args
 
 from quantmaster.automation.models import ActorContext
@@ -125,32 +126,15 @@ def _track_lark_ws_tasks(channel) -> None:
     channel._qm_lark_previous_task_factory = previous_factory
 
 
-async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
-    """Drain lark-oapi 1.x private WS tasks before its loop is stopped.
+async def _cancel_asyncio_task(task: asyncio.Task) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
-    The SDK's public ``stop_background`` closes the socket and immediately
-    stops its module-level loop.  Its ping, receive and ExpiringCache tasks are
-    otherwise destroyed while pending.  Keep this compatibility boundary here
-    instead of patching site-packages or hiding the resulting warnings.
-    """
-    ws_loop = getattr(channel, "_qm_lark_ws_loop", None)
-    owned_tasks = getattr(channel, "_qm_lark_ws_tasks", None)
-    previous_factory = getattr(channel, "_qm_lark_previous_task_factory", None)
-    if ws_loop is None or ws_loop.is_closed():
-        return False
-    ws = getattr(channel, "_ws_client", None)
-    if ws is None:
-        if not ws_loop.is_running() and ws_loop.get_task_factory() is not previous_factory:
-            ws_loop.set_task_factory(previous_factory)
-        return False
 
-    # A normal local shutdown must never enter the SDK's reconnect loop.
-    if hasattr(ws, "_auto_reconnect"):
-        ws._auto_reconnect = False
-
+async def _drain_lark_cache_task(ws, timeout: float) -> None:
+    """Drain the SDK cache cron on whichever private loop created it."""
     async def cancel_task(task: asyncio.Task) -> None:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await _cancel_asyncio_task(task)
 
     # ExpiringCache is constructed inside the SDK executor thread.  With no
     # event loop there, lark-oapi creates a separate orphan loop and schedules
@@ -182,52 +166,83 @@ async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
         except (TimeoutError, asyncio.CancelledError, RuntimeError, OSError):
             logger.warning("飞书 SDK 缓存协程未能在退出前完整回收", exc_info=True)
 
+
+async def _drain_owned_lark_tasks(
+    ws_loop, owned_tasks, previous_factory, ws,
+) -> list[asyncio.Task]:
+    """Cancel only tasks registered by this channel generation."""
+    if ws_loop.get_task_factory() is not previous_factory:
+        ws_loop.set_task_factory(previous_factory)
+    current = asyncio.current_task()
+    pending = [
+        task for task in tuple(owned_tasks or ())
+        if task is not current and not task.done()
+    ]
+    roots = [task for task in pending if _task_name(task).endswith("._select")]
+    background = [task for task in pending if task not in roots]
+    for task in background:
+        task.cancel()
+    if background:
+        await asyncio.gather(*background, return_exceptions=True)
+    disconnect = getattr(ws, "_disconnect", None)
+    if callable(disconnect):
+        await disconnect()
+    return roots
+
+
+async def _drain_running_lark_loop(ws_loop, drain, timeout: float) -> bool:
+    future = asyncio.run_coroutine_threadsafe(drain(), ws_loop)
+    roots = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+    for task in roots:
+        ws_loop.call_soon_threadsafe(task.cancel)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while ws_loop.is_running() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    if ws_loop.is_running():
+        logger.warning("飞书 SDK WebSocket 哨兵循环未能按时退出")
+        return False
+    return True
+
+
+def _restore_lark_task_factory(ws_loop, previous_factory) -> None:
+    if not ws_loop.is_running() and ws_loop.get_task_factory() is not previous_factory:
+        ws_loop.set_task_factory(previous_factory)
+
+
+async def _drain_stopped_lark_loop(ws_loop, drain) -> None:
+    roots = ws_loop.run_until_complete(drain())
+    for task in roots:
+        task.cancel()
+    if roots:
+        ws_loop.run_until_complete(asyncio.gather(*roots, return_exceptions=True))
+
+
+async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
+    """Drain this Feishu owner's private SDK tasks without global cancellation."""
+    ws_loop = getattr(channel, "_qm_lark_ws_loop", None)
+    owned_tasks = getattr(channel, "_qm_lark_ws_tasks", None)
+    previous_factory = getattr(channel, "_qm_lark_previous_task_factory", None)
+    if ws_loop is None or ws_loop.is_closed():
+        return False
+    ws = getattr(channel, "_ws_client", None)
+    if ws is None:
+        _restore_lark_task_factory(ws_loop, previous_factory)
+        return False
+    if hasattr(ws, "_auto_reconnect"):
+        ws._auto_reconnect = False
+    await _drain_lark_cache_task(ws, timeout)
+
     async def drain() -> list[asyncio.Task]:
-        # The owner stops registration before shutdown work starts, so cleanup
-        # tasks cannot be mistaken for SDK transport tasks.
-        if ws_loop.get_task_factory() is not previous_factory:
-            ws_loop.set_task_factory(previous_factory)
-        current = asyncio.current_task()
-        roots: list[asyncio.Task] = []
-        background: list[asyncio.Task] = []
-        for task in tuple(owned_tasks or ()):
-            if task is current or task.done():
-                continue
-            # WSClient.start() blocks on this sentinel via run_until_complete.
-            # Cancel it only after every real background task has been awaited.
-            if _task_name(task).endswith("._select") or _task_name(task) == "_select":
-                roots.append(task)
-            else:
-                background.append(task)
-        for task in background:
-            task.cancel()
-        if background:
-            await asyncio.gather(*background, return_exceptions=True)
-        disconnect = getattr(ws, "_disconnect", None)
-        if callable(disconnect):
-            await disconnect()
-        return roots
+        return await _drain_owned_lark_tasks(
+            ws_loop, owned_tasks, previous_factory, ws,
+        )
 
     try:
         if ws_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(drain(), ws_loop)
-            roots = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
-            for task in roots:
-                ws_loop.call_soon_threadsafe(task.cancel)
-            # Let run_until_complete consume the sentinel cancellation before
-            # FeishuChannel.stop() considers stopping/closing the loop.
-            deadline = asyncio.get_running_loop().time() + timeout
-            while ws_loop.is_running() and asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(0.01)
-            if ws_loop.is_running():
-                logger.warning("飞书 SDK WebSocket 哨兵循环未能按时退出")
+            if not await _drain_running_lark_loop(ws_loop, drain, timeout):
                 return False
         else:
-            roots = ws_loop.run_until_complete(drain())
-            for task in roots:
-                task.cancel()
-            if roots:
-                ws_loop.run_until_complete(asyncio.gather(*roots, return_exceptions=True))
+            await _drain_stopped_lark_loop(ws_loop, drain)
         # We already disconnected and fully drained this transport.  Prevent
         # FeishuChannel.stop() from running its private fallback a second time;
         # that fallback calls run_until_complete from our active asyncio loop
@@ -238,6 +253,49 @@ async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
     except (TimeoutError, asyncio.CancelledError, RuntimeError, OSError):
         logger.warning("飞书 SDK 后台协程未能在退出前完整回收", exc_info=True)
         return False
+
+
+def _feishu_channel_types():
+    try:
+        from lark_oapi.channel import FeishuChannel
+        try:
+            from lark_oapi.core import LogLevel
+        except ImportError:
+            LogLevel = None
+        try:
+            from lark_oapi.channel import PolicyConfig
+        except ImportError:
+            PolicyConfig = None
+    except ImportError as exc:
+        raise RuntimeError("未安装 lark-oapi，无法启动飞书长连接") from exc
+    return FeishuChannel, LogLevel, PolicyConfig
+
+
+def _is_bot_mention(channel, mention) -> bool:
+    identity = getattr(channel, "bot_identity", None)
+    bot_open_id = str(getattr(identity, "open_id", "") or "")
+    mention_open_id = str(getattr(mention, "open_id", "") or "")
+    if bot_open_id:
+        return bool(mention_open_id and mention_open_id == bot_open_id)
+    bot_names = {"quantmaster"}
+    identity_name = str(getattr(identity, "name", "") or "").strip().casefold()
+    if identity_name:
+        bot_names.add(identity_name)
+    mention_name = str(getattr(mention, "name", "") or "").strip().casefold()
+    return bool(mention_name and mention_name in bot_names)
+
+
+def _strip_bot_mentions(channel, chat_type: str, text: str, mentions: list) -> str:
+    for mention in mentions:
+        if chat_type == "group" and not _is_bot_mention(channel, mention):
+            continue
+        key = str(getattr(mention, "key", "") or "")
+        name = str(getattr(mention, "name", "") or "")
+        if key:
+            text = text.replace(key, "").strip()
+        if name:
+            text = text.replace(f"@{name}", "").strip()
+    return text
 
 
 class FeishuBotClient:
@@ -445,159 +503,127 @@ class FeishuBotClient:
             raise RuntimeError("飞书发送成功但响应缺少 message_id")
         return message_id
 
+    async def _receive_message(self, channel, app_id: str,
+                               on_message: Callable[[ActorContext, str], None],
+                               message) -> None:
+        if message.sender.is_bot:
+            return
+        message_id = str(message.message_id or "").strip()
+        chat_type: Literal["direct", "group"] = (
+            "direct" if message.chat_type == "p2p" else "group"
+        )
+        if not message_id or not self.store.claim_inbound(
+                "feishu", message_id, chat_type=chat_type, account_id=app_id):
+            return
+        mentions = list(message.mentions or [])
+        mentioned_bot = (
+            chat_type == "direct" or any(_is_bot_mention(channel, item) for item in mentions)
+        )
+        text = _strip_bot_mentions(
+            channel, chat_type, str(message.content_text or "").strip(), mentions,
+        )
+        if not text:
+            return
+        actor = ActorContext(
+            channel="feishu", target=str(message.chat_id), account_id=app_id,
+            chat_type=chat_type, sender_id=str(message.sender_id),
+            sender_name=str(message.sender_name or ""), message_id=message_id,
+            reply_to=str(getattr(getattr(message, "reply", None), "message_id", "") or ""),
+            reply_text=str(getattr(getattr(message, "reply", None), "text", "") or ""),
+        )
+        bound = self.store.target_by_route("feishu", app_id, actor.target)
+        if chat_type == "group" and bound:
+            self.store.remember_conversation_message(
+                channel="feishu", account_id=app_id, chat_id=actor.target,
+                message_id=message_id, sender_id=actor.sender_id,
+                sender_name=actor.sender_name, text=text, mentioned_bot=mentioned_bot,
+                reply_to=actor.reply_to,
+            )
+        if chat_type == "group" and not mentioned_bot:
+            return
+        on_message(actor, text)
+
+    async def _lifecycle_event(self, app_id: str, event) -> None:
+        event_type = str(
+            getattr(event, "event_type", "") or getattr(event, "type", "") or "botAdded"
+        )
+        logger.info("飞书 Bot 生命周期事件已接收: %s", event_type)
+        self.store.set_bot_status("feishu", app_id, "listening")
+
+    async def _raw_event(self, lifecycle_event, event) -> None:
+        event_type = str(
+            getattr(event, "event_type", "")
+            or getattr(getattr(event, "header", None), "event_type", "")
+        )
+        if event_type in {
+            "im.chat.access_event.bot_p2p_chat_entered_v1",
+            "im.chat.member.user.added_v1",
+        }:
+            await lifecycle_event(event)
+
+    def _claim_listener(self, channel, stop_event: threading.Event, app_id: str) -> int:
+        with self._lifecycle_lock:
+            if self._active_channel is not None:
+                raise RuntimeError("飞书 Bot 已由另一监听任务持有")
+            self._listener_generation += 1
+            generation = self._listener_generation
+            self._active_generation = generation
+            self._active_channel = channel
+            self._active_loop = asyncio.get_running_loop()
+            self._active_stop_event = stop_event
+            self._active_app_id = app_id
+            self._closing_generation = 0
+            return generation
+
+    @staticmethod
+    def _register_listener_events(channel, lifecycle_event, raw_event) -> None:
+        try:
+            from lark_oapi.channel.events import ChannelEventName
+
+            supported = set(get_args(ChannelEventName))
+            if "botAdded" in supported:
+                channel.on("botAdded", lifecycle_event)
+            if "raw" in supported:
+                channel.on("raw", raw_event)
+        except (ImportError, TypeError):
+            logger.debug("当前飞书 SDK 不暴露生命周期事件注册表")
+
+    async def _serve_listener(self, channel, generation: int, app_id: str,
+                              stop_event: threading.Event) -> None:
+        self.store.set_bot_status("feishu", app_id, "connecting")
+        try:
+            await channel.start_background(timeout=30)
+            self.store.set_bot_status("feishu", app_id, "listening")
+            logger.info("飞书 Bot 长连接已就绪")
+            while not stop_event.is_set():
+                await asyncio.sleep(0.05)
+        finally:
+            await self._aclose_owned(channel, generation)
+
     async def listen(self, on_message: Callable[[ActorContext, str], None],
                      stop_event: threading.Event) -> None:
-        """Own one Feishu listener until ``stop_event`` is set.
-
-        This is the canonical async lifecycle API.  The task that calls it owns
-        the SDK channel and is the only task allowed to close that channel.
-        ``listen_forever`` is only a synchronous thread bridge.
-        """
+        """Own one Feishu listener until ``stop_event`` is set."""
         if not self.is_configured():
-            # Direct calls are also harmless: no SDK import, WebSocket or retry loop.
             return
-        try:
-            from lark_oapi.channel import FeishuChannel
-            try:
-                from lark_oapi.core import LogLevel
-            except ImportError:  # 兼容旧 SDK 及精简测试替身。
-                LogLevel = None
-            try:
-                from lark_oapi.channel import PolicyConfig
-            except ImportError:  # 兼容旧 SDK 及精简测试替身。
-                PolicyConfig = None
-        except ImportError as exc:
-            raise RuntimeError("未安装 lark-oapi，无法启动飞书长连接") from exc
+        FeishuChannel, LogLevel, PolicyConfig = _feishu_channel_types()
         normalize_third_party_logger("Lark")
         app_id, secret = self.credentials_value()
-        channel = None
-        generation = 0
-
-        def bot_mention(mention) -> bool:
-            identity = getattr(channel, "bot_identity", None) if channel is not None else None
-            bot_open_id = str(getattr(identity, "open_id", "") or "")
-            mention_open_id = str(getattr(mention, "open_id", "") or "")
-            if bot_open_id:
-                return bool(mention_open_id and mention_open_id == bot_open_id)
-            bot_names = {"quantmaster"}
-            identity_name = str(getattr(identity, "name", "") or "").strip().casefold()
-            if identity_name:
-                bot_names.add(identity_name)
-            mention_name = str(getattr(mention, "name", "") or "").strip().casefold()
-            return bool(mention_name and mention_name in bot_names)
-
-        async def receive(message) -> None:
-            if message.sender.is_bot:
-                return
-            message_id = str(message.message_id or "").strip()
-            chat_type: Literal["direct", "group"] = (
-                "direct" if message.chat_type == "p2p" else "group"
+        options = {"app_id": app_id, "app_secret": secret}
+        if LogLevel is not None:
+            options["log_level"] = LogLevel.WARNING
+        if PolicyConfig is not None:
+            options["policy"] = PolicyConfig(
+                require_mention=False, respond_to_mention_all=False,
             )
-            if not message_id or not self.store.claim_inbound(
-                    "feishu", message_id, chat_type=chat_type, account_id=app_id):
-                return
-            text = str(message.content_text or "").strip()
-            mentions = list(message.mentions or [])
-            mentioned_bot = chat_type == "direct" or any(bot_mention(item) for item in mentions)
-            for mention in mentions:
-                if chat_type == "group" and not bot_mention(mention):
-                    continue
-                key = str(getattr(mention, "key", "") or "")
-                name = str(getattr(mention, "name", "") or "")
-                if key:
-                    text = text.replace(key, "").strip()
-                if name:
-                    text = text.replace(f"@{name}", "").strip()
-            if not text:
-                return
-            actor = ActorContext(
-                channel="feishu", target=str(message.chat_id), account_id=app_id,
-                chat_type=chat_type, sender_id=str(message.sender_id),
-                sender_name=str(message.sender_name or ""),
-                message_id=message_id,
-                reply_to=str(getattr(getattr(message, "reply", None), "message_id", "") or ""),
-                reply_text=str(getattr(getattr(message, "reply", None), "text", "") or ""),
-            )
-            bound = self.store.target_by_route("feishu", app_id, actor.target)
-            if chat_type == "group" and bound:
-                self.store.remember_conversation_message(
-                    channel="feishu", account_id=app_id, chat_id=actor.target,
-                    message_id=message_id, sender_id=actor.sender_id,
-                    sender_name=actor.sender_name, text=text, mentioned_bot=mentioned_bot,
-                    reply_to=actor.reply_to,
-                )
-            if chat_type == "group" and not mentioned_bot:
-                return
-            on_message(actor, text)
-
-        async def lifecycle_event(event) -> None:
-            """Acknowledge non-message lifecycle events without treating them as failures."""
-            event_type = str(
-                getattr(event, "event_type", "")
-                or getattr(event, "type", "")
-                or "botAdded"
-            )
-            logger.info("飞书 Bot 生命周期事件已接收: %s", event_type)
-            self.store.set_bot_status("feishu", app_id, "listening")
-
-        async def raw_event(event) -> None:
-            event_type = str(
-                getattr(event, "event_type", "")
-                or getattr(getattr(event, "header", None), "event_type", "")
-            )
-            if event_type in {
-                "im.chat.access_event.bot_p2p_chat_entered_v1",
-                "im.chat.member.user.added_v1",
-            }:
-                await lifecycle_event(event)
-
-        async def serve() -> None:
-            nonlocal channel, generation
-            # 允许普通群消息进入本地上下文缓存；是否回复由上面的真实 @ 检查决定。
-            options = {"app_id": app_id, "app_secret": secret}
-            if LogLevel is not None:
-                options["log_level"] = LogLevel.WARNING
-            if PolicyConfig is not None:
-                options["policy"] = PolicyConfig(
-                    require_mention=False, respond_to_mention_all=False)
-            channel = FeishuChannel(**options)
-            _track_lark_ws_tasks(channel)
-            running_loop = asyncio.get_running_loop()
-            with self._lifecycle_lock:
-                if self._active_channel is not None:
-                    raise RuntimeError("飞书 Bot 已由另一监听任务持有")
-                self._listener_generation += 1
-                generation = self._listener_generation
-                self._active_generation = generation
-                self._active_channel = channel
-                self._active_loop = running_loop
-                self._active_stop_event = stop_event
-                self._active_app_id = app_id
-                self._closing_generation = 0
-            channel.on("message", receive)
-            # 新版 SDK 用 botAdded 归一化会话进入/入群事件，同时保留 raw 兜底；
-            # 旧 SDK 和测试替身没有这些事件名时不做猜测性注册。
-            try:
-                from lark_oapi.channel.events import ChannelEventName
-
-                supported = set(get_args(ChannelEventName))
-                if "botAdded" in supported:
-                    channel.on("botAdded", lifecycle_event)
-                if "raw" in supported:
-                    channel.on("raw", raw_event)
-            except (ImportError, TypeError):
-                logger.debug("当前飞书 SDK 不暴露生命周期事件注册表")
-            self.store.set_bot_status("feishu", app_id, "connecting")
-            try:
-                await channel.start_background(timeout=30)
-                self.store.set_bot_status("feishu", app_id, "listening")
-                logger.info("飞书 Bot 长连接已就绪")
-                while not stop_event.is_set():
-                    await asyncio.sleep(0.05)
-            finally:
-                await self._aclose_owned(channel, generation)
-
-        await serve()
+        channel = FeishuChannel(**options)
+        _track_lark_ws_tasks(channel)
+        generation = self._claim_listener(channel, stop_event, app_id)
+        receive = partial(self._receive_message, channel, app_id, on_message)
+        lifecycle_event = partial(self._lifecycle_event, app_id)
+        raw_event = partial(self._raw_event, lifecycle_event)
+        channel.on("message", receive)
+        self._register_listener_events(channel, lifecycle_event, raw_event)
+        await self._serve_listener(channel, generation, app_id, stop_event)
 
     async def _wait_generation_closed(self, generation: int) -> None:
         while True:
