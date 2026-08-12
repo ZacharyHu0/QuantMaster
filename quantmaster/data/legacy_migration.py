@@ -54,7 +54,28 @@ def register_migrator(migrator: DomainMigrator) -> None:
 
 
 def registered_migrations() -> tuple[str, ...]:
+    register_builtin_migrations()
     return tuple(sorted(_MIGRATORS))
+
+
+def register_builtin_migrations() -> None:
+    """Load domain adapters only when migration management is explicitly used."""
+    from quantmaster.after_close.migration import after_close_legacy_migrator
+    from quantmaster.ai.news_migration import news_contract_migrator
+    from quantmaster.data.legacy_migrations import market_data_legacy_migrator
+    from quantmaster.decision.migration import decision_legacy_migrator
+
+    for migrator in (
+        market_data_legacy_migrator,
+        decision_legacy_migrator,
+        after_close_legacy_migrator,
+        news_contract_migrator,
+    ):
+        existing = _MIGRATORS.get(migrator.name)
+        if existing is None:
+            register_migrator(migrator)
+        elif type(existing) is not type(migrator):
+            raise ValueError(f"迁移类型冲突：{migrator.name}")
 
 
 def utc_now() -> str:
@@ -145,6 +166,7 @@ class LegacyMigrationManager:
         self._initialized = True
 
     def create(self, domain: str, *, mode: str = "dry_run", batch_size: int = 250) -> dict:
+        register_builtin_migrations()
         if domain not in _MIGRATORS:
             raise LegacyMigrationError(f"未知迁移类型：{domain}")
         if mode not in {"dry_run", "apply"}:

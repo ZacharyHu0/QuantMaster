@@ -12,6 +12,7 @@ from quantmaster.data.legacy_migration import (
     LegacyMigrationManager,
     MigrationRecord,
     register_migrator,
+    registered_migrations,
 )
 
 
@@ -62,6 +63,11 @@ def test_status_read_does_not_create_state_database(tmp_path):
     manager = LegacyMigrationManager(tmp_path)
     assert manager.latest() is None
     assert not manager.state_path.exists()
+
+
+def test_builtin_domain_migrations_are_registered_without_touching_data(tmp_path):
+    assert {"market_data", "decision", "after_close", "news"} <= set(registered_migrations())
+    assert not (tmp_path / "legacy_contract_migrations.sqlite").exists()
 
 
 def test_dry_run_persists_counts_and_specific_unknown_evidence(tmp_path, fixture_migrator):

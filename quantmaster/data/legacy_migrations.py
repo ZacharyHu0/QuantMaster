@@ -20,6 +20,7 @@ from typing import Any
 
 import pandas as pd
 
+from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 MigrationRow = dict[str, Any]
@@ -44,6 +45,34 @@ def _row(
 
 def _legacy_bar_name(symbol: str) -> str:
     return re.sub(r"[^0-9A-Za-z._^-]", "_", symbol)
+
+
+def _migrate_bar_file(
+    bars: Path, quarantine: Path, old_name: str, candidates: list[str], dry_run: bool,
+) -> MigrationRow | None:
+    source = bars / f"{old_name}.parquet"
+    quarantined = quarantine / source.name
+    if not source.is_file():
+        return _row(
+            f"bars/{source.name}", "conflict", "bar_filename_isolated",
+            detail=",".join(candidates),
+        ) if quarantined.is_file() else None
+    if len(candidates) != 1:
+        code, detail = "bar_symbol_collision", ",".join(candidates)
+        target = quarantined
+    else:
+        symbol = candidates[0]
+        current = bars / f"{symbol}.parquet"
+        if not current.exists():
+            if not dry_run:
+                os.replace(source, current)
+            return _row(f"bars/{source.name}", "converted", "bar_filename_migrated", detail=symbol)
+        code, detail, target = "bar_target_exists", symbol, quarantined
+    if not dry_run:
+        quarantine.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            os.replace(source, target)
+    return _row(f"bars/{source.name}", "conflict", code, detail=detail)
 
 
 def migrate_bar_filenames(
@@ -75,47 +104,81 @@ def migrate_bar_filenames(
     results: list[MigrationRow] = []
     quarantine = data_root / "migration_quarantine" / "market_data" / "bars"
     for old_name, candidates in sorted(owners.items()):
-        source = bars / f"{old_name}.parquet"
-        record_key = f"bars/{source.name}"
+        record_key = f"bars/{old_name}.parquet"
         if only_keys is not None and record_key not in only_keys:
             continue
-        quarantined = quarantine / source.name
-        if not source.is_file():
-            if quarantined.is_file():
-                results.append(_row(
-                    f"bars/{source.name}", "conflict", "bar_filename_isolated",
-                    detail=",".join(candidates),
-                ))
-            continue
-        if len(candidates) != 1:
-            if not dry_run:
-                quarantine.mkdir(parents=True, exist_ok=True)
-                if not quarantined.exists():
-                    os.replace(source, quarantined)
-            results.append(_row(
-                f"bars/{source.name}", "conflict", "bar_symbol_collision",
-                detail=",".join(candidates),
-            ))
-            continue
-        symbol = candidates[0]
-        target = bars / f"{symbol}.parquet"
-        if target.exists():
-            if not dry_run:
-                quarantine.mkdir(parents=True, exist_ok=True)
-                if not quarantined.exists():
-                    os.replace(source, quarantined)
-            results.append(_row(
-                f"bars/{source.name}", "conflict", "bar_target_exists",
-                detail=symbol,
-            ))
-            continue
-        if not dry_run:
-            os.replace(source, target)
-        results.append(_row(
-            f"bars/{source.name}", "converted", "bar_filename_migrated",
-            detail=symbol,
-        ))
+        result = _migrate_bar_file(bars, quarantine, old_name, candidates, dry_run)
+        if result is not None:
+            results.append(result)
     return results
+
+
+def _instrument_name_result(
+    connection: sqlite3.Connection, symbol: str, values: set[str], current: dict[str, str],
+    dry_run: bool,
+) -> MigrationRow:
+    if len(values) != 1:
+        return _row(
+            f"instrument:{symbol}", "conflict", "instrument_name_conflict",
+            detail=" | ".join(sorted(values)),
+        )
+    name = next(iter(values))
+    if symbol not in current:
+        return _row(
+            f"instrument:{symbol}", "blank", "instrument_symbol_missing",
+            detail="不凭旧名称创建证券记录",
+        )
+    if current[symbol].strip():
+        return _row(f"instrument:{symbol}", "unchanged", "instrument_name_present")
+    if not dry_run:
+        connection.execute("UPDATE instruments SET name=? WHERE symbol=? AND name=''", (name, symbol))
+    return _row(f"instrument:{symbol}", "converted", "instrument_name_filled")
+
+
+def _etf_reviews(
+    connection: sqlite3.Connection, only_keys: set[str] | None,
+) -> Iterable[MigrationRow]:
+    columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(instruments)")}
+    if not {"symbol", "name", "market", "exchange", "asset_type"}.issubset(columns):
+        return
+    rows = connection.execute(
+        """SELECT symbol FROM instruments
+           WHERE market='CN' AND exchange IN ('SH','SZ') AND asset_type='fund'
+             AND UPPER(name) LIKE '%ETF%' AND UPPER(name) NOT LIKE '%LOF%'
+             AND name NOT LIKE '%联接%' ORDER BY symbol"""
+    )
+    for (symbol,) in rows:
+        if only_keys is None or f"instrument:{symbol}:asset_type" in only_keys:
+            yield _row(
+                f"instrument:{symbol}:asset_type", "review",
+                "instrument_etf_semantics_unproven", detail="名称不是 asset_type 的可靠证据",
+            )
+
+
+def _load_legacy_names(source: Path) -> tuple[dict[str, set[str]], list[MigrationRow]]:
+    results: list[MigrationRow] = []
+    payload: object = {}
+    if source.is_file():
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            results.append(_row(
+                "stock_names.json", "review", "instrument_names_unreadable", detail=str(exc),
+            ))
+        if not isinstance(payload, dict) or not isinstance(payload.get("names"), dict):
+            unknown = payload.keys() if isinstance(payload, dict) else ()
+            results.append(_row(
+                "stock_names.json", "review", "instrument_names_unknown_format",
+                unknown_fields=unknown,
+            ))
+            payload = {}
+    names: dict[str, set[str]] = {}
+    raw_names = payload.get("names", {}) if isinstance(payload, dict) else {}
+    for raw_symbol, raw_name in raw_names.items():
+        symbol, name = str(raw_symbol).strip().upper(), str(raw_name).strip()
+        if symbol and name:
+            names.setdefault(symbol, set()).add(name)
+    return names, results
 
 
 def migrate_instrument_names(
@@ -125,23 +188,7 @@ def migrate_instrument_names(
     data_root = Path(root)
     source = data_root / "stock_names.json"
     database = data_root / "security_master.sqlite"
-    results: list[MigrationRow] = []
-    payload: object = {}
-    if source.is_file():
-        try:
-            payload = json.loads(source.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            results.append(_row(
-                "stock_names.json", "review", "instrument_names_unreadable",
-                detail=str(exc),
-            ))
-        if not isinstance(payload, dict) or not isinstance(payload.get("names"), dict):
-            unknown = payload.keys() if isinstance(payload, dict) else ()
-            results.append(_row(
-                "stock_names.json", "review", "instrument_names_unknown_format",
-                unknown_fields=unknown,
-            ))
-            payload = {}
+    names, results = _load_legacy_names(source)
     if not database.is_file():
         if source.is_file():
             results.append(_row(
@@ -150,12 +197,6 @@ def migrate_instrument_names(
             ))
         return results
 
-    names: dict[str, set[str]] = {}
-    raw_names = payload.get("names", {}) if isinstance(payload, dict) else {}
-    for raw_symbol, raw_name in raw_names.items():
-        symbol, name = str(raw_symbol).strip().upper(), str(raw_name).strip()
-        if symbol and name:
-            names.setdefault(symbol, set()).add(name)
     connection = connect_sqlite(database, policy="cache")
     try:
         rows = {
@@ -166,48 +207,11 @@ def migrate_instrument_names(
             record_key = f"instrument:{symbol}"
             if only_keys is not None and record_key not in only_keys:
                 continue
-            if len(values) != 1:
-                results.append(_row(
-                    f"instrument:{symbol}", "conflict", "instrument_name_conflict",
-                    detail=" | ".join(sorted(values)),
-                ))
-                continue
-            name = next(iter(values))
-            if symbol not in rows:
-                results.append(_row(
-                    f"instrument:{symbol}", "blank", "instrument_symbol_missing",
-                    detail="不凭旧名称创建证券记录",
-                ))
-            elif rows[symbol].strip():
-                results.append(_row(
-                    f"instrument:{symbol}", "unchanged", "instrument_name_present",
-                ))
-            else:
-                if not dry_run:
-                    connection.execute(
-                        "UPDATE instruments SET name=? WHERE symbol=? AND name=''", (name, symbol),
-                    )
-                results.append(_row(
-                    f"instrument:{symbol}", "converted", "instrument_name_filled",
-                ))
+            results.append(_instrument_name_result(connection, symbol, values, rows, dry_run))
 
         # The old constructor used a name heuristic to relabel funds as ETFs.
         # Preserve candidates in the audit stream, but do not change asset type.
-        columns = {str(item[1]) for item in connection.execute("PRAGMA table_info(instruments)")}
-        if {"symbol", "name", "market", "exchange", "asset_type"}.issubset(columns):
-            for symbol in (item[0] for item in connection.execute(
-                """SELECT symbol FROM instruments
-                   WHERE market='CN' AND exchange IN ('SH','SZ') AND asset_type='fund'
-                     AND UPPER(name) LIKE '%ETF%' AND UPPER(name) NOT LIKE '%LOF%'
-                     AND name NOT LIKE '%联接%' ORDER BY symbol"""
-            )):
-                if only_keys is not None and f"instrument:{symbol}:asset_type" not in only_keys:
-                    continue
-                results.append(_row(
-                    f"instrument:{symbol}:asset_type", "review",
-                    "instrument_etf_semantics_unproven",
-                    detail="名称不是 asset_type 的可靠证据",
-                ))
+        results.extend(_etf_reviews(connection, only_keys))
         if not dry_run:
             connection.commit()
         else:
@@ -376,7 +380,7 @@ class MarketDataLegacyMigrator:
 
     def inspect(self, root: str | Path) -> Iterable[MigrationRow]:
         for migrate in self._domains:
-            yield from migrate(root, dry_run=True)
+            yield from (_as_record(item) for item in migrate(root, dry_run=True))
 
     def migrate_batch(
         self, root: str | Path, after_key: str, limit: int,
@@ -392,7 +396,7 @@ class MarketDataLegacyMigrator:
         )[:limit]
         selected = {str(record["record_key"]) for record in candidates}
         for migrate in self._domains:
-            yield from migrate(root, dry_run=False, only_keys=selected)
+            yield from (_as_record(item) for item in migrate(root, dry_run=False, only_keys=selected))
 
     def rollback(self, root: str | Path, backup_root: str | Path) -> None:
         """Restore only market-data paths from a runner-created data-root backup."""
@@ -412,3 +416,15 @@ class MarketDataLegacyMigrator:
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
+
+
+def _as_record(value: MigrationRow) -> MigrationRecord:
+    return MigrationRecord(
+        record_key=str(value["record_key"]), outcome=str(value["outcome"]),
+        diagnostic_code=str(value.get("diagnostic_code") or ""),
+        unknown_fields=tuple(value.get("unknown_fields") or ()),
+        detail=str(value.get("detail") or ""),
+    )
+
+
+market_data_legacy_migrator = MarketDataLegacyMigrator()

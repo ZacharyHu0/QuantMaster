@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.after_close.models import SCHEMA_VERSION, AfterCloseSnapshot
+from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -131,15 +132,30 @@ class AfterCloseLegacyMigrator:
     name = "after_close"
 
     def inspect(self, root: str | Path) -> Iterable[dict[str, Any]]:
-        return iter(inspect_after_close_snapshots(root))
+        return (_as_record(item) for item in inspect_after_close_snapshots(root))
 
     def migrate_batch(
         self, root: str | Path, *, after_key: str, limit: int,
     ) -> Iterable[dict[str, Any]]:
-        return iter(migrate_after_close_batch(root, after_key=after_key, limit=limit))
+        return (
+            _as_record(item)
+            for item in migrate_after_close_batch(root, after_key=after_key, limit=limit)
+        )
 
     def rollback(self, root: str | Path, backup_root: str | Path) -> None:
         source = Path(backup_root) / "after_close.sqlite"
         if not source.is_file():
             raise FileNotFoundError("盘后快照备份不存在")
         shutil.copy2(source, Path(root) / "after_close.sqlite")
+
+
+def _as_record(value: dict[str, Any]) -> MigrationRecord:
+    return MigrationRecord(
+        record_key=str(value["record_key"]), outcome=str(value["outcome"]),
+        diagnostic_code=str(value.get("diagnostic_code") or ""),
+        unknown_fields=tuple(value.get("unknown_fields") or ()),
+        detail=str(value.get("detail") or ""),
+    )
+
+
+after_close_legacy_migrator = AfterCloseLegacyMigrator()

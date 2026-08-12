@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.decision.schema import (
     DECISION_PAYLOAD_SCHEMA_VERSION,
     DecisionSchemaError,
@@ -256,3 +259,59 @@ def migrate_decision_snapshots(
             for item in outcomes
         ],
     }
+
+
+def _migration_record(outcome: dict[str, Any]) -> MigrationRecord:
+    status = str(outcome["status"])
+    mapped = {
+        "migrated": "converted", "unchanged": "unchanged",
+        "unclassified": "review", "conflict": "conflict",
+    }[status]
+    return MigrationRecord(
+        record_key=_record_key(outcome["identity"]), outcome=mapped,
+        diagnostic_code=str(outcome["diagnostic_code"]),
+        unknown_fields=tuple(sorted(outcome.get("unknown") or {})),
+        detail=str(outcome["detail"]),
+    )
+
+
+class DecisionLegacyMigrator:
+    name = "decision"
+
+    @staticmethod
+    def _path(root: str | Path) -> Path:
+        return Path(root) / "decisions.sqlite"
+
+    def _outcomes(self, root: str | Path) -> list[dict[str, Any]]:
+        path = self._path(root)
+        if not path.is_file():
+            return []
+        with connect_sqlite(path, read_only=True, row_factory=True) as connection:
+            rows = connection.execute(
+                "SELECT signal_date,universe,horizon,profile,policy_hash,model_version,"
+                "payload,created_at FROM selection_snapshots ORDER BY created_at,signal_date"
+            ).fetchall()
+        return [_classify(row) for row in rows]
+
+    def inspect(self, root: str | Path) -> Iterable[MigrationRecord]:
+        return (_migration_record(item) for item in self._outcomes(root))
+
+    def migrate_batch(
+        self, root: str | Path, *, after_key: str, limit: int,
+    ) -> Iterable[MigrationRecord]:
+        selected = [
+            item for item in self._outcomes(root)
+            if _record_key(item["identity"]) > after_key
+        ][:limit]
+        if selected:
+            _apply_outcomes(self._path(root), selected, max(1, limit))
+        return (_migration_record(item) for item in selected)
+
+    def rollback(self, root: str | Path, backup_root: str | Path) -> None:
+        source = Path(backup_root) / "decisions.sqlite"
+        if not source.is_file():
+            raise FileNotFoundError("决策快照备份不存在")
+        shutil.copy2(source, self._path(root))
+
+
+decision_legacy_migrator = DecisionLegacyMigrator()

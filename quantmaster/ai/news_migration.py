@@ -71,11 +71,7 @@ def _schema_version(connection: sqlite3.Connection) -> int:
         raise RuntimeError("news_schema_version_invalid") from exc
 
 
-def _record(row: sqlite3.Row, columns: set[str]) -> MigrationRecord:
-    unknown: list[str] = []
-    for field in _OPTIONAL_EVIDENCE_FIELDS:
-        if field not in columns or row[field] in {None, "", 0}:
-            unknown.append(field)
+def _invalid_dimension(row: sqlite3.Row, columns: set[str]) -> MigrationRecord | None:
     for field in ("symbols", "sectors"):
         raw = row[field] if field in columns else None
         if raw in {None, ""}:
@@ -83,21 +79,27 @@ def _record(row: sqlite3.Row, columns: set[str]) -> MigrationRecord:
         try:
             decoded = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
-            return MigrationRecord(
-                record_key=f"news:{int(row['id']):020d}",
-                outcome="conflict",
-                diagnostic_code=f"news_{field}_json_invalid",
-                unknown_fields=(field,),
-                detail=f"资讯 {row['id']} 的 {field} 不是当前 JSON 数组；拒绝按旧格式猜测",
-            )
-        if not isinstance(decoded, list):
-            return MigrationRecord(
-                record_key=f"news:{int(row['id']):020d}",
-                outcome="conflict",
-                diagnostic_code=f"news_{field}_shape_invalid",
-                unknown_fields=(field,),
-                detail=f"资讯 {row['id']} 的 {field} 不是数组；拒绝 decoder fallback",
-            )
+            code = f"news_{field}_json_invalid"
+        else:
+            if isinstance(decoded, list):
+                continue
+            code = f"news_{field}_shape_invalid"
+        return MigrationRecord(
+            record_key=f"news:{int(row['id']):020d}", outcome="conflict",
+            diagnostic_code=code, unknown_fields=(field,),
+            detail=f"资讯 {row['id']} 的 {field} 不是当前 JSON 数组；拒绝 decoder fallback",
+        )
+    return None
+
+
+def _record(row: sqlite3.Row, columns: set[str]) -> MigrationRecord:
+    unknown: list[str] = []
+    for field in _OPTIONAL_EVIDENCE_FIELDS:
+        if field not in columns or row[field] in {None, "", 0}:
+            unknown.append(field)
+    invalid = _invalid_dimension(row, columns)
+    if invalid is not None:
+        return invalid
     analysis_version = row["analysis_version"] if "analysis_version" in columns else None
     if analysis_version in {None, 0, 1, "", "1"}:
         for field in ("factor_importance_score", "factor_weight_at_analysis"):
