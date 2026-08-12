@@ -591,6 +591,35 @@
     live.innerHTML = `<i></i>${failed ? `${failed} 个来源异常` : `${enabled.length} 个来源已启用`}`;
   }
 
+  function sourceStage(source) {
+    if (!source.enabled) return '已停用';
+    if (source.last_status === 'running') return '抓取中';
+    if (Number(source.last_pending || 0)) return '待处理';
+    if (source.last_status === 'failed' || source.health === 'failed') return '等待恢复';
+    return source.last_run ? '空闲' : '未运行';
+  }
+
+  function sourceDiagnostic(source) {
+    const parts = [
+      `阶段 ${sourceStage(source)}`,
+      `发现 ${Number(source.last_fetched || 0).toLocaleString()}`,
+      `已落盘 ${Number(source.last_saved || 0).toLocaleString()}`,
+      `待处理 ${Number(source.last_pending || 0).toLocaleString()}`,
+    ];
+    if (source.last_success_at) parts.push(`最近成功 ${source.last_success_at}`);
+    if (source.last_error_code) parts.push(`诊断码 ${source.last_error_code}`);
+    if (source.last_error) parts.push(`原因 ${source.last_error}`);
+    return parts.join('\n');
+  }
+
+  function sourceProgress(source) {
+    const found = Number(source.last_fetched || 0);
+    const saved = Number(source.last_saved || 0);
+    const pending = Number(source.last_pending || 0);
+    const total = Math.max(found, saved + pending);
+    return total ? Math.max(0, Math.min(100, Math.round(saved / total * 100))) : 0;
+  }
+
   function updateSourceFilter() {
     const select = document.getElementById('news-source-filter');
     const current = select.value;
@@ -611,7 +640,7 @@
       const items = state.sources.filter(source => source.group_name === group);
       if (!items.length) return '';
       return `<div class="source-list-group">${html(groupLabel(group))}</div>${items.map(source =>
-        `<button class="source-list-item ${state.selectedSource?.id === source.id ? 'active' : ''}" data-source-id="${html(source.id)}" type="button"><i class="${source.enabled ? 'enabled' : ''}"></i><span><strong>${html(source.name)}</strong><small>${html(source.last_error || (source.last_run ? `最近运行 ${source.last_run}` : '尚未运行'))}</small></span><span>${html(source.kind)}</span></button>`
+        `<button class="source-list-item ${state.selectedSource?.id === source.id ? 'active' : ''}" data-source-id="${html(source.id)}" type="button" aria-label="${html(`${source.name}，${sourceStage(source)}`)}"><i class="${source.enabled ? 'enabled' : ''}"></i><span><strong>${html(source.name)}</strong><small>${html(`${sourceStage(source)} · ${source.last_error_code || source.last_error || (source.last_run ? `最近运行 ${source.last_run}` : '尚未运行')}`)}</small><b class="source-progress" aria-label="已落盘进度 ${sourceProgress(source)}%"><i style="width:${sourceProgress(source)}%"></i></b></span><span>${html(source.kind)}</span></button>`
       ).join('')}`;
     }).join('') || '<div class="msg">暂无来源</div>';
   }
@@ -653,6 +682,8 @@
     document.getElementById('source-editor-kind').textContent = source?.built_in ? 'BUILT-IN ADAPTER' : 'CUSTOM SOURCE';
     document.getElementById('source-editor-title').textContent = source?.name || '添加声明式资讯来源';
     document.getElementById('source-secret-state').textContent = source?.auth_configured ? '凭据已配置' : '无鉴权凭据';
+    const run = source ? ` · ${sourceStage(source)} · 发现 ${Number(source.last_fetched || 0)} / 已落盘 ${Number(source.last_saved || 0)} / 待处理 ${Number(source.last_pending || 0)}` : '';
+    sourceFeedback(source?.last_error ? 'error' : '', source ? `${run.slice(3)}${source.last_error_code ? ` · 诊断码 ${source.last_error_code}` : ''}` : '');
     sourceForm.querySelector('[data-source-delete]').hidden = !source || source.built_in;
     sourceForm.querySelector('[data-source-clear-token]').hidden = !source?.auth_configured;
     sourceForm.querySelector('[data-source-run]').hidden = !source;
@@ -938,6 +969,12 @@
   }
 
   document.getElementById('news-open-sources').onclick = openSourceSettings;
+  document.getElementById('news-source-feedback').addEventListener('dblclick', async () => {
+    const source = state.selectedSource;
+    if (!source || !navigator.clipboard) return;
+    await navigator.clipboard.writeText(sourceDiagnostic(source));
+    sourceFeedback('success', '已复制脱敏诊断摘要');
+  });
   document.getElementById('settings-nav').addEventListener('click', event => {
     if (event.target.closest('[data-settings-section="sources"]')) loadSources(true);
   });

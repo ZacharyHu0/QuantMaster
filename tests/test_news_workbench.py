@@ -236,6 +236,19 @@ def test_source_crud_and_dynamic_credentials(tmp_path):
     assert target not in credentials.values
 
 
+def test_source_list_projects_last_run_progress_without_exposing_secrets(tmp_path):
+    store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
+    source = store.create(source_value(name="进度来源"))
+    run_id = store.start_run(source["id"])
+    store.finish_run(run_id, fetched=12, saved=7, pending=5, status="degraded")
+
+    listed = next(item for item in store.list() if item["id"] == source["id"])
+    assert listed["last_fetched"] == 12
+    assert listed["last_saved"] == 7
+    assert listed["last_pending"] == 5
+    assert "top-secret" not in json.dumps(listed, ensure_ascii=False).lower()
+
+
 def test_declarative_parsers(monkeypatch, tmp_path):
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
     payloads = {
