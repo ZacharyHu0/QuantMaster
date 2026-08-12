@@ -342,7 +342,7 @@ def test_decision_store_checks_same_day_deployment_instant(
     store = DecisionStore(tmp_path / "decisions.sqlite")
     if accepted:
         store.save(report, "demo", panel=_decision_panel())
-        assert store.latest("demo") == report
+        assert store.latest("demo") == {**report, "universe": "demo"}
     else:
         with pytest.raises(ValueError, match="上海 15:00 后"):
             store.save(report, "demo", panel=_decision_panel())

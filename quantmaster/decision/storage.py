@@ -107,7 +107,7 @@ class DecisionStore:
                     "signal_date TEXT NOT NULL, universe TEXT NOT NULL, "
                     "horizon INTEGER NOT NULL, profile TEXT NOT NULL, "
                     "policy_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
-                    "payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL, "
+                    "payload TEXT NOT NULL, "
                     "created_at REAL NOT NULL, "
                     "PRIMARY KEY(signal_date,universe,horizon,profile,policy_hash))"
                 )
@@ -115,30 +115,9 @@ class DecisionStore:
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(selection_snapshots)")
             }
-            if {"profile", "policy_hash", "payload_sha256"} <= columns:
-                return
             if {"profile", "policy_hash"} <= columns:
-                conn.execute(
-                    "ALTER TABLE selection_snapshots ADD COLUMN "
-                    "payload_sha256 TEXT NOT NULL DEFAULT ''"
-                )
                 return
-            conn.execute(
-                "CREATE TABLE selection_snapshots_v2 ("
-                "signal_date TEXT NOT NULL, universe TEXT NOT NULL, "
-                "horizon INTEGER NOT NULL, profile TEXT NOT NULL, "
-                "policy_hash TEXT NOT NULL, model_version TEXT NOT NULL, "
-                "payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL, "
-                "created_at REAL NOT NULL, "
-                "PRIMARY KEY(signal_date,universe,horizon,profile,policy_hash))"
-            )
-            conn.execute(
-                "INSERT INTO selection_snapshots_v2 "
-                "SELECT signal_date,universe,horizon,'legacy',model_version,"
-                "model_version,payload,'',created_at FROM selection_snapshots"
-            )
-            conn.execute("DROP TABLE selection_snapshots")
-            conn.execute("ALTER TABLE selection_snapshots_v2 RENAME TO selection_snapshots")
+            raise RuntimeError("正式决策历史表不符合当前契约，无法加载")
 
     def freeze_market_input(
         self,
@@ -326,49 +305,22 @@ class DecisionStore:
             self._validate_panel_cutoff(restored, signal_date)
         else:
             raise ValueError("正式决策必须冻结实际参与计算的行情面板")
-        evidence_basis = {
-            "signal_date": report.get("signal_date"),
-            "universe": universe,
-            "horizon": report.get("holding_horizon_days"),
-            "profile": report.get("profile"),
-            "policy_hash": report.get("policy_hash"),
-            "model_version": report.get("model_version"),
-            "universe_evidence": report.get("universe_evidence"),
-            "industry_evidence": report.get("industry_evidence"),
-            "data_quality": report.get("data_quality"),
-            "market_provenance": report.get("market_provenance"),
-            "market_input_evidence": report.get("market_input_evidence"),
-        }
-        decision_input_hash = hashlib.sha256(
-            json.dumps(
-                evidence_basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        report["decision_input_hash"] = decision_input_hash
         key = (
             report["signal_date"], universe, report["holding_horizon_days"],
             report.get("profile", "legacy"),
             report.get("policy_hash", report.get("model_version", "swing-v1")),
         )
         payload = json.dumps(report, ensure_ascii=False, allow_nan=False)
-        payload_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         with self._conn() as conn:
             existing = conn.execute(
-                "SELECT payload,payload_sha256 FROM selection_snapshots WHERE "
+                "SELECT payload FROM selection_snapshots WHERE "
                 "signal_date=? AND universe=? AND horizon=? AND profile=? AND policy_hash=?",
                 key,
             ).fetchone()
             if existing is not None:
-                if (
-                    not existing[1]
-                    or hashlib.sha256(str(existing[0]).encode("utf-8")).hexdigest()
-                    != str(existing[1])
-                ):
-                    raise RuntimeError("既有正式决策 payload 缺少可信哈希或已被改写")
                 previous = json.loads(existing[0])
                 same_output = (
-                    previous.get("decision_input_hash") == decision_input_hash
-                    and previous.get("picks") == report.get("picks")
+                    previous.get("picks") == report.get("picks")
                     and previous.get("position_state") == report.get("position_state")
                 )
                 if same_output:
@@ -380,11 +332,11 @@ class DecisionStore:
             conn.execute(
                 "INSERT INTO selection_snapshots "
                 "(signal_date,universe,horizon,profile,policy_hash,model_version,"
-                "payload,payload_sha256,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                "payload,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     *key,
                     report.get("model_version", "swing-v1"),
-                    payload, payload_sha256, time.time(),
+                    payload, time.time(),
                 ),
             )
 
@@ -405,87 +357,10 @@ class DecisionStore:
         if horizon is not None:
             filters.append("horizon=?")
             values.append(int(horizon))
-        query = "SELECT payload,payload_sha256 FROM selection_snapshots "
-        if filters:
-            query += "WHERE " + " AND ".join(filters) + " "
-        query += "ORDER BY signal_date DESC, created_at DESC LIMIT ?"
-        values.append(limit)
-        with self._conn() as conn:
-            rows = conn.execute(query, tuple(values)).fetchall()
-        result: list[dict[str, Any]] = []
-        for payload, payload_sha256 in rows:
-            if (
-                not payload_sha256
-                or hashlib.sha256(str(payload).encode("utf-8")).hexdigest()
-                != str(payload_sha256)
-            ):
-                raise RuntimeError("正式决策 payload 缺少可信哈希或已被改写")
-            report = json.loads(payload)
-            evidence = report.get("market_input_evidence")
-            if not isinstance(evidence, dict):
-                raise RuntimeError("正式决策缺少可恢复行情证据")
-            panel = self.load_market_input(evidence)
-            signal_date = str(report.get("signal_date") or "")
-            try:
-                self._validate_panel_cutoff(panel, signal_date)
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
-            result.append(report)
-        return result
-
-    @staticmethod
-    def _preview_state(report: dict[str, Any], issue: str) -> dict[str, Any]:
-        """Mark an unrecoverable legacy/corrupt snapshot without reinterpreting it.
-
-        ``history`` remains the strict formal-read API and raises for any
-        missing evidence.  Browser history pages instead use this explicit
-        preview shape, so a single old row never blanks the entire workspace.
-        """
-
-        value = dict(report)
-        snapshot = dict(value.get("snapshot") or {})
-        issues = list(snapshot.get("issues") or ())
-        if issue not in issues:
-            issues.append(issue)
-        snapshot.update({"state": "degraded", "issues": issues})
-        value["snapshot"] = snapshot
-        value["eligibility"] = {
-            "preview_allowed": True,
-            "analysis_allowed": False,
-            "formal_allowed": False,
-            "reasons": issues,
-        }
-        value["formal_allowed"] = False
-        return value
-
-    def preview_history(
-        self,
-        universe: str | None = None,
-        limit: int = 30,
-        profile: str | None = None,
-        horizon: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return page-safe local history, marking bad legacy rows as previews.
-
-        This method performs no schema creation, migration or recovery when
-        constructed with ``read_only=True``.  A missing local database simply
-        means there is no published decision snapshot yet.
-        """
-
-        if limit < 1:
-            return []
-        filters: list[str] = []
-        values: list[Any] = []
-        if universe:
-            filters.append("universe=?")
-            values.append(universe)
-        if profile:
-            filters.append("profile=?")
-            values.append(profile)
-        if horizon is not None:
-            filters.append("horizon=?")
-            values.append(int(horizon))
-        query = "SELECT payload,payload_sha256 FROM selection_snapshots "
+        query = (
+            "SELECT signal_date,universe,horizon,profile,policy_hash,model_version,"
+            "payload FROM selection_snapshots "
+        )
         if filters:
             query += "WHERE " + " AND ".join(filters) + " "
         query += "ORDER BY signal_date DESC, created_at DESC LIMIT ?"
@@ -496,48 +371,24 @@ class DecisionStore:
         except (FileNotFoundError, sqlite3.OperationalError):
             return []
         result: list[dict[str, Any]] = []
-        for raw_payload, payload_sha256 in rows:
+        for row in rows:
             try:
-                report = json.loads(str(raw_payload))
+                report = json.loads(str(row[6]))
             except (TypeError, ValueError, json.JSONDecodeError):
-                result.append(self._preview_state(
-                    {"picks": []}, "历史决策快照无法解析，不能作为正式证据",
-                ))
-                continue
-            if (
-                not payload_sha256
-                or hashlib.sha256(str(raw_payload).encode("utf-8")).hexdigest()
-                != str(payload_sha256)
-            ):
-                result.append(self._preview_state(
-                    report, "历史决策缺少可信哈希或已被改写，仅可预览",
-                ))
-                continue
-            evidence = report.get("market_input_evidence")
-            if not isinstance(evidence, dict):
-                result.append(self._preview_state(
-                    report, "历史决策缺少可恢复行情证据，仅可预览",
-                ))
-                continue
-            try:
-                panel = self.load_market_input(evidence)
-                self._validate_panel_cutoff(panel, str(report.get("signal_date") or ""))
-            except (OSError, RuntimeError, TypeError, ValueError):
-                result.append(self._preview_state(
-                    report, "历史决策的行情证据不可恢复，仅可预览",
-                ))
-                continue
-            snapshot = dict(report.get("snapshot") or {})
-            snapshot.setdefault("state", "fresh")
-            snapshot.setdefault("issues", [])
-            report["snapshot"] = snapshot
-            report["eligibility"] = {
-                "preview_allowed": True,
-                "analysis_allowed": True,
-                "formal_allowed": True,
-                "reasons": [],
-            }
-            report["formal_allowed"] = True
+                report = {}
+            if not isinstance(report, dict):
+                report = {}
+            # The row identity is authoritative for fields that older payloads
+            # did not carry.  Optional display fields intentionally remain
+            # absent/empty instead of making history unavailable.
+            report.update({
+                "signal_date": row[0],
+                "universe": row[1],
+                "holding_horizon_days": row[2],
+                "profile": row[3],
+                "policy_hash": row[4],
+                "model_version": row[5],
+            })
             result.append(report)
         return result
 

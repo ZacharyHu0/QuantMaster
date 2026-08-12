@@ -1002,7 +1002,7 @@ class TestBasics:
         assert [item["return"] for item in validation["picks"]] == [0.2, -0.1, 0.0]
         assert validation["average_return"] == 0.033333
 
-    def test_selection_history_marks_untrusted_legacy_snapshot_as_preview(self):
+    def test_selection_history_loads_unhashed_legacy_snapshot(self):
         from quantmaster.decision import DecisionStore
 
         report = {
@@ -1023,18 +1023,14 @@ class TestBasics:
                 ),
             },
         )
-        with store._conn() as connection:
-            connection.execute("UPDATE selection_snapshots SET payload_sha256='' ")
-
         response = client.get("/api/v1/research/selection/history", params={
             "universe": "demo", "profile": "risk_adjusted", "horizon": 3,
         })
 
         assert response.status_code == 200, response.text
         snapshot = response.json()["snapshots"][0]
-        assert snapshot["snapshot"]["state"] == "degraded"
-        assert snapshot["eligibility"]["preview_allowed"] is True
-        assert snapshot["eligibility"]["formal_allowed"] is False
+        assert snapshot["signal_date"] == "2026-08-03"
+        assert snapshot["picks"] == []
 
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
         from quantmaster.server import app as app_module
@@ -1268,9 +1264,7 @@ class TestBasics:
                    for pick in data["selection"]["picks"])
         assert data["history"][0]["signal_date"] == data["selection"]["signal_date"]
 
-        # A legacy row without a trusted hash is still useful as an explicit
-        # preview, but must not abort a new dashboard calculation after the
-        # current selection has already been emitted.
+        # A legacy row without a payload hash remains an ordinary history row.
         from quantmaster.decision import DecisionStore
 
         store = DecisionStore()
@@ -1278,9 +1272,9 @@ class TestBasics:
             connection.execute(
                 "INSERT INTO selection_snapshots "
                 "(signal_date,universe,horizon,profile,policy_hash,model_version,"
-                "payload,payload_sha256,created_at) "
+                "payload,created_at) "
                 "SELECT '2022-12-30',universe,horizon,profile,'legacy-unhashed',"
-                "model_version,payload,'',created_at-1 FROM selection_snapshots LIMIT 1"
+                "model_version,payload,created_at-1 FROM selection_snapshots LIMIT 1"
             )
 
         streamed = client.post("/api/v1/research/decision/dashboard/stream", json={
@@ -1311,13 +1305,11 @@ class TestBasics:
         ) < 100
         result = next(event["data"] for event in events if event["type"] == "result")
         assert len(result["selection"]["picks"]) == 4
-        degraded = [
+        legacy = next(
             snapshot for snapshot in result["history"]
-            if snapshot.get("snapshot", {}).get("state") == "degraded"
-        ]
-        assert len(degraded) == 1
-        assert degraded[0]["formal_allowed"] is False
-        assert "缺少可信哈希" in degraded[0]["snapshot"]["issues"][0]
+            if snapshot.get("policy_hash") == "legacy-unhashed"
+        )
+        assert legacy["signal_date"] == "2022-12-30"
 
     def test_decision_dashboard_refreshes_low_coverage_and_persists_partial_panel(
         self, panel, monkeypatch,

@@ -1585,7 +1585,7 @@ def selection_history(
 
     if horizon is not None and horizon not in {1, 3, 5, 7, 10, 20, 30}:
         raise HTTPException(422, "horizon 只支持 1、3、5、7、10、20、30")
-    snapshots = DecisionStore(read_only=True).preview_history(
+    snapshots = DecisionStore(read_only=True).history(
         universe,
         min(max(limit, 1), 200),
         profile=profile,
@@ -1845,11 +1845,7 @@ def _decision_dashboard_data(
             req.universe,
             panel={**panel, **decision_feature_inputs},
         )
-    # The dashboard is a mixed current-result/history view.  A corrupt or
-    # pre-hash legacy snapshot must remain visibly degraded, but must not make
-    # the freshly computed selection fail after it has already reached 96%.
-    # Strict consumers still use DecisionStore.history() and fail closed.
-    history = store.preview_history(req.universe, limit=10, profile=req.profile)
+    history = store.history(req.universe, limit=10, profile=req.profile)
     # 旧版本快照没有 name 字段；响应时补齐，避免历史区继续只显示代码。
     for snapshot in history:
         for pick in snapshot.get("picks", []):

@@ -1,5 +1,7 @@
 """牛熊/趋势状态与 1-7 日选股决策。"""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -169,11 +171,10 @@ def test_decision_market_input_is_frozen_and_tamper_evident(panel, tmp_path):
     artifact.write_bytes(artifact.read_bytes() + b"tampered")
     with pytest.raises(RuntimeError, match="已改写"):
         store.load_market_input(evidence)
-    with pytest.raises(RuntimeError, match="已改写"):
-        store.history("demo")
+    assert store.history("demo")[0]["signal_date"] == "2026-08-07"
 
 
-def test_decision_history_rejects_payload_tamper_and_legacy_unhashed_rows(tmp_path):
+def test_decision_history_loads_unhashed_legacy_rows_and_backfills_identity(tmp_path):
     panel = {
         "close": pd.DataFrame(
             [[10.0]],
@@ -194,16 +195,33 @@ def test_decision_history_rejects_payload_tamper_and_legacy_unhashed_rows(tmp_pa
     store.save(report, "demo", panel=panel)
     with store._conn() as connection:
         connection.execute(
-            "UPDATE selection_snapshots SET payload=REPLACE(payload,'flat','invested')"
+            "UPDATE selection_snapshots SET payload=?",
+            (json.dumps({"picks": [{"symbol": "600000.SH"}]}),),
         )
 
-    with pytest.raises(RuntimeError, match=r"payload.*改写"):
-        store.history("demo")
+    snapshot = store.history("demo")[0]
+    assert snapshot["signal_date"] == "2026-08-07"
+    assert snapshot["holding_horizon_days"] == 3
+    assert snapshot["profile"] == "risk_adjusted"
+    assert snapshot["picks"] == [{"symbol": "600000.SH"}]
 
+
+def test_decision_history_keeps_missing_optional_payload_fields_empty(tmp_path):
+    store = DecisionStore(tmp_path / "minimal-history.sqlite")
     with store._conn() as connection:
-        connection.execute("UPDATE selection_snapshots SET payload_sha256='' ")
-    with pytest.raises(RuntimeError, match="缺少可信哈希"):
-        store.history("demo")
+        connection.execute(
+            "INSERT INTO selection_snapshots "
+            "(signal_date,universe,horizon,profile,policy_hash,model_version,payload,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("2026-08-07", "demo", 3, "risk_adjusted", "legacy", "hybrid-v3:test",
+             "{}", 0.0),
+        )
+
+    assert store.history("demo") == [{
+        "signal_date": "2026-08-07", "universe": "demo", "holding_horizon_days": 3,
+        "profile": "risk_adjusted", "policy_hash": "legacy",
+        "model_version": "hybrid-v3:test",
+    }]
 
 
 def test_python_component_exposes_external_feature_input_for_freezing(panel, monkeypatch):
