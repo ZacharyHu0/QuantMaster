@@ -65,8 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           uv sync --locked --extra data --extra tushare --extra rust --extra release
-          uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
-          uv pip install --no-index --find-links dist/native quantmaster-kernel
+          uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out .artifacts/native
+          uv pip install --no-index --find-links .artifacts/native quantmaster-kernel
       - name: Verify native kernel and application version
         shell: bash
         env:
@@ -75,11 +75,10 @@ jobs:
           uv run python -c "from quantmaster.research.kernel import kernel_capabilities; assert kernel_capabilities()['backend'] == 'rust'"
           test "$RELEASE_TAG" = "v$(uv run python -c 'from quantmaster import __version__; print(__version__)')"
       - name: Build desktop executable
-        working-directory: packaging
-        run: uv run pyinstaller quantmaster.spec --noconfirm
+        run: uv run pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
       - name: Rename artifact
         shell: bash
-        run: mv "packaging/dist/${{ matrix.platform.artifact }}" "${{ matrix.platform.asset }}"
+        run: mv ".artifacts/packages/desktop/${{ matrix.platform.artifact }}" "${{ matrix.platform.asset }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.platform.asset }}
@@ -102,25 +101,25 @@ jobs:
         with:
           pattern: release-*
           merge-multiple: true
-          path: dist/release
+          path: .artifacts/release
       - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          path: dist/release
+          path: .artifacts/release
           format: cyclonedx-json
-          output-file: dist/release/QuantMaster.cdx.json
+          output-file: .artifacts/release/QuantMaster.cdx.json
           syft-version: "v1.50.0"
           upload-artifact: false
           upload-release-assets: false
       - name: Generate SHA-256 checksums
-        working-directory: dist/release
+        working-directory: .artifacts/release
         run: >-
           sha256sum QuantMaster-linux QuantMaster-macos QuantMaster-windows.exe
           QuantMaster.cdx.json > SHA256SUMS
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
-          subject-path: dist/release/*
+          subject-path: .artifacts/release/*
       - name: Extract current release notes
         shell: bash
         run: |
@@ -130,7 +129,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/release/*
+          files: .artifacts/release/*
           body_path: .release-notes.md
           fail_on_unmatched_files: true
           make_latest: true

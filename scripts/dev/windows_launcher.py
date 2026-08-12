@@ -1,4 +1,4 @@
-"""Build a named, branded virtual-environment launcher on Windows.
+"""Build the named, branded virtual-environment launcher on Windows.
 
 The generated executable is still the project's pinned venv interpreter, so it
 keeps editable imports and hot reload while Windows reports the real image name

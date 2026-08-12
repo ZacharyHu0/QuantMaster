@@ -5,7 +5,7 @@ import struct
 import pytest
 
 from quantmaster.release import VERSION
-from tools.windows_launcher import _read_icon, _version_resource
+from scripts.dev.windows_launcher import _read_icon, _version_resource
 
 
 def test_project_icon_has_valid_group_and_images() -> None:

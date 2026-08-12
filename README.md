@@ -51,12 +51,12 @@ pip install -e ".[data,dev]"     # data = akshare + yfinance（推荐）
 qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
 
-Windows 仓库用户也可以运行 `qm-serve.cmd --open`。脚本会固定使用项目 `.venv`，并默认
+Windows 仓库用户也可以运行 `scripts\\dev\\serve.cmd --open`。脚本会固定使用项目 `.venv`，并默认
 监视主站 Python 代码：连续写入会等待 30 秒静默，且任意两次重载至少间隔 5 分钟，
 冷却期间的全部修改会积压并合并为下一次安全热更新，
 单独修改发布元数据不会重启 Web worker，FreeStockDB 在整个启动器退出前保持运行；
 HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
-运行 `qm-serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
+运行 `scripts\\dev\\serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
 `QuantMaster.exe`；监督进程和热更新 worker 在 Windows 任务管理器中都显示为 QuantMaster。
 可用 `QM_RELOAD_QUIET_SECONDS`、`QM_RELOAD_MAX_BATCH_SECONDS` 和
 `QM_RELOAD_MIN_INTERVAL_SECONDS` 调整静默、连续写入批次和重载限频窗口。
@@ -308,22 +308,22 @@ Header 凭据只进入系统凭据库，跨域跳转和跨域详情页不会携�
 推送前建议运行与 GitHub CI 对齐的本地门禁：
 
 ```bash
-python tools/local_ci.py --all
+python scripts/ci/run.py --all
 ```
 
-默认运行 Ruff、异常/复杂度策略、mypy、核心测试和 3 个并行 full 测试分片；`--all` 额外运行 Chromium、Rust、wheel 和 PyInstaller 检查。只想快速验证核心门禁时运行 `python tools/local_ci.py`，资源有限时加 `--serial`。
+`--fast` 运行 Ruff、异常/复杂度策略、mypy 和核心测试；`--full` 运行完整 Python 测试分片且不重复执行核心测试；`--all` 再加入 Chromium、Rust、wheel 和 PyInstaller 检查。资源有限时可加 `--serial`。
 脚本始终使用仓库 `.venv` 解释器，即使 Git hook 由系统 Python 启动也不会混用环境。
 Windows 上会自动发现已安装的 Windows SDK 库目录，避免 Git hook 缺少开发者命令行环境时 Rust 链接失败。
 
 在 `main` 上提交版本时，已安装的 `.githooks/pre-commit` 会自动执行
-`python tools/local_ci.py --all`；门禁失败会阻止提交，因而不会触发 post-commit 的远端自动推送。
+`python scripts/ci/run.py --fast`；完整的 `--all` 验收在发布前单独运行。门禁失败会阻止提交，因而不会触发 post-commit 的远端自动推送。
 
 ### 版本提交与 GitHub 自动同步
 
 克隆仓库后执行一次：
 
 ```bash
-python tools/release_sync.py install
+python scripts/release/sync.py install
 ```
 
 此后每次提交都必须同时递增 `quantmaster/release.py`、更新实际发布日期并在
@@ -337,14 +337,14 @@ python tools/release_sync.py install
 发布会被 pre-commit 阻止，直到运行以下命令完成同步：
 
 ```bash
-python tools/release_sync.py status
-python tools/release_sync.py push
+python scripts/release/sync.py status
+python scripts/release/sync.py push
 ```
 
 `pre-commit` 只允许待提交版本使用上海当日作为实际发布日期；`status` 与 `push` 对历史
 提交只校验内部一致且日期不在未来，因此跨日恢复不会被误阻止。开始下一版本前还必须存在
 精确指向上一提交的不可变 `v{VERSION}` tag。若已推送版本的 CI 明确失败且尚未打 tag，维护者
-可用 `python tools/release_sync.py recover-ci --run-id <RUN_ID>` 将失败 run、当前提交和版本绑定
+可用 `python scripts/release/sync.py recover-ci --run-id <RUN_ID>` 将失败 run、当前提交和版本绑定
 在 `.git` 内；该授权只允许前向发布紧邻的 patch 版本，并会在新版本成功推送后自动清除。
 依赖与构建工具记录在跨平台 `uv.lock`，CI 和
 正式发布统一使用 `uv sync --locked`；可用 `QM_CONFIG_PATH` 为 doctor/CI 指定隔离配置。

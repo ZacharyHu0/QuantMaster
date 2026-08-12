@@ -344,7 +344,9 @@ def reload_web_worker(request: Request, background_tasks: BackgroundTasks) -> di
 
     trigger_path = manual_reload_trigger_path()
     if trigger_path is None:
-        raise HTTPException(409, "当前未启用热更新监督进程，请使用 qm-serve.cmd 启动")
+        raise HTTPException(
+            409, "当前未启用热更新监督进程，请使用 scripts/dev/serve.cmd 启动",
+        )
     background_tasks.add_task(request_manual_reload, trigger_path)
     return {
         "accepted": True,

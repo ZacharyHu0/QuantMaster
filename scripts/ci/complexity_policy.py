@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 # v1.6.0 adds audited, contract-heavy ingestion and point-in-time orchestration.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
@@ -17,7 +17,7 @@ BASELINE = 193
 def main() -> int:
     result = subprocess.run(
         [
-            sys.executable, "-m", "ruff", "check", "quantmaster", "tests", "tools",
+            sys.executable, "-m", "ruff", "check", "quantmaster", "tests", "scripts",
             "--no-cache", "--select", "C901", "--output-format", "json",
         ],
         cwd=ROOT,

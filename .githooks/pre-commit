@@ -8,4 +8,4 @@ else
   python_cmd=python3
 fi
 
-exec "$python_cmd" "$repo_root/tools/release_sync.py" pre-commit
+exec "$python_cmd" "$repo_root/scripts/release/sync.py" pre-commit

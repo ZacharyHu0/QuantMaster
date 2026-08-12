@@ -106,6 +106,6 @@ def test_frontend_does_not_reference_unversioned_api_routes():
 
 
 def test_broad_exception_policy_does_not_expand():
-    from tools.exception_policy import analyze
+    from scripts.ci.exception_policy import analyze
 
     assert analyze() == []

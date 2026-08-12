@@ -88,7 +88,8 @@ version = {attr = "quantmaster.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -p no:xonsh -p no:cacheprovider"
+addopts = "-q -p no:xonsh"
+cache_dir = ".artifacts/pytest/cache"
 markers = [
     "full: deterministic benchmark or complete-suite validation",
 ]
@@ -114,6 +115,7 @@ exclude_also = [
 
 [tool.mypy]
 python_version = "3.12"
+cache_dir = ".artifacts/cache/mypy"
 ignore_missing_imports = true
 follow_imports = "skip"
 check_untyped_defs = true
@@ -146,6 +148,7 @@ files = [
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+cache-dir = ".artifacts/cache/ruff"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "PIE", "RUF"]

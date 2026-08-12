@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.benchmark_refresh import run_benchmark
+from scripts.dev.benchmark_refresh import run_benchmark
 
 
 @pytest.mark.full

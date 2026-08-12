@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.release_sync import (
+from scripts.release.sync import (
     CHANGELOG_FILE,
     RELEASE_FILE,
     ci_recovery_errors,
@@ -77,7 +77,7 @@ def test_historical_metadata_allows_past_date_but_rejects_future_date():
 
 
 def test_previous_release_tag_must_point_to_head(monkeypatch):
-    from tools import release_sync
+    from scripts.release import sync as release_sync
 
     monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
     values = {("rev-list", "-n", "1", "v1.2.3"): "abc", ("rev-parse", "HEAD"): "def"}
@@ -86,7 +86,7 @@ def test_previous_release_tag_must_point_to_head(monkeypatch):
 
 
 def test_exact_ci_failure_recovery_allows_missing_previous_tag(monkeypatch):
-    from tools import release_sync
+    from scripts.release import sync as release_sync
 
     monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
     values = {("rev-list", "-n", "1", "v1.2.3"): "", ("rev-parse", "HEAD"): "abc"}
@@ -100,7 +100,7 @@ def test_exact_ci_failure_recovery_allows_missing_previous_tag(monkeypatch):
 
 
 def test_ci_failure_recovery_rejects_mismatched_commit(monkeypatch):
-    from tools import release_sync
+    from scripts.release import sync as release_sync
 
     monkeypatch.setattr(
         release_sync,
@@ -152,7 +152,7 @@ def test_push_config_ignores_invalid_resolve():
 
 
 def test_git_timeout_becomes_retryable_failure(monkeypatch):
-    from tools import release_sync
+    from scripts.release import sync as release_sync
 
     def expire(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])

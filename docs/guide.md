@@ -378,6 +378,6 @@ Web 市场页点击标的后可在日线、60 分、15 分、5 分和 1 分之�
 ```bash
 pip install pyinstaller
 cd packaging && pyinstaller quantmaster.spec
-# 产物 dist/QuantMaster(.exe)，双击即用；仓库打 v* tag 时 CI 会自动
+# 产物 .artifacts/packages/desktop/QuantMaster(.exe)，双击即用；仓库打 v* tag 时 CI 会自动
 # 构建 Mac/Windows/Linux 三平台版本并附到 GitHub Release
 ```

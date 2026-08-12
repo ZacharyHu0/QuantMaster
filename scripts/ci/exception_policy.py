@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "quantmaster"
 
 # Any new file, increase or unrecorded reduction fails CI. Reductions must lower the

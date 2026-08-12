@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "QM_ROOT=%~dp0"
+for %%I in ("%~dp0..\..") do set "QM_ROOT=%%~fI\"
 set "QM_PYTHON=%QM_ROOT%.venv\Scripts\python.exe"
 set "QM_LAUNCHER=%QM_ROOT%.venv\Scripts\QuantMaster.exe"
 
@@ -13,7 +13,7 @@ if not exist "%QM_PYTHON%" (
 
 pushd "%QM_ROOT%" >nul
 title QuantMaster
-"%QM_PYTHON%" tools\windows_launcher.py --source "%QM_PYTHON%" --icon "packaging\quantmaster.ico" --output "%QM_LAUNCHER%" >nul 2>nul
+"%QM_PYTHON%" scripts\dev\windows_launcher.py --source "%QM_PYTHON%" --icon "packaging\quantmaster.ico" --output "%QM_LAUNCHER%" >nul 2>nul
 if not exist "%QM_LAUNCHER%" (
     echo QuantMaster named launcher could not be prepared; falling back to Python.
     set "QM_LAUNCHER=%QM_PYTHON%"

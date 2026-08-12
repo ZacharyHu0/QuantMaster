@@ -33,17 +33,17 @@ jobs:
       - name: Cross-platform core tests
         shell: bash
         run: >-
-          mkdir -p reports &&
+          mkdir -p .artifacts/reports &&
           uv run python -m pytest tests/test_architecture.py tests/test_runtime_foundations.py
           tests/test_runtime_jobs.py tests/test_release_sync.py tests/test_settings.py
           --timeout=180
-          --junitxml=reports/core-${{ matrix.os }}.xml
+          --junitxml=.artifacts/reports/core-${{ matrix.os }}.xml
           --durations=30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: core-junit-${{ matrix.os }}
-          path: reports/*.xml
+          path: .artifacts/reports/*.xml
 
   rust-quality:
     timeout-minutes: 20
@@ -83,9 +83,9 @@ jobs:
       - name: Bind PyO3 to the locked Python
         shell: bash
         run: echo "PYO3_PYTHON=$(uv run python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
-      - run: uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out dist/native
+      - run: uv run maturin build --manifest-path rust/quantmaster-kernel/Cargo.toml --release --locked --out .artifacts/native
       - shell: bash
-        run: uv pip install --no-index --find-links dist/native quantmaster-kernel
+        run: uv pip install --no-index --find-links .artifacts/native quantmaster-kernel
       - name: Native/Python parity smoke
         run: >-
           uv run python -m pytest --full
@@ -99,6 +99,8 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     runs-on: ubuntu-latest
+    env:
+      COVERAGE_FILE: .artifacts/coverage/.coverage
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -110,26 +112,28 @@ jobs:
         run: uv sync --locked --extra dev --extra quality --extra rust
       - name: Run full-suite shard
         run: >-
-          mkdir -p reports &&
+          mkdir -p .artifacts/reports .artifacts/coverage &&
           uv run python -m coverage run --parallel-mode -m pytest
           --full
           --splits 3 --group ${{ matrix.shard }}
           --ignore=tests/test_ui_management.py
           --timeout=180
-          --junitxml=reports/coverage-${{ matrix.shard }}.xml --durations=30
+          --junitxml=.artifacts/reports/coverage-${{ matrix.shard }}.xml --durations=30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: |
-            .coverage.*
-            reports/*.xml
+            .artifacts/coverage/.coverage.*
+            .artifacts/reports/*.xml
           include-hidden-files: true
 
   coverage:
     timeout-minutes: 15
     needs: coverage-shard
     runs-on: ubuntu-latest
+    env:
+      COVERAGE_FILE: .artifacts/coverage/.coverage
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -143,13 +147,14 @@ jobs:
           merge-multiple: true
       - name: Combine branch coverage
         run: |
+          mkdir -p .artifacts/coverage
           uv run python -m coverage combine
           uv run python -m coverage report
-          uv run python -m coverage xml
+          uv run python -m coverage xml -o .artifacts/coverage/coverage.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
-          path: coverage.xml
+          path: .artifacts/coverage/coverage.xml
 
   browser:
     timeout-minutes: 25
@@ -167,15 +172,15 @@ jobs:
       - run: uv run playwright install --with-deps chromium
       - name: Chromium management flows
         run: >-
-          mkdir -p reports &&
+          mkdir -p .artifacts/reports &&
           uv run python -m pytest tests/test_ui_management.py
           --timeout=180
-          --junitxml=reports/browser.xml --durations=30
+          --junitxml=.artifacts/reports/browser.xml --durations=30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: browser-junit
-          path: reports/*.xml
+          path: .artifacts/reports/*.xml
 
   quality-package-audit:
     timeout-minutes: 35
@@ -191,9 +196,9 @@ jobs:
       - run: uv sync --locked --extra dev --extra quality --extra rust --extra release --extra data --extra tushare
       - name: Python quality ratchets
         run: |
-          uv run ruff check quantmaster tests tools
-          uv run python tools/exception_policy.py
-          uv run python tools/complexity_policy.py
+          uv run ruff check quantmaster tests scripts
+          uv run python scripts/ci/exception_policy.py
+          uv run python scripts/ci/complexity_policy.py
           uv run mypy
       - name: Audit locked core dependencies
         shell: bash
@@ -206,18 +211,17 @@ jobs:
           uv export --locked --no-dev --extra data --extra tushare --extra rust --extra release --no-emit-project --output-file desktop-requirements.txt
           uv run pip-audit --strict --require-hashes --disable-pip --requirement desktop-requirements.txt --vulnerability-service osv
       - name: Build wheel and source distribution
-        run: uv build
+        run: uv build --out-dir .artifacts/packages/python
       - name: Fresh wheel and CLI doctor smoke
         shell: bash
         run: |
           python -m venv /tmp/quantmaster-wheel
-          /tmp/quantmaster-wheel/bin/pip install dist/*.whl
+          /tmp/quantmaster-wheel/bin/pip install .artifacts/packages/python/*.whl
           QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" /tmp/quantmaster-wheel/bin/qm --help
           QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" /tmp/quantmaster-wheel/bin/qm doctor --deep
       - name: PyInstaller smoke build
-        working-directory: packaging
         shell: bash
         run: |
-          uv run pyinstaller quantmaster.spec --noconfirm
-          QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./dist/QuantMaster --help
-          QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./dist/QuantMaster doctor --deep
+          uv run pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
+          QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./.artifacts/packages/desktop/QuantMaster --help
+          QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./.artifacts/packages/desktop/QuantMaster doctor --deep

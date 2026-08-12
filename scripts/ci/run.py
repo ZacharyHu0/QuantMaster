@@ -7,10 +7,15 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+ARTIFACTS = ROOT / ".artifacts"
+PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
+PACKAGE_ROOT = ARTIFACTS / "packages"
+RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 
 
 def project_python() -> Path:
@@ -64,6 +69,8 @@ def pytest_shard(shard: int) -> None:
             "--ignore=tests/test_ui_management.py",
             "--timeout=180",
             "--durations=30",
+            "--basetemp",
+            str(RUN_ROOT / f"full-{shard}"),
         ],
     )
 
@@ -117,7 +124,7 @@ def run_shards() -> None:
 def smoke_fresh_wheel() -> None:
     """Install the wheel in an isolated environment and exercise the CLI."""
 
-    wheels = sorted((ROOT / "dist").glob("quantmaster-*.whl"))
+    wheels = sorted((PACKAGE_ROOT / "python").glob("quantmaster-*.whl"))
     if not wheels:
         raise SystemExit("[local-ci] wheel build did not produce a wheel")
     with tempfile.TemporaryDirectory(prefix="quantmaster-wheel-") as raw_temp:
@@ -151,6 +158,9 @@ def smoke_fresh_wheel() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--fast", action="store_true", help="run static checks and core tests")
+    mode.add_argument("--full", action="store_true", help="run static checks and full Python suite")
     parser.add_argument("--ui", action="store_true", help="also run Chromium management tests")
     parser.add_argument("--package", action="store_true", help="also build and smoke-test the wheel/EXE")
     parser.add_argument("--rust", action="store_true", help="also run Rust format/check/clippy/test gates")
@@ -165,36 +175,37 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "tools"])
-    run("exception policy", ["tools/exception_policy.py"])
-    run("complexity policy", ["tools/complexity_policy.py"])
+    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "scripts"])
+    run("exception policy", ["scripts/ci/exception_policy.py"])
+    run("complexity policy", ["scripts/ci/complexity_policy.py"])
     run("mypy", ["-m", "mypy"])
-    run(
-        "core tests",
-        [
-            "-m",
-            "pytest",
-            "tests/test_architecture.py",
-            "tests/test_runtime_foundations.py",
-            "tests/test_runtime_jobs.py",
-            "tests/test_release_sync.py",
-            "tests/test_settings.py",
-            "--timeout=180",
-            "--durations=30",
-        ],
-    )
-    if args.serial:
-        for shard in (1, 2, 3):
-            pytest_shard(shard)
+    if args.full or args.all:
+        if args.serial:
+            for shard in (1, 2, 3):
+                pytest_shard(shard)
+        else:
+            run_shards()
     else:
-        run_shards()
+        run(
+            "core tests",
+            [
+                "-m", "pytest", "tests/test_architecture.py",
+                "tests/test_runtime_foundations.py", "tests/test_runtime_jobs.py",
+                "tests/test_release_sync.py", "tests/test_settings.py",
+                "--timeout=180", "--durations=30", "--basetemp",
+                str(RUN_ROOT / "fast"),
+            ],
+        )
 
     if args.ui or args.all:
         ui_env = os.environ.copy()
         ui_env["QM_RUN_UI"] = "1"
         run(
             "Chromium management",
-            ["-m", "pytest", "tests/test_ui_management.py", "--timeout=180"],
+            ["-m", "pytest", "tests/test_ui_management.py", "--timeout=180",
+             "--basetemp", str(RUN_ROOT / "ui")],
             env=ui_env,
         )
 
@@ -217,10 +228,18 @@ def main() -> int:
         )
 
     if args.package or args.all:
-        run("wheel build", ["-m", "build"])
+        build_env = os.environ.copy()
+        build_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
+        run_external(
+            "wheel build",
+            ["uv", "build", "--out-dir", str(PACKAGE_ROOT / "python")],
+            env=build_env,
+        )
         smoke_fresh_wheel()
-        run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm", "packaging/quantmaster.spec"])
-        exe = ROOT / "dist" / "QuantMaster.exe"
+        run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm",
+            "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
+            str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
+        exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
         if exe.exists():
             run_external("EXE help", [str(exe), "--help"])
             with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:

@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.11.1"
+VERSION = "1.11.2"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "仓库工作流收敛",
+                "items": (
+                    (
+                        "开发、CI、发布和维护入口按职责归入 scripts，测试缓存与构建产物"
+                        "统一写入 .artifacts，避免项目根目录持续积累临时文件。"
+                    ),
+                    (
+                        "本地发布门禁拆分为 fast、full 和 all 三档，完整测试不再重复执行"
+                        "核心测试，缩短日常提交反馈时间。"
+                    ),
+                    (
+                        "审核并清理本地历史分支与 worktree，业务数据保持原位，"
+                        "清理证据保存在数据备份目录。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.11.1",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "跨平台版本资源加载修复",

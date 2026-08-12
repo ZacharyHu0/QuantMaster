@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 RELEASE_FILE = "quantmaster/release.py"
 CHANGELOG_FILE = "CHANGELOG.md"
 PENDING_MARKER = "quantmaster-release-sync.json"
@@ -288,14 +288,14 @@ def verify_previous_release_synced() -> list[str]:
     marker = pending_marker()
     if marker.exists():
         errors.append(
-            "上一个版本仍标记为待推送；先运行 `python tools/release_sync.py push`"
+            "上一个版本仍标记为待推送；先运行 `python scripts/release/sync.py push`"
         )
     local, tracking = local_and_tracking_heads()
     if not tracking:
         errors.append("缺少 origin/main 跟踪引用；先运行 `git fetch origin main`")
     elif local != tracking:
         errors.append(
-            "本地 main 与 origin/main 尚未同步；先运行 `python tools/release_sync.py push`"
+            "本地 main 与 origin/main 尚未同步；先运行 `python scripts/release/sync.py push`"
         )
     return errors
 
@@ -346,8 +346,8 @@ def local_ci_required(paths: set[str]) -> bool:
 
 def run_local_ci() -> int:
     """Run the same local pre-push gates used before an automatic GitHub push."""
-    command = [sys.executable, str(ROOT / "tools" / "local_ci.py"), "--all"]
-    print("[QuantMaster] main 发布提交先运行本地 CI 门禁：tools/local_ci.py --all")
+    command = [sys.executable, str(ROOT / "scripts" / "ci" / "run.py"), "--fast"]
+    print("[QuantMaster] main 发布提交先运行快速门禁：scripts/ci/run.py --fast")
     result = subprocess.run(command, cwd=ROOT, check=False)
     if result.returncode:
         print(
@@ -544,7 +544,7 @@ def push_current_release() -> int:
     print("[QuantMaster] 自动推送失败，提交已保留并标记为待同步。", file=sys.stderr)
     print(last_error, file=sys.stderr)
     print(
-        "恢复后运行：python tools/release_sync.py push",
+        "恢复后运行：python scripts/release/sync.py push",
         file=sys.stderr,
     )
     return 1

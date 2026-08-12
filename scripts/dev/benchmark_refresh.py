@@ -1,4 +1,4 @@
-"""Offline, reproducible refresh benchmark for the local DAG hot path.
+"""Run the offline, reproducible refresh benchmark for the local DAG hot path.
 
 It intentionally generates its own deterministic market fixture and never
 opens a provider.  That makes a regression report comparable across machines

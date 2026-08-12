@@ -21,7 +21,7 @@
   project tests, linting, or scripts.
 - Full-only suites require `--full`. In restricted Windows environments, use a writable
   workspace-local pytest base directory, for example
-  `./.venv/Scripts/python.exe -m pytest --full --basetemp .pytest-tmp <target>`.
+  `./.venv/Scripts/python.exe -m pytest --full --basetemp .artifacts/pytest/run <target>`.
 
 ## Release bookkeeping
 
@@ -39,10 +39,10 @@
 
 ## Release synchronization
 
-- Run `python tools/release_sync.py install` once after cloning. The tracked hooks validate every
+- Run `python scripts/release/sync.py install` once after cloning. The tracked hooks validate every
   commit and automatically push version-incrementing commits made on `main` to `origin/main`.
 - A failed push leaves a pending marker inside `.git` and blocks the next release commit. Recover
-  with `python tools/release_sync.py push`; inspect the state with `python tools/release_sync.py status`.
+  with `python scripts/release/sync.py push`; inspect the state with `python scripts/release/sync.py status`.
 - Auto-push is intentionally limited to `main`. Never enable it for the archived Claude branch or
   use a release commit to move that branch.
 - Do not bypass the hooks for normal project work. Each commit remains an independently validated,
