@@ -40,6 +40,17 @@ def test_settings_page_exposes_news_scan_intervals():
     assert 'name="automation.periodic_news_interval_minutes"' in source
 
 
+def test_model_diagnostic_cancel_is_compact_and_responsive():
+    root = __import__("pathlib").Path(__file__).parents[1] / "quantmaster" / "server" / "static"
+    script = (root / "settings.js").read_text(encoding="utf-8")
+    styles = (root / "settings.css").read_text(encoding="utf-8")
+
+    assert 'class="check-task-cancel"' in script
+    assert 'aria-label="取消当前检测"' in script
+    assert 'grid-template-columns: 6px minmax(0, 1fr) auto' in styles
+    assert '.check-task-cancel { grid-column: 2; grid-row: 2;' in styles
+
+
 def test_settings_page_exposes_online_provider_switches():
     source = (
         __import__("pathlib").Path(__file__).parents[1]

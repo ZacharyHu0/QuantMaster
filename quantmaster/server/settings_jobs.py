@@ -136,6 +136,39 @@ class SettingsJobs:
         *,
         api_key: str,
     ) -> tuple[dict[str, Any], bool]:
+        if not self.diagnostic_runtime.dispatch_enabled:
+            # Web generations cannot hand process-local memory to the
+            # supervisor.  Transfer the draft once over the authenticated
+            # local command channel; the worker puts it in its own one-shot
+            # vault before the durable job is created.  No secret enters the
+            # job ledger, event stream, artifact, or public response.
+            from quantmaster.runtime.worker_ipc import call_worker_command
+
+            response = call_worker_command(
+                "settings.diagnostic.create",
+                {
+                    "kind": str(kind),
+                    "document": document.model_dump(mode="json"),
+                    "api_key": str(api_key or ""),
+                },
+                timeout=2.0,
+            )
+            task = response.get("task")
+            if not isinstance(task, dict):
+                raise RuntimeError("后台执行器返回无效的设置检测任务")
+            return task, bool(response.get("created", True))
+
+        return self._submit_diagnostic_local(kind, document, api_key=api_key)
+
+    def _submit_diagnostic_local(
+        self,
+        kind: str,
+        document: SettingsDocument,
+        *,
+        api_key: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create a diagnostic after its secret has reached the worker."""
+
         reference = _DIAGNOSTIC_CREDENTIALS.put(document, api_key)
         # The durable spec contains only an opaque process-local reference.
         # Provider configuration and draft credentials never enter job/event/log JSON.

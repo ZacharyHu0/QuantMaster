@@ -125,6 +125,21 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .check-result.warning::before { background: var(--s4); }
 .check-result.error::before { background: var(--up); }
 .check-result.checking::before { background: var(--s1); animation: autosave-pulse 900ms ease-in-out infinite; }
+.check-result.checking { grid-template-columns: 6px minmax(0, 1fr) auto; }
+.check-task-cancel {
+  grid-column: 3; grid-row: 1; align-self: center; min-width: 0; min-height: 30px;
+  padding: 5px 9px; border: 1px solid var(--axis); border-radius: 6px;
+  color: var(--ink-2); background: transparent; font-size: 11px; line-height: 1;
+  white-space: nowrap; cursor: pointer;
+  transition: color 160ms var(--ease-out-quart), border-color 160ms var(--ease-out-quart),
+    background-color 160ms var(--ease-out-quart);
+}
+.check-task-cancel:hover {
+  color: var(--ink); border-color: var(--ink-2);
+  background: color-mix(in oklch, var(--surface) 82%, transparent);
+}
+.check-task-cancel:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+.check-task-cancel:disabled { color: var(--axis); border-color: var(--border); cursor: wait; }
 .check-summary { display: grid; gap: 3px; min-width: 0; }
 .check-summary > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
 .check-summary strong { color: var(--ink-2); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
@@ -325,6 +340,8 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
   .settings-content button,
   .settings-content input:not([type="checkbox"]):not([type="radio"]),
   .settings-content select { min-height: 44px; }
+  .check-result.checking { grid-template-columns: 6px minmax(0, 1fr); }
+  .check-task-cancel { grid-column: 2; grid-row: 2; justify-self: start; min-height: 44px; }
   .choice-row label { min-height: 44px; }
   .plaintext-confirm { display: flex; align-items: center; min-height: 44px; }
   .import-heading { flex-direction: column; }

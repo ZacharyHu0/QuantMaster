@@ -209,3 +209,44 @@ def test_settings_diagnostic_uses_process_local_one_shot_credentials(tmp_path, m
     assert api_key == "draft-secret"
     jobs.stop()
     set_config(None)
+
+
+def test_web_settings_diagnostic_transfers_secret_to_worker_without_ledger_persistence(
+    tmp_path, monkeypatch,
+):
+    from quantmaster.server import settings_jobs
+    from quantmaster.settings import SettingsDocument
+
+    set_config(_config(tmp_path))
+    jobs = settings_jobs.SettingsJobs()
+    jobs.diagnostic_runtime._dispatch_enabled = False
+    document = SettingsDocument()
+    captured = {}
+
+    def worker_command(operation, payload, **kwargs):
+        captured.update({"operation": operation, "payload": payload, "kwargs": kwargs})
+        return {
+            "task": {
+                "id": "worker-diagnostic",
+                "type": "settings.diagnostic",
+                "spec": {"kind": payload["kind"], "credential_reference": "opaque"},
+            },
+            "created": True,
+        }
+
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker_ipc.call_worker_command", worker_command,
+    )
+
+    task, created = jobs.submit_diagnostic(
+        "llm-web-search", document, api_key="draft-secret",
+    )
+
+    assert created is True
+    assert task["id"] == "worker-diagnostic"
+    assert captured["operation"] == "settings.diagnostic.create"
+    assert captured["payload"]["api_key"] == "draft-secret"
+    assert captured["kwargs"]["timeout"] == 2.0
+    assert "draft-secret" not in repr(task)
+    jobs.stop()
+    set_config(None)

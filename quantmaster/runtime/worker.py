@@ -250,6 +250,16 @@ class RuntimeWorker:
                         set_config(load_config())
                         changed = [str(value) for value in payload.get("changed_fields") or []]
                         return runtime.apply_config(changed)
+                    if operation == "settings.diagnostic.create":
+                        from quantmaster.settings import SettingsDocument
+
+                        document = SettingsDocument.model_validate(payload.get("document") or {})
+                        task, created = settings_worker._submit_diagnostic_local(
+                            str(payload.get("kind") or ""),
+                            document,
+                            api_key=str(payload.get("api_key") or ""),
+                        )
+                        return {"task": task, "created": created}
                 except KeyError as exc:
                     raise WorkerCommandError("job_not_found", "数据刷新任务不存在") from exc
                 except ValueError as exc:

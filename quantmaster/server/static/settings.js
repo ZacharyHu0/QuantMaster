@@ -523,7 +523,7 @@
     if (!el) return;
     const active = ['queued', 'running', 'cancelling'].includes(task.status);
     const action = active && task.links?.cancel
-      ? `<button type="button" class="check-task-cancel" data-settings-task-cancel="${html(task.id)}">取消</button>`
+      ? `<button type="button" class="check-task-cancel" data-settings-task-cancel="${html(task.id)}" aria-label="取消当前检测">取消检测</button>`
       : '';
     el.className = `check-result checking ${task.status === 'cancelling' ? 'stale' : ''}`;
     el.removeAttribute('data-checked');
