@@ -383,6 +383,90 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         browser.close()
 
 
+def test_runtime_lifecycle_snapshot_is_compact_sanitized_and_backward_compatible(live_server):
+    url, _ = live_server
+    lifecycle = {
+        "state": "draining",
+        "generation": "17",
+        "phase": "finish_atomic_unit",
+        "task_counts": {"active": 3, "converging": 2, "handoff": 1},
+        "durable_queue": {"pending": 8},
+        "deadline": {"phase": "persist_checkpoint", "remaining_seconds": 12},
+        "timeout_issues": [
+            {
+                "diagnostic_id": "QM-SHUTDOWN-014",
+                "component": "provider-executor",
+                "phase": "stop_executor",
+                "detail": "Bearer should-not-render token=also-secret; 在途调用超过阶段时限",
+            }
+        ],
+    }
+    diagnostics = {
+        "issues": [],
+        "runtime": {
+            "lifecycle": lifecycle,
+            "readiness": {"web_bound": True, "storage_ready": True},
+            "web": {"host": "127.0.0.1", "port": 8686, "pid": 12, "generation": "17"},
+            "supervisor": {"status": "running", "available": True},
+            "storage": {"status": "ready", "data_root": "local"},
+            "scheduler": {"status": "stopping", "managed_by": "runtime-worker"},
+        },
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route(
+            "**/api/v1/diagnostics",
+            lambda route: route.fulfill(status=200, json=diagnostics),
+        )
+        page.goto(url)
+        panel = page.locator("#runtime-lifecycle")
+        panel.wait_for(state="attached")
+        page.wait_for_function("!document.querySelector('#runtime-lifecycle').hidden")
+        page.locator("#runtime-summary").click()
+
+        assert panel.get_attribute("data-state") == "draining"
+        assert "正在收敛" in panel.inner_text()
+        assert "generation 17" in panel.inner_text()
+        assert "finish_atomic_unit" in panel.inner_text()
+        assert "剩余 12 秒" in panel.inner_text()
+        assert page.locator("#runtime-lifecycle-active").inner_text() == "3"
+        assert page.locator("#runtime-lifecycle-converging").inner_text() == "2"
+        assert page.locator("#runtime-lifecycle-handoff").inner_text() == "1"
+        assert page.locator("#runtime-lifecycle-queue").inner_text() == "8"
+        page.locator("#runtime-lifecycle-issues summary").click()
+        issue_text = page.locator("#runtime-lifecycle-issue-list").inner_text()
+        assert "QM-SHUTDOWN-014" in issue_text
+        assert "should-not-render" not in issue_text
+        assert "also-secret" not in issue_text
+        assert "***" in issue_text
+        assert page.locator("#runtime-info").get_attribute("data-level") == "warning"
+
+        entry_count = page.locator("#runtime-list .runtime-entry").count()
+        page.evaluate(
+            "runtime => window.QuantMasterRunInfo.syncRuntime(runtime)",
+            diagnostics["runtime"],
+        )
+        assert page.locator("#runtime-list .runtime-entry").count() == entry_count
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+        page.evaluate("window.QuantMasterRunInfo.syncRuntime({})")
+        assert page.locator("#runtime-lifecycle").is_hidden()
+        for state, label in (
+            ("running", "运行中"),
+            ("draining", "正在收敛"),
+            ("stopping", "正在停止"),
+            ("reloading", "正在重载"),
+        ):
+            page.evaluate(
+                "value => window.QuantMasterRunInfo.renderLifecycle(value)",
+                {"status": state, "generation_id": "18", "current_phase": "handoff"},
+            )
+            assert page.locator("#runtime-lifecycle-state").inner_text() == label
+        browser.close()
+
+
 def test_help_handbook_search_routes_and_calculators(live_server):
     url, _ = live_server
     trade_settings = {

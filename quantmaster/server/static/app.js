@@ -590,6 +590,19 @@ const runtimeInfo = (() => {
   const count = document.getElementById('runtime-count');
   const errorCount = document.getElementById('runtime-error-count');
   const list = document.getElementById('runtime-list');
+  const lifecyclePanel = document.getElementById('runtime-lifecycle');
+  const lifecycleState = document.getElementById('runtime-lifecycle-state');
+  const lifecycleTitle = document.getElementById('runtime-lifecycle-title');
+  const lifecycleGeneration = document.getElementById('runtime-lifecycle-generation');
+  const lifecycleActive = document.getElementById('runtime-lifecycle-active');
+  const lifecycleConverging = document.getElementById('runtime-lifecycle-converging');
+  const lifecycleHandoff = document.getElementById('runtime-lifecycle-handoff');
+  const lifecycleQueue = document.getElementById('runtime-lifecycle-queue');
+  const lifecyclePhase = document.getElementById('runtime-lifecycle-phase');
+  const lifecycleDeadline = document.getElementById('runtime-lifecycle-deadline');
+  const lifecycleIssues = document.getElementById('runtime-lifecycle-issues');
+  const lifecycleIssueSummary = document.getElementById('runtime-lifecycle-issue-summary');
+  const lifecycleIssueList = document.getElementById('runtime-lifecycle-issue-list');
   const entries = [];
   const levelLabels = {info:'进行中', success:'完成', warning:'需留意', error:'失败'};
   const emptyLabels = {
@@ -597,10 +610,98 @@ const runtimeInfo = (() => {
     running:'当前没有进行中的任务。', completed:'暂无已完成任务。',
   };
   let activeFilter = 'all', expanded = false, sequence = 0, operationSequence = 0;
+  let lifecycleSnapshot = null, lifecycleRevision = '';
 
   function compactText(value, limit = 360) {
     const text = String(value || '').replace(/\s+/g, ' ').trim();
     return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+  }
+  function safeLifecycleText(value, limit = 120) {
+    return compactText(value, limit)
+      .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***')
+      .replace(/\b[\w-]*(token|secret|password|authorization|credential|api[_-]?key)[\w-]*\s*[:=]\s*[^\s,;&]+/gi, '$1=***')
+      .replace(/([?&](?:token|secret|password|authorization|credential|api[_-]?key)=)[^&#\s]+/gi, '$1***')
+      .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{12,}\b/g, '***');
+  }
+  function lifecycleCount(value) {
+    const countValue = optionalCount(value);
+    return countValue === null ? 0 : Math.max(0, countValue);
+  }
+  function lifecycleLabel(state) {
+    return ({running:'运行中', draining:'正在收敛', stopping:'正在停止', reloading:'正在重载'})[state] || '状态未知';
+  }
+  function normalizeLifecycle(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const counts = raw.task_counts || raw.tasks || {};
+    const queue = raw.durable_queue || raw.queue || {};
+    const deadline = raw.deadline || {};
+    const stateValue = safeLifecycleText(raw.state || raw.status || 'running', 24).toLowerCase();
+    const state = ['running', 'draining', 'stopping', 'reloading'].includes(stateValue) ? stateValue : 'unknown';
+    const rawIssues = Array.isArray(raw.timeout_issues) ? raw.timeout_issues :
+      Array.isArray(raw.timeouts) ? raw.timeouts : [];
+    return {
+      state,
+      generation:safeLifecycleText(raw.generation ?? raw.generation_id ?? '—', 40),
+      phase:safeLifecycleText(raw.phase || raw.current_phase || deadline.phase || '—', 80),
+      counts:{
+        active:lifecycleCount(counts.active ?? raw.active_tasks),
+        converging:lifecycleCount(counts.converging ?? counts.settling ?? raw.converging_tasks),
+        handoff:lifecycleCount(counts.handoff ?? counts.handing_off ?? raw.handoff_tasks),
+      },
+      queue:lifecycleCount(queue.pending ?? queue.depth ?? queue.size ?? raw.durable_queue_pending),
+      deadline:{
+        phase:safeLifecycleText(deadline.phase || '', 80),
+        remaining:optionalCount(deadline.remaining_seconds ?? deadline.remaining ?? raw.deadline_remaining_seconds),
+      },
+      issues:rawIssues.slice(0, 20).map(issue => ({
+        diagnosticId:safeLifecycleText(issue?.diagnostic_id || issue?.code || '', 80),
+        component:safeLifecycleText(issue?.component || issue?.owner || '后台组件', 50),
+        phase:safeLifecycleText(issue?.phase || '未标记阶段', 60),
+        detail:safeLifecycleText(issue?.detail || issue?.message || '超过阶段时限', 180),
+      })),
+      issueCount:rawIssues.length,
+      hiddenIssueCount:Math.max(0, rawIssues.length - 6),
+    };
+  }
+  function renderLifecycle(raw) {
+    const snapshot = normalizeLifecycle(raw);
+    const revision = JSON.stringify(snapshot);
+    if (revision === lifecycleRevision) return;
+    lifecycleRevision = revision;
+    lifecycleSnapshot = snapshot;
+    lifecyclePanel.hidden = !snapshot;
+    if (!snapshot) {
+      syncSummary();
+      return;
+    }
+    lifecyclePanel.dataset.state = snapshot.state;
+    lifecycleState.textContent = lifecycleLabel(snapshot.state);
+    lifecycleTitle.textContent = snapshot.state === 'running' ? '服务运行生命周期' : '服务正在安全交接';
+    lifecycleGeneration.textContent = `generation ${snapshot.generation}`;
+    lifecycleActive.textContent = snapshot.counts.active;
+    lifecycleConverging.textContent = snapshot.counts.converging;
+    lifecycleHandoff.textContent = snapshot.counts.handoff;
+    lifecycleQueue.textContent = snapshot.queue;
+    lifecyclePhase.textContent = snapshot.phase;
+    const remaining = snapshot.deadline.remaining;
+    lifecycleDeadline.textContent = remaining === null
+      ? (snapshot.deadline.phase ? `${snapshot.deadline.phase} · 未报告剩余时间` : '未设置')
+      : remaining > 0 ? `${snapshot.deadline.phase ? `${snapshot.deadline.phase} · ` : ''}剩余 ${remaining} 秒`
+        : `${snapshot.deadline.phase ? `${snapshot.deadline.phase} · ` : ''}已到期`;
+    lifecycleIssues.hidden = snapshot.issues.length === 0;
+    if (!snapshot.issues.length) {
+      lifecycleIssues.open = false;
+      lifecycleIssueList.replaceChildren();
+      syncSummary();
+      return;
+    }
+    lifecycleIssueSummary.textContent = `${snapshot.issueCount} 个超时问题`;
+    lifecycleIssueList.innerHTML = snapshot.issues.slice(0, 6).map(issue => `<div class="runtime-lifecycle-issue">
+      <div><strong>${esc(issue.component)}</strong><span>${esc(issue.phase)}</span></div>
+      <p>${esc(issue.detail)}</p>
+      ${issue.diagnosticId ? `<code>${esc(issue.diagnosticId)}</code>` : ''}
+    </div>`).join('') + (snapshot.hiddenIssueCount ? `<p class="runtime-lifecycle-more">另有 ${snapshot.hiddenIssueCount} 项，请凭诊断码查看本机日志。</p>` : '');
+    syncSummary();
   }
   function visible(entry) {
     if (activeFilter === 'all') return true;
@@ -613,13 +714,16 @@ const runtimeInfo = (() => {
     const problems = entries.filter(entry => ['warning', 'error'].includes(entry.level));
     const errors = problems.filter(entry => entry.level === 'error');
     const focus = problems.at(-1) || entries.at(-1);
+    const lifecycleTimeouts = lifecycleSnapshot?.issueCount || 0;
     count.hidden = entries.length === 0;
     count.textContent = entries.length ? `${entries.length} 项` : '';
     errorCount.hidden = problems.length === 0;
     errorCount.textContent = problems.length ? `${problems.length} 个问题` : '';
     errorCount.setAttribute('aria-label', problems.length ? `${problems.length} 个后台问题` : '没有后台问题');
-    latest.textContent = focus ? `${focus.source} · ${focus.message}` : '后台正常';
-    root.dataset.level = errors.length ? 'error' : problems.length ? 'warning' : 'success';
+    latest.textContent = focus ? `${focus.source} · ${focus.message}` : lifecycleTimeouts
+      ? `安全退出 · ${lifecycleTimeouts} 个超时问题` : lifecycleSnapshot && lifecycleSnapshot.state !== 'running'
+        ? `${lifecycleLabel(lifecycleSnapshot.state)} · generation ${lifecycleSnapshot.generation}` : '后台正常';
+    root.dataset.level = errors.length ? 'error' : problems.length || lifecycleTimeouts ? 'warning' : 'success';
   }
   function diagnostics(entry) {
     const rows = [];
@@ -736,6 +840,7 @@ const runtimeInfo = (() => {
   }
   function syncRuntime(runtime) {
     if (!runtime || typeof runtime !== 'object') return;
+    renderLifecycle(runtime.lifecycle);
     const readiness = runtime.readiness || {};
     const web = runtime.web || {};
     const supervisor = runtime.supervisor || {};
@@ -829,7 +934,7 @@ const runtimeInfo = (() => {
     if (event.key === 'Escape' && expanded) setExpanded(false);
   });
   render();
-  return {add, begin, resolve, phase, sync, syncRuntime, open:() => setExpanded(true), close:() => setExpanded(false)};
+  return {add, begin, resolve, phase, sync, syncRuntime, renderLifecycle, open:() => setExpanded(true), close:() => setExpanded(false)};
 })();
 window.QuantMasterRunInfo = runtimeInfo;
 window.QuantMasterAPI = api;

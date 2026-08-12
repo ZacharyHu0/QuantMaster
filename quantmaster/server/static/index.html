@@ -1510,6 +1510,29 @@
   <div class="runtime-drawer-frame" id="runtime-drawer-frame" aria-hidden="true" inert>
     <div class="runtime-drawer-inner">
       <section class="runtime-drawer" aria-label="运行消息明细">
+        <section class="runtime-lifecycle" id="runtime-lifecycle" aria-label="运行生命周期" aria-live="polite" aria-atomic="true" hidden>
+          <div class="runtime-lifecycle-head">
+            <div class="runtime-lifecycle-identity">
+              <span class="runtime-lifecycle-state" id="runtime-lifecycle-state">运行中</span>
+              <strong id="runtime-lifecycle-title">服务运行生命周期</strong>
+            </div>
+            <span class="runtime-lifecycle-generation" id="runtime-lifecycle-generation">generation —</span>
+          </div>
+          <div class="runtime-lifecycle-counts" aria-label="生命周期任务计数">
+            <div><span>活跃</span><strong id="runtime-lifecycle-active">0</strong></div>
+            <div><span>收敛</span><strong id="runtime-lifecycle-converging">0</strong></div>
+            <div><span>交接</span><strong id="runtime-lifecycle-handoff">0</strong></div>
+            <div><span>持久队列</span><strong id="runtime-lifecycle-queue">0</strong></div>
+          </div>
+          <div class="runtime-lifecycle-progress">
+            <div><span>当前阶段</span><strong id="runtime-lifecycle-phase">—</strong></div>
+            <div><span>阶段时限</span><strong id="runtime-lifecycle-deadline">未设置</strong></div>
+          </div>
+          <details class="runtime-lifecycle-issues" id="runtime-lifecycle-issues" hidden>
+            <summary><span id="runtime-lifecycle-issue-summary">0 个超时问题</span><span>展开脱敏详情</span></summary>
+            <div id="runtime-lifecycle-issue-list"></div>
+          </details>
+        </section>
         <div class="runtime-toolbar">
           <div class="runtime-filters" role="group" aria-label="筛选运行消息">
             <button class="runtime-filter active" type="button" data-runtime-filter="all">全部</button>

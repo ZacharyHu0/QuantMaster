@@ -227,6 +227,17 @@ class TestBasics:
         assert "安全重试点" in lab_script
         assert "预计峰值空间" in lab_script
 
+    def test_runtime_lifecycle_presenter_is_optional_and_sanitized(self):
+        page = client.get("/").text
+        script = client.get("/static/app.js").text
+        styles = client.get("/static/app.css").text
+
+        assert 'id="runtime-lifecycle"' in page
+        assert "runtime.lifecycle" in script
+        assert "safeLifecycleText" in script
+        assert "timeout_issues" in script
+        assert '.runtime-lifecycle[data-state="draining"]' in styles
+
     def test_local_boundary_csrf_and_security_headers(self):
         anonymous = TestClient(app)
         blocked = anonymous.post("/api/v1/research/selection/daily", json={})
