@@ -276,7 +276,14 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
         os.chmod(path, stat.S_IWRITE)
         function(path)
 
-    shutil.rmtree(resolved, onexc=make_writable)
+    try:
+        shutil.rmtree(resolved, onexc=make_writable)
+    except PermissionError as exc:
+        blocked = Path(exc.filename or resolved)
+        raise SystemExit(
+            "已证明残留 checkout 干净，但 Windows ACL 阻止删除："
+            f"{blocked}；修复该路径权限后重新运行 remove"
+        ) from None
 
 
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:

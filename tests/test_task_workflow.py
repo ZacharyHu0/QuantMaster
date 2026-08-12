@@ -205,3 +205,22 @@ def test_remove_verified_residual_clears_readonly_files(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
     remove_verified_residual(primary, target, "codex/recovery")
     assert not target.exists()
+
+
+def test_remove_verified_residual_reports_acl_block(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    blocked = target / ".artifacts" / "pytest" / "cache"
+    monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
+    monkeypatch.setattr(
+        tasks.shutil, "rmtree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(13, "denied", blocked)),
+    )
+    with pytest.raises(SystemExit, match=r"Windows ACL.*pytest[\\/]cache"):
+        remove_verified_residual(primary, target, "codex/recovery")
+    assert target.exists()
