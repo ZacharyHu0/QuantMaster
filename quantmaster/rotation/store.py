@@ -31,6 +31,10 @@ ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 logger = logging.getLogger(__name__)
 ETF_METADATA_HISTORY_SCHEMA_VERSION = "2.0"
+ETF_OBSERVATION_COLUMNS = frozenset({
+    "trade_date", "symbol", "name", "category", "benchmark", "shares",
+    "nav", "close", "total_size", "share_source", "acquired_at",
+})
 _ETF_METADATA_CONTENT_FIELDS = (
     "symbol", "name", "benchmark", "benchmark_code", "index_name",
     "benchmark_level", "benchmark_type", "index_provider", "index_type",
@@ -1391,6 +1395,7 @@ class RotationStore:
     def save_etf_observations(self, frame: pd.DataFrame) -> None:
         if frame is None or frame.empty:
             return
+        self._require_current_etf_observations(frame)
         fd, temp_name = tempfile.mkstemp(
             prefix=".etf_observations.", suffix=".parquet.tmp", dir=self.root,
         )
@@ -1446,10 +1451,29 @@ class RotationStore:
         if not self.etf_path.is_file():
             return pd.DataFrame()
         try:
-            return pd.read_parquet(self.etf_path)
+            return self._require_current_etf_observations(pd.read_parquet(self.etf_path))
         except (OSError, ValueError) as exc:
             logger.error("ETF 观察文件完整性校验失败: %s", self.etf_path, exc_info=True)
             raise RotationIntegrityError("ETF 观察文件损坏，拒绝按空数据继续计算") from exc
+
+    @staticmethod
+    def _require_current_etf_observations(frame: pd.DataFrame) -> pd.DataFrame:
+        missing = sorted(ETF_OBSERVATION_COLUMNS - set(frame.columns))
+        if missing:
+            raise RotationIntegrityError(
+                "ETF 观察缓存不是当前合同；请先运行 market_data 迁移（缺少："
+                + "、".join(missing) + "）"
+            )
+        if frame.empty:
+            return frame
+        dates = pd.to_datetime(frame["trade_date"], errors="coerce")
+        symbols = frame["symbol"].fillna("").astype(str).str.strip()
+        acquired_present = frame["acquired_at"].notna()
+        acquired = pd.to_datetime(frame["acquired_at"], errors="coerce", utc=True)
+        invalid_acquired = acquired_present & acquired.isna()
+        if invalid_acquired.any() or dates.isna().any() or symbols.eq("").any():
+            raise RotationIntegrityError("ETF 观察缓存当前合同字段无效")
+        return frame
 
     def save_etf_metadata(self, frame: pd.DataFrame) -> None:
         """Persist immutable observations and a tamper-evident history manifest."""
@@ -1698,30 +1722,6 @@ class RotationStore:
         self._validate_etf_metadata_manifest_rows(history, manifest)
         return history
 
-    def _quarantine_legacy_etf_metadata_history(self) -> None:
-        """Move an obsolete, rebuildable history aside without decoding it."""
-        manifest_path = self.etf_metadata_history_manifest_path
-        if not manifest_path.is_file():
-            return
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return
-        if manifest.get("schema_version") == ETF_METADATA_HISTORY_SCHEMA_VERSION:
-            return
-        stamp = str(time.time_ns())
-        quarantine = self.root / "quarantine" / f"etf_metadata_history-{stamp}"
-        quarantine.mkdir(parents=True, exist_ok=True)
-        for path in (
-            self.etf_metadata_history_path,
-            self.etf_metadata_history_manifest_path,
-        ):
-            if path.is_file():
-                path.replace(quarantine / path.name)
-        logger.warning(
-            "ETF 元数据历史契约已淘汰，已隔离并等待 v2 重建：%s", quarantine,
-        )
-
     def etf_metadata(self) -> pd.DataFrame:
         if not self.etf_metadata_path.is_file():
             return pd.DataFrame()
@@ -1746,19 +1746,5 @@ class RotationStore:
 
     def _read_etf_metadata_history_locked(self) -> pd.DataFrame:
         if not self.etf_metadata_history_path.is_file():
-            return pd.DataFrame()
-        try:
-            manifest = json.loads(
-                self.etf_metadata_history_manifest_path.read_text(encoding="utf-8")
-            )
-        except FileNotFoundError:
-            manifest = None
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            manifest = None
-        if (
-            isinstance(manifest, dict)
-            and manifest.get("schema_version") != ETF_METADATA_HISTORY_SCHEMA_VERSION
-        ):
-            self._quarantine_legacy_etf_metadata_history()
             return pd.DataFrame()
         return self._read_verified_etf_metadata_history()

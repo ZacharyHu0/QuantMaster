@@ -60,6 +60,22 @@ _PRODUCTION_SNAPSHOT_ID = re.compile(r"etf_[0-9a-f]{24}")
 _EXCHANGE_ETF_SYMBOL = re.compile(r"[0-9]{6}\.(?:SH|SZ)")
 
 
+def _read_current_adjustment_factors(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        return pd.DataFrame(columns=_ADJUSTMENT_COLUMNS)
+    try:
+        cached = pd.read_parquet(path)
+    except (OSError, ValueError, ImportError) as exc:
+        raise RuntimeError("ETF adjustment-factor cache is unreadable") from exc
+    missing = sorted(set(_ADJUSTMENT_COLUMNS) - set(cached.columns))
+    if missing:
+        raise RuntimeError(
+            "ETF adjustment-factor cache is not the current contract; run the "
+            "market_data migration first (missing: " + ", ".join(missing) + ")"
+        )
+    return cached.loc[:, list(_ADJUSTMENT_COLUMNS)].copy()
+
+
 def _clean_scalar_text(*candidates: Any) -> str:
     """Return the first real scalar string without serializing pandas null sentinels."""
 
@@ -1712,22 +1728,12 @@ class EtfResearchService:
             if as_of
             else None
         )
-        try:
-            cached = pd.read_parquet(target) if target.is_file() else pd.DataFrame()
-        except (OSError, ValueError):
-            cached = pd.DataFrame()
+        cached = _read_current_adjustment_factors(target)
         if not cached.empty:
             cached["date"] = pd.to_datetime(cached.get("date"), errors="coerce")
             cached["symbol"] = cached.get("symbol", pd.Series(dtype=str)).astype(str).str.upper()
             cached["adj_factor"] = pd.to_numeric(cached.get("adj_factor"), errors="coerce")
-            if "source" not in cached:
-                cached["source"] = "unverified:legacy-factor-cache"
-            else:
-                cached["source"] = cached["source"].fillna(
-                    "unverified:legacy-factor-cache"
-                ).astype(str)
-            if "acquired_at" not in cached:
-                cached["acquired_at"] = pd.NaT
+            cached["source"] = cached["source"].fillna("").astype(str)
             cached["acquired_at"] = pd.to_datetime(
                 cached["acquired_at"], errors="coerce", utc=True,
             )
@@ -1896,10 +1902,6 @@ class EtfResearchService:
             cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
             cached["symbol"] = cached["symbol"].astype(str).str.upper()
             cached["adj_factor"] = pd.to_numeric(cached["adj_factor"], errors="coerce")
-            if "source" not in cached:
-                cached["source"] = "unverified:legacy-factor-cache"
-            if "acquired_at" not in cached:
-                cached["acquired_at"] = pd.NaT
             cached["acquired_at"] = pd.to_datetime(
                 cached["acquired_at"], errors="coerce", utc=True,
             )

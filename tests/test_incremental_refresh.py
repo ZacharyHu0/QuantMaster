@@ -11,6 +11,19 @@ from quantmaster.rotation.store import RotationStore
 from quantmaster.runtime.jobs import UnifiedJobStore
 
 
+def _etf_rows(rows):
+    frame = pd.DataFrame(rows)
+    defaults = {
+        "name": "沪深300ETF", "category": "核心宽基", "benchmark": "沪深300",
+        "nav": pd.NA, "close": pd.NA, "total_size": pd.NA,
+        "share_source": "test:fixture", "acquired_at": "2026-08-10T08:00:00+00:00",
+    }
+    for column, value in defaults.items():
+        if column not in frame:
+            frame[column] = value
+    return frame
+
+
 def _local_state() -> dict:
     return {
         "generations": [
@@ -62,7 +75,7 @@ def test_node_generations_invalidate_only_their_dependency_cut(tmp_path):
     store.replace_themes([
         {"code": "BK001", "name": "题材", "members": ["600000.SH"], "as_of": "2026-08-10"},
     ])
-    store.save_etf_observations(pd.DataFrame([
+    store.save_etf_observations(_etf_rows([
         {"trade_date": "2026-08-10", "symbol": "510300.SH", "shares": 100.0},
     ]))
 
@@ -76,7 +89,7 @@ def test_node_generations_invalidate_only_their_dependency_cut(tmp_path):
     assert after_theme["industries"] == before["industries"]
     assert after_theme["temperature"] == before["temperature"]
 
-    store.save_etf_observations(pd.DataFrame([
+    store.save_etf_observations(_etf_rows([
         {"trade_date": "2026-08-10", "symbol": "510300.SH", "shares": 101.0},
     ]))
     after_etf = service.snapshot_input_fingerprints(spec)
@@ -146,7 +159,7 @@ def test_etf_generation_only_recomputes_temperature_and_etf_nodes(tmp_path, monk
         "code": "BK1001", "name": "测试题材", "members": symbols[:16],
         "as_of": str(dates[-1].date()),
     }])
-    store.save_etf_observations(pd.DataFrame([
+    store.save_etf_observations(_etf_rows([
         {"trade_date": dates[-2], "symbol": "510300.SH", "shares": 100, "nav": 4.0},
         {"trade_date": dates[-1], "symbol": "510300.SH", "shares": 105, "nav": 4.1},
     ]))
@@ -155,7 +168,7 @@ def test_etf_generation_only_recomputes_temperature_and_etf_nodes(tmp_path, monk
     before_industries = service.snapshot_header("industries")["meta"]["snapshot_id"]
     before_themes = service.snapshot_header("themes")["meta"]["snapshot_id"]
 
-    store.save_etf_observations(pd.DataFrame([
+    store.save_etf_observations(_etf_rows([
         {"trade_date": dates[-2], "symbol": "510300.SH", "shares": 100, "nav": 4.0},
         {"trade_date": dates[-1], "symbol": "510300.SH", "shares": 110, "nav": 4.1},
     ]))

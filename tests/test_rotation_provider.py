@@ -335,7 +335,7 @@ def test_etf_backfill_target_respects_listing_and_existing_history_boundaries():
     assert _backfill_target("510300.SH", "20240102", "2024-01-02", period) is None
 
 
-def test_etf_merge_replaces_only_matching_legacy_projection():
+def test_etf_merge_rejects_old_observation_projection():
     previous = pd.DataFrame([
         {
             "trade_date": "2026-07-30", "symbol": "510300.SH",
@@ -356,13 +356,8 @@ def test_etf_merge_replaces_only_matching_legacy_projection():
         "share_source": "tushare:fund_share", "acquired_at": acquired_at,
     }])
 
-    result = _merge_etf_rows(previous, [observed])
-
-    assert len(result) == 2
-    current = result[result["trade_date"].eq(pd.Timestamp("2026-07-30"))]
-    historic = result[result["trade_date"].eq(pd.Timestamp("2026-07-29"))]
-    assert current["acquired_at"].tolist() == [acquired_at]
-    assert pd.isna(historic["acquired_at"].iloc[0])
+    with pytest.raises(ValueError, match="run the market_data migration"):
+        _merge_etf_rows(previous, [observed])
 
 
 def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monkeypatch):

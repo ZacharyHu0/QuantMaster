@@ -229,6 +229,283 @@ def migrate_instrument_names(
 
 _INDEX_REQUIRED = {"index_code", "con_code", "trade_date", "weight"}
 
+_ETF_OBSERVATION_V0 = {
+    "trade_date", "symbol", "name", "category", "benchmark", "shares", "nav", "close",
+}
+_ETF_OBSERVATION_V1 = _ETF_OBSERVATION_V0 | {"total_size", "share_source"}
+_ETF_OBSERVATION_CURRENT = _ETF_OBSERVATION_V1 | {"acquired_at"}
+_FACTOR_V0 = {"symbol", "date", "adj_factor"}
+_FACTOR_V1 = _FACTOR_V0 | {"source"}
+_FACTOR_CURRENT = _FACTOR_V1 | {"acquired_at"}
+
+
+def _archive_artifact(data_root: Path, relative: Path) -> Path:
+    source = data_root / relative
+    target = data_root / "migration_quarantine" / "market_data" / "rotation_artifacts" / relative
+    if target.exists():
+        raise FileExistsError(f"migration quarantine target already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False,
+    ) as stream:
+        staged = Path(stream.name)
+    try:
+        shutil.copy2(source, staged)
+        with staged.open("rb+") as stream:
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+        source.unlink()
+    finally:
+        staged.unlink(missing_ok=True)
+    return target
+
+
+def _copy_artifact(data_root: Path, relative: Path) -> Path:
+    source = data_root / relative
+    target = data_root / "migration_quarantine" / "market_data" / "rotation_artifacts" / relative
+    if target.exists():
+        raise FileExistsError(f"migration quarantine target already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    with target.open("rb+") as stream:
+        os.fsync(stream.fileno())
+    return target
+
+
+def _read_parquet_columns(path: Path) -> tuple[pd.DataFrame | None, MigrationRow | None]:
+    try:
+        return pd.read_parquet(path), None
+    except (OSError, ValueError, ImportError) as exc:
+        return None, _row(path.as_posix(), "review", "rotation_parquet_unreadable", detail=str(exc))
+
+
+def _current_observation_valid(frame: pd.DataFrame) -> bool:
+    if frame.empty:
+        return True
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce")
+    symbols = frame["symbol"].fillna("").astype(str).str.strip()
+    acquired_present = frame["acquired_at"].notna()
+    acquired = pd.to_datetime(frame["acquired_at"], errors="coerce", utc=True)
+    return bool(
+        dates.notna().all() and symbols.ne("").all()
+        and (~(acquired_present & acquired.isna())).all()
+    )
+
+
+def _current_factor_valid(frame: pd.DataFrame) -> bool:
+    if frame.empty:
+        return True
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    acquired_present = frame["acquired_at"].notna()
+    acquired = pd.to_datetime(frame["acquired_at"], errors="coerce", utc=True)
+    factors = pd.to_numeric(frame["adj_factor"], errors="coerce")
+    symbols = frame["symbol"].fillna("").astype(str).str.strip()
+    return bool(
+        dates.notna().all() and (~(acquired_present & acquired.isna())).all()
+        and factors.notna().all() and factors.gt(0).all() and symbols.ne("").all()
+    )
+
+
+def _atomic_parquet(path: Path, frame: pd.DataFrame) -> None:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.stem}.", suffix=".parquet.tmp", delete=False,
+    ) as stream:
+        staged = Path(stream.name)
+    try:
+        frame.to_parquet(staged, index=False)
+        with staged.open("rb+") as stream:
+            os.fsync(stream.fileno())
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _load_metadata_manifest(path: Path, key: str) -> tuple[dict[str, Any] | None, MigrationRow | None]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, _row(key, "review", "rotation_metadata_manifest_unreadable", detail=str(exc))
+    if not isinstance(value, dict):
+        return None, _row(key, "review", "rotation_metadata_manifest_unknown_format")
+    return value, None
+
+
+def _validate_v1_metadata_history(
+    parquet: Path, manifest: dict[str, Any], key: str,
+) -> tuple[pd.DataFrame | None, MigrationRow | None]:
+    v1_manifest_fields = {
+        "schema_version", "artifact", "file_sha256", "logical_sha256", "row_count",
+        "observation_count", "written_at", "manifest_sha256",
+    }
+    if (
+        manifest.get("schema_version") != "1.0"
+        or manifest.get("artifact") != "etf_metadata_history"
+        or set(manifest) != v1_manifest_fields
+    ):
+        return None, _row(
+            key, "review", "rotation_metadata_manifest_unknown_contract",
+            unknown_fields=set(manifest) - v1_manifest_fields,
+            detail="missing=" + ",".join(sorted(v1_manifest_fields - set(manifest))),
+        )
+    frame, error = _read_parquet_columns(parquet)
+    if error is not None or frame is None:
+        return None, _row(key, "review", "rotation_metadata_history_v1_unreadable")
+    required = {
+        "symbol", "observed_at", "observation_id", "observation_content_sha256",
+        "observation_integrity",
+    }
+    valid_shape = (
+        required.issubset(frame.columns)
+        and len(frame) == int(manifest.get("row_count") or -1)
+        and frame["observation_id"].nunique() == int(manifest.get("observation_count") or -1)
+    )
+    if not valid_shape:
+        return None, _row(key, "review", "rotation_metadata_history_v1_shape_failed")
+    return frame, None
+
+
+def _migrate_etf_observations(
+    root: Path, *, dry_run: bool, only_keys: set[str] | None,
+) -> list[MigrationRow]:
+    relative = Path("rotation/etf_observations.parquet")
+    key = "rotation/etf_observations"
+    if only_keys is not None and key not in only_keys:
+        return []
+    path = root / relative
+    if not path.is_file():
+        return []
+    frame, error = _read_parquet_columns(path)
+    if error is not None or frame is None:
+        return [_row(key, "review", "rotation_etf_observations_unreadable")]
+    columns = set(frame.columns)
+    if columns == _ETF_OBSERVATION_CURRENT:
+        valid = _current_observation_valid(frame)
+        return [_row(
+            key, "unchanged" if valid else "review",
+            "rotation_etf_observations_current" if valid
+            else "rotation_etf_observations_current_invalid",
+        )]
+    if columns != _ETF_OBSERVATION_V0 and columns != _ETF_OBSERVATION_V1:
+        return [_row(
+            key, "review", "rotation_etf_observations_unknown_contract",
+            unknown_fields=columns - _ETF_OBSERVATION_CURRENT,
+            detail="missing=" + ",".join(sorted(_ETF_OBSERVATION_CURRENT - columns)),
+        )]
+    migrated = frame.copy()
+    if columns == _ETF_OBSERVATION_V0:
+        migrated["total_size"] = pd.NA
+        # Git history proves the v0 writer exclusively used fund_share.
+        migrated["share_source"] = "tushare:fund_share"
+    migrated["acquired_at"] = pd.NaT
+    migrated = migrated.loc[:, sorted(_ETF_OBSERVATION_CURRENT)]
+    if not dry_run:
+        try:
+            _copy_artifact(root, relative)
+            _atomic_parquet(path, migrated)
+        except FileExistsError as exc:
+            return [_row(key, "conflict", "rotation_etf_observations_quarantine_conflict", detail=str(exc))]
+    return [_row(
+        key, "converted", "rotation_etf_observations_migrated",
+        unknown_fields=("acquired_at",),
+        detail=f"rows={len(frame)}; acquired_at remains blank",
+    )]
+
+
+def _inspect_metadata_history(root: Path, *, dry_run: bool, only_keys: set[str] | None) -> list[MigrationRow]:
+    key = "rotation/etf_metadata_history"
+    if only_keys is not None and key not in only_keys:
+        return []
+    parquet_rel = Path("rotation/etf_metadata_history.parquet")
+    manifest_rel = Path("rotation/etf_metadata_history.manifest.json")
+    parquet, manifest_path = root / parquet_rel, root / manifest_rel
+    quarantine = root / "migration_quarantine" / "market_data" / "rotation_artifacts"
+    if not parquet.exists() and not manifest_path.exists() and (
+        (quarantine / parquet_rel).is_file() and (quarantine / manifest_rel).is_file()
+    ):
+        return [_row(key, "blank", "rotation_metadata_history_v1_isolated")]
+    if not parquet.exists() and not manifest_path.exists():
+        return []
+    if not parquet.is_file() or not manifest_path.is_file():
+        return [_row(key, "review", "rotation_metadata_history_pair_incomplete")]
+    manifest, error = _load_metadata_manifest(manifest_path, key)
+    if error is not None or manifest is None:
+        return [error] if error is not None else []
+    if manifest.get("schema_version") == "2.0":
+        return [_row(key, "unchanged", "rotation_metadata_history_current")]
+    frame, error = _validate_v1_metadata_history(parquet, manifest, key)
+    if error is not None or frame is None:
+        return [error] if error is not None else []
+    if not dry_run:
+        try:
+            _archive_artifact(root, parquet_rel)
+            _archive_artifact(root, manifest_rel)
+        except FileExistsError as exc:
+            return [_row(key, "conflict", "rotation_metadata_history_quarantine_conflict", detail=str(exc))]
+    return [_row(
+        key, "blank", "rotation_metadata_history_v1_isolated",
+        detail=f"rows={len(frame)}; v2-only directory evidence remains blank until rebuilt",
+    )]
+
+
+def _inspect_simple_rotation_parquet(
+    root: Path, *, relative: Path, key: str, legacy_shapes: tuple[set[str], ...],
+    current_shape: set[str], validator: Callable[[pd.DataFrame], bool], dry_run: bool,
+    only_keys: set[str] | None, diagnostic: str, unknown_fields: tuple[str, ...],
+) -> list[MigrationRow]:
+    if only_keys is not None and key not in only_keys:
+        return []
+    path = root / relative
+    if not path.is_file():
+        isolated = (
+            root / "migration_quarantine" / "market_data" / "rotation_artifacts" / relative
+        )
+        if isolated.is_file():
+            return [_row(key, "blank", f"{diagnostic}_isolated")]
+        return []
+    frame, error = _read_parquet_columns(path)
+    if error is not None or frame is None:
+        return [_row(key, "review", f"{diagnostic}_unreadable", detail=error["detail"] if error else "")]
+    columns = set(frame.columns)
+    if columns == current_shape:
+        return [_row(
+            key, "unchanged" if validator(frame) else "review",
+            f"{diagnostic}_current" if validator(frame) else f"{diagnostic}_current_invalid",
+        )]
+    if columns not in legacy_shapes:
+        return [_row(
+            key, "review", f"{diagnostic}_unknown_contract",
+            unknown_fields=columns - current_shape,
+            detail="missing=" + ",".join(sorted(current_shape - columns)),
+        )]
+    if not dry_run:
+        try:
+            _archive_artifact(root, relative)
+        except FileExistsError as exc:
+            return [_row(key, "conflict", f"{diagnostic}_quarantine_conflict", detail=str(exc))]
+    return [_row(
+        key, "blank", f"{diagnostic}_isolated", unknown_fields=unknown_fields,
+        detail=f"rows={len(frame)}; acquisition time is not recoverable from the old writer",
+    )]
+
+
+def migrate_rotation_etf_artifacts(
+    root: str | Path, *, dry_run: bool = False, only_keys: set[str] | None = None,
+) -> list[MigrationRow]:
+    """Retire only exact Git-confirmed ETF cache contracts outside normal readers."""
+    data_root = Path(root)
+    results = _inspect_metadata_history(data_root, dry_run=dry_run, only_keys=only_keys)
+    results += _migrate_etf_observations(
+        data_root, dry_run=dry_run, only_keys=only_keys,
+    )
+    results += _inspect_simple_rotation_parquet(
+        data_root, relative=Path("etf-research/evidence/adjustment_factors.parquet"),
+        key="etf-research/evidence/adjustment_factors", legacy_shapes=(_FACTOR_V0, _FACTOR_V1),
+        current_shape=_FACTOR_CURRENT, validator=_current_factor_valid,
+        dry_run=dry_run, only_keys=only_keys, diagnostic="rotation_adjustment_factors",
+        unknown_fields=("acquired_at", "source"),
+    )
+    return results
+
 
 def migrate_index_membership(
     root: str | Path, *, dry_run: bool = False, only_keys: set[str] | None = None,
@@ -376,6 +653,7 @@ class MarketDataLegacyMigrator:
         migrate_instrument_names,
         migrate_index_membership,
         migrate_industry_current_projection,
+        migrate_rotation_etf_artifacts,
     )
 
     def inspect(self, root: str | Path) -> Iterable[MigrationRow]:
@@ -390,13 +668,20 @@ class MarketDataLegacyMigrator:
         candidates = sorted(
             (
                 record for record in self.inspect(root)
-                if str(record["record_key"]) > str(after_key or "")
+                if record.record_key > str(after_key or "")
             ),
-            key=lambda record: str(record["record_key"]),
+            key=lambda record: record.record_key,
         )[:limit]
-        selected = {str(record["record_key"]) for record in candidates}
+        selected = {record.record_key for record in candidates}
+        migrated: dict[str, MigrationRecord] = {}
         for migrate in self._domains:
-            yield from (_as_record(item) for item in migrate(root, dry_run=False, only_keys=selected))
+            for item in migrate(root, dry_run=False, only_keys=selected):
+                record = _as_record(item)
+                migrated[record.record_key] = record
+        for candidate in candidates:
+            key = candidate.record_key
+            if key in migrated:
+                yield migrated[key]
 
     def rollback(self, root: str | Path, backup_root: str | Path) -> None:
         """Restore only market-data paths from a runner-created data-root backup."""
@@ -416,6 +701,27 @@ class MarketDataLegacyMigrator:
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
+        quarantine = destination / "migration_quarantine" / "market_data" / "rotation_artifacts"
+        for relative in (
+            Path("rotation/etf_metadata_history.parquet"),
+            Path("rotation/etf_metadata_history.manifest.json"),
+            Path("rotation/etf_observations.parquet"),
+            Path("etf-research/evidence/adjustment_factors.parquet"),
+        ):
+            source = quarantine / relative
+            target = destination / relative
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                source.unlink()
+        for directory in sorted(
+            (path for path in quarantine.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts), reverse=True,
+        ) if quarantine.is_dir() else ():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
 
 
 def _as_record(value: MigrationRow) -> MigrationRecord:

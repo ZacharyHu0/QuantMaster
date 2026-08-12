@@ -26,7 +26,7 @@ from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
-from quantmaster.rotation.store import RotationStore
+from quantmaster.rotation.store import ETF_OBSERVATION_COLUMNS, RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
@@ -434,22 +434,22 @@ def _etf_plan(
     return _EtfPlan(dates, targets)
 
 
-def _legacy_etf_columns(previous: pd.DataFrame) -> pd.DataFrame:
+def _require_current_etf_observations(previous: pd.DataFrame) -> pd.DataFrame:
     if previous.empty:
         return previous
-    for column, default in (
-        ("benchmark", ""), ("total_size", pd.NA),
-        ("share_source", "tushare:fund_share"), ("acquired_at", pd.NaT),
-    ):
-        if column not in previous:
-            previous[column] = default
+    missing = sorted(ETF_OBSERVATION_COLUMNS - set(previous.columns))
+    if missing:
+        raise ValueError(
+            "ETF observation cache is not the current contract; run the market_data "
+            "migration first (missing: " + ", ".join(missing) + ")"
+        )
     return previous
 
 
 def _merge_etf_rows(previous: pd.DataFrame, rows: list[pd.DataFrame]) -> pd.DataFrame:
     from quantmaster.rotation.etf_v2 import classify_etf_profile
 
-    previous = _legacy_etf_columns(previous)
+    previous = _require_current_etf_observations(previous)
     result = pd.concat([*([previous] if not previous.empty else []), *rows], ignore_index=True)
     result["category"] = [
         classify_etf_profile(

@@ -434,6 +434,23 @@ def test_legacy_etf_metadata_history_without_manifest_fails_closed(tmp_path):
         )
 
 
+def test_obsolete_manifest_is_not_moved_by_runtime_reader(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    pd.DataFrame({"symbol": ["510300.SH"]}).to_parquet(
+        store.etf_metadata_history_path, index=False,
+    )
+    store.etf_metadata_history_manifest_path.write_text(
+        json.dumps({"schema_version": "1.0", "artifact": "etf_metadata_history"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RotationIntegrityError, match="manifest 哈希不匹配"):
+        store.etf_metadata_history()
+    assert store.etf_metadata_history_path.is_file()
+    assert store.etf_metadata_history_manifest_path.is_file()
+    assert not (store.root / "quarantine").exists()
+
+
 def test_rotation_overview_cache_invalidates_on_snapshot_id(tmp_path, monkeypatch):
     store = RotationStore(tmp_path / "rotation")
     service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
@@ -877,6 +894,13 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         {"trade_date": "2026-07-29", "symbol": "510300.SH", "shares": 100, "nav": 4.0},
         {"trade_date": "2026-07-30", "symbol": "510300.SH", "shares": 105, "nav": 4.1},
     ])
+    etf["name"] = "沪深300ETF"
+    etf["category"] = "核心宽基"
+    etf["benchmark"] = "沪深300"
+    etf["close"] = etf["nav"]
+    etf["total_size"] = pd.NA
+    etf["share_source"] = "test:fixture"
+    etf["acquired_at"] = "2026-07-30T08:00:00+00:00"
     store.save_etf_observations(etf)
     updates: list[tuple[int, str]] = []
     result = service.build(

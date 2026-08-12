@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 import pandas as pd
+import pytest
 
 from quantmaster.data.legacy_migrations import (
     MarketDataLegacyMigrator,
@@ -11,6 +12,7 @@ from quantmaster.data.legacy_migrations import (
     migrate_index_membership,
     migrate_industry_current_projection,
     migrate_instrument_names,
+    migrate_rotation_etf_artifacts,
 )
 
 
@@ -122,3 +124,91 @@ def test_adapter_empty_root_and_batch_resume(tmp_path):
     adapter = MarketDataLegacyMigrator()
     assert list(adapter.inspect(tmp_path)) == []
     assert list(adapter.migrate_batch(tmp_path, "", 10)) == []
+
+
+def test_rotation_old_observation_and_factor_caches_are_recoverably_isolated(tmp_path):
+    observations = tmp_path / "rotation" / "etf_observations.parquet"
+    observations.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "trade_date": ["2026-08-01"], "symbol": ["510300.SH"], "name": ["ETF"],
+        "category": ["核心宽基"], "benchmark": ["沪深300"], "shares": [1.0],
+        "nav": [4.0], "close": [4.0],
+    }).to_parquet(observations, index=False)
+    factors = tmp_path / "etf-research" / "evidence" / "adjustment_factors.parquet"
+    factors.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "symbol": ["510300.SH"], "date": ["2026-08-01"], "adj_factor": [1.0],
+    }).to_parquet(factors, index=False)
+
+    dry = migrate_rotation_etf_artifacts(tmp_path, dry_run=True)
+    assert {item["diagnostic_code"] for item in dry} == {
+        "rotation_etf_observations_migrated", "rotation_adjustment_factors_isolated",
+    }
+    assert observations.is_file() and factors.is_file()
+
+    migrated = migrate_rotation_etf_artifacts(tmp_path)
+    assert {item["outcome"] for item in migrated} == {"converted", "blank"}
+    assert observations.exists() and not factors.exists()
+    current = pd.read_parquet(observations)
+    assert current["share_source"].tolist() == ["tushare:fund_share"]
+    assert current["acquired_at"].isna().all()
+    quarantine = tmp_path / "migration_quarantine" / "market_data" / "rotation_artifacts"
+    assert (quarantine / "rotation" / observations.name).is_file()
+    assert (quarantine / "etf-research" / "evidence" / factors.name).is_file()
+    resumed = migrate_rotation_etf_artifacts(tmp_path)
+    assert {item["diagnostic_code"] for item in resumed} == {
+        "rotation_etf_observations_current", "rotation_adjustment_factors_isolated",
+    }
+
+    MarketDataLegacyMigrator().rollback(tmp_path, tmp_path / "empty-backup")
+    assert observations.is_file() and factors.is_file()
+    assert not (quarantine / "rotation" / observations.name).exists()
+    assert not (quarantine / "etf-research" / "evidence" / factors.name).exists()
+
+
+def test_rotation_artifact_batches_keep_sorted_resume_keys(tmp_path):
+    observations = tmp_path / "rotation" / "etf_observations.parquet"
+    observations.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "trade_date": ["2026-08-01"], "symbol": ["510300.SH"], "name": ["ETF"],
+        "category": ["核心宽基"], "benchmark": ["沪深300"], "shares": [1.0],
+        "nav": [4.0], "close": [4.0],
+    }).to_parquet(observations, index=False)
+    factors = tmp_path / "etf-research" / "evidence" / "adjustment_factors.parquet"
+    factors.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "symbol": ["510300.SH"], "date": ["2026-08-01"], "adj_factor": [1.0],
+    }).to_parquet(factors, index=False)
+    adapter = MarketDataLegacyMigrator()
+
+    first = list(adapter.migrate_batch(tmp_path, "", 1))
+    second = list(adapter.migrate_batch(tmp_path, first[-1].record_key, 1))
+    assert first[0].record_key == "etf-research/evidence/adjustment_factors"
+    assert second[0].record_key == "rotation/etf_observations"
+    assert list(adapter.migrate_batch(tmp_path, second[-1].record_key, 1)) == []
+
+
+def test_rotation_current_damage_and_unknown_contract_are_not_misclassified(tmp_path):
+    observations = tmp_path / "rotation" / "etf_observations.parquet"
+    observations.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "trade_date": ["bad"], "symbol": ["510300.SH"], "name": ["ETF"],
+        "category": ["核心宽基"], "benchmark": ["沪深300"], "shares": [1.0],
+        "nav": [4.0], "close": [4.0], "total_size": [4.0],
+        "share_source": ["tushare:fund_share"], "acquired_at": ["bad"],
+    }).to_parquet(observations, index=False)
+    result = migrate_rotation_etf_artifacts(tmp_path)
+    assert result[0]["diagnostic_code"] == "rotation_etf_observations_current_invalid"
+    assert result[0]["outcome"] == "review"
+    assert observations.is_file()
+
+
+def test_rotation_runtime_factor_cache_requires_current_columns(tmp_path):
+    from quantmaster.rotation.etf_research import _read_current_adjustment_factors
+
+    path = tmp_path / "adjustment_factors.parquet"
+    pd.DataFrame({
+        "symbol": ["510300.SH"], "date": ["2026-08-01"], "adj_factor": [1.0],
+    }).to_parquet(path, index=False)
+    with pytest.raises(RuntimeError, match="run the market_data migration"):
+        _read_current_adjustment_factors(path)
