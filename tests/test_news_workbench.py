@@ -1112,6 +1112,83 @@ def test_annotation_batches_use_news_specific_concurrency(tmp_path, isolated_con
     assert maximum == 3
 
 
+def test_separate_crawlers_share_one_news_pipeline(tmp_path, isolated_config):
+    """Scheduled fast/official jobs must not multiply annotation concurrency."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    isolated_config.news.annotation_max_concurrency = 2
+    active = maximum = 0
+    counter_lock = threading.Lock()
+
+    class SharedLLM:
+        def chat_json(self, prompt, system="", **kwargs):
+            nonlocal active, maximum
+            with counter_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with counter_lock:
+                active -= 1
+            return [{
+                "symbols": [], "sectors": [], "event_type": "其他",
+                "sentiment": 0, "summary": "流水线串行", "scope": "market",
+                "urgency": "normal", "confidence": 0.8,
+            }]
+
+    path = tmp_path / "news.sqlite"
+    store = NewsStore(path)
+    store.save([
+        NewsItem(source="test", title=f"跨任务 {index}", content=f"正文 {index}")
+        for index in range(8)
+    ])
+    crawlers = [
+        AICrawler(client=SharedLLM(), store=NewsStore(path)),
+        AICrawler(client=SharedLLM(), store=NewsStore(path)),
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(
+            lambda crawler: crawler.enrich_pending(limit=4, batch_size=1), crawlers,
+        ))
+
+    assert sum(result["completed"] for result in results) == 8
+    assert maximum == 2
+
+
+def test_storage_error_does_not_increment_model_failure_attempts(
+    tmp_path, monkeypatch,
+):
+    import sqlite3
+
+    class SuccessfulLLM:
+        def chat_json(self, prompt, system="", **kwargs):
+            return [{
+                "symbols": [], "sectors": [], "event_type": "其他",
+                "sentiment": 0, "summary": "模型已正常返回", "scope": "market",
+                "urgency": "normal", "confidence": 0.8,
+            }]
+
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([NewsItem(source="test", title="待持久化", content="模型结果正常")])
+    item_id = store.max_id()
+    monkeypatch.setattr(
+        store, "update_analyses",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    result = AICrawler(client=SuccessfulLLM(), store=store).enrich_pending(limit=1)
+
+    detail = store.detail(item_id)
+    assert result["failed"] == 1
+    assert result["retry_scheduled"] == 0
+    assert result["failure_details"][0]["code"] == "storage_busy"
+    assert detail["analysis_status"] == "pending"
+    assert detail["analysis_attempts"] == 0
+
+
 def test_concurrent_llm_results_serialize_before_claim_reads(tmp_path, monkeypatch):
     """Successful provider batches must not deadlock while upgrading SQLite locks."""
 

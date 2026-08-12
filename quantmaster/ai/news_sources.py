@@ -621,7 +621,13 @@ class NewsSourceStore:
 
     def register_ingest_batch(self, batch: FetchBatch, batch_id: str) -> str:
         """Persist an immutable provider batch and attach its durable window identity."""
-        if not batch.articles:
+        closes_empty_gap = bool(
+            batch.complete
+            and batch.previous_watermark
+            and batch.watermark
+            and batch.watermark != batch.previous_watermark
+        )
+        if not batch.articles and not closes_empty_gap:
             return ""
         source_id = str(batch.source_id or "")
         if not source_id:
@@ -629,8 +635,8 @@ class NewsSourceStore:
         candidate = str(
             batch.pending_watermark
             or batch.watermark
-            or batch.articles[0].provider_item_id
-            or batch.articles[0].evidence_binding_hash
+            or (batch.articles[0].provider_item_id if batch.articles else "")
+            or (batch.articles[0].evidence_binding_hash if batch.articles else "")
         )
         previous = str(batch.previous_watermark or "")
         if not candidate:
@@ -647,10 +653,16 @@ class NewsSourceStore:
             separators=(",", ":"),
         )
         window_id = hashlib.sha256(window_payload.encode("utf-8")).hexdigest()
-        article_identities = sorted(
-            str(item.evidence_binding_hash or item.provider_item_id or item.url)
-            for item in batch.articles
-        )
+        audit_articles: dict[str, FetchedArticle] = {}
+        for item in batch.articles:
+            identity = str(
+                item.evidence_binding_hash
+                or hashlib.sha256(
+                    f"{source_id}|{item.provider_item_id}|{item.url}".encode(),
+                ).hexdigest()
+            )
+            audit_articles.setdefault(identity, item)
+        article_identities = sorted(audit_articles)
         identity_hash = hashlib.sha256(
             json.dumps(article_identities, ensure_ascii=False, separators=(",", ":")).encode(
                 "utf-8",
@@ -680,7 +692,7 @@ class NewsSourceStore:
                 "article_identity_hash,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     durable_batch_id, window_id, source_id, int(batch.complete),
-                    str(batch.health), str(batch.error_code or ""), len(batch.articles),
+                    str(batch.health), str(batch.error_code or ""), len(audit_articles),
                     identity_hash, recorded_at,
                 ),
             )
@@ -691,17 +703,21 @@ class NewsSourceStore:
                 (
                     (
                         durable_batch_id,
-                        str(item.evidence_binding_hash or hashlib.sha256(
-                            f"{source_id}|{item.provider_item_id}|{item.url}".encode(),
-                        ).hexdigest()),
+                        identity,
                         str(item.evidence_binding_hash or ""),
                         source_id,
                         str(item.provider_item_id or ""),
                         str(item.raw_cache_key or "").replace("\\", "/"),
                     )
-                    for item in batch.articles
+                    for identity, item in sorted(audit_articles.items())
                 ),
             )
+            if closes_empty_gap:
+                conn.execute(
+                    "UPDATE news_ingest_windows SET status='complete',completed_at=?,"
+                    "completed_batch_id=? WHERE window_id=? AND status='pending'",
+                    (recorded_at, durable_batch_id, window_id),
+                )
         for article in batch.articles:
             article.ingest_window_id = window_id
             article.ingest_batch_id = durable_batch_id

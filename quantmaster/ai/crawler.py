@@ -42,6 +42,7 @@ from quantmaster.ai.news_contracts import (
     NewsProviderError,
 )
 from quantmaster.ai.news_providers import fetch_builtin_source
+from quantmaster.ai.news_pipeline_lock import NewsPipelineLock
 from quantmaster.ai.news_sources import (
     NewsSourceStore,
     fetch_declarative_source,
@@ -1612,9 +1613,24 @@ def _claim_heartbeat(
 
     def renew() -> None:
         interval = max(1.0, min(30.0, lease_seconds / 3))
-        while not stop.wait(interval):
-            if not claims.heartbeat(token, owner, lease_seconds=lease_seconds):
+        delay = interval
+        while not stop.wait(delay):
+            try:
+                if not claims.heartbeat(token, owner, lease_seconds=lease_seconds):
+                    alive.clear()
+                    return
+                delay = interval
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold():
+                    alive.clear()
+                    logger.warning("资讯分析租约续期失败", exc_info=True)
+                    return
+                # A transient writer must not kill the heartbeat thread.  Retry
+                # promptly; a later zero-row heartbeat still detects expiry.
+                delay = 1.0
+            except Exception:
                 alive.clear()
+                logger.warning("资讯分析租约续期失败", exc_info=True)
                 return
 
     thread = threading.Thread(target=renew, name="qm-news-claim-heartbeat", daemon=True)
@@ -1857,6 +1873,22 @@ class AICrawler:
                     claim_token=batch.token,
                     claim_owner=self.identity.value,
                 )
+        except sqlite3.Error as exc:
+            # Persistence contention is infrastructure failure, not another
+            # failed model attempt.  Leave the rows pending and release their
+            # claims so the already independent successful batches stay saved.
+            logger.warning("资讯分析结果落库失败", exc_info=True)
+            error = "资讯分析结果暂未写入，请稍后重试"
+            failure_detail = {
+                "batch": batch_number,
+                "code": "storage_busy",
+                "message": error,
+                "retryable": True,
+                "failed": len(items),
+                "retry_scheduled": 0,
+                "dead_letter": 0,
+                "next_retry_at": 0.0,
+            }
         except Exception as exc:
             logger.warning("资讯分析批次失败", exc_info=True)
             error = _safe_analysis_error(exc)
@@ -1907,6 +1939,20 @@ class AICrawler:
         manual: bool = False,
     ) -> Iterator[dict]:
         """Claim and process one fixed queue window, yielding durable progress."""
+        with NewsPipelineLock(self.store.path):
+            yield from self._enrich_pending_events_unlocked(
+                limit=limit, ids=ids, batch_size=batch_size,
+                mode=mode, manual=manual,
+            )
+
+    def _enrich_pending_events_unlocked(
+        self, limit: int | None = None, ids: list[int] | None = None,
+        batch_size: int | None = None,
+        *,
+        mode: ClaimMode = "pending",
+        manual: bool = False,
+    ) -> Iterator[dict]:
+        """Run one queue window while the database-wide pipeline lock is held."""
         cfg = get_config().news
         normalized_ids = normalize_news_ids(ids)
         size = max(1, min(int(batch_size or cfg.annotation_batch_size), 50))
@@ -2095,6 +2141,13 @@ class AICrawler:
 
     def run(self, sources: list[str] | None = None, limit: int = 30,
             skip_llm: bool = False, group: str | None = None) -> dict:
+        with NewsPipelineLock(self.store.path):
+            return self._run_unlocked(
+                sources=sources, limit=limit, skip_llm=skip_llm, group=group,
+            )
+
+    def _run_unlocked(self, sources: list[str] | None = None, limit: int = 30,
+                      skip_llm: bool = False, group: str | None = None) -> dict:
         before_id = self.store.max_id()
         configs: list[dict] = []
         if sources:

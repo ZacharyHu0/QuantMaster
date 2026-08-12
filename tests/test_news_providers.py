@@ -83,6 +83,32 @@ def _bind_official(store: NewsStore, *items: NewsItem) -> None:
         )
 
 
+def test_ingest_batch_audit_deduplicates_identical_article_identity(tmp_path):
+    store = NewsSourceStore(tmp_path / "news.sqlite")
+    article = FetchedArticle(
+        source="sina_live", provider_item_id="same-id", title="同一条快讯",
+        content="上游批次重复返回的同一条内容", url="https://example.com/same-id",
+        published_at="2026-08-12T01:00:00+00:00",
+        published_at_epoch=1786496400.0,
+    )
+    batch = FetchBatch(
+        source_id="sina_live", articles=[article, article],
+        watermark="same-id", complete=True,
+    )
+
+    store.register_ingest_batch(batch, "duplicate-batch")
+
+    with store._conn() as connection:
+        assert connection.execute(
+            "SELECT article_count FROM news_ingest_batches WHERE batch_id=?",
+            ("duplicate-batch",),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM news_ingest_batch_articles WHERE batch_id=?",
+            ("duplicate-batch",),
+        ).fetchone()[0] == 1
+
+
 def _official_detail_html(source_id: str, *, published: str = "2026-08-09") -> bytes:
     body = "可独立复核的官方详情正文，包含完整语义与必要上下文。" * 4
     if source_id == "sse":
@@ -209,6 +235,108 @@ def test_eastmoney_current_trace_contract_and_watermark(monkeypatch):
     assert batch.articles[0].content_scope == "provider_excerpt"
     assert batch.watermark == "new-2"
     assert batch.complete is True
+
+
+def test_eastmoney_missing_id_stops_at_committed_publication_floor(monkeypatch):
+    """A deleted provider cursor must not turn every run into an older backfill."""
+    payload = {
+        "code": "1",
+        "data": {
+            "sortEnd": "older-cursor",
+            "fastNewsList": [
+                {
+                    "code": "new-head", "title": "水位之后的新快讯",
+                    "summary": "应当正常保存的新内容。",
+                    "showTime": "2026-08-11 10:05:00",
+                },
+                {
+                    "code": "older-than-floor", "title": "早于已确认日期的历史快讯",
+                    "summary": "不应重新灌入的历史内容。",
+                    "showTime": "2026-08-11 03:59:59",
+                },
+            ],
+        },
+    }
+
+    monkeypatch.setattr(
+        "quantmaster.ai.news_providers._fetch_bytes",
+        lambda source, url, store: (
+            json.dumps(payload).encode(), url, "news_raw/eastmoney_fast/floor.gz",
+        ),
+    )
+    source = {
+        **_source("eastmoney_fast"),
+        "_state_latest_published_at": 1786413600.0,  # 10:00; retain a 6h overlap
+    }
+
+    batch = fetch_eastmoney_fast(source, object(), "deleted-old-id", 30)
+
+    assert [item.provider_item_id for item in batch.articles] == ["new-head"]
+    assert batch.watermark == "new-head"
+    assert batch.complete is True
+
+
+def test_eastmoney_resumed_backfill_closes_without_archiving_older_pages(monkeypatch):
+    payload = {
+        "code": "1",
+        "data": {
+            "sortEnd": "still-older",
+            "fastNewsList": [{
+                "code": "historical", "title": "历史快讯",
+                "summary": "已越过本地确认时间下界。",
+                "showTime": "2026-08-10 17:59:59",
+            }],
+        },
+    }
+    monkeypatch.setattr(
+        "quantmaster.ai.news_providers._fetch_bytes",
+        lambda source, url, store: (
+            json.dumps(payload).encode(), url, "news_raw/eastmoney_fast/resume.gz",
+        ),
+    )
+    source = {
+        **_source("eastmoney_fast"),
+        "_state_pending_watermark": "new-head",
+        "_state_next_cursor": "resume-cursor",
+        "_state_latest_published_at": 1786377600.0,  # 2026-08-11 00:00 Asia/Shanghai
+    }
+
+    batch = fetch_eastmoney_fast(source, object(), "deleted-old-id", 30)
+
+    assert batch.articles == []
+    assert batch.watermark == "new-head"
+    assert batch.pending_watermark == ""
+    assert batch.complete is True
+
+
+def test_empty_completed_gap_closes_ingest_window(tmp_path):
+    store = NewsSourceStore(tmp_path / "news.sqlite")
+    incomplete = FetchBatch(
+        source_id="eastmoney_fast",
+        articles=[FetchedArticle(
+            source="eastmoney_fast", provider_item_id="new-head", title="新快讯",
+            content="新快讯正文", url="https://kuaixun.eastmoney.com/7_24.html",
+        )],
+        watermark="old-id", previous_watermark="old-id",
+        pending_watermark="new-head", complete=False,
+    )
+    window_id = store.register_ingest_batch(incomplete, "incomplete-batch")
+
+    completed = FetchBatch(
+        source_id="eastmoney_fast", articles=[], watermark="new-head",
+        previous_watermark="old-id", complete=True,
+    )
+    assert store.register_ingest_batch(completed, "boundary-batch") == window_id
+
+    with store._conn() as connection:
+        assert tuple(connection.execute(
+            "SELECT status,completed_batch_id FROM news_ingest_windows WHERE window_id=?",
+            (window_id,),
+        ).fetchone()) == ("complete", "boundary-batch")
+        assert connection.execute(
+            "SELECT article_count FROM news_ingest_batches WHERE batch_id=?",
+            ("boundary-batch",),
+        ).fetchone()[0] == 0
 
 
 def test_csrc_current_json_contract_preserves_full_official_content(monkeypatch):

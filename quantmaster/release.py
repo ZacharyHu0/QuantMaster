@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "资讯增量与批次落库修复",
+                "items": (
+                    (
+                        "快讯增量回补在来源游标缺失时使用已确认发布时间和来源新鲜度窗口"
+                        "作为可验证下界，不再持续把数月前历史快讯灌入待处理队列。"
+                    ),
+                    (
+                        "快速、官方、周期及手动资讯流水线共享跨进程单飞锁；每个 LLM 批次"
+                        "返回后立即独立提交，已成功批次不等待同轮其他请求。"
+                    ),
+                    (
+                        "数据库暂时繁忙不会再增加模型失败次数或送入死信；租约心跳会重试"
+                        "瞬时锁冲突，抓取审计批次也会合并上游重复文章身份。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.8.2",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "资讯 LLM 结果落库修复",

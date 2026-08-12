@@ -334,6 +334,7 @@ def _finish_paginated_batch(
 def _select_paginated_articles(
     page_articles: list[FetchedArticle], watermark: str, pending_watermark: str,
     candidate_watermark: str, candidate_published_at: float, seen: set[str],
+    published_floor: float = 0.0,
 ) -> tuple[list[FetchedArticle], str, float, bool]:
     selected: list[FetchedArticle] = []
     reached = False
@@ -344,11 +345,29 @@ def _select_paginated_articles(
         if watermark and article.provider_item_id == watermark:
             reached = True
             break
+        # Provider IDs remain the primary cursor.  A previously committed
+        # publication time is also durable local evidence: once a descending
+        # feed has crossed below it, the old ID cannot occur on a later page.
+        # End the gap here instead of archiving progressively older history
+        # forever when the provider has removed the exact cursor item.
+        if watermark and published_floor > 0 and article.published_at_epoch < published_floor:
+            reached = True
+            break
         if article.provider_item_id in seen:
             continue
         seen.add(article.provider_item_id)
         selected.append(article)
     return selected, candidate_watermark, candidate_published_at, reached
+
+
+def _published_backfill_floor(source: dict[str, Any]) -> float:
+    """Bound a missing-ID backfill while retaining the source freshness overlap."""
+    latest = float(source.get("_state_latest_published_at") or 0.0)
+    try:
+        overlap = max(0.0, float(source.get("max_age_hours") or 0.0) * 3600.0)
+    except (TypeError, ValueError):
+        overlap = 0.0
+    return max(0.0, latest - overlap)
 
 
 def _parse_eastmoney_page(
@@ -397,6 +416,7 @@ def fetch_eastmoney_fast(
     pending_watermark = str(source.get("_state_pending_watermark") or "")
     candidate_watermark = pending_watermark
     candidate_published_at = -1.0
+    published_floor = _published_backfill_floor(source)
     reached = not watermark
     raw_keys: list[str] = []
     articles: list[FetchedArticle] = []
@@ -428,7 +448,7 @@ def fetch_eastmoney_fast(
         selected, candidate_watermark, candidate_published_at, page_reached = (
             _select_paginated_articles(
                 page_articles, watermark, pending_watermark,
-                candidate_watermark, candidate_published_at, seen,
+                candidate_watermark, candidate_published_at, seen, published_floor,
             )
         )
         articles.extend(selected)
@@ -511,6 +531,7 @@ def fetch_csrc(
     pending_watermark = str(source.get("_state_pending_watermark") or "")
     candidate_watermark = pending_watermark
     candidate_published_at = -1.0
+    published_floor = _published_backfill_floor(source)
     reached = not watermark
     raw_keys: list[str] = []
     articles: list[FetchedArticle] = []
@@ -543,7 +564,7 @@ def fetch_csrc(
         selected, candidate_watermark, candidate_published_at, page_reached = (
             _select_paginated_articles(
                 page_articles, watermark, pending_watermark,
-                candidate_watermark, candidate_published_at, seen,
+                candidate_watermark, candidate_published_at, seen, published_floor,
             )
         )
         articles.extend(selected)
