@@ -15,6 +15,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from scripts.dev.pytest_windows_acl import prepare_pytest_directory
+except ModuleNotFoundError:
+    from pytest_windows_acl import prepare_pytest_directory
+
 ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -143,8 +148,10 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
             primary / ".artifacts" / "worktrees" / cwd.name
             / "pytest" / f"impact-{uuid.uuid4().hex[:10]}"
         )
+        cache = prepare_pytest_directory(temp.parent / "cache")
         run([
-            python, "-m", "pytest", "-o", f"cache_dir={temp.parent / 'cache'}",
+            python, "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+            "-o", f"cache_dir={cache}",
             "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),
         ], cwd=cwd)

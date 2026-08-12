@@ -46,8 +46,17 @@ RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
 
 
+def prepare_pytest_directory(path: Path) -> Path:
+    """Create a pytest directory without replacing inherited Windows ACLs."""
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def pytest_args(*args: str) -> list[str]:
-    return ["-m", "pytest", "-o", f"cache_dir={PYTEST_CACHE}", *args]
+    return [
+        "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+        "-o", f"cache_dir={PYTEST_CACHE}", *args,
+    ]
 
 
 def project_python() -> Path:
@@ -220,6 +229,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    prepare_pytest_directory(PYTEST_CACHE)
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
     run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "scripts"])
     run("exception policy", ["scripts/ci/exception_policy.py"])

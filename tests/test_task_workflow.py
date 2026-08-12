@@ -2,7 +2,9 @@
 
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
+from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
     Impact,
     remove,
@@ -87,6 +89,33 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
 
 def test_ready_state_allows_task_changelog_updates():
     validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+
+
+def test_prepare_pytest_cache_precreates_directory(tmp_path):
+    cache = tmp_path / "task-artifacts" / "pytest" / "cache"
+
+    assert prepare_pytest_directory(cache) == cache
+    assert cache.is_dir()
+
+
+def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_path):
+    from scripts.dev import pytest_windows_acl
+
+    basetemp = tmp_path / "pytest" / "run"
+    factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
+    cache = tmp_path / "pytest" / "cache"
+    cleanups = []
+    config = SimpleNamespace(
+        cache=SimpleNamespace(_cachedir=cache),
+        _tmp_path_factory=factory,
+        add_cleanup=cleanups.append,
+    )
+    pytest_windows_acl.pytest_configure(config)
+
+    assert factory._basetemp == basetemp.resolve()
+    assert basetemp.is_dir()
+    assert cache.is_dir()
+    cleanups.pop()()
 
 
 def test_remove_empty_residual_is_idempotent_and_rejects_content(tmp_path):

@@ -45,8 +45,16 @@ def test_pytest_args_override_checkout_cache_dir(monkeypatch, tmp_path):
     cache = tmp_path / "external-cache"
     monkeypatch.setattr(run, "PYTEST_CACHE", cache)
     assert run.pytest_args("tests/test_one.py") == [
-        "-m", "pytest", "-o", f"cache_dir={cache}", "tests/test_one.py",
+        "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+        "-o", f"cache_dir={cache}", "tests/test_one.py",
     ]
+
+
+def test_prepare_pytest_cache_precreates_directory(tmp_path):
+    cache = tmp_path / "task-artifacts" / "pytest" / "cache"
+
+    assert run.prepare_pytest_directory(cache) == cache
+    assert cache.is_dir()
 
 
 def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
