@@ -1,5 +1,6 @@
 """Contracts for isolated task development and impact-based validation."""
 
+import stat
 from pathlib import Path
 
 from scripts.dev.tasks import (
@@ -187,6 +188,20 @@ def test_remove_verified_residual_deletes_only_proven_checkout(monkeypatch, tmp_
     target = primary / ".worktrees" / "recovery"
     target.mkdir(parents=True)
     (target / "tracked.txt").write_text("old checkout", encoding="utf-8")
+    monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
+    remove_verified_residual(primary, target, "codex/recovery")
+    assert not target.exists()
+
+
+def test_remove_verified_residual_clears_readonly_files(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    readonly = target / "cache.bin"
+    readonly.write_bytes(b"cache")
+    readonly.chmod(stat.S_IREAD)
     monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
     remove_verified_residual(primary, target, "codex/recovery")
     assert not target.exists()

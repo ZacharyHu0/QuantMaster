@@ -235,12 +235,27 @@ def residual_checkout_clean(primary: Path, target: Path, branch: str) -> bool:
         )
         if read_tree.returncode:
             return False
-        status = subprocess.run(
-            [*command, "status", "--porcelain", "--untracked-files=all"],
+        refreshed = subprocess.run(
+            [*command, "update-index", "--refresh"], cwd=primary, env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if refreshed.returncode:
+            return False
+        tracked = subprocess.run(
+            [*command, "diff-files", "--quiet"],
             cwd=primary, env=env, capture_output=True, text=True,
             encoding="utf-8", errors="replace", check=False,
         )
-        return status.returncode == 0 and not status.stdout.strip()
+        untracked = subprocess.run(
+            [*command, "ls-files", "--others", "--exclude-standard"],
+            cwd=primary, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False,
+        )
+        return (
+            tracked.returncode == 0
+            and untracked.returncode == 0
+            and not untracked.stdout.strip()
+        )
     finally:
         index.unlink(missing_ok=True)
 
@@ -255,7 +270,13 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
     expected_parent = (primary / ".worktrees").resolve()
     if resolved.parent != expected_parent:
         raise SystemExit("拒绝删除预期目录之外的残留 worktree")
-    shutil.rmtree(resolved)
+    def make_writable(function, path, error):
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+
+    shutil.rmtree(resolved, onexc=make_writable)
 
 
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
