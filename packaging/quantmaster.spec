@@ -7,8 +7,9 @@ import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
+project_root = Path(SPECPATH).parent
 release_scope = {}
-exec((Path(SPECPATH).parent / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
+exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
 version_info = None
 if sys.platform == "win32":
@@ -38,9 +39,9 @@ if sys.platform == "win32":
     )
 
 datas = [
-    ("../quantmaster/server/static", "quantmaster/server/static"),
-    ("../quantmaster/data/security_master.json.gz", "quantmaster/data"),
-    ("../quantmaster/skills/stock-analysis-framework", "quantmaster/skills/stock-analysis-framework"),
+    (str(project_root / "quantmaster/server/static"), "quantmaster/server/static"),
+    (str(project_root / "quantmaster/data/security_master.json.gz"), "quantmaster/data"),
+    (str(project_root / "quantmaster/skills/stock-analysis-framework"), "quantmaster/skills/stock-analysis-framework"),
 ]
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
@@ -50,8 +51,8 @@ optional_hidden = (
 )
 
 a = Analysis(
-    ["entry.py"],
-    pathex=[".."],
+    [str(project_root / "packaging/entry.py")],
+    pathex=[str(project_root)],
     datas=datas,
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
@@ -63,7 +64,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas,
     name="QuantMaster",
-    icon="quantmaster.ico",
+    icon=str(project_root / "packaging/quantmaster.ico"),
     version=version_info,
     console=True,           # 保留控制台便于查看日志；不想要黑窗口可改 False
     upx=False,

@@ -145,7 +145,7 @@ jobs:
         with:
           pattern: coverage-shard-*
           merge-multiple: true
-          path: .artifacts/coverage
+          path: .artifacts
       - name: Combine branch coverage
         run: |
           mkdir -p .artifacts/coverage
