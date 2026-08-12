@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -8,11 +10,16 @@ from quantmaster.rotation.analytics import (
     STATE_CODES,
     _amount_activity_score,
     _classify_trend_states,
+    _etf_capital_parameters,
+    _etf_flow_streak,
+    _external_temperature_evidence_item,
     _group_grade,
+    _group_window_signal,
     _midrank_percentile,
     _regime,
     _score_group_windows,
     _stage,
+    _unavailable_etf_capital_evidence,
     analyze_group_rotation,
     compute_etf_capital_evidence,
     compute_market_structure,
@@ -86,6 +93,61 @@ def test_trend_state_hysteresis_is_symmetric_and_resets_after_invalid_rows():
 )
 def test_market_temperature_regime_boundaries_match_reference(value, expected):
     assert _regime(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_note"),
+    [
+        (
+            {"available": False, "score": 55, "as_of": "2026-08-12", "note": "停用"},
+            "停用",
+        ),
+        (
+            {"available": True, "score": 101, "as_of": "2026-08-12", "note": "越界"},
+            "越界",
+        ),
+        (
+            {"available": True, "score": 55, "as_of": "2026-08-11", "note": "过期"},
+            "证据日期 2026-08-11 与行情日 2026-08-12 不一致",
+        ),
+    ],
+)
+def test_external_temperature_evidence_rejects_unusable_payloads(payload, expected_note):
+    item = _external_temperature_evidence_item(
+        "sentiment",
+        "情绪代理",
+        10,
+        "等待可核查资讯情绪",
+        "2026-08-12",
+        {"sentiment": payload},
+    )
+
+    assert item["score"] is None
+    assert item["note"] == expected_note
+    assert item["as_of"] == payload["as_of"]
+
+
+def test_external_temperature_evidence_preserves_valid_payload_metadata():
+    item = _external_temperature_evidence_item(
+        "sentiment",
+        "情绪代理",
+        10,
+        "等待可核查资讯情绪",
+        "2026-08-12",
+        {
+            "sentiment": {
+                "available": True,
+                "score": 55.126,
+                "as_of": "2026-08-12",
+                "note": "可用",
+                "event_count": 12,
+            },
+        },
+    )
+
+    assert item["score"] == 55.13
+    assert item["note"] == "可用"
+    assert item["event_count"] == 12
 
 
 def test_market_temperature_reconciles_all_state_counts():
@@ -298,6 +360,73 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
     }
 
 
+def test_group_window_signal_keeps_returns_when_prior_coverage_is_too_thin():
+    aggregation = SimpleNamespace(
+        rows={"group": object()},
+        eligible=np.array([[6.0], [10.0]]),
+        strong_ratio=np.array([[20.0], [25.0]]),
+        positive_ratio=np.array([[50.0], [60.0]]),
+        weak_ratio=np.array([[30.0], [15.0]]),
+        window_returns={1: (np.array([0.02]), np.array([0.75]))},
+        window_amount_activity={1: np.array([0.10])},
+    )
+
+    signal = _group_window_signal(
+        aggregation,
+        window=1,
+        group_index=0,
+        member_count=10,
+        current_position=1,
+        minimum_members=8,
+        minimum_coverage=0.70,
+        strong_now=25.0,
+        positive_now=60.0,
+        weak_now=15.0,
+        market_return=0.01,
+    )
+
+    assert signal == {
+        "strong_change_pp": None,
+        "positive_change_pp": None,
+        "weak_change_pp": None,
+        "rotation_change_pp": None,
+        "member_return": 0.02,
+        "excess_return": 0.01,
+        "advance_ratio": 0.75,
+        "amount_activity": 0.1,
+    }
+
+
+def test_group_window_signal_is_fully_unavailable_without_prior_session():
+    aggregation = SimpleNamespace(rows={"group": object()})
+
+    signal = _group_window_signal(
+        aggregation,
+        window=1,
+        group_index=0,
+        member_count=10,
+        current_position=0,
+        minimum_members=8,
+        minimum_coverage=0.70,
+        strong_now=25.0,
+        positive_now=60.0,
+        weak_now=15.0,
+        market_return=0.01,
+    )
+
+    assert set(signal) == {
+        "strong_change_pp",
+        "positive_change_pp",
+        "weak_change_pp",
+        "rotation_change_pp",
+        "member_return",
+        "excess_return",
+        "advance_ratio",
+        "amount_activity",
+    }
+    assert all(value is None for value in signal.values())
+
+
 def _score_item(index: int, *, positive: float = 0.0) -> dict:
     return {
         "code": f"G{index:02d}", "name": f"组 {index}", "level": "L1",
@@ -421,6 +550,39 @@ def test_etf_flow_uses_nav_then_marks_close_fallback():
     assert result["daily"][-1]["cumulative_ma5"] is None
 
 
+@pytest.mark.parametrize(
+    ("flows", "available_dates", "expected"),
+    [
+        ([2.0, 3.0, 4.0], 3, 3),
+        ([-2.0, -3.0, -4.0], 3, -3),
+        ([2.0, -3.0, -4.0], 3, -2),
+        ([2.0, 0.0, 4.0], 3, 1),
+    ],
+)
+def test_etf_flow_streak_stops_at_reversal_zero_or_missing_session(
+    flows,
+    available_dates,
+    expected,
+):
+    dates = list(pd.bdate_range("2026-08-10", periods=available_dates))
+    observations = pd.DataFrame({
+        "trade_date": dates[-len(flows):],
+        "flow": flows,
+    })
+
+    assert _etf_flow_streak(observations, dates) == expected
+
+
+def test_etf_flow_streak_stops_at_missing_session():
+    dates = list(pd.bdate_range("2026-08-10", periods=3))
+    observations = pd.DataFrame({
+        "trade_date": [dates[0], dates[2]],
+        "flow": [2.0, 4.0],
+    })
+
+    assert _etf_flow_streak(observations, dates) == 1
+
+
 def test_etf_flow_preserves_disclosed_benchmark_across_windows():
     rows = []
     for offset, trade_date in enumerate(pd.bdate_range("2026-07-01", periods=21)):
@@ -473,6 +635,50 @@ def _etf_evidence_frame(days: int = 80, funds: int = 20) -> pd.DataFrame:
                 "shares": shares, "nav": 1.0,
             })
     return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    ("expected_funds", "minimum_coverage", "expected"),
+    [
+        ("30", "0.75", (30, 0.75)),
+        (-2, -0.1, (0, 0.0)),
+        (12, 1.5, (12, 1.0)),
+        ("invalid", "invalid", (0, 0.80)),
+    ],
+)
+def test_etf_capital_parameters_normalize_invalid_configuration(
+    expected_funds,
+    minimum_coverage,
+    expected,
+):
+    assert _etf_capital_parameters(expected_funds, minimum_coverage) == expected
+
+
+def test_unavailable_etf_capital_evidence_keeps_coverage_contract():
+    result = _unavailable_etf_capital_evidence(
+        "覆盖不足",
+        window=5,
+        expected_count=30,
+        coverage_threshold=0.8,
+        observed_as_of="2026-08-12",
+        fund_count=20,
+    )
+
+    coverage = result.pop("coverage")
+    assert coverage == pytest.approx(2 / 3)
+    assert result == {
+        "available": False,
+        "score": None,
+        "as_of": "2026-08-12",
+        "note": "覆盖不足",
+        "window_sessions": 5,
+        "reference_windows": 0,
+        "fund_count": 20,
+        "expected_funds": 30,
+        "minimum_coverage": 0.8,
+        "net_subscription_rate": None,
+        "net_subscription_rate_pct": None,
+    }
 
 
 def test_etf_capital_evidence_is_historical_percentile_without_future_rows():

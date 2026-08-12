@@ -229,6 +229,216 @@ def _quality(
     }
 
 
+def _temperature_history_rows(valid: pd.DataFrame, history: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "date": _date(index),
+            "temperature": _number(row["temperature"], 2),
+            "ma5": _number(row["ma5"], 2),
+            "ma10": _number(row["ma10"], 2),
+            "ma20": _number(row["ma20"], 2),
+            "eligible": int(row["eligible"]),
+            "strong_up": int(row["strong_up"]),
+            "up": int(row["up"]),
+            "range": int(row["range"]),
+            "weak": int(row["weak"]),
+        }
+        for index, row in valid.tail(max(30, min(int(history), 3000))).iterrows()
+    ]
+
+
+def _temperature_market_series(
+    trend: TrendMatrices,
+    amount: pd.DataFrame | None,
+    valid_index: pd.Index,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    advance = (trend.returns > 0).sum(axis=1) / trend.returns.notna().sum(
+        axis=1,
+    ).replace(0, np.nan)
+    volume_scores = pd.Series(np.nan, index=valid_index, dtype=float)
+    volume_ratios = pd.Series(np.nan, index=valid_index, dtype=float)
+    if amount is None or amount.empty:
+        return advance, volume_scores, volume_ratios
+    amounts = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(
+        trend.close.index,
+    )
+    total = amounts.sum(axis=1, min_count=max(1, min(10, len(amounts.columns))))
+    ratio = total.rolling(5, min_periods=3).mean() / (
+        total.rolling(20, min_periods=10).mean() + EPS
+    )
+    volume_ratios = ratio.reindex(valid_index)
+    volume_scores = ((volume_ratios - 0.70) / 0.60 * 100).clip(lower=0, upper=100)
+    return advance, volume_scores, volume_ratios
+
+
+def _external_temperature_evidence_item(
+    identifier: str,
+    label: str,
+    weight: int,
+    fallback_note: str,
+    evidence_date: str,
+    external: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    payload = dict(external.get(identifier) or {})
+    score = _number(payload.get("score"), 2)
+    evidence_as_of = str(payload.get("as_of") or "")
+    note = str(payload.get("note") or fallback_note)
+    if payload.get("available") is False or score is None or not 0 <= score <= 100:
+        score = None
+    if evidence_as_of and evidence_as_of != evidence_date:
+        score = None
+        note = f"证据日期 {evidence_as_of} 与行情日 {evidence_date} 不一致"
+    item: dict[str, Any] = {
+        "id": identifier,
+        "label": label,
+        "score": score,
+        "weight": weight,
+        "note": note,
+    }
+    for field_name in (
+        "as_of", "window_sessions", "reference_windows", "fund_count",
+        "expected_funds", "coverage", "minimum_coverage",
+        "net_subscription_rate", "net_subscription_rate_pct", "event_count",
+        "signed_score", "halflife_days", "lookback_days", "knowledge_as_of_epoch",
+    ):
+        if field_name in payload:
+            item[field_name] = payload[field_name]
+    return item
+
+
+def _temperature_evidence_at(
+    valid: pd.DataFrame,
+    advance: pd.Series,
+    volume_scores: pd.Series,
+    volume_ratios: pd.Series,
+    evidence_date: Any,
+    external: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    date_text = _date(evidence_date)
+    volume_ratio = volume_ratios.get(evidence_date)
+    volume_score = _number(volume_scores.get(evidence_date), 2)
+    volume_note = "本地成交额不足"
+    if pd.notna(volume_ratio):
+        volume_note = f"全样本成交额 5/20 日比值 {_number(volume_ratio, 3)}"
+    items = [
+        {
+            "id": "trend", "label": "趋势分布",
+            "score": _number(valid.at[evidence_date, "temperature"], 2),
+            "weight": 40, "note": "温度本身",
+        },
+        {
+            "id": "breadth", "label": "涨跌宽度",
+            "score": _number(100 * advance.get(evidence_date), 2),
+            "weight": 20, "note": "当日上涨股票占比",
+        },
+        {
+            "id": "volume", "label": "量能确认", "score": volume_score,
+            "weight": 15, "note": volume_note,
+        },
+        _external_temperature_evidence_item(
+            "etf_capital", "ETF 资金", 15, "等待 ETF 份额快照", date_text, external,
+        ),
+        _external_temperature_evidence_item(
+            "sentiment", "情绪代理", 10, "等待可核查资讯情绪", date_text, external,
+        ),
+    ]
+    for item in items:
+        item["available"] = item["score"] is not None
+    available_weight = sum(item["weight"] for item in items if item["available"])
+    score = (
+        sum(float(item["score"]) * item["weight"] for item in items if item["available"])
+        / available_weight if available_weight else None
+    )
+    return {
+        "score": _number(score, 2),
+        "available_weight": available_weight,
+        "items": items,
+    }
+
+
+def _compared_temperature_items(
+    current_items: list[dict[str, Any]],
+    previous: dict[str, Any] | None,
+    history_note: str,
+) -> list[dict[str, Any]]:
+    previous_items = {item["id"]: item for item in (previous or {}).get("items", [])}
+    compared = []
+    for current_item in current_items:
+        previous_item = previous_items.get(current_item["id"])
+        current_available = bool(current_item["available"])
+        previous_available = bool(previous_item and previous_item["available"])
+        comparable = current_available and previous_available
+        previous_score = previous_item.get("score") if previous_item else None
+        change_pp = None
+        if comparable and current_item["score"] is not None and previous_score is not None:
+            change_pp = _number(float(current_item["score"]) - float(previous_score), 2)
+        compared.append({
+            "id": current_item["id"],
+            "label": current_item["label"],
+            "weight": current_item["weight"],
+            "current_score": current_item["score"],
+            "previous_score": previous_score,
+            "change_pp": change_pp,
+            "current_available": current_available,
+            "previous_available": previous_available,
+            "comparable": comparable,
+            "current_note": current_item["note"],
+            "previous_note": str(previous_item.get("note") or "") if previous_item else history_note,
+        })
+    return compared
+
+
+def _temperature_change_windows(
+    valid: pd.DataFrame,
+    temperature: float | None,
+    current_evidence: dict[str, Any],
+    evidence_history: dict[str, dict[str, dict[str, Any]]],
+    advance: pd.Series,
+    volume_scores: pd.Series,
+    volume_ratios: pd.Series,
+) -> dict[str, dict[str, Any]]:
+    valid_dates = list(valid.index)
+    current_date_text = _date(valid_dates[-1])
+    result: dict[str, dict[str, Any]] = {}
+    for window in ROTATION_WINDOWS:
+        history_note = f"历史仅有 {len(valid_dates)} 个有效交易日，无法回看 {window} 日"
+        reference_date = valid_dates[-window - 1] if len(valid_dates) > window else None
+        reference_text = _date(reference_date) if reference_date is not None else ""
+        previous = (
+            _temperature_evidence_at(
+                valid, advance, volume_scores, volume_ratios, reference_date,
+                evidence_history.get(reference_text) or {},
+            )
+            if reference_date is not None else None
+        )
+        compared_items = _compared_temperature_items(
+            current_evidence["items"], previous, history_note,
+        )
+        previous_temperature = (
+            _number(valid.at[reference_date, "temperature"], 2)
+            if reference_date is not None else None
+        )
+        result[str(window)] = {
+            "window": window,
+            "current_as_of": current_date_text,
+            "reference_as_of": reference_text,
+            "temperature": {
+                "current": temperature,
+                "previous": previous_temperature,
+                "change_pp": _number(float(temperature) - float(previous_temperature), 2)
+                if temperature is not None and previous_temperature is not None else None,
+            },
+            "evidence": {
+                "previous_score": (previous or {}).get("score"),
+                "previous_available_weight": int((previous or {}).get("available_weight") or 0),
+                "comparable_count": sum(item["comparable"] for item in compared_items),
+                "total_count": len(compared_items),
+                "items": compared_items,
+            },
+        }
+    return result
+
+
 def compute_market_temperature(
     close: pd.DataFrame,
     amount: pd.DataFrame | None = None,
@@ -256,189 +466,20 @@ def compute_market_temperature(
     current = valid.iloc[-1]
     temperature = _number(current["temperature"], 2)
     regime, regime_label = _regime(temperature)
-    history_rows = []
-    for index, row in valid.tail(max(30, min(int(history), 3000))).iterrows():
-        history_rows.append({
-            "date": _date(index),
-            "temperature": _number(row["temperature"], 2),
-            "ma5": _number(row["ma5"], 2),
-            "ma10": _number(row["ma10"], 2),
-            "ma20": _number(row["ma20"], 2),
-            "eligible": int(row["eligible"]),
-            "strong_up": int(row["strong_up"]),
-            "up": int(row["up"]),
-            "range": int(row["range"]),
-            "weak": int(row["weak"]),
-        })
-
-    advance = (trend.returns > 0).sum(axis=1) / trend.returns.notna().sum(axis=1).replace(0, np.nan)
-    volume_scores = pd.Series(np.nan, index=valid.index, dtype=float)
-    volume_ratios = pd.Series(np.nan, index=valid.index, dtype=float)
-    if amount is not None and not amount.empty:
-        amounts = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
-        total = amounts.sum(axis=1, min_count=max(1, min(10, len(amounts.columns))))
-        ratio = total.rolling(5, min_periods=3).mean() / (total.rolling(20, min_periods=10).mean() + EPS)
-        volume_ratios = ratio.reindex(valid.index)
-        volume_scores = ((volume_ratios - 0.70) / 0.60 * 100).clip(lower=0, upper=100)
-    current_date_text = _date(current_date)
-
-    def external_item(
-        identifier: str,
-        label: str,
-        weight: int,
-        fallback_note: str,
-        evidence_date: str,
-        external: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
-        payload = dict(external.get(identifier) or {})
-        score = _number(payload.get("score"), 2)
-        evidence_as_of = str(payload.get("as_of") or "")
-        note = str(payload.get("note") or fallback_note)
-        if payload.get("available") is False or score is None or not 0 <= score <= 100:
-            score = None
-        if evidence_as_of and evidence_as_of != evidence_date:
-            score = None
-            note = f"证据日期 {evidence_as_of} 与行情日 {evidence_date} 不一致"
-        item: dict[str, Any] = {
-            "id": identifier,
-            "label": label,
-            "score": score,
-            "weight": weight,
-            "note": note,
-        }
-        for field_name in (
-            "as_of", "window_sessions", "reference_windows", "fund_count",
-            "expected_funds", "coverage", "minimum_coverage",
-            "net_subscription_rate", "net_subscription_rate_pct", "event_count",
-            "signed_score", "halflife_days", "lookback_days",
-            "knowledge_as_of_epoch",
-        ):
-            if field_name in payload:
-                item[field_name] = payload[field_name]
-        return item
-
-    def evidence_at(
-        evidence_date: Any,
-        external: dict[str, dict[str, Any]],
-    ) -> dict[str, Any]:
-        date_text = _date(evidence_date)
-        volume_ratio = volume_ratios.get(evidence_date)
-        volume_score = _number(volume_scores.get(evidence_date), 2)
-        volume_note = "本地成交额不足"
-        if pd.notna(volume_ratio):
-            volume_note = f"全样本成交额 5/20 日比值 {_number(volume_ratio, 3)}"
-        items = [
-            {
-                "id": "trend", "label": "趋势分布",
-                "score": _number(valid.at[evidence_date, "temperature"], 2),
-                "weight": 40, "note": "温度本身",
-            },
-            {
-                "id": "breadth", "label": "涨跌宽度",
-                "score": _number(100 * advance.get(evidence_date), 2),
-                "weight": 20, "note": "当日上涨股票占比",
-            },
-            {
-                "id": "volume", "label": "量能确认", "score": volume_score,
-                "weight": 15, "note": volume_note,
-            },
-            external_item(
-                "etf_capital", "ETF 资金", 15, "等待 ETF 份额快照",
-                date_text, external,
-            ),
-            external_item(
-                "sentiment", "情绪代理", 10, "等待可核查资讯情绪",
-                date_text, external,
-            ),
-        ]
-        for item in items:
-            item["available"] = item["score"] is not None
-        available_weight = sum(item["weight"] for item in items if item["available"])
-        score = (
-            sum(float(item["score"]) * item["weight"] for item in items if item["available"])
-            / available_weight if available_weight else None
-        )
-        return {
-            "score": _number(score, 2),
-            "available_weight": available_weight,
-            "items": items,
-        }
-
-    evidence = evidence_at(current_date, supplemental_evidence or {})
+    history_rows = _temperature_history_rows(valid, history)
+    advance, volume_scores, volume_ratios = _temperature_market_series(
+        trend, amount, valid.index,
+    )
+    evidence = _temperature_evidence_at(
+        valid, advance, volume_scores, volume_ratios,
+        current_date, supplemental_evidence or {},
+    )
     evidence_items = evidence["items"]
     available_weight = int(evidence["available_weight"])
-    evidence_history = supplemental_evidence_history or {}
-    change_windows: dict[str, dict[str, Any]] = {}
-    valid_dates = list(valid.index)
-    for window in ROTATION_WINDOWS:
-        history_note = (
-            f"历史仅有 {len(valid_dates)} 个有效交易日，无法回看 {window} 日"
-        )
-        reference_date = valid_dates[-window - 1] if len(valid_dates) > window else None
-        reference_text = _date(reference_date) if reference_date is not None else ""
-        previous = (
-            evidence_at(reference_date, evidence_history.get(reference_text) or {})
-            if reference_date is not None else None
-        )
-        previous_items = {
-            item["id"]: item for item in (previous or {}).get("items", [])
-        }
-        compared_items = []
-        for current_item in evidence_items:
-            previous_item = previous_items.get(current_item["id"])
-            current_available = bool(current_item["available"])
-            previous_available = bool(previous_item and previous_item["available"])
-            comparable = current_available and previous_available
-            previous_score = previous_item.get("score") if previous_item else None
-            change_pp = None
-            if (
-                comparable
-                and current_item["score"] is not None
-                and previous_score is not None
-            ):
-                change_pp = _number(
-                    float(current_item["score"]) - float(previous_score), 2,
-                )
-            compared_items.append({
-                "id": current_item["id"],
-                "label": current_item["label"],
-                "weight": current_item["weight"],
-                "current_score": current_item["score"],
-                "previous_score": previous_score,
-                "change_pp": change_pp,
-                "current_available": current_available,
-                "previous_available": previous_available,
-                "comparable": comparable,
-                "current_note": current_item["note"],
-                "previous_note": (
-                    str(previous_item.get("note") or "") if previous_item else history_note
-                ),
-            })
-        previous_temperature = (
-            _number(valid.at[reference_date, "temperature"], 2)
-            if reference_date is not None else None
-        )
-        change_windows[str(window)] = {
-            "window": window,
-            "current_as_of": current_date_text,
-            "reference_as_of": reference_text,
-            "temperature": {
-                "current": temperature,
-                "previous": previous_temperature,
-                "change_pp": _number(
-                    float(temperature) - float(previous_temperature), 2,
-                ) if temperature is not None and previous_temperature is not None else None,
-            },
-            "evidence": {
-                "previous_score": (previous or {}).get("score"),
-                "previous_available_weight": int(
-                    (previous or {}).get("available_weight") or 0,
-                ),
-                "comparable_count": sum(item["comparable"] for item in compared_items),
-                "total_count": len(compared_items),
-                "items": compared_items,
-            },
-        }
+    change_windows = _temperature_change_windows(
+        valid, temperature, evidence, supplemental_evidence_history or {},
+        advance, volume_scores, volume_ratios,
+    )
     quality = _quality(
         int(current["eligible"]), len(trend.close.columns), expected_count,
         issues=[] if available_weight == 100 else [f"证据维度覆盖权重 {available_weight}/100"],
@@ -1224,6 +1265,255 @@ def map_theme_industries(
     return result
 
 
+def _group_universe_returns(
+    trend: TrendMatrices,
+    current_date: Any,
+    current_position: int,
+) -> dict[int, float | None]:
+    result: dict[int, float | None] = {}
+    for window in ROTATION_WINDOWS:
+        if current_position < window:
+            continue
+        previous_date = trend.close.index[current_position - window]
+        values = (
+            trend.close.loc[current_date] / trend.close.loc[previous_date] - 1.0
+        ).where(trend.eligible.loc[current_date]).replace(
+            [np.inf, -np.inf], np.nan,
+        ).dropna()
+        result[window] = _number(values.median(), 4) if len(values) >= 8 else None
+    return result
+
+
+def _empty_group_signal() -> dict[str, Any]:
+    return {
+        "strong_change_pp": None,
+        "positive_change_pp": None,
+        "weak_change_pp": None,
+        "rotation_change_pp": None,
+        "member_return": None,
+        "excess_return": None,
+        "advance_ratio": None,
+        "amount_activity": None,
+    }
+
+
+def _group_window_signal(
+    aggregation: _GroupAggregation,
+    *,
+    window: int,
+    group_index: int,
+    member_count: int,
+    current_position: int,
+    minimum_members: int,
+    minimum_coverage: float,
+    strong_now: float,
+    positive_now: float,
+    weak_now: float,
+    market_return: float | None,
+) -> dict[str, Any]:
+    previous_position = current_position - window
+    if previous_position < 0:
+        return _empty_group_signal()
+    eligible_before = int(aggregation.eligible[previous_position, group_index])
+    previous_coverage = eligible_before / member_count if member_count else 0.0
+    changes: tuple[float | None, float | None, float | None] = (None, None, None)
+    if eligible_before >= minimum_members and previous_coverage >= minimum_coverage:
+        changes = (
+            strong_now - float(aggregation.strong_ratio[previous_position, group_index]),
+            positive_now - float(aggregation.positive_ratio[previous_position, group_index]),
+            weak_now - float(aggregation.weak_ratio[previous_position, group_index]),
+        )
+    median_values, advance_values = aggregation.window_returns.get(
+        window,
+        (np.full(len(aggregation.rows), np.nan), np.full(len(aggregation.rows), np.nan)),
+    )
+    member_return = _number(median_values[group_index], 4)
+    strong_change, positive_change, weak_change = (
+        _number(value, 2) for value in changes
+    )
+    return {
+        "strong_change_pp": strong_change,
+        "positive_change_pp": positive_change,
+        "weak_change_pp": weak_change,
+        "rotation_change_pp": _number(
+            positive_change - weak_change
+            if positive_change is not None and weak_change is not None else None,
+            2,
+        ),
+        "member_return": member_return,
+        "excess_return": _number(
+            member_return - market_return
+            if member_return is not None and market_return is not None else None,
+            4,
+        ),
+        "advance_ratio": _number(advance_values[group_index], 4),
+        "amount_activity": _number(
+            aggregation.window_amount_activity[window][group_index], 4,
+        ),
+    }
+
+
+def _group_signals(
+    aggregation: _GroupAggregation,
+    *,
+    group_index: int,
+    member_count: int,
+    current_position: int,
+    minimum_members: int,
+    minimum_coverage: float,
+    strong_now: float,
+    positive_now: float,
+    weak_now: float,
+    universe_returns: dict[int, float | None],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(window): _group_window_signal(
+            aggregation,
+            window=window,
+            group_index=group_index,
+            member_count=member_count,
+            current_position=current_position,
+            minimum_members=minimum_members,
+            minimum_coverage=minimum_coverage,
+            strong_now=strong_now,
+            positive_now=positive_now,
+            weak_now=weak_now,
+            market_return=universe_returns.get(window),
+        )
+        for window in ROTATION_WINDOWS
+    }
+
+
+def _group_history(
+    aggregation: _GroupAggregation,
+    trend: TrendMatrices,
+    *,
+    group_index: int,
+    member_count: int,
+    history_start: int,
+    current_position: int,
+    minimum_members: int,
+    minimum_coverage: float,
+    current_stage: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    for position in range(history_start, current_position + 1):
+        valid = int(aggregation.eligible[position, group_index])
+        if not valid:
+            continue
+        strong_ratio = float(aggregation.strong_ratio[position, group_index])
+        positive_ratio = float(aggregation.positive_ratio[position, group_index])
+        weak_ratio = float(aggregation.weak_ratio[position, group_index])
+        stage_key = None
+        if position >= 3:
+            previous_valid = int(aggregation.eligible[position - 3, group_index])
+            previous_coverage = previous_valid / member_count if member_count else 0.0
+            if previous_valid >= minimum_members and previous_coverage >= minimum_coverage:
+                previous_positive = float(aggregation.positive_ratio[position - 3, group_index])
+                previous_weak = float(aggregation.weak_ratio[position - 3, group_index])
+                stage_key = _stage(
+                    positive_ratio, weak_ratio,
+                    positive_ratio - previous_positive,
+                    weak_ratio - previous_weak,
+                )
+        if position == current_position:
+            stage_key = current_stage
+        rows.append({
+            "date": _date(trend.close.index[position]),
+            "strong_ratio": _number(strong_ratio, 2),
+            "positive_ratio": _number(positive_ratio, 2),
+            "weak_ratio": _number(weak_ratio, 2),
+            "eligible": valid,
+            "stage": stage_key,
+            "stage_label": STAGE_LABELS.get(stage_key or "", "待判定"),
+        })
+    return rows
+
+
+def _group_rotation_item(
+    code: str,
+    group_row: _GroupRow,
+    aggregation: _GroupAggregation,
+    trend: TrendMatrices,
+    *,
+    names: dict[str, str],
+    kind: Literal["industry", "theme"],
+    current_position: int,
+    history_start: int,
+    minimum_members: int,
+    minimum_coverage: float,
+    universe_returns: dict[int, float | None],
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    member_count = group_row.member_count
+    group_index = group_row.index
+    eligible_count = int(aggregation.eligible[current_position, group_index])
+    coverage = eligible_count / member_count if member_count else 0.0
+    if eligible_count < minimum_members or coverage < minimum_coverage:
+        return None
+    strong_now = float(aggregation.strong_ratio[current_position, group_index])
+    positive_now = float(aggregation.positive_ratio[current_position, group_index])
+    weak_now = float(aggregation.weak_ratio[current_position, group_index])
+    signals = _group_signals(
+        aggregation,
+        group_index=group_index,
+        member_count=member_count,
+        current_position=current_position,
+        minimum_members=minimum_members,
+        minimum_coverage=minimum_coverage,
+        strong_now=strong_now,
+        positive_now=positive_now,
+        weak_now=weak_now,
+        universe_returns=universe_returns,
+    )
+    delta_positive = signals["3"]["positive_change_pp"]
+    delta_weak = signals["3"]["weak_change_pp"]
+    stage = _stage(
+        positive_now, weak_now, float(delta_positive or 0.0), float(delta_weak or 0.0),
+    )
+    day_returns = aggregation.returns_current[group_row.symbol_positions]
+    valid_returns = int(np.isfinite(day_returns).sum())
+    advance_ratio = (
+        float(((day_returns > 0) & np.isfinite(day_returns)).sum() / valid_returns)
+        if valid_returns else 0.0
+    )
+    history_rows = _group_history(
+        aggregation, trend,
+        group_index=group_index,
+        member_count=member_count,
+        history_start=history_start,
+        current_position=current_position,
+        minimum_members=minimum_members,
+        minimum_coverage=minimum_coverage,
+        current_stage=stage,
+    )
+    stage_sessions = _trailing_sessions(
+        [str(row["stage"] or "") for row in history_rows], stage, unavailable="",
+    )
+    raw = group_row.raw
+    return ({
+        "code": str(code),
+        "name": str(raw.get("name") or code),
+        "level": str(raw.get("level") or ("concept" if kind == "theme" else "L1")),
+        "parent_code": str(raw.get("parent_code") or ""),
+        "member_count": member_count,
+        "eligible_count": eligible_count,
+        "coverage": round(coverage, 4),
+        "strong_ratio": _number(strong_now, 2),
+        "positive_ratio": _number(positive_now, 2),
+        "weak_ratio": _number(weak_now, 2),
+        "delta_positive_3d": _number(delta_positive, 2),
+        "delta_weak_3d": _number(delta_weak, 2),
+        "signals": signals,
+        "advance_ratio": _number(advance_ratio, 4),
+        "stage": stage,
+        "stage_label": STAGE_LABELS[stage],
+        "stage_sessions": stage_sessions,
+        "representatives": _representatives_from_group_aggregation(
+            group_row, aggregation, names,
+        ),
+    }, history_rows)
+
+
 def analyze_group_rotation(
     close: pd.DataFrame,
     groups: dict[str, dict[str, Any]],
@@ -1246,17 +1536,7 @@ def analyze_group_rotation(
         raise ValueError("没有可用于板块聚合的交易日")
     current_date = valid_dates.index[-1]
     current_position = int(trend.close.index.get_loc(current_date))
-    window_dates = {
-        window: trend.close.index[current_position - window]
-        for window in ROTATION_WINDOWS
-        if current_position >= window
-    }
-    universe_returns: dict[int, float | None] = {}
-    for window, previous_date in window_dates.items():
-        values = (
-            trend.close.loc[current_date] / trend.close.loc[previous_date] - 1.0
-        ).where(trend.eligible.loc[current_date]).replace([np.inf, -np.inf], np.nan).dropna()
-        universe_returns[window] = _number(values.median(), 4) if len(values) >= 8 else None
+    universe_returns = _group_universe_returns(trend, current_date, current_position)
     amount_clean = None
     if amount is not None and not amount.empty:
         amount_clean = _clean_matrix(amount, columns=list(trend.close.columns)).reindex(trend.close.index)
@@ -1271,147 +1551,19 @@ def analyze_group_rotation(
     history_length = max(20, min(int(history), 520))
     history_start = max(0, current_position - history_length + 1)
     for code, group_row in aggregation.rows.items():
-        raw = group_row.raw
-        member_count = group_row.member_count
-        group_index = group_row.index
-        eligible_count = int(aggregation.eligible[current_position, group_index])
-        coverage = eligible_count / member_count if member_count else 0.0
-        if eligible_count < minimum_members or coverage < minimum_coverage:
+        prepared = _group_rotation_item(
+            code, group_row, aggregation, trend,
+            names=names,
+            kind=kind,
+            current_position=current_position,
+            history_start=history_start,
+            minimum_members=minimum_members,
+            minimum_coverage=minimum_coverage,
+            universe_returns=universe_returns,
+        )
+        if prepared is None:
             continue
-        strong_now = float(aggregation.strong_ratio[current_position, group_index])
-        positive_now = float(aggregation.positive_ratio[current_position, group_index])
-        weak_now = float(aggregation.weak_ratio[current_position, group_index])
-        signals: dict[str, dict[str, Any]] = {}
-        for window in ROTATION_WINDOWS:
-            previous_position = current_position - window
-            if previous_position < 0:
-                signals[str(window)] = {
-                    "strong_change_pp": None,
-                    "positive_change_pp": None,
-                    "weak_change_pp": None,
-                    "rotation_change_pp": None,
-                    "member_return": None,
-                    "excess_return": None,
-                    "advance_ratio": None,
-                    "amount_activity": None,
-                }
-                continue
-            eligible_before = int(aggregation.eligible[previous_position, group_index])
-            previous_coverage = eligible_before / member_count if member_count else 0.0
-            if eligible_before >= minimum_members and previous_coverage >= minimum_coverage:
-                strong_before = float(aggregation.strong_ratio[previous_position, group_index])
-                positive_before = float(aggregation.positive_ratio[previous_position, group_index])
-                weak_before = float(aggregation.weak_ratio[previous_position, group_index])
-                strong_change = strong_now - strong_before
-                positive_change = positive_now - positive_before
-                weak_change = weak_now - weak_before
-            else:
-                strong_change = None
-                positive_change = None
-                weak_change = None
-            median_values, advance_values = aggregation.window_returns.get(
-                window,
-                (np.full(len(aggregation.rows), np.nan), np.full(len(aggregation.rows), np.nan)),
-            )
-            member_return = _number(median_values[group_index], 4)
-            advance_ratio = _number(advance_values[group_index], 4)
-            market_return = universe_returns.get(window)
-            strong_change_value = _number(strong_change, 2)
-            positive_change_value = _number(positive_change, 2)
-            weak_change_value = _number(weak_change, 2)
-            signals[str(window)] = {
-                "strong_change_pp": strong_change_value,
-                "positive_change_pp": positive_change_value,
-                "weak_change_pp": weak_change_value,
-                "rotation_change_pp": _number(
-                    positive_change_value - weak_change_value
-                    if positive_change_value is not None and weak_change_value is not None
-                    else None,
-                    2,
-                ),
-                "member_return": member_return,
-                "excess_return": _number(
-                    member_return - market_return
-                    if member_return is not None and market_return is not None else None,
-                    4,
-                ),
-                "advance_ratio": advance_ratio,
-                "amount_activity": _number(
-                    aggregation.window_amount_activity[window][group_index], 4,
-                ),
-            }
-        three_day = signals["3"]
-        delta_positive = three_day["positive_change_pp"]
-        delta_weak = three_day["weak_change_pp"]
-        stage = _stage(
-            positive_now,
-            weak_now,
-            float(delta_positive or 0.0),
-            float(delta_weak or 0.0),
-        )
-        day_returns = aggregation.returns_current[group_row.symbol_positions]
-        valid_returns = int(np.isfinite(day_returns).sum())
-        advance_ratio = (
-            float(((day_returns > 0) & np.isfinite(day_returns)).sum() / valid_returns)
-            if valid_returns else 0.0
-        )
-        history_rows = []
-        for position in range(history_start, current_position + 1):
-            date_value = trend.close.index[position]
-            valid = int(aggregation.eligible[position, group_index])
-            if not valid:
-                continue
-            strong_ratio = float(aggregation.strong_ratio[position, group_index])
-            positive_ratio = float(aggregation.positive_ratio[position, group_index])
-            weak_ratio = float(aggregation.weak_ratio[position, group_index])
-            stage_key: str | None = None
-            if position >= 3:
-                previous_valid = int(aggregation.eligible[position - 3, group_index])
-                previous_coverage = previous_valid / member_count if member_count else 0.0
-                if previous_valid >= minimum_members and previous_coverage >= minimum_coverage:
-                    previous_positive = float(aggregation.positive_ratio[position - 3, group_index])
-                    previous_weak = float(aggregation.weak_ratio[position - 3, group_index])
-                    stage_key = _stage(
-                        float(positive_ratio), float(weak_ratio),
-                        float(positive_ratio - previous_positive),
-                        float(weak_ratio - previous_weak),
-                    )
-            if position == current_position:
-                stage_key = stage
-            history_rows.append({
-                "date": _date(date_value),
-                "strong_ratio": _number(strong_ratio, 2),
-                "positive_ratio": _number(positive_ratio, 2),
-                "weak_ratio": _number(weak_ratio, 2),
-                "eligible": valid,
-                "stage": stage_key,
-                "stage_label": STAGE_LABELS.get(stage_key or "", "待判定"),
-            })
-        stage_sessions = _trailing_sessions(
-            [str(row["stage"] or "") for row in history_rows], stage, unavailable="",
-        )
-        item = {
-            "code": str(code),
-            "name": str(raw.get("name") or code),
-            "level": str(raw.get("level") or ("concept" if kind == "theme" else "L1")),
-            "parent_code": str(raw.get("parent_code") or ""),
-            "member_count": member_count,
-            "eligible_count": eligible_count,
-            "coverage": round(coverage, 4),
-            "strong_ratio": _number(strong_now, 2),
-            "positive_ratio": _number(positive_now, 2),
-            "weak_ratio": _number(weak_now, 2),
-            "delta_positive_3d": _number(delta_positive, 2),
-            "delta_weak_3d": _number(delta_weak, 2),
-            "signals": signals,
-            "advance_ratio": _number(advance_ratio, 4),
-            "stage": stage,
-            "stage_label": STAGE_LABELS[stage],
-            "stage_sessions": stage_sessions,
-            "representatives": _representatives_from_group_aggregation(
-                group_row, aggregation, names,
-            ),
-        }
+        item, history_rows = prepared
         items.append(item)
         histories[str(code)] = history_rows
     _score_group_windows(items, kind)
@@ -1479,6 +1631,138 @@ def analyze_group_rotation(
     }
 
 
+def _etf_capital_parameters(
+    expected_funds: Any,
+    minimum_coverage: Any,
+) -> tuple[int, float]:
+    try:
+        expected_count = max(0, int(expected_funds or 0))
+    except (TypeError, ValueError):
+        expected_count = 0
+    try:
+        coverage_threshold = float(minimum_coverage)
+    except (TypeError, ValueError):
+        coverage_threshold = 0.80
+    return expected_count, max(0.0, min(1.0, coverage_threshold))
+
+
+def _unavailable_etf_capital_evidence(
+    note: str,
+    *,
+    window: int,
+    expected_count: int,
+    coverage_threshold: float,
+    observed_as_of: str = "",
+    fund_count: int = 0,
+) -> dict[str, Any]:
+    coverage = min(1.0, float(fund_count) / expected_count) if expected_count else None
+    return {
+        "available": False,
+        "score": None,
+        "as_of": observed_as_of,
+        "note": note,
+        "window_sessions": int(window),
+        "reference_windows": 0,
+        "fund_count": int(fund_count),
+        "expected_funds": expected_count or None,
+        "coverage": coverage,
+        "minimum_coverage": coverage_threshold if expected_count else None,
+        "net_subscription_rate": None,
+        "net_subscription_rate_pct": None,
+    }
+
+
+def _prepare_etf_capital_frame(frame: pd.DataFrame, target: pd.Timestamp) -> pd.DataFrame:
+    value = frame.copy()
+    value["trade_date"] = pd.to_datetime(value["trade_date"], errors="coerce")
+    if getattr(value["trade_date"].dt, "tz", None) is not None:
+        value["trade_date"] = value["trade_date"].dt.tz_localize(None)
+    value["trade_date"] = value["trade_date"].dt.normalize()
+    value["symbol"] = value["symbol"].astype(str)
+    value["shares"] = pd.to_numeric(value["shares"], errors="coerce")
+    nav = (
+        pd.to_numeric(value.get("nav"), errors="coerce")
+        if "nav" in value else pd.Series(np.nan, index=value.index)
+    )
+    close = (
+        pd.to_numeric(value.get("close"), errors="coerce")
+        if "close" in value else pd.Series(np.nan, index=value.index)
+    )
+    value["price"] = nav.fillna(close)
+    value = value.dropna(subset=["trade_date", "symbol", "shares", "price"])
+    value = value[(value["shares"] > 0) & (value["price"] > 0)]
+    value = value.drop_duplicates(["trade_date", "symbol"], keep="last")
+    return value[value["trade_date"] <= target].sort_values(["symbol", "trade_date"])
+
+
+def _etf_capital_rolling_rates(
+    value: pd.DataFrame,
+    observed_dates: pd.DatetimeIndex,
+    *,
+    window: int,
+    min_funds: int,
+) -> tuple[pd.DataFrame, pd.Series]:
+    previous_dates = {
+        pd.Timestamp(observed_dates[index]): pd.Timestamp(observed_dates[index - 1])
+        for index in range(1, len(observed_dates))
+    }
+    value = value.copy()
+    grouped = value.groupby("symbol", sort=False)
+    value["previous_trade_date"] = grouped["trade_date"].shift()
+    value["previous_shares"] = grouped["shares"].shift()
+    value["expected_previous_date"] = value["trade_date"].map(previous_dates)
+    consecutive = value["previous_trade_date"].eq(value["expected_previous_date"])
+    eligible = value[consecutive & value["previous_shares"].gt(0)].copy()
+    eligible["flow"] = (eligible["shares"] - eligible["previous_shares"]) * eligible["price"]
+    eligible["prior_value"] = eligible["previous_shares"] * eligible["price"]
+    eligible = eligible.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["flow", "prior_value"],
+    )
+    daily = eligible.groupby("trade_date").agg(
+        net_flow=("flow", "sum"),
+        prior_value=("prior_value", "sum"),
+        fund_count=("symbol", "nunique"),
+    ).reindex(observed_dates)
+    daily["rate"] = (
+        daily["net_flow"] / daily["prior_value"].where(daily["prior_value"] > 0)
+    ).where(daily["fund_count"] >= int(min_funds))
+    return daily, daily["rate"].rolling(int(window), min_periods=int(window)).sum()
+
+
+def _available_etf_capital_evidence(
+    current_rate: float,
+    reference: pd.Series,
+    *,
+    target_text: str,
+    window: int,
+    fund_count: int,
+    expected_count: int,
+    coverage_threshold: float,
+) -> dict[str, Any]:
+    less = int((reference < current_rate).sum())
+    equal = int((reference == current_rate).sum())
+    score = 100.0 * (less + 0.5 * equal) / len(reference)
+    rate_pct = _number(current_rate * 100, 2)
+    score_value = _number(score, 2)
+    return {
+        "available": True,
+        "score": score_value,
+        "as_of": target_text,
+        "note": (
+            f"近 {window} 日净申购率 {rate_pct:+.2f}% · "
+            f"近 {len(reference)} 个窗口第 {score_value:.2f} 百分位 · {fund_count} 只"
+        ),
+        "window_sessions": int(window),
+        "reference_windows": len(reference),
+        "fund_count": fund_count,
+        "expected_funds": expected_count or None,
+        "coverage": min(1.0, float(fund_count) / expected_count) if expected_count else None,
+        "minimum_coverage": coverage_threshold if expected_count else None,
+        "net_subscription_rate": _number(current_rate, 6),
+        "net_subscription_rate_pct": rate_pct,
+    }
+
+
 def compute_etf_capital_evidence(
     frame: pd.DataFrame,
     *,
@@ -1499,65 +1783,25 @@ def compute_etf_capital_evidence(
     """
     target = pd.to_datetime(as_of, errors="coerce")
     target_text = _date(target) if pd.notna(target) else ""
-    try:
-        expected_count = max(0, int(expected_funds or 0))
-    except (TypeError, ValueError):
-        expected_count = 0
-    try:
-        coverage_threshold = float(minimum_coverage)
-    except (TypeError, ValueError):
-        coverage_threshold = 0.80
-    coverage_threshold = max(0.0, min(1.0, coverage_threshold))
+    expected_count, coverage_threshold = _etf_capital_parameters(
+        expected_funds, minimum_coverage,
+    )
 
-    def unavailable(
-        note: str,
-        *,
-        observed_as_of: str = "",
-        fund_count: int = 0,
-    ) -> dict[str, Any]:
-        coverage = (
-            min(1.0, float(fund_count) / expected_count)
-            if expected_count else None
+    def unavailable(note: str, observed_as_of: str = "", fund_count: int = 0) -> dict[str, Any]:
+        return _unavailable_etf_capital_evidence(
+            note,
+            window=window,
+            expected_count=expected_count,
+            coverage_threshold=coverage_threshold,
+            observed_as_of=observed_as_of,
+            fund_count=fund_count,
         )
-        return {
-            "available": False,
-            "score": None,
-            "as_of": observed_as_of,
-            "note": note,
-            "window_sessions": int(window),
-            "reference_windows": 0,
-            "fund_count": int(fund_count),
-            "expected_funds": expected_count or None,
-            "coverage": coverage,
-            "minimum_coverage": coverage_threshold if expected_count else None,
-            "net_subscription_rate": None,
-            "net_subscription_rate_pct": None,
-        }
 
     required = {"trade_date", "symbol", "shares"}
     if pd.isna(target) or frame is None or frame.empty or not required.issubset(frame.columns):
         return unavailable("等待 ETF 份额与价格快照")
     target = pd.Timestamp(target).tz_localize(None).normalize()
-    value = frame.copy()
-    value["trade_date"] = pd.to_datetime(value["trade_date"], errors="coerce")
-    if getattr(value["trade_date"].dt, "tz", None) is not None:
-        value["trade_date"] = value["trade_date"].dt.tz_localize(None)
-    value["trade_date"] = value["trade_date"].dt.normalize()
-    value["symbol"] = value["symbol"].astype(str)
-    value["shares"] = pd.to_numeric(value["shares"], errors="coerce")
-    nav = (
-        pd.to_numeric(value.get("nav"), errors="coerce")
-        if "nav" in value else pd.Series(np.nan, index=value.index)
-    )
-    close = (
-        pd.to_numeric(value.get("close"), errors="coerce")
-        if "close" in value else pd.Series(np.nan, index=value.index)
-    )
-    value["price"] = nav.fillna(close)
-    value = value.dropna(subset=["trade_date", "symbol", "shares", "price"])
-    value = value[(value["shares"] > 0) & (value["price"] > 0)]
-    value = value.drop_duplicates(["trade_date", "symbol"], keep="last")
-    value = value[value["trade_date"] <= target].sort_values(["symbol", "trade_date"])
+    value = _prepare_etf_capital_frame(frame, target)
     if value.empty:
         return unavailable("目标行情日前没有可用 ETF 份额快照")
 
@@ -1567,33 +1811,11 @@ def compute_etf_capital_evidence(
     if target not in observed_dates:
         return unavailable(
             f"ETF 份额仅到 {latest_text}，目标行情日为 {target_text}",
-            observed_as_of=latest_text,
+            latest_text,
         )
-
-    previous_dates = {
-        pd.Timestamp(observed_dates[index]): pd.Timestamp(observed_dates[index - 1])
-        for index in range(1, len(observed_dates))
-    }
-    grouped = value.groupby("symbol", sort=False)
-    value["previous_trade_date"] = grouped["trade_date"].shift()
-    value["previous_shares"] = grouped["shares"].shift()
-    value["expected_previous_date"] = value["trade_date"].map(previous_dates)
-    consecutive = value["previous_trade_date"].eq(value["expected_previous_date"])
-    eligible = value[consecutive & value["previous_shares"].gt(0)].copy()
-    eligible["flow"] = (eligible["shares"] - eligible["previous_shares"]) * eligible["price"]
-    eligible["prior_value"] = eligible["previous_shares"] * eligible["price"]
-    eligible = eligible.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=["flow", "prior_value"],
+    daily, rolling_rate = _etf_capital_rolling_rates(
+        value, observed_dates, window=window, min_funds=min_funds,
     )
-    daily = eligible.groupby("trade_date").agg(
-        net_flow=("flow", "sum"),
-        prior_value=("prior_value", "sum"),
-        fund_count=("symbol", "nunique"),
-    ).reindex(observed_dates)
-    daily["rate"] = (
-        daily["net_flow"] / daily["prior_value"].where(daily["prior_value"] > 0)
-    ).where(daily["fund_count"] >= int(min_funds))
-    rolling_rate = daily["rate"].rolling(int(window), min_periods=int(window)).sum()
     current_rate = rolling_rate.get(target)
     fund_count = int(daily.at[target, "fund_count"] or 0) if pd.notna(
         daily.at[target, "fund_count"]
@@ -1602,8 +1824,7 @@ def compute_etf_capital_evidence(
         return {
             **unavailable(
                 f"目标行情日需至少 {min_funds} 只 ETF 的连续份额快照",
-                observed_as_of=target_text,
-                fund_count=fund_count,
+                target_text, fund_count,
             ),
             "fund_count": fund_count,
         }
@@ -1616,8 +1837,8 @@ def compute_etf_capital_evidence(
                     f"目标行情日 ETF 份额/价格覆盖 {fund_count}/{expected_count} "
                     f"（{coverage * 100:.1f}%），低于 {coverage_threshold * 100:.0f}% 发布门槛"
                 ),
-                observed_as_of=target_text,
-                fund_count=fund_count,
+                target_text,
+                fund_count,
             )
 
     reference = rolling_rate.loc[:target].dropna().tail(max(1, int(lookback)))
@@ -1625,52 +1846,34 @@ def compute_etf_capital_evidence(
         return {
             **unavailable(
                 f"ETF 资金历史仅有 {len(reference)} 个有效窗口，至少需要 {min_history} 个",
-                observed_as_of=target_text,
-                fund_count=fund_count,
+                target_text, fund_count,
             ),
             "reference_windows": len(reference),
             "fund_count": fund_count,
             "net_subscription_rate": _number(current_rate, 6),
             "net_subscription_rate_pct": _number(float(current_rate) * 100, 2),
         }
-    less = int((reference < float(current_rate)).sum())
-    equal = int((reference == float(current_rate)).sum())
-    score = 100.0 * (less + 0.5 * equal) / len(reference)
-    rate_pct = _number(float(current_rate) * 100, 2)
-    score_value = _number(score, 2)
+    return _available_etf_capital_evidence(
+        float(current_rate), reference,
+        target_text=target_text,
+        window=window,
+        fund_count=fund_count,
+        expected_count=expected_count,
+        coverage_threshold=coverage_threshold,
+    )
+
+
+def _cold_etf_flows() -> dict[str, Any]:
     return {
-        "available": True,
-        "score": score_value,
-        "as_of": target_text,
-        "note": (
-            f"近 {window} 日净申购率 {rate_pct:+.2f}% · "
-            f"近 {len(reference)} 个窗口第 {score_value:.2f} 百分位 · {fund_count} 只"
-        ),
-        "window_sessions": int(window),
-        "reference_windows": len(reference),
-        "fund_count": fund_count,
-        "expected_funds": expected_count or None,
-        "coverage": (
-            min(1.0, float(fund_count) / expected_count)
-            if expected_count else None
-        ),
-        "minimum_coverage": coverage_threshold if expected_count else None,
-        "net_subscription_rate": _number(current_rate, 6),
-        "net_subscription_rate_pct": rate_pct,
+        "as_of": "",
+        "items": [],
+        "daily": [],
+        "summary": {"status": "cold", "message": "等待 ETF 份额与净值快照"},
+        "definition": {"formula": "份额变化 × 当日净值；净值缺失时使用收盘价并标记"},
     }
 
 
-def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, Any]:
-    """Estimate ETF subscription/redemption flow as delta shares times NAV/close."""
-    required = {"trade_date", "symbol", "shares"}
-    if frame is None or frame.empty or not required.issubset(frame.columns):
-        return {
-            "as_of": "",
-            "items": [],
-            "daily": [],
-            "summary": {"status": "cold", "message": "等待 ETF 份额与净值快照"},
-            "definition": {"formula": "份额变化 × 当日净值；净值缺失时使用收盘价并标记"},
-        }
+def _prepare_etf_flow_frame(frame: pd.DataFrame) -> pd.DataFrame:
     value = frame.copy()
     value["trade_date"] = pd.to_datetime(value["trade_date"], errors="coerce")
     value["shares"] = pd.to_numeric(value["shares"], errors="coerce")
@@ -1696,38 +1899,36 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
     value["share_change"] = value.groupby("symbol", sort=False)["shares"].diff()
     value["flow"] = value["share_change"] * value["price"]
     value = value.replace([np.inf, -np.inf], np.nan)
-    dated = value.dropna(subset=["flow"])
-    if dated.empty:
-        return estimate_etf_flows(pd.DataFrame())
-    as_of = dated["trade_date"].max()
-    latest = dated[dated["trade_date"] == as_of].copy()
-    latest = latest.sort_values("flow", ascending=False)
-    available_dates = sorted(pd.Timestamp(item) for item in dated["trade_date"].dropna().unique())
-    latest_metadata = latest.drop_duplicates("symbol").set_index("symbol")
+    return value.dropna(subset=["flow"])
 
-    def flow_streak(symbol: str) -> int:
-        observations = dated[dated["symbol"].astype(str) == symbol]
-        by_date = {
-            pd.Timestamp(row["trade_date"]): float(row["flow"])
-            for _, row in observations.iterrows()
-            if pd.notna(row["flow"])
-        }
-        direction = 0
-        sessions = 0
-        for date_value in reversed(available_dates):
-            flow = by_date.get(date_value)
-            if flow is None or flow == 0:
-                break
-            next_direction = 1 if flow > 0 else -1
-            if direction and next_direction != direction:
-                break
-            direction = next_direction
-            sessions += 1
-        return direction * sessions
 
-    flow_streaks = {
-        str(symbol): flow_streak(str(symbol)) for symbol in latest_metadata.index.astype(str)
+def _etf_flow_streak(
+    observations: pd.DataFrame,
+    available_dates: list[pd.Timestamp],
+) -> int:
+    by_date = {
+        pd.Timestamp(row["trade_date"]): float(row["flow"])
+        for _, row in observations.iterrows()
+        if pd.notna(row["flow"])
     }
+    direction = 0
+    sessions = 0
+    for date_value in reversed(available_dates):
+        flow = by_date.get(date_value)
+        if flow is None or flow == 0:
+            break
+        next_direction = 1 if flow > 0 else -1
+        if direction and next_direction != direction:
+            break
+        direction = next_direction
+        sessions += 1
+    return direction * sessions
+
+
+def _etf_flow_window_data(
+    dated: pd.DataFrame,
+    available_dates: list[pd.Timestamp],
+) -> tuple[dict[int, pd.DataFrame], dict[str, dict[str, Any]]]:
     window_frames: dict[int, pd.DataFrame] = {}
     window_summaries: dict[str, dict[str, Any]] = {}
     for window in ROTATION_WINDOWS:
@@ -1744,33 +1945,62 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
             "inflow_count": int((aggregated["flow"] > 0).sum()) if len(selected_dates) == window else 0,
             "outflow_count": int((aggregated["flow"] < 0).sum()) if len(selected_dates) == window else 0,
         }
-    symbol_flows = {
-        window: values.set_index("symbol")["flow"].to_dict()
-        for window, values in window_frames.items()
+    return window_frames, window_summaries
+
+
+def _etf_flow_descriptor(
+    row: pd.Series | None,
+    latest_metadata: pd.DataFrame,
+) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    symbol = str(row["symbol"])
+    metadata = latest_metadata.loc[symbol] if symbol in latest_metadata.index else None
+    return {
+        "symbol": symbol,
+        "name": str(metadata.get("name") if metadata is not None else symbol),
+        "benchmark": str(metadata.get("benchmark") if metadata is not None else "未披露"),
+        "flow": _number(row["flow"], 2),
     }
 
-    def flow_descriptor(row: pd.Series | None) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        symbol = str(row["symbol"])
-        metadata = latest_metadata.loc[symbol] if symbol in latest_metadata.index else None
-        return {
-            "symbol": symbol,
-            "name": str(metadata.get("name") if metadata is not None else symbol),
-            "benchmark": str(metadata.get("benchmark") if metadata is not None else "未披露"),
-            "flow": _number(row["flow"], 2),
-        }
 
+def _complete_etf_flow_window_summaries(
+    window_frames: dict[int, pd.DataFrame],
+    window_summaries: dict[str, dict[str, Any]],
+    latest_metadata: pd.DataFrame,
+) -> None:
     for window, values in window_frames.items():
-        positive = values[values["flow"] > 0].sort_values(["flow", "symbol"], ascending=[False, True])
-        negative = values[values["flow"] < 0].sort_values(["flow", "symbol"], ascending=[True, True])
+        positive = values[values["flow"] > 0].sort_values(
+            ["flow", "symbol"], ascending=[False, True],
+        )
+        negative = values[values["flow"] < 0].sort_values(
+            ["flow", "symbol"], ascending=[True, True],
+        )
         window_summaries[str(window)].update({
-            "largest_inflow": flow_descriptor(positive.iloc[0]) if not positive.empty else None,
-            "largest_outflow": flow_descriptor(negative.iloc[0]) if not negative.empty else None,
+            "largest_inflow": _etf_flow_descriptor(
+                positive.iloc[0] if not positive.empty else None, latest_metadata,
+            ),
+            "largest_outflow": _etf_flow_descriptor(
+                negative.iloc[0] if not negative.empty else None, latest_metadata,
+            ),
         })
-    items = []
-    for _, row in latest.iterrows():
-        items.append({
+
+
+def _etf_flow_items(
+    latest: pd.DataFrame,
+    latest_metadata: pd.DataFrame,
+    dated: pd.DataFrame,
+    available_dates: list[pd.Timestamp],
+    symbol_flows: dict[int, dict[Any, Any]],
+) -> list[dict[str, Any]]:
+    streaks = {
+        str(symbol): _etf_flow_streak(
+            dated[dated["symbol"].astype(str) == str(symbol)], available_dates,
+        )
+        for symbol in latest_metadata.index.astype(str)
+    }
+    return [
+        {
             "symbol": str(row["symbol"]),
             "name": str(row.get("name") or row["symbol"]),
             "category": str(row.get("category") or "未分类"),
@@ -1781,28 +2011,33 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
                 for window, values in symbol_flows.items()
             },
             "share_change": _number(row["share_change"], 2),
-            "flow_streak_sessions": flow_streaks.get(str(row["symbol"]), 0),
+            "flow_streak_sessions": streaks.get(str(row["symbol"]), 0),
             "price": _number(row["price"], 4),
             "price_source": str(row["price_source"]),
-        })
-    daily = dated.groupby("trade_date", as_index=False)["flow"].sum().tail(max(20, min(int(history), 1000)))
-    daily["cumulative"] = daily["flow"].cumsum()
-    daily["cumulative_ma5"] = daily["cumulative"].rolling(5, min_periods=5).mean()
-    daily["cumulative_ma20"] = daily["cumulative"].rolling(20, min_periods=20).mean()
-    benchmark_groups: list[dict[str, Any]] = []
-    benchmark_values = dated.copy()
+        }
+        for _, row in latest.iterrows()
+    ]
+
+
+def _etf_benchmark_flows(
+    dated: pd.DataFrame,
+    latest_metadata: pd.DataFrame,
+    symbol_flows: dict[int, dict[Any, Any]],
+    window_summaries: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    values = dated.copy()
     latest_benchmarks = latest_metadata["benchmark"].fillna("").astype(str).to_dict()
-    benchmark_values["benchmark_label"] = (
-        benchmark_values["symbol"].astype(str).map(latest_benchmarks).fillna("")
-        .replace("", "未披露")
+    values["benchmark_label"] = (
+        values["symbol"].astype(str).map(latest_benchmarks).fillna("").replace("", "未披露")
     )
-    for benchmark, group in benchmark_values.groupby("benchmark_label", sort=True):
+    groups: list[dict[str, Any]] = []
+    for benchmark, group in values.groupby("benchmark_label", sort=True):
         symbols = set(group["symbol"].astype(str))
         categories = [
             str(latest_metadata.at[symbol, "category"])
             for symbol in symbols if symbol in latest_metadata.index
         ]
-        benchmark_groups.append({
+        groups.append({
             "benchmark": str(benchmark),
             "category": sorted(
                 set(categories), key=lambda value: (-categories.count(value), value),
@@ -1815,9 +2050,38 @@ def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, 
                 for window in ROTATION_WINDOWS
             },
         })
-    benchmark_groups.sort(key=lambda item: (
-        -abs(float(item["flows"].get("5") or 0.0)), item["benchmark"],
-    ))
+    groups.sort(key=lambda item: (-abs(float(item["flows"].get("5") or 0.0)), item["benchmark"]))
+    return groups
+
+
+def estimate_etf_flows(frame: pd.DataFrame, *, history: int = 780) -> dict[str, Any]:
+    """Estimate ETF subscription/redemption flow as delta shares times NAV/close."""
+    required = {"trade_date", "symbol", "shares"}
+    if frame is None or frame.empty or not required.issubset(frame.columns):
+        return _cold_etf_flows()
+    dated = _prepare_etf_flow_frame(frame)
+    if dated.empty:
+        return _cold_etf_flows()
+    as_of = dated["trade_date"].max()
+    latest = dated[dated["trade_date"] == as_of].copy().sort_values("flow", ascending=False)
+    available_dates = sorted(pd.Timestamp(item) for item in dated["trade_date"].dropna().unique())
+    latest_metadata = latest.drop_duplicates("symbol").set_index("symbol")
+    window_frames, window_summaries = _etf_flow_window_data(dated, available_dates)
+    symbol_flows = {
+        window: values.set_index("symbol")["flow"].to_dict()
+        for window, values in window_frames.items()
+    }
+    _complete_etf_flow_window_summaries(window_frames, window_summaries, latest_metadata)
+    items = _etf_flow_items(
+        latest, latest_metadata, dated, available_dates, symbol_flows,
+    )
+    daily = dated.groupby("trade_date", as_index=False)["flow"].sum().tail(max(20, min(int(history), 1000)))
+    daily["cumulative"] = daily["flow"].cumsum()
+    daily["cumulative_ma5"] = daily["cumulative"].rolling(5, min_periods=5).mean()
+    daily["cumulative_ma20"] = daily["cumulative"].rolling(20, min_periods=20).mean()
+    benchmark_groups = _etf_benchmark_flows(
+        dated, latest_metadata, symbol_flows, window_summaries,
+    )
     inflow_streaks = sorted(
         (item for item in items if int(item.get("flow_streak_sessions") or 0) > 0),
         key=lambda item: (-int(item["flow_streak_sessions"]), item["name"], item["symbol"]),

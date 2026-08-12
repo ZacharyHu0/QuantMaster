@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # v1.14.4 adds audited Feishu recovery and runtime diagnostics entry points.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
-BASELINE = 190
+BASELINE = 186
 
 
 def main() -> int:
