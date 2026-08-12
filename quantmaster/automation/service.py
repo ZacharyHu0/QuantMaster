@@ -132,7 +132,6 @@ class AutomationService:
         self.store = store or AutomationStore()
         self.weixin = WeixinClawBotClient(self.store)
         self.feishu = FeishuBotClient(self.store)
-        self.feishu.bootstrap_legacy()
         self.dispatcher = dispatcher or OutboxDispatcher(
             self.store, BotDeliveryGateway(self.store, self.weixin, self.feishu))
         self.dispatcher.analysis_delivery_handler = self.dispatch_analysis_deliveries

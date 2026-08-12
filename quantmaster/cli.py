@@ -111,6 +111,8 @@ def cmd_automation(args) -> None:
     from quantmaster.config import get_config
 
     service = AutomationService()
+    service.store.initialize()
+    service.store.sync_news_intervals()
     if args.automation_cmd == "run":
         _print_json(service.run_task(args.task, actor="cli"))
         return

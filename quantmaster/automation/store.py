@@ -12,7 +12,7 @@ from typing import Any
 from quantmaster.automation.models import AlertEvent, utc_now
 from quantmaster.automation.policy import resolved_policy
 from quantmaster.config import get_config
-from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script
 
 DEFAULT_TARGETS = (
     ("weixin_owner", "weixin", "微信管理员私聊", "direct"),
@@ -43,31 +43,17 @@ DEFAULT_JOBS = {
     "paper_rebalance_proposal": (False, {"type": "daily", "times": ["15:30"], "weekdays": True}),
 }
 
-_LEGACY_NEWS_SCHEDULES_V6 = {
-    "fast_news_scan": {"type": "interval", "minutes": 10, "window": "07:00-23:30"},
-    "official_news_scan": {
-        "type": "interval", "minutes": 15, "window": "07:00-23:30",
-    },
-    "periodic_news_scan": {
-        "type": "interval", "minutes": 60, "window": "07:00-23:30",
-    },
-}
-
-
 class AutomationStore:
     def __init__(self, path: Path | None = None, *, read_only: bool = False):
         self.path = path or get_config().data_root / "automation.sqlite"
         self.read_only = bool(read_only)
-        # The automation page is a reader of the worker-owned ledger.  Do not
-        # seed defaults or run migrations just because a Web generation opens
-        # its overview tab.
-        if not self.read_only:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._migrate()
-            self.ensure_defaults()
-            self.sync_news_intervals()
+        # Construction is deliberately side-effect free.  A writer must call
+        # initialize() during an explicit startup phase; historical databases
+        # are accepted only by the one-shot automation contract migrator.
 
     def _conn(self) -> sqlite3.Connection:
+        if not self.read_only and not self.path.is_file():
+            self.initialize()
         return connect_sqlite(
             self.path,
             timeout=0.25 if self.read_only else 5.0,
@@ -75,8 +61,21 @@ class AutomationStore:
             read_only=self.read_only,
         )
 
-    def _migrate(self) -> None:
-        def schema_v6(conn: sqlite3.Connection) -> None:
+    def initialize(self) -> None:
+        if self.read_only:
+            raise RuntimeError("只读 AutomationStore 不能初始化")
+        existed = self.path.is_file()
+        if existed:
+            with connect_sqlite(self.path) as conn:
+                version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version != AUTOMATION_SCHEMA_VERSION:
+                raise RuntimeError(
+                    "automation_schema_requires_explicit_contract_migration: "
+                    f"found={version}, expected={AUTOMATION_SCHEMA_VERSION}"
+                )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        def current_schema(conn: sqlite3.Connection) -> None:
             execute_sql_script(conn, """
                 CREATE TABLE IF NOT EXISTS notification_targets (
                     id TEXT PRIMARY KEY, channel TEXT NOT NULL, label TEXT NOT NULL,
@@ -91,9 +90,11 @@ class AutomationStore:
                     user_id TEXT NOT NULL DEFAULT '', base_url TEXT NOT NULL DEFAULT '',
                     secret_target TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'configured',
                     cursor TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL, UNIQUE(channel,account_id));
+                    updated_at TEXT NOT NULL, last_validated_at TEXT NOT NULL DEFAULT '',
+                    UNIQUE(channel,account_id));
                 CREATE TABLE IF NOT EXISTS inbound_messages (
                     channel TEXT NOT NULL, message_id TEXT NOT NULL, received_at TEXT NOT NULL,
+                    chat_type TEXT NOT NULL DEFAULT '', account_id TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(channel,message_id));
                 CREATE TABLE IF NOT EXISTS conversation_messages (
                     channel TEXT NOT NULL, account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
@@ -127,6 +128,10 @@ class AutomationStore:
                     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at REAL NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
                     delivered_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+                    lease_owner TEXT NOT NULL DEFAULT '', lease_token TEXT NOT NULL DEFAULT '',
+                    lease_expires_at REAL NOT NULL DEFAULT 0, heartbeat_at REAL NOT NULL DEFAULT 0,
+                    retry_after_at REAL NOT NULL DEFAULT 0,
+                    diagnostic_code TEXT NOT NULL DEFAULT '', ambiguous_at TEXT NOT NULL DEFAULT '',
                     UNIQUE(event_id, target_id),
                     FOREIGN KEY(event_id) REFERENCES alert_events(id),
                     FOREIGN KEY(target_id) REFERENCES notification_targets(id));
@@ -156,6 +161,8 @@ class AutomationStore:
                     result TEXT NOT NULL, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS runtime_leases (
                     name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS scheduler_cursors (
+                    job_name TEXT PRIMARY KEY, window_end REAL NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS market_breadth (
                     observed_at TEXT PRIMARY KEY, advance_ratio REAL NOT NULL,
                     sample_size INTEGER NOT NULL);
@@ -167,158 +174,10 @@ class AutomationStore:
                 CREATE INDEX IF NOT EXISTS idx_conversation_chat_created
                     ON conversation_messages(channel,account_id,chat_id,created_at DESC);
             """)
-            target_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(notification_targets)")}
-            if "context_token" not in target_columns:
-                conn.execute(
-                    "ALTER TABLE notification_targets ADD COLUMN context_token TEXT NOT NULL DEFAULT ''")
-            inbound_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(inbound_messages)")}
-            if "chat_type" not in inbound_columns:
-                conn.execute(
-                    "ALTER TABLE inbound_messages ADD COLUMN chat_type TEXT NOT NULL DEFAULT ''")
-            if "account_id" not in inbound_columns:
-                conn.execute(
-                    "ALTER TABLE inbound_messages ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
-            analysis_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(analysis_deliveries)")}
-            if "query" not in analysis_columns:
-                conn.execute(
-                    "ALTER TABLE analysis_deliveries ADD COLUMN query TEXT NOT NULL DEFAULT ''")
-            if "mode" not in analysis_columns:
-                conn.execute(
-                    "ALTER TABLE analysis_deliveries ADD COLUMN mode TEXT NOT NULL DEFAULT 'deep'")
-            conn.execute(
-                "UPDATE task_runs SET status='interrupted_legacy',finished_at=?,"
-                "error=CASE WHEN error='' THEN 'migrated to unified durable jobs' ELSE error END "
-                "WHERE status='running'",
-                (utc_now(),),
-            )
-
-        def schema_v7(conn: sqlite3.Connection) -> None:
-            now = utc_now()
-            for name in ("fast_news_scan", "official_news_scan", "periodic_news_scan"):
-                row = conn.execute(
-                    "SELECT schedule FROM job_templates WHERE name=?", (name,),
-                ).fetchone()
-                if row is None:
-                    continue
-                try:
-                    current_schedule = json.loads(str(row[0] or "{}"))
-                except json.JSONDecodeError:
-                    continue
-                if current_schedule != _LEGACY_NEWS_SCHEDULES_V6[name]:
-                    continue
-                schedule = DEFAULT_JOBS[name][1]
-                conn.execute(
-                    "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
-                    (json.dumps(schedule), now, name),
-                )
-
-        def schema_v8(conn: sqlite3.Connection) -> None:
-            # The settings document is now the single owner of these three
-            # intervals.  Exact historical defaults move to the new quieter
-            # defaults; any legacy custom value remains recoverable until the
-            # configured settings are explicitly synchronized below.
-            old_defaults = {
-                "fast_news_scan": {"type": "interval", "minutes": 5},
-                "official_news_scan": {"type": "interval", "minutes": 15},
-                "periodic_news_scan": {"type": "interval", "minutes": 30},
-            }
-            now = utc_now()
-            for name, old_schedule in old_defaults.items():
-                row = conn.execute(
-                    "SELECT schedule FROM job_templates WHERE name=?", (name,),
-                ).fetchone()
-                if row is None:
-                    continue
-                try:
-                    current = json.loads(str(row[0] or "{}"))
-                except json.JSONDecodeError:
-                    continue
-                if current == old_schedule:
-                    conn.execute(
-                        "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
-                    (json.dumps(DEFAULT_JOBS[name][1]), now, name),
-                    )
-
-        def schema_v9(conn: sqlite3.Connection) -> None:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(bot_accounts)")}
-            if "last_validated_at" not in columns:
-                conn.execute(
-                    "ALTER TABLE bot_accounts ADD COLUMN last_validated_at TEXT NOT NULL DEFAULT ''")
-
-        def schema_v10(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS scheduler_cursors ("
-                "job_name TEXT PRIMARY KEY,window_end REAL NOT NULL,updated_at TEXT NOT NULL)"
-            )
-
-        def schema_v11(conn: sqlite3.Connection) -> None:
-            columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(delivery_attempts)")
-            }
-            additions = {
-                "lease_owner": "TEXT NOT NULL DEFAULT ''",
-                "lease_token": "TEXT NOT NULL DEFAULT ''",
-                "lease_expires_at": "REAL NOT NULL DEFAULT 0",
-                "heartbeat_at": "REAL NOT NULL DEFAULT 0",
-                "retry_after_at": "REAL NOT NULL DEFAULT 0",
-                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
-                "ambiguous_at": "TEXT NOT NULL DEFAULT ''",
-            }
-            for name, declaration in additions.items():
-                if name not in columns:
-                    conn.execute(
-                        f"ALTER TABLE delivery_attempts ADD COLUMN {name} {declaration}"
-                    )
-            conn.execute(
-                "UPDATE delivery_attempts SET status=CASE status "
-                "WHEN 'delivered' THEN 'sent' WHEN 'retry' THEN 'retry_wait' "
-                "WHEN 'failed' THEN 'dead_letter' ELSE status END"
-            )
-            conn.execute("DROP INDEX IF EXISTS idx_delivery_due")
-            conn.execute(
-                "CREATE INDEX idx_delivery_due ON delivery_attempts("
-                "status,next_attempt_at,lease_expires_at)"
-            )
-
-        def schema_v12(conn: sqlite3.Connection) -> None:
-            columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(analysis_deliveries)")
-            }
-            additions = {
-                "attempts": "INTEGER NOT NULL DEFAULT 0",
-                "lease_owner": "TEXT NOT NULL DEFAULT ''",
-                "lease_token": "TEXT NOT NULL DEFAULT ''",
-                "lease_expires_at": "REAL NOT NULL DEFAULT 0",
-                "heartbeat_at": "REAL NOT NULL DEFAULT 0",
-                "operation": "TEXT NOT NULL DEFAULT ''",
-                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
-                "ambiguous_at": "TEXT NOT NULL DEFAULT ''",
-            }
-            for name, declaration in additions.items():
-                if name not in columns:
-                    conn.execute(
-                        f"ALTER TABLE analysis_deliveries ADD COLUMN {name} {declaration}"
-                    )
-            conn.execute(
-                "UPDATE analysis_deliveries SET status=CASE status "
-                "WHEN 'active' THEN 'pending' WHEN 'retry' THEN 'retry_wait' "
-                "WHEN 'delivered' THEN 'sent' WHEN 'failed' THEN 'dead_letter' "
-                "ELSE status END"
-            )
-            conn.execute("DROP INDEX IF EXISTS idx_analysis_delivery_due")
-            conn.execute(
-                "CREATE INDEX idx_analysis_delivery_due ON analysis_deliveries("
-                "status,next_attempt_at,lease_expires_at)"
-            )
-
-        with self._conn() as conn:
-            migrate_schema(conn, (
-                (6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9),
-                (10, schema_v10), (11, schema_v11), (12, schema_v12),
-            ))
+        with connect_sqlite(self.path, row_factory=True) as conn:
+            current_schema(conn)
+            conn.execute(f"PRAGMA user_version={AUTOMATION_SCHEMA_VERSION}")
+        self.ensure_defaults()
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:

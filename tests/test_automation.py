@@ -16,6 +16,7 @@ from quantmaster.automation.channels.feishu import FeishuBotClient, feishu_conne
 from quantmaster.automation.channels.weixin import WeixinClawBotClient
 from quantmaster.automation.commands import BotCommandRouter
 from quantmaster.automation.delivery import OutboxDispatcher, format_alert, format_feishu_card
+from quantmaster.automation.migration import automation_contract_migrator
 from quantmaster.automation.models import ActorContext, AlertEvent
 from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
@@ -39,29 +40,52 @@ class MemoryCredentials:
         self.values.pop(target, None)
 
 
-def test_legacy_news_schedules_are_replaced_by_settings_defaults(tmp_path):
+def test_store_construction_does_not_write_or_upgrade_legacy_database(tmp_path):
     path = tmp_path / "automation.sqlite"
-    AutomationStore(path)
-    expected = {
-        "fast_news_scan": {"type": "interval", "minutes": 1},
-        "official_news_scan": {"type": "interval", "minutes": 10},
-        "periodic_news_scan": {"type": "interval", "minutes": 60},
-    }
+    store = AutomationStore(path)
+    assert not path.exists()
+    store.initialize()
     with sqlite3.connect(path) as connection:
-        for name, schedule in expected.items():
-            connection.execute(
-                "UPDATE job_templates SET schedule=? WHERE name=?",
-                (json.dumps(schedule), name),
-            )
+        connection.execute("PRAGMA user_version=6")
+    before = path.read_bytes()
+
+    AutomationStore(path)
+
+    assert path.read_bytes() == before
+
+
+def test_automation_migrator_only_replaces_exact_historical_defaults(tmp_path):
+    path = tmp_path / "automation.sqlite"
+    store = AutomationStore(path)
+    store.initialize()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE job_templates SET schedule=? WHERE name='fast_news_scan'",
+            (json.dumps({"type": "interval", "minutes": 10, "window": "07:00-23:30"}),),
+        )
+        connection.execute(
+            "UPDATE job_templates SET schedule=? WHERE name='official_news_scan'",
+            (json.dumps({"type": "interval", "minutes": 17}),),
+        )
         connection.execute("PRAGMA user_version=6")
 
+    dry_run = {item.record_key: item for item in automation_contract_migrator.inspect(tmp_path)}
+    assert dry_run["100:schedule:fast_news_scan"].outcome == "converted"
+    assert dry_run["100:schedule:official_news_scan"].diagnostic_code == (
+        "automation_custom_schedule_preserved"
+    )
+    converted = list(automation_contract_migrator.migrate_batch(
+        tmp_path, after_key="", limit=100,
+    ))
+    assert converted
     migrated = AutomationStore(path)
     schedules = {item["name"]: item["schedule"] for item in migrated.jobs()}
-    assert {name: schedules[name] for name in expected} == {
-        "fast_news_scan": {"type": "interval", "minutes": 20},
-        "official_news_scan": {"type": "interval", "minutes": 120},
-        "periodic_news_scan": {"type": "interval", "minutes": 360},
-    }
+    assert schedules["fast_news_scan"] == {"type": "interval", "minutes": 20}
+    assert schedules["official_news_scan"] == {"type": "interval", "minutes": 17}
+    second = list(automation_contract_migrator.migrate_batch(
+        tmp_path, after_key="", limit=100,
+    ))
+    assert all(item.outcome == "unchanged" for item in second)
 
 
 def test_news_schedule_defaults_follow_settings(tmp_path, isolated_config):
@@ -70,6 +94,8 @@ def test_news_schedule_defaults_follow_settings(tmp_path, isolated_config):
     isolated_config.automation.periodic_news_interval_minutes = 420
 
     store = AutomationStore(tmp_path / "automation.sqlite")
+    store.initialize()
+    store.sync_news_intervals()
 
     assert [store.job(name)["schedule"]["minutes"] for name in (
         "fast_news_scan", "official_news_scan", "periodic_news_scan",
@@ -1164,6 +1190,54 @@ def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monke
     assert store.bot_account("feishu") is None
 
 
+def test_deleted_feishu_credentials_are_not_revived_from_legacy_config(
+        tmp_path, isolated_config, monkeypatch,
+):
+    path = tmp_path / "automation.sqlite"
+    store = AutomationStore(path)
+    store.initialize()
+    credentials = MemoryCredentials()
+    client = FeishuBotClient(store, credentials)
+    client.configure("cli_removed", "secret-one")
+    store.delete_bot_accounts("feishu")
+    credentials.delete("bot:feishu:cli_removed")
+    isolated_config.automation.feishu_app_id = "cli_legacy"
+    monkeypatch.setenv("QM_FEISHU_APP_SECRET", "legacy-secret")
+
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    service.feishu = FeishuBotClient(store, credentials)
+
+    assert store.bot_account("feishu") is None
+    assert service.feishu.is_configured() is False
+    assert credentials.values == {}
+
+
+def test_automation_migrator_audits_incomplete_feishu_without_secret_write(
+        tmp_path, isolated_config, monkeypatch,
+):
+    path = tmp_path / "automation.sqlite"
+    store = AutomationStore(path)
+    store.initialize()
+    store.save_bot_account(channel="feishu", account_id="cli_old", secret_target="")
+    isolated_config.automation.feishu_app_id = "cli_config_only"
+    monkeypatch.delenv("QM_FEISHU_APP_SECRET", raising=False)
+
+    records = {item.record_key: item for item in automation_contract_migrator.inspect(tmp_path)}
+
+    account = records["200:feishu:feishu:cli_old"]
+    assert account.outcome == "blank"
+    assert account.diagnostic_code == "feishu_secret_target_missing"
+    assert account.unknown_fields == ("secret_target",)
+    external = records["300:feishu:external-config"]
+    assert external.outcome == "blank"
+    assert external.diagnostic_code == "feishu_legacy_credentials_incomplete"
+    list(automation_contract_migrator.migrate_batch(tmp_path, after_key="", limit=100))
+    migrated = store.bot_account("feishu")
+    assert migrated["secret_target"] == ""
+    assert migrated["status"] == "not_configured"
+    assert migrated["last_error"] == "credential_migration_required"
+
+
 def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):
     import apscheduler.schedulers.background as scheduler_module
 
@@ -1204,10 +1278,7 @@ def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path
 
     monkeypatch.setattr(scheduler_module, "BackgroundScheduler", FakeScheduler)
     monkeypatch.setattr(runtime, "reload_jobs", lambda: None)
-    # This test owns only the missing-credential channel contract.  Startup
-    # catch-up can legitimately dispatch unrelated daily jobs and therefore
-    # create worker threads, which would be caught by the sentinel above.
-    monkeypatch.setattr(runtime_module.AutomationRuntime, "catch_up_daily_jobs", list)
+    monkeypatch.setattr(runtime, "catch_up_daily_jobs", list)
     assert runtime._start_scheduler_locked()
     assert runtime.scheduler.job_ids == ["_lease", "_cleanup"]
 
@@ -1216,6 +1287,7 @@ def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path
     )
     mixed.leader = True
     monkeypatch.setattr(mixed, "reload_jobs", lambda: None)
+    monkeypatch.setattr(mixed, "catch_up_daily_jobs", list)
     assert mixed._start_scheduler_locked()
     assert mixed.scheduler.job_ids == ["_lease", "_outbox", "_cleanup"]
     assert mixed.scheduler.callbacks["_outbox"].__self__ is mixed.service.dispatcher

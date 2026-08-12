@@ -42,6 +42,12 @@ class AutomationRuntime:
                 return self.leader
             if getattr(self.service, "_closed", False):
                 raise RuntimeError("自动化运行时 generation 已关闭")
+            initialize = getattr(self.service.store, "initialize", None)
+            if initialize is not None:
+                initialize()
+            sync_intervals = getattr(self.service.store, "sync_news_intervals", None)
+            if sync_intervals is not None:
+                sync_intervals()
             self.started = True
             if not get_config().automation.enabled:
                 return False

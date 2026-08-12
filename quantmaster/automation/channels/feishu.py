@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -13,7 +12,6 @@ from typing import Literal, get_args
 
 from quantmaster.automation.models import ActorContext
 from quantmaster.automation.store import AutomationStore
-from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.logging_config import normalize_third_party_logger, redact_sensitive_text
 
@@ -340,9 +338,7 @@ class FeishuBotClient:
         try:
             if account.get("secret_target"):
                 secret = self.credentials.get(str(account["secret_target"])) or ""
-            elif app_id:
-                secret = os.environ.get("QM_FEISHU_APP_SECRET", "")
-        except Exception:
+        except CredentialError:
             # A broken credential store must not result in a connection attempt.
             pass
         configured = bool(app_id and secret)
@@ -366,20 +362,6 @@ class FeishuBotClient:
             "updated_at": str(account.get("updated_at") or ""),
             "last_error": _safe_feishu_error(account.get("last_error")),
         }
-
-    def bootstrap_legacy(self) -> dict | None:
-        """仅在账号库为空时接纳旧 YAML/环境变量配置。"""
-        if (self.store.bot_account("feishu") or
-                self.store.channel_credentials_removed("feishu")):
-            return None
-        app_id = get_config().automation.feishu_app_id.strip()
-        secret = os.environ.get("QM_FEISHU_APP_SECRET", "").strip()
-        if not app_id or not secret:
-            return None
-        return self.store.save_bot_account(
-            channel="feishu", account_id=app_id, base_url="https://open.feishu.cn",
-            secret_target="", status="configured",
-        )
 
     @staticmethod
     def verify(app_id: str, app_secret: str, timeout: float = 10.0) -> dict:
@@ -427,12 +409,10 @@ class FeishuBotClient:
 
     def credentials_value(self) -> tuple[str, str]:
         account = self.store.bot_account("feishu")
-        if account and account.get("secret_target"):
-            app_id = account["account_id"]
-            secret = self.credentials.get(account["secret_target"]) or ""
-        else:
-            app_id = (account or {}).get("account_id") or get_config().automation.feishu_app_id
-            secret = os.environ.get("QM_FEISHU_APP_SECRET", "")
+        if not account or not account.get("secret_target"):
+            raise RuntimeError("飞书应用 Bot 尚未通过当前凭据流程配置")
+        app_id = account["account_id"]
+        secret = self.credentials.get(account["secret_target"]) or ""
         if not app_id or not secret:
             raise RuntimeError("飞书应用 Bot 尚未配置 App ID/App Secret")
         return app_id, secret

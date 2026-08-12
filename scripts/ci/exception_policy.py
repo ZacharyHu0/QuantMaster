@@ -14,7 +14,6 @@ BASELINE = {
     "quantmaster/ai/crawler.py": 3,
     "quantmaster/ai/news_sources.py": 2,
     "quantmaster/analysis/stock.py": 6,
-    "quantmaster/automation/channels/feishu.py": 1,
     "quantmaster/automation/channels/weixin.py": 2,
     "quantmaster/automation/commands.py": 2,
     "quantmaster/automation/runtime.py": 2,
