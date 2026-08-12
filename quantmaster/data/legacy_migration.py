@@ -65,6 +65,7 @@ def register_builtin_migrations() -> None:
     from quantmaster.automation.migration import automation_contract_migrator
     from quantmaster.backtest.paper_legacy_migration import PaperLegacyMigrator
     from quantmaster.data.legacy_migrations import market_data_legacy_migrator
+    from quantmaster.data.startup_schema_migration import startup_schema_migrator
     from quantmaster.decision.migration import decision_legacy_migrator
 
     for migrator in (
@@ -74,6 +75,7 @@ def register_builtin_migrations() -> None:
         news_contract_migrator,
         automation_contract_migrator,
         PaperLegacyMigrator(),
+        startup_schema_migrator,
     ):
         existing = _MIGRATORS.get(migrator.name)
         if existing is None:

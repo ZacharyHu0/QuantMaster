@@ -26,8 +26,14 @@ from quantmaster.backtest.spec import (
     pin_decision_strategy,
     split_factor_references,
 )
-from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
+from quantmaster.backtest.workbench import (
+    BacktestSchemaMigrationRequired,
+    BacktestService,
+    BacktestStore,
+    get_backtest_worker,
+)
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+from quantmaster.data.startup_schema_migration import StartupSchemaMigrator
 from quantmaster.portfolio import TradeRecord
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
@@ -1255,7 +1261,13 @@ def test_swing_backtests_become_read_only_and_active_runs_are_cancelled(tmp_path
                     "2026-08-02" if status == "completed" else "",
                 ),
             )
+        conn.execute("DROP TABLE backtest_store_meta")
 
+    with pytest.raises(BacktestSchemaMigrationRequired):
+        BacktestStore(path, artifacts)
+    assert [record.outcome for record in StartupSchemaMigrator().migrate_batch(
+        tmp_path, after_key="", limit=1,
+    )] == ["converted"]
     migrated = BacktestStore(path, artifacts)
 
     assert migrated.get("legacy-queued")["status"] == "cancelled"

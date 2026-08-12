@@ -386,7 +386,9 @@ def apply_recovery(
         try:
             _verify_lease(path, lease, test_db=test_db)
             if before["user_version"] == 4:
-                PaperStore(path, path.parent / "paper_accounts")
+                PaperStore.migrate_legacy_database(
+                    path, path.parent / "paper_accounts",
+                )
             plan = recovery_plan(path)
             affected = 0
             with connect_sqlite(path, row_factory=True) as conn:

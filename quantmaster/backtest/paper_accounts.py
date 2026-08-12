@@ -85,6 +85,10 @@ ORDER_TRANSITIONS = {
 }
 
 
+class PaperSchemaMigrationRequired(RuntimeError):
+    """The paper ledger needs the explicit startup-schema migrator."""
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -100,10 +104,17 @@ class PaperStore:
         self.path = Path(path) if path else get_config().data_root / "paper.sqlite"
         self.account_root = Path(account_root) if account_root else get_config().data_root / "paper_accounts"
         self.read_only = bool(read_only)
-        if not self.read_only:
+        database_exists = self.path.is_file()
+        if not database_exists:
+            if self.read_only:
+                raise FileNotFoundError(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.account_root.mkdir(parents=True, exist_ok=True)
-            self._migrate()
+            self._initialize_current()
+        else:
+            self._require_current()
+            if not self.read_only:
+                self.account_root.mkdir(parents=True, exist_ok=True)
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -113,7 +124,49 @@ class PaperStore:
             read_only=self.read_only,
         )
 
-    def _migrate(self) -> None:
+    def _initialize_current(self) -> None:
+        self._migrate_legacy_schema()
+
+    @classmethod
+    def migrate_legacy_database(
+        cls, path: str | Path, account_root: str | Path,
+    ) -> None:
+        """Upgrade a confirmed paper database from an explicit migration workflow."""
+        store = cls.__new__(cls)
+        store.path = Path(path)
+        store.account_root = Path(account_root)
+        store.read_only = False
+        store._migrate_legacy_schema()
+
+    def _require_current(self) -> None:
+        with self._conn() as connection:
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {
+                "paper_accounts", "paper_cycles", "paper_orders", "paper_auto_runs",
+                "paper_legacy_imports",
+            }
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            account_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(paper_accounts)")
+            }
+            run_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(paper_auto_runs)")
+            }
+            if (
+                required - tables or version != PAPER_SCHEMA_VERSION
+                or not {"strategy_warning", "runtime_warning", "strategy_effective_after"}
+                <= account_columns
+                or not {"lease_token", "heartbeat_at", "failure_code"} <= run_columns
+            ):
+                raise PaperSchemaMigrationRequired(
+                    "paper.sqlite 不是当前 schema，需执行 startup-schemas 一次性迁移"
+                )
+
+    def _migrate_legacy_schema(self) -> None:
         def schema_v1(conn: sqlite3.Connection) -> None:
             execute_sql_script(
                 conn,

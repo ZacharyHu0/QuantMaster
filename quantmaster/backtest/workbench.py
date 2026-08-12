@@ -27,6 +27,11 @@ from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import resolve_session_target
 
 logger = logging.getLogger(__name__)
+BACKTEST_SCHEMA_VERSION = 1
+
+
+class BacktestSchemaMigrationRequired(RuntimeError):
+    """The backtest ledger needs the explicit startup-schema migrator."""
 
 
 def utc_now() -> str:
@@ -48,10 +53,17 @@ class BacktestStore:
             Path(artifact_root) if artifact_root else get_config().data_root / "backtests"
         )
         self.read_only = bool(read_only)
-        if not self.read_only:
+        database_exists = self.path.is_file()
+        if not database_exists:
+            if self.read_only:
+                raise FileNotFoundError(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.artifact_root.mkdir(parents=True, exist_ok=True)
-            self._migrate()
+            self._initialize_current()
+        else:
+            self._require_current()
+            if not self.read_only:
+                self.artifact_root.mkdir(parents=True, exist_ok=True)
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -61,7 +73,26 @@ class BacktestStore:
             read_only=self.read_only,
         )
 
-    def _migrate(self) -> None:
+    def _initialize_current(self) -> None:
+        self._migrate_legacy_schema()
+
+    def _require_current(self) -> None:
+        with self._conn() as connection:
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {"backtest_runs", "backtest_events", "backtest_store_meta"}
+            row = connection.execute(
+                "SELECT value FROM backtest_store_meta WHERE key='schema_version'"
+            ).fetchone() if "backtest_store_meta" in tables else None
+            if required - tables or row is None or str(row[0]) != str(BACKTEST_SCHEMA_VERSION):
+                raise BacktestSchemaMigrationRequired(
+                    "backtests.sqlite 不是当前 schema，需执行 startup-schemas 一次性迁移"
+                )
+
+    def _migrate_legacy_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -82,6 +113,8 @@ class BacktestStore:
                     ON backtest_runs(status,created_at);
                 CREATE INDEX IF NOT EXISTS idx_backtest_events
                     ON backtest_events(run_id,seq);
+                CREATE TABLE IF NOT EXISTS backtest_store_meta (
+                    key TEXT PRIMARY KEY,value TEXT NOT NULL);
             """)
             now = utc_now()
             active = conn.execute(
@@ -114,6 +147,11 @@ class BacktestStore:
                         now,
                     ),
                 )
+            conn.execute(
+                "INSERT INTO backtest_store_meta(key,value) VALUES ('schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(BACKTEST_SCHEMA_VERSION),),
+            )
 
     @staticmethod
     def _decode(row: sqlite3.Row | None) -> dict | None:

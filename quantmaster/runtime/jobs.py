@@ -45,6 +45,11 @@ DEFAULT_LEASE_SECONDS = 30.0
 DEFAULT_RUNTIME_DRAIN_SECONDS = 5.0
 INLINE_ARTIFACT_LIMIT = 128 * 1024
 _CPU_JOB_GATE = threading.Semaphore(1)
+JOB_SCHEMA_VERSION = 1
+
+
+class JobSchemaMigrationRequired(RuntimeError):
+    """The durable job ledger needs the explicit startup-schema migrator."""
 
 
 @dataclass(frozen=True)
@@ -129,10 +134,17 @@ class UnifiedJobStore:
         # Web generations use this class for task status polling.  Opening a
         # nonexistent ledger must be a fast read failure, not an implicit
         # schema migration or a new directory tree.
-        if not self.read_only:
+        database_exists = self.path.is_file()
+        if not database_exists:
+            if self.read_only:
+                raise FileNotFoundError(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.artifacts_root.mkdir(parents=True, exist_ok=True)
-            self._migrate()
+            self._initialize_current()
+        else:
+            self._require_current()
+            if not self.read_only:
+                self.artifacts_root.mkdir(parents=True, exist_ok=True)
 
     def _conn(self):
         return connect_sqlite(
@@ -142,7 +154,51 @@ class UnifiedJobStore:
             read_only=self.read_only,
         )
 
-    def _migrate(self) -> None:
+    def _initialize_current(self) -> None:
+        with self._conn() as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone():
+                raise JobSchemaMigrationRequired("jobs.sqlite 非空，拒绝按新库初始化")
+        self._migrate_legacy_schema()
+
+    def _require_current(self) -> None:
+        with self._conn() as connection:
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {
+                "runtime_jobs", "runtime_job_events", "runtime_job_artifacts",
+                "runtime_artifact_repairs", "runtime_store_meta",
+            }
+            missing = sorted(required - tables)
+            row = connection.execute(
+                "SELECT value FROM runtime_store_meta WHERE key='schema_version'"
+            ).fetchone() if "runtime_store_meta" in tables else None
+            if missing or row is None or str(row[0]) != str(JOB_SCHEMA_VERSION):
+                raise JobSchemaMigrationRequired(
+                    "jobs.sqlite 不是当前 schema，需执行 startup-schemas 一次性迁移"
+                )
+            job_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(runtime_jobs)")
+            }
+            artifact_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(runtime_job_artifacts)")
+            }
+            if not {
+                "business_key", "input_fingerprint", "algorithm_version", "lease_token",
+                "llm_scope", "llm_revision", "cancellation_reason", "trigger_count",
+                "coalesced_count", "last_trigger_at", "next_retry_at", "waiting_on",
+                "diagnostic_code", "last_completed_unit_at",
+            } <= job_columns or not {"external_path", "payload_bytes"} <= artifact_columns:
+                raise JobSchemaMigrationRequired(
+                    "jobs.sqlite 缺少当前字段，需执行 startup-schemas 一次性迁移"
+                )
+
+    def _migrate_legacy_schema(self) -> None:
         with self._conn() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS runtime_jobs (
@@ -242,6 +298,15 @@ class UnifiedJobStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_runtime_job_singleflight "
                 "ON runtime_jobs(type,spec_hash,input_fingerprint,algorithm_version,status,created_at)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS runtime_store_meta ("
+                "key TEXT PRIMARY KEY,value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO runtime_store_meta(key,value) VALUES ('schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(JOB_SCHEMA_VERSION),),
             )
 
     @staticmethod
