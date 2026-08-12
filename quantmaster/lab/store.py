@@ -31,6 +31,10 @@ _GENERATED_FACTOR_NAME = re.compile(
 LAB_SCHEMA_VERSION = 11
 
 
+class LabSchemaMigrationRequired(RuntimeError):
+    """An existing Lab ledger is not the sole current schema."""
+
+
 def _collision_safe_factor_name(
     name: str, slug: str, occupied: dict[str, str],
 ) -> str:
@@ -75,31 +79,14 @@ class LabStore:
         # migration, a backup, or a curated-catalog write.  The runtime worker
         # owns those lifecycle operations at startup.
         if self.read_only:
+            if self.path.is_file():
+                self._require_current()
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._backup_before_migration()
-        self._migrate()
-
-    def _backup_before_migration(self) -> None:
-        """Create one recoverable online backup before upgrading a real ledger."""
-        if not self.path.is_file() or self.path.stat().st_size == 0:
-            return
-        try:
-            with connect_sqlite(self.path) as source:
-                version = int(source.execute("PRAGMA user_version").fetchone()[0])
-                if version <= 0 or version >= LAB_SCHEMA_VERSION:
-                    return
-                backup_dir = self.path.parent / "backups"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                target = backup_dir / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"
-                if target.exists():
-                    return
-                with connect_sqlite(target) as destination:
-                    source.backup(destination)
-        except sqlite3.Error:
-            target = self.path.parent / "backups" / f"lab-pre-schema-v{LAB_SCHEMA_VERSION}.sqlite"
-            target.unlink(missing_ok=True)
-            raise
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            self._migrate_legacy_schema()
+        else:
+            self._require_current()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -109,7 +96,7 @@ class LabStore:
             read_only=self.read_only,
         )
 
-    def _migrate(self) -> None:
+    def _migrate_legacy_schema(self) -> None:
         def schema_v8(conn: sqlite3.Connection) -> None:
             previous_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
             execute_sql_script(conn, """
@@ -326,6 +313,41 @@ class LabStore:
 
         with self._conn() as conn:
             migrate_schema(conn, ((LAB_SCHEMA_VERSION, schema_v8),))
+
+    def _require_current(self) -> None:
+        required_tables = {
+            "factor_definitions", "factor_versions", "lab_jobs", "lab_job_events",
+            "deployments", "research_cycles", "strategy_candidates", "shadow_signals",
+        }
+        with connect_sqlite(self.path, read_only=True) as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            missing = required_tables - tables
+            if version != LAB_SCHEMA_VERSION or missing:
+                raise LabSchemaMigrationRequired(
+                    f"lab schema 需显式迁移: version={version}; missing={sorted(missing)}"
+                )
+            definition_columns = {
+                str(row[1]) for row in connection.execute(
+                    "PRAGMA table_info(factor_definitions)"
+                )
+            }
+            job_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(lab_jobs)")
+            }
+            missing_columns = (
+                {"name_key"} - definition_columns
+                | {"error_code", "error_json", "telemetry_json", "cancellation_reason"}
+                - job_columns
+            )
+            if missing_columns:
+                raise LabSchemaMigrationRequired(
+                    f"lab current schema 损坏: missing={sorted(missing_columns)}"
+                )
 
     @staticmethod
     def _repair_factor_names(conn: sqlite3.Connection) -> None:

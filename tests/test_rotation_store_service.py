@@ -578,6 +578,12 @@ def test_legacy_taxonomy_backfill_adds_identity_without_inventing_effective_date
             ),
         )
 
+    from quantmaster.data.store_schema_migration import StoreSchemaMigrator
+
+    record = next(iter(StoreSchemaMigrator().migrate_batch(
+        tmp_path, after_key="", limit=3,
+    )))
+    assert record.outcome == "converted"
     migrated = RotationStore(tmp_path / "rotation")
     industry = migrated.taxonomy_nodes()[0]
     theme = migrated.themes()[0]

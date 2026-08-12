@@ -30,6 +30,12 @@ from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
 logger = logging.getLogger(__name__)
+
+
+class RotationSchemaMigrationRequired(RuntimeError):
+    """An existing rotation cache/preferences pair is not current."""
+
+
 ETF_METADATA_HISTORY_SCHEMA_VERSION = "2.0"
 ETF_OBSERVATION_COLUMNS = frozenset({
     "trade_date", "symbol", "name", "category", "benchmark", "shares",
@@ -473,9 +479,15 @@ class RotationStore:
         # The runtime worker owns schema migration and preference seeding.  A
         # page reader observes only a published cache and treats an absent
         # ledger as cold rather than creating it under the HTTP request.
-        if not self.read_only:
+        if self.read_only:
+            if self.cache_path.exists() or self.preferences_path.exists():
+                self._require_current()
+        else:
             self.root.mkdir(parents=True, exist_ok=True)
-            self._initialize()
+            if not self.cache_path.exists() and not self.preferences_path.exists():
+                self._initialize_current()
+            else:
+                self._require_current()
 
     def _cache(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -717,7 +729,7 @@ class RotationStore:
                 (strict_json_dumps(payload), str(row["code"])),
             )
 
-    def _initialize(self) -> None:
+    def _migrate_legacy_schema(self) -> None:
         with self._cache() as connection:
             migrate_schema(connection, (
                 (1, self._cache_v1), (2, self._cache_v2), (3, self._cache_v3),
@@ -725,6 +737,45 @@ class RotationStore:
             ))
         with self._preferences() as connection:
             migrate_schema(connection, ((1, self._preferences_v1),))
+
+    def _initialize_current(self) -> None:
+        self._migrate_legacy_schema()
+
+    def _require_current(self) -> None:
+        if not self.cache_path.is_file() or not self.preferences_path.is_file():
+            raise RotationSchemaMigrationRequired("轮动 schema 文件不完整，需显式迁移")
+        with self._cache() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            required = {
+                "snapshots", "taxonomy_nodes", "theme_catalog", "runtime_state",
+                "theme_sync_runs", "theme_sync_items", "snapshot_items", "snapshot_details",
+            }
+            item_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(snapshot_items)")
+            }
+            if version != 6 or required - tables or {
+                "flow_1", "flow_3", "flow_5", "flow_20", "daily_flow",
+                "grade_1", "grade_3", "grade_5", "grade_20",
+            } - item_columns:
+                raise RotationSchemaMigrationRequired(
+                    f"rotation cache schema 需显式迁移: version={version}"
+                )
+        with self._preferences() as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if version != 1 or "preferences" not in tables:
+                raise RotationSchemaMigrationRequired(
+                    f"rotation preferences schema 需显式迁移: version={version}"
+                )
 
     @staticmethod
     def _indexed_snapshot_items(
