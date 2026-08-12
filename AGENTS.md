@@ -19,6 +19,15 @@
 - Run Python validation through the project virtual environment: `./.venv/Scripts/python.exe`
   on Windows (or the platform-equivalent `.venv` interpreter). Do not use a system Python for
   project tests, linting, or scripts.
+- Linked task worktrees do not contain a separate `.venv`. Before entering one, resolve the
+  interpreter from the primary checkout and keep using that absolute path for every Python command;
+  on Windows this is `<primary>\\.venv\\Scripts\\python.exe`. A missing
+  `.worktrees/<slug>/.venv` is not evidence that the project interpreter is unavailable, and must
+  never trigger a fallback to system Python or creation/copying of another virtual environment.
+- Commands which invoke `uv` must use a per-worktree writable cache inside project artifacts, for
+  example set `UV_CACHE_DIR=<primary>/.artifacts/worktrees/<slug>/uv-cache`. Do not depend on or
+  modify the user's global uv cache, and never share one writable cache between concurrent
+  worktrees.
 - Full-only suites require `--full`. In restricted Windows environments, use a writable
   workspace-local pytest base directory, for example
   `./.venv/Scripts/python.exe -m pytest --full --basetemp .artifacts/pytest/run <target>`.
@@ -30,6 +39,11 @@
 - Create and remove task worktrees with `./.venv/Scripts/python.exe scripts/dev/tasks.py start
   <slug>` and `... tasks.py remove <slug>`. Removal is allowed only after the task tree has been
   squash-integrated into `main` and the worktree is clean.
+- Run `start` and `remove` from the primary checkout with its project interpreter. If a restricted
+  environment prevents Git from writing branch locks or worktree metadata, request the narrow
+  repository-scoped Git write authorization and retry the same task-script command. Do not work in
+  the primary checkout as a workaround, manually recreate the task branch/worktree, change global
+  Git configuration, or bypass the task script.
 - Task branches may use small checkpoint commits and may update `CHANGELOG.md` when the change is
   user-facing. They must not edit `quantmaster/release.py`; version metadata is updated on `main`
   only when semantic-versioning rules warrant it.
