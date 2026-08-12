@@ -14,6 +14,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -125,6 +126,27 @@ class ThemeSourceUnavailable(RuntimeError):
     """A theme provider cannot currently supply a usable coherent catalog."""
 
 
+@dataclass(frozen=True)
+class _EtfPeriod:
+    end: pd.Timestamp
+    history_start: pd.Timestamp
+    recent_start: pd.Timestamp
+
+
+@dataclass(frozen=True)
+class _EtfMaps:
+    names: dict[str, Any]
+    categories: dict[str, Any]
+    benchmarks: dict[str, str]
+    listing_dates: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _EtfPlan:
+    dates: list[pd.Timestamp]
+    backfill_targets: list[tuple[str, pd.Timestamp, pd.Timestamp]]
+
+
 def _compact_error(exc: BaseException, limit: int = 180) -> str:
     return (redact_sensitive_text(exc).replace("\n", " ").strip() or type(exc).__name__)[:limit]
 
@@ -152,6 +174,303 @@ def _broad_etf_category(name: Any, benchmark: Any = "") -> str:
     if any(term.upper() in text for term in _BROAD_STRATEGY_TERMS):
         return "策略宽基"
     return ""
+
+
+def _clean_text(*candidates: Any) -> str:
+    for candidate in candidates:
+        if candidate is None or pd.isna(candidate):
+            continue
+        value = str(candidate).strip()
+        if value and value.casefold() != "nan":
+            return value
+    return ""
+
+
+def _latest_symbol_rows(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if frame.empty or "symbol" not in frame:
+        return {}
+    return {
+        str(row.get("symbol") or "").upper(): row
+        for row in frame.to_dict("records")
+        if row.get("symbol")
+    }
+
+
+def _latest_share_rows(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if frame.empty or not {"symbol", "trade_date"}.issubset(frame.columns):
+        return {}
+    values = frame.copy()
+    values["trade_date"] = pd.to_datetime(values["trade_date"], errors="coerce")
+    values["symbol"] = values["symbol"].astype(str).str.upper()
+    latest = (
+        values.sort_values("trade_date")
+        .drop_duplicates("symbol", keep="last")
+        .to_dict("records")
+    )
+    return {str(row.get("symbol") or "").upper(): row for row in latest}
+
+
+def _eligible_local_etf(instrument: Instrument, target: pd.Timestamp) -> bool:
+    name = _clean_text(instrument.name)
+    if instrument.exchange not in {"SH", "SZ"}:
+        return False
+    if "LOF" in name.upper() or "联接" in name:
+        return False
+    is_etf = instrument.asset_type == "etf" or (
+        instrument.asset_type == "fund"
+        and ("ETF" in name.upper() or "交易型" in name)
+    )
+    listed = pd.to_datetime(instrument.list_date, errors="coerce")
+    delisted = pd.to_datetime(instrument.delist_date, errors="coerce")
+    return is_etf and not (
+        (pd.notna(listed) and pd.Timestamp(listed).normalize() > target)
+        or (pd.notna(delisted) and pd.Timestamp(delisted).normalize() < target)
+    )
+
+
+def _local_etf_metadata_row(
+    instrument: Instrument,
+    rich: dict[str, Any],
+    share: dict[str, Any],
+    master_evidence: dict[str, Any],
+    end: pd.Timestamp,
+) -> dict[str, Any]:
+    from quantmaster.rotation.etf_v2 import classify_etf_profile
+
+    name = _clean_text(instrument.name)
+    metadata_source = _clean_text(
+        rich.get("metadata_source"), "free-stockdb:security-master"
+    )
+    benchmark = _clean_text(rich.get("benchmark"), share.get("benchmark"))
+    index_name = _clean_text(rich.get("index_name"), benchmark)
+    fund_type = _clean_text(rich.get("fund_type"), share.get("fund_type"), "ETF")
+    invest_type = _clean_text(rich.get("invest_type"), share.get("invest_type"))
+    taxonomy_source = (
+        "etf_basic"
+        if "etf_basic" in metadata_source
+        else "fund_basic"
+        if "fund_basic" in metadata_source
+        else "local_stockdb"
+    )
+    taxonomy = classify_etf_profile(
+        _clean_text(rich.get("name"), name),
+        benchmark=benchmark,
+        benchmark_code=_clean_text(rich.get("benchmark_code")),
+        index_name=index_name,
+        fund_type=fund_type,
+        invest_type=invest_type,
+        etf_type=_clean_text(rich.get("etf_type")),
+        benchmark_type=_clean_text(rich.get("benchmark_type")),
+        index_type=_clean_text(rich.get("index_type")),
+        metadata_source=taxonomy_source,
+    )
+    observed_at = float(instrument.observed_at or 0)
+    return {
+        "symbol": instrument.symbol,
+        "name": _clean_text(rich.get("name"), name),
+        "benchmark": benchmark,
+        "benchmark_code": _clean_text(rich.get("benchmark_code")),
+        "index_name": index_name,
+        "benchmark_level": _clean_text(rich.get("benchmark_level")),
+        "benchmark_type": _clean_text(rich.get("benchmark_type")),
+        "index_provider": _clean_text(rich.get("index_provider")),
+        "index_type": _clean_text(rich.get("index_type")),
+        "fund_type": fund_type,
+        "invest_type": invest_type,
+        "mgr_name": _clean_text(rich.get("mgr_name"), rich.get("manager")),
+        "custod_name": _clean_text(rich.get("custod_name"), rich.get("custodian")),
+        "mgt_fee": rich.get("mgt_fee", rich.get("management_fee")),
+        "etf_type": _clean_text(rich.get("etf_type")),
+        "exchange": instrument.exchange,
+        "asset_type": instrument.asset_type,
+        "status": instrument.status,
+        "list_date": _clean_text(instrument.list_date, rich.get("list_date")),
+        "delist_date": _clean_text(instrument.delist_date),
+        "category": taxonomy["category"],
+        "asset_class": taxonomy["asset_class"],
+        "sector_id": taxonomy["sector_id"],
+        "sector_name": taxonomy["sector_name"],
+        "normalized_index": taxonomy["normalized_index"],
+        "classification_source": taxonomy["classification_source"],
+        "classification_confidence": taxonomy["classification_confidence"],
+        "metadata_source": metadata_source,
+        "updated_at": _clean_text(rich.get("updated_at"), end.date().isoformat()),
+        "directory_member_source": str(instrument.source),
+        "directory_member_observed_at": (
+            pd.Timestamp(observed_at, unit="s", tz="UTC").isoformat()
+            if observed_at > 0
+            else master_evidence["acquired_at"]
+        ),
+    }
+
+
+def _normalise_etf_basic(basic: pd.DataFrame) -> pd.DataFrame:
+    basic = basic.rename(columns={"ts_code": "symbol"})
+    basic["symbol"] = basic["symbol"].astype(str).str.upper()
+    if "name" not in basic:
+        basic["name"] = ""
+    if "cname" in basic:
+        basic["name"] = basic["name"].replace("", pd.NA).fillna(basic["cname"])
+    if "fund_type" not in basic:
+        basic["fund_type"] = ""
+    basic["name"] = basic["name"].astype(str)
+    basic["fund_type"] = basic["fund_type"].astype(str)
+    basic = basic[
+        basic["symbol"].str.endswith((".SH", ".SZ"), na=False)
+        & ~basic["name"].str.contains("联接|LOF", case=False, na=False)
+        & (
+            basic["name"].str.contains("ETF", case=False, na=False)
+            | basic["fund_type"].str.contains("ETF|交易型", case=False, na=False)
+        )
+    ].copy()
+    for column in (
+        "benchmark", "benchmark_code", "list_date", "benchmark_level",
+        "benchmark_type", "index_provider", "index_type", "mgr_name",
+        "custod_name", "mgt_fee", "etf_type",
+    ):
+        if column not in basic:
+            basic[column] = ""
+    return basic
+
+
+def _classify_etf_basic(basic: pd.DataFrame, metadata_source: str) -> pd.DataFrame:
+    from quantmaster.rotation.etf_v2 import classify_etf_profile
+
+    source = "etf_basic" if metadata_source.endswith("etf_basic") else "fund_basic"
+    items = [
+        classify_etf_profile(
+            name,
+            benchmark="" if pd.isna(benchmark) else str(benchmark),
+            benchmark_code="" if pd.isna(code) else str(code),
+            index_name=("" if pd.isna(benchmark) else str(benchmark))
+            if source == "etf_basic" else "",
+            fund_type="" if pd.isna(fund_type) else str(fund_type),
+            invest_type="" if pd.isna(invest_type) else str(invest_type),
+            etf_type="" if pd.isna(etf_type) else str(etf_type),
+            benchmark_type="" if pd.isna(benchmark_type) else str(benchmark_type),
+            index_type="" if pd.isna(index_type) else str(index_type),
+            metadata_source=source,
+        )
+        for name, benchmark, code, fund_type, invest_type, etf_type, benchmark_type, index_type in zip(
+            basic["name"], basic["benchmark"], basic["benchmark_code"],
+            basic["fund_type"], basic.get("invest_type", pd.Series("", index=basic.index)),
+            basic.get("etf_type", pd.Series("", index=basic.index)),
+            basic.get("benchmark_type", pd.Series("", index=basic.index)),
+            basic.get("index_type", pd.Series("", index=basic.index)), strict=True,
+        )
+    ]
+    for column in (
+        "category", "asset_class", "sector_id", "sector_name", "normalized_index",
+        "classification_source", "classification_confidence",
+    ):
+        basic[column] = [item[column] for item in items]
+    return basic
+
+
+def _etf_maps(basic: pd.DataFrame) -> _EtfMaps:
+    indexed = basic.set_index("symbol")
+    return _EtfMaps(
+        names=indexed["name"].to_dict(),
+        categories=indexed["category"].to_dict(),
+        benchmarks=indexed["benchmark"].fillna("").astype(str).to_dict(),
+        listing_dates=indexed["list_date"].to_dict(),
+    )
+
+
+def _symbol_date(previous: pd.DataFrame, method: str) -> pd.Series:
+    if previous.empty or not {"symbol", "trade_date"}.issubset(previous.columns):
+        return pd.Series(dtype="datetime64[ns]")
+    parsed = previous[["symbol", "trade_date"]].copy()
+    parsed["trade_date"] = pd.to_datetime(parsed["trade_date"], errors="coerce")
+    grouped = parsed.groupby("symbol")["trade_date"]
+    return grouped.max() if method == "max" else grouped.min()
+
+
+def _backfill_target(
+    symbol: str,
+    listed_value: Any,
+    existing_value: Any,
+    period: _EtfPeriod,
+) -> tuple[str, pd.Timestamp, pd.Timestamp] | None:
+    listed = pd.to_datetime(listed_value, errors="coerce")
+    start_at = max(period.history_start, listed) if pd.notna(listed) else period.history_start
+    stop_at = (
+        pd.Timestamp(existing_value) - pd.Timedelta(days=1)
+        if pd.notna(existing_value) else period.end
+    )
+    if start_at.normalize() > stop_at.normalize():
+        return None
+    return symbol, start_at.normalize(), stop_at.normalize()
+
+
+def _etf_plan(
+    previous: pd.DataFrame,
+    basic: pd.DataFrame,
+    maps: _EtfMaps,
+    calendar: list[str],
+    period: _EtfPeriod,
+) -> _EtfPlan:
+    latest = _symbol_date(previous, "max")
+    current = sum(
+        pd.notna(latest.get(symbol, pd.NaT))
+        and pd.Timestamp(latest.get(symbol)).date()
+        >= (period.end - pd.Timedelta(days=10)).date()
+        for symbol in maps.categories
+    )
+    sessions = 25 if current < len(maps.categories) * 0.8 else 6
+    dates = [pd.Timestamp(value) for value in calendar if pd.Timestamp(value) <= period.end][-sessions:]
+    earliest = _symbol_date(previous, "min")
+    history_symbols = {
+        symbol for symbol, name, benchmark in zip(
+            basic["symbol"], basic["name"], basic["benchmark"], strict=True,
+        ) if _broad_etf_category(name, benchmark)
+    }
+    targets = [
+        target for symbol in history_symbols
+        if (target := _backfill_target(
+            symbol, maps.listing_dates.get(symbol), earliest.get(symbol, pd.NaT), period,
+        )) is not None
+    ]
+    return _EtfPlan(dates, targets)
+
+
+def _legacy_etf_columns(previous: pd.DataFrame) -> pd.DataFrame:
+    if previous.empty:
+        return previous
+    for column, default in (
+        ("benchmark", ""), ("total_size", pd.NA),
+        ("share_source", "tushare:fund_share"), ("acquired_at", pd.NaT),
+    ):
+        if column not in previous:
+            previous[column] = default
+    return previous
+
+
+def _merge_etf_rows(previous: pd.DataFrame, rows: list[pd.DataFrame]) -> pd.DataFrame:
+    from quantmaster.rotation.etf_v2 import classify_etf_profile
+
+    previous = _legacy_etf_columns(previous)
+    result = pd.concat([*([previous] if not previous.empty else []), *rows], ignore_index=True)
+    result["category"] = [
+        classify_etf_profile(
+            "" if pd.isna(name) else str(name),
+            benchmark="" if pd.isna(benchmark) else str(benchmark),
+        )["category"]
+        for name, benchmark in zip(
+            result.get("name", pd.Series("", index=result.index)),
+            result.get("benchmark", pd.Series("", index=result.index)), strict=True,
+        )
+    ]
+    result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce")
+    evidenced = result.groupby(["trade_date", "symbol"], dropna=False)[
+        "acquired_at"
+    ].transform(lambda values: values.notna().any())
+    result = result.loc[~(result["acquired_at"].isna() & evidenced)]
+    return (
+        result.dropna(subset=["trade_date", "symbol"])
+        .drop_duplicates(["trade_date", "symbol", "acquired_at"], keep="last")
+        .sort_values(["symbol", "trade_date", "acquired_at"])
+    )
 
 
 class RotationProvider:
@@ -264,40 +583,10 @@ class RotationProvider:
     def _local_etf_metadata(self, previous: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
         """Freeze a complete ETF directory observation before remote field enhancement."""
         from quantmaster.rotation.etf_research import etf_directory_master_hash
-        from quantmaster.rotation.etf_v2 import classify_etf_profile
 
         existing = self.store.etf_metadata_history()
-        existing_rows = (
-            {
-                str(row.get("symbol") or "").upper(): row
-                for row in existing.to_dict("records")
-                if row.get("symbol")
-            }
-            if not existing.empty and "symbol" in existing
-            else {}
-        )
-        share_rows: dict[str, dict[str, Any]] = {}
-        if not previous.empty and {"symbol", "trade_date"}.issubset(previous.columns):
-            values = previous.copy()
-            values["trade_date"] = pd.to_datetime(values["trade_date"], errors="coerce")
-            values["symbol"] = values["symbol"].astype(str).str.upper()
-            share_rows = {
-                str(row.get("symbol") or "").upper(): row
-                for row in (
-                    values.sort_values("trade_date")
-                    .drop_duplicates("symbol", keep="last")
-                    .to_dict("records")
-                )
-            }
-
-        def clean(*candidates: Any) -> str:
-            for candidate in candidates:
-                if candidate is None or pd.isna(candidate):
-                    continue
-                value = str(candidate).strip()
-                if value and value.casefold() != "nan":
-                    return value
-            return ""
+        existing_rows = _latest_symbol_rows(existing)
+        share_rows = _latest_share_rows(previous)
 
         target = pd.Timestamp(end).normalize()
         selected_instruments: list[Any] = []
@@ -322,92 +611,21 @@ class RotationProvider:
                 for row in master_evidence["records"]
             ]
         elif self.instrument_store is not None:
-            for instrument in self.instrument_store.list(market="CN"):
-                name = clean(instrument.name)
-                if instrument.exchange not in {"SH", "SZ"}:
-                    continue
-                if "LOF" in name.upper() or "联接" in name:
-                    continue
-                if instrument.asset_type != "etf" and not (
-                    instrument.asset_type == "fund"
-                    and ("ETF" in name.upper() or "交易型" in name)
-                ):
-                    continue
-                listed = pd.to_datetime(instrument.list_date, errors="coerce")
-                delisted = pd.to_datetime(instrument.delist_date, errors="coerce")
-                if pd.notna(listed) and pd.Timestamp(listed).normalize() > target:
-                    continue
-                if pd.notna(delisted) and pd.Timestamp(delisted).normalize() < target:
-                    continue
-                selected_instruments.append(instrument)
-        rows: list[dict[str, Any]] = []
-        for instrument in selected_instruments:
-            name = clean(instrument.name)
-            rich = existing_rows.get(instrument.symbol, {})
-            share = share_rows.get(instrument.symbol, {})
-            metadata_source = clean(rich.get("metadata_source"), "free-stockdb:security-master")
-            benchmark = clean(rich.get("benchmark"), share.get("benchmark"))
-            index_name = clean(rich.get("index_name"), benchmark)
-            fund_type = clean(rich.get("fund_type"), share.get("fund_type"), "ETF")
-            invest_type = clean(rich.get("invest_type"), share.get("invest_type"))
-            taxonomy_source = (
-                "etf_basic"
-                if "etf_basic" in metadata_source
-                else "fund_basic"
-                if "fund_basic" in metadata_source
-                else "local_stockdb"
+            selected_instruments = [
+                instrument
+                for instrument in self.instrument_store.list(market="CN")
+                if _eligible_local_etf(instrument, target)
+            ]
+        rows = [
+            _local_etf_metadata_row(
+                instrument,
+                existing_rows.get(instrument.symbol, {}),
+                share_rows.get(instrument.symbol, {}),
+                master_evidence,
+                end,
             )
-            taxonomy = classify_etf_profile(
-                clean(rich.get("name"), name),
-                benchmark=benchmark,
-                benchmark_code=clean(rich.get("benchmark_code")),
-                index_name=index_name,
-                fund_type=fund_type,
-                invest_type=invest_type,
-                etf_type=clean(rich.get("etf_type")),
-                benchmark_type=clean(rich.get("benchmark_type")),
-                index_type=clean(rich.get("index_type")),
-                metadata_source=taxonomy_source,
-            )
-            rows.append(
-                {
-                    "symbol": instrument.symbol,
-                    "name": clean(rich.get("name"), name),
-                    "benchmark": benchmark,
-                    "benchmark_code": clean(rich.get("benchmark_code")),
-                    "index_name": index_name,
-                    "benchmark_level": clean(rich.get("benchmark_level")),
-                    "benchmark_type": clean(rich.get("benchmark_type")),
-                    "index_provider": clean(rich.get("index_provider")),
-                    "index_type": clean(rich.get("index_type")),
-                    "fund_type": fund_type,
-                    "invest_type": invest_type,
-                    "mgr_name": clean(rich.get("mgr_name"), rich.get("manager")),
-                    "custod_name": clean(rich.get("custod_name"), rich.get("custodian")),
-                    "mgt_fee": rich.get("mgt_fee", rich.get("management_fee")),
-                    "etf_type": clean(rich.get("etf_type")),
-                    "exchange": instrument.exchange,
-                    "asset_type": instrument.asset_type,
-                    "status": instrument.status,
-                    "list_date": clean(instrument.list_date, rich.get("list_date")),
-                    "delist_date": clean(instrument.delist_date),
-                    "category": taxonomy["category"],
-                    "asset_class": taxonomy["asset_class"],
-                    "sector_id": taxonomy["sector_id"],
-                    "sector_name": taxonomy["sector_name"],
-                    "normalized_index": taxonomy["normalized_index"],
-                    "classification_source": taxonomy["classification_source"],
-                    "classification_confidence": taxonomy["classification_confidence"],
-                    "metadata_source": metadata_source,
-                    "updated_at": clean(rich.get("updated_at"), end.date().isoformat()),
-                    "directory_member_source": str(instrument.source),
-                    "directory_member_observed_at": pd.Timestamp(
-                        float(instrument.observed_at or 0), unit="s", tz="UTC"
-                    ).isoformat()
-                    if float(instrument.observed_at or 0) > 0
-                    else master_evidence["acquired_at"],
-                }
-            )
+            for instrument in selected_instruments
+        ]
         frame = pd.DataFrame(rows)
         if not frame.empty:
             frame = frame.sort_values("symbol").reset_index(drop=True)
@@ -1240,47 +1458,391 @@ class RotationProvider:
                     f"同花顺 {str(ths_error)[:90]}"
                 ) from ths_error
 
+    def _completed_etf_session(self, as_of: str) -> tuple[str, BaseException | None]:
+        from quantmaster.rotation.service import _expected_market_session
+
+        end_value = as_of or _expected_market_session()
+        if end_value:
+            return end_value, None
+        probe_end = market_date().isoformat()
+        probe_start = (pd.Timestamp(market_date()) - pd.Timedelta(days=45)).date().isoformat()
+        local_calendar = getattr(self.local_source, "trade_calendar", None)
+        using_local = callable(local_calendar)
+        reader = local_calendar if using_local else self.source.trade_calendar
+        error: BaseException | None = None
+        try:
+            observed = reader(probe_start, probe_end)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            error = exc
+            observed = []
+        if len(observed) == 0 and using_local:
+            try:
+                observed = self.source.trade_calendar(probe_start, probe_end)
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                error = exc
+                observed = []
+        candidates = pd.to_datetime(pd.Index(observed), errors="coerce")
+        eligible = [stamp for stamp in candidates[~candidates.isna()] if stamp.date() <= market_date()]
+        return (
+            max(stamp.date().isoformat() for stamp in eligible) if eligible else "",
+            error,
+        )
+
+    def _etf_calendar(self, period: _EtfPeriod, issues: list[str]) -> list[str]:
+        calendar: list[str] = []
+        local_calendar = getattr(self.local_source, "trade_calendar", None)
+        if callable(local_calendar):
+            try:
+                calendar = local_calendar(
+                    str(period.recent_start.date()), str(period.end.date())
+                )
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                issues.append(f"stockdb 交易日历不可用，降级 Tushare：{_compact_error(exc)}")
+        return calendar or self.source.trade_calendar(
+            str(period.recent_start.date()), str(period.end.date())
+        )
+
+    def _official_etf_basic(self, issues: list[str]) -> pd.DataFrame:
+        basic = self._tushare_call(
+            "etf_basic", 7, list_status="L",
+            fields=(
+                "ts_code,extname,cname,index_code,index_name,list_date,list_status,"
+                "exchange,mgr_name,custod_name,mgt_fee,etf_type"
+            ),
+        ).rename(columns={
+            "extname": "name", "index_name": "benchmark", "index_code": "benchmark_code",
+        })
+        basic["fund_type"] = basic.get("etf_type", "ETF")
+        basic["invest_type"] = basic.get("etf_type", "")
+        try:
+            catalog = self._tushare_call(
+                "mkt_idx_bmk", 5,
+                fields="ts_code,name,fullname,bmk_level,bmk_type,bmk_src,idx_type",
+            ).rename(columns={
+                "ts_code": "benchmark_code", "bmk_level": "benchmark_level",
+                "bmk_type": "benchmark_type", "bmk_src": "index_provider",
+                "idx_type": "index_type",
+            })
+        except RotationProviderCallError as exc:
+            issues.append(f"mkt_idx_bmk 不可用，指数分类使用显式规则：{_compact_error(exc)}")
+            logger.warning(issues[-1])
+            return basic
+        if "benchmark_code" not in catalog:
+            return basic
+        catalog["benchmark_code"] = catalog["benchmark_code"].astype(str).str.upper()
+        basic["benchmark_code"] = basic["benchmark_code"].astype(str).str.upper()
+        return basic.merge(
+            catalog[[
+                "benchmark_code", "benchmark_level", "benchmark_type",
+                "index_provider", "index_type",
+            ]].drop_duplicates("benchmark_code", keep="last"),
+            on="benchmark_code", how="left",
+        )
+
+    def _read_etf_basic(
+        self, local_basic: pd.DataFrame, issues: list[str],
+    ) -> tuple[pd.DataFrame, str]:
+        disabled = PROVIDER_HEALTH.disabled_status("tushare:etf_basic")
+        try:
+            if disabled:
+                raise RotationProviderCallError("当前 Tushare 凭据已确认无 etf_basic 权限")
+            return self._official_etf_basic(issues), "tushare:etf_basic"
+        except RotationProviderCallError as exc:
+            try:
+                basic = self._tushare_call(
+                    "fund_basic", 7, market="E", status="L",
+                    fields="ts_code,name,fund_type,invest_type,benchmark,list_date,market",
+                )
+            except RotationProviderCallError as fallback_exc:
+                if local_basic.empty:
+                    raise
+                issues.append(
+                    "Tushare ETF 元数据增强不可用，继续使用 stockdb 全市场目录："
+                    f"{_compact_error(fallback_exc)}"
+                )
+                logger.warning(issues[-1])
+                return local_basic.copy(), "free-stockdb:security-master"
+            if disabled:
+                issues.append("etf_basic 已按当前凭据跳过，官方字段直接使用 fund_basic")
+                logger.info(issues[-1])
+            else:
+                issues.append(f"etf_basic 不可用，官方字段降级 fund_basic：{_compact_error(exc)}")
+                logger.warning(issues[-1])
+            return basic, "tushare:fund_basic"
+
+    def _prepare_etf_basic(
+        self,
+        basic: pd.DataFrame,
+        local_basic: pd.DataFrame,
+        metadata_source: str,
+        end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        basic = _classify_etf_basic(_normalise_etf_basic(basic), metadata_source)
+        if metadata_source.startswith("tushare:"):
+            basic["metadata_source"] = metadata_source
+            basic["updated_at"] = end.date().isoformat()
+        else:
+            if "metadata_source" not in basic:
+                basic["metadata_source"] = "free-stockdb:security-master"
+            if "updated_at" not in basic:
+                basic["updated_at"] = end.date().isoformat()
+        if basic.empty:
+            raise RuntimeError("基金目录中没有可核查的场内 ETF")
+        if not local_basic.empty and metadata_source.startswith("tushare:"):
+            basic = self._merge_local_etf_basic(basic, local_basic)
+        observed = pd.Timestamp(market_now())
+        if observed.tzinfo is None:
+            observed = observed.tz_localize("Asia/Shanghai")
+        if not local_basic.empty and "observed_at" in local_basic:
+            local_observed = pd.to_datetime(
+                local_basic["observed_at"], errors="coerce", utc=True
+            ).max()
+            if pd.notna(local_observed) and observed.tz_convert("UTC") <= local_observed:
+                observed = (local_observed + pd.Timedelta(microseconds=1)).tz_convert(
+                    "Asia/Shanghai"
+                )
+        basic["observed_at"] = observed.isoformat()
+        self.store.save_etf_metadata(basic)
+        return basic
+
+    @staticmethod
+    def _merge_local_etf_basic(
+        basic: pd.DataFrame, local_basic: pd.DataFrame,
+    ) -> pd.DataFrame:
+        basic = pd.concat([local_basic, basic], ignore_index=True, sort=False)
+        priority = basic["metadata_source"].fillna("").astype(str).map(
+            lambda value: 3 if "etf_basic" in value else 2 if "fund_basic" in value else 1
+        )
+        basic = (
+            basic.assign(_metadata_priority=priority)
+            .sort_values(["symbol", "_metadata_priority"])
+            .drop_duplicates("symbol", keep="last")
+            .drop(columns="_metadata_priority")
+            .reset_index(drop=True)
+        )
+        catalog = local_basic.set_index("symbol")
+        for column in (
+            "exchange", "asset_type", "status", "list_date", "delist_date",
+            "effective_date", "directory_member_source", "directory_member_observed_at",
+            "directory_source", "directory_acquired_at", "directory_cutoff_at",
+            "directory_freshness", "directory_master_record_count",
+            "directory_master_batch_record_count", "directory_master_snapshot_sha256",
+            "directory_catalog_snapshot_id", "directory_catalog_records_sha256",
+            "directory_catalog_file_sha256", "directory_catalog_file_size",
+            "directory_catalog_file_mtime_ns", "directory_catalog_relative_path",
+            "directory_catalog_as_of", "directory_catalog_expected_count",
+            "directory_attestation_sha256", "directory_snapshot_id", "directory_complete",
+            "directory_expected_symbols", "directory_observed_symbols",
+            "directory_quality_reason",
+        ):
+            fallback = basic["symbol"].map(catalog[column])
+            if column not in basic:
+                basic[column] = fallback
+                continue
+            missing = basic[column].isna()
+            if basic[column].dtype == object:
+                missing |= basic[column].astype(str).str.strip().isin({"", "nan", "None"})
+            basic.loc[missing, column] = fallback.loc[missing]
+        return basic
+
+    def _history_etf_frame(
+        self,
+        target: tuple[str, pd.Timestamp, pd.Timestamp],
+        maps: _EtfMaps,
+    ) -> pd.DataFrame | None:
+        symbol, start_at, stop_at = target
+        shares = self._tushare_call(
+            "fund_share", 30, ts_code=symbol,
+            start_date=start_at.strftime("%Y%m%d"), end_date=stop_at.strftime("%Y%m%d"),
+            fields="ts_code,trade_date,fd_share",
+        ).rename(columns={"ts_code": "symbol", "fd_share": "shares"})
+        daily = self._tushare_call(
+            "fund_daily", 30, ts_code=symbol,
+            start_date=start_at.strftime("%Y%m%d"), end_date=stop_at.strftime("%Y%m%d"),
+            fields="ts_code,trade_date,close",
+        ).rename(columns={"ts_code": "symbol"})
+        if not {"symbol", "trade_date", "shares"}.issubset(shares.columns):
+            return None
+        if not {"symbol", "trade_date", "close"}.issubset(daily.columns):
+            daily = pd.DataFrame(columns=["symbol", "trade_date", "close"])
+        shares["shares"] = pd.to_numeric(shares["shares"], errors="coerce") * 10_000
+        merged = shares.merge(
+            daily[["symbol", "trade_date", "close"]],
+            on=["symbol", "trade_date"], how="left",
+        )
+        merged["nav"] = float("nan")
+        merged["trade_date"] = pd.to_datetime(merged["trade_date"], errors="coerce")
+        merged["name"] = merged["symbol"].map(maps.names).fillna(merged["symbol"])
+        merged["category"] = merged["symbol"].map(maps.categories)
+        merged["benchmark"] = merged["symbol"].map(maps.benchmarks).fillna("")
+        merged["total_size"] = pd.NA
+        merged["share_source"] = "tushare:fund_share"
+        return merged[[
+            "trade_date", "symbol", "name", "category", "benchmark", "shares",
+            "nav", "close", "total_size", "share_source",
+        ]]
+
+    def _sync_etf_history(
+        self, targets, maps: _EtfMaps, progress, cancelled, issues: list[str],
+    ) -> list[pd.DataFrame]:
+        rows = []
+        for index, target in enumerate(targets, start=1):
+            if cancelled():
+                raise InterruptedError("ETF 历史份额同步已取消")
+            symbol, start_at, stop_at = target
+            try:
+                frame = self._history_etf_frame(target, maps)
+            except RotationProviderCallError as exc:
+                issue = f"{maps.names.get(symbol, symbol)} 历史资金数据回填失败：{_compact_error(exc)}"
+                issues.append(issue)
+                logger.warning(issue)
+                continue
+            if frame is None:
+                continue
+            rows.append(frame)
+            progress(
+                55 + round(3 * index / max(1, len(targets))), "回填 ETF 历史",
+                f"{index}/{len(targets)} · {maps.names.get(symbol, symbol)} · "
+                f"{start_at.date()}—{stop_at.date()}",
+            )
+        return rows
+
+    def _etf_share_frame(
+        self, trade_date: pd.Timestamp, share_size_available: bool, issues: list[str],
+    ) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+        compact = trade_date.strftime("%Y%m%d")
+        shares = pd.DataFrame()
+        if share_size_available:
+            try:
+                shares = self._tushare_call(
+                    "etf_share_size", 1, trade_date=compact,
+                    fields=(
+                        "trade_date,ts_code,etf_name,total_share,total_size,nav,close,exchange"
+                    ),
+                ).rename(columns={
+                    "ts_code": "symbol", "etf_name": "reported_name", "total_share": "shares",
+                })
+                if {"symbol", "shares"}.issubset(shares.columns):
+                    shares["shares"] = pd.to_numeric(shares["shares"], errors="coerce") * 10_000
+                    shares["total_size"] = (
+                        pd.to_numeric(shares["total_size"], errors="coerce") * 10_000
+                        if "total_size" in shares else pd.NA
+                    )
+                    shares["share_source"] = "tushare:etf_share_size"
+                else:
+                    shares = pd.DataFrame()
+            except RotationProviderCallError as exc:
+                share_size_available = False
+                issues.append(f"etf_share_size 不可用，最近份额降级 fund_share：{_compact_error(exc)}")
+                logger.warning(issues[-1])
+        daily = pd.DataFrame()
+        if shares.empty:
+            shares = self.source._call(
+                "fund_share", 1, trade_date=compact,
+                fields="ts_code,trade_date,fd_share",
+            ).rename(columns={"ts_code": "symbol", "fd_share": "shares"})
+            daily = self.source._call(
+                "fund_daily", 1, trade_date=compact,
+                fields="ts_code,trade_date,close",
+            ).rename(columns={"ts_code": "symbol"})
+            shares["shares"] = pd.to_numeric(shares.get("shares"), errors="coerce") * 10_000
+            shares["total_size"] = pd.NA
+            shares["share_source"] = "tushare:fund_share"
+        return shares, daily, share_size_available
+
+    def _etf_nav_frame(
+        self, shares: pd.DataFrame, trade_date: pd.Timestamp, nav_available: bool,
+    ) -> tuple[pd.DataFrame, bool]:
+        if "nav" in shares:
+            return shares[["symbol", "nav"]].copy(), nav_available
+        if not nav_available:
+            return pd.DataFrame(columns=["symbol", "nav"]), False
+        try:
+            nav = self._tushare_call(
+                "fund_nav", 1, nav_date=trade_date.strftime("%Y%m%d"), market="E",
+                fields="ts_code,nav_date,unit_nav",
+            ).rename(columns={"ts_code": "symbol", "unit_nav": "nav"})
+        except RotationProviderCallError as exc:
+            logger.warning(
+                "场内基金单位净值接口不可用，本轮 ETF 资金改用收盘价并逐只标记：%s",
+                _compact_error(exc),
+            )
+            return pd.DataFrame(columns=["symbol", "nav"]), False
+        if not {"symbol", "nav"}.issubset(nav.columns):
+            nav = pd.DataFrame(columns=["symbol", "nav"])
+        return nav, True
+
+    def _recent_etf_frame(
+        self, trade_date: pd.Timestamp, maps: _EtfMaps, acquired_at: str,
+        share_size_available: bool, nav_available: bool, issues: list[str],
+    ) -> tuple[pd.DataFrame | None, bool, bool]:
+        shares, daily, share_size_available = self._etf_share_frame(
+            trade_date, share_size_available, issues
+        )
+        if not {"symbol", "shares"}.issubset(shares.columns):
+            return None, share_size_available, nav_available
+        if "close" in shares:
+            daily = shares[["symbol", "close"]].copy()
+        if not {"symbol", "close"}.issubset(daily.columns):
+            daily = pd.DataFrame(columns=["symbol", "close"])
+        nav, nav_available = self._etf_nav_frame(shares, trade_date, nav_available)
+        shares = shares[shares["symbol"].isin(maps.categories)]
+        if shares.empty:
+            return None, share_size_available, nav_available
+        merged = shares[["symbol", "shares", "total_size", "share_source"]].merge(
+            daily[["symbol", "close"]], on="symbol", how="left"
+        )
+        if nav.empty:
+            merged["nav"] = pd.NA
+        else:
+            merged = merged.merge(
+                nav.drop_duplicates("symbol", keep="last")[["symbol", "nav"]],
+                on="symbol", how="left",
+            )
+        merged["trade_date"] = trade_date.normalize()
+        merged["acquired_at"] = acquired_at
+        merged["name"] = merged["symbol"].map(maps.names).fillna(merged["symbol"])
+        merged["category"] = merged["symbol"].map(maps.categories)
+        merged["benchmark"] = merged["symbol"].map(maps.benchmarks).fillna("")
+        return merged[[
+            "trade_date", "symbol", "name", "category", "benchmark", "shares",
+            "nav", "close", "total_size", "share_source", "acquired_at",
+        ]], share_size_available, nav_available
+
+    def _sync_recent_etfs(
+        self, dates, maps: _EtfMaps, acquired_at: str,
+        progress, cancelled, issues: list[str],
+    ) -> tuple[list[pd.DataFrame], bool]:
+        disabled = PROVIDER_HEALTH.disabled_status("tushare:etf_share_size")
+        share_size_available = disabled is None
+        if disabled:
+            issues.append("etf_share_size 已按当前凭据跳过，最近份额直接使用 fund_share")
+            logger.info(issues[-1])
+        nav_available = True
+        rows = []
+        for index, trade_date in enumerate(dates, start=1):
+            if cancelled():
+                raise InterruptedError("ETF 份额同步已取消")
+            frame, share_size_available, nav_available = self._recent_etf_frame(
+                trade_date, maps, acquired_at, share_size_available, nav_available, issues
+            )
+            if frame is None:
+                continue
+            rows.append(frame)
+            progress(
+                58 + round(4 * index / max(1, len(dates))), "同步 ETF 份额",
+                f"{index}/{len(dates)} · {trade_date.date()}",
+            )
+        return rows, share_size_available
+
     def sync_etf_observations(
         self, progress, cancelled, *, as_of: str = "",
     ) -> dict[str, Any]:
         """Keep legacy broad history and maintain a 25-session all-market share panel."""
-        from quantmaster.rotation.etf_v2 import classify_etf_profile
-        from quantmaster.rotation.service import _expected_market_session
-
         previous = self.store.etf_observations()
         issues: list[str] = []
         acquired_at = market_now().isoformat()
-        end_value = as_of or _expected_market_session()
-        calendar_error: BaseException | None = None
-        if not end_value:
-            # The shared resolver may be unavailable in an offline/local-only
-            # installation.  Derive the ceiling from an actual provider calendar
-            # rather than using the wall-clock date as a synthetic session.
-            probe_end = market_date().isoformat()
-            probe_start = (
-                pd.Timestamp(market_date()) - pd.Timedelta(days=45)
-            ).date().isoformat()
-            local_calendar = getattr(self.local_source, "trade_calendar", None)
-            using_local_calendar = callable(local_calendar)
-            calendar_reader = local_calendar
-            if not using_local_calendar:
-                calendar_reader = self.source.trade_calendar
-            try:
-                observed = calendar_reader(probe_start, probe_end)
-            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                calendar_error = exc
-                observed = []
-            if len(observed) == 0 and using_local_calendar:
-                try:
-                    observed = self.source.trade_calendar(probe_start, probe_end)
-                except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                    calendar_error = exc
-                    observed = []
-            candidates = pd.to_datetime(pd.Index(observed), errors="coerce")
-            candidates = candidates[~candidates.isna()]
-            eligible = [stamp for stamp in candidates if stamp.date() <= market_date()]
-            if eligible:
-                end_value = max(stamp.date().isoformat() for stamp in eligible)
+        end_value, calendar_error = self._completed_etf_session(as_of)
         # Capture the local directory before remote metadata enhancement can
         # fail, but bind its effective date to a completed-session hint (or a
         # bounded prior day), never to today's wall-clock date.
@@ -1293,532 +1855,28 @@ class RotationProvider:
             if calendar_error is not None:
                 raise calendar_error
             raise RuntimeError("无法确认 ETF 观察的最近完成交易日")
-        history_start = end - pd.DateOffset(years=3, days=20)
-        recent_start = end - pd.Timedelta(days=45 if previous.empty else 20)
+        period = _EtfPeriod(
+            end=end,
+            history_start=end - pd.DateOffset(years=3, days=20),
+            recent_start=end - pd.Timedelta(days=45 if previous.empty else 20),
+        )
         if not local_basic.empty:
             progress(3, "读取本地 ETF 元数据", f"stockdb 证券主表 {len(local_basic)} 只")
-        calendar: list[str] = []
-        local_calendar = getattr(self.local_source, "trade_calendar", None)
-        if callable(local_calendar):
-            try:
-                calendar = local_calendar(str(recent_start.date()), str(end.date()))
-            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                issues.append(f"stockdb 交易日历不可用，降级 Tushare：{_compact_error(exc)}")
-        if not calendar:
-            calendar = self.source.trade_calendar(str(recent_start.date()), str(end.date()))
-        metadata_source = "tushare:etf_basic"
-        disabled_etf_basic = PROVIDER_HEALTH.disabled_status("tushare:etf_basic")
-        try:
-            if disabled_etf_basic:
-                raise RotationProviderCallError("当前 Tushare 凭据已确认无 etf_basic 权限")
-            basic = self._tushare_call(
-                "etf_basic",
-                7,
-                list_status="L",
-                fields=(
-                    "ts_code,extname,cname,index_code,index_name,list_date,list_status,"
-                    "exchange,mgr_name,custod_name,mgt_fee,etf_type"
-                ),
-            ).rename(
-                columns={
-                    "extname": "name",
-                    "index_name": "benchmark",
-                    "index_code": "benchmark_code",
-                }
-            )
-            basic["fund_type"] = basic.get("etf_type", "ETF")
-            basic["invest_type"] = basic.get("etf_type", "")
-            try:
-                benchmark_catalog = self._tushare_call(
-                    "mkt_idx_bmk",
-                    5,
-                    fields="ts_code,name,fullname,bmk_level,bmk_type,bmk_src,idx_type",
-                ).rename(
-                    columns={
-                        "ts_code": "benchmark_code",
-                        "bmk_level": "benchmark_level",
-                        "bmk_type": "benchmark_type",
-                        "bmk_src": "index_provider",
-                        "idx_type": "index_type",
-                    }
-                )
-                if "benchmark_code" in benchmark_catalog:
-                    benchmark_catalog["benchmark_code"] = (
-                        benchmark_catalog["benchmark_code"].astype(str).str.upper()
-                    )
-                    basic["benchmark_code"] = basic["benchmark_code"].astype(str).str.upper()
-                    basic = basic.merge(
-                        benchmark_catalog[
-                            [
-                                "benchmark_code",
-                                "benchmark_level",
-                                "benchmark_type",
-                                "index_provider",
-                                "index_type",
-                            ]
-                        ].drop_duplicates("benchmark_code", keep="last"),
-                        on="benchmark_code",
-                        how="left",
-                    )
-            except RotationProviderCallError as exc:
-                issues.append(f"mkt_idx_bmk 不可用，指数分类使用显式规则：{_compact_error(exc)}")
-                logger.warning(issues[-1])
-        except RotationProviderCallError as exc:
-            metadata_source = "tushare:fund_basic"
-            try:
-                basic = self._tushare_call(
-                    "fund_basic",
-                    7,
-                    market="E",
-                    status="L",
-                    fields="ts_code,name,fund_type,invest_type,benchmark,list_date,market",
-                )
-                if disabled_etf_basic:
-                    issues.append("etf_basic 已按当前凭据跳过，官方字段直接使用 fund_basic")
-                    logger.info(issues[-1])
-                else:
-                    issues.append(
-                        f"etf_basic 不可用，官方字段降级 fund_basic：{_compact_error(exc)}"
-                    )
-                    logger.warning(issues[-1])
-            except RotationProviderCallError as fallback_exc:
-                if local_basic.empty:
-                    raise
-                metadata_source = "free-stockdb:security-master"
-                basic = local_basic.copy()
-                issues.append(
-                    "Tushare ETF 元数据增强不可用，继续使用 stockdb 全市场目录："
-                    f"{_compact_error(fallback_exc)}"
-                )
-                logger.warning(issues[-1])
-        basic = basic.rename(columns={"ts_code": "symbol"})
-        basic["symbol"] = basic["symbol"].astype(str).str.upper()
-        if "name" not in basic:
-            basic["name"] = ""
-        if "cname" in basic:
-            basic["name"] = basic["name"].replace("", pd.NA).fillna(basic["cname"])
-        if "fund_type" not in basic:
-            basic["fund_type"] = ""
-        basic["name"] = basic["name"].astype(str)
-        basic["fund_type"] = basic["fund_type"].astype(str)
-        basic = basic[
-            basic["symbol"].str.endswith((".SH", ".SZ"), na=False)
-            & ~basic["name"].str.contains("联接|LOF", case=False, na=False)
-            & (
-                basic["name"].str.contains("ETF", case=False, na=False)
-                | basic["fund_type"].str.contains("ETF|交易型", case=False, na=False)
-            )
-        ].copy()
-        if "benchmark" not in basic:
-            basic["benchmark"] = ""
-        if "benchmark_code" not in basic:
-            basic["benchmark_code"] = ""
-        if "list_date" not in basic:
-            basic["list_date"] = ""
-        for column in (
-            "benchmark_level",
-            "benchmark_type",
-            "index_provider",
-            "index_type",
-            "mgr_name",
-            "custod_name",
-            "mgt_fee",
-            "etf_type",
-        ):
-            if column not in basic:
-                basic[column] = ""
-        taxonomies = [
-            classify_etf_profile(
-                name,
-                benchmark="" if pd.isna(benchmark) else str(benchmark),
-                benchmark_code="" if pd.isna(code) else str(code),
-                index_name=("" if pd.isna(benchmark) else str(benchmark))
-                if metadata_source.endswith("etf_basic")
-                else "",
-                fund_type="" if pd.isna(fund_type) else str(fund_type),
-                invest_type="" if pd.isna(invest_type) else str(invest_type),
-                etf_type="" if pd.isna(etf_type) else str(etf_type),
-                benchmark_type="" if pd.isna(benchmark_type) else str(benchmark_type),
-                index_type="" if pd.isna(index_type) else str(index_type),
-                metadata_source="etf_basic" if metadata_source.endswith("etf_basic") else "fund_basic",
-            )
-            for name, benchmark, code, fund_type, invest_type, etf_type, benchmark_type, index_type in zip(
-                basic["name"],
-                basic["benchmark"],
-                basic["benchmark_code"],
-                basic["fund_type"],
-                basic.get("invest_type", pd.Series("", index=basic.index)),
-                basic.get("etf_type", pd.Series("", index=basic.index)),
-                basic.get("benchmark_type", pd.Series("", index=basic.index)),
-                basic.get("index_type", pd.Series("", index=basic.index)),
-                strict=True,
-            )
-        ]
-        basic["category"] = [item["category"] for item in taxonomies]
-        basic["asset_class"] = [item["asset_class"] for item in taxonomies]
-        basic["sector_id"] = [item["sector_id"] for item in taxonomies]
-        basic["sector_name"] = [item["sector_name"] for item in taxonomies]
-        basic["normalized_index"] = [item["normalized_index"] for item in taxonomies]
-        basic["classification_source"] = [item["classification_source"] for item in taxonomies]
-        basic["classification_confidence"] = [
-            item["classification_confidence"] for item in taxonomies
-        ]
-        if metadata_source.startswith("tushare:"):
-            basic["metadata_source"] = metadata_source
-            basic["updated_at"] = end.date().isoformat()
-        else:
-            if "metadata_source" not in basic:
-                basic["metadata_source"] = "free-stockdb:security-master"
-            if "updated_at" not in basic:
-                basic["updated_at"] = end.date().isoformat()
-        if basic.empty:
-            raise RuntimeError("基金目录中没有可核查的场内 ETF")
-        if not local_basic.empty and metadata_source.startswith("tushare:"):
-            basic = pd.concat([local_basic, basic], ignore_index=True, sort=False)
-            source_priority = basic["metadata_source"].fillna("").astype(str).map(
-                lambda value: 3 if "etf_basic" in value else 2 if "fund_basic" in value else 1
-            )
-            basic = (
-                basic.assign(_metadata_priority=source_priority)
-                .sort_values(["symbol", "_metadata_priority"])
-                .drop_duplicates("symbol", keep="last")
-                .drop(columns="_metadata_priority")
-                .reset_index(drop=True)
-            )
-            catalog = local_basic.set_index("symbol")
-            for column in (
-                "exchange",
-                "asset_type",
-                "status",
-                "list_date",
-                "delist_date",
-                "effective_date",
-                "directory_member_source",
-                "directory_member_observed_at",
-                "directory_source",
-                "directory_acquired_at",
-                "directory_cutoff_at",
-                "directory_freshness",
-                "directory_master_record_count",
-                "directory_master_batch_record_count",
-                "directory_master_snapshot_sha256",
-                "directory_catalog_snapshot_id",
-                "directory_catalog_records_sha256",
-                "directory_catalog_file_sha256",
-                "directory_catalog_file_size",
-                "directory_catalog_file_mtime_ns",
-                "directory_catalog_relative_path",
-                "directory_catalog_as_of",
-                "directory_catalog_expected_count",
-                "directory_attestation_sha256",
-                "directory_snapshot_id",
-                "directory_complete",
-                "directory_expected_symbols",
-                "directory_observed_symbols",
-                "directory_quality_reason",
-            ):
-                fallback = basic["symbol"].map(catalog[column])
-                if column not in basic:
-                    basic[column] = fallback
-                    continue
-                missing = basic[column].isna()
-                if basic[column].dtype == object:
-                    missing |= basic[column].astype(str).str.strip().isin({"", "nan", "None"})
-                basic.loc[missing, column] = fallback.loc[missing]
-        metadata_observed = pd.Timestamp(market_now())
-        if metadata_observed.tzinfo is None:
-            metadata_observed = metadata_observed.tz_localize("Asia/Shanghai")
-        if not local_basic.empty and "observed_at" in local_basic:
-            local_observed = pd.to_datetime(
-                local_basic["observed_at"], errors="coerce", utc=True
-            ).max()
-            candidate_utc = metadata_observed.tz_convert("UTC")
-            if pd.notna(local_observed) and candidate_utc <= local_observed:
-                metadata_observed = (
-                    local_observed + pd.Timedelta(microseconds=1)
-                ).tz_convert("Asia/Shanghai")
-        basic["observed_at"] = metadata_observed.isoformat()
-        self.store.save_etf_metadata(basic)
-        names = basic.set_index("symbol")["name"].to_dict()
-        categories = basic.set_index("symbol")["category"].to_dict()
-        benchmarks = basic.set_index("symbol")["benchmark"].fillna("").astype(str).to_dict()
-        listing_dates = basic.set_index("symbol")["list_date"].to_dict()
-        rows: list[pd.DataFrame] = []
-        previous_latest = pd.Series(dtype="datetime64[ns]")
-        if not previous.empty and {"symbol", "trade_date"}.issubset(previous.columns):
-            parsed_latest = previous.copy()
-            parsed_latest["trade_date"] = pd.to_datetime(parsed_latest["trade_date"], errors="coerce")
-            previous_latest = parsed_latest.groupby("symbol")["trade_date"].max()
-        current_symbols = sum(
-            pd.notna(previous_latest.get(symbol, pd.NaT))
-            and pd.Timestamp(previous_latest.get(symbol)).date() >= (end - pd.Timedelta(days=10)).date()
-            for symbol in categories
+        calendar = self._etf_calendar(period, issues)
+        raw_basic, metadata_source = self._read_etf_basic(local_basic, issues)
+        basic = self._prepare_etf_basic(raw_basic, local_basic, metadata_source, end)
+        maps = _etf_maps(basic)
+        plan = _etf_plan(previous, basic, maps, calendar, period)
+        rows = self._sync_etf_history(
+            plan.backfill_targets, maps, progress, cancelled, issues
         )
-        bootstrap_sessions = 25 if current_symbols < len(categories) * 0.8 else 6
-        dates = [pd.Timestamp(value) for value in calendar if pd.Timestamp(value) <= end][
-            -bootstrap_sessions:
-        ]
-
-        previous_dates = pd.Series(dtype="datetime64[ns]")
-        if not previous.empty and {"symbol", "trade_date"}.issubset(previous.columns):
-            parsed_previous = previous.copy()
-            parsed_previous["trade_date"] = pd.to_datetime(
-                parsed_previous["trade_date"],
-                errors="coerce",
-            )
-            previous_dates = parsed_previous.groupby("symbol")["trade_date"].min()
-
-        backfill_targets: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
-        history_symbols = {
-            symbol
-            for symbol, name, benchmark in zip(
-                basic["symbol"], basic["name"], basic["benchmark"], strict=True
-            )
-            if _broad_etf_category(name, benchmark)
-        }
-        for symbol in history_symbols:
-            listed = pd.to_datetime(listing_dates.get(symbol), errors="coerce")
-            start_at = max(history_start, listed) if pd.notna(listed) else history_start
-            existing_start = previous_dates.get(symbol, pd.NaT)
-            stop_at = pd.Timestamp(existing_start) - pd.Timedelta(days=1) if pd.notna(existing_start) else end
-            if start_at.normalize() <= stop_at.normalize():
-                backfill_targets.append((symbol, start_at.normalize(), stop_at.normalize()))
-
-        for index, (symbol, start_at, stop_at) in enumerate(backfill_targets, start=1):
-            if cancelled():
-                raise InterruptedError("ETF 历史份额同步已取消")
-            try:
-                shares = self._tushare_call(
-                    "fund_share",
-                    30,
-                    ts_code=symbol,
-                    start_date=start_at.strftime("%Y%m%d"),
-                    end_date=stop_at.strftime("%Y%m%d"),
-                    fields="ts_code,trade_date,fd_share",
-                ).rename(columns={"ts_code": "symbol", "fd_share": "shares"})
-                daily = self._tushare_call(
-                    "fund_daily",
-                    30,
-                    ts_code=symbol,
-                    start_date=start_at.strftime("%Y%m%d"),
-                    end_date=stop_at.strftime("%Y%m%d"),
-                    fields="ts_code,trade_date,close",
-                ).rename(columns={"ts_code": "symbol"})
-            except RotationProviderCallError as exc:
-                issue = f"{names.get(symbol, symbol)} 历史资金数据回填失败：{_compact_error(exc)}"
-                issues.append(issue)
-                logger.warning(issue)
-                continue
-            if not {"symbol", "trade_date", "shares"}.issubset(shares.columns):
-                continue
-            if not {"symbol", "trade_date", "close"}.issubset(daily.columns):
-                daily = pd.DataFrame(columns=["symbol", "trade_date", "close"])
-            shares["shares"] = pd.to_numeric(shares["shares"], errors="coerce") * 10_000
-            merged = shares.merge(
-                daily[["symbol", "trade_date", "close"]],
-                on=["symbol", "trade_date"],
-                how="left",
-            )
-            merged["nav"] = float("nan")
-            merged["trade_date"] = pd.to_datetime(merged["trade_date"], errors="coerce")
-            merged["name"] = merged["symbol"].map(names).fillna(merged["symbol"])
-            merged["category"] = merged["symbol"].map(categories)
-            merged["benchmark"] = merged["symbol"].map(benchmarks).fillna("")
-            merged["total_size"] = pd.NA
-            merged["share_source"] = "tushare:fund_share"
-            rows.append(
-                merged[
-                    [
-                        "trade_date",
-                        "symbol",
-                        "name",
-                        "category",
-                        "benchmark",
-                        "shares",
-                        "nav",
-                        "close",
-                        "total_size",
-                        "share_source",
-                    ]
-                ]
-            )
-            progress(
-                55 + round(3 * index / max(1, len(backfill_targets))),
-                "回填 ETF 历史",
-                f"{index}/{len(backfill_targets)} · {names.get(symbol, symbol)} · "
-                f"{start_at.date()}—{stop_at.date()}",
-            )
-
-        nav_available = True
-        disabled_share_size = PROVIDER_HEALTH.disabled_status("tushare:etf_share_size")
-        share_size_available = disabled_share_size is None
-        if disabled_share_size:
-            issues.append("etf_share_size 已按当前凭据跳过，最近份额直接使用 fund_share")
-            logger.info(issues[-1])
-        for index, trade_date in enumerate(dates, start=1):
-            if cancelled():
-                raise InterruptedError("ETF 份额同步已取消")
-            compact = trade_date.strftime("%Y%m%d")
-            shares = pd.DataFrame()
-            if share_size_available:
-                try:
-                    shares = self._tushare_call(
-                        "etf_share_size",
-                        1,
-                        trade_date=compact,
-                        fields=("trade_date,ts_code,etf_name,total_share,total_size,nav,close,exchange"),
-                    ).rename(
-                        columns={
-                            "ts_code": "symbol",
-                            "etf_name": "reported_name",
-                            "total_share": "shares",
-                        }
-                    )
-                    if {"symbol", "shares"}.issubset(shares.columns):
-                        shares["shares"] = pd.to_numeric(shares["shares"], errors="coerce") * 10_000
-                        if "total_size" in shares:
-                            shares["total_size"] = (
-                                pd.to_numeric(shares["total_size"], errors="coerce") * 10_000
-                            )
-                        else:
-                            shares["total_size"] = pd.NA
-                        shares["share_source"] = "tushare:etf_share_size"
-                    else:
-                        shares = pd.DataFrame()
-                except RotationProviderCallError as exc:
-                    share_size_available = False
-                    issues.append(f"etf_share_size 不可用，最近份额降级 fund_share：{_compact_error(exc)}")
-                    logger.warning(issues[-1])
-            daily = pd.DataFrame()
-            if shares.empty:
-                shares = self.source._call(
-                    "fund_share",
-                    1,
-                    trade_date=compact,
-                    fields="ts_code,trade_date,fd_share",
-                ).rename(columns={"ts_code": "symbol", "fd_share": "shares"})
-                daily = self.source._call(
-                    "fund_daily",
-                    1,
-                    trade_date=compact,
-                    fields="ts_code,trade_date,close",
-                ).rename(columns={"ts_code": "symbol"})
-                shares["shares"] = pd.to_numeric(shares.get("shares"), errors="coerce") * 10_000
-                shares["total_size"] = pd.NA
-                shares["share_source"] = "tushare:fund_share"
-            if not {"symbol", "shares"}.issubset(shares.columns):
-                continue
-            if "close" in shares:
-                daily = shares[["symbol", "close"]].copy()
-            if not {"symbol", "close"}.issubset(daily.columns):
-                daily = pd.DataFrame(columns=["symbol", "close"])
-            nav = (
-                shares[["symbol", "nav"]].copy()
-                if "nav" in shares
-                else pd.DataFrame(columns=["symbol", "nav"])
-            )
-            if nav.empty and nav_available:
-                try:
-                    nav = self._tushare_call(
-                        "fund_nav",
-                        1,
-                        nav_date=compact,
-                        market="E",
-                        fields="ts_code,nav_date,unit_nav",
-                    ).rename(columns={"ts_code": "symbol", "unit_nav": "nav"})
-                    if not {"symbol", "nav"}.issubset(nav.columns):
-                        nav = pd.DataFrame(columns=["symbol", "nav"])
-                except RotationProviderCallError as exc:
-                    nav_available = False
-                    logger.warning(
-                        "场内基金单位净值接口不可用，本轮 ETF 资金改用收盘价并逐只标记：%s",
-                        _compact_error(exc),
-                    )
-            if shares.empty:
-                continue
-            shares = shares[shares["symbol"].isin(categories)]
-            if shares.empty:
-                continue
-            selected_columns = ["symbol", "shares", "total_size", "share_source"]
-            merged = shares[selected_columns].merge(daily[["symbol", "close"]], on="symbol", how="left")
-            if not nav.empty:
-                nav = nav.drop_duplicates("symbol", keep="last")
-                merged = merged.merge(nav[["symbol", "nav"]], on="symbol", how="left")
-            else:
-                merged["nav"] = pd.NA
-            merged["trade_date"] = trade_date.normalize()
-            merged["acquired_at"] = acquired_at
-            merged["name"] = merged["symbol"].map(names).fillna(merged["symbol"])
-            merged["category"] = merged["symbol"].map(categories)
-            merged["benchmark"] = merged["symbol"].map(benchmarks).fillna("")
-            rows.append(
-                merged[
-                    [
-                        "trade_date",
-                        "symbol",
-                        "name",
-                        "category",
-                        "benchmark",
-                        "shares",
-                        "nav",
-                        "close",
-                        "total_size",
-                        "share_source",
-                        "acquired_at",
-                    ]
-                ]
-            )
-            progress(
-                58 + round(4 * index / max(1, len(dates))),
-                "同步 ETF 份额",
-                f"{index}/{len(dates)} · {trade_date.date()}",
-            )
+        recent_rows, share_size_available = self._sync_recent_etfs(
+            plan.dates, maps, acquired_at, progress, cancelled, issues
+        )
+        rows.extend(recent_rows)
         if not rows and previous.empty:
             raise RuntimeError("ETF 份额接口未返回可用数据")
-        if not previous.empty and "benchmark" not in previous:
-            previous["benchmark"] = ""
-        if not previous.empty and "total_size" not in previous:
-            previous["total_size"] = pd.NA
-        if not previous.empty and "share_source" not in previous:
-            previous["share_source"] = "tushare:fund_share"
-        if not previous.empty and "acquired_at" not in previous:
-            # Clean replacement: legacy observations stay visible for current
-            # diagnostics but cannot enter historical replay without evidence.
-            previous["acquired_at"] = pd.NaT
-        result = pd.concat(
-            [*([previous] if not previous.empty else []), *rows],
-            ignore_index=True,
-        )
-        result["category"] = [
-            classify_etf_profile(
-                "" if pd.isna(name) else str(name),
-                benchmark="" if pd.isna(benchmark) else str(benchmark),
-            )["category"]
-            for name, benchmark in zip(
-                result.get("name", pd.Series("", index=result.index)),
-                result.get("benchmark", pd.Series("", index=result.index)),
-                strict=True,
-            )
-        ]
-        result["trade_date"] = pd.to_datetime(result["trade_date"], errors="coerce")
-        evidenced_groups = result.groupby(
-            ["trade_date", "symbol"], dropna=False
-        )["acquired_at"].transform(lambda values: values.notna().any())
-        # Once a dated observation has acquisition evidence, discard an
-        # otherwise identical legacy projection whose acquisition time is
-        # unknowable.  Real observations from distinct acquisition instants
-        # remain append-only for point-in-time replay.
-        result = result.loc[
-            ~(result["acquired_at"].isna() & evidenced_groups)
-        ]
-        result = (
-            result.dropna(subset=["trade_date", "symbol"])
-            .drop_duplicates(
-                ["trade_date", "symbol", "acquired_at"],
-                keep="last",
-            )
-            .sort_values(["symbol", "trade_date", "acquired_at"])
-        )
+        result = _merge_etf_rows(previous, rows)
         self.store.save_etf_observations(result)
         available_dates = result["trade_date"].dropna()
         return {
@@ -1827,8 +1885,7 @@ class RotationProvider:
             "history_start": str(available_dates.min().date()) if not available_dates.empty else "",
             "history_end": str(available_dates.max().date()) if not available_dates.empty else "",
             "metadata_source": (
-                metadata_source
-                if local_basic.empty
+                metadata_source if local_basic.empty
                 else f"free-stockdb:security-master + {metadata_source}"
             ),
             "share_source": "etf_share_size" if share_size_available else "fund_share",

@@ -2,6 +2,9 @@
 
 ## 未发布
 
+### 代码可维护性
+- ETF 目录与份额同步拆分为会话解析、元数据增强、历史回填规划、逐日采集和证据化合并阶段，保持本地优先、降级错误、持久化与返回契约不变，并继续收紧 Ruff C901 库存
+
 ### Windows 进程管理
 - 源码启动器改为由 `QuantMaster.exe` 直接承载 CPython 运行时，不再经过隐藏的 `python.exe` 重定向层；Windows 可按 QuantMaster 根进程折叠 StockDB、Web 与运行时 worker
 - Web、运行时与计算 worker 使用各自的镜像名，并修复命名 worker 再派生子进程时回退为普通 `python.exe` 的问题；发行版也会在导入应用前正确分派 multiprocessing 子进程
