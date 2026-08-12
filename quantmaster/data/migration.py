@@ -129,6 +129,17 @@ def _copy_sqlite(source: Path, target: Path) -> None:
                 raise MigrationError(f"SQLite 校验失败: {source.name}")
 
 
+def backup_sqlite_tree(source_root: Path, target_root: Path, *, exclude: set[str] | None = None) -> None:
+    """Create verified SQLite backups without copying WAL/SHM sidecars."""
+    target_root.mkdir(parents=True, exist_ok=False)
+    excluded = exclude or set()
+    for source in sorted(source_root.rglob("*.sqlite")):
+        if target_root in source.parents or source.name in excluded:
+            continue
+        destination = target_root / source.relative_to(source_root)
+        _copy_sqlite(source, destination)
+
+
 class DataMigrationManager:
     def __init__(self, config_manager: ConfigManager | None = None):
         self.config_manager = config_manager or ConfigManager()

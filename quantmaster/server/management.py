@@ -22,6 +22,11 @@ from pydantic import Field
 
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
+from quantmaster.data.legacy_migration import (
+    LegacyMigrationError,
+    legacy_migration_manager,
+    registered_migrations,
+)
 from quantmaster.data.migration import MigrationError, migration_manager
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
@@ -790,6 +795,12 @@ class MigrationCreate(ContractModel):
     mode: Literal["copy", "switch"] = "copy"
 
 
+class LegacyMigrationCreate(ContractModel):
+    domain: str = Field(min_length=1, max_length=80)
+    mode: Literal["dry_run", "apply"] = "dry_run"
+    batch_size: int = Field(default=250, ge=1, le=5000)
+
+
 @router.post("/data/migrations")
 def create_migration(request: Request, value: MigrationCreate) -> dict:
     _require_csrf(request)
@@ -831,6 +842,70 @@ def cancel_migration(task_id: str, request: Request) -> dict:
         return migration_manager.cancel(task_id)
     except KeyError:
         raise _public_error(404, "数据迁移任务不存在", "取消数据迁移任务失败") from None
+
+
+@router.get("/data/contract-migrations")
+def contract_migration_status(request: Request) -> dict:
+    _require_local(request)
+    return {
+        "available_types": list(registered_migrations()),
+        "latest": legacy_migration_manager.latest(),
+    }
+
+
+@router.post("/data/contract-migrations", status_code=202)
+def create_contract_migration(request: Request, value: LegacyMigrationCreate) -> dict:
+    _require_csrf(request)
+    try:
+        return legacy_migration_manager.create(
+            value.domain, mode=value.mode, batch_size=value.batch_size,
+        )
+    except LegacyMigrationError:
+        raise _public_error(
+            409, "历史合同迁移当前无法启动", "创建历史合同迁移失败",
+        ) from None
+
+
+@router.get("/data/contract-migrations/{run_id}")
+def get_contract_migration(run_id: str, request: Request) -> dict:
+    _require_local(request)
+    try:
+        return legacy_migration_manager.get(run_id)
+    except KeyError:
+        raise _public_error(404, "历史合同迁移不存在", "读取历史合同迁移失败") from None
+
+
+@router.post("/data/contract-migrations/{run_id}/pause")
+def pause_contract_migration(run_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return legacy_migration_manager.pause(run_id)
+    except KeyError:
+        raise _public_error(404, "历史合同迁移不存在", "暂停历史合同迁移失败") from None
+    except LegacyMigrationError:
+        raise _public_error(409, "历史合同迁移当前无法暂停", "暂停历史合同迁移失败") from None
+
+
+@router.post("/data/contract-migrations/{run_id}/resume", status_code=202)
+def resume_contract_migration(run_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return legacy_migration_manager.resume(run_id)
+    except KeyError:
+        raise _public_error(404, "历史合同迁移不存在", "续跑历史合同迁移失败") from None
+    except LegacyMigrationError:
+        raise _public_error(409, "历史合同迁移当前无法续跑", "续跑历史合同迁移失败") from None
+
+
+@router.post("/data/contract-migrations/{run_id}/rollback", status_code=202)
+def rollback_contract_migration(run_id: str, request: Request) -> dict:
+    _require_csrf(request)
+    try:
+        return legacy_migration_manager.rollback(run_id)
+    except KeyError:
+        raise _public_error(404, "历史合同迁移不存在", "回滚历史合同迁移失败") from None
+    except LegacyMigrationError:
+        raise _public_error(409, "历史合同迁移当前无法回滚", "回滚历史合同迁移失败") from None
 
 
 class DataRefreshRequest(ContractModel):

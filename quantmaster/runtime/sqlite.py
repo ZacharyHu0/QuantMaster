@@ -83,7 +83,11 @@ def connect_sqlite(
         destination.parent.mkdir(parents=True, exist_ok=True)
     from quantmaster.runtime.maintenance import MaintenanceActiveError, maintenance_barrier
 
-    if maintenance_barrier.frozen and not destination.exists():
+    if (
+        maintenance_barrier.frozen
+        and not maintenance_barrier.write_authorized
+        and not destination.exists()
+    ):
         raise MaintenanceActiveError("维护期间不能创建新的 SQLite 数据库")
     key = _database_key(destination)
     if read_only:
@@ -108,7 +112,7 @@ def connect_sqlite(
             )
         if row_factory:
             connection.row_factory = sqlite3.Row
-        if maintenance_barrier.frozen:
+        if maintenance_barrier.frozen and not maintenance_barrier.write_authorized:
             connection.execute("PRAGMA query_only=ON")
         return connection
     except Exception:

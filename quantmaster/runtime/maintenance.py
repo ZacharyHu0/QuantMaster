@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class MaintenanceBarrier:
         self._state = "open"
         self._token = ""
         self._reason = ""
+        self._local = threading.local()
 
     @property
     def active(self) -> bool:
@@ -134,10 +136,29 @@ class MaintenanceBarrier:
 
     def require_writable(self) -> None:
         with self._lock:
-            if self._state != "open":
+            if self._state != "open" and not self.write_authorized:
                 raise MaintenanceActiveError(
                     f"数据根处于维护状态: {self._reason or self._state}"
                 )
+
+    @property
+    def write_authorized(self) -> bool:
+        token = str(getattr(self._local, "authorized_token", ""))
+        with self._lock:
+            return bool(token and self._state == "frozen" and token == self._token)
+
+    @contextmanager
+    def authorize(self, lease: MaintenanceLease):
+        """Allow only the lease-owning thread to perform the frozen migration."""
+        with self._lock:
+            if self._state != "frozen" or lease.token != self._token:
+                raise MaintenanceActiveError("维护写授权租约无效")
+        previous = getattr(self._local, "authorized_token", "")
+        self._local.authorized_token = lease.token
+        try:
+            yield
+        finally:
+            self._local.authorized_token = previous
 
 
 maintenance_barrier = MaintenanceBarrier()
