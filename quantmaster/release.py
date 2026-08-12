@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.12.2"
+VERSION = "1.13.0"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -15,41 +15,41 @@ RELEASES = (
         "date": RELEASE_DATE,
         "sections": (
             {
-                "title": "设置与数据源诊断",
+                "title": "在线数据源控制",
                 "items": (
                     (
-                        "模型服务检测改用进程内一次性凭据引用，不再为临时诊断写入"
-                        " Windows Credential Manager，消除凭据冲突并恢复模型目录与联网检测。"
+                        "设置中心新增 free-stockdb-online、AKShare、Tushare 与 Yahoo Finance"
+                        " 独立开关；关闭后统一调度不再请求对应来源，诊断会明确显示为用户关闭。"
                     ),
                     (
-                        "数据源检测允许显式探测本机 provider，避免已运行的 free-stockdb 被"
-                        "本地访问保护误报为离线；AkShare 缺失提示同步给出可选依赖安装命令。"
+                        "free-stockdb-online 可按需配置服务地址与超时，只作为小批量交互补缺"
+                        "的末位来源，不进入普通后台或正式研究请求链。"
                     ),
                 ),
             },
             {
-                "title": "资讯时效与标注进度",
+                "title": "本地行情与刷新性能",
                 "items": (
                     (
-                        "新浪财经在历史缺口回补期间仍会优先探测首页，并利用可信时间下界"
-                        "结束无效回补，避免最新资讯长期停滞。"
+                        "观察、选股和盘后轮动优先复用本地 StockDB 的批量行情、证券资料与"
+                        "板块证据，仅在本地数据确实缺失、过期或无效时进入在线后备来源。"
                     ),
                     (
-                        "手动标注不再复用已经结束的旧任务，进度按实际批次更新，部分失败"
-                        "会明确报告，操作按钮在任务真正结束前保持忙碌状态。"
+                        "扩大本地摄取批次并有界并行行情刷新，移除页面刷新主链路中的逐标的"
+                        "联网补证，显著减少数据库重复打开与外部请求。"
                     ),
                 ),
             },
             {
-                "title": "隔离任务工作流",
+                "title": "Windows 托管进程生命周期",
                 "items": (
                     (
-                        "隔离 worktree 统一发现主工作区虚拟环境，并将 pytest、Ruff 与 mypy"
-                        "缓存写到任务专属制品目录，避免验证污染任务树。"
+                        "托管服务和 worker 统一标记 QuantMaster 进程角色并保持在应用进程树"
+                        "内，修复 reload 与子进程启动时脱离管理的问题。"
                     ),
                     (
-                        "Windows worktree 清理可恢复 Git 已移除登记但实体目录仍存在的状态，"
-                        "安全处理虚拟环境目录联接，并仅在确认已集成且干净后删除任务分支。"
+                        "控制台收到 Ctrl+C 或 reload 退出时会关闭所拥有的 StockDB 与 worker，"
+                        "避免后台托管进程残留。"
                     ),
                 ),
             },
