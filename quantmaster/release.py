@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,38 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "设置布局与模型检测",
+                "items": (
+                    (
+                        "数据源诊断改为顶部对齐且高度独立，自动化观察列表在宽屏并排；"
+                        "窄屏仍保持单列。"
+                    ),
+                    (
+                        "模型目录与联网搜索检测通过受认证的 worker IPC 一次性交接临时"
+                        "凭据，修复跨进程误报失效，并统一取消按钮与响应式状态布局。"
+                    ),
+                ),
+            },
+            {
+                "title": "研究数据与 Quant Lab",
+                "items": (
+                    (
+                        "跨资产研究生产湖整理为默认折叠的版本化研究产物工具，明确其回测"
+                        "和 Quant Lab 用途，并改为展开后按需读取目录。"
+                    ),
+                    (
+                        "匿名云端样本关闭时逐次确认，打开后自动发送；服务端同步校验确认"
+                        "合同，本地环境补齐锁定版本的 Tushare 依赖。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.13.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "在线数据源控制",
