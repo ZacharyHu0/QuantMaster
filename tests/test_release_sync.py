@@ -1,5 +1,6 @@
 """Release metadata and automatic GitHub synchronization guard."""
 
+import json
 import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from scripts.release.sync import (
     push_config_variants,
     release_assignments,
     release_today,
+    replace_failed_release,
     run_git,
     validate_metadata,
     verify_previous_release_tag,
@@ -118,6 +120,102 @@ def test_ci_failure_recovery_only_allows_next_patch():
     assert is_next_patch("1.2.3", "1.2.4") is True
     assert is_next_patch("1.2.3", "1.2.5") is False
     assert is_next_patch("1.2.3", "1.3.0") is False
+
+
+def test_same_version_replacement_requires_exact_failed_run(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda: ("1.2.3", []))
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    monkeypatch.setattr(release_sync, "verify_previous_release_synced", list)
+    monkeypatch.setattr(
+        release_sync,
+        "read_ci_recovery",
+        lambda: ({
+            "mode": "replace", "version": "1.2.3", "commit": "old",
+            "tag_target": "old", "run_id": 42,
+        }, ""),
+    )
+    values = {
+        ("status", "--porcelain"): "",
+        ("rev-list", "-n", "1", "v1.2.3"): "old",
+        ("rev-parse", "HEAD"): "new",
+    }
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: values[tuple(args)],
+    )
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(
+        release_sync, "_failed_run_matches",
+        lambda run_id, commit: ["run evidence mismatch"],
+    )
+    assert replace_failed_release() == 1
+
+
+def test_same_version_authorization_binds_tagged_failed_commit(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda: ("1.2.3", []))
+    monkeypatch.setattr(release_sync, "verify_previous_release_synced", list)
+    values = {
+        ("rev-parse", "HEAD"): "fixed",
+        ("rev-list", "-n", "1", "v1.2.3"): "failed",
+    }
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: values[tuple(args)],
+    )
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "_failed_run_matches", lambda run_id, commit: [])
+    marker = tmp_path / "recovery.json"
+    monkeypatch.setattr(release_sync, "ci_recovery_marker", lambda: marker)
+    assert release_sync.authorize_ci_recovery(42, replace=True) == 0
+    recovery = json.loads(marker.read_text(encoding="utf-8"))
+    assert recovery["commit"] == "failed"
+    assert recovery["tag_target"] == "failed"
+
+
+def test_same_version_replacement_moves_only_authorized_tag(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda: ("1.2.3", []))
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    monkeypatch.setattr(release_sync, "verify_previous_release_synced", list)
+    monkeypatch.setattr(
+        release_sync,
+        "read_ci_recovery",
+        lambda: ({
+            "mode": "replace", "version": "1.2.3", "commit": "old",
+            "tag_target": "old", "run_id": 42,
+        }, ""),
+    )
+    values = {
+        ("status", "--porcelain"): "",
+        ("rev-list", "-n", "1", "v1.2.3"): "old",
+        ("rev-parse", "HEAD"): "new",
+    }
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: values[tuple(args)],
+    )
+    calls = []
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "_failed_run_matches", lambda run_id, commit: [])
+    monkeypatch.setattr(release_sync, "clear_ci_recovery", lambda: None)
+    monkeypatch.setattr(
+        release_sync.subprocess, "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    assert replace_failed_release() == 0
+    assert ["push", "--force", "origin", "refs/tags/v1.2.3"] in calls
 
 
 def test_release_clock_uses_asia_shanghai_date_at_utc_boundary():

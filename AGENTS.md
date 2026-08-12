@@ -71,6 +71,11 @@
   version in Python, HTML, or JavaScript; `pyproject.toml` reads it dynamically.
 - Git tags and GitHub Releases must use `v{VERSION}`. The release workflow verifies the tag and
   publishes `CHANGELOG.md` as the GitHub Release body, so those records must stay synchronized.
+- A published version may be replaced in place only when the owner explicitly requests it and the
+  exact tagged commit has a failed GitHub CI run. Authorize with `scripts/release/sync.py recover-ci
+  --run-id <id> --replace`, commit and push a descendant fix without changing `VERSION`, then run
+  `scripts/release/sync.py replace-failed`. The command revalidates the failed run, clean synchronized
+  `main`, unchanged version, tag target, and ancestry before replacing the Release and tag.
 
 ## Release synchronization
 

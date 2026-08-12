@@ -467,8 +467,8 @@ def github_https_push_url(origin_url: str, username: str = "") -> str:
     return f"https://{account}@github.com/{owner}/{repository}.git"
 
 
-def authorize_ci_recovery(run_id: int) -> int:
-    """Authorize one forward patch after a pushed release fails its CI run."""
+def authorize_ci_recovery(run_id: int, *, replace: bool = False) -> int:
+    """Authorize a forward patch or a same-version replacement after failed CI."""
     errors: list[str] = []
     if current_branch() != "main":
         errors.append("CI 失败恢复只能在 main 上授权")
@@ -478,10 +478,19 @@ def authorize_ci_recovery(run_id: int) -> int:
     commit = git_text(["rev-parse", "HEAD"])
     tag = f"v{version}"
     tag_target = git_text(["rev-list", "-n", "1", tag], required=False)
-    if tag_target:
+    if tag_target and not replace:
         errors.append(f"{tag} 已存在；不需要 CI 失败恢复")
+    if replace and not tag_target:
+        errors.append(f"{tag} 不存在；不能执行同版本替换")
     if run_id <= 0:
         errors.append("GitHub Actions run ID 必须是正整数")
+    failed_commit = tag_target if replace else commit
+    if replace and tag_target:
+        errors.extend(_failed_run_matches(run_id, tag_target))
+        if commit == tag_target:
+            errors.append("HEAD 尚未包含替换修复")
+        elif run_git(["merge-base", "--is-ancestor", tag_target, commit]).returncode:
+            errors.append("替换修复必须是失败提交的后代")
     if print_errors(errors, "无法授权 CI 失败恢复"):
         return 1
 
@@ -490,9 +499,11 @@ def authorize_ci_recovery(run_id: int) -> int:
     marker.write_text(
         json.dumps(
             {
-                "commit": commit,
+                "commit": failed_commit,
                 "version": version,
                 "run_id": run_id,
+                "mode": "replace" if replace else "forward-patch",
+                "tag_target": tag_target,
                 "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             },
             ensure_ascii=False,
@@ -501,10 +512,99 @@ def authorize_ci_recovery(run_id: int) -> int:
         encoding="utf-8",
     )
     print(
-        f"[QuantMaster] 已授权 v{version} ({commit[:8]}) 从失败 CI run "
-        f"{run_id} 前向发布一个 patch；成功推送后标记自动清除。"
+        f"[QuantMaster] 已授权 v{version} ({failed_commit[:8]}) 从失败 CI run "
+        f"{run_id} {'执行同版本替换' if replace else '前向发布一个 patch'}。"
     )
     return 0
+
+
+def _failed_run_matches(run_id: int, commit: str) -> list[str]:
+    result = subprocess.run(
+        ["gh", "run", "view", str(run_id), "--json", "conclusion,headSha"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode:
+        return [result.stderr.strip() or "无法查询 GitHub Actions run"]
+    try:
+        evidence = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return [f"GitHub Actions run 证据无效：{exc}"]
+    errors: list[str] = []
+    if evidence.get("conclusion") != "failure":
+        errors.append(f"GitHub Actions run {run_id} 不是失败状态")
+    if evidence.get("headSha") != commit:
+        errors.append(f"GitHub Actions run {run_id} 不属于待替换提交 {commit[:12]}")
+    return errors
+
+
+def _replacement_context() -> tuple[str, dict[str, Any], str, str, list[str]]:
+    version, errors = committed_release_errors()
+    recovery, read_error = read_ci_recovery()
+    errors = list(errors)
+    if current_branch() != "main":
+        errors.append("同版本替换只能在 main 上执行")
+    errors.extend(verify_previous_release_synced())
+    if git_text(["status", "--porcelain"], required=False):
+        errors.append("工作区必须干净")
+    errors.extend([read_error] if read_error else [])
+    if recovery is None:
+        errors.append("缺少 recover-ci --replace 生成的授权")
+        recovery = {}
+    if recovery.get("mode") != "replace":
+        errors.append("CI 恢复授权不是同版本替换模式")
+    if recovery.get("version") != version:
+        errors.append("CI 恢复授权与当前版本不匹配")
+    old_commit = str(recovery.get("commit", ""))
+    tag = f"v{version}"
+    tag_target = git_text(["rev-list", "-n", "1", tag], required=False)
+    if not old_commit or tag_target != old_commit or recovery.get("tag_target") != old_commit:
+        errors.append(f"{tag} 不再指向已授权的失败提交")
+    head = git_text(["rev-parse", "HEAD"])
+    if head == old_commit:
+        errors.append("HEAD 尚未包含替换修复")
+    elif old_commit and run_git(["merge-base", "--is-ancestor", old_commit, head]).returncode:
+        errors.append("替换修复必须是失败提交的后代")
+    run_id = recovery.get("run_id")
+    if isinstance(run_id, int) and run_id > 0 and old_commit:
+        errors.extend(_failed_run_matches(run_id, old_commit))
+    else:
+        errors.append("CI 恢复授权缺少有效 run ID")
+    return version, recovery, head, tag, errors
+
+
+def _publish_replacement(version: str, old_commit: str, head: str, tag: str) -> int:
+    deleted = subprocess.run(
+        ["gh", "release", "delete", tag, "--yes"], cwd=ROOT, check=False,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if deleted.returncode:
+        return print_errors(
+            [deleted.stderr.strip() or f"无法删除现有 {tag} Release"], "替换失败",
+        )
+    updated = run_git([
+        "tag", "-f", "-a", tag, head, "-m", f"QuantMaster {version} (CI replacement)",
+    ])
+    if updated.returncode:
+        return print_errors([updated.stderr.strip()], "更新本地标签失败")
+    pushed = run_git(["push", "--force", "origin", f"refs/tags/{tag}"])
+    if pushed.returncode:
+        return print_errors([pushed.stderr.strip()], "推送替换标签失败")
+    clear_ci_recovery()
+    print(f"[QuantMaster] {tag} 已从 {old_commit[:8]} 替换为 {head[:8]}")
+    return 0
+
+
+def replace_failed_release() -> int:
+    """Move the current version tag only when exact failed-CI evidence permits it."""
+    version, recovery, head, tag, errors = _replacement_context()
+    if print_errors(errors, "无法替换失败发布"):
+        return 1
+    return _publish_replacement(version, str(recovery["commit"]), head, tag)
 
 
 def push_current_release() -> int:
@@ -665,6 +765,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="为已推送但 CI 失败且未打 tag 的版本授权一次前向 patch",
     )
     recovery_parser.add_argument("--run-id", type=int, required=True)
+    recovery_parser.add_argument(
+        "--replace", action="store_true", help="授权受控替换已有的当前版本标签",
+    )
+    subparsers.add_parser("replace-failed", help="按失败 CI 授权替换当前版本 Release")
     subparsers.add_parser("pre-commit", help=argparse.SUPPRESS)
     subparsers.add_parser("post-commit", help=argparse.SUPPRESS)
     return parser
@@ -677,7 +781,8 @@ def main(argv: list[str] | None = None) -> int:
         "check": check_worktree,
         "status": status,
         "push": push_current_release,
-        "recover-ci": lambda: authorize_ci_recovery(args.run_id),
+        "recover-ci": lambda: authorize_ci_recovery(args.run_id, replace=args.replace),
+        "replace-failed": replace_failed_release,
         "pre-commit": pre_commit,
         "post-commit": post_commit,
     }
