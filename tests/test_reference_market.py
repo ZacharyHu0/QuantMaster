@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quantmaster.data.reference_market import fetch_reference
+from quantmaster.data.storage import BarStore
 
 
 def _frame() -> pd.DataFrame:
@@ -99,3 +100,36 @@ def test_dollar_index_uses_akshare_before_yahoo(monkeypatch):
     assert result.source == "akshare:global-index"
     assert calls == [{"symbol": "美元指数"}]
     assert result.frame["close"].iloc[-1] == 103.0
+
+
+def test_refresh_reference_symbol_uses_dedicated_route_and_writes_cache(tmp_path, monkeypatch):
+    from quantmaster.data import registry
+
+    raw = _frame().assign(volume=0.0).set_index("date")
+    calls: list[tuple[str, str, str]] = []
+
+    def reference(symbol: str, start: str, end: str):
+        calls.append((symbol, start, end))
+        return type("Fetch", (), {"frame": raw, "source": "sina:foreign-futures"})()
+
+    monkeypatch.setattr(registry, "fetch_reference", reference, raising=False)
+    monkeypatch.setattr(
+        "quantmaster.data.reference_market.fetch_reference", reference,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.reference_market.is_reference_symbol", lambda symbol: symbol == "GC=F.US",
+    )
+    monkeypatch.setattr(
+        registry, "_request_factories", lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("通用 provider 不应被调用"),
+        ),
+    )
+
+    store = BarStore(root=tmp_path / "bars")
+    result = registry.refresh_history(
+        "GC=F.US", "2026-07-20", "2026-07-24", store=store,
+    )
+
+    assert calls == [("GC=F.US", "2026-07-20", "2026-07-24")]
+    assert result.data.index.equals(raw.index)
+    assert store.metadata("GC=F.US")["last_source"] == "sina:foreign-futures"

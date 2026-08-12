@@ -1046,12 +1046,17 @@ def _fetch_segment(
         return evidence, quality, storage_source
 
     def save(
-        source: DataSource,
+        source: DataSource | None,
         merged: pd.DataFrame,
         evidence: pd.DataFrame,
         evaluated: tuple[pd.DataFrame, BarDataQuality, str] | None = None,
     ) -> tuple[pd.DataFrame, list[str], bool]:
-        _, quality, storage_source = evaluated or evaluate(source, evidence)
+        if evaluated is None:
+            if source is None:
+                raise ValueError("行情写入缺少来源")
+            _, quality, storage_source = evaluate(source, evidence)
+        else:
+            _, quality, storage_source = evaluated
         store.put(
             symbol,
             merged,
@@ -1062,6 +1067,49 @@ def _fetch_segment(
             quality=quality.to_dict(),
         )
         return store.get(symbol), errors, True
+
+    # These canonical reference symbols intentionally retain their ``.US``
+    # suffix, so the generic market classifier would otherwise send them
+    # through the US-equity lane.  Use their dedicated routes first: they
+    # validate the provider ticker (Sina GC/CL/HG or Tushare USDCNH) and make
+    # the per-symbol Yahoo fallback explicit.  A failure remains local to this
+    # symbol and the generic candidates below can still be tried.
+    from quantmaster.data.reference_market import (
+        ReferenceMarketUnavailable,
+        fetch_reference,
+        is_reference_symbol,
+    )
+    if is_reference_symbol(symbol):
+        try:
+            reference = fetch_reference(symbol, start, end)
+            frame = reference.frame
+            if not _covers_requested_range(frame, start, end, symbol=symbol):
+                errors.append("reference-market: 响应内部过于稀疏")
+            else:
+                merged = frame if cached is None or cached.empty else _align_increment(
+                    cached, frame, direction,
+                )
+                fresh_latest = pd.Timestamp(frame.index.max()).normalize()
+                evaluated = (
+                    frame,
+                    _assess_daily_frame(
+                        frame, start, end, symbol=symbol, source=reference.source,
+                    ),
+                    reference.source,
+                )
+                if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
+                    errors.append(
+                        f"reference-market: 未返回 {cached_latest.date()} 之后的新行情"
+                    )
+                else:
+                    return save(None, merged, frame, evaluated)
+        except ReferenceMarketUnavailable as exc:
+            errors.extend(
+                f"reference-market/{item['source']}: {item['detail']}"
+                for item in exc.attempts
+            )
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            errors.append(f"reference-market: {exc}")
 
     for factory in _request_factories(
         priority=priority, allow_online=True, provider=provider,

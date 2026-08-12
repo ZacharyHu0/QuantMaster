@@ -34,6 +34,13 @@ _SINA_US = {"^GSPC.US": ".INX", "^IXIC.US": ".IXIC", "^DJI.US": ".DJI"}
 _SINA_HK = {"^HSI.HK": "HSI", "^HSTECH.HK": "HSTECH"}
 _SINA_GLOBAL = {"^N225.JP": "日经225指数", "^KS11.KR": "首尔综合指数"}
 _SINA_FUTURES = {"GC=F.US": "GC", "CL=F.US": "CL", "HG=F.US": "HG"}
+_REFERENCE_SYMBOLS = frozenset((*_SINA_FUTURES, "CNY=X.US"))
+
+
+def is_reference_symbol(symbol: str) -> bool:
+    """Whether a symbol has a dedicated, semantically compatible route."""
+
+    return symbol.upper() in _REFERENCE_SYMBOLS
 
 
 def _normalize(raw: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
