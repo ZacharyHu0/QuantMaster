@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import email.utils
+import logging
+import os
+import socket
+import sqlite3
+import threading
+import time
+import uuid
 from collections.abc import Callable
+from datetime import UTC
 from typing import Any, Protocol
 
 import httpx
@@ -9,12 +18,42 @@ from quantmaster.automation.channels import FeishuBotClient, WeixinClawBotClient
 from quantmaster.automation.store import AutomationStore
 from quantmaster.credentials import CredentialError
 
+logger = logging.getLogger(__name__)
+
 
 class DeliveryError(RuntimeError):
-    def __init__(self, message: str, *, permanent: bool = False, needs_rebind: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        permanent: bool = False,
+        needs_rebind: bool = False,
+        retry_after_at: float = 0.0,
+        diagnostic_code: str = "delivery_failed",
+        ambiguous: bool = False,
+    ):
         super().__init__(message)
         self.permanent = permanent
         self.needs_rebind = needs_rebind
+        self.retry_after_at = max(0.0, float(retry_after_at or 0.0))
+        self.diagnostic_code = str(diagnostic_code or "delivery_failed")[:80]
+        self.ambiguous = bool(ambiguous)
+
+
+def _retry_after_at(headers: Any) -> float:
+    raw = str((headers or {}).get("Retry-After") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return time.time() + max(0.0, min(float(raw), 7 * 86400.0))
+    except ValueError:
+        try:
+            value = email.utils.parsedate_to_datetime(raw)
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return max(time.time(), value.timestamp())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
 
 
 def _trim(value: Any, limit: int = 280) -> str:
@@ -355,7 +394,10 @@ class BotDeliveryGateway:
         except DeliveryError:
             raise
         except CredentialError as exc:
-            raise DeliveryError(str(exc), permanent=True, needs_rebind=True) from exc
+            raise DeliveryError(
+                str(exc), permanent=True, needs_rebind=True,
+                diagnostic_code="credentials_invalid",
+            ) from exc
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
             body = exc.response.text[:500]
@@ -364,41 +406,236 @@ class BotDeliveryGateway:
             raise DeliveryError(
                 f"{delivery['channel']} 接口返回 {code}: {body}",
                 permanent=code in {400, 401, 403, 404}, needs_rebind=needs_rebind,
+                retry_after_at=_retry_after_at(exc.response.headers),
+                diagnostic_code=f"http_{code}",
             ) from exc
         except httpx.HTTPError as exc:
-            raise DeliveryError(f"{delivery['channel']} 接口暂时不可达: {exc}") from exc
+            raise DeliveryError(
+                f"{delivery['channel']} 接口暂时不可达: {exc}",
+                diagnostic_code="transport_error",
+            ) from exc
         except RuntimeError as exc:
             message = str(exc)
             permanent = any(word in message for word in (
                 "尚未配置", "不存在", "未安装", "token", "App ID", "App Secret"))
             needs_rebind = "context_token" in message or "重新扫码" in message
-            raise DeliveryError(message, permanent=permanent, needs_rebind=needs_rebind) from exc
+            code = "not_configured" if permanent else (
+                "rate_limited" if any(value in message.casefold() for value in (
+                    "429", "rate limit", "too many",
+                )) else "transport_error"
+            )
+            raise DeliveryError(
+                message, permanent=permanent, needs_rebind=needs_rebind,
+                diagnostic_code=code,
+            ) from exc
+        except (OSError, ValueError, TypeError, AttributeError, ImportError) as exc:
+            # Third-party SDK versions do not share one transport exception
+            # hierarchy.  Convert their failures so one bad item cannot abort
+            # the whole claimed batch without a durable outcome.
+            message = str(exc)
+            lowered = message.casefold()
+            diagnostic = "tls_error" if any(value in lowered for value in (
+                "ssl", "tls", "certificate",
+            )) else "transport_error"
+            raise DeliveryError(message, diagnostic_code=diagnostic) from exc
 
 
 class OutboxDispatcher:
     def __init__(self, store: AutomationStore, gateway: DeliveryGateway | None = None):
         self.store = store
         self.gateway = gateway or BotDeliveryGateway(store)
+        self._injected_gateway = gateway is not None
         self.analysis_delivery_handler: Callable[[int], dict[str, int]] | None = None
+        self.owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self._worker_lock = threading.Lock()
+        self._wake_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._worker_thread: threading.Thread | None = None
+        self._dispatching = False
+        self.coalesced_triggers = 0
+
+    def available_channels(self) -> set[str]:
+        advertised = getattr(self.gateway, "available_channels", None)
+        if callable(advertised):
+            return {str(value) for value in advertised()}
+        if self._injected_gateway:
+            return {
+                str(target["channel"])
+                for target in self.store.targets()
+                if target.get("enabled") and target.get("target") and target.get("account_id")
+            }
+        result: set[str] = set()
+        if self.store.bot_account("weixin"):
+            result.add("weixin")
+        feishu = self.store.bot_account("feishu")
+        if feishu and str(feishu.get("status") or "") not in {"disabled", "not_configured"}:
+            configured = getattr(getattr(self.gateway, "feishu", None), "is_configured", None)
+            if not callable(configured) or configured():
+                result.add("feishu")
+        return result
+
+    def enabled(self) -> bool:
+        return bool(self.available_channels())
+
+    def start(self) -> bool:
+        """Start the single durable delivery worker without performing I/O inline."""
+        if not self.enabled():
+            return False
+        with self._worker_lock:
+            if self._worker_thread and self._worker_thread.is_alive():
+                return False
+            self._stop_event.clear()
+            self._wake_event.clear()
+            worker = threading.Thread(
+                target=self._worker,
+                name="qm-outbox-delivery",
+                daemon=True,
+            )
+            self._worker_thread = worker
+            worker.start()
+        return True
+
+    def wake(self) -> bool:
+        """Quick APScheduler callback; overlapping triggers collapse into one wake."""
+        with self._worker_lock:
+            coalesced = self._dispatching or self._wake_event.is_set()
+            if coalesced:
+                self.coalesced_triggers += 1
+            self._wake_event.set()
+        return not coalesced
+
+    def stop(self, timeout: float = 5.0) -> None:
+        with self._worker_lock:
+            worker = self._worker_thread
+            self._stop_event.set()
+            self._wake_event.set()
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, timeout))
+        with self._worker_lock:
+            if self._worker_thread is worker and (not worker or not worker.is_alive()):
+                self._worker_thread = None
+                self._dispatching = False
+
+    def worker_status(self) -> dict[str, Any]:
+        with self._worker_lock:
+            worker = self._worker_thread
+            return {
+                "running": bool(worker and worker.is_alive()),
+                "dispatching": self._dispatching,
+                "wake_pending": self._wake_event.is_set(),
+                "coalesced_triggers": self.coalesced_triggers,
+            }
+
+    def _worker(self) -> None:
+        while True:
+            self._wake_event.wait()
+            self._wake_event.clear()
+            if self._stop_event.is_set():
+                return
+            with self._worker_lock:
+                self._dispatching = True
+            try:
+                self.dispatch()
+            except (sqlite3.Error, OSError):
+                logger.exception("outbox durable worker cycle failed")
+            finally:
+                with self._worker_lock:
+                    self._dispatching = False
+
+    def _send(self, item: dict[str, Any], token: str) -> None:
+        stop = threading.Event()
+
+        def renew() -> None:
+            while not stop.wait(30.0):
+                try:
+                    if not self.store.heartbeat_delivery(
+                        str(item["id"]), self.owner, token,
+                    ):
+                        return
+                except (sqlite3.Error, OSError):
+                    logger.warning(
+                        "outbox delivery heartbeat failed id=%s", item["id"], exc_info=True,
+                    )
+
+        heartbeat = threading.Thread(
+            target=renew, name=f"outbox-heartbeat-{str(item['id'])[-8:]}", daemon=True,
+        )
+        heartbeat.start()
+        try:
+            self.gateway.send(item)
+        finally:
+            stop.set()
+            heartbeat.join(timeout=1.0)
 
     def dispatch(self, limit: int = 20) -> dict[str, int]:
         result = {"delivered": 0, "failed": 0, "retried": 0}
-        for item in self.store.due_deliveries(limit):
+        channels = self.available_channels()
+        if not channels:
+            return result
+        for item in self.store.claim_deliveries(
+            self.owner, limit=limit, channels=channels,
+        ):
+            token = str(item["lease_token"])
+            if not self.store.begin_delivery(str(item["id"]), self.owner, token):
+                continue
             try:
-                self.gateway.send(item)
+                self._send(item, token)
             except DeliveryError as exc:
-                self.store.delivery_failure(item["id"], str(exc), permanent=exc.permanent)
+                status = self.store.delivery_failure(
+                    str(item["id"]), self.owner, token, str(exc),
+                    permanent=exc.permanent,
+                    ambiguous=exc.ambiguous,
+                    retry_after_at=exc.retry_after_at,
+                    diagnostic_code=exc.diagnostic_code,
+                )
                 if exc.needs_rebind:
                     self.store.set_target_status(item["target_id"], "needs_rebind", str(exc))
                 elif exc.permanent:
                     self.store.set_target_status(item["target_id"], "degraded", str(exc))
-                result["failed" if exc.permanent else "retried"] += 1
+                if status == "ambiguous":
+                    result["failed"] += 1
+                elif status == "dead_letter":
+                    result["failed"] += 1
+                elif status == "retry_wait":
+                    result["retried"] += 1
+            except (
+                OSError, ValueError, TypeError, AttributeError, ImportError, RuntimeError,
+            ) as exc:
+                logger.exception(
+                    "outbox delivery outcome is unknown id=%s", item["id"],
+                )
+                status = self.store.delivery_failure(
+                    str(item["id"]), self.owner, token, str(exc),
+                    ambiguous=True,
+                    diagnostic_code="delivery_outcome_unknown",
+                )
+                if status == "ambiguous":
+                    result["failed"] += 1
+                self.store.set_target_status(item["target_id"], "degraded", str(exc))
             else:
-                self.store.delivery_success(item["id"])
-                self.store.set_target_status(item["target_id"], "healthy")
-                result["delivered"] += 1
-        if self.analysis_delivery_handler:
+                try:
+                    acknowledged = self.store.delivery_success(
+                        str(item["id"]), self.owner, token,
+                    )
+                except (sqlite3.Error, OSError):
+                    # The provider has accepted the message, but the durable ack is
+                    # unknown. Keep `sending`; lease recovery quarantines it.
+                    logger.exception(
+                        "outbox delivery ack failed; item will be quarantined "
+                        "after lease expiry id=%s",
+                        item["id"],
+                    )
+                    continue
+                if acknowledged:
+                    self.store.set_target_status(item["target_id"], "healthy")
+                    result["delivered"] += 1
+                else:
+                    logger.error(
+                        "outbox delivery ack lost; item quarantined on lease recovery id=%s",
+                        item["id"],
+                    )
+        if self.analysis_delivery_handler and "feishu" in channels:
             analysis = self.analysis_delivery_handler(limit)
-            for key in result:
+            for key in ("delivered", "failed", "retried"):
                 result[key] += int(analysis.get(key) or 0)
         return result

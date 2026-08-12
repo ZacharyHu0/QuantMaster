@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -99,6 +100,35 @@ class RecordingGateway:
         self.items.append(delivery)
 
 
+class FailingGateway(RecordingGateway):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def send(self, delivery):
+        super().send(delivery)
+        raise self.error
+
+
+class WeixinOnlyGateway(RecordingGateway):
+    def available_channels(self):
+        return {"weixin"}
+
+
+class BlockingGateway(RecordingGateway):
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.thread_ids = []
+
+    def send(self, delivery):
+        super().send(delivery)
+        self.thread_ids.append(threading.get_ident())
+        self.entered.set()
+        assert self.release.wait(5)
+
+
 def _response(method: str, url: str, payload: dict) -> httpx.Response:
     return httpx.Response(200, json=payload, request=httpx.Request(method, url))
 
@@ -175,6 +205,189 @@ def test_store_binding_outbox_and_delivery(tmp_path):
     assert service.dispatcher.dispatch() == {"delivered": 1, "failed": 0, "retried": 0}
     assert gateway.items[0]["target"] == "oc_chat"
     assert service.dispatcher.dispatch()["delivered"] == 0
+
+
+def _queued_delivery(tmp_path, *, target_id="feishu_owner", channel="feishu"):
+    store = AutomationStore(tmp_path / f"{target_id}.sqlite")
+    store.bind_target(
+        target_id, target="oc_chat", account_id="cli_app",
+        owner_actor=f"{channel}:cli_app:owner", actor="test",
+    )
+    event = AlertEvent(
+        kind="task_report",
+        score=0,
+        severity="info",
+        dedupe_key=f"event-{target_id}",
+    )
+    saved, _ = store.save_event(event)
+    assert store.enqueue(saved["id"], target_id)
+    return store
+
+
+def test_outbox_claim_is_atomic_fenced_and_sent_is_not_reclaimed(tmp_path):
+    store = _queued_delivery(tmp_path)
+    first = store.claim_deliveries("worker-a", channels={"feishu"})
+    second = store.claim_deliveries("worker-b", channels={"feishu"})
+    assert len(first) == 1 and second == []
+    item = first[0]
+    assert not store.begin_delivery(item["id"], "worker-b", item["lease_token"])
+    assert store.begin_delivery(item["id"], "worker-a", item["lease_token"])
+    assert store.delivery_success(item["id"], "worker-a", item["lease_token"])
+    assert store.claim_deliveries("worker-b", channels={"feishu"}) == []
+    with store._conn() as connection:
+        row = connection.execute(
+            "SELECT status,attempts FROM delivery_attempts WHERE id=?", (item["id"],),
+        ).fetchone()
+    assert dict(row) == {"status": "sent", "attempts": 1}
+
+
+def test_outbox_expired_claim_recovers_but_expired_sending_is_ambiguous(tmp_path):
+    store = _queued_delivery(tmp_path)
+    claimed = store.claim_deliveries("worker-a", channels={"feishu"})[0]
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE delivery_attempts SET lease_expires_at=0 WHERE id=?", (claimed["id"],),
+        )
+    recovered = store.claim_deliveries("worker-b", channels={"feishu"})[0]
+    assert recovered["id"] == claimed["id"]
+    assert store.begin_delivery(recovered["id"], "worker-b", recovered["lease_token"])
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE delivery_attempts SET lease_expires_at=0 WHERE id=?", (claimed["id"],),
+        )
+    assert store.claim_deliveries("worker-c", channels={"feishu"}) == []
+    with store._conn() as connection:
+        row = connection.execute(
+            "SELECT status,diagnostic_code,ambiguous_at FROM delivery_attempts WHERE id=?",
+            (claimed["id"],),
+        ).fetchone()
+    assert row["status"] == "ambiguous"
+    assert row["diagnostic_code"] == "delivery_ack_unknown"
+    assert row["ambiguous_at"]
+
+
+def test_outbox_send_success_with_ack_failure_is_never_blindly_retried(
+    tmp_path, monkeypatch,
+):
+    store = _queued_delivery(tmp_path)
+    gateway = RecordingGateway()
+    dispatcher = OutboxDispatcher(store, gateway)
+    monkeypatch.setattr(
+        store, "delivery_success",
+        lambda *_args: (_ for _ in ()).throw(sqlite3.OperationalError("ack unavailable")),
+    )
+
+    assert dispatcher.dispatch() == {"delivered": 0, "failed": 0, "retried": 0}
+    assert len(gateway.items) == 1
+    with store._conn() as connection:
+        row = connection.execute(
+            "SELECT id,status FROM delivery_attempts",
+        ).fetchone()
+        assert row["status"] == "sending"
+        connection.execute(
+            "UPDATE delivery_attempts SET lease_expires_at=0 WHERE id=?", (row["id"],),
+        )
+    assert dispatcher.dispatch() == {"delivered": 0, "failed": 0, "retried": 0}
+    assert len(gateway.items) == 1
+    with store._conn() as connection:
+        assert connection.execute(
+            "SELECT status FROM delivery_attempts",
+        ).fetchone()[0] == "ambiguous"
+
+
+def test_outbox_retry_after_and_dead_letter_are_item_granular(tmp_path):
+    from quantmaster.automation.delivery import DeliveryError
+
+    store = _queued_delivery(tmp_path)
+    retry_at = time.time() + 600
+    gateway = FailingGateway(DeliveryError(
+        "limited", retry_after_at=retry_at, diagnostic_code="http_429",
+    ))
+    dispatcher = OutboxDispatcher(store, gateway)
+    assert dispatcher.dispatch() == {"delivered": 0, "failed": 0, "retried": 1}
+    with store._conn() as connection:
+        row = connection.execute(
+            "SELECT status,next_attempt_at,retry_after_at,diagnostic_code "
+            "FROM delivery_attempts",
+        ).fetchone()
+    assert row["status"] == "retry_wait"
+    assert row["next_attempt_at"] >= retry_at
+    assert row["retry_after_at"] == pytest.approx(retry_at)
+    assert row["diagnostic_code"] == "http_429"
+    assert dispatcher.dispatch() == {"delivered": 0, "failed": 0, "retried": 0}
+
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE delivery_attempts SET next_attempt_at=0,attempts=4 WHERE status='retry_wait'"
+        )
+    assert dispatcher.dispatch() == {"delivered": 0, "failed": 1, "retried": 0}
+    with store._conn() as connection:
+        assert connection.execute(
+            "SELECT status FROM delivery_attempts",
+        ).fetchone()[0] == "dead_letter"
+
+
+def test_outbox_skips_unavailable_feishu_but_delivers_weixin(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    for channel in ("feishu", "weixin"):
+        target_id = f"{channel}_owner"
+        store.bind_target(
+            target_id,
+            target=f"{channel}_target",
+            account_id=f"{channel}_account",
+            owner_actor=f"{channel}:{channel}_account:owner",
+            actor="test",
+        )
+        saved, _ = store.save_event(AlertEvent(
+            kind="task_report",
+            score=0,
+            severity="info",
+            dedupe_key=f"event-{channel}",
+        ))
+        assert store.enqueue(saved["id"], target_id)
+
+    gateway = WeixinOnlyGateway()
+    dispatcher = OutboxDispatcher(store, gateway)
+
+    assert dispatcher.dispatch() == {"delivered": 1, "failed": 0, "retried": 0}
+    assert [item["channel"] for item in gateway.items] == ["weixin"]
+    with store._conn() as connection:
+        rows = connection.execute(
+            "SELECT nt.channel,da.status FROM delivery_attempts da "
+            "JOIN notification_targets nt ON nt.id=da.target_id ORDER BY nt.channel"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("feishu", "pending"), ("weixin", "sent"),
+    ]
+
+
+def test_outbox_worker_is_single_instance_and_coalesces_overlapping_wakes(tmp_path):
+    store = _queued_delivery(tmp_path)
+    gateway = BlockingGateway()
+    dispatcher = OutboxDispatcher(store, gateway)
+
+    assert dispatcher.start()
+    caller_thread = threading.get_ident()
+    worker = dispatcher._worker_thread
+    assert worker is not None
+    assert not dispatcher.start()
+    assert dispatcher._worker_thread is worker
+    assert dispatcher.wake()
+    assert gateway.entered.wait(2)
+    assert gateway.thread_ids == [worker.ident]
+    assert gateway.thread_ids != [caller_thread]
+
+    assert not dispatcher.wake()
+    assert not dispatcher.wake()
+    assert dispatcher.worker_status()["coalesced_triggers"] == 2
+    gateway.release.set()
+    deadline = time.time() + 2
+    while dispatcher.worker_status()["dispatching"] and time.time() < deadline:
+        time.sleep(0.01)
+    dispatcher.stop()
+
+    assert len(gateway.items) == 1
+    assert not dispatcher.worker_status()["running"]
 
 
 def test_binding_code_is_single_use(tmp_path):
@@ -952,6 +1165,8 @@ def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monke
 
 
 def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):
+    import apscheduler.schedulers.background as scheduler_module
+
     import quantmaster.automation.runtime as runtime_module
 
     store = AutomationStore(tmp_path / "automation.sqlite")
@@ -970,6 +1185,36 @@ def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path
     assert runtime.start_channels()["feishu"] is False
     assert started == []
     assert store.bot_account("feishu")["status"] == "not_configured"
+
+    class FakeScheduler:
+        def __init__(self, **_kwargs):
+            self.job_ids = []
+            self.callbacks = {}
+
+        def start(self):
+            return None
+
+        def add_job(self, *_args, **kwargs):
+            self.job_ids.append(kwargs["id"])
+            self.callbacks[kwargs["id"]] = _args[0]
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    monkeypatch.setattr(scheduler_module, "BackgroundScheduler", FakeScheduler)
+    monkeypatch.setattr(runtime, "reload_jobs", lambda: None)
+    assert runtime._start_scheduler_locked()
+    assert runtime.scheduler.job_ids == ["_lease", "_cleanup"]
+
+    mixed = runtime_module.AutomationRuntime(
+        AutomationService(store, OutboxDispatcher(store, WeixinOnlyGateway())),
+    )
+    mixed.leader = True
+    monkeypatch.setattr(mixed, "reload_jobs", lambda: None)
+    assert mixed._start_scheduler_locked()
+    assert mixed.scheduler.job_ids == ["_lease", "_outbox", "_cleanup"]
+    assert mixed.scheduler.callbacks["_outbox"].__self__ is mixed.service.dispatcher
+    assert mixed.scheduler.callbacks["_outbox"].__func__ is OutboxDispatcher.wake
 
 
 def test_feishu_public_state_is_redacted_and_tracks_validation(tmp_path):

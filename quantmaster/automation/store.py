@@ -19,7 +19,7 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 10
+AUTOMATION_SCHEMA_VERSION = 11
 
 NEWS_INTERVAL_FIELDS = {
     "fast_news_scan": "fast_news_interval_minutes",
@@ -250,10 +250,39 @@ class AutomationStore:
                 "job_name TEXT PRIMARY KEY,window_end REAL NOT NULL,updated_at TEXT NOT NULL)"
             )
 
+        def schema_v11(conn: sqlite3.Connection) -> None:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(delivery_attempts)")
+            }
+            additions = {
+                "lease_owner": "TEXT NOT NULL DEFAULT ''",
+                "lease_token": "TEXT NOT NULL DEFAULT ''",
+                "lease_expires_at": "REAL NOT NULL DEFAULT 0",
+                "heartbeat_at": "REAL NOT NULL DEFAULT 0",
+                "retry_after_at": "REAL NOT NULL DEFAULT 0",
+                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
+                "ambiguous_at": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE delivery_attempts ADD COLUMN {name} {declaration}"
+                    )
+            conn.execute(
+                "UPDATE delivery_attempts SET status=CASE status "
+                "WHEN 'delivered' THEN 'sent' WHEN 'retry' THEN 'retry_wait' "
+                "WHEN 'failed' THEN 'dead_letter' ELSE status END"
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_delivery_due")
+            conn.execute(
+                "CREATE INDEX idx_delivery_due ON delivery_attempts("
+                "status,next_attempt_at,lease_expires_at)"
+            )
+
         with self._conn() as conn:
             migrate_schema(conn, (
                 (6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9),
-                (10, schema_v10),
+                (10, schema_v10), (11, schema_v11),
             ))
 
     @staticmethod
@@ -712,49 +741,165 @@ class AutomationStore:
             )
         return cursor.rowcount == 1
 
-    def due_deliveries(self, limit: int = 20) -> list[dict]:
+    def claim_deliveries(
+        self,
+        owner: str,
+        *,
+        limit: int = 20,
+        lease_seconds: float = 120.0,
+        channels: set[str] | None = None,
+    ) -> list[dict]:
+        """Atomically claim a small due batch and fence expired send attempts.
+
+        An expired ``claimed`` row is safe to recover because no external call
+        started.  An expired ``sending`` row is deliberately quarantined as
+        ``ambiguous``: the remote side may have accepted it before the process
+        disappeared, so an automatic resend would be unsafe.
+        """
+        current = time.time()
+        token = uuid.uuid4().hex
+        channel_values = sorted(str(value) for value in channels or () if value)
+        channel_sql = ""
+        params: list[Any] = [current]
+        if channels is not None:
+            if not channel_values:
+                return []
+            placeholders = ",".join("?" for _ in channel_values)
+            channel_sql = f" AND t.channel IN ({placeholders})"
+            params.extend(channel_values)
+        params.append(max(1, min(100, int(limit))))
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE delivery_attempts SET status='retry_wait',lease_owner='',"
+                "lease_token='',lease_expires_at=0,heartbeat_at=0,next_attempt_at=? "
+                "WHERE status='claimed' AND lease_expires_at<=?",
+                (current, current),
+            )
+            conn.execute(
+                "UPDATE delivery_attempts SET status='ambiguous',lease_owner='',"
+                "lease_token='',lease_expires_at=0,heartbeat_at=0,ambiguous_at=?,"
+                "diagnostic_code='delivery_ack_unknown',last_error="
+                "CASE WHEN last_error='' THEN 'delivery outcome unknown after worker lease expired' "
+                "ELSE last_error END WHERE status='sending' AND lease_expires_at<=?",
+                (utc_now(), current),
+            )
             rows = conn.execute(
+                "SELECT d.id FROM delivery_attempts d "
+                "JOIN notification_targets t ON t.id=d.target_id "
+                "WHERE d.status IN ('pending','retry_wait') AND d.next_attempt_at<=? "
+                "AND t.enabled=1"
+                f"{channel_sql} ORDER BY d.next_attempt_at,d.created_at LIMIT ?",
+                params,
+            ).fetchall()
+            selected = [str(row["id"]) for row in rows]
+            if not selected:
+                return []
+            placeholders = ",".join("?" for _ in selected)
+            expiry = current + max(15.0, float(lease_seconds))
+            conn.execute(
+                "UPDATE delivery_attempts SET status='claimed',lease_owner=?,lease_token=?,"
+                "lease_expires_at=?,heartbeat_at=? "
+                f"WHERE id IN ({placeholders}) AND status IN ('pending','retry_wait')",
+                (owner, token, expiry, current, *selected),
+            )
+            claimed = conn.execute(
                 "SELECT d.*,e.kind,e.score,e.severity,e.direction,e.occurred_at,e.data_as_of,"
                 "e.symbols,e.relevance,e.evidence,e.source_urls,e.payload,t.channel,t.target,"
-                "t.account_id,t.context_token,t.label,t.status AS target_status FROM delivery_attempts d "
-                "JOIN alert_events e ON e.id=d.event_id "
+                "t.account_id,t.context_token,t.label,t.status AS target_status "
+                "FROM delivery_attempts d JOIN alert_events e ON e.id=d.event_id "
                 "JOIN notification_targets t ON t.id=d.target_id "
-                "WHERE d.status IN ('pending','retry') AND d.next_attempt_at<=? "
-                "ORDER BY d.next_attempt_at LIMIT ?",
-                (time.time(), limit),
+                f"WHERE d.id IN ({placeholders}) AND d.lease_owner=? AND d.lease_token=? "
+                "ORDER BY d.next_attempt_at,d.created_at",
+                (*selected, owner, token),
             ).fetchall()
         return [
             self._decode_row(row, ("symbols", "evidence", "source_urls", "payload")) or {}
-            for row in rows
+            for row in claimed
         ]
 
-    def delivery_success(self, delivery_id: str) -> None:
+    def begin_delivery(self, delivery_id: str, owner: str, token: str) -> bool:
+        current = time.time()
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE delivery_attempts SET status='delivered',attempts=attempts+1,"
-                "delivered_at=?,last_error='' WHERE id=?", (utc_now(), delivery_id))
+            changed = conn.execute(
+                "UPDATE delivery_attempts SET status='sending',attempts=attempts+1,"
+                "heartbeat_at=? WHERE id=? AND status='claimed' AND lease_owner=? "
+                "AND lease_token=? AND lease_expires_at>?",
+                (current, delivery_id, owner, token, current),
+            ).rowcount
+        return changed == 1
 
-    def delivery_failure(self, delivery_id: str, error: str, *, permanent: bool = False) -> None:
+    def heartbeat_delivery(
+        self, delivery_id: str, owner: str, token: str, *, lease_seconds: float = 120.0,
+    ) -> bool:
+        current = time.time()
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE delivery_attempts SET heartbeat_at=?,lease_expires_at=? "
+                "WHERE id=? AND status IN ('claimed','sending') AND lease_owner=? "
+                "AND lease_token=? AND lease_expires_at>?",
+                (current, current + max(15.0, float(lease_seconds)), delivery_id,
+                 owner, token, current),
+            ).rowcount
+        return changed == 1
+
+    def delivery_success(self, delivery_id: str, owner: str, token: str) -> bool:
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE delivery_attempts SET status='sent',delivered_at=?,last_error='',"
+                "diagnostic_code='',retry_after_at=0,lease_owner='',lease_token='',"
+                "lease_expires_at=0,heartbeat_at=0 WHERE id=? AND status='sending' "
+                "AND lease_owner=? AND lease_token=?",
+                (utc_now(), delivery_id, owner, token),
+            ).rowcount
+        return changed == 1
+
+    def delivery_failure(
+        self,
+        delivery_id: str,
+        owner: str,
+        token: str,
+        error: str,
+        *,
+        permanent: bool = False,
+        ambiguous: bool = False,
+        retry_after_at: float = 0.0,
+        diagnostic_code: str = "delivery_failed",
+    ) -> str:
         delays = (30, 120, 600, 1800)
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT attempts FROM delivery_attempts WHERE id=?", (delivery_id,)).fetchone()
-            attempts = int(row[0] if row else 0) + 1
+                "SELECT attempts FROM delivery_attempts WHERE id=? AND status='sending' "
+                "AND lease_owner=? AND lease_token=?",
+                (delivery_id, owner, token),
+            ).fetchone()
+            if row is None:
+                return "lease_lost"
+            attempts = max(1, int(row["attempts"] or 0))
             terminal = permanent or attempts >= 5
+            status = "ambiguous" if ambiguous else "dead_letter" if terminal else "retry_wait"
             delay = delays[min(attempts - 1, len(delays) - 1)]
-            conn.execute(
-                "UPDATE delivery_attempts SET status=?,attempts=?,next_attempt_at=?,last_error=? WHERE id=?",
-                ("failed" if terminal else "retry", attempts, time.time() + delay,
-                 error[:1000], delivery_id),
+            retry_at = 0.0 if status != "retry_wait" else max(
+                time.time() + delay, float(retry_after_at or 0.0),
             )
+            conn.execute(
+                "UPDATE delivery_attempts SET status=?,next_attempt_at=?,retry_after_at=?,"
+                "last_error=?,diagnostic_code=?,ambiguous_at=?,lease_owner='',lease_token='',"
+                "lease_expires_at=0,heartbeat_at=0 WHERE id=? AND status='sending' "
+                "AND lease_owner=? AND lease_token=?",
+                (status, retry_at, float(retry_after_at or 0.0), error[:1000],
+                 diagnostic_code[:80], utc_now() if ambiguous else "", delivery_id,
+                 owner, token),
+            )
+        return status
 
     def hourly_delivery_count(self, target_id: str) -> int:
         cutoff = (datetime.now(UTC) - timedelta(hours=1)).isoformat(timespec="seconds")
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM delivery_attempts WHERE target_id=? "
-                "AND status='delivered' AND delivered_at>=?", (target_id, cutoff)).fetchone()
+                "AND status='sent' AND delivered_at>=?", (target_id, cutoff)).fetchone()
         return int(row[0])
 
     def last_delivered_event(self, target_id: str, kind: str) -> dict | None:
@@ -762,7 +907,7 @@ class AutomationStore:
             row = conn.execute(
                 "SELECT e.direction,e.occurred_at,d.delivered_at,e.score FROM delivery_attempts d "
                 "JOIN alert_events e ON e.id=d.event_id WHERE d.target_id=? AND e.kind=? "
-                "AND d.status='delivered' ORDER BY d.delivered_at DESC LIMIT 1",
+                "AND d.status='sent' ORDER BY d.delivered_at DESC LIMIT 1",
                 (target_id, kind),
             ).fetchone()
         return dict(row) if row else None
@@ -1024,7 +1169,8 @@ class AutomationStore:
             conn.execute("DELETE FROM task_runs WHERE started_at<?", (cutoff,))
             conn.execute("DELETE FROM audit_log WHERE created_at<?", (cutoff,))
             conn.execute(
-                "DELETE FROM delivery_attempts WHERE created_at<? AND status IN ('delivered','failed')",
+                "DELETE FROM delivery_attempts WHERE created_at<? "
+                "AND status IN ('sent','dead_letter','ambiguous')",
                 (cutoff,),
             )
             conn.execute(

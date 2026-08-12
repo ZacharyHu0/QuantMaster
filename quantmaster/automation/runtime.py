@@ -56,6 +56,7 @@ class AutomationRuntime:
             self.service.store.release_lease("scheduler", self.owner)
             self.leader = False
             return False
+        self.service.dispatcher.start()
         jobs = getattr(self.service, "jobs", None)
         if jobs is not None:
             jobs.start()
@@ -78,10 +79,12 @@ class AutomationRuntime:
                 self._heartbeat, "interval", seconds=10, id="_lease", replace_existing=True,
                 coalesce=True, max_instances=1, misfire_grace_time=10,
             )
-            self.scheduler.add_job(
-                self.service.dispatcher.dispatch, "interval", seconds=15, id="_outbox",
-                replace_existing=True, coalesce=True, max_instances=1, misfire_grace_time=30,
-            )
+            if self.service.dispatcher.enabled():
+                self.scheduler.add_job(
+                    self.service.dispatcher.wake, "interval", seconds=15, id="_outbox",
+                    replace_existing=True, coalesce=True, max_instances=1,
+                    misfire_grace_time=30,
+                )
             self.scheduler.add_job(
                 self._cleanup,
                 "cron", hour=3, minute=15, id="_cleanup", replace_existing=True,
@@ -217,6 +220,9 @@ class AutomationRuntime:
         if not self.service.store.acquire_lease("scheduler", self.owner):
             logger.error("自动化调度租约丢失，停止当前调度器")
             self.leader = False
+            dispatcher = getattr(self.service, "dispatcher", None)
+            if dispatcher is not None:
+                dispatcher.stop(timeout=0)
             if self.scheduler:
                 self.scheduler.shutdown(wait=False)
 
@@ -487,6 +493,9 @@ class AutomationRuntime:
             if jobs is not None:
                 jobs.pause()
             self.scheduler, self.leader, self.started = None, False, False
+        dispatcher = getattr(self.service, "dispatcher", None)
+        if dispatcher is not None:
+            dispatcher.stop()
         if standby_thread and standby_thread is not threading.current_thread():
             standby_thread.join(timeout=2)
         for thread in threads:
