@@ -829,6 +829,47 @@ def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monke
     assert store.bot_account("feishu") is None
 
 
+def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.save_bot_account(channel="feishu", account_id="cli_missing", secret_target="missing")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    service.feishu = FeishuBotClient(store, MemoryCredentials())
+    runtime = runtime_module.AutomationRuntime(service)
+    runtime.started = runtime.leader = True
+    started = []
+
+    class UnexpectedThread:
+        def __init__(self, *args, **kwargs):
+            started.append((args, kwargs))
+
+    monkeypatch.setattr(runtime_module.threading, "Thread", UnexpectedThread)
+    assert runtime.start_channels()["feishu"] is False
+    assert started == []
+    assert store.bot_account("feishu")["status"] == "not_configured"
+
+
+def test_feishu_public_state_is_redacted_and_tracks_validation(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    client = FeishuBotClient(store, credentials)
+    client.configure("cli_12345678", "super-secret-token")
+    store.set_bot_validation(
+        "feishu", "cli_12345678", "network_error",
+        "Authorization=Bearer super-secret-token ticket=abc123",
+    )
+
+    public = client.public_account(store.bot_account("feishu") or {})
+
+    assert public["app_id_suffix"] == "5678"
+    assert public["app_secret_present"] is True
+    assert public["last_validated_at"]
+    assert "super-secret-token" not in str(public)
+    assert "abc123" not in str(public)
+    assert "***" in public["last_error"]
+
+
 def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):
     import threading
     from types import SimpleNamespace

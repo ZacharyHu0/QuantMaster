@@ -754,7 +754,14 @@
       for (const channel of ['weixin', 'feishu']) {
         const account = (data.bot_accounts || []).find(item => item.channel === channel);
         const configured = Boolean(data.channels?.[channel]?.configured);
-        setChannelState(channel, configured, account?.status || '');
+        const feishuStates = {
+          not_configured: '未配置', invalid_credentials: '凭据无效',
+          tls_error: 'TLS 失败', network_error: '网络不可达',
+          rate_limited: '连接受限', connected: '已连接', connecting: '连接中',
+        };
+        setChannelState(channel, configured,
+          channel === 'feishu' ? (feishuStates[account?.status] || account?.status || '')
+            : (account?.status || ''));
       }
       const feishu = (data.bot_accounts || []).find(item => item.channel === 'feishu');
       const appId = document.getElementById('feishu-app-id');

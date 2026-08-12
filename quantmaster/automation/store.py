@@ -19,7 +19,7 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 8
+AUTOMATION_SCHEMA_VERSION = 9
 
 NEWS_INTERVAL_FIELDS = {
     "fast_news_scan": "fast_news_interval_minutes",
@@ -235,11 +235,17 @@ class AutomationStore:
                 if current == old_schedule:
                     conn.execute(
                         "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
-                        (json.dumps(DEFAULT_JOBS[name][1]), now, name),
+                    (json.dumps(DEFAULT_JOBS[name][1]), now, name),
                     )
 
+        def schema_v9(conn: sqlite3.Connection) -> None:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(bot_accounts)")}
+            if "last_validated_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE bot_accounts ADD COLUMN last_validated_at TEXT NOT NULL DEFAULT ''")
+
         with self._conn() as conn:
-            migrate_schema(conn, ((6, schema_v6), (7, schema_v7), (8, schema_v8)))
+            migrate_schema(conn, ((6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9)))
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -436,6 +442,16 @@ class AutomationStore:
                 "UPDATE bot_accounts SET status=?,last_error=?,updated_at=? "
                 "WHERE channel=? AND account_id=?",
                 (status, error[:500], utc_now(), channel, account_id),
+            )
+
+    def set_bot_validation(self, channel: str, account_id: str, status: str,
+                           error: str = "") -> None:
+        """Persist only a sanitized validation outcome, never credentials or SDK payloads."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE bot_accounts SET status=?,last_error=?,last_validated_at=?,updated_at=? "
+                "WHERE channel=? AND account_id=?",
+                (status, error[:500], utc_now(), utc_now(), channel, account_id),
             )
 
     def claim_inbound(self, channel: str, message_id: str, *, chat_type: str = "",

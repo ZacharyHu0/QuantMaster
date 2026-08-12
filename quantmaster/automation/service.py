@@ -164,6 +164,7 @@ class AutomationService:
         cfg = get_config().automation
         targets = self.public_targets()
         accounts = [
+            self.feishu.public_account(account) if account["channel"] == "feishu" else
             {key: value for key, value in account.items() if key != "secret_target"}
             for account in self.store.bot_accounts()
         ]
@@ -212,8 +213,16 @@ class AutomationService:
                 except CredentialError:
                     pass
         self.store.delete_other_bot_accounts("feishu", account["account_id"])
+        validation_state = str(verification.get("state") or (
+            "connected" if verification["status"] == "success" else "network_error"
+        ))
+        self.store.set_bot_validation(
+            "feishu", account["account_id"], validation_state,
+            "" if validation_state == "connected" else verification["message"],
+        )
+        account = self.store.bot_account("feishu", account["account_id"]) or account
         return {
-            **{key: value for key, value in account.items() if key != "secret_target"},
+            **self.feishu.public_account(account),
             "verification": verification,
         }
 

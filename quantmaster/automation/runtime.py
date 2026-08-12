@@ -144,7 +144,12 @@ class AutomationRuntime:
             logger.exception("%s Bot 接收线程异常退出", channel)
             account = self.service.store.bot_account(channel)
             if account:
-                self.service.store.set_bot_status(channel, account["account_id"], "degraded", str(exc))
+                if channel == "feishu":
+                    state = self.service.feishu.failure_state(exc)
+                    error = self.service.feishu.safe_error(exc)
+                else:
+                    state, error = "degraded", str(exc)
+                self.service.store.set_bot_status(channel, account["account_id"], state, error)
 
     def start_channels(self) -> dict[str, bool]:
         """启动已配置的直连 Bot；重复调用不会创建重复监听线程。"""
@@ -158,6 +163,14 @@ class AutomationRuntime:
                 account = self.service.store.bot_account(channel)
                 thread = self._channel_threads.get(channel)
                 if not account:
+                    result[channel] = False
+                    continue
+                if channel == "feishu" and not self.service.feishu.is_configured():
+                    # Missing credentials are a terminal local condition, not
+                    # a retryable transport failure.  Do not create a worker.
+                    self.service.store.set_bot_status(
+                        channel, account["account_id"], "not_configured",
+                    )
                     result[channel] = False
                     continue
                 if thread and thread.is_alive():
@@ -292,6 +305,11 @@ class AutomationRuntime:
             account = self.service.store.bot_account(channel)
             if not account:
                 return "disabled"
+            if channel == "feishu" and not self.service.feishu.is_configured():
+                self.service.store.set_bot_status(
+                    channel, account["account_id"], "not_configured",
+                )
+                return "not_configured"
             replacement = threading.Thread(
                 target=self._channel_worker, args=(channel,),
                 name=f"qm-{channel}-bot", daemon=True,

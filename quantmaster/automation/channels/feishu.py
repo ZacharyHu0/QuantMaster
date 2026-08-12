@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -12,10 +13,26 @@ from typing import Literal, get_args
 from quantmaster.automation.models import ActorContext
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
-from quantmaster.credentials import CredentialStore
+from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.logging_config import normalize_third_party_logger
 
 logger = logging.getLogger(__name__)
+
+FEISHU_STATES = {
+    "disabled", "not_configured", "invalid_credentials", "tls_error",
+    "network_error", "rate_limited", "connected",
+}
+
+
+def _safe_feishu_error(value: object) -> str:
+    """Keep diagnostics actionable without putting authentication material in state."""
+    message = str(value or "").strip()
+    message = re.sub(r"(?i)(bearer\s+)[^\s,;&]+", r"\1***", message)
+    message = re.sub(
+        r"(?i)((?:app[_ -]?secret|token|authorization|ticket|cookie|header)\s*[=:]\s*)[^\s,;&]+",
+        r"\1***", message,
+    )
+    return message[:500]
 
 
 def _task_name(task: asyncio.Task) -> str:
@@ -162,6 +179,47 @@ class FeishuBotClient:
         self.store.clear_channel_removal_marker("feishu")
         return account
 
+    def credential_state(self) -> dict:
+        """Return a UI-safe snapshot; this is intentionally not a credential reader."""
+        account = self.store.bot_account("feishu")
+        if not account:
+            return {
+                "state": "not_configured", "app_id_present": False,
+                "app_id_suffix": "", "app_secret_present": False,
+                "last_validated_at": "",
+            }
+        app_id = str(account.get("account_id") or "")
+        secret = ""
+        try:
+            if account.get("secret_target"):
+                secret = self.credentials.get(str(account["secret_target"])) or ""
+            elif app_id:
+                secret = os.environ.get("QM_FEISHU_APP_SECRET", "")
+        except Exception:
+            # A broken credential store must not result in a connection attempt.
+            pass
+        configured = bool(app_id and secret)
+        return {
+            "state": str(account.get("status") or "not_configured") if configured else "not_configured",
+            "app_id_present": bool(app_id), "app_id_suffix": app_id[-4:] if app_id else "",
+            "app_secret_present": bool(secret),
+            "last_validated_at": str(account.get("last_validated_at") or ""),
+        }
+
+    def public_account(self, account: dict) -> dict:
+        """Project persisted account metadata into a status-safe representation."""
+        state = self.credential_state()
+        return {
+            "channel": "feishu",
+            "status": state["state"],
+            "app_id_present": state["app_id_present"],
+            "app_id_suffix": state["app_id_suffix"],
+            "app_secret_present": state["app_secret_present"],
+            "last_validated_at": state["last_validated_at"],
+            "updated_at": str(account.get("updated_at") or ""),
+            "last_error": _safe_feishu_error(account.get("last_error")),
+        }
+
     def bootstrap_legacy(self) -> dict | None:
         """仅在账号库为空时接纳旧 YAML/环境变量配置。"""
         if (self.store.bot_account("feishu") or
@@ -190,14 +248,27 @@ class FeishuBotClient:
             )
             payload = response.json()
             valid = response.is_success and int(payload.get("code", -1)) == 0
+            if response.status_code == 429:
+                state, message = "rate_limited", "飞书验证请求受限；请稍后重试"
+            elif valid:
+                state, message = "connected", "App ID / App Secret 有效"
+            else:
+                state, message = "invalid_credentials", "App ID 或 App Secret 无效"
             return {
-                "status": "success" if valid else "error",
-                "message": "App ID / App Secret 有效" if valid else "App ID 或 App Secret 无效",
+                "status": "success" if valid else "warning" if state == "rate_limited" else "error",
+                "state": state, "message": message,
                 "latency_ms": round((time.perf_counter() - started) * 1000),
             }
-        except (httpx.HTTPError, ValueError):
+        except httpx.ConnectError:
             return {
-                "status": "warning", "message": "飞书联网验证失败；凭据仍可保存后重试",
+                "status": "warning", "state": "network_error",
+                "message": "飞书网络不可达；凭据可保存后重试",
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+            }
+        except (httpx.TransportError, ValueError):
+            return {
+                "status": "warning", "state": "tls_error",
+                "message": "飞书 TLS/传输验证失败；请检查系统时间、证书和网络",
                 "latency_ms": round((time.perf_counter() - started) * 1000),
             }
 
@@ -212,6 +283,30 @@ class FeishuBotClient:
         if not app_id or not secret:
             raise RuntimeError("飞书应用 Bot 尚未配置 App ID/App Secret")
         return app_id, secret
+
+    def is_configured(self) -> bool:
+        try:
+            app_id, secret = self.credentials_value()
+            return bool(app_id and secret)
+        except (CredentialError, RuntimeError):
+            return False
+
+    @staticmethod
+    def safe_error(value: object) -> str:
+        return _safe_feishu_error(value)
+
+    @staticmethod
+    def failure_state(value: object) -> str:
+        message = str(value or "").casefold()
+        if "429" in message or "rate limit" in message or "too many" in message:
+            return "rate_limited"
+        if any(token in message for token in ("ssl", "tls", "certificate")):
+            return "tls_error"
+        if any(token in message for token in (
+            "401", "403", "invalid credential", "app secret", "app id", "unauthorized",
+        )):
+            return "invalid_credentials"
+        return "network_error"
 
     def _client(self):
         try:
@@ -257,6 +352,9 @@ class FeishuBotClient:
 
     def listen_forever(self, on_message: Callable[[ActorContext, str], None],
                        stop_event: threading.Event) -> None:
+        if not self.is_configured():
+            # Direct calls are also harmless: no SDK import, WebSocket or retry loop.
+            return
         try:
             from lark_oapi.channel import FeishuChannel
             try:
