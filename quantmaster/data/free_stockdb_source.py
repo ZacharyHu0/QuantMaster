@@ -258,9 +258,6 @@ class FreeStockDBSource(DataSource):
             "fq": fq,
             "as_df": False,
         }
-        # Older stock_sdk builds do not expose the fields keyword.  Keep the
-        # established daily/minute contract compatible while asking newer
-        # builds for the richer after-close cross section explicitly.
         if fields is not None:
             arguments["fields"] = fields
         try:
@@ -332,45 +329,38 @@ class FreeStockDBSource(DataSource):
         return provider_call(self.name, key, fetch, probe=probe)
 
     @staticmethod
-    def _records(payload) -> list[dict]:
-        if isinstance(payload, dict):
-            return [dict(payload)] if "close" in payload else []
+    def _dictionary_rows(payload: Any, *, contract: str) -> list[dict[str, Any]]:
+        """Decode the current unprojected SDK/HTTP contract: ``list[dict]``."""
         if not isinstance(payload, list):
-            return []
-        records: list[dict] = []
-        for item in payload:
-            key = ""
-            value = item
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                key, value = str(item[0]), item[1]
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError:
-                    continue
-            if not isinstance(value, dict):
-                continue
-            record = dict(value)
-            if not record.get("date") and key:
-                record["date"] = key.rsplit(":", 1)[-1]
-            records.append(record)
-        return records
+            raise FreeStockDBProviderError(
+                f"{contract} 合同错误：预期 list[dict]，实际 {type(payload).__name__}"
+            )
+        invalid = next((index for index, item in enumerate(payload) if not isinstance(item, dict)), None)
+        if invalid is not None:
+            raise FreeStockDBProviderError(
+                f"{contract} 合同错误：第 {invalid} 行不是对象"
+            )
+        return [dict(item) for item in payload]
 
-    @classmethod
-    def _records_for_fields(cls, payload, fields: str) -> list[dict]:
-        """Decode SDK rows returned as positional arrays when fields is supplied."""
+    @staticmethod
+    def _projected_rows(payload: Any, fields: str) -> list[dict[str, Any]]:
+        """Decode the current ``stock_sdk.get_data(fields=...)`` positional contract."""
         names = [item.strip() for item in fields.split(",") if item.strip()]
-        if not isinstance(payload, list) or not names:
-            return cls._records(payload)
-        records: list[dict] = []
-        fallback: list[Any] = []
-        for item in payload:
-            if isinstance(item, (list, tuple)) and len(item) == len(names) and len(item) > 2:
-                records.append(dict(zip(names, item, strict=True)))
-            else:
-                fallback.append(item)
-        if fallback:
-            records.extend(cls._records(fallback))
+        if not names:
+            raise ValueError("free-stockdb SDK fields 不能为空")
+        if not isinstance(payload, list):
+            raise FreeStockDBProviderError(
+                "stock_sdk projected rows 合同错误：预期二维位置数组"
+            )
+        records: list[dict[str, Any]] = []
+        for index, item in enumerate(payload):
+            if not isinstance(item, (list, tuple)) or len(item) != len(names):
+                actual = len(item) if isinstance(item, (list, tuple)) else type(item).__name__
+                raise FreeStockDBProviderError(
+                    "stock_sdk projected rows 合同错误："
+                    f"第 {index} 行宽度 {actual}，预期 {len(names)}"
+                )
+            records.append(dict(zip(names, item, strict=True)))
         return records
 
     def _query_http(
@@ -379,8 +369,6 @@ class FreeStockDBSource(DataSource):
         code: str,
         start: str = "",
         end: str = "",
-        *,
-        raw_fallback: bool = True,
     ) -> list[dict]:
         if start and end and start != end:
             range_query = f"fwd:{start},{end}"
@@ -388,21 +376,15 @@ class FreeStockDBSource(DataSource):
             range_query = f"key:{start}"
         else:
             range_query = "all:"
-        modern = self._records(
-            self._request(
-                {
-                    "cmd": "vals",
-                    "t": table,
-                    "k1": f"key:{code}",
-                    "k2": range_query,
-                }
-            )
+        return self._dictionary_rows(
+            self._request({
+                "cmd": "vals",
+                "t": table,
+                "k1": f"key:{code}",
+                "k2": range_query,
+            }),
+            contract="free-stockdb HTTP vals",
         )
-        if modern or not raw_fallback:
-            return modern
-        if "*" in code:
-            return []
-        return self._records(self._request({"cmd": "get", "t": f"{table}:{code}:*"}))
 
     @staticmethod
     def _apply_qfq(records: list[dict], factors: list[dict], code: str) -> list[dict]:
@@ -483,7 +465,7 @@ class FreeStockDBSource(DataSource):
             factors = self._query_http("复权", code)
             records = self._apply_qfq(records, factors, code)
         else:
-            records = self._records(payload)
+            records = self._dictionary_rows(payload, contract="stock_sdk daily")
         return self._frame(records, intraday=False).loc[start:end]
 
     def daily_many(
@@ -504,14 +486,19 @@ class FreeStockDBSource(DataSource):
             return super().daily_many(ordered, start, end)
         if not isinstance(payload, dict):
             if len(ordered) == 1:
-                return {ordered[0]: self._frame(self._records(payload), intraday=False).loc[start:end]}
-            return {}
+                rows = self._dictionary_rows(payload, contract="stock_sdk daily batch")
+                return {ordered[0]: self._frame(rows, intraday=False).loc[start:end]}
+            raise FreeStockDBProviderError(
+                "stock_sdk daily batch 合同错误：多证券请求必须返回 code 到 rows 的对象"
+            )
         result: dict[str, pd.DataFrame] = {}
         for symbol, code in zip(ordered, codes, strict=True):
-            values = payload.get(code)
-            if values is None:
-                values = payload.get(symbol)
-            frame = self._frame(self._records(values), intraday=False).loc[start:end]
+            if code not in payload:
+                continue
+            rows = self._dictionary_rows(
+                payload[code], contract=f"stock_sdk daily batch {code}",
+            )
+            frame = self._frame(rows, intraday=False).loc[start:end]
             if not frame.empty:
                 result[symbol] = frame
         return result
@@ -553,16 +540,9 @@ class FreeStockDBSource(DataSource):
         begin = _compact_time(start, intraday=False)
         finish = _compact_time(end, intraday=False)
         fields = ",".join(columns[1:])
-        try:
-            # Cross-sectional ingestion archives point-in-time raw prices.  Research
-            # prices are derived later from the separately frozen factor payload.
-            payload = self._sdk_data(codes, begin, finish, "1d", fq=None, fields=fields)
-        except (KeyError, TypeError):
-            # Old SDK builds and strict wrappers only understand the original
-            # cross-section projection.  Missing rich fields remain null.
-            legacy = ",".join(columns[1:13])
-            payload = self._sdk_data(codes, begin, finish, "1d", fq=None, fields=legacy)
-            fields = legacy
+        # Cross-sectional ingestion archives point-in-time raw prices.  Research
+        # prices are derived later from the separately frozen factor payload.
+        payload = self._sdk_data(codes, begin, finish, "1d", fq=None, fields=fields)
         records: list[dict[str, Any]] = []
         if payload is None:
             for symbol, code in zip(ordered, codes, strict=True):
@@ -570,11 +550,19 @@ class FreeStockDBSource(DataSource):
                     records.append({**item, "symbol": symbol})
         elif isinstance(payload, dict):
             for symbol, code in zip(ordered, codes, strict=True):
-                values = payload.get(code, payload.get(symbol))
-                for item in self._records_for_fields(values, fields):
+                if code not in payload:
+                    continue
+                for item in self._projected_rows(payload[code], fields):
                     records.append({**item, "symbol": symbol})
         elif len(ordered) == 1:
-            records = [{**item, "symbol": ordered[0]} for item in self._records_for_fields(payload, fields)]
+            records = [
+                {**item, "symbol": ordered[0]}
+                for item in self._projected_rows(payload, fields)
+            ]
+        elif payload is not None:
+            raise FreeStockDBProviderError(
+                "stock_sdk projected batch 合同错误：多证券请求必须返回 code 到 rows 的对象"
+            )
         frame = pd.DataFrame(records)
         for column in columns:
             if column not in frame:
@@ -731,7 +719,8 @@ class FreeStockDBSource(DataSource):
         finish = _compact_time(end, intraday=True)
         payload = self._sdk_data(code, begin, finish, frequency, fq=None)
         if payload is not None:
-            return self._frame(self._records(payload), intraday=True).loc[start:end]
+            rows = self._dictionary_rows(payload, contract="stock_sdk intraday")
+            return self._frame(rows, intraday=True).loc[start:end]
         records = self._query_http("分钟k", code, begin, finish)
         frame = self._frame(records, intraday=True).loc[start:end]
         if frame.empty or frequency == "1m":
@@ -770,12 +759,20 @@ class FreeStockDBSource(DataSource):
             frequency,
             fq=None,
         )
-        if not isinstance(payload, dict):
+        if payload is None:
             return pd.DataFrame(columns=["symbol", "date", *OHLCV_COLUMNS, "amount"])
+        if not isinstance(payload, dict):
+            raise FreeStockDBProviderError(
+                "stock_sdk intraday batch 合同错误：预期 code 到 rows 的对象"
+            )
         frames: list[pd.DataFrame] = []
         for symbol, code in zip(ordered, codes, strict=True):
-            values = payload.get(code, payload.get(symbol))
-            frame = self._frame(self._records(values), intraday=True)
+            if code not in payload:
+                continue
+            rows = self._dictionary_rows(
+                payload[code], contract=f"stock_sdk intraday batch {code}",
+            )
+            frame = self._frame(rows, intraday=True)
             if frame.empty:
                 continue
             frame = frame.reset_index()
@@ -825,10 +822,14 @@ class FreeStockDBSource(DataSource):
     @staticmethod
     def _flatten_batch(payload) -> list[dict]:
         if not isinstance(payload, dict):
-            return FreeStockDBSource._records(payload)
+            raise FreeStockDBProviderError(
+                "stock_sdk batch 合同错误：预期 code 到 rows 的对象"
+            )
         records: list[dict] = []
         for code, values in payload.items():
-            for item in FreeStockDBSource._records(values):
+            for item in FreeStockDBSource._dictionary_rows(
+                values, contract=f"stock_sdk batch {code}",
+            ):
                 item.setdefault("code", str(code))
                 records.append(item)
         return records
@@ -858,7 +859,6 @@ class FreeStockDBSource(DataSource):
                     "*",
                     trading_date,
                     trading_date,
-                    raw_fallback=False,
                 )
                 if records:
                     break
@@ -968,9 +968,12 @@ class FreeStockDBSource(DataSource):
         for symbol in dict.fromkeys(str(item).upper() for item in symbols):
             code = symbol.partition(".")[0].zfill(6)
             for item in self._query_http("复权", code, begin, finish):
-                value = item.get("cum", item.get("factor"))
                 http_rows.append(
-                    {"symbol": symbol, "date": item.get("date"), "adj_factor": value}
+                    {
+                        "symbol": symbol,
+                        "date": item.get("date"),
+                        "adj_factor": item.get("cum"),
+                    }
                 )
         frame = pd.DataFrame(http_rows, columns=["symbol", "date", "adj_factor"])
         if not frame.empty:
@@ -1125,7 +1128,9 @@ class FreeStockDBSource(DataSource):
             },
             probe=True,
         )
-        records = self._records(payload)
+        records = self._dictionary_rows(
+            payload, contract="free-stockdb HTTP vals probe",
+        )
         valid = []
         for item in records:
             raw_close = item.get("close")

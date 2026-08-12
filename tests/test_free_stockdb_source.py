@@ -38,14 +38,18 @@ class _FakeClient:
     def get_data(self, **kwargs):
         self.calls.append(kwargs)
         stamp = "20260805100500" if kwargs["frequency"] == "5m" else "20260805"
-        return [{
+        record = {
             "date": stamp,
             "open": 10,
             "high": 11,
             "low": 9,
             "close": 10.5,
             "volume": 100,
-        }]
+        }
+        fields = kwargs.get("fields")
+        if fields:
+            return [[record.get(field) for field in fields.split(",")]]
+        return [record]
 
 
 def _source(monkeypatch) -> tuple[FreeStockDBSource, _FakeClient]:
@@ -108,13 +112,14 @@ def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None
 
     def request(params, *, probe=False):
         calls.append((params, probe))
-        return [["日k:600519:20260807", {
+        return [{
+            "date": 20260807,
             "open": 1400.0,
             "high": 1410.0,
             "low": 1390.0,
             "close": 1405.0,
             "volume": 100.0,
-        }]]
+        }]
 
     monkeypatch.setattr(source, "_request", request)
 
@@ -136,6 +141,38 @@ def test_http_probe_rejects_connected_but_unverifiable_payload(monkeypatch) -> N
 
     with pytest.raises(RuntimeError, match="没有返回可验证记录"):
         source.probe()
+
+
+@pytest.mark.parametrize("payload,diagnostic", [
+    ({"date": 20260807, "close": 1405}, "预期 list\\[dict\\]"),
+    ([["日k:600519:20260807", {"close": 1405}]], "第 0 行不是对象"),
+    (['{"date":20260807,"close":1405}'], "第 0 行不是对象"),
+])
+def test_http_vals_rejects_retired_payload_shapes(monkeypatch, payload, diagnostic) -> None:
+    source = FreeStockDBSource()
+    source._sdk_checked = True
+    source._client = None
+    monkeypatch.setattr(source, "_request", lambda *_args, **_kwargs: payload)
+
+    with pytest.raises(FreeStockDBProviderError, match=diagnostic):
+        source.daily("600519.SH", "2026-08-07", "2026-08-07")
+
+
+def test_http_empty_vals_is_a_valid_empty_result_without_get_fallback(monkeypatch) -> None:
+    source = FreeStockDBSource()
+    source._sdk_checked = True
+    source._client = None
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        source, "_request",
+        lambda params, **_kwargs: calls.append(params) or [],
+    )
+
+    result = source.daily("600519.SH", "2026-08-07", "2026-08-07")
+
+    assert result.empty
+    assert calls
+    assert all(call["cmd"] == "vals" for call in calls)
 
 
 def test_free_stockdb_board_data_feeds_industry_and_concepts(monkeypatch) -> None:
@@ -178,7 +215,7 @@ def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> 
             "pe_ttm": 20, "pb": 2, "is_st": False,
         }
         return {
-            code: [[values[field] for field in fields]]
+            code: [[values.get(field) for field in fields]]
             for code in kwargs["code"]
         }
 
@@ -192,6 +229,34 @@ def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> 
     assert frame["symbol"].tolist() == ["000001.SZ", "600519.SH"]
     assert frame["amount"].tolist() == [1_000_000, 1_000_000]
     assert frame["is_st"].tolist() == [False, False]
+
+
+def test_projected_sdk_rows_reject_dictionary_and_wrong_width(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+    client.get_data = lambda **kwargs: {
+        kwargs["code"][0]: [{"date": 20260806, "close": 10.5}],
+        kwargs["code"][1]: [[20260806]],
+    }
+
+    with pytest.raises(FreeStockDBProviderError, match="第 0 行宽度 dict"):
+        source.daily_cross_section(
+            ["600519.SH", "000001.SZ"], "2026-08-06", "2026-08-06",
+        )
+
+
+def test_cross_section_does_not_retry_a_retired_field_projection(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+
+    def reject(**kwargs):
+        client.calls.append(kwargs)
+        raise KeyError("unknown field")
+
+    client.get_data = reject
+
+    with pytest.raises(KeyError, match="unknown field"):
+        source.daily_cross_section(["600519.SH"], "2026-08-06", "2026-08-06")
+
+    assert len(client.calls) == 1
 
 
 def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> None:
