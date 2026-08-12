@@ -1125,6 +1125,8 @@ def test_annotation_batches_use_news_specific_concurrency(tmp_path, isolated_con
     isolated_config.news.annotation_max_concurrency = 3
     active = maximum = 0
     lock = threading.Lock()
+    three_workers_started = threading.Event()
+    release_workers = threading.Event()
 
     class ConcurrentLLM:
         def chat_json(self, prompt, system="", **kwargs):
@@ -1132,7 +1134,14 @@ def test_annotation_batches_use_news_specific_concurrency(tmp_path, isolated_con
             with lock:
                 active += 1
                 maximum = max(maximum, active)
-            time.sleep(0.05)
+                if active == 3:
+                    three_workers_started.set()
+            # The assertion is about the configured concurrency ceiling,
+            # not Windows scheduler luck in a 50ms sleep.  Hold the first
+            # workers until all three have deterministically entered.
+            if three_workers_started.wait(2):
+                release_workers.set()
+            release_workers.wait(2)
             with lock:
                 active -= 1
             return [{
