@@ -19,7 +19,7 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 11
+AUTOMATION_SCHEMA_VERSION = 12
 
 NEWS_INTERVAL_FIELDS = {
     "fast_news_scan": "fast_news_interval_minutes",
@@ -283,7 +283,7 @@ class AutomationStore:
                 "status,next_attempt_at,lease_expires_at)"
             )
 
-        def schema_v11(conn: sqlite3.Connection) -> None:
+        def schema_v12(conn: sqlite3.Connection) -> None:
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(analysis_deliveries)")
             }
@@ -317,7 +317,7 @@ class AutomationStore:
         with self._conn() as conn:
             migrate_schema(conn, (
                 (6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9),
-                (10, schema_v10), (11, schema_v11),
+                (10, schema_v10), (11, schema_v11), (12, schema_v12),
             ))
 
     @staticmethod

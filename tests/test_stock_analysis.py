@@ -535,6 +535,19 @@ def test_analysis_delivery_claim_is_atomic_and_fenced(tmp_path):
         )
 
 
+def test_analysis_delivery_lease_schema_is_a_distinct_v12_migration(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+
+    with store._conn() as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(analysis_deliveries)")
+        }
+
+    assert version == 12
+    assert {"lease_owner", "lease_token", "lease_expires_at", "heartbeat_at"} <= columns
+
+
 def test_analysis_delivery_expired_claim_recovers_but_appendix_is_ambiguous(tmp_path):
     store = AutomationStore(tmp_path / "automation.sqlite")
     store.bind_target(
