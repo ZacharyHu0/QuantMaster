@@ -8,6 +8,8 @@ import math
 import os
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -19,12 +21,14 @@ from quantmaster.config import get_config
 CNN_GRAPH_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 CNN_PAGE_URL = "https://edition.cnn.com/markets/fear-and-greed"
 CACHE_TTL_SECONDS = 30 * 60
+REFRESH_RETRY_SECONDS = 60
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_HISTORY_POINTS = 370
 RSI_ADD_THRESHOLD = 22.0
 FEAR_GREED_RARE_THRESHOLD = 10.0
 
 _CACHE_LOCK = threading.Lock()
+_REFRESH_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 _RATING_LABELS = {
@@ -209,6 +213,14 @@ def load_cnn_fear_greed(*, force: bool = False) -> dict[str, object]:
     path = _cache_path()
     with _CACHE_LOCK:
         cached = _read_cache(path)
+    if cached is not None and not force and _cache_is_fresh(cached):
+        return dict(cached)
+    with _REFRESH_LOCK:
+        # Another background caller may have refreshed while this caller was
+        # waiting.  Recheck without holding the cache lock across network I/O,
+        # so Web snapshot reads remain local and prompt during a slow upstream.
+        with _CACHE_LOCK:
+            cached = _read_cache(path)
         if cached is not None and not force and _cache_is_fresh(cached):
             return dict(cached)
         try:
@@ -231,7 +243,8 @@ def load_cnn_fear_greed(*, force: bool = False) -> dict[str, object]:
                 raise ValueError("CNN 恐贪响应过大")
             result = parse_cnn_fear_greed(response.json())
             try:
-                _write_cache(path, result)
+                with _CACHE_LOCK:
+                    _write_cache(path, result)
             except OSError as exc:
                 logger.debug("CNN 恐贪缓存写入失败: %s", exc)
             return result
@@ -244,3 +257,65 @@ def load_cnn_fear_greed(*, force: bool = False) -> dict[str, object]:
                     "warning": "CNN 指数刷新失败，正在使用最近一次本地缓存。",
                 }
             return _unavailable()
+
+
+class CnnFearGreedRefresher:
+    """Keep the local CNN snapshot fresh outside disposable Web processes."""
+
+    def __init__(
+        self,
+        refresh: Callable[[], dict[str, object]] | None = None,
+        *,
+        interval_seconds: float = CACHE_TTL_SECONDS,
+        retry_seconds: float = REFRESH_RETRY_SECONDS,
+    ) -> None:
+        self._refresh = refresh or load_cnn_fear_greed
+        self._interval_seconds = interval_seconds
+        self._retry_seconds = retry_seconds
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="cnn-fear-greed-refresh",
+                daemon=True,
+            )
+            self._thread.start()
+            return True
+
+    def stop(self, timeout: float = 10.0) -> None:
+        with self._lock:
+            thread = self._thread
+            self._stop.set()
+        if thread is not None:
+            thread.join(timeout=timeout)
+        with self._lock:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                result = self._refresh()
+                ready = result.get("status") == "ready"
+            except (OSError, RuntimeError, TypeError, ValueError, httpx.HTTPError):
+                ready = False
+                logger.exception("CNN 恐贪后台刷新异常")
+            delay = self._interval_seconds if ready else self._retry_seconds
+            elapsed = time.monotonic() - started
+            if self._stop.wait(max(0.0, delay - elapsed)):
+                return
+
+
+_REFRESHER = CnnFearGreedRefresher()
+
+
+def get_cnn_fear_greed_refresher() -> CnnFearGreedRefresher:
+    return _REFRESHER

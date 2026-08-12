@@ -1,10 +1,12 @@
 """大盘 RSI 与 CNN 恐贪的轻量契约测试。"""
 
+import threading
+
 import numpy as np
 import pandas as pd
 
 from quantmaster.market import classify_opportunity, indicator_frame
-from quantmaster.market.fear_greed import parse_cnn_fear_greed
+from quantmaster.market.fear_greed import CnnFearGreedRefresher, parse_cnn_fear_greed
 
 
 def test_rsi_and_fear_greed_opportunity_contract():
@@ -38,3 +40,45 @@ def test_rsi_and_fear_greed_opportunity_contract():
         {"date": "2026-08-07", "score": 9.9, "rating": "extreme fear", "rating_label": "极度恐惧"},
     ]
     assert parsed["thresholds"] == {"rsi_add": 22.0, "fear_greed_rare": 10.0}
+
+
+def test_cnn_refresher_runs_immediately_and_retries_stale_result():
+    calls = 0
+    retried = threading.Event()
+
+    def refresh():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            retried.set()
+        return {"status": "stale"}
+
+    refresher = CnnFearGreedRefresher(
+        refresh, interval_seconds=10, retry_seconds=0.01,
+    )
+    try:
+        assert refresher.start()
+        assert not refresher.start()
+        assert retried.wait(timeout=1)
+    finally:
+        refresher.stop()
+    assert calls >= 2
+
+
+def test_cnn_refresher_uses_normal_interval_after_success():
+    called = threading.Event()
+
+    def refresh():
+        called.set()
+        return {"status": "ready"}
+
+    refresher = CnnFearGreedRefresher(
+        refresh, interval_seconds=10, retry_seconds=0.01,
+    )
+    try:
+        assert refresher.start()
+        assert called.wait(timeout=1)
+        called.clear()
+        assert not called.wait(timeout=0.03)
+    finally:
+        refresher.stop()

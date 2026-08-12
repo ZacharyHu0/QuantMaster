@@ -187,6 +187,7 @@ class RuntimeWorker:
             from quantmaster.lab.capabilities import publish_capabilities
             from quantmaster.lab.llm_jobs import get_lab_llm_jobs
             from quantmaster.lab.worker import get_worker
+            from quantmaster.market import get_cnn_fear_greed_refresher
             from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
             from quantmaster.research.jobs import get_research_job_manager
             from quantmaster.rotation.etf_jobs import get_etf_research_jobs
@@ -211,6 +212,7 @@ class RuntimeWorker:
             news_worker = get_news_jobs()
             settings_worker = get_settings_jobs()
             lab_llm_worker = get_lab_llm_jobs()
+            cnn_fear_greed_refresher = get_cnn_fear_greed_refresher()
 
             def publish_lab_capabilities() -> None:
                 try:
@@ -269,6 +271,7 @@ class RuntimeWorker:
                 raise WorkerCommandError("unknown_command", "后台执行器不支持该命令")
 
             def drain() -> None:
+                cnn_fear_greed_refresher.stop()
                 get_paper_automation_worker().stop()
                 rotation_worker.stop()
                 repair_worker.shutdown()
@@ -285,6 +288,7 @@ class RuntimeWorker:
                 lab_llm_worker.runtime.pause()
 
             def resume() -> None:
+                cnn_fear_greed_refresher.start()
                 stock_analysis_worker.resume()
                 after_close_worker.resume()
                 etf_research_worker.resume()
@@ -339,6 +343,7 @@ class RuntimeWorker:
             backtest_worker.start()
             get_paper_automation_worker().start()
             rotation_worker.start(bootstrap_local=bootstrap_rotation)
+            cnn_fear_greed_refresher.start()
             command_server = RuntimeCommandServer(handle_command)
             try:
                 command_server.start()
@@ -395,6 +400,7 @@ class RuntimeWorker:
             from quantmaster.data.repair import get_data_repair_manager
             from quantmaster.lab.llm_jobs import shutdown_lab_llm_jobs
             from quantmaster.lab.worker import get_worker
+            from quantmaster.market import get_cnn_fear_greed_refresher
             from quantmaster.research.jobs import get_research_job_manager
             from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
             from quantmaster.rotation.service import get_rotation_worker
@@ -407,6 +413,7 @@ class RuntimeWorker:
             self._stop_heartbeat()
             stop_diagnostics_sampler()
             free_stockdb_runtime.stop_event_bridge()
+            get_cnn_fear_greed_refresher().stop()
             get_paper_automation_worker().stop()
             get_rotation_worker().shutdown()
             get_data_repair_manager().shutdown()

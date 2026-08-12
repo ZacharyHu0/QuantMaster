@@ -2,6 +2,7 @@
 
 from quantmaster.market.fear_greed import (
     classify_opportunity,
+    get_cnn_fear_greed_refresher,
     load_cnn_fear_greed,
     read_cnn_fear_greed,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "analyze_market",
     "analyze_sectors",
     "classify_opportunity",
+    "get_cnn_fear_greed_refresher",
     "indicator_frame",
     "load_cnn_fear_greed",
     "read_cnn_fear_greed",
