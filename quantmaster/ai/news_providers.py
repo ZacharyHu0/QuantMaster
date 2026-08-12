@@ -170,7 +170,16 @@ def fetch_sina_live(
     candidate_published_at = -1.0
     last_page = start_page
     exhausted_without_watermark = False
-    for page in range(start_page, start_page + max_pages):
+    # A long-running historical backfill must not starve the live head.  Probe
+    # page one on every resumed run, then spend the bounded backfill budget at
+    # the durable cursor.  Articles are persisted even while the committed
+    # watermark remains fenced, so this keeps current headlines flowing
+    # without silently skipping the unresolved gap.
+    pages = list(range(start_page, start_page + max_pages))
+    if start_page > 1:
+        pages.insert(0, 1)
+    published_floor = _published_backfill_floor(source)
+    for page in pages:
         last_page = page
         query = urlencode({"page": page, "page_size": page_size, "zhibo_id": 152, "tag_id": 0})
         page_source = source if page == 1 else {**source, "_conditional_cache": False}
@@ -206,6 +215,7 @@ def fetch_sina_live(
                 raise NewsContractError("新浪快讯返回空列表", code="sina_empty")
             exhausted_without_watermark = bool(watermark)
             break
+        crossed_published_floor = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -216,12 +226,29 @@ def fetch_sina_live(
                 entry.get("create_time") or entry.get("created_at") or entry.get("timestamp"),
             )
             latest_published_at = max(latest_published_at, published_epoch)
+            if page == 1 and pending_watermark and provider_id == pending_watermark:
+                # The pending head was already archived by an earlier partial
+                # round.  Page one is only a live delta probe while backfill
+                # resumes at its separate cursor.
+                break
             if not pending_watermark and published_epoch > candidate_published_at:
                 candidate_watermark = provider_id
                 candidate_published_at = published_epoch
             if watermark and provider_id == watermark:
                 reached = True
                 continue
+            # Once a descending historical page is older than the durable
+            # publication-time overlap, the missing provider id cannot appear
+            # later.  This is local evidence that closes a removed-ID gap; do
+            # not apply it to page one, whose provider may contain pinned old
+            # items ahead of current headlines.
+            if (
+                watermark and page > 1 and published_floor > 0
+                and published_epoch < published_floor
+            ):
+                reached = True
+                crossed_published_floor = True
+                break
             text = _clean_text(entry.get("rich_text") or entry.get("content") or entry.get("title"))
             if not text:
                 continue
@@ -235,7 +262,7 @@ def fetch_sina_live(
                 fetched_at=fetched_at, is_official=False, raw_cache_key=raw_key,
                 content_scope="provider_excerpt",
             ))
-        if reached:
+        if reached or crossed_published_floor:
             break
         if not watermark:  # Initial install intentionally starts at the current head.
             reached = True

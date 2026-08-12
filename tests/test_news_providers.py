@@ -610,8 +610,8 @@ def test_sina_backfill_commits_only_after_cross_round_gap_is_closed(monkeypatch,
     calls.clear()
     page_sizes.clear()
     second = fetch_builtin_source(store.get("sina_live") or {}, store, limit=50)
-    assert calls == [11, 12]
-    assert page_sizes == [1, 1]
+    assert calls == [1, 11, 12]
+    assert page_sizes == [1, 1, 1]
     assert second.complete is True
     assert second.watermark == "112"
     assert [item.provider_item_id for item in second.articles] == ["102", "101"]
@@ -655,7 +655,7 @@ def test_sina_resume_commits_pending_when_old_watermark_is_page_head(monkeypatch
 
     calls.clear()
     second = fetch_builtin_source(store.get("sina_live") or {}, store, limit=1)
-    assert calls == [11]
+    assert calls == [1, 11]
     assert second.articles == []
     assert second.complete is True
     assert second.previous_watermark == "100"
@@ -665,6 +665,55 @@ def test_sina_resume_commits_pending_when_old_watermark_is_page_head(monkeypatch
     assert state["watermark"] == "199"
     assert state["pending_watermark"] == ""
     assert state["backfill_cursor"] == ""
+
+
+def test_sina_resumed_backfill_keeps_live_head_fresh_and_closes_removed_id_gap(
+    monkeypatch, tmp_path,
+):
+    store = NewsSourceStore(tmp_path / "news.sqlite")
+    store.record_batch(FetchBatch(
+        source_id="sina_live", watermark="100",
+        latest_published_at=1786424400.0,
+    ))
+    store.record_batch(FetchBatch(
+        source_id="sina_live", watermark="100", previous_watermark="100",
+        pending_watermark="105", next_cursor="211:30", complete=False,
+        latest_published_at=1786424400.0,
+    ))
+    calls: list[int] = []
+
+    def fake_fetch(source, url, fetch_store):
+        page = int(url.split("page=", 1)[1].split("&", 1)[0])
+        calls.append(page)
+        entries = ([
+            {
+                "id": "200", "rich_text": "当前最新快讯",
+                "create_time": "2026-08-12 17:30:00",
+            },
+            {
+                "id": "105", "rich_text": "已归档的 pending 头部",
+                "create_time": "2026-08-11 13:07:10",
+            },
+        ] if page == 1 else [{
+            "id": "90", "rich_text": "已越过本地发布时间下界的旧条目",
+            "create_time": "2026-08-10 12:00:00",
+        }])
+        payload = {"result": {"data": {"feed": {"list": entries}}}}
+        return json.dumps(payload).encode(), url, f"sha256:page-{page}"
+
+    monkeypatch.setattr("quantmaster.ai.news_providers._fetch_bytes", fake_fetch)
+    monkeypatch.setattr(
+        "quantmaster.ai.news_providers.time.time", lambda: 1786527600.0,
+    )
+
+    batch = fetch_builtin_source(store.get("sina_live") or {}, store, limit=30)
+
+    assert calls == [1, 211]
+    assert [item.provider_item_id for item in batch.articles] == ["200"]
+    assert batch.latest_published_at == 1786527000.0
+    assert batch.complete is True
+    assert batch.watermark == "105"
+    assert batch.next_cursor == ""
 
 
 def test_sina_pinned_old_item_does_not_hide_newer_items_after_watermark(monkeypatch):
