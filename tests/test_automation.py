@@ -1857,6 +1857,39 @@ def test_scheduler_status_projection_is_additive_and_redacts_runtime_internals(
     assert jobs[0]["execution"]["running_instances"] == 1
 
 
+def test_automation_run_projection_ignores_retired_flat_runtime_fields():
+    from quantmaster.server.automation import _public_automation_run
+
+    public = _public_automation_run({
+        "id": "job-current-contract",
+        "type": "automation.fast_news_scan",
+        "status": "queued",
+        "backoff": {"active": True, "waiting_on": "provider", "next_retry_at": 10},
+        "stalled": {
+            "is_stalled": True, "reason": "heartbeat expired",
+            "diagnostic_code": "job_heartbeat_stale", "waiting_on": "provider",
+            "observed_at": 11,
+        },
+        "pending_units": 99,
+        "next_retry_at": 999,
+        "waiting_for": "retired-flat-value",
+        "is_stalled": False,
+        "stalled_reason": "retired-flat-value",
+        "coalesced_triggers": 42,
+        "coalesced_count": 3,
+    })
+
+    assert public["queue"] == {
+        "pending": 0, "running": 0, "retry_wait": 0, "dead_letter": 0,
+    }
+    assert public["backoff"]["waiting_on"] == "provider"
+    assert public["backoff"]["next_retry_at"] != ""
+    assert public["stalled"]["diagnostic_code"] == "job_heartbeat_stale"
+    assert public["stalled"]["waiting_on"] == "provider"
+    assert public["coalesced_count"] == 3
+    assert "coalesced_triggers" not in public
+
+
 def test_automation_api_and_ui_contract():
     client = TestClient(app)
     overview = client.get("/api/v1/automation/overview")

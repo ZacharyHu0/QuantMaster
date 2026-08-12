@@ -266,11 +266,6 @@ class NewsStore:
         self.sources = NewsSourceStore(
             self.path, read_only=self.read_only, initialize=not database_exists,
         )
-        from quantmaster.data.industry import load_cached_industry_map
-
-        # A missing current projection is a natural optional state.  A damaged
-        # or obsolete projection is an explicit contract error; do not swallow it.
-        self._industry_map = load_cached_industry_map()
         self.claims = NewsClaimStore(self.path, read_only=self.read_only)
 
     def _conn(self, *, write_intent: bool = False) -> sqlite3.Connection:
@@ -292,7 +287,6 @@ class NewsStore:
             item_id,
             item.symbols,
             item.sectors,
-            industry_map=self._industry_map,
             normalize_sectors=_normalize_sectors,
         )
 
@@ -462,15 +456,19 @@ class NewsStore:
         for field_name in ("symbols", "sectors"):
             try:
                 decoded = json.loads(value.get(field_name) or "[]")
-                value[field_name] = decoded if isinstance(decoded, list) else []
-            except (TypeError, json.JSONDecodeError):
-                value[field_name] = []
-        inferred = [self._industry_map.get(str(symbol), "") for symbol in value["symbols"]]
-        value["sectors"] = _normalize_sectors([*value["sectors"], *inferred])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"news row {value.get('id')} has invalid {field_name} JSON"
+                ) from exc
+            if not isinstance(decoded, list):
+                raise RuntimeError(
+                    f"news row {value.get('id')} {field_name} must be a JSON array"
+                )
+            value[field_name] = decoded
+        value["sectors"] = _normalize_sectors(value["sectors"])
         value["is_official"] = bool(value.get("is_official"))
-        # Workbench and alert APIs retain the established public name, while
-        # formal factor consumers select factor_importance_score explicitly.
-        value["importance_score"] = float(value.get("alert_importance_score") or 0)
+        value["alert_importance_score"] = float(value.get("alert_importance_score") or 0)
+        value.pop("importance_score", None)
         epoch = float(value.get("first_seen_at") or value.get("created_at") or 0)
         value["first_seen_epoch"] = epoch
         value["first_seen_at"] = (
@@ -1255,9 +1253,7 @@ class NewsStore:
             "THEN CAST(strftime('%s',n.published_at) AS REAL) "
             "ELSE CAST(strftime('%s',n.published_at,'-8 hours') AS REAL) END"
         )
-        importance_sql = (
-            "COALESCE(NULLIF(n.factor_importance_score,0),n.importance_score)"
-        )
+        importance_sql = "n.factor_importance_score"
         source_weight_sql = (
             "COALESCE(NULLIF(n.factor_weight_at_analysis,0),s.factor_weight)"
         )
@@ -1673,9 +1669,7 @@ class AICrawler:
         return self._client
 
     @staticmethod
-    def _apply_result(
-        item: NewsItem, result: dict, industry_map: dict[str, str] | None = None,
-    ) -> None:
+    def _apply_result(item: NewsItem, result: dict) -> None:
         symbols = result.get("symbols", [])
         if not isinstance(symbols, list):
             symbols = []
@@ -1686,10 +1680,7 @@ class AICrawler:
         sectors = result.get("sectors", [])
         if not isinstance(sectors, list):
             sectors = []
-        mapping = industry_map or {}
-        item.sectors = _normalize_sectors([
-            *sectors, *(mapping.get(symbol, "") for symbol in item.symbols),
-        ])
+        item.sectors = _normalize_sectors(sectors)
         event_type = str(result.get("event_type", "其他"))
         allowed_event_types = {"政策", "业绩", "并购", "行业", "宏观", "其他"}
         item.event_type = event_type if event_type in allowed_event_types else "其他"
@@ -1735,7 +1726,7 @@ class AICrawler:
             for item, result in zip(batch, parsed, strict=False):
                 if not isinstance(result, dict):
                     continue
-                self._apply_result(item, result, self.store._industry_map)
+                self._apply_result(item, result)
         return items
 
     @staticmethod
@@ -1879,7 +1870,7 @@ class AICrawler:
                 for item, result in zip(items, parsed, strict=True):
                     if item.db_id is None:
                         raise ValueError("待标注资讯缺少持久化 ID")
-                    self._apply_result(item, result, self.store._industry_map)
+                    self._apply_result(item, result)
                     item.importance_score, item.scope, _ = importance_score(
                         item, set(), set(),
                     )

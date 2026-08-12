@@ -1265,7 +1265,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         "execution": {
             "id": "job-1", "active_job_id": "job-1", "status": "running",
             "progress": 1, "phase": "fetch", "detail": "等待 provider",
-            "running_instances": 1, "coalesced_triggers": 2,
+            "running_instances": 1, "coalesced_count": 2,
             "started_at": "2026-07-27T10:00:00+00:00", "finished_at": "",
             "heartbeat_at": "2026-07-27T10:02:00+00:00",
             "last_completed_unit_at": "2026-07-27T10:01:30+00:00",
@@ -1273,11 +1273,11 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
             "queue": {"pending": 3, "running": 1, "retry_wait": 1, "dead_letter": 0},
             "backoff": {
                 "active": True, "reason": "provider Retry-After",
-                "waiting_for": "provider", "next_retry_at": "2026-07-27T10:05:00+00:00",
+                "waiting_on": "provider", "next_retry_at": "2026-07-27T10:05:00+00:00",
             },
             "stalled": {
                 "is_stalled": False, "reason": "", "diagnostic_code": "",
-                "observed_at": "", "waiting_for": "",
+                "observed_at": "", "waiting_on": "",
             },
             "links": {"self": "/api/v1/jobs/job-1"},
         },
@@ -1285,7 +1285,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     overview = {
         "enabled": True,
         "timezone": "Asia/Shanghai",
-        "runtime": "running",
+        "runtime": {"status": "running", "worker": {"phase": "serving"}},
         "bot_accounts": [
             {
                 "channel": "feishu",
@@ -1295,12 +1295,11 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
             }
         ],
         "jobs": [job],
-        "recent_runs": [],
         "recent_events": [],
         "targets": [target],
         "queue_summary": {
             "queued": 0, "running": 1, "retry_wait": 1, "failed": 0,
-            "dead_letter": 0, "coalesced_triggers": 2,
+            "dead_letter": 0, "coalesced_count": 2,
         },
         "outbox": {
             "dispatcher_status": "running", "pending": 2, "leased": 0,

@@ -271,7 +271,7 @@
     const timestamp = localDate(item.first_seen_at || item.published_at);
     const sentiment = Number(item.sentiment || 0);
     const sentimentClass = sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
-    const score = Math.round(Number(item.importance_score || 0));
+    const score = Math.round(Number(item.alert_importance_score || 0));
     const sectors = Array.isArray(item.sectors) ? item.sectors : [];
     const tags = [
       item.is_official ? '<span class="news-tag official">官方</span>' : '',
@@ -348,8 +348,8 @@
     state.items = [...byId.values()].filter(matchesCurrentFilters);
     const importance = filterForm.elements.sort.value === 'importance';
     state.items.sort(importance
-      ? (left, right) => Number(right.importance_score || 0) -
-        Number(left.importance_score || 0) || Number(right.id) - Number(left.id)
+      ? (left, right) => Number(right.alert_importance_score || 0) -
+        Number(left.alert_importance_score || 0) || Number(right.id) - Number(left.id)
       : (left, right) => Number(right.id) - Number(left.id));
     state.items = state.items.slice(0, 40);
     state.updatedIds = updated;

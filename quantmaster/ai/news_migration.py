@@ -250,7 +250,7 @@ class NewsContractMigrator:
                 raise RuntimeError("news_schema_newer_than_runtime")
             if current < NEWS_SCHEMA_VERSION:
                 migrate_legacy_news_schema(
-                    connection, industry_map={}, normalize_sectors=_normalize_sectors,
+                    connection, normalize_sectors=_normalize_sectors,
                 )
                 needs_source_schema = True
         if needs_source_schema:

@@ -12,7 +12,7 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from quantmaster.ai.news_contracts import (
@@ -92,19 +92,13 @@ def replace_news_dimensions(
     news_id: int,
     symbols: Sequence[Any],
     sectors: Sequence[Any],
-    *,
-    industry_map: Mapping[str, str],
-    normalize_sectors: Callable[[list[Any]], list[str]],
+    *, normalize_sectors: Callable[[list[Any]], list[str]],
 ) -> None:
     """Replace formal dimensions only from values frozen in the news row.
 
-    ``industry_map`` remains in the signature for migration-call compatibility,
-    but the live map must never rewrite a historical factor dimension.  The
-    crawler freezes any symbol-to-industry inference into ``news.sectors`` in
-    the analysis transaction; current display enrichment is a separate read
-    projection.
+    The crawler freezes dimensions in the analysis transaction.  Current
+    symbol classifications are never accepted by this historical write path.
     """
-    del industry_map
     normalized_symbols = list(dict.fromkeys(
         str(symbol).strip() for symbol in symbols if str(symbol).strip()
     ))
@@ -290,7 +284,6 @@ def _rebuild_legacy_title_identity_table(connection: sqlite3.Connection) -> None
 def _rebuild_dimensions(
     connection: sqlite3.Connection,
     *,
-    industry_map: Mapping[str, str],
     normalize_sectors: Callable[[list[Any]], list[str]],
 ) -> None:
     connection.execute("DELETE FROM news_analysis_symbols")
@@ -302,7 +295,6 @@ def _rebuild_dimensions(
             int(row["id"]),
             _decode_list(row["symbols"]),
             _decode_list(row["sectors"]),
-            industry_map=industry_map,
             normalize_sectors=normalize_sectors,
         )
 
@@ -374,7 +366,6 @@ def require_current_news_schema(connection: sqlite3.Connection) -> None:
 def migrate_legacy_news_schema(
     connection: sqlite3.Connection,
     *,
-    industry_map: Mapping[str, str],
     normalize_sectors: Callable[[list[Any]], list[str]],
 ) -> None:
     """Explicit one-shot migration using only facts persisted in the old database."""
@@ -397,7 +388,6 @@ def migrate_legacy_news_schema(
         _create_news_schema(connection, legacy=False)
         _rebuild_dimensions(
             connection,
-            industry_map=industry_map,
             normalize_sectors=normalize_sectors,
         )
         connection.execute(

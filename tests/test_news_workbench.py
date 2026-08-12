@@ -541,7 +541,7 @@ def test_sandbox_factor_downweights_sina_fast_against_official_evidence(tmp_path
     assert preview.iloc[0, 0] == pytest.approx((0.6 - 0.25) / 1.25)
 
 
-def test_sandbox_factor_can_use_legacy_analyzed_rows_without_promoting_them(tmp_path):
+def test_sandbox_factor_does_not_reinterpret_retired_importance_score(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     published = pd.Timestamp("2026-08-03 10:00", tz="Asia/Shanghai")
     item = NewsItem(
@@ -578,11 +578,10 @@ def test_sandbox_factor_can_use_legacy_analyzed_rows_without_promoting_them(tmp_
     )
 
     assert production.iloc[0, 0] is pd.NA or pd.isna(production.iloc[0, 0])
-    assert preview.iloc[0, 0] == pytest.approx(0.8)
+    assert preview.iloc[0, 0] is pd.NA or pd.isna(preview.iloc[0, 0])
     metadata = preview.attrs["news_factor"]
     assert metadata["formal_eligible"] is False
-    assert "factor_importance_missing" in metadata["reasons"]
-    assert "factor_source_weight_missing" in metadata["reasons"]
+    assert "no_usable_publication_rows" in metadata["reasons"]
 
 
 def test_news_list_truncates_body_but_detail_is_complete(tmp_path):
@@ -604,9 +603,9 @@ def test_llm_annotations_are_constrained():
         "sectors": ["电子", "DROP TABLE", "化工", "电子"],
         "event_type": "任意代码", "sentiment": "nan", "confidence": "inf",
         "scope": "private", "urgency": "now", "summary": "摘要",
-    }, {"600519.SH": "食品饮料"})
+    })
     assert item.symbols == ["600519.SH"]
-    assert item.sectors == ["电子", "基础化工", "食品饮料"]
+    assert item.sectors == ["电子", "基础化工"]
     assert item.event_type == "其他"
     assert item.sentiment == 0
     assert item.confidence == 0
@@ -741,7 +740,50 @@ def test_live_industry_map_change_cannot_rewrite_historical_sector_factor(
 
     assert before == after
     assert [row["sector"] for row in after] == ["银行"]
-    assert reopened.recent(1)[0]["sectors"] == ["银行", "电子"]
+    assert reopened.recent(1)[0]["sectors"] == ["银行"]
+
+
+def test_annotation_only_freezes_sectors_returned_by_the_analysis():
+    item = NewsItem(source="test", title="行业确认", content="正文")
+
+    AICrawler._apply_result(item, {
+        "symbols": ["600001.SH"],
+        "sectors": ["银行"],
+        "event_type": "行业",
+    })
+
+    assert item.symbols == ["600001.SH"]
+    assert item.sectors == ["银行"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("symbols", "not-json"),
+    ("sectors", '{"行业":"银行"}'),
+])
+def test_news_reader_rejects_corrupt_dimension_json(tmp_path, field, value):
+    store = NewsStore(tmp_path / "news.sqlite")
+    assert store.save([official_news(
+        store, title="损坏维度", content="损坏维度正文",
+        symbols=["600001.SH"], sectors=["银行"], analysis_status="complete",
+    )]) == 1
+    with store._conn() as connection:
+        connection.execute(f"UPDATE news SET {field}=? WHERE id=1", (value,))
+
+    with pytest.raises(RuntimeError, match=rf"{field} (JSON|must be a JSON array)"):
+        store.recent(1)
+
+
+def test_news_public_row_only_exposes_alert_importance_score(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    assert store.save([official_news(
+        store, title="重要资讯", content="重要资讯正文",
+        importance_score=82, analysis_status="complete",
+    )]) == 1
+
+    public = store.recent(1)[0]
+
+    assert public["alert_importance_score"] == 82
+    assert "importance_score" not in public
 
 
 def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkeypatch):

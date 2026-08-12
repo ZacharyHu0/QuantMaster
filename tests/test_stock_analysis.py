@@ -501,7 +501,7 @@ def test_analysis_delivery_persists_cursor_and_enforces_update_budget(tmp_path):
     assert delivery["event_seq"] == 7
     assert delivery["update_count"] == 6
     assert delivery["appendix_cursor"] == 2
-    assert restarted.due_analysis_deliveries()[0]["target"] == "oc_analysis"
+    assert restarted.claim_analysis_deliveries("test-worker")[0]["target"] == "oc_analysis"
     with np.testing.assert_raises_regex(ValueError, "不能倒退"):
         restarted.update_analysis_delivery(saved["id"], event_seq=6)
     with np.testing.assert_raises_regex(ValueError, "不能超过 10 次"):
@@ -687,7 +687,7 @@ def test_feishu_appendix_delivery_resumes_after_restart_without_reupdating_main(
     assert first_result["retried"] == 1
     assert interrupted["appendix_cursor"] == 1
     assert interrupted["update_count"] == 1
-    store.update_analysis_delivery(saved["id"], status="retry", next_attempt_at=0)
+    store.update_analysis_delivery(saved["id"], status="retry_wait", next_attempt_at=0)
 
     restarted_store = AutomationStore(path)
     restarted_service = AutomationService(restarted_store, OutboxDispatcher(restarted_store))

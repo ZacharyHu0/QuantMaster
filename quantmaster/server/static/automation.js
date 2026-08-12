@@ -90,9 +90,11 @@
 
   function latestRun(jobName) {
     const job = (state.data?.jobs || []).find(item => item.name === jobName);
-    if (job?.execution?.id) return job.execution;
-    return (state.data?.recent_runs || []).find(item =>
-      cleanJobName(item.job_name || item.task || item.type) === jobName) || null;
+    return job?.execution?.id ? job.execution : null;
+  }
+
+  function runtimeStatus() {
+    return String(state.data?.runtime?.status || 'disabled');
   }
 
   function progressValue(value) {
@@ -134,7 +136,7 @@
       return {tone:'error', label:'最近失败', order:0, recent};
     }
     if (!job.enabled) return {tone:'notice', label:'已暂停', order:1, recent};
-    if (state.data?.runtime !== 'running') {
+    if (runtimeStatus() !== 'running') {
       return {tone:'warning', label:'等待运行时', order:2, recent};
     }
     if (recent?.backoff?.active || ['retry', 'retrying', 'retry_wait'].includes(recentStatus)) {
@@ -169,7 +171,7 @@
     }
     if (['connecting', 'configured', 'waiting_message'].includes(accountStatus)) {
       return {tone:'warning', label:statusText(accountStatus),
-        detail:state.data?.runtime === 'running' ? '通道仍在建立连接。' : '启用自动化运行时后才会建立连接。'};
+        detail:runtimeStatus() === 'running' ? '通道仍在建立连接。' : '启用自动化运行时后才会建立连接。'};
     }
     return {tone:'warning', label:statusText(accountStatus), detail:'通道尚未进入稳定监听状态。'};
   }
@@ -205,7 +207,7 @@
   function renderRuntimeHeader() {
     const runtime = document.getElementById('automation-runtime');
     const updated = document.getElementById('automation-updated-at');
-    const current = state.data?.runtime || 'disabled';
+    const current = runtimeStatus();
     const tone = current === 'running' ? 'healthy' : current === 'standby' ? 'warning' : 'error';
     runtime.className = `automation-status ${tone}`;
     runtime.textContent = current === 'running'
@@ -218,7 +220,7 @@
 
   function buildAttentionItems() {
     const items = [];
-    const runtime = state.data?.runtime || 'disabled';
+    const runtime = runtimeStatus();
     if (runtime !== 'running') {
       items.push({tone:runtime === 'standby' ? 'warning' : 'error',
         title:runtime === 'standby' ? '调度器正在等待运行租约' : '自动化运行时尚未启用',
@@ -265,14 +267,15 @@
     const attention = buildAttentionItems();
     const upcoming = jobs.filter(job => job.enabled && job.next_run)
       .sort((a, b) => new Date(a.next_run) - new Date(b.next_run)).slice(0, 4);
-    const runtimeTone = state.data.runtime === 'running' ? 'healthy'
-      : state.data.runtime === 'standby' ? 'warning' : 'error';
+    const runtime = runtimeStatus();
+    const runtimeTone = runtime === 'running' ? 'healthy'
+      : runtime === 'standby' ? 'warning' : 'error';
     const queue = state.data.queue_summary || {};
     const outbox = state.data.outbox || {};
     const queueRisk = Number(queue.failed || 0) + Number(queue.dead_letter || 0);
     const outboxRisk = Number(outbox.dead_letter || 0);
     const operationalRevision = JSON.stringify([
-      state.data.runtime, queueRisk, queue.running, queue.retry_wait, outbox.dispatcher_status,
+      runtime, queueRisk, queue.running, queue.retry_wait, outbox.dispatcher_status,
       outbox.pending, outbox.retry_wait, outbox.dead_letter,
       ...jobs.map(job => [job.name, jobHealth(job).label, job.execution?.stalled?.diagnostic_code || '']),
     ]);
@@ -281,11 +284,11 @@
 
     root.innerHTML = `
       <dl class="automation-health-rail" aria-label="自动化健康状态">
-        <div><dt>运行时</dt><dd>${statusMarkup(state.data.runtime === 'running' ? '运行正常' : state.data.runtime === 'standby' ? '等待租约' : '已关闭', runtimeTone)}<small>${esc(state.data.timezone || '—')}</small></dd></div>
+        <div><dt>运行时</dt><dd>${statusMarkup(runtime === 'running' ? '运行正常' : runtime === 'standby' ? '等待租约' : '已关闭', runtimeTone)}<small>${esc(state.data.timezone || '—')}</small></dd></div>
         <div><dt>计划任务</dt><dd>${statusMarkup(failedJobs ? `${failedJobs} 项失败` : `${enabledJobs}/${jobs.length} 已启用`, failedJobs ? 'error' : enabledJobs === jobs.length ? 'healthy' : 'notice')}<small>${jobs.length ? '按异常与暂停状态排序' : '尚未配置任务'}</small></dd></div>
         <div><dt>飞书主通道</dt><dd>${statusMarkup(feishu.label, feishu.tone)}<small>${esc(feishu.detail)}</small></dd></div>
         <div><dt>推送目标</dt><dd>${statusMarkup(enabledTargets.length ? `${healthyTargets}/${enabledTargets.length} 可用` : '未启用', healthyTargets === enabledTargets.length && enabledTargets.length ? 'healthy' : enabledTargets.length ? 'warning' : 'neutral')}<small>${targets.length} 个已登记会话</small></dd></div>
-        <div><dt>Durable 队列</dt><dd>${statusMarkup(queueRisk ? `${queueRisk} 项需处理` : `${Number(queue.running || 0)} 运行 · ${Number(queue.queued || 0)} 排队`, queueRisk ? 'error' : Number(queue.retry_wait || 0) ? 'neutral' : 'healthy')}<small>退避 ${Number(queue.retry_wait || 0)} · 合并触发 ${Number(queue.coalesced_triggers || 0)}</small></dd></div>
+        <div><dt>Durable 队列</dt><dd>${statusMarkup(queueRisk ? `${queueRisk} 项需处理` : `${Number(queue.running || 0)} 运行 · ${Number(queue.queued || 0)} 排队`, queueRisk ? 'error' : Number(queue.retry_wait || 0) ? 'neutral' : 'healthy')}<small>退避 ${Number(queue.retry_wait || 0)} · 合并触发 ${Number(queue.coalesced_count || 0)}</small></dd></div>
         <div><dt>Outbox</dt><dd>${statusMarkup(outboxRisk ? `${outboxRisk} 项死信` : outbox.dispatcher_status === 'running' ? `${Number(outbox.pending || 0)} 待发送` : outbox.dispatcher_status === 'disabled' ? '已停用' : '未配置', outboxRisk ? 'error' : outbox.dispatcher_status === 'running' ? 'healthy' : 'neutral')}<small>重试 ${Number(outbox.retry_wait || 0)}${outbox.next_retry_at ? ` · ${dateText(outbox.next_retry_at)}` : ''}</small></dd></div>
       </dl>
       <div class="automation-overview-grid">
@@ -519,14 +522,14 @@
           <dl class="automation-job-facts">
             <div><dt>Durable Job</dt><dd>${execution.id ? `<a href="${esc(execution.links?.self || `/api/v1/jobs/${execution.id}`)}">${esc(execution.id)}</a>` : '—'}</dd></div>
             <div><dt>原子队列</dt><dd>${esc(queueText(queue))}</dd></div>
-            <div><dt>合并触发</dt><dd>${Number(execution.coalesced_triggers || 0)} 次</dd></div>
+            <div><dt>合并触发</dt><dd>${Number(execution.coalesced_count || 0)} 次</dd></div>
             <div><dt>上次开始</dt><dd>${dateText(execution.started_at)}</dd></div>
             <div><dt>上次结束</dt><dd>${dateText(execution.finished_at)}</dd></div>
             <div><dt>当前耗时</dt><dd>${execution.started_at ? durationText(execution.elapsed_seconds) : '—'}</dd></div>
             <div><dt>心跳 / 最近原子项</dt><dd>${dateText(execution.heartbeat_at)} / ${dateText(execution.last_completed_unit_at)}</dd></div>
           </dl>
-          ${backoff.active ? `<div class="automation-job-diagnostic" data-tone="neutral"><strong>合法退避${backoff.next_retry_at ? ` · 下次重试 ${dateText(backoff.next_retry_at)}` : ''}</strong><span>${esc(backoff.reason || backoff.waiting_for || '等待重试条件满足')}</span></div>` : ''}
-          ${stalled.is_stalled ? `<div class="automation-job-diagnostic" data-tone="error" role="status"><strong>任务停滞 · ${esc(stalled.diagnostic_code || 'stalled')}</strong><span>${esc(stalled.reason || '进度心跳已超出预期')} · 当前等待 ${esc(stalled.waiting_for || '未知对象')} · 观察于 ${dateText(stalled.observed_at)}</span></div>` : ''}
+          ${backoff.active ? `<div class="automation-job-diagnostic" data-tone="neutral"><strong>合法退避${backoff.next_retry_at ? ` · 下次重试 ${dateText(backoff.next_retry_at)}` : ''}</strong><span>${esc(backoff.waiting_on || '等待重试条件满足')}</span></div>` : ''}
+          ${stalled.is_stalled ? `<div class="automation-job-diagnostic" data-tone="error" role="status"><strong>任务停滞 · ${esc(stalled.diagnostic_code || 'stalled')}</strong><span>${esc(stalled.reason || '进度心跳已超出预期')} · 当前等待 ${esc(stalled.waiting_on || '未知对象')} · 观察于 ${dateText(stalled.observed_at)}</span></div>` : ''}
           <div class="job-actions">
             <button class="ghost" type="button" data-job-toggle="${esc(job.name)}" data-enabled="${job.enabled}" ${saving ? 'disabled' : ''}>${job.enabled ? '暂停任务' : '恢复任务'}</button>
             <button class="ghost" type="button" data-job-run="${esc(job.name)}" ${saving ? 'disabled' : ''}>立即运行任务</button>

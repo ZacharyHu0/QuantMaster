@@ -471,7 +471,7 @@ def set_config(cfg: Config | None) -> None:
 
 
 def get_config_readiness() -> dict[str, str]:
-    """Return the cached data-root state used by ``/health/ready``.
+    """Return the cached data-root state used by ``/api/v1/health``.
 
     The initial call may establish configuration during process bootstrap.  A
     running Web generation is already configured in its lifespan, so ordinary

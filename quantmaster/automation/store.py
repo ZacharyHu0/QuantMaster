@@ -1058,10 +1058,6 @@ class AutomationStore:
             ).fetchall()
         return [dict(row) for row in claimed]
 
-    def due_analysis_deliveries(self, limit: int = 20) -> list[dict]:
-        """Compatibility entry point that still performs an atomic fenced claim."""
-        return self.claim_analysis_deliveries("legacy-analysis-dispatch", limit=limit)
-
     def begin_analysis_delivery(
         self, delivery_id: str, owner: str, token: str, *, operation: str,
     ) -> bool:
@@ -1112,12 +1108,6 @@ class AutomationStore:
         owner: str = "", token: str = "", release: bool = False,
         diagnostic_code: str | None = None,
     ) -> dict:
-        aliases = {
-            "active": "pending", "retry": "retry_wait",
-            "delivered": "sent", "failed": "dead_letter",
-        }
-        if status is not None:
-            status = aliases.get(status, status)
         if status is not None and status not in {
             "pending", "claimed", "sending", "retry_wait", "sent",
             "dead_letter", "ambiguous",

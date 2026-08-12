@@ -12,15 +12,14 @@ from quantmaster.automation.runtime import get_runtime
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
 from quantmaster.runtime.contracts import ContractModel
-from quantmaster.runtime.jobs import UnifiedJobStore
+from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.runtime.worker import runtime_worker_status
 from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter()
 _MISSING = object()
-_ACTIVE_RUN_STATUSES = frozenset({"queued", "pending", "running", "cancelling", "interrupted"})
-_RETRY_RUN_STATUSES = frozenset({"retry", "retrying", "retry_wait"})
-_FAILED_RUN_STATUSES = frozenset({"failed", "error", "timed_out", "timeout"})
+_ACTIVE_RUN_STATUSES = frozenset({"queued", "running", "cancelling", "interrupted"})
+_FAILED_RUN_STATUSES = frozenset({"failed"})
 _JOB_KINDS = {
     "intraday_monitor": "high_frequency_poll",
     "fast_news_scan": "time_window",
@@ -96,7 +95,7 @@ def _automation_run_rows() -> list[dict[str, Any]]:
     except (FileNotFoundError, sqlite3.Error):
         return []
     return [
-        value for value in values
+        UnifiedJobRuntime.public(value) for value in values
         if str(value.get("type") or "").startswith("automation.")
     ][:50]
 
@@ -112,14 +111,10 @@ def _public_automation_run(value: dict[str, Any]) -> dict[str, Any]:
     backoff = backoff_value if isinstance(backoff_value, dict) else {}
     stalled_value = value.get("stalled") or {}
     stalled = stalled_value if isinstance(stalled_value, dict) else {}
-    queue_value = value.get("queue") or value.get("durable_queue") or {}
+    queue_value = value.get("queue") or {}
     queue = queue_value if isinstance(queue_value, dict) else {}
-    next_retry_at = _iso_time(
-        backoff.get("next_retry_at") or value.get("next_retry_at")
-    )
-    diagnostic_code = str(
-        stalled.get("diagnostic_code") or value.get("diagnostic_code") or ""
-    )[:80]
+    next_retry_at = _iso_time(backoff.get("next_retry_at"))
+    diagnostic_code = str(stalled.get("diagnostic_code") or "")[:80]
     job_id = str(value.get("id") or "")
     return {
         "domain": "automation",
@@ -142,26 +137,24 @@ def _public_automation_run(value: dict[str, Any]) -> dict[str, Any]:
         "elapsed_seconds": _seconds_between(started_at, finished_at),
         "estimated_remaining_seconds": _count(value.get("estimated_remaining_seconds")),
         "queue": {
-            "pending": _count(queue.get("pending") or value.get("pending_units")),
-            "running": _count(queue.get("running") or value.get("running_units")),
-            "retry_wait": _count(queue.get("retry_wait") or value.get("retry_wait_units")),
-            "dead_letter": _count(queue.get("dead_letter") or value.get("dead_letter_units")),
+            "pending": _count(queue.get("pending")),
+            "running": _count(queue.get("running")),
+            "retry_wait": _count(queue.get("retry_wait")),
+            "dead_letter": _count(queue.get("dead_letter")),
         },
-        "coalesced_triggers": _count(
-            value.get("coalesced_triggers") or value.get("coalesced_count")
-        ),
+        "coalesced_count": _count(value.get("coalesced_count")),
         "backoff": {
-            "active": bool(backoff.get("active") or next_retry_at),
-            "reason": str(backoff.get("reason") or value.get("backoff_reason") or "")[:500],
-            "waiting_for": str(backoff.get("waiting_for") or value.get("waiting_for") or "")[:200],
+            "active": bool(backoff.get("active")),
+            "reason": str(backoff.get("reason") or "")[:500],
+            "waiting_on": str(backoff.get("waiting_on") or "")[:200],
             "next_retry_at": next_retry_at,
         },
         "stalled": {
-            "is_stalled": bool(stalled.get("is_stalled") or value.get("is_stalled")),
-            "reason": str(stalled.get("reason") or value.get("stalled_reason") or "")[:500],
+            "is_stalled": bool(stalled.get("is_stalled")),
+            "reason": str(stalled.get("reason") or "")[:500],
             "diagnostic_code": diagnostic_code,
-            "observed_at": _iso_time(stalled.get("observed_at") or value.get("stalled_at")),
-            "waiting_for": str(stalled.get("waiting_for") or value.get("waiting_for") or "")[:200],
+            "observed_at": _iso_time(stalled.get("observed_at")),
+            "waiting_on": str(stalled.get("waiting_on") or "")[:200],
         },
         "links": {
             "self": f"/api/v1/jobs/{job_id}",
@@ -180,15 +173,6 @@ def _outbox_summary(store: AutomationStore, *, enabled: bool) -> dict[str, Any]:
         "pending": 0, "leased": 0, "retry_wait": 0,
         "sent": 0, "dead_letter": 0, "next_retry_at": "",
     }
-    for method_name in ("outbox_summary", "delivery_summary", "delivery_stats"):
-        method = getattr(store, method_name, None)
-        if callable(method):
-            try:
-                supplied = method()
-            except (OSError, sqlite3.Error):
-                break
-            if isinstance(supplied, dict):
-                return {**defaults, **supplied}
     try:
         accounts = store.bot_accounts("feishu")
         configured = any(
@@ -203,12 +187,9 @@ def _outbox_summary(store: AutomationStore, *, enabled: bool) -> dict[str, Any]:
             ).fetchall()
     except (FileNotFoundError, OSError, sqlite3.Error):
         return defaults
-    mapping = {
-        "pending": "pending", "leased": "leased", "processing": "leased",
-        "retry": "retry_wait", "retry_wait": "retry_wait",
-        "delivered": "sent", "sent": "sent",
-        "failed": "dead_letter", "dead_letter": "dead_letter",
-    }
+    mapping = {status: status for status in (
+        "pending", "leased", "retry_wait", "sent", "dead_letter",
+    )}
     retry_times: list[float] = []
     for row in rows:
         key = mapping.get(str(row["status"] or ""))
@@ -248,7 +229,7 @@ def _job_projection(
                     [_count((run.get("queue") or {}).get("dead_letter")) for run in matching] or [0]
                 ),
             } if active else queue,
-            "coalesced_triggers": sum(_count(run.get("coalesced_triggers")) for run in matching),
+            "coalesced_count": sum(_count(run.get("coalesced_count")) for run in matching),
         }
         projected.append({**template, "job_kind": _JOB_KINDS.get(name, "manual"), "execution": execution})
     return projected
@@ -256,12 +237,12 @@ def _job_projection(
 
 def _queue_summary(runs: list[dict[str, Any]]) -> dict[str, int]:
     return {
-        "queued": sum(str(run.get("status") or "") in {"queued", "pending"} for run in runs),
+        "queued": sum(str(run.get("status") or "") == "queued" for run in runs),
         "running": sum(str(run.get("status") or "") in {"running", "cancelling"} for run in runs),
-        "retry_wait": sum(str(run.get("status") or "") in _RETRY_RUN_STATUSES for run in runs),
+        "retry_wait": sum(bool((run.get("backoff") or {}).get("active")) for run in runs),
         "failed": sum(str(run.get("status") or "") in _FAILED_RUN_STATUSES for run in runs),
         "dead_letter": sum(_count((run.get("queue") or {}).get("dead_letter")) for run in runs),
-        "coalesced_triggers": sum(_count(run.get("coalesced_triggers")) for run in runs),
+        "coalesced_count": sum(_count(run.get("coalesced_count")) for run in runs),
     }
 
 
@@ -271,8 +252,10 @@ def _cold_overview() -> dict[str, Any]:
     return {
         "enabled": enabled,
         "timezone": get_config().automation.timezone,
-        "runtime": "disabled" if not enabled else "degraded",
-        "runtime_detail": {**worker, "channels": {}, "source": "runtime-worker-heartbeat"},
+        "runtime": {
+            "status": "disabled" if not enabled else "degraded",
+            "worker": worker,
+        },
         "channels": {
             "feishu": {"configured": False, "label": "飞书应用 Bot", "role": "primary"},
             "weixin": {"configured": False, "label": "腾讯微信 ClawBot", "role": "limited"},
@@ -284,7 +267,6 @@ def _cold_overview() -> dict[str, Any]:
         },
         "targets": [],
         "jobs": [],
-        "recent_runs": [],
         "recent_events": [],
         "scheduler": {
             "status": "disabled" if not enabled else "unavailable",
@@ -351,12 +333,7 @@ def automation_overview(request: Request) -> dict:
         return {
             "enabled": enabled,
             "timezone": get_config().automation.timezone,
-            "runtime": runtime,
-            "runtime_detail": {
-                **worker,
-                "channels": {},
-                "source": "runtime-worker-heartbeat",
-            },
+            "runtime": {"status": runtime, "worker": worker},
             "channels": {
                 "feishu": {
                     "configured": any(a.get("channel") == "feishu" for a in accounts),
@@ -378,8 +355,6 @@ def automation_overview(request: Request) -> dict:
             },
             "targets": targets,
             "jobs": _job_projection(templates, runs),
-            # Kept for older clients; current scheduler UI uses the durable execution projection.
-            "recent_runs": store.recent_runs(12),
             "recent_events": store.recent_events(12),
             "scheduler": {
                 "status": runtime,
