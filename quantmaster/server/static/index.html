@@ -1383,8 +1383,8 @@
             <label>快讯扫描间隔（分钟）<input name="automation.fast_news_interval_minutes" type="number" min="5" max="1440" step="1" required><small>默认 20 分钟，适用于新浪与东方财富快讯。</small></label>
             <label>官方公告间隔（分钟）<input name="automation.official_news_interval_minutes" type="number" min="5" max="1440" step="1" required><small>默认 120 分钟，即 2 小时。</small></label>
             <label>定期资讯间隔（分钟）<input name="automation.periodic_news_interval_minutes" type="number" min="5" max="1440" step="1" required><small>默认 360 分钟，即 6 小时。</small></label>
-            <label class="field-wide">重点观察列表<textarea name="automation.watchlist" data-value-type="list" rows="4" placeholder="600519.SH&#10;000858.SZ"></textarea><small>每行或逗号分隔；代码会自动补全市场后缀并去重。</small></label>
-            <label class="field-wide">市场哨兵指数<textarea name="automation.sentinel_indices" data-value-type="list" rows="3" required placeholder="000300.SH&#10;000905.SH"></textarea><small>1–12 个指数，用于盘中市场转折监测。</small></label>
+            <label class="automation-list-field">重点观察列表<textarea name="automation.watchlist" data-value-type="list" rows="6" placeholder="600519.SH&#10;000858.SZ"></textarea><small>每行或逗号分隔；代码会自动补全市场后缀并去重。</small></label>
+            <label class="automation-list-field">市场哨兵指数<textarea name="automation.sentinel_indices" data-value-type="list" rows="6" required placeholder="000300.SH&#10;000905.SH"></textarea><small>1–12 个指数，用于盘中市场转折监测。</small></label>
             <label class="field-wide">微信 ClawBot API 地址<input name="automation.weixin_api_base" type="url" required placeholder="https://ilinkai.weixin.qq.com"><small>通常无需修改；仅在腾讯接口地址或兼容代理发生变化时调整。</small></label>
           </div>
 

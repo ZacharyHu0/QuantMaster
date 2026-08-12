@@ -294,6 +294,7 @@ class TestBasics:
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
         app_styles = client.get("/static/app.css").text
+        settings_styles = client.get("/static/settings.css").text
         assert resp.status_code == 200
         assert "QuantMaster" in resp.text
         assert 'data-tab="decision"' in resp.text
@@ -319,6 +320,10 @@ class TestBasics:
         assert "名称与代码 · 标注提及次数" in resp.text
         assert "/static/settings.css?rev=" in resp.text
         assert "/static/settings.js?rev=" in resp.text
+        assert ".settings-diagnostic-grid" in settings_styles
+        assert "align-items: start; margin-bottom: 24px" in settings_styles
+        assert resp.text.count('class="automation-list-field"') == 2
+        assert '.automation-list-field textarea { min-height: 168px; }' in settings_styles
         assert "%%QM_SETTINGS_CSS_REV%%" not in resp.text
         assert "%%QM_SETTINGS_JS_REV%%" not in resp.text
         assert "/static/news.css?rev=" in resp.text

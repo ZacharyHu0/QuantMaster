@@ -164,6 +164,31 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "快照回滚",
         ]
 
+        page.locator('#settings-nav [data-settings-section="online-data"]').click()
+        page.locator('[data-settings-panel="online-data"]').wait_for(state="visible")
+        diagnostic_cards = page.locator(
+            '[data-settings-panel="online-data"] .settings-diagnostic-grid .settings-diagnostic'
+        )
+        diagnostic_cards.nth(0).locator(".check-result").evaluate(
+            "element => { element.style.minHeight = '240px'; }"
+        )
+        card_layout = diagnostic_cards.evaluate_all(
+            "elements => elements.map(element => "
+            "({top: element.offsetTop, height: element.offsetHeight}))"
+        )
+        assert card_layout[0]["top"] == card_layout[1]["top"]
+        assert card_layout[0]["height"] > card_layout[1]["height"]
+
+        page.locator('#settings-nav [data-settings-section="automation"]').click()
+        page.locator('[data-settings-panel="automation"]').wait_for(state="visible")
+        desktop_lists = page.locator(".automation-list-field").evaluate_all(
+            "elements => elements.map(element => "
+            "({top: element.offsetTop, left: element.offsetLeft}))"
+        )
+        assert desktop_lists[0]["top"] == desktop_lists[1]["top"]
+        assert desktop_lists[0]["left"] < desktop_lists[1]["left"]
+        page.locator('#settings-nav [data-settings-section="llm"]').click()
+
         browser_settings = page.evaluate("structuredClone(window.QuantMasterManagement.state.config)")
 
         def fulfill_settings_save(route):
@@ -343,6 +368,13 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         mobile_settings = page.locator("#settings-section-select")
         assert mobile_settings.is_visible()
         assert page.locator("#settings-nav").is_hidden()
+        mobile_settings.select_option("automation")
+        mobile_lists = page.locator(".automation-list-field").evaluate_all(
+            "elements => elements.map(element => "
+            "({top: element.offsetTop, left: element.offsetLeft}))"
+        )
+        assert mobile_lists[0]["left"] == mobile_lists[1]["left"]
+        assert mobile_lists[0]["top"] < mobile_lists[1]["top"]
         mobile_settings.select_option("local-data")
         assert page.locator('[data-settings-panel="local-data"]').is_visible()
         columns = page.locator(".settings-shell").evaluate("el => getComputedStyle(el).gridTemplateColumns")

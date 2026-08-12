@@ -57,6 +57,7 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .field-grid input, .field-grid select { width: 100%; min-width: 0; }
 .field-grid small, .secret-field small { color: var(--muted); font-size: 11px; min-height: 17px; }
 .field-wide { grid-column: 1 / -1; }
+.automation-list-field textarea { min-height: 168px; }
 .field-grid [aria-invalid="true"] { border-color: var(--up); }
 .toggle-field {
   display: flex !important; flex-direction: row !important; align-items: center;
@@ -100,7 +101,7 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .settings-subsection { margin-top: 24px; }
 .settings-diagnostic-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px;
-  margin-bottom: 24px;
+  align-items: start; margin-bottom: 24px;
 }
 .settings-diagnostic {
   display: grid; gap: 12px; margin-bottom: 24px; padding-bottom: 24px;
