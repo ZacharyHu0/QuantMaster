@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import threading
+import unicodedata
 from ctypes import wintypes
 from multiprocessing import spawn
 from pathlib import Path
@@ -142,6 +143,39 @@ def initialize_windows_app_process(*, root: bool = False) -> bool:
     return True
 
 
+def _safe_role(role: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(role))
+    safe = "".join(
+        character if character.isalnum() or character in " .-_" else " "
+        for character in normalized
+    )
+    return " ".join(safe.split()).strip(" .")
+
+
+def _base_interpreter() -> Path | None:
+    """Resolve a real CPython host even from an already-renamed child.
+
+    CPython derives ``_base_executable`` by retaining the current image name.
+    For ``QuantMaster Runtime Worker.exe`` that points at a same-named file in
+    ``base_prefix`` which does not exist.  Falling back to the canonical base
+    ``python.exe`` keeps grandchildren role-labelled too.
+    """
+
+    candidates = (
+        Path(getattr(sys, "_base_executable", sys.executable)),
+        Path(sys.base_prefix) / "python.exe",
+        Path(sys.executable),
+    )
+    return next((path.resolve() for path in candidates if path.is_file()), None)
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def _role_executable(role: str) -> str | None:
     """Return a role-labelled interpreter copy for Windows Task Manager.
 
@@ -157,31 +191,55 @@ def _role_executable(role: str) -> str | None:
     # with no adjacent CPython DLLs). Its renamed copies cannot start outside
     # the original ``python.exe`` name. A base-interpreter copy alongside
     # ``pyvenv.cfg`` retains the venv while giving Task Manager a role image.
-    source = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    source = _base_interpreter()
     target_directory = Path(sys.executable).resolve().parent
-    if not source.is_file() or source.suffix.casefold() != ".exe":
+    if source is None or source.suffix.casefold() != ".exe":
         return None
-    safe_role = "".join(
-        character for character in role if character.isalnum() or character in " -_"
-    ).strip()
+    safe_role = _safe_role(role)
     if not safe_role:
         return None
     target = target_directory / f"QuantMaster {safe_role}.exe"
     if target == source:
         return str(source)
     try:
-        if not target.exists() or target.stat().st_size != source.stat().st_size:
+        marker = target.with_suffix(target.suffix + ".role")
+        from quantmaster.release import VERSION
+
+        identity = f"{VERSION}|{safe_role}|{source.stat().st_mtime_ns}|{source.stat().st_size}"
+        if not target.exists() or _read_text(marker) != identity:
             temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
             try:
                 shutil.copy2(source, temporary)
+                # A one-file PyInstaller archive lives in the executable
+                # overlay. Source-mode CPython copies can safely receive role
+                # VERSIONINFO; packaged copies retain their original resource
+                # while their image filename still exposes the worker role.
+                if not getattr(sys, "frozen", False):
+                    from quantmaster.runtime.windows_executable import (
+                        write_version_resource,
+                    )
+
+                    write_version_resource(
+                        temporary,
+                        VERSION,
+                        description=f"QuantMaster {safe_role}",
+                        internal_name=f"QuantMaster {safe_role}",
+                        original_filename=target.name,
+                    )
                 os.replace(temporary, target)
+                marker.write_text(identity, encoding="utf-8")
             finally:
                 temporary.unlink(missing_ok=True)
         # Windows resolves dependent DLLs before Python can restore a venv's
         # base directory.  A renamed venv interpreter must therefore retain
         # the two CPython runtime DLLs beside itself.
         base_directory = source.parent
-        for name in ("python312.dll", "python3.dll"):
+        for name in (
+            f"python{sys.version_info.major}{sys.version_info.minor}.dll",
+            f"python{sys.version_info.major}.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+        ):
             dependency = base_directory / name
             destination = target.with_name(name)
             if dependency.is_file() and (

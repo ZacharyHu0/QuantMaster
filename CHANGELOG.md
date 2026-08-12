@@ -2,6 +2,10 @@
 
 ## 未发布
 
+### Windows 进程管理
+- 源码启动器改为由 `QuantMaster.exe` 直接承载 CPython 运行时，不再经过隐藏的 `python.exe` 重定向层；Windows 可按 QuantMaster 根进程折叠 StockDB、Web 与运行时 worker
+- Web、运行时与计算 worker 使用各自的镜像名，并修复命名 worker 再派生子进程时回退为普通 `python.exe` 的问题；发行版也会在导入应用前正确分派 multiprocessing 子进程
+
 ### CNN 恐贪指数后台刷新修复
 - 持久后台执行器启动时立即刷新 CNN 恐贪快照，成功后每 30 分钟更新，暂态失败则短间隔重试；Web 页面继续只读取本地快照，不再因运行时改造而永久停留在旧缓存
 

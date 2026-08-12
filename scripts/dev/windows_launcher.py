@@ -1,8 +1,11 @@
-"""Build the named, branded virtual-environment launcher on Windows.
+"""Build a branded CPython host that remains the QuantMaster root process.
 
-The generated executable is still the project's pinned venv interpreter, so it
-keeps editable imports and hot reload while Windows reports the real image name
-as ``QuantMaster.exe`` instead of ``python.exe``.
+Copying a virtual-environment redirector gives the launcher the right filename,
+but that redirector immediately creates a base ``python.exe`` process. Windows
+then sees the application workers as children of Python rather than children of
+QuantMaster. This builder copies the real CPython host and its runtime DLLs
+beside the venv instead, so editable imports still work while ``QuantMaster.exe``
+itself owns the complete process tree.
 """
 
 from __future__ import annotations
@@ -14,9 +17,12 @@ import json
 import os
 import shutil
 import struct
+import sys
 from pathlib import Path
 
-_SCHEMA = 2
+from quantmaster.runtime.windows_executable import build_version_resource
+
+_SCHEMA = 3
 _RT_ICON = 3
 _RT_GROUP_ICON = 14
 _RT_VERSION = 16
@@ -69,80 +75,8 @@ def _integer_resource(identifier: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(identifier)
 
 
-def _pad(data: bytes) -> bytes:
-    return data + b"\0" * (-len(data) % 4)
-
-
-def _version_block(
-    key: str,
-    *,
-    value: bytes = b"",
-    value_length: int = 0,
-    value_type: int = 1,
-    children: tuple[bytes, ...] = (),
-) -> bytes:
-    body = struct.pack("<HHH", 0, value_length, value_type)
-    body += key.encode("utf-16le") + b"\0\0"
-    body = _pad(body) + value
-    body = _pad(body) + b"".join(children)
-    return struct.pack("<H", len(body)) + body[2:]
-
-
-def _text_version_block(key: str, value: str) -> bytes:
-    encoded = value.encode("utf-16le") + b"\0\0"
-    return _version_block(key, value=encoded, value_length=len(value) + 1)
-
-
 def _version_resource(version: str) -> bytes:
-    numbers = [int(part) for part in version.split(".")]
-    if len(numbers) != 3 or any(number < 0 or number > 65535 for number in numbers):
-        raise ValueError(f"无效版本号：{version}")
-    major, minor, patch = numbers
-    fixed = struct.pack(
-        "<13I",
-        0xFEEF04BD,
-        0x00010000,
-        (major << 16) | minor,
-        patch << 16,
-        (major << 16) | minor,
-        patch << 16,
-        0x3F,
-        0,
-        0x00040004,
-        1,
-        0,
-        0,
-        0,
-    )
-    display_version = f"{version}.0"
-    strings = {
-        "CompanyName": "QuantMaster Contributors",
-        "FileDescription": "QuantMaster",
-        "FileVersion": display_version,
-        "InternalName": "QuantMaster",
-        "OriginalFilename": "QuantMaster.exe",
-        "ProductName": "QuantMaster",
-        "ProductVersion": display_version,
-    }
-    table = _version_block(
-        "040904B0",
-        children=tuple(_text_version_block(key, value) for key, value in strings.items()),
-    )
-    string_info = _version_block("StringFileInfo", children=(table,))
-    translation = _version_block(
-        "Translation",
-        value=struct.pack("<HH", 0x0409, 0x04B0),
-        value_length=4,
-        value_type=0,
-    )
-    variable_info = _version_block("VarFileInfo", children=(translation,))
-    return _version_block(
-        "VS_VERSION_INFO",
-        value=fixed,
-        value_length=len(fixed),
-        value_type=0,
-        children=(string_info, variable_info),
-    )
+    return build_version_resource(version)
 
 
 def _write_resources(executable: Path, icon: Path, version: str) -> None:
@@ -216,6 +150,36 @@ def _write_resources(executable: Path, icon: Path, version: str) -> None:
             end(handle, True)
 
 
+def _runtime_dependencies(source: Path) -> tuple[Path, ...]:
+    """Return the adjacent DLLs required by a renamed CPython host."""
+
+    names = (
+        f"python{sys.version_info.major}{sys.version_info.minor}.dll",
+        f"python{sys.version_info.major}.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+    )
+    return tuple(path for name in names if (path := source.with_name(name)).is_file())
+
+
+def _copy_runtime_dependencies(source: Path, output: Path) -> None:
+    for dependency in _runtime_dependencies(source):
+        destination = output.with_name(dependency.name)
+        source_stat = dependency.stat()
+        try:
+            current = destination.stat()
+        except FileNotFoundError:
+            current = None
+        if current is not None and current.st_size == source_stat.st_size:
+            continue
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            shutil.copy2(dependency, temporary)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def build_launcher(source: Path, icon: Path, output: Path, version: str) -> bool:
     """Create or refresh the launcher; return whether a file was replaced."""
     source = source.resolve()
@@ -226,18 +190,25 @@ def build_launcher(source: Path, icon: Path, output: Path, version: str) -> bool
     if not icon.is_file():
         raise FileNotFoundError(f"未找到 QuantMaster 图标：{icon}")
 
+    dependencies = _runtime_dependencies(source)
     fingerprint = hashlib.sha256(
-        (_digest(source, icon) + "|" + version).encode(),
+        (_digest(source, icon, *dependencies) + "|" + version).encode(),
     ).hexdigest()
     marker = output.with_suffix(output.suffix + ".json")
     try:
         current = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         current = {}
-    if output.is_file() and current.get("fingerprint") == fingerprint:
+    dependencies_ready = all(
+        output.with_name(path.name).is_file()
+        and output.with_name(path.name).stat().st_size == path.stat().st_size
+        for path in dependencies
+    )
+    if output.is_file() and dependencies_ready and current.get("fingerprint") == fingerprint:
         return False
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    _copy_runtime_dependencies(source, output)
     temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
     try:
         shutil.copy2(source, temporary)
@@ -263,7 +234,9 @@ def main() -> int:
     parser.add_argument("--icon", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    build_launcher(args.source, args.icon, args.output, VERSION)
+    base_source = Path(getattr(sys, "_base_executable", ""))
+    source = base_source if base_source.is_file() else args.source
+    build_launcher(source, args.icon, args.output, VERSION)
     return 0
 
 
