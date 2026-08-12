@@ -21,13 +21,13 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from quantmaster.ai.llm import LLMClient, LLMError
 from quantmaster.ai.news_claims import (
@@ -41,8 +41,8 @@ from quantmaster.ai.news_contracts import (
     FetchedArticle,
     NewsProviderError,
 )
-from quantmaster.ai.news_providers import fetch_builtin_source
 from quantmaster.ai.news_pipeline_lock import NewsPipelineLock
+from quantmaster.ai.news_providers import fetch_builtin_source
 from quantmaster.ai.news_sources import (
     NewsSourceStore,
     fetch_declarative_source,
@@ -1628,7 +1628,7 @@ def _claim_heartbeat(
                 # A transient writer must not kill the heartbeat thread.  Retry
                 # promptly; a later zero-row heartbeat still detects expiry.
                 delay = 1.0
-            except Exception:
+            except sqlite3.Error:
                 alive.clear()
                 logger.warning("资讯分析租约续期失败", exc_info=True)
                 return
@@ -1882,7 +1882,7 @@ class AICrawler:
             # A configuration rotation is neither a provider failure nor a
             # dead letter.  The finally block releases its claim immediately.
             raise
-        except sqlite3.Error as exc:
+        except sqlite3.Error:
             # Persistence contention is infrastructure failure, not another
             # failed model attempt.  Leave the rows pending and release their
             # claims so the already independent successful batches stay saved.
@@ -1927,7 +1927,7 @@ class AICrawler:
         finally:
             try:
                 self.store.claims.release(batch.token, self.identity.value)
-            except Exception:
+            except sqlite3.Error:
                 logger.warning("资讯分析租约释放失败", exc_info=True)
         return {
             "batch": batch_number,
@@ -2094,7 +2094,7 @@ class AICrawler:
                 future.cancel()
                 try:
                     self.store.claims.release(batch.token, self.identity.value)
-                except Exception:
+                except sqlite3.Error:
                     logger.warning("资讯取消时释放分析租约失败", exc_info=True)
             executor.shutdown(wait=True, cancel_futures=True)
         result = {

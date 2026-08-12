@@ -11,7 +11,7 @@ PACKAGE = ROOT / "quantmaster"
 # Any new file, increase or unrecorded reduction fails CI. Reductions must lower the
 # matching baseline in the same release so the ratchet cannot silently drift upward.
 BASELINE = {
-    "quantmaster/ai/crawler.py": 5,
+    "quantmaster/ai/crawler.py": 3,
     "quantmaster/ai/news_sources.py": 2,
     "quantmaster/analysis/stock.py": 6,
     "quantmaster/automation/channels/weixin.py": 2,

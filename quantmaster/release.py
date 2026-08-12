@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.10.0"
+VERSION = "1.10.1"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "资讯异常边界修复",
+                "items": (
+                    (
+                        "资讯租约心跳与释放仅吸收可恢复的 SQLite 故障，其他程序错误会继续"
+                        "暴露；流水线锁在中断时仍保证释放，不再扩大宽泛异常捕获。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.10.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "LLM 请求后台隔离",

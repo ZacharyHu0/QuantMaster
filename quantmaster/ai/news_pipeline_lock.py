@@ -88,7 +88,7 @@ class NewsPipelineLock(AbstractContextManager["NewsPipelineLock"]):
             else:
                 _FILE_LOCK_STATE[self.key] = (state[0] + 1, state[1])
             return self
-        except Exception:
+        except BaseException:
             self.thread_lock.release()
             raise
 
