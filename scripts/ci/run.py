@@ -6,12 +6,15 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def primary_root() -> Path:
@@ -48,8 +51,11 @@ PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
 
 def prepare_pytest_directory(path: Path) -> Path:
     """Create a pytest directory without replacing inherited Windows ACLs."""
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    from quantmaster.runtime.storage_governance import prepare_writable_directory
+
+    target = path.resolve()
+    prepare_writable_directory(target)
+    return target
 
 
 def pytest_args(*args: str) -> list[str]:
@@ -82,6 +88,11 @@ def run(label: str, args: list[str], *, env: dict[str, str] | None = None) -> No
     effective_env = os.environ.copy()
     effective_env["RUFF_CACHE_DIR"] = str(ARTIFACTS / "cache" / "ruff")
     effective_env["MYPY_CACHE_DIR"] = str(ARTIFACTS / "cache" / "mypy")
+    effective_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
+    effective_env["QM_CONFIG_PATH"] = os.devnull
+    effective_env["QM_FREE_STOCKDB_ROOT"] = str(
+        ARTIFACTS / "runtime" / "tests" / "free-stockdb"
+    )
     effective_env.update(env or {})
     completed = subprocess.run(command, cwd=ROOT, env=effective_env, check=False)
     if completed.returncode:
@@ -228,7 +239,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    RUN_ROOT.mkdir(parents=True, exist_ok=True)
+    prepare_pytest_directory(RUN_ROOT)
     prepare_pytest_directory(PYTEST_CACHE)
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
     run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "scripts"])

@@ -133,6 +133,9 @@ def run(command: list[str], *, cwd: Path) -> None:
     env = os.environ.copy()
     env["RUFF_CACHE_DIR"] = str(artifacts / "cache" / "ruff")
     env["MYPY_CACHE_DIR"] = str(artifacts / "cache" / "mypy")
+    env["UV_CACHE_DIR"] = str(artifacts / "uv-cache")
+    env["QM_CONFIG_PATH"] = os.devnull
+    env["QM_FREE_STOCKDB_ROOT"] = str(artifacts / "runtime" / "tests" / "free-stockdb")
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
@@ -178,6 +181,18 @@ def start(slug: str) -> None:
         raise SystemExit(f"worktree 已存在：{target}")
     git(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], cwd=primary)
     git(["worktree", "add", "-b", branch, str(target), "origin/main"], cwd=primary)
+    artifact_root = primary / ".artifacts" / "worktrees" / slug
+    for directory in (
+        artifact_root / "cache" / "ruff",
+        artifact_root / "cache" / "mypy",
+        artifact_root / "uv-cache",
+        artifact_root / "pytest" / "cache",
+        artifact_root / "pytest" / "runs",
+        artifact_root / "runtime" / "tests" / "data",
+        artifact_root / "runtime" / "tests" / "free-stockdb",
+        artifact_root / "runtime" / "tests" / "provider-cache",
+    ):
+        prepare_pytest_directory(directory)
     print(f"[task] created {branch} at {target}")
 
 

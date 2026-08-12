@@ -1,5 +1,7 @@
 """Local CI must reuse the primary checkout virtual environment."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 from scripts.ci import run
@@ -72,3 +74,11 @@ def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
     run.run("test", ["-c", "pass"])
     assert captured["env"]["RUFF_CACHE_DIR"] == str(artifacts / "cache" / "ruff")
     assert captured["env"]["MYPY_CACHE_DIR"] == str(artifacts / "cache" / "mypy")
+
+
+def test_ci_script_can_import_project_modules_when_executed_directly():
+    result = subprocess.run(
+        [sys.executable, "scripts/ci/run.py", "--help"],
+        cwd=run.ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr

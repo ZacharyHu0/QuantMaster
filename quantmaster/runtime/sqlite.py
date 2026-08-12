@@ -116,6 +116,23 @@ def connect_sqlite(
         raise
 
 
+def connect_sqlite_recovery(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
+    """Open a maintenance-only connection without changing journal policy."""
+
+    destination = Path(path).expanduser()
+    if not destination.is_absolute():
+        raise ValueError("SQLite recovery path must be absolute")
+    if read_only:
+        if not destination.is_file():
+            raise FileNotFoundError(destination)
+        return sqlite3.connect(
+            f"{destination.resolve().as_uri()}?mode=ro", uri=True,
+            timeout=30.0, factory=_ManagedConnection,
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(destination, timeout=30.0, factory=_ManagedConnection)
+
+
 Migration = tuple[int, Callable[[sqlite3.Connection], None]]
 
 
