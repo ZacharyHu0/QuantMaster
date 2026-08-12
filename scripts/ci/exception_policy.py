@@ -36,7 +36,6 @@ BASELINE = {
     "quantmaster/data/repair.py": 1,
     "quantmaster/data/research.py": 1,
     "quantmaster/data/resilience.py": 1,
-    "quantmaster/automation/channels/feishu.py": 1,
     "quantmaster/data/free_stockdb_runtime.py": 3,
     "quantmaster/data/storage.py": 1,
     "quantmaster/data/tushare_source.py": 2,
