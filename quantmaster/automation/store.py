@@ -134,11 +134,15 @@ class AutomationStore:
                     id TEXT PRIMARY KEY, job_id TEXT NOT NULL, analysis_id TEXT NOT NULL,
                     target_id TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '',
                     query TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'deep',
-                    status TEXT NOT NULL DEFAULT 'active', event_seq INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending', event_seq INTEGER NOT NULL DEFAULT 0,
                     update_count INTEGER NOT NULL DEFAULT 0, appendix_cursor INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at REAL NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
                     delivered_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL, UNIQUE(job_id,target_id),
+                    updated_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_owner TEXT NOT NULL DEFAULT '', lease_token TEXT NOT NULL DEFAULT '',
+                    lease_expires_at REAL NOT NULL DEFAULT 0, heartbeat_at REAL NOT NULL DEFAULT 0,
+                    operation TEXT NOT NULL DEFAULT '', diagnostic_code TEXT NOT NULL DEFAULT '',
+                    ambiguous_at TEXT NOT NULL DEFAULT '', UNIQUE(job_id,target_id),
                     FOREIGN KEY(target_id) REFERENCES notification_targets(id));
                 CREATE TABLE IF NOT EXISTS pending_actions (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, actor TEXT NOT NULL,
@@ -276,6 +280,37 @@ class AutomationStore:
             conn.execute("DROP INDEX IF EXISTS idx_delivery_due")
             conn.execute(
                 "CREATE INDEX idx_delivery_due ON delivery_attempts("
+                "status,next_attempt_at,lease_expires_at)"
+            )
+
+        def schema_v11(conn: sqlite3.Connection) -> None:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(analysis_deliveries)")
+            }
+            additions = {
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+                "lease_owner": "TEXT NOT NULL DEFAULT ''",
+                "lease_token": "TEXT NOT NULL DEFAULT ''",
+                "lease_expires_at": "REAL NOT NULL DEFAULT 0",
+                "heartbeat_at": "REAL NOT NULL DEFAULT 0",
+                "operation": "TEXT NOT NULL DEFAULT ''",
+                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
+                "ambiguous_at": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE analysis_deliveries ADD COLUMN {name} {declaration}"
+                    )
+            conn.execute(
+                "UPDATE analysis_deliveries SET status=CASE status "
+                "WHEN 'active' THEN 'pending' WHEN 'retry' THEN 'retry_wait' "
+                "WHEN 'delivered' THEN 'sent' WHEN 'failed' THEN 'dead_letter' "
+                "ELSE status END"
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_analysis_delivery_due")
+            conn.execute(
+                "CREATE INDEX idx_analysis_delivery_due ON analysis_deliveries("
                 "status,next_attempt_at,lease_expires_at)"
             )
 
@@ -1067,8 +1102,9 @@ class AutomationStore:
                 "analysis_id=excluded.analysis_id,message_id=CASE WHEN excluded.message_id<>'' "
                 "THEN excluded.message_id ELSE analysis_deliveries.message_id END,"
                 "query=excluded.query,mode=excluded.mode,"
-                "status=CASE WHEN analysis_deliveries.status IN ('delivered','failed') "
-                "THEN analysis_deliveries.status ELSE 'active' END,updated_at=excluded.updated_at",
+                "status=CASE WHEN analysis_deliveries.status IN "
+                "('sent','dead_letter','ambiguous') THEN analysis_deliveries.status "
+                "ELSE 'pending' END,updated_at=excluded.updated_at",
                 (delivery_id, job_id, analysis_id, target_id, message_id,
                  query[:80], mode, now, now),
             )
@@ -1086,29 +1122,136 @@ class AutomationStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def due_analysis_deliveries(self, limit: int = 20) -> list[dict]:
+    def claim_analysis_deliveries(
+        self, owner: str, *, limit: int = 20, lease_seconds: float = 120.0,
+    ) -> list[dict]:
+        current = time.time()
+        token = uuid.uuid4().hex
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE analysis_deliveries SET status='retry_wait',lease_owner='',"
+                "lease_token='',lease_expires_at=0,heartbeat_at=0,operation='',"
+                "next_attempt_at=? WHERE status='claimed' AND lease_expires_at<=?",
+                (current, current),
+            )
+            conn.execute(
+                "UPDATE analysis_deliveries SET status='retry_wait',lease_owner='',"
+                "lease_token='',lease_expires_at=0,heartbeat_at=0,operation='',"
+                "next_attempt_at=?,diagnostic_code='worker_lease_expired' "
+                "WHERE status='sending' AND operation='update' AND lease_expires_at<=?",
+                (current, current),
+            )
+            conn.execute(
+                "UPDATE analysis_deliveries SET status='ambiguous',lease_owner='',"
+                "lease_token='',lease_expires_at=0,heartbeat_at=0,ambiguous_at=?,"
+                "diagnostic_code='appendix_ack_unknown',last_error="
+                "CASE WHEN last_error='' THEN "
+                "'appendix delivery outcome unknown after worker lease expired' "
+                "ELSE last_error END WHERE status='sending' AND operation='appendix' "
+                "AND lease_expires_at<=?",
+                (utc_now(), current),
+            )
             rows = conn.execute(
+                "SELECT d.id FROM analysis_deliveries d "
+                "JOIN notification_targets t ON t.id=d.target_id "
+                "WHERE d.status IN ('pending','retry_wait') AND d.next_attempt_at<=? "
+                "AND t.enabled=1 AND t.channel='feishu' ORDER BY d.updated_at LIMIT ?",
+                (current, max(1, min(100, int(limit)))),
+            ).fetchall()
+            selected = [str(row["id"]) for row in rows]
+            if not selected:
+                return []
+            placeholders = ",".join("?" for _ in selected)
+            conn.execute(
+                "UPDATE analysis_deliveries SET status='claimed',lease_owner=?,lease_token=?,"
+                "lease_expires_at=?,heartbeat_at=? "
+                f"WHERE id IN ({placeholders}) AND status IN ('pending','retry_wait')",
+                (owner, token, current + max(15.0, float(lease_seconds)), current, *selected),
+            )
+            claimed = conn.execute(
                 "SELECT d.*,t.channel,t.account_id,t.target,t.chat_type,t.status AS target_status "
                 "FROM analysis_deliveries d JOIN notification_targets t ON t.id=d.target_id "
-                "WHERE d.status IN ('active','retry') AND d.next_attempt_at<=? "
-                "ORDER BY d.updated_at LIMIT ?",
-                (time.time(), max(1, int(limit))),
+                f"WHERE d.id IN ({placeholders}) AND d.lease_owner=? AND d.lease_token=? "
+                "ORDER BY d.updated_at",
+                (*selected, owner, token),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in claimed]
+
+    def due_analysis_deliveries(self, limit: int = 20) -> list[dict]:
+        """Compatibility entry point that still performs an atomic fenced claim."""
+        return self.claim_analysis_deliveries("legacy-analysis-dispatch", limit=limit)
+
+    def begin_analysis_delivery(
+        self, delivery_id: str, owner: str, token: str, *, operation: str,
+    ) -> bool:
+        if operation not in {"inspect", "update", "appendix"}:
+            raise ValueError("分析投递操作非法")
+        current = time.time()
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE analysis_deliveries SET status='sending',operation=?,"
+                "attempts=attempts+1,heartbeat_at=? WHERE id=? AND status='claimed' "
+                "AND lease_owner=? AND lease_token=? AND lease_expires_at>?",
+                (operation, current, delivery_id, owner, token, current),
+            ).rowcount
+        return changed == 1
+
+    def heartbeat_analysis_delivery(
+        self, delivery_id: str, owner: str, token: str, *, lease_seconds: float = 120.0,
+    ) -> bool:
+        current = time.time()
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE analysis_deliveries SET heartbeat_at=?,lease_expires_at=? "
+                "WHERE id=? AND status IN ('claimed','sending') AND lease_owner=? "
+                "AND lease_token=? AND lease_expires_at>?",
+                (current, current + max(15.0, float(lease_seconds)), delivery_id,
+                 owner, token, current),
+            ).rowcount
+        return changed == 1
+
+    def set_analysis_delivery_operation(
+        self, delivery_id: str, owner: str, token: str, operation: str,
+    ) -> bool:
+        if operation not in {"inspect", "update", "appendix"}:
+            raise ValueError("分析投递操作非法")
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE analysis_deliveries SET operation=?,heartbeat_at=? "
+                "WHERE id=? AND status='sending' AND lease_owner=? AND lease_token=?",
+                (operation, time.time(), delivery_id, owner, token),
+            ).rowcount
+        return changed == 1
 
     def update_analysis_delivery(
         self, delivery_id: str, *, event_seq: int | None = None,
         status: str | None = None, message_id: str | None = None,
         update_increment: int = 0, appendix_cursor: int | None = None,
         last_error: str | None = None, next_attempt_at: float | None = None,
+        owner: str = "", token: str = "", release: bool = False,
+        diagnostic_code: str | None = None,
     ) -> dict:
-        if status is not None and status not in {"active", "retry", "delivered", "failed"}:
+        aliases = {
+            "active": "pending", "retry": "retry_wait",
+            "delivered": "sent", "failed": "dead_letter",
+        }
+        if status is not None:
+            status = aliases.get(status, status)
+        if status is not None and status not in {
+            "pending", "claimed", "sending", "retry_wait", "sent",
+            "dead_letter", "ambiguous",
+        }:
             raise ValueError("分析投递状态非法")
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            where = "id=?"
+            params: tuple[Any, ...] = (delivery_id,)
+            if owner or token:
+                where += " AND lease_owner=? AND lease_token=? AND status IN ('claimed','sending')"
+                params = (delivery_id, owner, token)
             current = conn.execute(
-                "SELECT * FROM analysis_deliveries WHERE id=?", (delivery_id,),
+                f"SELECT * FROM analysis_deliveries WHERE {where}", params,
             ).fetchone()
             if current is None:
                 raise KeyError(delivery_id)
@@ -1122,22 +1265,61 @@ class AutomationStore:
                 raise ValueError("单任务飞书卡片更新不能超过 10 次")
             resolved_status = status or str(current["status"])
             delivered_at = (
-                utc_now() if resolved_status == "delivered" else str(current["delivered_at"]))
+                utc_now() if resolved_status == "sent" else str(current["delivered_at"]))
+            lease_values = ("", "", 0.0, 0.0, "") if release else (
+                str(current["lease_owner"]), str(current["lease_token"]),
+                float(current["lease_expires_at"]), float(current["heartbeat_at"]),
+                str(current["operation"]),
+            )
             conn.execute(
                 "UPDATE analysis_deliveries SET event_seq=?,status=?,message_id=?,update_count=?,"
-                "appendix_cursor=?,last_error=?,next_attempt_at=?,delivered_at=?,updated_at=? "
-                "WHERE id=?",
+                "appendix_cursor=?,last_error=?,next_attempt_at=?,delivered_at=?,updated_at=?,"
+                "lease_owner=?,lease_token=?,lease_expires_at=?,heartbeat_at=?,operation=?,"
+                "diagnostic_code=? WHERE id=?",
                 (seq, resolved_status,
                  str(current["message_id"] if message_id is None else message_id), updates,
                  int(current["appendix_cursor"] if appendix_cursor is None else appendix_cursor),
                  str(current["last_error"] if last_error is None else last_error)[:1000],
                  float(current["next_attempt_at"] if next_attempt_at is None else next_attempt_at),
-                 delivered_at, utc_now(), delivery_id),
+                 delivered_at, utc_now(), *lease_values,
+                 str(current["diagnostic_code"] if diagnostic_code is None
+                     else diagnostic_code)[:80], delivery_id),
             )
             row = conn.execute(
                 "SELECT * FROM analysis_deliveries WHERE id=?", (delivery_id,),
             ).fetchone()
         return dict(row)
+
+    def fail_analysis_delivery(
+        self, delivery_id: str, owner: str, token: str, error: str,
+        *, ambiguous: bool = False, diagnostic_code: str = "analysis_delivery_failed",
+    ) -> str:
+        delays = (30, 120, 600, 1800)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempts FROM analysis_deliveries WHERE id=? AND status='sending' "
+                "AND lease_owner=? AND lease_token=?",
+                (delivery_id, owner, token),
+            ).fetchone()
+            if row is None:
+                return "lease_lost"
+            attempts = max(1, int(row["attempts"] or 0))
+            status = "ambiguous" if ambiguous else (
+                "dead_letter" if attempts >= 5 else "retry_wait"
+            )
+            next_attempt = 0.0 if status != "retry_wait" else (
+                time.time() + delays[min(attempts - 1, len(delays) - 1)]
+            )
+            conn.execute(
+                "UPDATE analysis_deliveries SET status=?,next_attempt_at=?,last_error=?,"
+                "diagnostic_code=?,ambiguous_at=?,lease_owner='',lease_token='',"
+                "lease_expires_at=0,heartbeat_at=0,operation='' WHERE id=? AND status='sending' "
+                "AND lease_owner=? AND lease_token=?",
+                (status, next_attempt, error[:1000], diagnostic_code[:80],
+                 utc_now() if ambiguous else "", delivery_id, owner, token),
+            )
+        return status
 
     def release_lease(self, name: str, owner: str) -> None:
         with self._conn() as conn:

@@ -445,7 +445,7 @@ class OutboxDispatcher:
         self.store = store
         self.gateway = gateway or BotDeliveryGateway(store)
         self._injected_gateway = gateway is not None
-        self.analysis_delivery_handler: Callable[[int], dict[str, int]] | None = None
+        self.analysis_delivery_handler: Callable[[int, str], dict[str, int]] | None = None
         self.owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._worker_lock = threading.Lock()
         self._wake_event = threading.Event()
@@ -575,67 +575,64 @@ class OutboxDispatcher:
         for item in self.store.claim_deliveries(
             self.owner, limit=limit, channels=channels,
         ):
-            token = str(item["lease_token"])
-            if not self.store.begin_delivery(str(item["id"]), self.owner, token):
-                continue
-            try:
-                self._send(item, token)
-            except DeliveryError as exc:
-                status = self.store.delivery_failure(
-                    str(item["id"]), self.owner, token, str(exc),
-                    permanent=exc.permanent,
-                    ambiguous=exc.ambiguous,
-                    retry_after_at=exc.retry_after_at,
-                    diagnostic_code=exc.diagnostic_code,
-                )
-                if exc.needs_rebind:
-                    self.store.set_target_status(item["target_id"], "needs_rebind", str(exc))
-                elif exc.permanent:
-                    self.store.set_target_status(item["target_id"], "degraded", str(exc))
-                if status == "ambiguous":
-                    result["failed"] += 1
-                elif status == "dead_letter":
-                    result["failed"] += 1
-                elif status == "retry_wait":
-                    result["retried"] += 1
-            except (
-                OSError, ValueError, TypeError, AttributeError, ImportError, RuntimeError,
-            ) as exc:
-                logger.exception(
-                    "outbox delivery outcome is unknown id=%s", item["id"],
-                )
-                status = self.store.delivery_failure(
-                    str(item["id"]), self.owner, token, str(exc),
-                    ambiguous=True,
-                    diagnostic_code="delivery_outcome_unknown",
-                )
-                if status == "ambiguous":
-                    result["failed"] += 1
-                self.store.set_target_status(item["target_id"], "degraded", str(exc))
-            else:
-                try:
-                    acknowledged = self.store.delivery_success(
-                        str(item["id"]), self.owner, token,
-                    )
-                except (sqlite3.Error, OSError):
-                    # The provider has accepted the message, but the durable ack is
-                    # unknown. Keep `sending`; lease recovery quarantines it.
-                    logger.exception(
-                        "outbox delivery ack failed; item will be quarantined "
-                        "after lease expiry id=%s",
-                        item["id"],
-                    )
-                    continue
-                if acknowledged:
-                    self.store.set_target_status(item["target_id"], "healthy")
-                    result["delivered"] += 1
-                else:
-                    logger.error(
-                        "outbox delivery ack lost; item quarantined on lease recovery id=%s",
-                        item["id"],
-                    )
+            outcome = self._dispatch_item(item)
+            if outcome:
+                result[outcome] += 1
         if self.analysis_delivery_handler and "feishu" in channels:
-            analysis = self.analysis_delivery_handler(limit)
+            analysis = self.analysis_delivery_handler(limit, self.owner)
             for key in ("delivered", "failed", "retried"):
                 result[key] += int(analysis.get(key) or 0)
         return result
+
+    def _dispatch_item(self, item: dict[str, Any]) -> str:
+        token = str(item["lease_token"])
+        if not self.store.begin_delivery(str(item["id"]), self.owner, token):
+            return ""
+        try:
+            self._send(item, token)
+        except DeliveryError as exc:
+            return self._record_delivery_error(item, token, exc)
+        except (
+            OSError, ValueError, TypeError, AttributeError, ImportError, RuntimeError,
+        ) as exc:
+            logger.exception("outbox delivery outcome is unknown id=%s", item["id"])
+            self.store.delivery_failure(
+                str(item["id"]), self.owner, token, str(exc), ambiguous=True,
+                diagnostic_code="delivery_outcome_unknown",
+            )
+            self.store.set_target_status(item["target_id"], "degraded", str(exc))
+            return "failed"
+        return self._ack_delivery(item, token)
+
+    def _record_delivery_error(
+        self, item: dict[str, Any], token: str, exc: DeliveryError,
+    ) -> str:
+        status = self.store.delivery_failure(
+            str(item["id"]), self.owner, token, str(exc),
+            permanent=exc.permanent, ambiguous=exc.ambiguous,
+            retry_after_at=exc.retry_after_at, diagnostic_code=exc.diagnostic_code,
+        )
+        if exc.needs_rebind:
+            self.store.set_target_status(item["target_id"], "needs_rebind", str(exc))
+        elif exc.permanent:
+            self.store.set_target_status(item["target_id"], "degraded", str(exc))
+        return "retried" if status == "retry_wait" else "failed"
+
+    def _ack_delivery(self, item: dict[str, Any], token: str) -> str:
+        try:
+            acknowledged = self.store.delivery_success(
+                str(item["id"]), self.owner, token,
+            )
+        except (sqlite3.Error, OSError):
+            logger.exception(
+                "outbox delivery ack failed; item will be quarantined after lease expiry id=%s",
+                item["id"],
+            )
+            return ""
+        if not acknowledged:
+            logger.error(
+                "outbox delivery ack lost; item quarantined on lease recovery id=%s", item["id"],
+            )
+            return ""
+        self.store.set_target_status(item["target_id"], "healthy")
+        return "delivered"

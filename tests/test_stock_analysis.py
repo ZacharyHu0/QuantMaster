@@ -462,7 +462,7 @@ def test_feishu_service_updates_one_card_to_final_report(tmp_path, monkeypatch):
     assert "基本面" in json.dumps(service.feishu.updated[0][1], ensure_ascii=False)
     assert service.feishu.updated[-1][1]["header"]["title"]["content"].endswith("六维分析")
     delivery = store.analysis_delivery("job-analysis", "feishu_group")
-    assert delivery["status"] == "delivered"
+    assert delivery["status"] == "sent"
     assert delivery["update_count"] == 2
     memory = store.conversation_context(
         channel="feishu",
@@ -506,6 +506,87 @@ def test_analysis_delivery_persists_cursor_and_enforces_update_budget(tmp_path):
         restarted.update_analysis_delivery(saved["id"], event_seq=6)
     with np.testing.assert_raises_regex(ValueError, "不能超过 10 次"):
         restarted.update_analysis_delivery(saved["id"], update_increment=5)
+
+
+def test_analysis_delivery_claim_is_atomic_and_fenced(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.bind_target(
+        "feishu_owner", target="oc_analysis", account_id="cli_analysis",
+        owner_actor="feishu:cli_analysis:owner", actor="test",
+    )
+    store.save_analysis_delivery(
+        job_id="job-claim", analysis_id="job-claim", target_id="feishu_owner",
+        message_id="om-main",
+    )
+
+    first = store.claim_analysis_deliveries("worker-a")
+    assert len(first) == 1
+    assert store.claim_analysis_deliveries("worker-b") == []
+    item = first[0]
+    assert not store.begin_analysis_delivery(
+        item["id"], "worker-b", item["lease_token"], operation="update",
+    )
+    assert store.begin_analysis_delivery(
+        item["id"], "worker-a", item["lease_token"], operation="update",
+    )
+    with pytest.raises(KeyError):
+        store.update_analysis_delivery(
+            item["id"], event_seq=1, owner="worker-b", token=item["lease_token"],
+        )
+
+
+def test_analysis_delivery_expired_claim_recovers_but_appendix_is_ambiguous(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.bind_target(
+        "feishu_owner", target="oc_analysis", account_id="cli_analysis",
+        owner_actor="feishu:cli_analysis:owner", actor="test",
+    )
+    store.save_analysis_delivery(
+        job_id="job-expiry", analysis_id="job-expiry", target_id="feishu_owner",
+        message_id="om-main",
+    )
+    claimed = store.claim_analysis_deliveries("worker-a")[0]
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE analysis_deliveries SET lease_expires_at=0 WHERE id=?", (claimed["id"],),
+        )
+    recovered = store.claim_analysis_deliveries("worker-b")[0]
+    assert store.begin_analysis_delivery(
+        recovered["id"], "worker-b", recovered["lease_token"], operation="appendix",
+    )
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE analysis_deliveries SET lease_expires_at=0 WHERE id=?", (claimed["id"],),
+        )
+    assert store.claim_analysis_deliveries("worker-c") == []
+    row = store.analysis_delivery("job-expiry", "feishu_owner")
+    assert (row["status"], row["diagnostic_code"]) == (
+        "ambiguous", "appendix_ack_unknown",
+    )
+
+
+def test_analysis_delivery_cursor_ack_is_token_fenced(tmp_path):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.bind_target(
+        "feishu_owner", target="oc_analysis", account_id="cli_analysis",
+        owner_actor="feishu:cli_analysis:owner", actor="test",
+    )
+    store.save_analysis_delivery(
+        job_id="job-cursor", analysis_id="job-cursor", target_id="feishu_owner",
+        message_id="om-main",
+    )
+    item = store.claim_analysis_deliveries("worker-a")[0]
+    assert store.begin_analysis_delivery(
+        item["id"], "worker-a", item["lease_token"], operation="appendix",
+    )
+    updated = store.update_analysis_delivery(
+        item["id"], appendix_cursor=2, owner="worker-a", token=item["lease_token"],
+    )
+    assert updated["appendix_cursor"] == 2
+    with pytest.raises(KeyError):
+        store.update_analysis_delivery(
+            item["id"], appendix_cursor=3, owner="worker-a", token="stale-token",
+        )
 
 
 def test_feishu_appendix_delivery_resumes_after_restart_without_reupdating_main(
@@ -602,7 +683,7 @@ def test_feishu_appendix_delivery_resumes_after_restart_without_reupdating_main(
     completed = restarted_store.analysis_delivery("job-restart", "feishu_owner")
 
     assert final_result["delivered"] == 1
-    assert completed["status"] == "delivered"
+    assert completed["status"] == "sent"
     assert completed["appendix_cursor"] == len(cards)
     assert restarted_service.feishu.updated == []
     assert len(restarted_service.feishu.sent) == len(cards) - 1

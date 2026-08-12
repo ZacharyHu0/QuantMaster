@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
+import sqlite3
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -364,163 +365,236 @@ class AutomationService:
             "message_id": message_id,
         }
 
-    def dispatch_analysis_deliveries(self, limit: int = 20) -> dict[str, int]:
+    def dispatch_analysis_deliveries(
+        self, limit: int = 20, owner: str = "",
+    ) -> dict[str, int]:
         """将统一任务事件节流更新到原飞书卡，并从持久游标恢复附录投递。"""
         from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
-        from quantmaster.automation.stock_cards import (
-            stock_analysis_failure_card,
-            stock_analysis_progress_card,
-            stock_analysis_report_cards,
-        )
 
         result = {"delivered": 0, "failed": 0, "retried": 0}
         jobs = get_stock_analysis_jobs()
-        terminal_statuses = {"completed", "completed_with_errors", "failed", "cancelled"}
-        notable_types = {
-            "evidence_collection_completed",
-            "dimension_completed",
-            "dimension_degraded",
-            "job_terminal",
-        }
-        for delivery in self.store.due_analysis_deliveries(limit):
-            route = dict(delivery)
-            try:
-                job = jobs.public_job(str(delivery["job_id"]))
-                events = jobs.events(
-                    str(delivery["job_id"]),
-                    after=int(delivery["event_seq"]),
-                    limit=500,
-                )
-                newest_seq = max(
-                    [int(delivery["event_seq"]), *[int(item["seq"]) for item in events]],
-                )
-                analysis = jobs.analysis(str(delivery["analysis_id"]))
-                report = analysis.get("report")
-                is_terminal = str(job.get("status")) in terminal_statuses
-
-                if is_terminal and report:
-                    cards = stock_analysis_report_cards(report)
-                    cursor = int(delivery["appendix_cursor"])
-                    if cursor == 0:
-                        self.feishu.update_card(
-                            message_id=str(delivery["message_id"]),
-                            card=cards[0],
-                        )
-                        delivery = self.store.update_analysis_delivery(
-                            str(delivery["id"]),
-                            event_seq=newest_seq,
-                            update_increment=1,
-                            appendix_cursor=1,
-                            last_error="",
-                        )
-                        cursor = 1
-                    while cursor < len(cards):
-                        self.feishu.send_card(chat_id=str(route["target"]), card=cards[cursor])
-                        cursor += 1
-                        delivery = self.store.update_analysis_delivery(
-                            str(delivery["id"]),
-                            event_seq=newest_seq,
-                            appendix_cursor=cursor,
-                            last_error="",
-                        )
-                    self.store.update_analysis_delivery(
-                        str(delivery["id"]),
-                        event_seq=newest_seq,
-                        status="delivered",
-                        last_error="",
-                    )
-                    if route.get("chat_type") == "group":
-                        instrument = report.get("instrument") or {}
-                        overall = report.get("overall") or {}
-                        self.store.remember_conversation_message(
-                            channel="feishu",
-                            account_id=str(route["account_id"]),
-                            chat_id=str(route["target"]),
-                            message_id=f"local_bot_{uuid.uuid4().hex}",
-                            sender_id="bot",
-                            sender_name="QuantMaster",
-                            text=(
-                                f"{instrument.get('name') or instrument.get('symbol')}"
-                                f"（{instrument.get('symbol')}）六维分析完成：综合分 "
-                                f"{overall.get('score')}，{overall.get('stance')}。"
-                                f"{overall.get('thesis') or ''}"
-                            ),
-                            is_bot=True,
-                        )
-                    result["delivered"] += 1
-                    continue
-
-                if is_terminal:
-                    self.feishu.update_card(
-                        message_id=str(delivery["message_id"]),
-                        card=stock_analysis_failure_card(
-                            str(delivery.get("query") or "个股分析"),
-                            str(
-                                analysis.get("error")
-                                or job.get("detail")
-                                or job.get("status")
-                                or "任务未完成"
-                            ),
-                        ),
-                    )
-                    self.store.update_analysis_delivery(
-                        str(delivery["id"]),
-                        event_seq=newest_seq,
-                        status="failed",
-                        update_increment=1,
-                        last_error=str(
-                            analysis.get("error")
-                            or job.get("detail")
-                            or job.get("status")
-                            or "任务未完成"
-                        ),
-                    )
-                    result["failed"] += 1
-                    continue
-
-                notable = any(str(item.get("type")) in notable_types for item in events)
-                if not notable:
-                    if newest_seq > int(delivery["event_seq"]):
-                        self.store.update_analysis_delivery(
-                            str(delivery["id"]), event_seq=newest_seq,
-                        )
-                    continue
-                # 保留最后一次更新给终态卡；其余事件仍通过 SQLite 游标消费。
-                if int(delivery["update_count"]) >= 9:
-                    self.store.update_analysis_delivery(
-                        str(delivery["id"]), event_seq=newest_seq,
-                    )
-                    continue
-                self.feishu.update_card(
-                    message_id=str(delivery["message_id"]),
-                    card=stock_analysis_progress_card(
-                        str(delivery.get("query") or "个股分析"),
-                        int(job.get("progress") or 0),
-                        str(job.get("phase") or "分析进行中"),
-                        str(job.get("detail") or "已完成维度会持续保留"),
-                        mode=str(delivery.get("mode") or "deep"),
-                        dimensions=list(analysis.get("dimensions") or []),
-                    ),
-                )
-                self.store.update_analysis_delivery(
-                    str(delivery["id"]),
-                    event_seq=newest_seq,
-                    update_increment=1,
-                    last_error="",
-                )
-            except Exception as exc:
-                logger.exception("飞书个股分析续投失败 job_id=%s", delivery.get("job_id"))
-                try:
-                    self.store.update_analysis_delivery(
-                        str(delivery["id"]),
-                        status="retry",
-                        last_error=str(exc),
-                        next_attempt_at=time.time() + 30,
-                    )
-                except Exception:
-                    logger.exception("飞书个股分析续投状态保存失败 delivery_id=%s", delivery.get("id"))
-                result["retried"] += 1
+        lease_owner = owner or self.dispatcher.owner
+        for delivery in self.store.claim_analysis_deliveries(lease_owner, limit=limit):
+            outcome = self._dispatch_analysis_delivery(delivery, jobs, lease_owner)
+            if outcome:
+                result[outcome] += 1
         return result
+
+    def _dispatch_analysis_delivery(self, delivery: dict, jobs: Any, owner: str) -> str:
+        token = str(delivery["lease_token"])
+        delivery_id = str(delivery["id"])
+        if not self.store.begin_analysis_delivery(
+            delivery_id, owner, token, operation="inspect",
+        ):
+            return ""
+        try:
+            job, events, newest_seq, analysis = self._analysis_delivery_snapshot(delivery, jobs)
+            terminal = str(job.get("status")) in {
+                "completed", "completed_with_errors", "failed", "cancelled",
+            }
+            if terminal and analysis.get("report"):
+                return self._deliver_analysis_report(
+                    delivery, analysis["report"], newest_seq, owner, token,
+                )
+            if terminal:
+                return self._deliver_analysis_failure(
+                    delivery, job, analysis, newest_seq, owner, token,
+                )
+            return self._deliver_analysis_progress(
+                delivery, job, events, analysis, newest_seq, owner, token,
+            )
+        except Exception as exc:
+            logger.exception("飞书个股分析续投失败 job_id=%s", delivery.get("job_id"))
+            status = self.store.fail_analysis_delivery(
+                delivery_id, owner, token, str(exc),
+                diagnostic_code="analysis_delivery_failed",
+            )
+            return "retried" if status == "retry_wait" else "failed"
+
+    @staticmethod
+    def _analysis_delivery_snapshot(delivery: dict, jobs: Any) -> tuple:
+        job = jobs.public_job(str(delivery["job_id"]))
+        events = jobs.events(
+            str(delivery["job_id"]), after=int(delivery["event_seq"]), limit=500,
+        )
+        newest_seq = max(
+            [int(delivery["event_seq"]), *[int(item["seq"]) for item in events]],
+        )
+        analysis = jobs.analysis(str(delivery["analysis_id"]))
+        return job, events, newest_seq, analysis
+
+    def _analysis_operation(
+        self, delivery: dict, owner: str, token: str, operation: str,
+    ) -> None:
+        if not self.store.set_analysis_delivery_operation(
+            str(delivery["id"]), owner, token, operation,
+        ):
+            raise RuntimeError("analysis delivery lease lost")
+        self.store.heartbeat_analysis_delivery(str(delivery["id"]), owner, token)
+
+    def _analysis_external_call(
+        self, delivery: dict, owner: str, token: str, callback: Any,
+    ) -> Any:
+        stop = threading.Event()
+
+        def renew() -> None:
+            while not stop.wait(30):
+                try:
+                    if not self.store.heartbeat_analysis_delivery(
+                        str(delivery["id"]), owner, token,
+                    ):
+                        return
+                except (sqlite3.Error, OSError):
+                    logger.warning("analysis delivery heartbeat failed", exc_info=True)
+
+        thread = threading.Thread(
+            target=renew, name=f"analysis-delivery-{str(delivery['id'])[-8:]}", daemon=True,
+        )
+        thread.start()
+        try:
+            return callback()
+        finally:
+            stop.set()
+            thread.join(timeout=1)
+
+    def _deliver_analysis_report(
+        self, delivery: dict, report: dict, newest_seq: int, owner: str, token: str,
+    ) -> str:
+        from quantmaster.automation.stock_cards import stock_analysis_report_cards
+
+        cards = stock_analysis_report_cards(report)
+        route_target = str(delivery["target"])
+        route = {
+            "chat_type": delivery.get("chat_type"),
+            "account_id": delivery.get("account_id"),
+            "target": route_target,
+        }
+        cursor = int(delivery["appendix_cursor"])
+        if cursor == 0:
+            self._analysis_operation(delivery, owner, token, "update")
+            self._analysis_external_call(
+                delivery, owner, token,
+                lambda: self.feishu.update_card(
+                    message_id=str(delivery["message_id"]), card=cards[0],
+                ),
+            )
+            delivery = self.store.update_analysis_delivery(
+                str(delivery["id"]), event_seq=newest_seq, update_increment=1,
+                appendix_cursor=1, last_error="", owner=owner, token=token,
+            )
+            delivery["target"] = delivery.get("target") or route_target
+            cursor = 1
+        while cursor < len(cards):
+            self._analysis_operation(delivery, owner, token, "appendix")
+            self._analysis_external_call(
+                delivery, owner, token,
+                lambda card=cards[cursor]: self.feishu.send_card(
+                    chat_id=route_target, card=card,
+                ),
+            )
+            cursor += 1
+            try:
+                delivery = self.store.update_analysis_delivery(
+                    str(delivery["id"]), event_seq=newest_seq, appendix_cursor=cursor,
+                    last_error="", owner=owner, token=token,
+                )
+            except (sqlite3.Error, OSError):
+                logger.exception(
+                    "analysis appendix cursor ack failed; quarantining delivery_id=%s",
+                    delivery["id"],
+                )
+                return ""
+        self.store.update_analysis_delivery(
+            str(delivery["id"]), event_seq=newest_seq, status="sent", last_error="",
+            owner=owner, token=token, release=True,
+        )
+        self._remember_analysis_report(route, report)
+        return "delivered"
+
+    def _remember_analysis_report(self, delivery: dict, report: dict) -> None:
+        if delivery.get("chat_type") != "group":
+            return
+        instrument = report.get("instrument") or {}
+        overall = report.get("overall") or {}
+        try:
+            self.store.remember_conversation_message(
+                channel="feishu", account_id=str(delivery["account_id"]),
+                chat_id=str(delivery["target"]),
+                message_id=f"local_bot_{uuid.uuid4().hex}", sender_id="bot",
+                sender_name="QuantMaster",
+                text=(
+                    f"{instrument.get('name') or instrument.get('symbol')}"
+                    f"（{instrument.get('symbol')}）六维分析完成：综合分 "
+                    f"{overall.get('score')}，{overall.get('stance')}。"
+                    f"{overall.get('thesis') or ''}"
+                ),
+                is_bot=True,
+            )
+        except (sqlite3.Error, OSError):
+            logger.warning("analysis report conversation memory failed", exc_info=True)
+
+    def _deliver_analysis_failure(
+        self, delivery: dict, job: dict, analysis: dict, newest_seq: int,
+        owner: str, token: str,
+    ) -> str:
+        from quantmaster.automation.stock_cards import stock_analysis_failure_card
+
+        error = str(
+            analysis.get("error") or job.get("detail") or job.get("status") or "任务未完成"
+        )
+        self._analysis_operation(delivery, owner, token, "update")
+        self._analysis_external_call(
+            delivery, owner, token,
+            lambda: self.feishu.update_card(
+                message_id=str(delivery["message_id"]),
+                card=stock_analysis_failure_card(
+                    str(delivery.get("query") or "个股分析"), error,
+                ),
+            ),
+        )
+        self.store.update_analysis_delivery(
+            str(delivery["id"]), event_seq=newest_seq, status="dead_letter",
+            update_increment=1, last_error=error, owner=owner, token=token,
+            release=True, diagnostic_code="analysis_job_failed",
+        )
+        return "failed"
+
+    def _deliver_analysis_progress(
+        self, delivery: dict, job: dict, events: list[dict], analysis: dict,
+        newest_seq: int, owner: str, token: str,
+    ) -> str:
+        from quantmaster.automation.stock_cards import stock_analysis_progress_card
+
+        notable = any(str(item.get("type")) in {
+            "evidence_collection_completed", "dimension_completed",
+            "dimension_degraded", "job_terminal",
+        } for item in events)
+        if not notable or int(delivery["update_count"]) >= 9:
+            self.store.update_analysis_delivery(
+                str(delivery["id"]), event_seq=newest_seq, status="pending",
+                owner=owner, token=token, release=True,
+            )
+            return ""
+        self._analysis_operation(delivery, owner, token, "update")
+        self._analysis_external_call(
+            delivery, owner, token,
+            lambda: self.feishu.update_card(
+                message_id=str(delivery["message_id"]),
+                card=stock_analysis_progress_card(
+                    str(delivery.get("query") or "个股分析"),
+                    int(job.get("progress") or 0),
+                    str(job.get("phase") or "分析进行中"),
+                    str(job.get("detail") or "已完成维度会持续保留"),
+                    mode=str(delivery.get("mode") or "deep"),
+                    dimensions=list(analysis.get("dimensions") or []),
+                ),
+            ),
+        )
+        self.store.update_analysis_delivery(
+            str(delivery["id"]), event_seq=newest_seq, status="pending",
+            update_increment=1, last_error="", owner=owner, token=token, release=True,
+        )
+        return ""
 
     def update_policy(self, target_id: str, preset: str, overrides: dict,
                       enabled: bool | None, actor: str) -> dict:
