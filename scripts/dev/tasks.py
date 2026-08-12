@@ -7,6 +7,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -211,6 +212,52 @@ def remove_empty_residual(target: Path) -> None:
     target.rmdir()
 
 
+def residual_checkout_clean(primary: Path, target: Path, branch: str) -> bool:
+    """Verify a deregistered checkout still matches its task branch exactly."""
+    marker = target / ".git"
+    if not marker.is_file():
+        return False
+    marker_value = marker.read_text(encoding="utf-8", errors="replace").strip()
+    if not marker_value.startswith("gitdir: "):
+        return False
+    recorded = Path(marker_value.removeprefix("gitdir: "))
+    expected = primary / ".git" / "worktrees" / target.name
+    if recorded.resolve() != expected.resolve():
+        return False
+    index = primary / ".artifacts" / "task-remove" / f"{uuid.uuid4().hex}.index"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_INDEX_FILE": str(index), "GIT_WORK_TREE": str(target)}
+    command = ["git", "-c", f"safe.directory={primary.as_posix()}"]
+    try:
+        read_tree = subprocess.run(
+            [*command, "read-tree", branch], cwd=primary, env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if read_tree.returncode:
+            return False
+        status = subprocess.run(
+            [*command, "status", "--porcelain", "--untracked-files=all"],
+            cwd=primary, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False,
+        )
+        return status.returncode == 0 and not status.stdout.strip()
+    finally:
+        index.unlink(missing_ok=True)
+
+
+def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
+    if not target.exists():
+        return
+    remove_primary_venv_link(target, primary)
+    if not residual_checkout_clean(primary, target, branch):
+        raise SystemExit("worktree 登记已移除，但残留 checkout 无法证明干净，拒绝删除")
+    resolved = target.resolve()
+    expected_parent = (primary / ".worktrees").resolve()
+    if resolved.parent != expected_parent:
+        raise SystemExit("拒绝删除预期目录之外的残留 worktree")
+    shutil.rmtree(resolved)
+
+
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
@@ -269,10 +316,15 @@ def remove(slug: str) -> None:
         if git(["status", "--porcelain"], cwd=target).stdout.strip():
             raise SystemExit("worktree 不干净，拒绝移除")
         remove_primary_venv_link(target, primary)
-        git(["worktree", "remove", str(target)], cwd=primary)
+        result = git(["worktree", "remove", str(target)], cwd=primary, check=False)
+        still_registered = target in registered_worktrees(primary)
+        if result.returncode and still_registered:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
+            raise RuntimeError(f"Git worktree 移除失败：{detail}")
+        if target.exists():
+            remove_verified_residual(primary, target, branch)
     else:
-        remove_primary_venv_link(target, primary)
-        remove_empty_residual(target)
+        remove_verified_residual(primary, target, branch)
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     print(f"[task] removed {branch} and {target}")

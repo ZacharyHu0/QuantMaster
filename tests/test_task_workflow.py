@@ -7,6 +7,7 @@ from scripts.dev.tasks import (
     remove,
     remove_empty_residual,
     remove_primary_venv_link,
+    remove_verified_residual,
     select_impact,
     validate_ready_state,
 )
@@ -136,6 +137,7 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {primary})
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
+    monkeypatch.setattr(tasks, "remove_verified_residual", lambda root, path, branch: path.rmdir())
     monkeypatch.setattr(tasks, "git", fake_git)
     remove("recovery")
     assert not target.exists()
@@ -162,3 +164,29 @@ def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="尚未完整 squash"):
         remove("recovery")
     assert target.exists()
+
+
+def test_remove_verified_residual_requires_clean_checkout(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: False)
+    with pytest.raises(SystemExit, match="无法证明干净"):
+        remove_verified_residual(primary, target, "codex/recovery")
+    assert target.exists()
+
+
+def test_remove_verified_residual_deletes_only_proven_checkout(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    (target / "tracked.txt").write_text("old checkout", encoding="utf-8")
+    monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
+    remove_verified_residual(primary, target, "codex/recovery")
+    assert not target.exists()
