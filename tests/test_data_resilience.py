@@ -208,6 +208,19 @@ def test_akshare_exponential_retry(isolated_config, monkeypatch):
     assert sleeps == [0.25, 0.5]
 
 
+def test_online_provider_switches_block_direct_calls(isolated_config):
+    isolated_config.data.akshare_enabled = False
+    isolated_config.data.tushare_enabled = False
+    isolated_config.data.yfinance_enabled = False
+    isolated_config.data.free_stockdb_online_enabled = False
+
+    with pytest.raises(LocalOnlyDataAccessError, match="akshare"):
+        akshare_call("disabled", lambda: "unexpected")
+    for lane in ("tushare:daily", "yahoo:daily", "free-stockdb-online"):
+        with pytest.raises(LocalOnlyDataAccessError, match="已在设置中关闭"):
+            provider_call(lane, "disabled", lambda: "unexpected")
+
+
 def test_tushare_rate_limit_is_shared_in_data_root(isolated_config, monkeypatch):
     isolated_config.data.tushare_calls_per_minute = 600
     sleeps: list[float] = []

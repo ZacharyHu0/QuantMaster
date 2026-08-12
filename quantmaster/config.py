@@ -50,6 +50,9 @@ class DataConfig:
     free_stockdb_online_enabled: bool = False
     free_stockdb_online_url: str = "http://8.138.149.215:7899"
     free_stockdb_online_timeout: float = 4.0
+    akshare_enabled: bool = True
+    tushare_enabled: bool = True
+    yfinance_enabled: bool = True
     free_stockdb_ingest_retain: int = 30
     free_stockdb_stock_history_sessions: int = 180
     free_stockdb_stock_initial_lookback_days: int = 300
@@ -251,6 +254,15 @@ def _apply_env(cfg: Config) -> None:
         "QM_FREE_STOCKDB_ONLINE_URL", cfg.data.free_stockdb_online_url).strip().rstrip("/")
     cfg.data.free_stockdb_online_timeout = float(env.get(
         "QM_FREE_STOCKDB_ONLINE_TIMEOUT", cfg.data.free_stockdb_online_timeout))
+    cfg.data.akshare_enabled = env.get(
+        "QM_AKSHARE_ENABLED", str(cfg.data.akshare_enabled)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.tushare_enabled = env.get(
+        "QM_TUSHARE_ENABLED", str(cfg.data.tushare_enabled)
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    cfg.data.yfinance_enabled = env.get(
+        "QM_YFINANCE_ENABLED", str(cfg.data.yfinance_enabled)
+    ).strip().lower() in {"1", "true", "yes", "on"}
     cfg.data.akshare_retries = int(
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(

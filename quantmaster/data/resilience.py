@@ -697,6 +697,24 @@ def _require_remote_io(lane: str) -> None:
         )
 
 
+def _provider_enabled(lane: str) -> bool:
+    """Return the user's online-request switch for a known provider lane."""
+    cfg = get_config().data
+    return {
+        "akshare": cfg.akshare_enabled,
+        "tushare": cfg.tushare_enabled,
+        "yahoo": cfg.yfinance_enabled,
+        "free-stockdb-online": cfg.free_stockdb_online_enabled,
+    }.get(lane.partition(":")[0].casefold(), True)
+
+
+def _require_provider_enabled(lane: str, *, probe: bool) -> None:
+    if probe or _provider_enabled(lane):
+        return
+    provider = lane.partition(":")[0].casefold()
+    raise LocalOnlyDataAccessError(f"数据源 {provider} 已在设置中关闭")
+
+
 def provider_call[T](
     lane: str,
     key: str,
@@ -707,6 +725,7 @@ def provider_call[T](
 ) -> T:
     """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
     _require_remote_io(lane)
+    _require_provider_enabled(lane, probe=probe)
     PROVIDER_HEALTH.check_available(lane, probe=probe)
 
     def scheduled() -> T:
@@ -746,6 +765,7 @@ def akshare_call[T](
     """执行 AKShare 请求，失败时按配置做指数退避重试。"""
     _require_remote_io(lane)
     cfg = get_config().data
+    _require_provider_enabled("akshare", probe=probe)
     attempts = max(1, int(cfg.akshare_retries))
     backoff = max(0.0, float(cfg.akshare_retry_backoff))
     key = label + ":" + hashlib.sha256(

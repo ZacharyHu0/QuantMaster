@@ -40,6 +40,38 @@ def test_settings_page_exposes_news_scan_intervals():
     assert 'name="automation.periodic_news_interval_minutes"' in source
 
 
+def test_settings_page_exposes_online_provider_switches():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "quantmaster" / "server" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    for name in (
+        "data.free_stockdb_online_enabled",
+        "data.akshare_enabled",
+        "data.tushare_enabled",
+        "data.yfinance_enabled",
+    ):
+        assert f'name="{name}"' in source
+
+
+def test_online_provider_switches_round_trip_through_settings(tmp_path):
+    manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
+    update = _update(manager)
+    update.data.free_stockdb_online_enabled = True
+    update.data.akshare_enabled = False
+    update.data.tushare_enabled = False
+    update.data.yfinance_enabled = False
+
+    result = manager.save(update)
+    public = manager.public()["data"]
+
+    assert "data.free_stockdb_online_enabled" in result["changed_fields"]
+    assert public["free_stockdb_online_enabled"] is True
+    assert public["akshare_enabled"] is False
+    assert public["tushare_enabled"] is False
+    assert public["yfinance_enabled"] is False
+
+
 class FakeCredentials:
     def __init__(self, available=True):
         self.available = available

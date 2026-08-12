@@ -28,6 +28,9 @@ data:
   free_stockdb_online_enabled: true       # 仅用于小批交互补缺
   free_stockdb_online_url: http://8.138.149.215:7899
   free_stockdb_online_timeout: 4
+  akshare_enabled: true                 # 统一行情调度是否允许请求 AKShare
+  tushare_enabled: true                 # 统一行情调度是否允许请求 Tushare
+  yfinance_enabled: true                # 海外市场是否允许请求 Yahoo Finance
   free_stockdb_ingest_retain: 30      # 保留最近成功摄取清单；内容块按引用去重
   free_stockdb_stock_history_sessions: 180
   free_stockdb_stock_initial_lookback_days: 300

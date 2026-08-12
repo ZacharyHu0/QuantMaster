@@ -1290,6 +1290,13 @@
             </section>
           </div>
           <div class="field-grid settings-subsection">
+            <div class="field-wide section-divider"><strong>在线请求开关</strong><small>关闭后统一行情调度不会向该来源发起请求；已有本地缓存仍可读取。</small></div>
+            <label class="toggle-field"><span><strong>free-stockdb-online</strong><small>公开测试服务，仅用于小批量交互补缺；默认关闭。</small></span><input name="data.free_stockdb_online_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>AKShare</strong><small>A 股、港股、指数与期货的免费在线来源。</small></span><input name="data.akshare_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>Tushare</strong><small>使用已配置 Token 的 A 股与指数在线来源。</small></span><input name="data.tushare_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>Yahoo Finance</strong><small>美股、日韩市场及部分海外行情来源。</small></span><input name="data.yfinance_enabled" type="checkbox" role="switch"></label>
+            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required placeholder="http://8.138.149.215:7899"><small>参考服务当前提供远程 stock_sdk 通道；高频或正式研究应使用本地库。</small></label>
+            <label>free-stockdb-online 超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
             <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
             <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源。</small></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button></div><small id="tushare-secret-state"></small></label>

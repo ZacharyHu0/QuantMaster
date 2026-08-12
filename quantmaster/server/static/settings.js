@@ -271,7 +271,10 @@
       markCheckStale('lab');
     }
     if (['data.free_stockdb_url', 'data.free_stockdb_timeout',
-      'data.free_stockdb_sdk_path'].includes(name)) markCheckStale('data-sources');
+      'data.free_stockdb_sdk_path', 'data.free_stockdb_online_enabled',
+      'data.free_stockdb_online_url', 'data.free_stockdb_online_timeout',
+      'data.akshare_enabled', 'data.tushare_enabled',
+      'data.yfinance_enabled'].includes(name)) markCheckStale('data-sources');
     if (input.id === 'tushare-secret') {
       markCheckStale('tushare');
       markCheckStale('lab');

@@ -199,7 +199,7 @@ def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> N
     assert calls == ["free-stockdb-online"]
 
 
-def test_cn_source_order_excludes_untrusted_public_http(monkeypatch) -> None:
+def test_cn_source_order_appends_enabled_public_http(monkeypatch) -> None:
     from quantmaster.config import get_config
     from quantmaster.data.base import Market
     from quantmaster.data.registry import _factories
@@ -208,7 +208,24 @@ def test_cn_source_order_excludes_untrusted_public_http(monkeypatch) -> None:
     names = [source.name for source in _factories()[Market.CN]]
 
     assert names[:3] == ["free-stockdb", "tushare", "akshare"]
-    assert "free-stockdb-online" not in names
+    assert names[-1] == "free-stockdb-online"
+
+
+def test_online_source_switches_remove_disabled_providers(monkeypatch) -> None:
+    from quantmaster.config import get_config
+    from quantmaster.data.base import Market
+    from quantmaster.data.registry import _factories
+
+    data = get_config().data
+    monkeypatch.setattr(data, "akshare_enabled", False)
+    monkeypatch.setattr(data, "tushare_enabled", False)
+    monkeypatch.setattr(data, "yfinance_enabled", False)
+
+    factories = _factories()
+
+    assert [source.name for source in factories[Market.CN]] == ["free-stockdb"]
+    assert factories[Market.US] == []
+    assert factories[Market.HK] == []
 
 
 def test_sdk_path_auto_discovers_managed_pybao_and_explicit_path_wins(
@@ -279,7 +296,7 @@ def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None
     assert client.calls[0]["code"] == ["600519", "000858"]
 
 
-def test_online_source_is_never_in_trusted_request_factories(monkeypatch) -> None:
+def test_online_source_is_only_in_interactive_request_factories(monkeypatch) -> None:
     from quantmaster.config import get_config
     from quantmaster.data.base import Market
     from quantmaster.data.registry import _request_factories
@@ -296,5 +313,19 @@ def test_online_source_is_never_in_trusted_request_factories(monkeypatch) -> Non
     )[Market.CN]]
 
     assert "free-stockdb-online" not in normal
-    assert "free-stockdb-online" not in interactive
+    assert interactive[-1] == "free-stockdb-online"
     assert "free-stockdb-online" not in full
+
+
+def test_explicit_online_source_respects_disabled_switch(monkeypatch) -> None:
+    from quantmaster.config import get_config
+    from quantmaster.data.registry import _request_factories
+
+    monkeypatch.setattr(get_config().data, "free_stockdb_online_enabled", False)
+
+    with pytest.raises(ValueError, match="已在设置中关闭"):
+        _request_factories(
+            priority="interactive",
+            allow_online=True,
+            provider="free-stockdb-online",
+        )

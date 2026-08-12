@@ -245,12 +245,42 @@ def _check_free_stockdb(data: DataSettings | None, timeout: float) -> dict[str, 
         }
 
 
-def check_data_sources(
-    timeout: float = 8.0,
-    data: DataSettings | None = None,
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    sources: dict[str, Any] = {}
+def _check_free_stockdb_online(data: DataSettings | None, timeout: float) -> dict[str, Any]:
+    if data is None:
+        return {}
+    if not data.free_stockdb_online_enabled:
+        return {
+            "free-stockdb-online": {
+                "status": "success",
+                "message": "已在设置中关闭",
+                "category": "disabled-by-user",
+            },
+        }
+    try:
+        from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource
+
+        details = FreeStockDBOnlineSource().probe()
+        return {
+            "free-stockdb-online": {
+                "status": "success",
+                "message": "公开测试服务可用（仅小批交互补缺）",
+                "engine": str(details.get("engine") or "free-stockdb"),
+                "service_url": str(details.get("service_url") or data.free_stockdb_online_url),
+            },
+        }
+    except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return {
+            "free-stockdb-online": {
+                "status": "warning",
+                "message": f"公开测试服务不可用，将保留本地数据（{type(exc).__name__}）",
+                "category": "network",
+            },
+        }
+
+
+def _connectivity_probes(
+    data: DataSettings | None,
+) -> tuple[dict[str, tuple[str, str]], dict[str, Any]]:
     probes = {
         "akshare": (
             "akshare:eastmoney",
@@ -263,6 +293,28 @@ def check_data_sources(
             "?range=1d&interval=1d",
         ),
     }
+    disabled: dict[str, Any] = {}
+    switches = {
+        "akshare": True if data is None else data.akshare_enabled,
+        "yfinance": True if data is None else data.yfinance_enabled,
+    }
+    for provider, enabled in switches.items():
+        if enabled:
+            continue
+        probes.pop(provider)
+        disabled[provider] = {
+            "status": "success", "message": "已在设置中关闭",
+            "category": "disabled-by-user",
+        }
+    return probes, disabled
+
+
+def check_data_sources(
+    timeout: float = 8.0,
+    data: DataSettings | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    probes, sources = _connectivity_probes(data)
 
     def probe(package: str, lane: str, url: str) -> tuple[str, dict[str, str]]:
         try:
@@ -323,6 +375,12 @@ def check_data_sources(
             sources[package] = result
 
     sources.update(_check_free_stockdb(data, timeout))
+    sources.update(_check_free_stockdb_online(data, timeout))
+    if data is not None and not data.tushare_enabled:
+        sources["tushare"] = {
+            "status": "success", "message": "已在设置中关闭",
+            "category": "disabled-by-user",
+        }
 
     from quantmaster.data.instruments import instrument_diagnostics
     from quantmaster.data.resilience import PROVIDER_HEALTH

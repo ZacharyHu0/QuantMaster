@@ -1150,25 +1150,37 @@ def _session_refresh_due(
 def _factories() -> dict[Market, list]:
     from quantmaster.data.akshare_source import AkshareSource
     from quantmaster.data.free_stockdb_source import (
+        FreeStockDBOnlineSource,
         FreeStockDBSource,
     )
     from quantmaster.data.tushare_source import TushareSource
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    ak, free, yf, tu = (
+    ak, free, free_online, yf, tu = (
         AkshareSource,
         FreeStockDBSource,
+        FreeStockDBOnlineSource,
         YFinanceSource,
         TushareSource,
     )
-    # The public trial HTTP service is not an authoritative trading-data source.
-    # It remains available only to explicitly experimental modules and can never
-    # enter the trusted market-data fallback chain.
-    local_first = [free, tu, ak]
+    cfg = get_config().data
+
+    def enabled(*factories):
+        switches = {
+            ak: cfg.akshare_enabled,
+            tu: cfg.tushare_enabled,
+            yf: cfg.yfinance_enabled,
+        }
+        return [factory for factory in factories if switches.get(factory, True)]
+
+    # The public endpoint is an explicitly enabled, last-resort interactive
+    # supplement. _request_factories removes it from normal/background work.
+    online_tail = [free_online] if cfg.free_stockdb_online_enabled else []
+    local_first = [free, *enabled(tu, ak), *online_tail]
     orders = {
         "free-stockdb": local_first,
-        "akshare": [ak, tu, free],
-        "tushare": [tu, ak, free],
+        "akshare": [*enabled(ak, tu), free, *online_tail],
+        "tushare": [*enabled(tu, ak), free, *online_tail],
     }
     selected = str(get_config().data.primary_provider).strip().lower()
     if selected not in orders:
@@ -1178,12 +1190,12 @@ def _factories() -> dict[Market, list]:
     cn = orders[selected]
     return {
         Market.CN: cn,
-        Market.HK: [ak, yf],
-        Market.US: [yf],
-        Market.JP: [yf],
-        Market.KR: [yf],
-        Market.FUTURES: [ak, yf],
-        Market.INDEX: [tu, ak, yf],
+        Market.HK: enabled(ak, yf),
+        Market.US: enabled(yf),
+        Market.JP: enabled(yf),
+        Market.KR: enabled(yf),
+        Market.FUTURES: enabled(ak, yf),
+        Market.INDEX: enabled(tu, ak, yf),
     }
 
 
@@ -1202,11 +1214,22 @@ def _request_factories(
         return {market: [] for market in Market}
     selected_provider = str(provider or "").strip().lower()
     if selected_provider:
-        from quantmaster.data.free_stockdb_source import FreeStockDBSource
+        cfg = get_config().data
+        enabled = {
+            "free-stockdb-online": cfg.free_stockdb_online_enabled,
+            "tushare": cfg.tushare_enabled,
+        }
+        if selected_provider in enabled and not enabled[selected_provider]:
+            raise ValueError(f"数据源 {selected_provider} 已在设置中关闭")
+        from quantmaster.data.free_stockdb_source import (
+            FreeStockDBOnlineSource,
+            FreeStockDBSource,
+        )
         from quantmaster.data.tushare_source import TushareSource
 
         selected = {
             "free-stockdb": FreeStockDBSource,
+            "free-stockdb-online": FreeStockDBOnlineSource,
             "tushare": TushareSource,
         }.get(selected_provider)
         if selected is None:
