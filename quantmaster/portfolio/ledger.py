@@ -101,7 +101,10 @@ class Ledger:
         self.read_only = bool(read_only)
         if not self.path.is_file():
             if self.read_only:
-                raise FileNotFoundError(self.path)
+                # A never-created personal ledger is a valid empty state.  Read methods
+                # handle the missing file without creating it; an existing non-current
+                # ledger still goes through the strict schema check below.
+                return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._conn() as conn:
                 migrate_schema(conn, ((LEDGER_SCHEMA_VERSION, self._schema_v1),))
