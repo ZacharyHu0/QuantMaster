@@ -7,6 +7,8 @@ build/
 dist/
 .artifacts/
 .worktrees/
+/AGENTS.md
+/.impeccable.md
 .test_durations
 .task-runtime/
 .venv/
