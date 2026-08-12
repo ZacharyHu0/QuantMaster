@@ -12,6 +12,7 @@ from scripts.release.sync import (
     ci_recovery_errors,
     github_https_push_url,
     is_next_patch,
+    post_commit,
     pre_commit,
     push_config_variants,
     release_assignments,
@@ -205,7 +206,43 @@ def test_main_partial_release_metadata_is_rejected(monkeypatch):
     assert pre_commit() == 1
 
 
-@pytest.mark.parametrize("release_path", [RELEASE_FILE, CHANGELOG_FILE])
+def test_main_changelog_only_commit_is_allowed(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {CHANGELOG_FILE})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    assert pre_commit() == 0
+
+
+def test_version_commit_does_not_require_a_tag_or_auto_push(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    release, changelog = valid_sources()
+    today = release_today().isoformat()
+    release = release.replace("2026-07-27", today)
+    changelog = changelog.replace("2026-07-27", today)
+    previous = release.replace('VERSION = "1.2.3"', 'VERSION = "1.2.2"')
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {RELEASE_FILE, CHANGELOG_FILE})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    monkeypatch.setattr(
+        release_sync, "read_staged",
+        lambda path: release if path == RELEASE_FILE else changelog,
+    )
+    monkeypatch.setattr(release_sync, "read_committed", lambda path: previous)
+    monkeypatch.setattr(release_sync, "run_local_ci", lambda: 0)
+    monkeypatch.setattr(
+        release_sync, "verify_previous_release_tag",
+        lambda version: (_ for _ in ()).throw(AssertionError("tag gate called")),
+    )
+    assert pre_commit() == 0
+    monkeypatch.setattr(
+        release_sync, "push_current_release",
+        lambda: (_ for _ in ()).throw(AssertionError("implicit push called")),
+    )
+    assert post_commit() == 0
+
+
+@pytest.mark.parametrize("release_path", [RELEASE_FILE])
 def test_task_branch_rejects_release_metadata(monkeypatch, release_path):
     from scripts.release import sync as release_sync
 

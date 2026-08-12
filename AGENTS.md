@@ -30,9 +30,9 @@
 - Create and remove task worktrees with `./.venv/Scripts/python.exe scripts/dev/tasks.py start
   <slug>` and `... tasks.py remove <slug>`. Removal is allowed only after the task tree has been
   squash-integrated into `main` and the worktree is clean.
-- Task branches may use small checkpoint commits. They must not edit `quantmaster/release.py` or
-  `CHANGELOG.md`; those files belong only to an explicitly requested or materially valuable release
-  commit on `main`.
+- Task branches may use small checkpoint commits and may update `CHANGELOG.md` when the change is
+  user-facing. They must not edit `quantmaster/release.py`; version metadata is updated on `main`
+  only when semantic-versioning rules warrant it.
 - When a task discovers independent work, create a separate task instead of expanding the current
   diff. Resolve conflicts with current `origin/main` inside the task worktree before integration.
 - `.artifacts`, pytest temporary directories, writable databases, and runtime state are local to
@@ -58,12 +58,11 @@
 
 ## Release bookkeeping
 
-- Create a release only when the owner explicitly requests one or when a materially valuable update
-  warrants publication. Ordinary fixes, documentation changes, tests, and refactors may be pushed
-  to `main` without changing version metadata, tagging, or publishing a GitHub Release.
-- Every actual release commit must increment `VERSION` in `quantmaster/release.py` using semantic
-  versioning and set `RELEASE_DATE` to the actual release date. Task branches must not touch either
-  release metadata file.
+- Commits may update `CHANGELOG.md` as needed. When an integrated change warrants a version bump,
+  update `VERSION` in `quantmaster/release.py` using semantic versioning and set `RELEASE_DATE` to
+  the actual version date. A version commit is not a release and may be pushed normally.
+- Create a Git tag and GitHub Release only when the owner explicitly requests publication. Never
+  infer release authorization from a changelog edit, version bump, merge, commit, or push.
 - `MAJOR` is owner-controlled and must never change without a separate, explicit authorization from
   the owner. New functionality increments `MINOR`; fixes and patches increment only `PATCH`.
 - Add the matching user-facing notes to `RELEASES` in `quantmaster/release.py` and to the top
@@ -75,11 +74,9 @@
 
 ## Release synchronization
 
-- Run `python scripts/release/sync.py install` once after cloning. The tracked hooks validate every
-  commit and automatically push version-incrementing commits made on `main` to `origin/main`.
-- A failed push leaves a pending marker inside `.git` and blocks the next release commit. Recover
-  with `python scripts/release/sync.py push`; inspect the state with `python scripts/release/sync.py status`.
-- Auto-push is intentionally limited to `main`. Never enable it for the archived Claude branch or
-  use a release commit to move that branch.
-- Do not bypass the hooks for normal project work. Ordinary commits remain independently validated
-  changes; versioned release synchronization applies only to commits that update release metadata.
+- Run `python scripts/release/sync.py install` once after cloning. The tracked hooks validate
+  version metadata on `main` but never push, tag, or publish automatically.
+- Push ordinary and version commits through the normal explicit Git workflow. Inspect metadata and
+  branch synchronization with `python scripts/release/sync.py status`.
+- Do not bypass the hooks for normal project work. Release publication remains a separate,
+  owner-authorized tag workflow.

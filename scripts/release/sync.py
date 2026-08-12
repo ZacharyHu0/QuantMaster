@@ -1,9 +1,8 @@
-"""Bind QuantMaster release commits on ``main`` to their GitHub push.
+"""Validate QuantMaster version bookkeeping without publishing a release.
 
-The tracked hooks call this module before and after every commit.  A release
-commit is validated from the Git index, then pushed only after Git has made an
-immutable commit.  Failed pushes leave a marker inside ``.git`` and the next
-release is blocked until the previous commit is synchronized.
+The tracked pre-commit hook validates version changes on ``main``.  Commits,
+pushes, tags, and GitHub Releases remain explicit operations; the post-commit
+hook intentionally has no side effects.
 """
 
 from __future__ import annotations
@@ -358,16 +357,16 @@ def run_local_ci() -> int:
 
 
 def _non_main_commit(paths: set[str], branch: str) -> int:
-    release_paths = sorted({RELEASE_FILE, CHANGELOG_FILE}.intersection(paths))
-    if release_paths:
+    version_paths = sorted({RELEASE_FILE}.intersection(paths))
+    if version_paths:
         return print_errors(
             [
-                "任务分支不得修改发布元数据；完成 ready 后在 main 的 squash release 中更新："
-                + ", ".join(release_paths)
+                "任务分支不得修改版本元数据；完成 ready 后按需在 main 更新："
+                + ", ".join(version_paths)
             ],
-            "任务提交包含发布文件，提交已阻止",
+            "任务提交包含版本文件，提交已阻止",
         )
-    print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过发布门禁")
+    print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过版本门禁")
     return 0
 
 
@@ -378,15 +377,14 @@ def pre_commit() -> int:
     branch = current_branch()
     if branch != "main":
         return _non_main_commit(paths, branch)
-    required = {RELEASE_FILE, CHANGELOG_FILE}
-    release_paths = required.intersection(paths)
-    if not release_paths:
-        print("[QuantMaster] main 普通提交：未修改发布元数据，跳过发布门禁和自动推送")
+    if RELEASE_FILE not in paths:
+        print("[QuantMaster] main 普通提交：未修改版本元数据")
         return 0
+    required = {RELEASE_FILE, CHANGELOG_FILE}
     missing = sorted(required - paths)
-    errors = [f"发布提交必须同时暂存 {path}" for path in missing]
+    errors = [f"版本提交必须同时暂存 {path}" for path in missing]
     if missing:
-        return print_errors(errors, "发布元数据不完整，提交已阻止")
+        return print_errors(errors, "版本元数据不完整，提交已阻止")
 
     release_source = read_staged(RELEASE_FILE)
     changelog_source = read_staged(CHANGELOG_FILE)
@@ -397,22 +395,13 @@ def pre_commit() -> int:
         head_version = release_assignments(read_committed(RELEASE_FILE)).get("VERSION", "")
         if version_tuple(staged_version) <= version_tuple(head_version):
             errors.append(f"VERSION 必须递增：{staged_version} <= {head_version}")
-        head = git_text(["rev-parse", "HEAD"])
-        recovered, _ = ci_recovery_errors(head_version, head)
-        if recovered and not is_next_patch(head_version, staged_version):
-            errors.append(
-                "CI 失败恢复只允许发布下一个 patch 版本："
-                f"{head_version} -> {staged_version}"
-            )
     except (RuntimeError, ValueError, SyntaxError) as exc:
         errors.append(f"无法比较当前与待提交版本：{exc}")
-    errors.extend(verify_previous_release_synced())
-    errors.extend(verify_previous_release_tag(head_version))
-    if print_errors(errors, "发布提交校验失败"):
+    if print_errors(errors, "版本提交校验失败"):
         return 1
     if local_ci_required(paths) and run_local_ci():
         return 1
-    print(f"[QuantMaster] 发布提交校验通过：v{staged_version}")
+    print(f"[QuantMaster] 版本提交校验通过：v{staged_version}；未发布 Release")
     return 0
 
 
@@ -442,7 +431,7 @@ def auto_push_enabled() -> bool:
     environment = os.getenv("QM_RELEASE_AUTO_PUSH", "").strip().lower()
     if environment in {"0", "false", "no", "off"}:
         return False
-    configured = config_value("quantmaster.releaseAutoPush", "true").lower()
+    configured = config_value("quantmaster.releaseAutoPush", "false").lower()
     return configured not in {"0", "false", "no", "off"}
 
 
@@ -572,12 +561,8 @@ def push_current_release() -> int:
 
 
 def post_commit() -> int:
-    if current_branch() != "main" or not release_changed_in_head():
-        return 0
-    if not auto_push_enabled():
-        print("[QuantMaster] 自动推送已禁用；本次提交未上传。")
-        return 0
-    return push_current_release()
+    """Never turn a commit or version bump into an implicit publication."""
+    return 0
 
 
 def install_hooks(args: argparse.Namespace) -> int:
@@ -587,7 +572,7 @@ def install_hooks(args: argparse.Namespace) -> int:
         return print_errors([f"钩子文件不可用：{path}" for path in missing], "安装失败")
     settings = [
         ("core.hooksPath", ".githooks"),
-        ("quantmaster.releaseAutoPush", "true"),
+        ("quantmaster.releaseAutoPush", "false"),
         ("quantmaster.releasePushRetries", str(args.retries)),
         ("quantmaster.releasePushTimeoutSeconds", str(args.push_timeout)),
         ("credential.useHttpPath", "true"),
@@ -608,7 +593,7 @@ def install_hooks(args: argparse.Namespace) -> int:
         result = run_git(["config", "--local", key, value])
         if result.returncode:
             return print_errors([result.stderr.strip()], "写入 Git 配置失败")
-    print("[QuantMaster] Git hooks 已启用：版本提交将在 main 上自动推送。")
+    print("[QuantMaster] Git hooks 已启用：校验版本元数据，不自动推送或发布。")
     return status()
 
 

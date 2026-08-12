@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-RELEASE_PATHS = frozenset({"quantmaster/release.py", "CHANGELOG.md"})
+VERSION_PATHS = frozenset({"quantmaster/release.py"})
 
 
 def git(args: list[str], *, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -185,9 +185,9 @@ def validate_ready_state(branch: str, status: str, behind: bool, changed: list[s
         raise SystemExit("工作区不干净；请先提交任务改动")
     if behind:
         raise SystemExit("任务分支落后于 origin/main；请先更新并解决冲突")
-    release_changes = RELEASE_PATHS.intersection(changed)
-    if release_changes:
-        raise SystemExit("任务分支不得修改发布元数据：" + ", ".join(sorted(release_changes)))
+    version_changes = VERSION_PATHS.intersection(changed)
+    if version_changes:
+        raise SystemExit("任务分支不得修改版本元数据：" + ", ".join(sorted(version_changes)))
 
 
 def remove(slug: str) -> None:
@@ -204,7 +204,7 @@ def remove(slug: str) -> None:
     if git(["status", "--porcelain"], cwd=target).stdout.strip():
         raise SystemExit("worktree 不干净，拒绝移除")
     remaining = set(git_lines(["diff", "--name-only", branch, "main"], cwd=primary))
-    if remaining - RELEASE_PATHS:
+    if remaining - VERSION_PATHS:
         raise SystemExit(f"{branch} 尚未完整 squash 到 main，拒绝移除")
     git(["worktree", "remove", str(target)], cwd=primary)
     git(["branch", "-d", branch], cwd=primary)
