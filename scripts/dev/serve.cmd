@@ -18,10 +18,11 @@ if not exist "%QM_LAUNCHER%" (
     echo QuantMaster named launcher could not be prepared; falling back to Python.
     set "QM_LAUNCHER=%QM_PYTHON%"
 )
-rem Keep cmd.exe out of the long-running app tree.  Once this short launcher
-rem exits, QuantMaster becomes the visible root and owns stockdb/workers.
+rem Do not use START here: it detaches Ctrl+C from QuantMaster and can leave
+rem its workers behind. The foreground QuantMaster process owns every app
+rem child; cmd.exe is only the unavoidable shell parent of a .cmd launch.
 rem Pass --no-reload for the traditional single-process mode.
-start "QuantMaster" /b "%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*
+"%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*
 set "QM_EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 

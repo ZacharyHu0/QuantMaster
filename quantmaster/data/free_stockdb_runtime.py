@@ -470,7 +470,10 @@ class FreeStockDBRuntime:
     def _launch_service_process(
         executable: Path, config_path: Path, root: Path,
     ) -> subprocess.Popen[bytes]:
-        command = [str(executable), "-d", str(config_path), "-s", "start"]
+        # ``-d`` forks the vendor server away from QuantMaster, making it a
+        # terminal/system child and preventing reliable lifetime ownership.
+        # Foreground mode keeps stockdb as this Runtime Worker's actual child.
+        command = [str(executable), str(config_path), "-s", "start"]
         return subprocess.Popen(
             command, cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

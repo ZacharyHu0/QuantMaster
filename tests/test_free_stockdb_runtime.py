@@ -107,6 +107,23 @@ def test_managed_service_launches_original_vendor_binary(
     assert calls == [(executable, config_path, root)]
 
 
+def test_managed_service_keeps_stockdb_in_the_runtime_worker_process_tree(monkeypatch, tmp_path):
+    executable = tmp_path / "stockdb.exe"
+    config_path = tmp_path / "stockdb.conf"
+    captured = {}
+
+    def popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr("quantmaster.data.free_stockdb_runtime.subprocess.Popen", popen)
+
+    FreeStockDBRuntime._launch_service_process(executable, config_path, tmp_path)
+
+    assert captured["command"] == [str(executable), str(config_path), "-s", "start"]
+
+
 def test_daemon_launcher_may_exit_before_service_starts(tmp_path, monkeypatch) -> None:
     root = tmp_path / "free-stockdb"
     root.mkdir()

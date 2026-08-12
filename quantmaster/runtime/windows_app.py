@@ -153,7 +153,12 @@ def _role_executable(role: str) -> str | None:
 
     if os.name != "nt":
         return None
-    source = Path(sys.executable).resolve()
+    # ``sys.executable`` is normally the venv redirector (a tiny executable
+    # with no adjacent CPython DLLs). Its renamed copies cannot start outside
+    # the original ``python.exe`` name. A base-interpreter copy alongside
+    # ``pyvenv.cfg`` retains the venv while giving Task Manager a role image.
+    source = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    target_directory = Path(sys.executable).resolve().parent
     if not source.is_file() or source.suffix.casefold() != ".exe":
         return None
     safe_role = "".join(
@@ -161,7 +166,7 @@ def _role_executable(role: str) -> str | None:
     ).strip()
     if not safe_role:
         return None
-    target = source.with_name(f"QuantMaster {safe_role}.exe")
+    target = target_directory / f"QuantMaster {safe_role}.exe"
     if target == source:
         return str(source)
     try:
@@ -175,9 +180,7 @@ def _role_executable(role: str) -> str | None:
         # Windows resolves dependent DLLs before Python can restore a venv's
         # base directory.  A renamed venv interpreter must therefore retain
         # the two CPython runtime DLLs beside itself.
-        base_directory = Path(
-            getattr(sys, "_base_executable", sys.executable),
-        ).resolve().parent
+        base_directory = source.parent
         for name in ("python312.dll", "python3.dll"):
             dependency = base_directory / name
             destination = target.with_name(name)

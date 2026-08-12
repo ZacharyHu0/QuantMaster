@@ -17,6 +17,17 @@ def test_root_serve_wrapper_forwards_to_development_launcher() -> None:
     assert "exit /b %ERRORLEVEL%" in wrapper
 
 
+def test_development_launcher_keeps_quantmaster_attached_to_ctrl_c() -> None:
+    from pathlib import Path
+
+    launcher = (Path(__file__).parents[1] / "scripts/dev/serve.cmd").read_text(
+        encoding="utf-8",
+    )
+
+    assert '"%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*' in launcher
+    assert 'start "QuantMaster" /b' not in launcher
+
+
 def test_project_icon_has_valid_group_and_images() -> None:
     from pathlib import Path
 
