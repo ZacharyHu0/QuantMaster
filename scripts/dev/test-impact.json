@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "always": [
+    "tests/test_architecture.py"
+  ],
+  "docs_only": [
+    "AGENTS.md",
+    "README.md",
+    "docs/**",
+    "examples/**",
+    "LICENSE"
+  ],
+  "full_suite": [
+    ".github/**",
+    ".githooks/**",
+    "pyproject.toml",
+    "uv.lock",
+    "tests/conftest.py",
+    "scripts/ci/**",
+    "scripts/release/**",
+    "scripts/dev/test-impact.json",
+    "quantmaster/release.py",
+    "CHANGELOG.md"
+  ],
+  "rules": [
+    {
+      "paths": ["quantmaster/data/**"],
+      "tests": [
+        "tests/test_data_resilience.py",
+        "tests/test_free_stockdb_redesign.py",
+        "tests/test_free_stockdb_runtime.py",
+        "tests/test_free_stockdb_source.py",
+        "tests/test_instrument_snapshots.py",
+        "tests/test_market_data_truth.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/server/**"],
+      "tests": [
+        "tests/test_server.py",
+        "tests/test_server_lifecycle.py",
+        "tests/test_jobs_api.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/server/static/**"],
+      "tests": ["tests/test_ui_management.py"]
+    },
+    {
+      "paths": ["quantmaster/rotation/**"],
+      "tests": [
+        "tests/test_rotation_analytics.py",
+        "tests/test_rotation_api.py",
+        "tests/test_rotation_provider.py",
+        "tests/test_rotation_store_service.py",
+        "tests/test_etf_research_v2.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/runtime/**"],
+      "tests": [
+        "tests/test_runtime_foundations.py",
+        "tests/test_runtime_jobs.py",
+        "tests/test_runtime_metrics.py",
+        "tests/test_worker_ipc.py",
+        "tests/test_worker_supervisor.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/ai/**"],
+      "tests": [
+        "tests/test_llm.py",
+        "tests/test_llm_request_isolation.py",
+        "tests/test_news_providers.py",
+        "tests/test_news_workbench.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/backtest/**", "quantmaster/portfolio/**"],
+      "tests": [
+        "tests/test_backtest.py",
+        "tests/test_trading_workbenches.py",
+        "tests/test_watchlist.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/lab/**", "quantmaster/research/**", "quantmaster/factors/**"],
+      "tests": [
+        "tests/test_lab.py",
+        "tests/test_research_pipeline.py",
+        "tests/test_research_optimization.py",
+        "tests/test_factors.py"
+      ]
+    },
+    {
+      "paths": ["quantmaster/automation/**"],
+      "tests": ["tests/test_automation.py", "tests/test_runtime_jobs.py"]
+    },
+    {
+      "paths": ["quantmaster/after_close/**"],
+      "tests": ["tests/test_after_close.py"]
+    },
+    {
+      "paths": ["quantmaster/config.py", "quantmaster/settings.py", "quantmaster/settings_checks.py"],
+      "tests": ["tests/test_settings.py", "tests/test_settings_checks.py"]
+    },
+    {
+      "paths": ["tests/test_*.py"],
+      "tests_from_paths": true
+    },
+    {
+      "paths": ["scripts/dev/**"],
+      "tests": ["tests/test_task_workflow.py"]
+    }
+  ]
+}

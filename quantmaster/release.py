@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.11.5"
+VERSION = "1.12.0"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,33 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "并行任务与分层验证",
+                "items": (
+                    (
+                        "每个 feature 或 bug 使用独立 worktree 和任务分支，开发提交不再争抢"
+                        "版本文件；完整验收后 squash 为一个 main release。"
+                    ),
+                    (
+                        "新增显式影响测试映射、保守完整套件回退和历史耗时均衡分片，缩短"
+                        "开发反馈，同时保持发布前完整验证。"
+                    ),
+                    (
+                        "PyInstaller 仅收集实际需要的 SciPy FFT 兼容模块，并显式排除"
+                        " Torch、Dask、pytest 和包内测试，避免完整开发环境生成超大 EXE。"
+                    ),
+                    (
+                        "本地 CI、GitHub CI 和正式发布新增 350 MiB 体积及禁用模块门禁，"
+                        "阻止异常桌面包进入发布流程。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.11.5",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "一键启动入口恢复",

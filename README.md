@@ -301,9 +301,33 @@ Header 凭据只进入系统凭据库，跨域跳转和跨域详情页不会携�
 
 ### 开发测试
 
-`python -m pytest` 只运行适合日常反馈的快速契约；修改资讯、LLM 或大型研究模块时运行
-`python -m pytest --full`。Chromium 管理流程由 CI 的独立 browser lane 验证，不要求每次
-本地改动重复启动浏览器。
+每个 feature、bug 或独立重构都使用一个 `codex/<task-slug>` 分支和独立 worktree：
+
+```bash
+./.venv/Scripts/python.exe scripts/dev/tasks.py start <task-slug>
+cd .worktrees/<task-slug>
+../../.venv/Scripts/python.exe scripts/dev/tasks.py check
+```
+
+任务分支可自由做小步 checkpoint 提交，但不得修改 `quantmaster/release.py` 或
+`CHANGELOG.md`。`check` 根据相对 `origin/main` 的改动读取受版本控制的影响映射，只运行
+相邻合同；显式测试总是带 `--full`，因此不会误跳过 full-only 文件。未知路径、测试基础设施、
+依赖或 CI/release 改动会保守升级到完整 Python 套件。可用 `--staged` 只检查暂存区，失败后
+优先用精确 node id 或 `pytest --last-failed` 重跑。
+
+准备合入时先提交全部改动、更新到当前 `origin/main`，然后运行：
+
+```bash
+../../.venv/Scripts/python.exe scripts/dev/tasks.py ready
+```
+
+涉及浏览器、Rust 或打包时分别加 `--ui`、`--rust`、`--package`。通过后将单个任务 squash
+为 `main` 上一个独立 release，再更新版本和日志。合入并确认工作区干净后执行
+`scripts/dev/tasks.py remove <task-slug>` 清理。`.artifacts`、pytest basetemp、可写数据库和
+运行时目录必须保持 worktree 独占，禁止多个任务共享。
+
+`python -m pytest` 仍可运行默认快速契约；`python -m pytest --full` 运行完整 Python 合同。
+Chromium 管理流程由 CI 的独立 browser lane 验证，不要求每次本地改动重复启动浏览器。
 
 推送前建议运行与 GitHub CI 对齐的本地门禁：
 
@@ -312,6 +336,9 @@ python scripts/ci/run.py --all
 ```
 
 `--fast` 运行 Ruff、异常/复杂度策略、mypy 和核心测试；`--full` 运行完整 Python 测试分片且不重复执行核心测试；`--all` 再加入 Chromium、Rust、wheel 和 PyInstaller 检查。资源有限时可加 `--serial`。
+完整分片使用本地历史耗时和 `least_duration` 均衡；当最慢分片超过最快分片 1.25 倍时，运行
+`python scripts/ci/run.py --refresh-durations` 串行刷新 `.artifacts/pytest/durations.json`，目标将
+三个分片耗时差控制在约 20% 内。
 脚本始终使用仓库 `.venv` 解释器，即使 Git hook 由系统 Python 启动也不会混用环境。
 Windows 上会自动发现已安装的 Windows SDK 库目录，避免 Git hook 缺少开发者命令行环境时 Rust 链接失败。
 
@@ -326,9 +353,10 @@ Windows 上会自动发现已安装的 Windows SDK 库目录，避免 Git hook �
 python scripts/release/sync.py install
 ```
 
-此后每次提交都必须同时递增 `quantmaster/release.py`、更新实际发布日期并在
-`CHANGELOG.md` 顶部加入对应说明。提交发生在 `main` 且版本确实递增时，post-commit
-钩子会自动重试推送到 `origin/main`；普通功能分支和 Claude 归档分支不会自动上传。
+此后任务分支提交不需要版本变更，且 hook 会拒绝任务分支修改发布元数据。只有完成
+`tasks.py ready` 后 squash 到 `main` 的 release 提交，才同时递增 `quantmaster/release.py`、
+更新实际发布日期并在 `CHANGELOG.md` 顶部加入对应说明。post-commit 会自动重试推送该
+main release；普通任务分支和 Claude 归档分支不会自动上传。
 安装命令会为 HTTPS origin 自动绑定仓库 owner，并按完整仓库路径隔离 GitHub 凭据，
 避免系统凭据管理器误用另一个 GitHub 账号；不会把 Token 或密码写入仓库。弱网下单次
 `git push` 默认 180 秒超时，可在安装时用 `--push-timeout 30..600` 调整，失败后仍保留恢复标记。

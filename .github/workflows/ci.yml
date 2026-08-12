@@ -116,6 +116,8 @@ jobs:
           uv run python -m coverage run --parallel-mode -m pytest
           --full
           --splits 3 --group ${{ matrix.shard }}
+          --splitting-algorithm least_duration
+          --durations-path=.artifacts/pytest/durations.json
           --ignore=tests/test_ui_management.py
           --timeout=180
           --junitxml=.artifacts/reports/coverage-${{ matrix.shard }}.xml --durations=30
@@ -224,5 +226,6 @@ jobs:
         shell: bash
         run: |
           uv run pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
+          uv run python scripts/release/check_desktop_artifact.py .artifacts/packages/desktop/QuantMaster --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
           QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./.artifacts/packages/desktop/QuantMaster --help
           QM_CONFIG_PATH=/dev/null QM_DATA_ROOT="$(mktemp -d)" ./.artifacts/packages/desktop/QuantMaster doctor --deep

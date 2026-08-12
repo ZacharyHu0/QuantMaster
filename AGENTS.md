@@ -23,6 +23,37 @@
   workspace-local pytest base directory, for example
   `./.venv/Scripts/python.exe -m pytest --full --basetemp .artifacts/pytest/run <target>`.
 
+## Isolated task workflow
+
+- Each feature, bug, or independent refactor must use one `codex/<task-slug>` branch in its own
+  `.worktrees/<task-slug>` worktree. Do not mix unrelated goals in one worktree or release.
+- Create and remove task worktrees with `./.venv/Scripts/python.exe scripts/dev/tasks.py start
+  <slug>` and `... tasks.py remove <slug>`. Removal is allowed only after the task tree has been
+  squash-integrated into `main` and the worktree is clean.
+- Task branches may use small checkpoint commits. They must not edit `quantmaster/release.py` or
+  `CHANGELOG.md`; those files belong only to the final squash release on `main`.
+- When a task discovers independent work, create a separate task instead of expanding the current
+  diff. Resolve conflicts with current `origin/main` inside the task worktree before integration.
+- `.artifacts`, pytest temporary directories, writable databases, and runtime state are local to
+  one worktree. Never point concurrent worktrees at the same writable path or `--basetemp`.
+
+## Layered verification and integration
+
+- During development run `./.venv/Scripts/python.exe scripts/dev/tasks.py check`. The checked-in
+  impact map selects adjacent contracts and invokes explicit tests with `--full`; unknown or
+  infrastructure paths fail safe to the complete Python suite. Use `--staged` to inspect only the
+  index or `--base <ref>` when the comparison base is not `origin/main`.
+- Re-run a failure by exact pytest node id or `--last-failed`, then rerun the task impact set after
+  the fix. Do not repeatedly run the complete suite during the edit loop without a concrete need.
+- Before integration, commit all task changes, update to current `origin/main`, and run
+  `./.venv/Scripts/python.exe scripts/dev/tasks.py ready`. Add `--ui`, `--rust`, or `--package`
+  when the task affects those lanes.
+- `ready` runs the complete static and Python gates. After it passes, squash exactly that one task
+  into one independently revertible release commit on `main`; only then update version metadata.
+- Refresh local duration-balanced shards with `scripts/ci/run.py --refresh-durations` when the
+  slowest shard exceeds the fastest by 25%. Keep the three shard wall times within 20% when
+  practical. The timing file is local cache, not release evidence.
+
 ## Release bookkeeping
 
 - Every repository modification, including documentation and test changes, must increment

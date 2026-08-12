@@ -45,10 +45,14 @@ datas = [
 ]
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
-    collect_submodules("apscheduler") + collect_submodules("lark_oapi") +
-    collect_submodules("qrcode") +
-    collect_submodules("scipy._external.array_api_compat")
+    collect_submodules("apscheduler") +
+    collect_submodules("lark_oapi", filter=lambda name: name != "lark_oapi.adapter.flask") +
+    collect_submodules("qrcode", filter=lambda name: not name.startswith("qrcode.tests"))
 )
+scipy_array_api_hidden = [
+    "scipy._external.array_api_compat.common._fft",
+    "scipy._external.array_api_compat.numpy.fft",
+]
 
 a = Analysis(
     [str(project_root / "packaging/entry.py")],
@@ -57,8 +61,11 @@ a = Analysis(
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",
-    ] + optional_hidden,
-    excludes=["tkinter", "matplotlib"],
+    ] + optional_hidden + scipy_array_api_hidden,
+    excludes=[
+        "tkinter", "matplotlib", "torch", "dask", "pytest", "_pytest",
+        "qrcode.tests", "lark_oapi.adapter.flask",
+    ],
 )
 pyz = PYZ(a.pure)
 exe = EXE(

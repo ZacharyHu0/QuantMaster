@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = ROOT / ".artifacts"
 PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
+PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
 PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 
@@ -66,6 +67,10 @@ def pytest_shard(shard: int) -> None:
             "3",
             "--group",
             str(shard),
+            "--splitting-algorithm",
+            "least_duration",
+            "--durations-path",
+            str(PYTEST_DURATIONS),
             "--ignore=tests/test_ui_management.py",
             "--timeout=180",
             "--durations=30",
@@ -170,6 +175,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="run full shards serially instead of in parallel",
     )
+    parser.add_argument(
+        "--refresh-durations",
+        action="store_true",
+        help="sample the complete suite serially and refresh local pytest split timings",
+    )
     return parser.parse_args()
 
 
@@ -181,7 +191,17 @@ def main() -> int:
     run("exception policy", ["scripts/ci/exception_policy.py"])
     run("complexity policy", ["scripts/ci/complexity_policy.py"])
     run("mypy", ["-m", "mypy"])
-    if args.full or args.all:
+    if args.refresh_durations:
+        run(
+            "refresh full-suite durations",
+            [
+                "-m", "pytest", "--full", "--ignore=tests/test_ui_management.py",
+                "--store-durations", "--clean-durations", "--durations-path",
+                str(PYTEST_DURATIONS), "--timeout=180", "--durations=30",
+                "--basetemp", str(RUN_ROOT / "duration-sample"),
+            ],
+        )
+    elif args.full or args.all:
         if args.serial:
             for shard in (1, 2, 3):
                 pytest_shard(shard)
@@ -241,6 +261,13 @@ def main() -> int:
             str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
         exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
         if exe.exists():
+            run(
+                "desktop artifact policy",
+                [
+                    "scripts/release/check_desktop_artifact.py", str(exe), "--analysis",
+                    str(ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
+                ],
+            )
             run_external("EXE help", [str(exe), "--help"])
             with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
                 exe_env = os.environ.copy()

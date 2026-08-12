@@ -12,6 +12,7 @@ from scripts.release.sync import (
     ci_recovery_errors,
     github_https_push_url,
     is_next_patch,
+    pre_commit,
     push_config_variants,
     release_assignments,
     release_today,
@@ -174,3 +175,20 @@ def test_github_push_url_accepts_explicit_account_and_rejects_ssh():
         "https://github.com/example/project", "release-bot",
     ) == "https://release-bot@github.com/example/project.git"
     assert github_https_push_url("git@github.com:example/project.git") == ""
+
+
+def test_task_branch_commit_skips_release_gate(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {"quantmaster/data/storage.py"})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "codex/storage-fix")
+    assert pre_commit() == 0
+
+
+@pytest.mark.parametrize("release_path", [RELEASE_FILE, CHANGELOG_FILE])
+def test_task_branch_rejects_release_metadata(monkeypatch, release_path):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {release_path})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "codex/storage-fix")
+    assert pre_commit() == 1

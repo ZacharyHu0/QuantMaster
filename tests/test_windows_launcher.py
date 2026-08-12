@@ -38,13 +38,17 @@ def test_launcher_version_resource_uses_quantmaster_identity() -> None:
     assert f"{VERSION}.0".encode("utf-16le") in payload
 
 
-def test_pyinstaller_collects_scipy_array_api_compatibility_modules() -> None:
+def test_pyinstaller_collects_only_required_scipy_array_api_modules() -> None:
     from pathlib import Path
 
     spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
         encoding="utf-8",
     )
-    assert 'collect_submodules("scipy._external.array_api_compat")' in spec
+    assert '"scipy._external.array_api_compat.common._fft"' in spec
+    assert '"scipy._external.array_api_compat.numpy.fft"' in spec
+    assert 'collect_submodules("scipy._external.array_api_compat")' not in spec
+    assert '"torch"' in spec
+    assert '"qrcode.tests"' in spec
     assert 'release_scope["VERSION"]' in spec
     assert "version=version_info" in spec
     assert 'if sys.platform == "win32":' in spec

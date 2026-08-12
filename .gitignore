@@ -7,6 +7,8 @@ build/
 dist/
 .artifacts/
 .worktrees/
+.test_durations
+.task-runtime/
 .venv/
 venv/
 .pytest_cache/
