@@ -12,7 +12,8 @@ datas = [
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
     collect_submodules("apscheduler") + collect_submodules("lark_oapi") +
-    collect_submodules("qrcode")
+    collect_submodules("qrcode") +
+    collect_submodules("scipy._external.array_api_compat")
 )
 
 a = Analysis(

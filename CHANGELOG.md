@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.10.6（2026-08-12）
+
+### 跨平台 EXE 科学计算模块修复
+- PyInstaller 显式收集 SciPy array-api 兼容子模块，修复 Linux 单文件产物执行深度 doctor 时缺少 `numpy.fft` 兼容模块的问题
+- 本地发布门禁对单文件产物新增隔离数据目录下的 deep doctor 冒烟，不再只验证 CLI help
+
 ## v1.10.5（2026-08-12）
 
 ### 干净安装依赖修复

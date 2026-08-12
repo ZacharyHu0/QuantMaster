@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.10.5"
+VERSION = "1.10.6"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台 EXE 科学计算模块修复",
+                "items": (
+                    (
+                        "PyInstaller 显式收集 SciPy array-api 兼容子模块，修复 Linux 单文件"
+                        "产物执行深度 doctor 时缺少 numpy.fft 兼容模块的问题。"
+                    ),
+                    (
+                        "本地发布门禁对单文件产物新增隔离数据目录下的 deep doctor 冒烟，"
+                        "不再只验证 CLI help。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.10.5",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "干净安装依赖修复",

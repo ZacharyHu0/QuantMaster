@@ -29,6 +29,15 @@ def test_launcher_version_resource_uses_quantmaster_identity() -> None:
     assert f"{VERSION}.0".encode("utf-16le") in payload
 
 
+def test_pyinstaller_collects_scipy_array_api_compatibility_modules() -> None:
+    from pathlib import Path
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+    assert 'collect_submodules("scipy._external.array_api_compat")' in spec
+
+
 @pytest.mark.parametrize("version", ["1.2", "1.2.3.4", "1.x.3", "-1.2.3"])
 def test_launcher_version_resource_rejects_invalid_versions(version: str) -> None:
     with pytest.raises((ValueError, TypeError)):
