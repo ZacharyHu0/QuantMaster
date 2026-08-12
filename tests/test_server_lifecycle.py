@@ -52,7 +52,9 @@ def test_windows_console_handler_routes_ctrl_c_to_coordinated_shutdown(monkeypat
         SetConsoleCtrlHandler = Function()
 
     monkeypatch.setattr(lifecycle.os, "name", "nt")
-    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: Kernel())
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda *_args, **_kwargs: Kernel(), raising=False,
+    )
     requested = []
     complete = threading.Event()
     complete.set()
