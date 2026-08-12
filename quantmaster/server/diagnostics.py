@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import UTC, datetime
 from typing import Any
 
+from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.server.problems import collect_health_report, make_problem
 
 _TTL_SECONDS = 5.0
@@ -20,6 +22,8 @@ _cached_at = 0.0
 _sampler_stop = threading.Event()
 _sampler: threading.Thread | None = None
 logger = logging.getLogger(__name__)
+_problem_history: dict[str, dict[str, Any]] = {}
+_SECRET_FIELD = re.compile(r"(?i)(?:token|secret|password|authorization|header|ticket|credential)")
 
 
 def invalidate_diagnostics() -> None:
@@ -37,6 +41,43 @@ def _refresh() -> None:
 
         report["components"] = safe_operational_metrics()
         report["llm"] = get_llm_execution_coordinator().diagnostics()
+        from quantmaster.server.readiness import runtime_status
+
+        runtime = runtime_status()
+        try:
+            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+            stockdb = free_stockdb_runtime.status()
+            # This is a public status endpoint, not a sidecar debug dump.
+            # Keep only an explicit non-secret allowlist.
+            runtime["free_stockdb"] = {
+                key: stockdb.get(key)
+                for key in (
+                    "state", "managed", "supervised", "validated_session",
+                    "target_session", "actual_session", "update_result",
+                    "next_update_at", "sdk_engine",
+                )
+            }
+        except (OSError, RuntimeError, TypeError, ValueError):
+            runtime["free_stockdb"] = {
+                "state": "degraded", "message": "状态读取失败",
+            }
+        report["runtime"] = runtime
+        readiness = runtime["readiness"]
+        if not readiness["storage_ready"]:
+            report.setdefault("issues", []).append(make_problem(
+                "core_storage_unavailable",
+                severity="error",
+                source="本地存储",
+                title="核心本地存储不可用",
+                message="配置的数据目录尚不可访问，Web 不能安全处理本地数据。",
+                action="检查数据目录权限或恢复磁盘后重启 QuantMaster。",
+                blocking=True,
+                problem_id="readiness:storage",
+                correlation_id="readiness-storage",
+            ))
+        _decorate_problem_history(report)
+        report = _redact_report(report)
     except Exception:  # final diagnostic boundary: never break liveness/readiness
         logger.warning("完整诊断收集失败", exc_info=True)
         report = {
@@ -51,11 +92,51 @@ def _refresh() -> None:
                 action="稍后重试并查看服务日志。",
             )],
         }
+        _decorate_problem_history(report)
     with _lock:
         _cached = report
         _cached_at = time.monotonic()
         _refreshing = False
         _ready.set()
+
+
+def _decorate_problem_history(report: dict[str, Any]) -> None:
+    """Attach stable, non-secret occurrence metadata for the status drawer."""
+
+    checked_at = str(report.get("checked_at") or datetime.now(UTC).isoformat())
+    active: set[str] = set()
+    for item in report.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("id") or item.get("code") or "diagnostic")
+        active.add(key)
+        previous = _problem_history.get(key)
+        if previous is None:
+            previous = {"first_seen": checked_at, "consecutive_count": 0}
+        previous["last_seen"] = checked_at
+        previous["consecutive_count"] = int(previous["consecutive_count"]) + 1
+        _problem_history[key] = previous
+        item.update(previous)
+        item.setdefault("correlation_id", key)
+    for key in set(_problem_history) - active:
+        _problem_history.pop(key, None)
+
+
+def _redact_report(value: Any) -> Any:
+    """Never turn an internal component snapshot into a credential leak."""
+
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {
+            str(key): "***" if _SECRET_FIELD.search(str(key)) else _redact_report(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_report(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_report(item) for item in value]
+    return value
 
 
 def _start_refresh() -> None:

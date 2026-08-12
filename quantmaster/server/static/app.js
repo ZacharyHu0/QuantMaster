@@ -604,6 +604,8 @@ const runtimeInfo = (() => {
   }
   function diagnostics(entry) {
     const rows = [];
+    if (entry.code) rows.push(`<dt>错误码</dt><dd><code>${esc(entry.code)}</code></dd>`);
+    if (entry.correlationId) rows.push(`<dt>关联编号</dt><dd><code>${esc(entry.correlationId)}</code></dd>`);
     if (entry.detail) rows.push(`<dt>原因</dt><dd>${esc(entry.detail)}</dd>`);
     if (entry.path) rows.push(`<dt>接口</dt><dd><code>${esc(entry.path)}</code></dd>`);
     if (entry.requestId) rows.push(`<dt>请求编号</dt><dd><span class="runtime-request"><code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span></dd>`);
@@ -619,6 +621,9 @@ const runtimeInfo = (() => {
     if (entry.retryStatus) rows.push(`<dt>重试状态</dt><dd>${esc(entry.retryStatus)}${entry.nextRetryAt ? ` · ${esc(new Date(entry.nextRetryAt).toLocaleString('zh-CN', {hour12:false}))}` : ''}</dd>`);
     if (entry.responseSummary) rows.push(`<dt>响应摘要</dt><dd>${esc(entry.responseSummary)}</dd>`);
     if (entry.diagnosticId) rows.push(`<dt>诊断请求码</dt><dd><span class="runtime-request"><code>${esc(entry.diagnosticId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.diagnosticId)}" aria-label="复制诊断请求码">复制</button></span></dd>`);
+    if (entry.firstSeen) rows.push(`<dt>首次出现</dt><dd>${esc(entry.firstSeen)}</dd>`);
+    if (entry.lastSeen) rows.push(`<dt>最近出现</dt><dd>${esc(entry.lastSeen)}</dd>`);
+    if (entry.consecutiveCount !== null) rows.push(`<dt>连续次数</dt><dd>${entry.consecutiveCount} 次</dd>`);
     return rows.length ? `<details class="runtime-diagnostics"><summary>诊断信息</summary><dl class="runtime-diagnostics-grid">${rows.join('')}</dl></details>` : '';
   }
   function render() {
@@ -653,6 +658,9 @@ const runtimeInfo = (() => {
       id:previous?.id || ++sequence, key, level:safeLevel,
       source:compactText(source || '系统', 40), message:compactText(message || '状态已更新', 160),
       detail:compactText(meta.detail), action:compactText(meta.action, 220),
+      code:compactText(meta.code, 80), correlationId:compactText(meta.correlationId, 80),
+      firstSeen:compactText(meta.firstSeen, 80), lastSeen:compactText(meta.lastSeen, 80),
+      consecutiveCount:optionalCount(meta.consecutiveCount),
       path:compactText(meta.path, 220), requestId:compactText(meta.requestId, 80),
       remoteFailures:optionalCount(meta.remoteFailures), localBlocks:optionalCount(meta.localBlocks),
       provider:compactText(meta.provider, 40), endpoint:compactText(meta.endpoint, 220),
@@ -695,6 +703,9 @@ const runtimeInfo = (() => {
         diagnosticId:problem.diagnostic_id, errorCategory:problem.error_category,
         httpStatus:problem.http_status, retryStatus:problem.retry_status,
         nextRetryAt:problem.next_retry_at, responseSummary:problem.response_summary,
+        code:problem.code, correlationId:problem.correlation_id,
+        firstSeen:problem.first_seen, lastSeen:problem.last_seen,
+        consecutiveCount:problem.consecutive_count,
       },
     ));
     render();
@@ -703,6 +714,26 @@ const runtimeInfo = (() => {
     const key = `operation:${Date.now()}:${++operationSequence}`;
     add('info', source, message, {...meta, key});
     return key;
+  }
+  function syncRuntime(runtime) {
+    if (!runtime || typeof runtime !== 'object') return;
+    const readiness = runtime.readiness || {};
+    const web = runtime.web || {};
+    const supervisor = runtime.supervisor || {};
+    const storage = runtime.storage || {};
+    const scheduler = runtime.scheduler || {};
+    const stockdb = runtime.free_stockdb || {};
+    const values = [
+      ['web', 'Web', `${web.host || '127.0.0.1'}:${web.port || '—'} · PID ${web.pid || '—'} · generation ${web.generation || '0'}`, readiness.web_bound ? 'success' : 'error', web.version || ''],
+      ['supervisor', 'Supervisor', `${supervisor.status || 'unknown'}${supervisor.worker_pid ? ` · worker PID ${supervisor.worker_pid}` : ''}`, supervisor.available ? 'success' : 'warning', supervisor.reason || ''],
+      ['storage', '本地存储', `${storage.status || 'unknown'} · ${storage.data_root || '—'}`, readiness.storage_ready ? 'success' : 'error', readiness.storage_ready ? '核心存储可用' : '核心存储不可用，Web 操作已阻断。'],
+      ['free-stockdb', 'free-stockdb', `${stockdb.state || stockdb.status || 'unknown'}${stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : ''}`, ['running', 'ready'].includes(stockdb.state || stockdb.status) ? 'success' : 'warning', stockdb.message || '可选本地数据服务'],
+      ['scheduler', 'Scheduler', `${scheduler.status || 'unknown'} · ${scheduler.managed_by || 'runtime-worker'}`, scheduler.status === 'running' ? 'success' : 'warning', '后台调度不影响核心 Web 就绪。'],
+    ];
+    values.forEach(([id, source, message, level, detail]) => add(level, source, message, {
+      detail, key:`persistent:runtime:${id}`, scope:'runtime', persistent:true,
+      revision:JSON.stringify([message, level, detail]),
+    }));
   }
   function resolve(key) {
     const index = entries.findIndex(entry => entry.key === key);
@@ -754,7 +785,7 @@ const runtimeInfo = (() => {
     if (event.key === 'Escape' && expanded) setExpanded(false);
   });
   render();
-  return {add, begin, resolve, phase, sync, open:() => setExpanded(true), close:() => setExpanded(false)};
+  return {add, begin, resolve, phase, sync, syncRuntime, open:() => setExpanded(true), close:() => setExpanded(false)};
 })();
 window.QuantMasterRunInfo = runtimeInfo;
 window.QuantMasterAPI = api;
@@ -827,6 +858,7 @@ async function refreshBackendHealth() {
   try {
     const data = await api('/api/v1/diagnostics', {cache:'no-store'});
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
+    runtimeInfo.syncRuntime(data.runtime);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
       id:'health-unreachable', severity:'error', source:'后台状态',

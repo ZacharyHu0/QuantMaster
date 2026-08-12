@@ -31,7 +31,7 @@ from pydantic import Field
 
 from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
-from quantmaster.config import get_config, get_config_readiness
+from quantmaster.config import get_config
 from quantmaster.data.base import DataEvidenceNotReady, MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
@@ -713,13 +713,10 @@ async def liveness() -> dict:
 
 @app.get("/api/v1/health/ready")
 async def readiness() -> dict:
-    """Return a cached local readiness state without touching stores."""
-    state = get_config_readiness()
-    return {
-        "status": state["status"],
-        "version": __version__,
-        "data_root": state["data_root"],
-    }
+    """Return the explicit Web readiness contract without touching stores."""
+    from quantmaster.server.readiness import readiness_status
+
+    return readiness_status()
 
 
 @app.get("/api/v1/diagnostics")

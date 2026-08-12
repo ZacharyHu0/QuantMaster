@@ -150,6 +150,10 @@ class TestBasics:
             "quantmaster.server.problems.collect_health_report",
             lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe stores")),
         )
+        monkeypatch.setattr(
+            "quantmaster.runtime.worker.runtime_worker_status",
+            lambda: {"available": False},
+        )
         live = client.get("/api/v1/health/live")
         assert live.status_code == 200
         assert {
@@ -163,6 +167,17 @@ class TestBasics:
         ready = client.get("/api/v1/health/ready")
         assert ready.status_code == 200
         assert ready.json()["status"] == "ready"
+        assert {
+            key: ready.json()[key]
+            for key in (
+                "process_started", "web_bound", "core_ready", "storage_ready",
+                "optional_services_ready", "fully_ready",
+            )
+        } == {
+            "process_started": True, "web_bound": True, "core_ready": True,
+            "storage_ready": True, "optional_services_ready": False,
+            "fully_ready": False,
+        }
 
     def test_readiness_does_not_create_a_cold_data_root(
         self, isolated_config, tmp_path, monkeypatch,
@@ -190,9 +205,50 @@ class TestBasics:
         assert ready.json() == {
             "status": "not_ready",
             "version": __version__,
+            "release_date": RELEASE_DATE,
             "data_root": str(cold_root),
+            "process_started": True,
+            "web_bound": True,
+            "core_ready": False,
+            "storage_ready": False,
+            "optional_services_ready": False,
+            "fully_ready": False,
         }
         assert not cold_root.exists()
+
+    def test_diagnostics_expose_sanitized_runtime_status_and_core_storage_problem(self, monkeypatch):
+        from quantmaster.server import diagnostics as diagnostics_module
+
+        monkeypatch.setattr(
+            "quantmaster.server.readiness.runtime_status",
+            lambda: {
+                "web": {
+                    "pid": 123, "host": "127.0.0.1", "port": 8686,
+                    "generation": "7", "version": __version__,
+                },
+                "readiness": {"storage_ready": False, "web_bound": True},
+                "supervisor": {"status": "running", "available": True, "reason": ""},
+                "storage": {"status": "unavailable", "data_root": "C:/safe"},
+                "scheduler": {"status": "running", "managed_by": "runtime-worker"},
+            },
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.free_stockdb_runtime.free_stockdb_runtime.status",
+            lambda: {"state": "running", "message": "Bearer secret-token"},
+        )
+        diagnostics_module._cached = None
+        diagnostics_module._refresh()
+        payload = diagnostics_module.diagnostics(refresh=False)
+
+        assert payload["runtime"]["web"]["generation"] == "7"
+        assert payload["runtime"]["scheduler"]["managed_by"] == "runtime-worker"
+        problem = next(item for item in payload["issues"] if item["code"] == "core_storage_unavailable")
+        assert problem["correlation_id"] == "readiness-storage"
+        assert problem["consecutive_count"] >= 1
+        assert problem["first_seen"] and problem["last_seen"]
+        assert "secret-token" not in str(payload)
+        assert "错误码" in (client.get("/static/app.js").text)
+        assert "syncRuntime(data.runtime)" in (client.get("/static/app.js").text)
 
     def test_local_boundary_csrf_and_security_headers(self):
         anonymous = TestClient(app)
