@@ -100,8 +100,15 @@
 .automation-job-row { display:grid; gap:var(--space-sm); padding:13px 14px; scroll-margin-top:96px; }
 .automation-job-primary { display:grid; gap:3px; min-width:0; }
 .automation-job-primary > div { display:flex; align-items:center; justify-content:space-between; gap:var(--space-md); }
+.automation-job-primary > div > span { display:flex; min-width:0; align-items:baseline; gap:7px; flex-wrap:wrap; }
 .automation-job-primary strong { color:var(--ink); font-size:13px; font-weight:620; }
 .automation-job-primary small { color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; }
+.automation-job-primary .automation-job-kind { padding:1px 5px; border:1px solid var(--axis); border-radius:4px; font-size:8px; letter-spacing:.04em; }
+.automation-job-progress { display:grid; grid-template-columns:minmax(0,1fr) max-content; align-items:center; gap:8px; }
+.automation-job-progress progress { width:100%; height:5px; border:0; border-radius:999px; overflow:hidden; accent-color:var(--s1); }
+.automation-job-progress progress::-webkit-progress-bar { background:var(--axis); }
+.automation-job-progress progress::-webkit-progress-value { background:var(--s1); }
+.automation-job-progress span { color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
 .automation-job-expand { min-height:40px; border:1px solid var(--axis); border-radius:7px; background:transparent; color:var(--ink-2); padding:7px 10px; cursor:pointer; font:inherit; font-size:11px; text-align:left; }
 .automation-job-detail-shell,.automation-disclosure-shell,.policy-details { display:grid; grid-template-rows:0fr; opacity:0; transform:translateY(-3px); transition:grid-template-rows 260ms var(--ease-out-quart),opacity 180ms var(--ease-out-quart),transform 220ms var(--ease-out-quart); }
 .automation-job-detail,.automation-channel-detail,.automation-target-detail,.policy-details-inner { min-height:0; overflow:hidden; }
@@ -114,6 +121,15 @@
 .automation-job-field > span { color:var(--muted); font-size:9px; letter-spacing:.06em; }
 .automation-job-field > strong { color:var(--ink-2); font-size:11px; font-weight:550; line-height:1.5; }
 .automation-job-field > small { overflow-wrap:anywhere; color:var(--muted); font-size:10px; line-height:1.45; }
+.automation-job-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 14px; margin:0; }
+.automation-job-facts div { min-width:0; }
+.automation-job-facts dt { color:var(--muted); font-size:9px; letter-spacing:.05em; }
+.automation-job-facts dd { min-width:0; margin:2px 0 0; overflow-wrap:anywhere; color:var(--ink-2); font-size:10px; line-height:1.45; font-variant-numeric:tabular-nums; }
+.automation-job-facts a { color:var(--s1); }
+.automation-job-diagnostic { display:grid; gap:2px; padding:8px 9px; border:1px solid var(--axis); border-radius:7px; font-size:10px; line-height:1.5; }
+.automation-job-diagnostic strong { color:var(--ink-2); font-weight:620; }
+.automation-job-diagnostic span { color:var(--muted); overflow-wrap:anywhere; }
+.automation-job-diagnostic[data-tone="error"] { border-color:color-mix(in oklch,var(--bad) 42%,var(--axis)); }
 .job-actions,.target-tools,.automation-channel-actions { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
 .job-actions button { flex:1 1 130px; }
 .automation-row-feedback,.target-feedback { min-height:16px; color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; line-height:1.45; }
@@ -220,7 +236,7 @@
   .automation-health-rail { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .automation-health-rail > div { display:block; border-bottom:1px solid var(--border); }
   .automation-health-rail > div:nth-child(odd) { border-right:1px solid var(--border); }
-  .automation-health-rail > div:nth-child(n+3) { border-bottom:0; }
+  .automation-health-rail > div:nth-child(n+5) { border-bottom:0; }
   .automation-health-rail dd { margin-top:6px; }
   .automation-target-summary { grid-template-columns:minmax(0,1fr) auto auto; }
   .automation-target-disclosure { grid-column:1; grid-row:1/3; }
@@ -236,10 +252,12 @@
   .automation-heading { grid-template-columns:minmax(0,1fr) auto; align-items:start; }
   .automation-heading-tools { min-width:270px; justify-items:end; }
   .automation-refresh-line { justify-content:flex-end; }
-  .automation-job-row { grid-template-columns:minmax(210px,.9fr) minmax(0,1.5fr); align-items:center; gap:var(--space-md) var(--space-xl); padding:11px 14px; }
-  .automation-job-expand { display:none; }
-  .automation-job-detail-shell { grid-column:2; grid-row:1; grid-template-rows:1fr; opacity:1; transform:none; }
-  .automation-job-detail { grid-template-columns:minmax(175px,1.1fr) minmax(160px,.9fr) auto; align-items:center; gap:var(--space-lg); padding:0; }
+  .automation-job-row { grid-template-columns:minmax(240px,1fr) minmax(150px,.35fr); align-items:center; gap:var(--space-md) var(--space-xl); padding:11px 14px; }
+  .automation-job-expand { justify-self:end; min-width:150px; text-align:center; }
+  .automation-job-detail-shell { grid-column:1/-1; }
+  .automation-job-row.expanded .automation-job-detail { padding-top:var(--space-sm); border-top:1px solid var(--border); }
+  .automation-job-detail { grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; gap:var(--space-lg); }
+  .automation-job-facts,.automation-job-diagnostic,.job-actions { grid-column:1/-1; }
   .job-actions { justify-content:flex-end; flex-wrap:nowrap; }
   .job-actions button { flex:0 0 auto; }
   .automation-row-feedback { grid-column:1/-1; }
@@ -272,8 +290,9 @@
 }
 
 @media (min-width:980px) {
-  .automation-health-rail { grid-template-columns:repeat(4,minmax(0,1fr)); }
-  .automation-health-rail > div,.automation-health-rail > div:nth-child(n+3) { border-bottom:0; }
+  .automation-health-rail { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .automation-health-rail > div { border-bottom:0; }
+  .automation-health-rail > div:nth-child(-n+3) { border-bottom:1px solid var(--border); }
   .automation-health-rail > div:not(:last-child) { border-right:1px solid var(--border); }
   .automation-overview-grid { grid-template-columns:minmax(0,1.45fr) minmax(310px,.55fr); }
   .automation-message-layout { display:grid; grid-template-columns:minmax(330px,.68fr) minmax(0,1.32fr); gap:var(--space-lg); align-items:start; }
@@ -298,6 +317,7 @@
   .binding-command button { width:100%; }
   .binding-progress { align-items:flex-start; flex-direction:column; gap:var(--space-xs); }
   .automation-record-table td { grid-template-columns:80px minmax(0,1fr); }
+  .automation-job-facts { grid-template-columns:1fr; }
 }
 
 @media (prefers-reduced-motion:reduce) {

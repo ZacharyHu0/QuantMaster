@@ -1625,6 +1625,36 @@ def test_startup_daily_catchup_discovers_due_date_once(tmp_path, monkeypatch):
     assert ("daily_close_pipeline", "startup_recovery") in calls
     assert ("news_digest", "startup_recovery") in calls
     assert len(recovered) == len(calls)
+def test_scheduler_status_projection_is_additive_and_redacts_runtime_internals(
+    tmp_path, isolated_config,
+):
+    from quantmaster.config import get_config
+    from quantmaster.runtime.jobs import UnifiedJobStore
+    from quantmaster.server.automation import _automation_runs, _job_projection
+
+    store = UnifiedJobStore(get_config().data_root / "jobs.sqlite")
+    raw, _ = store.submit("automation.fast_news_scan", {"name": "fast_news_scan"})
+    with store._conn() as connection:
+        connection.execute(
+            "UPDATE runtime_jobs SET status='running',progress=1,phase='fetch',detail='window 3',"
+            "owner='private-worker',lease_token='private-token',heartbeat_at=?,started_at=? WHERE id=?",
+            (time.time(), datetime.now(UTC).isoformat(), raw["id"]),
+        )
+
+    runs = _automation_runs()
+    assert len(runs) == 1
+    public = runs[0]
+    assert public["progress"] == 1
+    assert public["started_at"] and public["heartbeat_at"]
+    assert public["links"]["self"] == f"/api/v1/jobs/{raw['id']}"
+    assert not ({"owner", "lease_token", "lease_expires", "spec"} & set(public))
+
+    jobs = _job_projection([
+        {"name": "fast_news_scan", "enabled": True, "schedule": {}, "next_run": ""},
+    ], runs)
+    assert jobs[0]["job_kind"] == "time_window"
+    assert jobs[0]["execution"]["active_job_id"] == raw["id"]
+    assert jobs[0]["execution"]["running_instances"] == 1
 
 
 def test_automation_api_and_ui_contract():
@@ -1675,3 +1705,9 @@ def test_automation_api_and_ui_contract():
     assert "长连接正常，但尚未收到消息事件" in script
     assert "发送测试消息" in script
     assert "测试消息未发送" in script
+    assert "function progressValue(value)" in script
+    assert "Number(value.progress) <= 1" not in script
+    assert "Durable Job" in script
+    assert "任务停滞" in script
+    assert "合法退避" in script
+    assert "已连接同一任务" in script

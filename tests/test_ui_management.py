@@ -1173,10 +1173,30 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     job = {
         "name": "news_digest",
         "enabled": False,
+        "job_kind": "daily",
         "schedule": {"type": "daily", "times": ["11:35", "21:00"]},
         "args": {},
         "next_run": None,
         "updated_at": "2026-07-27T10:00:00+00:00",
+        "execution": {
+            "id": "job-1", "active_job_id": "job-1", "status": "running",
+            "progress": 1, "phase": "fetch", "detail": "等待 provider",
+            "running_instances": 1, "coalesced_triggers": 2,
+            "started_at": "2026-07-27T10:00:00+00:00", "finished_at": "",
+            "heartbeat_at": "2026-07-27T10:02:00+00:00",
+            "last_completed_unit_at": "2026-07-27T10:01:30+00:00",
+            "elapsed_seconds": 120,
+            "queue": {"pending": 3, "running": 1, "retry_wait": 1, "dead_letter": 0},
+            "backoff": {
+                "active": True, "reason": "provider Retry-After",
+                "waiting_for": "provider", "next_retry_at": "2026-07-27T10:05:00+00:00",
+            },
+            "stalled": {
+                "is_stalled": False, "reason": "", "diagnostic_code": "",
+                "observed_at": "", "waiting_for": "",
+            },
+            "links": {"self": "/api/v1/jobs/job-1"},
+        },
     }
     overview = {
         "enabled": True,
@@ -1194,6 +1214,15 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         "recent_runs": [],
         "recent_events": [],
         "targets": [target],
+        "queue_summary": {
+            "queued": 0, "running": 1, "retry_wait": 1, "failed": 0,
+            "dead_letter": 0, "coalesced_triggers": 2,
+        },
+        "outbox": {
+            "dispatcher_status": "running", "pending": 2, "leased": 0,
+            "retry_wait": 1, "sent": 4, "dead_letter": 0,
+            "next_retry_at": "2026-07-27T10:05:00+00:00",
+        },
         "inbound": {
             "feishu": {
                 "total": 1,
@@ -1278,7 +1307,8 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
                     "run_id": "job-2",
                     "job_id": "job-2",
                     "task": "news_digest",
-                    "created": True,
+                    "created": False,
+                    "progress": 1,
                 },
             )
             return
@@ -1349,6 +1379,13 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         assert page.get_by_role("tab", name="任务调度", exact=True).get_attribute("aria-selected") == "true"
 
         page.locator('[data-job-row="news_digest"] [data-job-expand]').click()
+        assert page.locator('[data-job-row="news_digest"] progress').get_attribute("value") == "1"
+        assert "高频" not in page.locator('[data-job-row="news_digest"]').inner_text()
+        assert "每日业务" in page.locator('[data-job-row="news_digest"]').inner_text()
+        assert "待处理 3 · 运行 1 · 重试 1 · 死信 0" in page.locator(
+            '[data-job-row="news_digest"]'
+        ).inner_text()
+        assert "合法退避" in page.locator('[data-job-row="news_digest"]').inner_text()
         page.get_by_role("button", name="立即运行任务", exact=True).click()
         _wait_for_class(
             page.locator(
@@ -1357,6 +1394,9 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
             "success",
         )
         assert requests["run"] == 1
+        assert "已连接同一任务 job-2 · 当前 1%" in page.locator(
+            '[data-job-row="news_digest"] .automation-row-feedback'
+        ).inner_text()
 
         page.get_by_role("tab", name="消息推送", exact=True).click()
         page.locator('[data-target-card="feishu_owner"]').wait_for()

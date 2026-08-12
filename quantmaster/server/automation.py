@@ -18,6 +18,19 @@ from quantmaster.server.management import _require_csrf, _require_local
 
 router = APIRouter()
 _MISSING = object()
+_ACTIVE_RUN_STATUSES = frozenset({"queued", "pending", "running", "cancelling", "interrupted"})
+_RETRY_RUN_STATUSES = frozenset({"retry", "retrying", "retry_wait"})
+_FAILED_RUN_STATUSES = frozenset({"failed", "error", "timed_out", "timeout"})
+_JOB_KINDS = {
+    "intraday_monitor": "high_frequency_poll",
+    "fast_news_scan": "time_window",
+    "official_news_scan": "time_window",
+    "periodic_news_scan": "time_window",
+    "daily_close_pipeline": "daily",
+    "news_digest": "daily",
+    "news_dead_letter_recovery": "daily",
+    "paper_rebalance_proposal": "daily",
+}
 
 
 def service():
@@ -49,7 +62,33 @@ def _public_target(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _automation_runs() -> list[dict[str, Any]]:
+def _iso_time(value: Any) -> str:
+    if value in (None, "", 0, 0.0):
+        return ""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), UTC).isoformat()
+    return str(value)
+
+
+def _seconds_between(start: Any, finish: Any = "") -> int:
+    if not start:
+        return 0
+    try:
+        left = datetime.fromisoformat(str(start)).timestamp()
+        right = datetime.fromisoformat(str(finish)).timestamp() if finish else time.time()
+    except (TypeError, ValueError):
+        return 0
+    return max(0, round(right - left))
+
+
+def _count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _automation_run_rows() -> list[dict[str, Any]]:
     try:
         values = UnifiedJobStore(
             get_config().data_root / "jobs.sqlite", read_only=True,
@@ -60,6 +99,170 @@ def _automation_runs() -> list[dict[str, Any]]:
         value for value in values
         if str(value.get("type") or "").startswith("automation.")
     ][:50]
+
+
+def _public_automation_run(value: dict[str, Any]) -> dict[str, Any]:
+    """Publish scheduler facts without exposing a job spec, owner or lease token."""
+
+    status = str(value.get("status") or "unknown")
+    started_at = _iso_time(value.get("started_at"))
+    finished_at = _iso_time(value.get("finished_at"))
+    heartbeat_at = _iso_time(value.get("heartbeat_at"))
+    backoff_value = value.get("backoff") or {}
+    backoff = backoff_value if isinstance(backoff_value, dict) else {}
+    stalled_value = value.get("stalled") or {}
+    stalled = stalled_value if isinstance(stalled_value, dict) else {}
+    queue_value = value.get("queue") or value.get("durable_queue") or {}
+    queue = queue_value if isinstance(queue_value, dict) else {}
+    next_retry_at = _iso_time(
+        backoff.get("next_retry_at") or value.get("next_retry_at")
+    )
+    diagnostic_code = str(
+        stalled.get("diagnostic_code") or value.get("diagnostic_code") or ""
+    )[:80]
+    job_id = str(value.get("id") or "")
+    return {
+        "domain": "automation",
+        "id": job_id,
+        "type": str(value.get("type") or "automation.job"),
+        "status": status,
+        "created": bool(value.get("created")),
+        "coalesced": bool(value.get("coalesced")),
+        "reused": bool(value.get("reused")),
+        "progress": max(0, min(100, _count(value.get("progress")))),
+        "phase": str(value.get("phase") or "")[:200],
+        "detail": str(value.get("detail") or "")[:1000],
+        "attempt": max(1, _count(value.get("attempt")) or 1),
+        "created_at": _iso_time(value.get("created_at")),
+        "updated_at": _iso_time(value.get("updated_at")),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "heartbeat_at": heartbeat_at,
+        "last_completed_unit_at": _iso_time(value.get("last_completed_unit_at")),
+        "elapsed_seconds": _seconds_between(started_at, finished_at),
+        "estimated_remaining_seconds": _count(value.get("estimated_remaining_seconds")),
+        "queue": {
+            "pending": _count(queue.get("pending") or value.get("pending_units")),
+            "running": _count(queue.get("running") or value.get("running_units")),
+            "retry_wait": _count(queue.get("retry_wait") or value.get("retry_wait_units")),
+            "dead_letter": _count(queue.get("dead_letter") or value.get("dead_letter_units")),
+        },
+        "coalesced_triggers": _count(
+            value.get("coalesced_triggers") or value.get("coalesced_count")
+        ),
+        "backoff": {
+            "active": bool(backoff.get("active") or next_retry_at),
+            "reason": str(backoff.get("reason") or value.get("backoff_reason") or "")[:500],
+            "waiting_for": str(backoff.get("waiting_for") or value.get("waiting_for") or "")[:200],
+            "next_retry_at": next_retry_at,
+        },
+        "stalled": {
+            "is_stalled": bool(stalled.get("is_stalled") or value.get("is_stalled")),
+            "reason": str(stalled.get("reason") or value.get("stalled_reason") or "")[:500],
+            "diagnostic_code": diagnostic_code,
+            "observed_at": _iso_time(stalled.get("observed_at") or value.get("stalled_at")),
+            "waiting_for": str(stalled.get("waiting_for") or value.get("waiting_for") or "")[:200],
+        },
+        "links": {
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+        },
+    }
+
+
+def _automation_runs() -> list[dict[str, Any]]:
+    return [_public_automation_run(value) for value in _automation_run_rows()]
+
+
+def _outbox_summary(store: AutomationStore, *, enabled: bool) -> dict[str, Any]:
+    defaults = {
+        "dispatcher_status": "disabled" if not enabled else "not_configured",
+        "pending": 0, "leased": 0, "retry_wait": 0,
+        "sent": 0, "dead_letter": 0, "next_retry_at": "",
+    }
+    for method_name in ("outbox_summary", "delivery_summary", "delivery_stats"):
+        method = getattr(store, method_name, None)
+        if callable(method):
+            try:
+                supplied = method()
+            except (OSError, sqlite3.Error):
+                break
+            if isinstance(supplied, dict):
+                return {**defaults, **supplied}
+    try:
+        accounts = store.bot_accounts("feishu")
+        configured = any(
+            str(item.get("status") or "") not in {"disabled", "not_configured"}
+            and bool(item.get("account_id")) and bool(item.get("secret_target"))
+            for item in accounts
+        )
+        with store._conn() as connection:  # read-only operational projection
+            rows = connection.execute(
+                "SELECT status,COUNT(*) AS count,MIN(next_attempt_at) AS next_attempt_at "
+                "FROM delivery_attempts GROUP BY status"
+            ).fetchall()
+    except (FileNotFoundError, OSError, sqlite3.Error):
+        return defaults
+    mapping = {
+        "pending": "pending", "leased": "leased", "processing": "leased",
+        "retry": "retry_wait", "retry_wait": "retry_wait",
+        "delivered": "sent", "sent": "sent",
+        "failed": "dead_letter", "dead_letter": "dead_letter",
+    }
+    retry_times: list[float] = []
+    for row in rows:
+        key = mapping.get(str(row["status"] or ""))
+        if key:
+            defaults[key] += _count(row["count"])
+        if key == "retry_wait" and row["next_attempt_at"]:
+            retry_times.append(float(row["next_attempt_at"]))
+    defaults["dispatcher_status"] = (
+        "disabled" if not enabled else "running" if configured else "not_configured"
+    )
+    if retry_times:
+        defaults["next_retry_at"] = _iso_time(min(retry_times))
+    return defaults
+
+
+def _job_projection(
+    templates: list[dict[str, Any]], runs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for template in templates:
+        name = str(template.get("name") or "")
+        matching = [run for run in runs if str(run.get("type") or "") == f"automation.{name}"]
+        active = [run for run in matching if str(run.get("status") or "") in _ACTIVE_RUN_STATUSES]
+        selected = active[0] if active else matching[0] if matching else {}
+        queue = selected.get("queue") or {}
+        execution = {
+            **selected,
+            "active_job_id": str((active[0] if active else {}).get("id") or ""),
+            "running_instances": sum(
+                str(run.get("status") or "") in {"running", "cancelling"} for run in matching
+            ),
+            "queue": {
+                "pending": sum(_count((run.get("queue") or {}).get("pending")) for run in active),
+                "running": sum(_count((run.get("queue") or {}).get("running")) for run in active),
+                "retry_wait": sum(_count((run.get("queue") or {}).get("retry_wait")) for run in active),
+                "dead_letter": max(
+                    [_count((run.get("queue") or {}).get("dead_letter")) for run in matching] or [0]
+                ),
+            } if active else queue,
+            "coalesced_triggers": sum(_count(run.get("coalesced_triggers")) for run in matching),
+        }
+        projected.append({**template, "job_kind": _JOB_KINDS.get(name, "manual"), "execution": execution})
+    return projected
+
+
+def _queue_summary(runs: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "queued": sum(str(run.get("status") or "") in {"queued", "pending"} for run in runs),
+        "running": sum(str(run.get("status") or "") in {"running", "cancelling"} for run in runs),
+        "retry_wait": sum(str(run.get("status") or "") in _RETRY_RUN_STATUSES for run in runs),
+        "failed": sum(str(run.get("status") or "") in _FAILED_RUN_STATUSES for run in runs),
+        "dead_letter": sum(_count((run.get("queue") or {}).get("dead_letter")) for run in runs),
+        "coalesced_triggers": sum(_count(run.get("coalesced_triggers")) for run in runs),
+    }
 
 
 def _cold_overview() -> dict[str, Any]:
@@ -83,6 +286,13 @@ def _cold_overview() -> dict[str, Any]:
         "jobs": [],
         "recent_runs": [],
         "recent_events": [],
+        "scheduler": {
+            "status": "disabled" if not enabled else "unavailable",
+            "managed_by": "runtime-worker", "worker_pid": None,
+            "timezone": get_config().automation.timezone,
+        },
+        "queue_summary": _queue_summary([]),
+        "outbox": _outbox_summary(AutomationStore(read_only=True), enabled=enabled),
         "snapshot": {"state": "degraded", "issues": ["automation_snapshot_unavailable"]},
     }
 
@@ -136,6 +346,8 @@ def automation_overview(request: Request) -> dict:
         worker = runtime_worker_status()
         enabled = bool(get_config().automation.enabled)
         runtime = "disabled" if not enabled else "running" if worker.get("available") else "degraded"
+        runs = _automation_runs()
+        templates = store.jobs()
         return {
             "enabled": enabled,
             "timezone": get_config().automation.timezone,
@@ -165,9 +377,19 @@ def automation_overview(request: Request) -> dict:
                 "weixin": store.inbound_status("weixin"),
             },
             "targets": targets,
-            "jobs": store.jobs(),
+            "jobs": _job_projection(templates, runs),
+            # Kept for older clients; current scheduler UI uses the durable execution projection.
             "recent_runs": store.recent_runs(12),
             "recent_events": store.recent_events(12),
+            "scheduler": {
+                "status": runtime,
+                "managed_by": "runtime-worker",
+                "worker_pid": worker.get("pid"),
+                "timezone": get_config().automation.timezone,
+                "checked_at": datetime.now(UTC).isoformat(),
+            },
+            "queue_summary": _queue_summary(runs),
+            "outbox": _outbox_summary(store, enabled=enabled),
         }
 
     return _read(project, default=_cold_overview)
@@ -187,7 +409,9 @@ def automation_targets(request: Request) -> dict:
 @router.get("/api/v1/automation/jobs")
 def automation_jobs(request: Request) -> dict:
     _require_local(request)
-    return {"jobs": _read(lambda store: store.jobs(), default=[]), "runs": _automation_runs()}
+    runs = _automation_runs()
+    jobs = _read(lambda store: _job_projection(store.jobs(), runs), default=[])
+    return {"jobs": jobs, "runs": runs, "queue_summary": _queue_summary(runs)}
 
 
 @router.get("/api/v1/automation/audit")
@@ -278,11 +502,31 @@ def automation_job_update(name: str, value: ScheduleIn, request: Request) -> dic
 def automation_job_run(name: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return service().run_task(
+        result = service().run_task(
             name,
             actor="web",
             idempotency_key=str(request.headers.get("Idempotency-Key") or ""),
         )
+        job_id = str(result.get("job_id") or result.get("run_id") or "")
+        result.setdefault("coalesced", not bool(result.get("created", True)))
+        result.setdefault("reused", False)
+        result.setdefault("links", {
+            "self": f"/api/v1/jobs/{job_id}",
+            "events": f"/api/v1/jobs/{job_id}/events",
+        })
+        try:
+            run = UnifiedJobStore(
+                get_config().data_root / "jobs.sqlite", read_only=True,
+            ).get(job_id)
+        except (FileNotFoundError, KeyError, sqlite3.Error):
+            return result
+        public = _public_automation_run(run)
+        result.update({
+            "status": public["status"], "progress": public["progress"],
+            "phase": public["phase"], "coalesced": result["coalesced"],
+            "reused": bool(run.get("reused")), "links": public["links"],
+        })
+        return result
     except Exception as exc:
         raise _error(exc) from exc
 

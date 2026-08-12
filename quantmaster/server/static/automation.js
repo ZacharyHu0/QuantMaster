@@ -8,7 +8,7 @@
     jobFeedback:new Map(), jobSaving:new Set(), diagnostics:null,
     recordCache:{runs:null, events:null, audit:null},
     recordErrors:{runs:'', events:'', audit:''}, recordLoading:new Set(),
-    lastLoadedAt:null, pageFeedbackTimer:0,
+    lastLoadedAt:null, pageFeedbackTimer:0, operationalRevision:'',
   };
 
   const viewNames = ['overview', 'jobs', 'messaging', 'records'];
@@ -39,6 +39,9 @@
     error:'运行失败', cancelled:'已取消', canceled:'已取消', paused:'已暂停',
   };
   const failingRunStatuses = new Set(['failed', 'error', 'dead', 'timed_out', 'timeout']);
+  const jobKindLabels = {
+    high_frequency_poll:'高频轮询', daily:'每日业务', time_window:'时间窗摄取', manual:'手工任务',
+  };
 
   async function secureApi(path, options = {}) {
     return api(path, options);
@@ -86,8 +89,26 @@
   }
 
   function latestRun(jobName) {
+    const job = (state.data?.jobs || []).find(item => item.name === jobName);
+    if (job?.execution?.id) return job.execution;
     return (state.data?.recent_runs || []).find(item =>
       cleanJobName(item.job_name || item.task || item.type) === jobName) || null;
+  }
+
+  function progressValue(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : null;
+  }
+
+  function durationText(value) {
+    const seconds = Math.max(0, Math.round(Number(value) || 0));
+    if (seconds < 60) return `${seconds} 秒`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+    return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
+  }
+
+  function queueText(queue = {}) {
+    return `待处理 ${Number(queue.pending || 0)} · 运行 ${Number(queue.running || 0)} · 重试 ${Number(queue.retry_wait || 0)} · 死信 ${Number(queue.dead_letter || 0)}`;
   }
 
   function runStatus(value) {
@@ -106,12 +127,21 @@
   function jobHealth(job) {
     const recent = latestRun(job.name);
     const recentStatus = runStatus(recent?.status);
+    if (recent?.stalled?.is_stalled) {
+      return {tone:'error', label:'任务停滞', order:0, recent};
+    }
     if (failingRunStatuses.has(recentStatus)) {
       return {tone:'error', label:'最近失败', order:0, recent};
     }
     if (!job.enabled) return {tone:'notice', label:'已暂停', order:1, recent};
     if (state.data?.runtime !== 'running') {
       return {tone:'warning', label:'等待运行时', order:2, recent};
+    }
+    if (recent?.backoff?.active || ['retry', 'retrying', 'retry_wait'].includes(recentStatus)) {
+      return {tone:'neutral', label:'合法退避', order:3, recent};
+    }
+    if (['queued', 'pending', 'running', 'cancelling', 'interrupted'].includes(recentStatus)) {
+      return {tone:'warning', label:runStatusLabels[recentStatus] || '处理中', order:3, recent};
     }
     return {tone:'healthy', label:'按计划运行', order:3, recent};
   }
@@ -237,6 +267,17 @@
       .sort((a, b) => new Date(a.next_run) - new Date(b.next_run)).slice(0, 4);
     const runtimeTone = state.data.runtime === 'running' ? 'healthy'
       : state.data.runtime === 'standby' ? 'warning' : 'error';
+    const queue = state.data.queue_summary || {};
+    const outbox = state.data.outbox || {};
+    const queueRisk = Number(queue.failed || 0) + Number(queue.dead_letter || 0);
+    const outboxRisk = Number(outbox.dead_letter || 0);
+    const operationalRevision = JSON.stringify([
+      state.data.runtime, queueRisk, queue.running, queue.retry_wait, outbox.dispatcher_status,
+      outbox.pending, outbox.retry_wait, outbox.dead_letter,
+      ...jobs.map(job => [job.name, jobHealth(job).label, job.execution?.stalled?.diagnostic_code || '']),
+    ]);
+    root.setAttribute('aria-live', operationalRevision === state.operationalRevision ? 'off' : 'polite');
+    state.operationalRevision = operationalRevision;
 
     root.innerHTML = `
       <dl class="automation-health-rail" aria-label="自动化健康状态">
@@ -244,6 +285,8 @@
         <div><dt>计划任务</dt><dd>${statusMarkup(failedJobs ? `${failedJobs} 项失败` : `${enabledJobs}/${jobs.length} 已启用`, failedJobs ? 'error' : enabledJobs === jobs.length ? 'healthy' : 'notice')}<small>${jobs.length ? '按异常与暂停状态排序' : '尚未配置任务'}</small></dd></div>
         <div><dt>飞书主通道</dt><dd>${statusMarkup(feishu.label, feishu.tone)}<small>${esc(feishu.detail)}</small></dd></div>
         <div><dt>推送目标</dt><dd>${statusMarkup(enabledTargets.length ? `${healthyTargets}/${enabledTargets.length} 可用` : '未启用', healthyTargets === enabledTargets.length && enabledTargets.length ? 'healthy' : enabledTargets.length ? 'warning' : 'neutral')}<small>${targets.length} 个已登记会话</small></dd></div>
+        <div><dt>Durable 队列</dt><dd>${statusMarkup(queueRisk ? `${queueRisk} 项需处理` : `${Number(queue.running || 0)} 运行 · ${Number(queue.queued || 0)} 排队`, queueRisk ? 'error' : Number(queue.retry_wait || 0) ? 'neutral' : 'healthy')}<small>退避 ${Number(queue.retry_wait || 0)} · 合并触发 ${Number(queue.coalesced_triggers || 0)}</small></dd></div>
+        <div><dt>Outbox</dt><dd>${statusMarkup(outboxRisk ? `${outboxRisk} 项死信` : outbox.dispatcher_status === 'running' ? `${Number(outbox.pending || 0)} 待发送` : outbox.dispatcher_status === 'disabled' ? '已停用' : '未配置', outboxRisk ? 'error' : outbox.dispatcher_status === 'running' ? 'healthy' : 'neutral')}<small>重试 ${Number(outbox.retry_wait || 0)}${outbox.next_retry_at ? ` · ${dateText(outbox.next_retry_at)}` : ''}</small></dd></div>
       </dl>
       <div class="automation-overview-grid">
         <section class="automation-overview-section automation-attention" aria-labelledby="automation-attention-title">
@@ -454,19 +497,36 @@
       const saving = state.jobSaving.has(job.name);
       const feedback = state.jobFeedback.get(job.name);
       const recent = health.recent;
+      const execution = job.execution || recent || {};
+      const progress = progressValue(execution.progress);
+      const queue = execution.queue || {};
+      const backoff = execution.backoff || {};
+      const stalled = execution.stalled || {};
       const recentLabel = recent
         ? `${runStatusLabels[runStatus(recent.status)] || recent.status} · ${dateText(recent.finished_at || recent.started_at)}`
         : '尚无最近运行记录';
       const recentDetail = recent?.error || (typeof recent?.result === 'string' ? recent.result : '');
       return `<article class="automation-job-row ${expanded ? 'expanded' : ''}" id="automation-job-${domId(job.name)}" data-job-row="${esc(job.name)}" tabindex="-1">
         <div class="automation-job-primary">
-          <div><strong>${esc(jobLabels[job.name] || job.name)}</strong>${statusMarkup(health.label, health.tone)}</div>
-          <small>${job.next_run ? `下次 ${dateText(job.next_run)}` : job.enabled ? '等待调度器计算下次时间' : '恢复后重新计算下次时间'}</small>
+          <div><span><strong>${esc(jobLabels[job.name] || job.name)}</strong><small class="automation-job-kind">${esc(jobKindLabels[job.job_kind] || job.job_kind || '计划任务')}</small></span>${statusMarkup(health.label, health.tone)}</div>
+          <small>${job.next_run ? `下次触发 ${dateText(job.next_run)}` : job.enabled ? '等待调度器计算下次时间' : '恢复后重新计算下次时间'} · ${Number(execution.running_instances || 0)} 个运行实例</small>
+          ${progress === null || !execution.id ? '' : `<div class="automation-job-progress"><progress max="100" value="${progress}" aria-label="${esc(jobLabels[job.name] || job.name)}进度 ${progress}%"></progress><span>${progress}%</span></div>`}
         </div>
         <button class="automation-job-expand" type="button" data-job-expand="${esc(job.name)}" aria-expanded="${expanded}" aria-controls="automation-job-detail-${domId(job.name)}">${expanded ? '收起任务详情' : '展开任务详情'}</button>
         <div class="automation-job-detail-shell" id="automation-job-detail-${domId(job.name)}"><div class="automation-job-detail">
           <div class="automation-job-field"><span>运行计划</span><strong>${esc(scheduleText(job.schedule))}</strong></div>
           <div class="automation-job-field"><span>最近结果</span><strong>${esc(recentLabel)}</strong>${recentDetail ? `<small>${esc(recentDetail)}</small>` : ''}</div>
+          <dl class="automation-job-facts">
+            <div><dt>Durable Job</dt><dd>${execution.id ? `<a href="${esc(execution.links?.self || `/api/v1/jobs/${execution.id}`)}">${esc(execution.id)}</a>` : '—'}</dd></div>
+            <div><dt>原子队列</dt><dd>${esc(queueText(queue))}</dd></div>
+            <div><dt>合并触发</dt><dd>${Number(execution.coalesced_triggers || 0)} 次</dd></div>
+            <div><dt>上次开始</dt><dd>${dateText(execution.started_at)}</dd></div>
+            <div><dt>上次结束</dt><dd>${dateText(execution.finished_at)}</dd></div>
+            <div><dt>当前耗时</dt><dd>${execution.started_at ? durationText(execution.elapsed_seconds) : '—'}</dd></div>
+            <div><dt>心跳 / 最近原子项</dt><dd>${dateText(execution.heartbeat_at)} / ${dateText(execution.last_completed_unit_at)}</dd></div>
+          </dl>
+          ${backoff.active ? `<div class="automation-job-diagnostic" data-tone="neutral"><strong>合法退避${backoff.next_retry_at ? ` · 下次重试 ${dateText(backoff.next_retry_at)}` : ''}</strong><span>${esc(backoff.reason || backoff.waiting_for || '等待重试条件满足')}</span></div>` : ''}
+          ${stalled.is_stalled ? `<div class="automation-job-diagnostic" data-tone="error" role="status"><strong>任务停滞 · ${esc(stalled.diagnostic_code || 'stalled')}</strong><span>${esc(stalled.reason || '进度心跳已超出预期')} · 当前等待 ${esc(stalled.waiting_for || '未知对象')} · 观察于 ${dateText(stalled.observed_at)}</span></div>` : ''}
           <div class="job-actions">
             <button class="ghost" type="button" data-job-toggle="${esc(job.name)}" data-enabled="${job.enabled}" ${saving ? 'disabled' : ''}>${job.enabled ? '暂停任务' : '恢复任务'}</button>
             <button class="ghost" type="button" data-job-run="${esc(job.name)}" ${saving ? 'disabled' : ''}>立即运行任务</button>
@@ -494,7 +554,8 @@
     return `<div class="automation-record-table-wrap"><table class="automation-record-table"><thead><tr><th>任务</th><th>状态</th><th>进度</th><th>阶段与详情</th><th>更新时间</th></tr></thead><tbody>${items.map(item => {
       const name = cleanJobName(item.type);
       const status = runStatus(item.status);
-      const progress = Number.isFinite(Number(item.progress)) ? `${Math.round(Number(item.progress) * (Number(item.progress) <= 1 ? 100 : 1))}%` : '—';
+      const value = progressValue(item.progress);
+      const progress = value === null ? '—' : `${value}%`;
       return `<tr><td data-label="任务"><strong>${esc(jobLabels[name] || name)}</strong><small>${esc(item.id || '')}</small></td><td data-label="状态">${statusMarkup(runStatusLabels[status] || status || '未知', runTone(status))}</td><td data-label="进度">${esc(progress)}</td><td data-label="阶段与详情"><strong>${esc(item.phase || '—')}</strong><small>${esc(item.detail || '')}</small></td><td data-label="更新时间"><time>${dateText(item.updated_at || item.created_at)}</time></td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
@@ -964,8 +1025,11 @@
         state.jobFeedback.set(name, {kind:'success', message:pausing ? '任务已暂停。' : '任务已恢复并重新加入调度。'});
       } else {
         const result = await secureApi(`/api/v1/automation/jobs/${encodeURIComponent(name)}/run`, {method:'POST'});
+        const progress = progressValue(result.progress);
         state.jobFeedback.set(name, {kind:'success',
-          message:result.created === false ? '相同任务已经在队列中，无需重复提交。' : '任务已提交，正在后台排队执行。'});
+          message:result.created === false
+            ? `已连接同一任务 ${result.job_id || result.run_id || ''}${progress === null ? '' : ` · 当前 ${progress}%`}，继续显示其原有进度。`
+            : `任务 ${result.job_id || result.run_id || ''} 已提交，正在后台排队执行。`});
       }
       invalidateRecordCache();
       await window.loadAutomation(true, {silent:true, invalidateRecords:false});
