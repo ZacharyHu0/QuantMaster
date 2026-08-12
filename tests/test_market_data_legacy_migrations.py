@@ -6,6 +6,7 @@ import sqlite3
 import pandas as pd
 import pytest
 
+from quantmaster.data.migration import backup_sqlite_tree
 from quantmaster.data.legacy_migrations import (
     MarketDataLegacyMigrator,
     migrate_bar_filenames,
@@ -146,6 +147,12 @@ def test_rotation_old_observation_and_factor_caches_are_recoverably_isolated(tmp
     }
     assert observations.is_file() and factors.is_file()
 
+    backup = tmp_path.parent / f"{tmp_path.name}-backup"
+    backup_sqlite_tree(
+        tmp_path,
+        backup,
+        extra_paths=MarketDataLegacyMigrator.backup_paths,
+    )
     migrated = migrate_rotation_etf_artifacts(tmp_path)
     assert {item["outcome"] for item in migrated} == {"converted", "blank"}
     assert observations.exists() and not factors.exists()
@@ -160,7 +167,7 @@ def test_rotation_old_observation_and_factor_caches_are_recoverably_isolated(tmp
         "rotation_etf_observations_current", "rotation_adjustment_factors_isolated",
     }
 
-    MarketDataLegacyMigrator().rollback(tmp_path, tmp_path / "empty-backup")
+    MarketDataLegacyMigrator().rollback(tmp_path, backup)
     assert observations.is_file() and factors.is_file()
     assert not (quarantine / "rotation" / observations.name).exists()
     assert not (quarantine / "etf-research" / "evidence" / factors.name).exists()
