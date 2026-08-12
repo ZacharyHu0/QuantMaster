@@ -11,6 +11,7 @@
     researchTimer: null,
     researchPreview: null,
     researchCatalog: null,
+    researchControlsLoaded: false,
     modelCheckSignature: '',
     modelCheckTimer: null,
     autoSaveTimer: null,
@@ -225,7 +226,6 @@
       state.loaded = true;
       fillForm(data);
       await loadDataRefreshControls();
-      await loadResearchControls();
     } catch (error) {
       document.getElementById('settings-config-path').textContent = `设置不可用：${error.message}`;
       form.querySelectorAll('input, select, textarea, button').forEach(item => { item.disabled = true; });
@@ -1187,6 +1187,7 @@
         request('/api/v1/research/data/jobs?limit=1'),
       ]);
       state.researchCatalog = catalog;
+      state.researchControlsLoaded = true;
       const datasetSelect = document.getElementById('research-datasets');
       const selectedDatasets = new Set([...datasetSelect.selectedOptions].map(item => item.value));
       datasetSelect.innerHTML = (catalog.datasets || []).filter(item => !item.premium).map(item =>
@@ -1258,6 +1259,10 @@
   document.getElementById('research-data-reload').addEventListener('click', async event => {
     event.target.disabled = true;
     try { await loadResearchControls(); } finally { event.target.disabled = false; }
+  });
+  document.getElementById('research-artifacts').addEventListener('toggle', async event => {
+    if (!event.target.open || state.researchControlsLoaded) return;
+    await loadResearchControls();
   });
   document.getElementById('research-preview').addEventListener('click', async event => {
     event.target.disabled = true;

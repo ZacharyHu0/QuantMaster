@@ -1311,9 +1311,9 @@
         </section>
 
         <section class="settings-group" data-settings-panel="research-data">
-          <div class="group-heading"><div><h3>研究数据</h3><p>定义盘后全市场扫描规则，并生产可追溯的跨资产研究分区。</p></div></div>
+          <div class="group-heading"><div><h3>研究数据</h3><p>管理日常盘后候选扫描；需要复现实验时，再按需构建版本固定的研究产物。</p></div></div>
           <div class="field-grid">
-            <div class="field-wide section-divider"><strong>盘后全市场研究</strong><small>原生更新成功后，通过完整性门才发布新的正式快照。</small></div>
+            <div class="field-wide section-divider"><strong>盘后候选扫描</strong><small>本地行情库更新成功后，通过完整性检查才发布新的候选快照。这是本页的日常功能。</small></div>
             <label class="toggle-field"><span><strong>启用盘后扫描</strong><small>构建板块优先级与板块内研究候选。</small></span><input name="data.after_close_enabled" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>更新后自动运行</strong><small>free-stockdb 更新成功并恢复服务后自动提交扫描。</small></span><input name="data.after_close_auto_run" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>纳入北交所</strong><small>关闭后全市场扫描只包含沪深普通股。</small></span><input name="data.after_close_include_bj" type="checkbox" role="switch"></label>
@@ -1322,27 +1322,35 @@
             <label>20 日日均成交额下限<input name="data.after_close_min_avg_amount" type="number" min="0" step="1000000" required><small>默认 30,000,000 元。</small></label>
             <label>研究候选数量<input name="data.after_close_candidate_limit" type="number" min="5" max="200" required></label>
           </div>
-          <div class="research-data-box">
-            <div class="research-data-heading"><div><h4>跨资产研究生产湖</h4><p>按日生成可追溯的股票、ETF 与期货分区；先预览依赖、权限和磁盘影响，再启动可恢复任务。</p></div><button class="ghost" id="research-data-reload" type="button">刷新目录</button></div>
-            <div class="research-capabilities" id="research-capabilities" aria-live="polite"><span>正在读取日线权限与计算内核…</span></div>
-            <div class="research-plan-grid">
-              <fieldset id="research-assets"><legend>资产</legend><label><input type="checkbox" value="stock" checked> A 股</label><label><input type="checkbox" value="etf"> ETF</label><label><input type="checkbox" value="future"> 期货</label></fieldset>
-              <label>模式<select id="research-mode"><option value="incremental">增量生产</option><option value="historical">历史初始化</option></select></label>
-              <label>计算内核<select id="research-backend"><option value="auto">自动（Rust 优先）</option><option value="python">Python</option><option value="rust">Rust / 自动回退</option></select></label>
-              <label>起始日期<input id="research-start" type="date"></label>
-              <label>结束日期<input id="research-end" type="date"></label>
-              <label class="research-multi">数据集<select id="research-datasets" multiple aria-label="研究数据集"></select><small>留空时使用各资产 2000 积分日线基线。</small></label>
-              <label class="research-multi">研究产物<select id="research-specs" multiple aria-label="因子、标签与风险暴露"></select><small>可多选；同一 provider 的输入只扫描一次。</small></label>
-              <button class="ghost research-preview" id="research-preview" type="button">生成 Dry-run</button>
+          <details class="research-artifacts settings-advanced" id="research-artifacts">
+            <summary><span><strong>版本化研究产物</strong><small>高级功能 · 仅在因子回测、模型训练或复现实验时按需使用</small></span></summary>
+            <div class="research-data-box">
+              <div class="research-purpose" aria-label="版本化研究产物说明">
+                <div><strong>它会生成什么</strong><span>把股票、ETF 或期货日线加工成带版本和来源记录的因子、标签及风险暴露。</span></div>
+                <div><strong>谁会使用</strong><span>使用 <code>artifact:…</code> 引用的回测，以及发布模型产物的 Quant Lab 流程。</span></div>
+                <div><strong>什么时候不用</strong><span>普通看盘、候选扫描和常规回测无需操作；这里不会自动运行，也不会生成交易指令。</span></div>
+              </div>
+              <div class="research-data-heading"><div><h4>构建研究产物</h4><p>先估算数据权限、任务批次和磁盘占用，确认后才会写入本地研究目录。</p></div><button class="ghost" id="research-data-reload" type="button">刷新可用项</button></div>
+              <div class="research-capabilities" id="research-capabilities" aria-live="polite"><span>展开后读取可用数据与计算内核…</span></div>
+              <div class="research-plan-grid">
+                <fieldset id="research-assets"><legend>资产范围</legend><label><input type="checkbox" value="stock" checked> A 股</label><label><input type="checkbox" value="etf"> ETF</label><label><input type="checkbox" value="future"> 期货</label></fieldset>
+                <label>构建方式<select id="research-mode"><option value="incremental">更新已有产物</option><option value="historical">首次构建历史</option></select></label>
+                <label>计算方式<select id="research-backend"><option value="auto">自动选择</option><option value="python">仅 Python</option><option value="rust">优先 Rust，可回退</option></select></label>
+                <label>起始日期<input id="research-start" type="date"></label>
+                <label>结束日期<input id="research-end" type="date"></label>
+                <label class="research-multi">原始数据<select id="research-datasets" multiple aria-label="研究原始数据"></select><small>不选择时，使用所选资产可用的基础日线数据。</small></label>
+                <label class="research-multi">要生成的产物<select id="research-specs" multiple aria-label="要生成的因子、标签与风险暴露"></select><small>可同时选择多个因子、标签或风险暴露。</small></label>
+                <button class="ghost research-preview" id="research-preview" type="button">估算任务</button>
+              </div>
+              <div class="maintenance-confirm" id="research-confirm" hidden><span data-research-preview-text></span><button class="primary" id="research-start-button" type="button">确认构建</button></div>
+              <div class="maintenance-progress research-progress" id="research-progress" hidden aria-live="polite">
+                <div><span data-research-phase>准备中</span><strong data-research-percent>0%</strong></div>
+                <div class="load-track"><div class="load-fill"></div></div>
+                <div class="maintenance-actions"><button class="ghost" id="research-cancel" type="button">完成当前分区后停止</button><button class="ghost" id="research-resume" type="button" hidden>继续构建</button></div>
+                <small data-research-detail></small>
+              </div>
             </div>
-            <div class="maintenance-confirm" id="research-confirm" hidden><span data-research-preview-text></span><button class="primary" id="research-start-button" type="button">启动研究任务</button></div>
-            <div class="maintenance-progress research-progress" id="research-progress" hidden aria-live="polite">
-              <div><span data-research-phase>准备中</span><strong data-research-percent>0%</strong></div>
-              <div class="load-track"><div class="load-fill"></div></div>
-              <div class="maintenance-actions"><button class="ghost" id="research-cancel" type="button">完成当前分区后取消</button><button class="ghost" id="research-resume" type="button" hidden>继续任务</button></div>
-              <small data-research-detail></small>
-            </div>
-          </div>
+          </details>
         </section>
 
         <section class="settings-group" data-settings-panel="news">

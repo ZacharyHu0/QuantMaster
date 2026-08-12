@@ -473,6 +473,10 @@ class TestBasics:
         assert resp.text.count("data-settings-section=") == 11
         for panel in ("local-data", "online-data", "research-data"):
             assert f'data-settings-panel="{panel}"' in resp.text
+        assert 'id="research-artifacts"' in resp.text
+        assert "版本化研究产物" in resp.text
+        assert "普通看盘、候选扫描和常规回测无需操作" in resp.text
+        assert "跨资产研究生产湖" not in resp.text
         for diagnostic in (
             "llm-models", "llm-web-search", "storage", "data-sources", "tushare", "lab", "server",
         ):
