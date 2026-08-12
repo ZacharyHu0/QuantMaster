@@ -31,6 +31,7 @@
     strategy_changed: '策略修改后已替代',
   };
   const strategyLabel = strategy => {
+    if (!strategy) return '历史策略未知';
     if (strategy?.kind === 'decision') {
       const profile = {
         risk_adjusted:'扣费风险收益', short_term:'短期命中收益', stable:'稳定可解释',
@@ -758,7 +759,7 @@
       return;
     }
     paperList.innerHTML = paperState.accounts.map(account => `<button type="button" class="paper-account-button ${account.id === paperState.activeId ? 'active' : ''}" data-paper-account="${account.id}" data-archived="${account.status === 'archived'}">
-      <strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.universe)} · ${strategyLabel(account.strategy)} · ${statusLabel[account.mode]}</span>
+      <strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.universe || '候选未知')} · ${strategyLabel(account.strategy)} · ${statusLabel[account.mode]}</span>
       <i class="trading-status ${account.status}">${statusLabel[account.status] || account.status}</i>
     </button>`).join('');
   }
@@ -767,16 +768,21 @@
     const strategy = account.strategy || {};
     const facts = [
       ['策略', strategyLabel(strategy)],
-      ['候选', `${account.universe} · ${(account.universe_snapshot?.symbols || []).length} 只`],
+      ['候选', account.universe
+        ? `${account.universe} · ${(account.universe_snapshot?.symbols || []).length} 只`
+        : '历史候选未知'],
       ['执行方式', account.mode === 'auto' ? '每日自动交易' : '手动运行'],
-      ['初始资金', number(account.initial_capital)],
+      ['初始资金', account.initial_capital == null
+        ? '历史初始资金未知' : number(account.initial_capital)],
     ];
     if (strategy.kind === 'factor') {
       facts.push(['因子表达式', strategy.factor], ['调仓频率', {D:'每日', W:'每周', M:'每月'}[strategy.rebalance] || strategy.rebalance]);
     } else {
       facts.push(['持有期', `${strategy.holding_days || strategy.horizon || '—'} 个交易日`]);
     }
-    facts.push(['持仓数', number(strategy.top_n)], ['单票上限', percent(strategy.cap_weight)]);
+    if (strategy.kind) {
+      facts.push(['持仓数', number(strategy.top_n)], ['单票上限', percent(strategy.cap_weight)]);
+    }
     const policy = strategy.policy_snapshot || {};
     if (strategy.kind === 'decision') {
       facts.push(['模型版本', policy.model_version || '规则基线'], ['策略画像', strategy.profile || '—']);
@@ -788,21 +794,23 @@
     const snapshot = account.universe_snapshot || {};
     const members = snapshot.symbols || [];
     const management = account.management || {};
-    const managementState = account.status === 'archived'
+    const managementState = !account.strategy
+      ? ['历史事实可查看', '策略等元数据无可靠证据；账户已暂停，账本成交与现金流仍可查看。', 'paused']
+      : account.status === 'archived'
       ? ['只读归档', '策略和历史账本仍可查看；恢复账户或复制策略后继续。', 'archived']
       : management.pending_strategy_change
       ? ['切换待执行', `新策略将在 ${management.strategy_effective_after || '后续交易日'} 信号日之后执行。`, 'pending']
       : ['可直接编辑', '修改会建立新策略分段，旧周期和成交历史保持原样。', 'editable'];
-    const source = account.source_backtest_id
+    const source = !account.strategy ? '历史来源未知' : account.source_backtest_id
       ? `回测 ${String(account.source_backtest_id).slice(0, 8)}`
       : snapshot.cloned_from ? `复制自 ${String(snapshot.cloned_from).slice(0, 8)}` : '直接创建';
     return `<section class="paper-strategy-panel" aria-labelledby="paper-strategy-title">
-      <div class="paper-strategy-head"><h3 id="paper-strategy-title">独立策略快照</h3><code title="完整策略哈希">${escapeHtml(account.strategy_hash)}</code></div>
+      <div class="paper-strategy-head"><h3 id="paper-strategy-title">独立策略快照</h3>${account.strategy_hash ? `<code title="完整策略哈希">${escapeHtml(account.strategy_hash)}</code>` : '<span>历史策略未知</span>'}</div>
       <div class="paper-strategy-management" data-state="${managementState[2]}"><strong>${managementState[0]}</strong><span>${managementState[1]}</span></div>
       <div class="paper-strategy-grid">
         ${strategyFacts(account).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}
         <div><span>策略来源</span><strong>${escapeHtml(source)}</strong></div>
-        <div><span>候选快照</span><strong>${escapeHtml(snapshot.as_of || '创建时固化')} · ${escapeHtml(snapshot.quality || '—')}</strong></div>
+        <div><span>候选快照</span><strong>${account.strategy ? `${escapeHtml(snapshot.as_of || '创建时固化')} · ${escapeHtml(snapshot.quality || '—')}` : '历史候选快照未知'}</strong></div>
       </div>
       <details class="paper-strategy-members"><summary>查看 ${members.length} 只快照成员</summary><p>${members.length ? members.map(escapeHtml).join(' · ') : '候选快照为空'}</p></details>
     </section>`;
@@ -920,7 +928,7 @@
     document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
     document.getElementById('paper-account-title').textContent = account.name;
     const executionMode = account.mode === 'auto' ? '每日自动交易' : '手动运行';
-    document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${executionMode} · 快照 ${account.strategy_hash.slice(0, 10)}`;
+    document.getElementById('paper-account-meta').textContent = `${account.universe || '候选未知'} · ${strategyLabel(account.strategy)} · ${executionMode}${account.strategy_hash ? ` · 快照 ${account.strategy_hash.slice(0, 10)}` : ''}`;
     paperActions.hidden = false;
     document.getElementById('paper-propose').disabled = account.status !== 'active';
     document.getElementById('paper-process').disabled = account.status !== 'active';
@@ -941,9 +949,10 @@
       if (index >= 0) paperState.accounts[index] = account;
       renderAccountList();
       document.getElementById('paper-account-title').textContent = account.name;
-      document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'} · 快照 ${account.strategy_hash.slice(0, 10)}`;
+      document.getElementById('paper-account-meta').textContent = `${account.universe || '候选未知'} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'}${account.strategy_hash ? ` · 快照 ${account.strategy_hash.slice(0, 10)}` : ''}`;
       edit.textContent = '编辑账户与策略';
       edit.title = '修改策略、候选或调仓频率后，按 15:00 分界排入后续真实交易日开盘';
+      edit.disabled = account.status === 'archived' || !account.management?.strategy_editable;
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderAutomation(payload.automation)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
@@ -1053,6 +1062,7 @@
     const account = paperState.activeReport?.account ||
       paperState.accounts.find(item => item.id === paperState.activeId);
     if (!account || !paperEditForm) return;
+    if (!account.strategy) return;
     const copy = action === 'copy';
     const strategy = account.strategy || {};
     paperEditForm.elements.action.value = action;

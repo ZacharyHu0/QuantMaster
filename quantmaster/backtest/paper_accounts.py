@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -38,88 +37,11 @@ from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migra
 from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
-PAPER_SCHEMA_VERSION = 4
+PAPER_SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _migrate_swing_accounts(conn: sqlite3.Connection) -> None:
-    """Retire executable Swing accounts without rewriting their ledger history."""
-    from quantmaster.backtest.spec import DecisionStrategySpec
-    from quantmaster.decision import resolve_policy
-
-    now = utc_now()
-    current = datetime.now(SHANGHAI)
-    signal_day = current.date()
-    if (current.hour, current.minute) >= (15, 0):
-        signal_day += timedelta(days=1)
-    rows = conn.execute(
-        "SELECT id,status,strategy_json,universe,universe_json FROM paper_accounts"
-    ).fetchall()
-    for row in rows:
-        try:
-            legacy = json.loads(row["strategy_json"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if legacy.get("kind") != "swing":
-            continue
-        account_id = str(row["id"])
-        conn.execute(
-            "UPDATE paper_orders SET status='superseded',reason='strategy_changed',"
-            "updated_at=? WHERE account_id=? AND status IN ('proposed','queued','blocked')",
-            (now, account_id),
-        )
-        conn.execute(
-            "UPDATE paper_cycles SET status='superseded',finished_at=? WHERE account_id=? "
-            "AND status IN ('proposed','confirmed','blocked')",
-            (now, account_id),
-        )
-        conn.execute(
-            "UPDATE paper_auto_runs SET status='cancelled',next_retry_at=0,lease_owner='',"
-            "lease_expires=0,lease_token='',heartbeat_at=0,updated_at=? "
-            "WHERE account_id=? AND status<>'completed'",
-            (now, account_id),
-        )
-        warning = "旧 Swing 策略已迁移为 Hybrid v2 短期画像；历史账本与成交保持不变。"
-        try:
-            universe_snapshot = json.loads(row["universe_json"] or "{}")
-            symbols = list(universe_snapshot.get("symbols") or [])
-            holding_days = int(legacy.get("holding_days") or 3)
-            strategy = DecisionStrategySpec(
-                profile="short_term",
-                top_n=int(legacy.get("top_n") or 5),
-                holding_days=holding_days,
-                cap_weight=float(legacy.get("cap_weight") or 0.25),
-                policy_snapshot=resolve_policy(
-                    str(row["universe"]), holding_days, "short_term", symbols=symbols,
-                ),
-            ).model_dump(mode="json")
-            strategy_hash = content_hash({
-                "strategy": strategy,
-                "universe": universe_snapshot,
-            })
-        except (TypeError, ValueError, AttributeError):
-            logger.exception("旧 Swing 模拟账户迁移失败 account_id=%s", account_id)
-            conn.execute(
-                "UPDATE paper_accounts SET status='archived',mode='manual',"
-                "source_backtest_id='',warning=?,strategy_warning=?,runtime_warning='',"
-                "strategy_effective_after='',updated_at=? WHERE id=?",
-                ("旧 Swing 配置无法安全迁移，账户已转为只读归档。",) * 2
-                + (now, account_id),
-            )
-            continue
-        effective_after = "" if row["status"] == "archived" else signal_day.isoformat()
-        conn.execute(
-            "UPDATE paper_accounts SET strategy_json=?,strategy_hash=?,source_backtest_id='',"
-            "warning=?,strategy_warning=?,runtime_warning='',strategy_effective_after=?,"
-            "updated_at=? WHERE id=?",
-            (
-                canonical_json(strategy), strategy_hash, warning, warning,
-                effective_after, now, account_id,
-            ),
-        )
 
 
 class PaperStore:
@@ -178,9 +100,6 @@ class PaperStore:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(cycle_id) REFERENCES paper_cycles(id),
                     FOREIGN KEY(account_id) REFERENCES paper_accounts(id));
-                CREATE TABLE IF NOT EXISTS paper_migrations (
-                    source_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL,
-                    account_id TEXT NOT NULL, migrated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS paper_auto_runs (
                     run_date TEXT NOT NULL, account_id TEXT NOT NULL,
                     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +110,11 @@ class PaperStore:
                     failure_code TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(run_date,account_id),
+                    FOREIGN KEY(account_id) REFERENCES paper_accounts(id));
+                CREATE TABLE IF NOT EXISTS paper_legacy_imports (
+                    source_name TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL UNIQUE,
+                    migrated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES paper_accounts(id));
                 CREATE INDEX IF NOT EXISTS idx_paper_cycles
                     ON paper_cycles(account_id,created_at DESC);
@@ -229,7 +153,14 @@ class PaperStore:
                 conn.execute(
                     "ALTER TABLE paper_auto_runs ADD COLUMN failure_code TEXT NOT NULL DEFAULT ''"
                 )
-            _migrate_swing_accounts(conn)
+
+        def schema_v5(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS paper_legacy_imports ("
+                "source_name TEXT PRIMARY KEY,account_id TEXT NOT NULL UNIQUE,"
+                "migrated_at TEXT NOT NULL,"
+                "FOREIGN KEY(account_id) REFERENCES paper_accounts(id))"
+            )
 
         with self._conn() as conn:
             migrate_schema(
@@ -237,7 +168,8 @@ class PaperStore:
                 (
                     (1, schema_v1),
                     (2, schema_v2),
-                    (PAPER_SCHEMA_VERSION, schema_v4),
+                    (4, schema_v4),
+                    (PAPER_SCHEMA_VERSION, schema_v5),
                 ),
             )
 
@@ -246,8 +178,14 @@ class PaperStore:
         if row is None:
             return None
         value = dict(row)
+        imported = bool(value.pop("_migration_imported", False))
         value["strategy"] = json.loads(value.pop("strategy_json"))
         value["universe_snapshot"] = json.loads(value.pop("universe_json"))
+        if imported:
+            value["initial_capital"] = None
+            value["universe"] = None
+            value["source_backtest_id"] = None
+            value["created_at"] = None
         value["strategy_warning"] = str(value.get("strategy_warning") or "")
         value["runtime_warning"] = str(value.get("runtime_warning") or "")
         value["strategy_effective_after"] = str(value.get("strategy_effective_after") or "")
@@ -335,13 +273,22 @@ class PaperStore:
 
     def account(self, account_id: str) -> dict | None:
         with self._conn() as conn:
-            row = conn.execute("SELECT * FROM paper_accounts WHERE id=?", (account_id,)).fetchone()
+            row = conn.execute(
+                "SELECT paper_accounts.*,EXISTS(SELECT 1 FROM paper_legacy_imports "
+                "WHERE account_id=paper_accounts.id) AS _migration_imported "
+                "FROM paper_accounts WHERE id=?",
+                (account_id,),
+            ).fetchone()
         return self._account_value(row)
 
     def accounts(self, include_archived: bool = False) -> list[dict]:
         where = "" if include_archived else "WHERE status<>'archived'"
         with self._conn() as conn:
-            rows = conn.execute(f"SELECT * FROM paper_accounts {where} ORDER BY created_at DESC").fetchall()
+            rows = conn.execute(
+                "SELECT paper_accounts.*,EXISTS(SELECT 1 FROM paper_legacy_imports "
+                "WHERE account_id=paper_accounts.id) AS _migration_imported "
+                f"FROM paper_accounts {where} ORDER BY created_at DESC"
+            ).fetchall()
         return [self._account_value(row) or {} for row in rows]
 
     @staticmethod
@@ -896,71 +843,10 @@ class PaperStore:
             )
         return self.cycle(cycle_id) or {}
 
-    def migrate_legacy(self) -> dict | None:
-        source = get_config().data_root / "ledger_paper.sqlite"
-        if not source.is_file():
-            return None
-        source_key = str(source.resolve())
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT account_id FROM paper_migrations WHERE source_path=?",
-                (source_key,),
-            ).fetchone()
-        if row:
-            return self.account(row["account_id"])
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        account_id, now = uuid.uuid4().hex, utc_now()
-        name = "历史模拟盘"
-        with self._conn() as conn:
-            if conn.execute("SELECT 1 FROM paper_accounts WHERE name=?", (name,)).fetchone():
-                name = f"历史模拟盘-{digest[:6]}"
-        strategy = FactorStrategySpec().model_dump(mode="json")
-        universe = {"name": "legacy", "symbols": [], "source": source_key}
-        destination = self.ledger_path(account_id)
-        # A byte copy of the main file loses committed rows that are still in
-        # the source WAL. SQLite's online backup API snapshots main + WAL while
-        # leaving the legacy database untouched and readable.
-        with connect_sqlite(source) as source_conn, connect_sqlite(destination) as destination_conn:
-            source_conn.backup(destination_conn)
-        Ledger(path=destination)
-        warning = "由旧模拟账本导入；策略来源未知，已暂停。"
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO paper_accounts "
-                "(id,name,status,mode,initial_capital,strategy_json,strategy_hash,universe,"
-                "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
-                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    account_id,
-                    name,
-                    "paused",
-                    "manual",
-                    0.0,
-                    canonical_json(strategy),
-                    content_hash({"strategy": strategy, "legacy": digest}),
-                    "legacy",
-                    canonical_json(universe),
-                    "",
-                    warning,
-                    warning,
-                    "",
-                    now,
-                    now,
-                ),
-            )
-            conn.execute(
-                "INSERT INTO paper_migrations VALUES (?,?,?,?)",
-                (source_key, digest, account_id, now),
-            )
-        return self.account(account_id)
-
-
 class PaperService:
     def __init__(self, store: PaperStore | None = None, *, read_only: bool = False):
         self.read_only = bool(read_only)
         self.store = store or PaperStore(read_only=self.read_only)
-        if not self.read_only:
-            self.store.migrate_legacy()
 
     @staticmethod
     def _resolve_universe(name: str, as_of: str) -> tuple[list[str], dict]:
@@ -1028,7 +914,7 @@ class PaperService:
         archived = account["status"] == "archived"
         account["activity"] = activity
         account["management"] = {
-            "strategy_editable": not archived,
+            "strategy_editable": not archived and bool(account.get("strategy")),
             "pending_strategy_change": bool(account.get("strategy_effective_after")),
             "strategy_effective_after": account.get("strategy_effective_after", ""),
             "can_archive": not archived,
@@ -1251,44 +1137,15 @@ class PaperService:
             raise ValueError(message)
         strategy_spec = account["strategy"]
         if strategy_spec.get("kind") == "decision":
-            old_snapshot = strategy_spec.get("policy_snapshot") or {}
-            if int(old_snapshot.get("schema_version", 0) or 0) < 3:
-                from quantmaster.backtest.spec import DecisionStrategySpec
-                from quantmaster.decision import resolve_policy, upgrade_policy_snapshot
-
-                upgraded_policy = (
-                    upgrade_policy_snapshot(old_snapshot)
-                    if old_snapshot else resolve_policy(
-                        account["universe"],
-                        int(strategy_spec.get("holding_days") or 3),
-                        str(strategy_spec.get("profile") or "risk_adjusted"),
-                        symbols=eligible_symbols,
-                    )
+            snapshot = strategy_spec.get("policy_snapshot")
+            if (
+                not isinstance(snapshot, dict)
+                or int(snapshot.get("schema_version", 0) or 0) != 3
+                or not snapshot.get("position_control")
+            ):
+                raise ValueError(
+                    "账户策略快照不是当前 schema；请先运行显式历史数据迁移"
                 )
-                upgraded_strategy = DecisionStrategySpec.model_validate(strategy_spec).model_copy(
-                    update={"policy_snapshot": upgraded_policy},
-                )
-                metadata = {
-                    key: value for key, value in account["universe_snapshot"].items()
-                    if key not in {"name", "symbols"}
-                }
-                upgraded_account = PaperAccountSpec(
-                    name=account["name"],
-                    strategy=upgraded_strategy,
-                    universe=account["universe"],
-                    initial_capital=account["initial_capital"],
-                    mode=account["mode"],
-                    source_backtest_id=account.get("source_backtest_id", ""),
-                )
-                account = self.store.replace_strategy(
-                    account_id,
-                    upgraded_account,
-                    symbols=eligible_symbols,
-                    universe_meta=metadata,
-                    warning="旧 Hybrid 账户已升级为自动仓位控制；模型组件与历史账本保持不变。",
-                    effective_after=latest_date.strftime("%Y-%m-%d"),
-                )
-                strategy_spec = account["strategy"]
         transition_after = str(account.get("strategy_effective_after") or "")
         force_transition = bool(transition_after)
         if strategy_spec.get("kind") == "decision":

@@ -965,7 +965,7 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
         )
 
 
-def test_legacy_hybrid_paper_account_upgrades_once_and_supersedes_old_orders(
+def test_old_hybrid_paper_account_requires_explicit_migration_without_mutating_history(
     tmp_path,
     panel,
 ):
@@ -1014,109 +1014,16 @@ def test_legacy_hybrid_paper_account_upgrades_once_and_supersedes_old_orders(
     before_cashflows = len(store.ledger(account["id"]).cashflows())
     service = PaperService(store)
 
-    first = service.propose(account["id"], panel=panel)
-    upgraded = store.account(account["id"])
-    assert upgraded["strategy"]["policy_snapshot"]["schema_version"] == 3
-    assert upgraded["strategy"]["policy_snapshot"]["components"] == legacy["components"]
-    assert store.cycle(old_cycle["id"])["status"] == "superseded"
+    with pytest.raises(ValueError, match="显式历史数据迁移"):
+        service.propose(account["id"], panel=panel)
+
+    stored = store.account(account["id"])
+    assert stored["strategy"]["policy_snapshot"] == legacy
+    assert store.cycle(old_cycle["id"])["status"] == "proposed"
     assert {order["status"] for order in store.orders(cycle_id=old_cycle["id"])} == {
-        "superseded"
+        "proposed"
     }
     assert len(store.ledger(account["id"]).cashflows()) == before_cashflows
-
-    second = service.propose(account["id"], panel=panel)
-    assert second["id"] == first["id"]
-    assert second["created"] is False
-    assert store.account(account["id"])["strategy"]["policy_snapshot"][
-        "policy_hash"
-    ] == upgraded["strategy"]["policy_snapshot"]["policy_hash"]
-
-
-@pytest.mark.parametrize("status", ["active", "archived"])
-def test_swing_paper_account_migrates_to_short_term_hybrid(
-    tmp_path, monkeypatch, status,
-):
-    path = tmp_path / "paper.sqlite"
-    account_root = tmp_path / "accounts"
-    original = PaperStore(path, account_root)
-    account_id = "a" * 32
-    strategy = {"kind": "swing", "top_n": 7, "holding_days": 5, "cap_weight": 0.2}
-    universe = {"name": "demo", "symbols": ["600000.SH", "000001.SZ"]}
-    with original._conn() as conn:
-        conn.execute(
-            "INSERT INTO paper_accounts "
-            "(id,name,status,mode,initial_capital,strategy_json,strategy_hash,universe,"
-            "universe_json,source_backtest_id,warning,strategy_warning,runtime_warning,"
-            "strategy_effective_after,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                account_id, "旧短线", status, "auto", 100_000,
-                json.dumps(strategy), "legacy-hash", "demo", json.dumps(universe),
-                "legacy-run", "", "", "", "", "2026-08-01", "2026-08-01",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO paper_cycles "
-            "(id,account_id,signal_date,status,strategy_hash,target_json,reference_json,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (
-                "legacy-cycle", account_id, "2026-08-01", "proposed",
-                "legacy-hash", "{}", "{}", "2026-08-01",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO paper_orders "
-            "(id,cycle_id,account_id,symbol,target_weight,side,status,idempotency_key,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                "legacy-order", "legacy-cycle", account_id, "600000.SH", 0.2,
-                "buy", "proposed", "legacy-order-key", "2026-08-01", "2026-08-01",
-            ),
-        )
-        conn.execute(
-            "INSERT INTO paper_auto_runs(run_date,account_id,status,lease_owner,"
-            "lease_expires,lease_token,heartbeat_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (
-                "2026-08-02", account_id, "running", "legacy-worker", 9_999_999_999,
-                "legacy-lease", 9_999_999_000, "2026-08-02",
-            ),
-        )
-        conn.execute("PRAGMA user_version=2")
-    monkeypatch.setattr(
-        "quantmaster.decision.resolve_policy",
-        lambda universe, horizon, profile, **kwargs: {
-            "schema_version": 3, "universe": universe, "horizon": horizon,
-            "profile": profile, "policy_hash": "migrated-policy",
-        },
-    )
-
-    migrated = PaperStore(path, account_root)
-    account = migrated.account(account_id)
-
-    assert account["strategy"] == {
-        "kind": "decision", "profile": "short_term", "top_n": 7,
-        "holding_days": 5, "cap_weight": 0.2,
-        "policy_snapshot": {
-            "schema_version": 3, "universe": "demo", "horizon": 5,
-            "profile": "short_term", "policy_hash": "migrated-policy",
-        },
-    }
-    assert account["source_backtest_id"] == ""
-    assert bool(account["strategy_effective_after"]) is (status == "active")
-    assert migrated.cycle("legacy-cycle")["status"] == "superseded"
-    assert migrated.orders(cycle_id="legacy-cycle")[0]["status"] == "superseded"
-    with migrated._conn() as conn:
-        auto_run = dict(conn.execute(
-            "SELECT status,lease_owner,lease_expires,lease_token,heartbeat_at "
-            "FROM paper_auto_runs WHERE account_id=?",
-            (account_id,),
-        ).fetchone())
-    assert auto_run == {
-        "status": "cancelled", "lease_owner": "", "lease_expires": 0.0,
-        "lease_token": "", "heartbeat_at": 0.0,
-    }
-    strategy_hash = account["strategy_hash"]
-    assert PaperStore(path, account_root).account(account_id)["strategy_hash"] == strategy_hash
 
 
 def test_swing_backtests_become_read_only_and_active_runs_are_cancelled(tmp_path):
