@@ -1218,6 +1218,17 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert ".factor-completion-option.active" in css
     assert "position: fixed" in css.split(".factor-completion-menu", 1)[1].split("}", 1)[0]
 
+    trading_script = client.get("/static/trading.js").text
+    assert "后台撮合任务" in trading_script
+    assert "订单业务状态" in trading_script
+    assert "核心数量冲突" in trading_script
+    assert "waiting_market_data: '等待行情'" in trading_script
+    assert "stalled: '已卡死'" in trading_script
+    assert '.paper-task-panel[data-health="problem"]' in css
+    assert ".trading-status.waiting_market_open" in css
+    blocked_rule = css.split(".trading-status.blocked", 1)[1].split("}", 1)[0]
+    assert "var(--bad)" not in blocked_rule
+
 
 def test_factor_reference_splitter_preserves_expression_commas():
     assert split_factor_references("ts_corr(rank(volume), rank(close), 20), mom_20d") == [

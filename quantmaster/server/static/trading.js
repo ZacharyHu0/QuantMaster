@@ -18,6 +18,10 @@
     queued: '排队中', running: '运行中', interrupted: '恢复中', completed: '已完成',
     failed: '失败', cancelled: '已取消', proposed: '待确认', confirmed: '待开盘',
     blocked: '部分受阻', superseded: '已替代', filled: '已成交', skipped: '无需调整',
+    created: '已创建', accepted: '已接受', open: '可撮合', partially_filled: '部分成交',
+    waiting_market_open: '等待开市', waiting_price: '等待价格', waiting_market_data: '等待行情',
+    expired: '已过期', rejected: '已拒绝', retry_wait: '等待重试', idle: '空闲',
+    leased: '已领取', stalled: '已卡死', orphaned: '无主任务', manual_recovery: '待人工处理',
     active: '运行中', paused: '已暂停', archived: '已删除', auto: '自动', manual: '手动',
   };
   const orderReason = {
@@ -814,8 +818,55 @@
   }
 
   function orderStatus(order) {
-    const reason = order.reason ? ` · ${orderReason[order.reason] || order.reason}` : '';
+    const rawReason = order.waiting_reason || order.reason;
+    const reason = rawReason ? ` · ${orderReason[rawReason] || rawReason}` : '';
     return `${statusLabel[order.status] || order.status}${reason}`;
+  }
+
+  function timeValue(value) {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', {hour12: false});
+  }
+
+  function renderAutomation(automation) {
+    if (!automation) return `<section class="paper-task-panel" aria-labelledby="paper-task-title">
+      <div><span class="paper-kicker">后台撮合任务</span><h3 id="paper-task-title">尚无运行记录</h3></div>
+      <p>订单业务状态仍以下方记录为准；未启动后台任务不代表订单卡死。</p></section>`;
+    const status = automation.task_status || automation.status || 'idle';
+    const diagnostic = automation.diagnostic_code || automation.failure_code || '';
+    const isProblem = ['stalled', 'orphaned', 'manual_recovery'].includes(status) || automation.health === 'needs_manual_recovery';
+    return `<section class="paper-task-panel" data-health="${isProblem ? 'problem' : 'normal'}" aria-labelledby="paper-task-title">
+      <div class="paper-task-heading"><div><span class="paper-kicker">后台撮合任务</span><h3 id="paper-task-title">${escapeHtml(statusLabel[status] || status)}</h3></div><span class="trading-status ${escapeHtml(status)}">${escapeHtml(statusLabel[status] || status)}</span></div>
+      <dl class="paper-task-facts">
+        <div><dt>当前 owner</dt><dd>${escapeHtml(automation.owner || automation.lease_owner || '—')}</dd></div>
+        <div><dt>租约到期</dt><dd>${escapeHtml(timeValue(automation.lease_expires_at || automation.lease_expires))}</dd></div>
+        <div><dt>最近心跳</dt><dd>${escapeHtml(timeValue(automation.heartbeat_at))}</dd></div>
+        <div><dt>下次尝试</dt><dd>${escapeHtml(timeValue(automation.next_attempt_at || automation.next_retry_at))}</dd></div>
+      </dl>
+      <p>${escapeHtml(automation.last_progress || automation.last_error || '任务没有报告异常。')}${diagnostic ? ` <code>${escapeHtml(diagnostic)}</code>` : ''}</p>
+      ${automation.recovered_lease ? '<small>本次已安全接管过期租约，并从上次进度继续。</small>' : ''}
+    </section>`;
+  }
+
+  function renderFill(fill) {
+    return `<li><time>${escapeHtml(timeValue(fill.filled_at || fill.time))}</time><strong>${number(fill.qty || fill.quantity)} @ ${number(fill.price)}</strong><span>费用 ${number(fill.fee)} · ${escapeHtml(fill.market_ref || fill.market_data_ref || '无行情引用')} · ${escapeHtml(fill.rule_version || '无规则版本')}</span></li>`;
+  }
+
+  function renderOrder(order) {
+    const fills = order.fills || [];
+    const requested = order.requested_qty ?? order.shares;
+    const filled = order.filled_qty ?? (order.status === 'filled' ? order.shares : 0);
+    const remaining = order.remaining_qty ?? Math.max(0, Number(requested || 0) - Number(filled || 0));
+    const integrity = order.integrity_code || order.diagnostic_code || '';
+    const progress = order.market_data_progress || order.last_progress || '';
+    return `<article class="paper-order" data-status="${escapeHtml(order.status)}" data-integrity="${integrity ? 'conflict' : 'ok'}">
+      <div class="paper-order-main"><div><strong>${escapeHtml(order.symbol || '未知标的')}</strong><span>${percent(order.target_weight)} · ${order.side === 'buy' ? '买入' : order.side === 'sell' ? '卖出' : '调仓'}</span></div><span class="trading-status ${escapeHtml(order.status)}">${escapeHtml(orderStatus(order))}</span></div>
+      <dl class="paper-order-facts"><div><dt>申报 / 已成交 / 剩余</dt><dd>${number(requested)} / ${number(filled)} / ${number(remaining)}</dd></div><div><dt>均价 / 费用</dt><dd>${number(order.avg_fill_price ?? order.price)} / ${number(order.fee)}</dd></div><div><dt>下次检查</dt><dd>${escapeHtml(timeValue(order.next_check_at || order.next_attempt_at))}</dd></div><div><dt>最近进展</dt><dd>${escapeHtml(timeValue(order.last_progress_at || order.updated_at))}</dd></div></dl>
+      ${(progress || order.required_market_range || order.latest_market_data_at) ? `<p class="paper-order-progress">${escapeHtml(progress || '行情等待中')}${order.required_market_range ? ` · 需要 ${escapeHtml(order.required_market_range)}` : ''}${order.latest_market_data_at ? ` · 最近可用 ${escapeHtml(order.latest_market_data_at)}` : ''}</p>` : ''}
+      ${integrity ? `<p class="paper-order-conflict" role="alert">核心数量冲突：<code>${escapeHtml(integrity)}</code>。未补造成交，需要人工核对。</p>` : ''}
+      ${fills.length ? `<details class="paper-fills"><summary>${fills.length} 笔 fill 明细</summary><ol>${fills.map(renderFill).join('')}</ol></details>` : ''}
+    </article>`;
   }
 
   function renderCycles(cycles) {
@@ -824,9 +875,7 @@
       <div class="paper-cycle-head"><div><strong>信号日 ${escapeHtml(cycle.signal_date)}</strong><span class="trading-status ${cycle.status}">${statusLabel[cycle.status] || cycle.status}</span><span>${cycle.execution_date ? `最近处理 ${escapeHtml(cycle.execution_date)}` : '尚未到执行日'}</span></div>
         <div class="paper-cycle-actions">${cycle.status === 'proposed' ? '<button class="trading-primary" type="button" data-cycle-confirm>确认并等待开盘</button>' : ''}</div></div>
       ${renderWarnings(cycle.warnings)}
-      <div class="paper-orders"><table><thead><tr><th>标的</th><th>目标权重</th><th>方向</th><th>数量</th><th>成交价</th><th>费用</th><th>状态</th></tr></thead><tbody>
-        ${(cycle.orders || []).map(order => `<tr><td>${escapeHtml(order.symbol)}</td><td>${percent(order.target_weight)}</td><td>${order.side === 'buy' ? '买入' : order.side === 'sell' ? '卖出' : '调仓'}</td><td>${number(order.shares)}</td><td>${number(order.price)}</td><td>${number(order.fee)}</td><td><span class="trading-status ${order.status}">${escapeHtml(orderStatus(order))}</span></td></tr>`).join('') || '<tr><td colspan="7">当前持仓已经符合目标</td></tr>'}
-      </tbody></table></div>
+      <div class="paper-orders" aria-label="订单业务状态">${(cycle.orders || []).map(renderOrder).join('') || '<div class="trading-empty"><strong>当前持仓已符合目标</strong><span>本周期不需要下单。</span></div>'}</div>
     </section>`).join('');
   }
 
@@ -895,7 +944,7 @@
       document.getElementById('paper-account-meta').textContent = `${account.universe} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'} · 快照 ${account.strategy_hash.slice(0, 10)}`;
       edit.textContent = '编辑账户与策略';
       edit.title = '修改策略、候选或调仓频率后，按 15:00 分界排入后续真实交易日开盘';
-      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
+      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderAutomation(payload.automation)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
     } catch (error) {
