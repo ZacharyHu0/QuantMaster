@@ -8,6 +8,15 @@ from quantmaster.release import VERSION
 from scripts.dev.windows_launcher import _read_icon, _version_resource
 
 
+def test_root_serve_wrapper_forwards_to_development_launcher() -> None:
+    from pathlib import Path
+
+    wrapper = (Path(__file__).parents[1] / "qm-serve.cmd").read_text(encoding="utf-8")
+
+    assert 'call "%~dp0scripts\\dev\\serve.cmd" %*' in wrapper
+    assert "exit /b %ERRORLEVEL%" in wrapper
+
+
 def test_project_icon_has_valid_group_and_images() -> None:
     from pathlib import Path
 
