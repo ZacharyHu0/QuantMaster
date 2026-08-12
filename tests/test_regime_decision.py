@@ -174,7 +174,7 @@ def test_decision_market_input_is_frozen_and_tamper_evident(panel, tmp_path):
     assert store.history("demo")[0]["signal_date"] == "2026-08-07"
 
 
-def test_decision_history_loads_unhashed_legacy_rows_and_backfills_identity(tmp_path):
+def test_decision_history_rejects_malformed_current_row_without_legacy_fallback(tmp_path):
     panel = {
         "close": pd.DataFrame(
             [[10.0]],
@@ -199,14 +199,12 @@ def test_decision_history_loads_unhashed_legacy_rows_and_backfills_identity(tmp_
             (json.dumps({"picks": [{"symbol": "600000.SH"}]}),),
         )
 
-    snapshot = store.history("demo")[0]
-    assert snapshot["signal_date"] == "2026-08-07"
-    assert snapshot["holding_horizon_days"] == 3
-    assert snapshot["profile"] == "risk_adjusted"
-    assert snapshot["picks"] == [{"symbol": "600000.SH"}]
+    with pytest.raises(RuntimeError, match="一次性迁移") as raised:
+        store.history("demo")
+    assert raised.value.diagnostic_code == "decision_payload_migration_required"
 
 
-def test_decision_history_keeps_missing_optional_payload_fields_empty(tmp_path):
+def test_decision_history_rejects_invalid_json_as_current_damage(tmp_path):
     store = DecisionStore(tmp_path / "minimal-history.sqlite")
     with store._conn() as connection:
         connection.execute(
@@ -214,14 +212,12 @@ def test_decision_history_keeps_missing_optional_payload_fields_empty(tmp_path):
             "(signal_date,universe,horizon,profile,policy_hash,model_version,payload,created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             ("2026-08-07", "demo", 3, "risk_adjusted", "legacy", "hybrid-v3:test",
-             "{}", 0.0),
+             "{broken", 0.0),
         )
 
-    assert store.history("demo") == [{
-        "signal_date": "2026-08-07", "universe": "demo", "holding_horizon_days": 3,
-        "profile": "risk_adjusted", "policy_hash": "legacy",
-        "model_version": "hybrid-v3:test",
-    }]
+    with pytest.raises(RuntimeError, match="不会尝试旧格式") as raised:
+        store.history("demo")
+    assert raised.value.diagnostic_code == "decision_payload_invalid_json"
 
 
 def test_python_component_exposes_external_feature_input_for_freezing(panel, monkeypatch):
@@ -279,12 +275,10 @@ def test_hybrid_strategy_uses_profile_risk_limits(panel, tmp_path):
     assert (signals.sum(axis=1) <= 0.65 + 1e-9).all()
 
 
-def test_legacy_hybrid_snapshot_replays_equal_weight_logic(panel, tmp_path):
+def test_legacy_hybrid_snapshot_requires_explicit_migration(panel, tmp_path):
     import json
 
     from quantmaster.backtest.spec import content_hash
-    from quantmaster.decision import hybrid_score_bundle
-    from quantmaster.decision.hybrid import continuous_market_exposure
     from quantmaster.lab.store import LabStore
 
     policy = resolve_policy(
@@ -307,25 +301,9 @@ def test_legacy_hybrid_snapshot_replays_equal_weight_logic(panel, tmp_path):
         policy_snapshot=legacy,
         cap_weight=0.25,
     )
-    actual = strategy.target_weights(panel)
-    scores = hybrid_score_bundle(
-        panel,
-        horizon=3,
-        profile="risk_adjusted",
-        universe="demo",
-        policy_snapshot=legacy,
-    )["score"]
-    selected = (scores.rank(axis=1, ascending=False) <= 4).astype(float).where(
-        scores.notna(), 0.0,
-    )
-    expected = selected.div(selected.sum(axis=1).replace(0, np.nan), axis=0)
-    expected = expected.mul(
-        continuous_market_exposure(panel, "risk_adjusted"), axis=0,
-    ).clip(upper=0.25)
-    due = pd.Series(False, index=expected.index)
-    due.iloc[::3] = True
-    expected = expected.where(due, other=float("nan"))
-    pd.testing.assert_frame_equal(actual, expected)
+    with pytest.raises(RuntimeError, match="一次性迁移") as raised:
+        strategy.target_weights(panel)
+    assert raised.value.diagnostic_code == "decision_policy_version_unsupported"
 
 
 def test_profile_constraints_survive_missing_factor_component():

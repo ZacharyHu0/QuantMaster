@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.decision.schema import validate_current_policy
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 logger = logging.getLogger(__name__)
@@ -490,22 +491,6 @@ def resolve_policy(
     return payload
 
 
-def upgrade_policy_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade a stored Hybrid policy without re-resolving its model components."""
-    value = json.loads(json.dumps(snapshot, ensure_ascii=False))
-    if int(value.get("schema_version", 0) or 0) >= 3 and value.get("position_control"):
-        return value
-    value.pop("policy_hash", None)
-    value.pop("model_version", None)
-    value["schema_version"] = 3
-    value["engine_version"] = "hybrid-v3-position-control"
-    value["position_control"] = _position_control_policy()
-    value["policy_hash"] = _content_hash(value)
-    profile = str(value.get("profile") or "risk_adjusted")
-    value["model_version"] = f"hybrid-v3:{profile}:{value['policy_hash'][:12]}"
-    return value
-
-
 def _expression_component(
     panel: dict[str, pd.DataFrame], component: dict[str, Any],
 ) -> pd.DataFrame:
@@ -633,6 +618,7 @@ def hybrid_score_bundle(
     snapshot = json.loads(json.dumps(policy_snapshot or resolve_policy(
         universe, horizon, profile, symbols=list(close.columns)
     ), ensure_ascii=False))
+    validate_current_policy(snapshot)
     rule_score, rule_weights, _ranked = rule_signal_bundle(panel, horizon)
     scores: dict[str, pd.DataFrame] = {"rule": rule_score}
     warnings = list(snapshot.get("warnings") or [])
@@ -878,9 +864,6 @@ def hybrid_daily_selection(
     close = panel["close"].reindex(scores.index).astype(float)
     calibration, calibration_summary = calibrate_latest(scores, close, horizon)
     snapshot = bundle["model_snapshot"]
-    if int(snapshot.get("schema_version", 0) or 0) < 3:
-        snapshot = upgrade_policy_snapshot(snapshot)
-        bundle["model_snapshot"] = snapshot
     from quantmaster.decision.position_control import build_position_plan
 
     # Horizon is the forecast label; target weights still roll every session.
@@ -1066,22 +1049,6 @@ class HybridDecisionStrategy:
         self.cap_weight = cap_weight
         self.name = f"decision_{profile}_top{top_n}_hold{holding_days}d"
 
-    def _legacy_weights(self, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        bundle = hybrid_score_bundle(
-            panel, horizon=self.holding_days, profile=self.profile,
-            universe=self.universe, policy_snapshot=self.policy_snapshot,
-        )
-        scores = bundle["score"]
-        ranks = scores.rank(axis=1, ascending=False)
-        selected = (ranks <= self.top_n).astype(float).where(scores.notna(), 0.0)
-        counts = selected.sum(axis=1).replace(0, float("nan"))
-        weights = selected.div(counts, axis=0)
-        exposure = continuous_market_exposure(panel, self.profile)
-        weights = weights.mul(exposure, axis=0).clip(upper=self.cap_weight)
-        due = pd.Series(False, index=weights.index)
-        due.iloc[::self.holding_days] = True
-        return weights.where(due, other=float("nan"))
-
     def signal_bundle(
         self,
         panel: dict[str, pd.DataFrame],
@@ -1096,13 +1063,6 @@ class HybridDecisionStrategy:
             universe=self.universe, policy_snapshot=self.policy_snapshot,
         )
         snapshot = bundle["model_snapshot"]
-        if int(snapshot.get("schema_version", 0) or 0) < 3:
-            return SignalBundle(
-                weights=self._legacy_weights(panel),
-                scores=bundle["score"],
-                contributions=bundle["components"],
-                metadata={"policy_snapshot": snapshot, "position_control": "legacy"},
-            )
         from quantmaster.decision.position_control import build_position_plan
 
         rebalance = pd.Series(True, index=bundle["score"].index)
@@ -1172,5 +1132,4 @@ __all__ = [
     "profile_definition",
     "resolve_policy",
     "rule_signal_bundle",
-    "upgrade_policy_snapshot",
 ]

@@ -15,6 +15,11 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.decision.schema import (
+    DECISION_PAYLOAD_SCHEMA_VERSION,
+    DecisionSchemaError,
+    validate_current_payload,
+)
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import daily_signal_cutoff
 
@@ -305,10 +310,27 @@ class DecisionStore:
             self._validate_panel_cutoff(restored, signal_date)
         else:
             raise ValueError("正式决策必须冻结实际参与计算的行情面板")
+        created_timestamp = time.time()
+        report["decision_schema_version"] = DECISION_PAYLOAD_SCHEMA_VERSION
+        report["universe"] = universe
+        report["created_at"] = datetime.fromtimestamp(
+            created_timestamp, tz=UTC,
+        ).isoformat()
+        report.setdefault("picks", [])
+        report.setdefault("profile", None)
+        report.setdefault("policy_hash", None)
+        report.setdefault("model_version", None)
         key = (
             report["signal_date"], universe, report["holding_horizon_days"],
-            report.get("profile", "legacy"),
-            report.get("policy_hash", report.get("model_version", "swing-v1")),
+            report["profile"] or "", report["policy_hash"] or "",
+        )
+        validate_current_payload(
+            report,
+            row_identity={
+                "signal_date": key[0], "universe": key[1], "horizon": key[2],
+                "profile": report["profile"], "policy_hash": report["policy_hash"],
+                "model_version": report["model_version"], "created_at": report["created_at"],
+            },
         )
         payload = json.dumps(report, ensure_ascii=False, allow_nan=False)
         with self._conn() as conn:
@@ -335,8 +357,8 @@ class DecisionStore:
                 "payload,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     *key,
-                    report.get("model_version", "swing-v1"),
-                    payload, time.time(),
+                    report["model_version"] or "",
+                    payload, created_timestamp,
                 ),
             )
 
@@ -359,7 +381,7 @@ class DecisionStore:
             values.append(int(horizon))
         query = (
             "SELECT signal_date,universe,horizon,profile,policy_hash,model_version,"
-            "payload FROM selection_snapshots "
+            "payload,created_at FROM selection_snapshots "
         )
         if filters:
             query += "WHERE " + " AND ".join(filters) + " "
@@ -374,21 +396,18 @@ class DecisionStore:
         for row in rows:
             try:
                 report = json.loads(str(row[6]))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                report = {}
-            if not isinstance(report, dict):
-                report = {}
-            # The row identity is authoritative for fields that older payloads
-            # did not carry.  Optional display fields intentionally remain
-            # absent/empty instead of making history unavailable.
-            report.update({
-                "signal_date": row[0],
-                "universe": row[1],
-                "holding_horizon_days": row[2],
-                "profile": row[3],
-                "policy_hash": row[4],
-                "model_version": row[5],
-            })
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise DecisionSchemaError(
+                    "decision_payload_invalid_json",
+                    f"决策快照 {row[0]}/{row[1]} payload 已损坏，不会尝试旧格式 decoder",
+                ) from exc
+            identity = {
+                "signal_date": row[0], "universe": row[1], "horizon": row[2],
+                "profile": row[3] or None, "policy_hash": row[4] or None,
+                "model_version": row[5] or None,
+                "created_at": datetime.fromtimestamp(float(row[7]), tz=UTC).isoformat(),
+            }
+            validate_current_payload(report, row_identity=identity)
             result.append(report)
         return result
 

@@ -1254,7 +1254,8 @@ class TestBasics:
                    for pick in data["selection"]["picks"])
         assert data["history"][0]["signal_date"] == data["selection"]["signal_date"]
 
-        # A legacy row without a payload hash remains an ordinary history row.
+        # A row whose columns disagree with its current payload is diagnosed;
+        # the fresh dashboard result remains available without a decoder guess.
         from quantmaster.decision import DecisionStore
 
         store = DecisionStore()
@@ -1295,11 +1296,12 @@ class TestBasics:
         ) < 100
         result = next(event["data"] for event in events if event["type"] == "result")
         assert len(result["selection"]["picks"]) == 4
-        legacy = next(
-            snapshot for snapshot in result["history"]
-            if snapshot.get("policy_hash") == "legacy-unhashed"
+        assert result["history"] == []
+        assert result["status"] == "completed_with_issues"
+        assert any(
+            issue.get("code") == "history_unavailable"
+            for issue in result["issues"]
         )
-        assert legacy["signal_date"] == "2022-12-30"
 
     def test_decision_dashboard_refreshes_low_coverage_and_persists_partial_panel(
         self, panel, monkeypatch,

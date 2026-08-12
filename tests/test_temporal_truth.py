@@ -336,6 +336,9 @@ def test_decision_store_checks_same_day_deployment_instant(
         "policy_hash": "policy",
         "model_version": "model",
         "model_snapshot": {
+            "schema_version": 3,
+            "engine_version": "hybrid-v3-position-control",
+            "position_control": {"round_trip_cost": 0.002},
             "components": [{"name": "PIT model", "deployed_at": deployed_at}],
         },
     }
