@@ -1297,6 +1297,91 @@ def test_automation_run_uses_unified_durable_job_and_idempotency(tmp_path, monke
     service.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def test_daily_triggers_manual_and_stockdb_share_trade_date_job(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    runtime = runtime_module.AutomationRuntime(service)
+    moment = datetime(2026, 8, 12, 15, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(
+        "quantmaster.automation.service.resolve_session_target",
+        lambda as_of="", now=None: SimpleNamespace(
+            session=as_of or "2026-08-12", ready=True,
+        ),
+    )
+
+    first = runtime.discover_job("daily_close_pipeline", now=moment)
+    second = runtime.discover_job("daily_close_pipeline", now=moment.replace(minute=35))
+    manual = service.run_task("daily_close_pipeline", actor="web", as_of="2026-08-12")
+    stockdb = service.run_task(
+        "daily_close_pipeline", actor="free-stockdb", as_of="2026-08-12",
+        business_key="daily_close_pipeline:date:2026-08-12",
+    )
+
+    assert {first["job_id"], second["job_id"], manual["job_id"], stockdb["job_id"]} == {
+        first["job_id"],
+    }
+    job = service.jobs.store.get(first["job_id"])
+    assert job["trigger_count"] == 4
+    assert job["coalesced_count"] == 3
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_interval_discovery_merges_missed_windows_without_losing_boundary(tmp_path):
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    submitted = []
+    service = SimpleNamespace(
+        store=store,
+        run_task=lambda name, **kwargs: submitted.append((name, kwargs)) or kwargs,
+    )
+    runtime = runtime_module.AutomationRuntime(service)
+    zone = ZoneInfo("Asia/Shanghai")
+
+    runtime.discover_job("fast_news_scan", now=datetime(2026, 8, 12, 10, 20, tzinfo=zone))
+    runtime.discover_job("fast_news_scan", now=datetime(2026, 8, 12, 11, 20, tzinfo=zone))
+
+    assert len(submitted) == 2
+    first_key = submitted[0][1]["business_key"]
+    second_key = submitted[1][1]["business_key"]
+    assert "10:00:00+08:00:2026-08-12T10:20:00+08:00" in first_key
+    assert "10:20:00+08:00:2026-08-12T11:20:00+08:00" in second_key
+    assert store.scheduler_cursor("fast_news_scan") == pytest.approx(
+        datetime(2026, 8, 12, 11, 20, tzinfo=zone).timestamp()
+    )
+
+
+def test_startup_daily_catchup_discovers_due_date_once(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    calls = []
+    runtime = runtime_module.AutomationRuntime(SimpleNamespace(store=store))
+    monkeypatch.setattr(
+        runtime, "discover_job",
+        lambda name, **kwargs: calls.append((name, kwargs["actor"])) or {"task": name},
+    )
+    now = datetime(2026, 8, 12, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    recovered = runtime.catch_up_daily_jobs(now=now)
+
+    assert ("daily_close_pipeline", "startup_recovery") in calls
+    assert ("news_digest", "startup_recovery") in calls
+    assert len(recovered) == len(calls)
+
+
 def test_automation_api_and_ui_contract():
     client = TestClient(app)
     overview = client.get("/api/v1/automation/overview")

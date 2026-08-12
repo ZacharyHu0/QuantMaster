@@ -5,7 +5,7 @@ import os
 import socket
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -73,6 +73,7 @@ class AutomationRuntime:
             self.scheduler = BackgroundScheduler(timezone=self.timezone)
             self.scheduler.start()
             self.reload_jobs()
+            self.catch_up_daily_jobs()
             self.scheduler.add_job(
                 self._heartbeat, "interval", seconds=10, id="_lease", replace_existing=True,
                 coalesce=True, max_instances=1, misfire_grace_time=10,
@@ -239,11 +240,78 @@ class AutomationRuntime:
         job = self.service.store.job(name)
         if not job or not job["enabled"] or not self._within_schedule(job["schedule"]):
             return
-        slot = datetime.now(self.timezone).replace(second=0, microsecond=0).isoformat()
-        self.service.run_task(
-            name,
-            idempotency_key=f"scheduler:{name}:{slot}",
+        self.discover_job(name)
+
+    def _business_request(
+        self, name: str, now: datetime | None = None,
+    ) -> tuple[str, str, str]:
+        """Return business key, explicit as-of and durable interval boundary."""
+
+        current = (now or datetime.now(self.timezone)).astimezone(self.timezone)
+        job = self.service.store.job(name)
+        if not job:
+            raise KeyError(name)
+        schedule = job["schedule"]
+        if schedule["type"] == "interval":
+            minutes = max(1, int(schedule["minutes"]))
+            epoch = int(current.timestamp())
+            window_end_epoch = epoch - epoch % (minutes * 60)
+            window_end = datetime.fromtimestamp(window_end_epoch, self.timezone)
+            window_start = window_end - timedelta(minutes=minutes)
+            return (
+                f"{name}:window:{window_start.isoformat()}:{window_end.isoformat()}",
+                "",
+                str(float(window_end_epoch)),
+            )
+        if name in {"daily_close_pipeline", "paper_rebalance_proposal"}:
+            business_date = current.date().isoformat()
+        else:
+            business_date = current.date().isoformat()
+        slot = ""
+        if name == "news_digest":
+            slot = max(
+                (value for value in schedule.get("times") or () if value <= current.strftime("%H:%M")),
+                default=str((schedule.get("times") or [current.strftime("%H:%M")])[0]),
+            )
+        suffix = f":{slot}" if slot else ""
+        return f"{name}:date:{business_date}{suffix}", business_date, ""
+
+    def discover_job(self, name: str, *, now: datetime | None = None, actor: str = "scheduler") -> dict:
+        """Fast APS callback: discover and wake one durable business task."""
+
+        current = (now or datetime.now(self.timezone)).astimezone(self.timezone)
+        business_key, as_of, boundary = self._business_request(name, current)
+        if boundary:
+            end_epoch = float(boundary)
+            previous = self.service.store.scheduler_cursor(name)
+            if previous and previous < end_epoch:
+                start = datetime.fromtimestamp(previous, self.timezone)
+                end = datetime.fromtimestamp(end_epoch, self.timezone)
+                business_key = f"{name}:window:{start.isoformat()}:{end.isoformat()}"
+            result = self.service.run_task(
+                name, actor=actor, business_key=business_key, as_of=as_of,
+            )
+            self.service.store.advance_scheduler_cursor(name, end_epoch)
+            return result
+        return self.service.run_task(
+            name, actor=actor, business_key=business_key, as_of=as_of,
         )
+
+    def catch_up_daily_jobs(self, *, now: datetime | None = None) -> list[dict]:
+        """On leader start, discover each due daily business date once."""
+
+        current = (now or datetime.now(self.timezone)).astimezone(self.timezone)
+        recovered: list[dict] = []
+        for item in self.service.store.jobs():
+            schedule = item["schedule"]
+            if not item["enabled"] or schedule.get("type") != "daily":
+                continue
+            if schedule.get("weekdays") and current.weekday() >= 5:
+                continue
+            if not any(value <= current.strftime("%H:%M") for value in schedule.get("times") or ()):
+                continue
+            recovered.append(self.discover_job(item["name"], now=current, actor="startup_recovery"))
+        return recovered
 
     def reload_jobs(self) -> None:
         if not self.scheduler or not self.leader:

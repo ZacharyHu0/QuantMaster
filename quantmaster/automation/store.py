@@ -19,7 +19,7 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 9
+AUTOMATION_SCHEMA_VERSION = 10
 
 NEWS_INTERVAL_FIELDS = {
     "fast_news_scan": "fast_news_interval_minutes",
@@ -244,8 +244,17 @@ class AutomationStore:
                 conn.execute(
                     "ALTER TABLE bot_accounts ADD COLUMN last_validated_at TEXT NOT NULL DEFAULT ''")
 
+        def schema_v10(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS scheduler_cursors ("
+                "job_name TEXT PRIMARY KEY,window_end REAL NOT NULL,updated_at TEXT NOT NULL)"
+            )
+
         with self._conn() as conn:
-            migrate_schema(conn, ((6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9)))
+            migrate_schema(conn, (
+                (6, schema_v6), (7, schema_v7), (8, schema_v8), (9, schema_v9),
+                (10, schema_v10),
+            ))
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -618,6 +627,32 @@ class AutomationStore:
     def set_next_run(self, name: str, next_run: str) -> None:
         with self._conn() as conn:
             conn.execute("UPDATE job_templates SET next_run=? WHERE name=?", (next_run, name))
+
+    def scheduler_cursor(self, name: str) -> float:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT window_end FROM scheduler_cursors WHERE job_name=?", (name,),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
+    def advance_scheduler_cursor(self, name: str, window_end: float) -> bool:
+        """Monotonically persist the last discovered interval boundary."""
+
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT window_end FROM scheduler_cursors WHERE job_name=?", (name,),
+            ).fetchone()
+            previous = float(row[0]) if row else 0.0
+            if previous >= float(window_end):
+                return False
+            conn.execute(
+                "INSERT INTO scheduler_cursors(job_name,window_end,updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(job_name) DO UPDATE SET window_end=excluded.window_end,"
+                "updated_at=excluded.updated_at",
+                (name, float(window_end), utc_now()),
+            )
+        return True
 
     def start_run(self, job_name: str, actor: str) -> str:
         run_id = uuid.uuid4().hex

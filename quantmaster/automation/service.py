@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -849,10 +850,14 @@ class AutomationService:
         *,
         actor: str = "scheduler",
         idempotency_key: str = "",
+        business_key: str = "",
         as_of: str = "",
     ) -> dict:
         if name not in ALLOWED_TASKS:
             raise ValueError("任务不在允许列表中")
+        if not business_key:
+            business_key, inferred_as_of = self.business_request(name, as_of=as_of)
+            as_of = as_of or inferred_as_of
         deadlines = {
             "intraday_monitor": 180,
             "fast_news_scan": 600,
@@ -865,23 +870,67 @@ class AutomationService:
         }
         job, created = self.jobs.submit(
             f"automation.{name}",
-            {"name": name, "actor": actor, "as_of": str(as_of or "")},
+            {"name": name, "as_of": str(as_of or "")},
             idempotency_key=idempotency_key,
+            business_key=business_key,
+            trigger_actor=actor,
             deadline_seconds=deadlines[name],
-            max_attempts=3,
+            # Provider/article queues own their atomic retry policy.  The
+            # runtime never restarts an entire scheduled batch behind cron's
+            # back; a later trigger resumes this same business job explicitly.
+            max_attempts=1,
             llm_scope="news" if name in LLM_NEWS_TASKS else "",
         )
+        public = self.jobs.public(job)
         return {
             "status": "accepted" if created else str(job["status"]),
             "run_id": job["id"],
             "job_id": job["id"],
             "task": name,
             "created": created,
+            "coalesced": bool(public.get("coalesced")),
+            "reused": bool(public.get("reused")),
+            "progress": int(public.get("progress") or 0),
+            "phase": str(public.get("phase") or ""),
+            "business_key": str(public.get("business_key") or ""),
+            "links": dict(public.get("links") or {}),
         }
+
+    def business_request(
+        self, name: str, *, as_of: str = "", now: datetime | None = None,
+    ) -> tuple[str, str]:
+        """Resolve a stable business identity shared by cron, Web and Bot ingress."""
+
+        job = self.store.job(name)
+        if job is None:
+            raise KeyError(name)
+        zone = ZoneInfo(get_config().automation.timezone)
+        current = now or datetime.now(zone)
+        current = current.replace(tzinfo=zone) if current.tzinfo is None else current.astimezone(zone)
+        schedule = job["schedule"]
+        if schedule["type"] == "interval":
+            seconds = max(60, int(schedule["minutes"]) * 60)
+            window_end = int(current.timestamp()) // seconds * seconds
+            start = datetime.fromtimestamp(window_end - seconds, zone)
+            end = datetime.fromtimestamp(window_end, zone)
+            return f"{name}:window:{start.isoformat()}:{end.isoformat()}", ""
+        if name in {"daily_close_pipeline", "paper_rebalance_proposal"}:
+            expectation = resolve_session_target(as_of, now=current)
+            business_date = expectation.session or current.date().isoformat()
+        else:
+            business_date = str(as_of or current.date().isoformat())
+        slot = ""
+        if name == "news_digest":
+            slot = max(
+                (value for value in schedule.get("times") or () if value <= current.strftime("%H:%M")),
+                default=str((schedule.get("times") or [current.strftime("%H:%M")])[0]),
+            )
+        suffix = f":{slot}" if slot else ""
+        return f"{name}:date:{business_date}{suffix}", business_date
 
     def _unified_task_handler(self, context: JobContext, spec: dict) -> JobOutcome:
         name = str(spec.get("name") or "")
-        actor = str(spec.get("actor") or "scheduler")
+        actor = "scheduler"
         if name not in ALLOWED_TASKS:
             raise ValueError("持久任务规格包含未知自动化任务")
         context.progress(5, "准备自动化任务", name)
@@ -894,6 +943,7 @@ class AutomationService:
             else:
                 result = task()
             context.ensure_active()
+            context.completed_unit(f"{name} 原子结果已持久化")
             context.progress(90, "保存任务结果", name)
             self._after_task_success(context.job_id, name, result)
             artifact = context.write_artifact(

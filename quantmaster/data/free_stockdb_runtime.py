@@ -1486,7 +1486,7 @@ class FreeStockDBRuntime:
                     "daily_close_pipeline",
                     actor="free-stockdb",
                     as_of=target,
-                    idempotency_key=f"free-stockdb-close:{target}",
+                    business_key=f"daily_close_pipeline:date:{target}",
                 )
                 logger.info("free-stockdb 验收完成，已提交 %s 正式选股流水线", target)
             if kind == "update_succeeded" and target:

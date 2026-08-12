@@ -84,6 +84,61 @@ def test_unified_runtime_idempotency_events_artifacts_and_retry(tmp_path):
     runtime.stop()
 
 
+def test_business_key_reuses_active_completed_and_resumes_failed_job(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    first, created = store.submit(
+        "automation.daily_close_pipeline", {"name": "daily_close_pipeline", "as_of": "2026-08-12"},
+        business_key="daily_close_pipeline:date:2026-08-12", trigger_actor="scheduler",
+    )
+    active, active_created = store.submit(
+        first["type"], first["spec"], business_key=first["business_key"], trigger_actor="web",
+    )
+    assert created is True
+    assert active_created is False
+    assert active["id"] == first["id"]
+    assert active["coalesced_count"] == 1
+
+    assert store.claim(first["id"], "worker") is True
+    running = store.get(first["id"])
+    store.finish(
+        first["id"], "worker", JobOutcome("completed", "done"),
+        lease_token=running["lease_token"],
+    )
+    completed, completed_created = store.submit(
+        first["type"], first["spec"], business_key=first["business_key"],
+        trigger_actor="startup_recovery",
+    )
+    assert completed_created is False
+    assert completed["id"] == first["id"]
+    assert completed["status"] == "completed"
+    assert completed["reused"] is True
+
+    second, _ = store.submit(
+        "automation.fast_news_scan", {"name": "fast_news_scan", "as_of": ""},
+        business_key="fast_news_scan:window:10:00:10:20",
+    )
+    assert store.claim(second["id"], "worker") is True
+    failed = store.get(second["id"])
+    store.finish(
+        second["id"], "worker", JobOutcome("failed", "network timeout"),
+        lease_token=failed["lease_token"],
+    )
+    resumed, resumed_created = store.submit(
+        second["type"], second["spec"], business_key=second["business_key"],
+        trigger_actor="scheduler",
+    )
+    assert resumed_created is False
+    assert resumed["id"] == second["id"]
+    assert resumed["status"] == "queued"
+
+
+def test_business_key_rejects_different_parameters(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    store.submit("demo", {"range": "a"}, business_key="symbol:000001.SZ:1d:a")
+    with pytest.raises(ValueError, match="业务幂等键"):
+        store.submit("demo", {"range": "b"}, business_key="symbol:000001.SZ:1d:a")
+
+
 def test_unified_runtime_cancel_and_expired_lease_recovery(tmp_path):
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     runtime = UnifiedJobRuntime(store, max_workers=1)

@@ -148,6 +148,7 @@ class UnifiedJobStore:
                 CREATE TABLE IF NOT EXISTS runtime_jobs (
                     id TEXT PRIMARY KEY, type TEXT NOT NULL, spec_json TEXT NOT NULL,
                     spec_hash TEXT NOT NULL, idempotency_key TEXT NOT NULL DEFAULT '',
+                    business_key TEXT NOT NULL DEFAULT '',
                     input_fingerprint TEXT NOT NULL DEFAULT '',
                     algorithm_version TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +157,13 @@ class UnifiedJobStore:
                     owner TEXT NOT NULL DEFAULT '', lease_expires REAL NOT NULL DEFAULT 0,
                     lease_token TEXT NOT NULL DEFAULT '',
                     heartbeat_at REAL NOT NULL DEFAULT 0,
+                    trigger_count INTEGER NOT NULL DEFAULT 1,
+                    coalesced_count INTEGER NOT NULL DEFAULT 0,
+                    last_trigger_at TEXT NOT NULL DEFAULT '',
+                    next_retry_at REAL NOT NULL DEFAULT 0,
+                    waiting_on TEXT NOT NULL DEFAULT '',
+                    diagnostic_code TEXT NOT NULL DEFAULT '',
+                    last_completed_unit_at REAL NOT NULL DEFAULT 0,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
                     llm_scope TEXT NOT NULL DEFAULT '', llm_revision TEXT NOT NULL DEFAULT '',
                     cancellation_reason TEXT NOT NULL DEFAULT '',
@@ -196,12 +204,20 @@ class UnifiedJobStore:
                 for row in connection.execute("PRAGMA table_info(runtime_jobs)").fetchall()
             }
             for name, declaration in {
+                "business_key": "TEXT NOT NULL DEFAULT ''",
                 "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
                 "algorithm_version": "TEXT NOT NULL DEFAULT ''",
                 "lease_token": "TEXT NOT NULL DEFAULT ''",
                 "llm_scope": "TEXT NOT NULL DEFAULT ''",
                 "llm_revision": "TEXT NOT NULL DEFAULT ''",
                 "cancellation_reason": "TEXT NOT NULL DEFAULT ''",
+                "trigger_count": "INTEGER NOT NULL DEFAULT 1",
+                "coalesced_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_trigger_at": "TEXT NOT NULL DEFAULT ''",
+                "next_retry_at": "REAL NOT NULL DEFAULT 0",
+                "waiting_on": "TEXT NOT NULL DEFAULT ''",
+                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
+                "last_completed_unit_at": "REAL NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -219,6 +235,10 @@ class UnifiedJobStore:
                     connection.execute(
                         f"ALTER TABLE runtime_job_artifacts ADD COLUMN {name} {declaration}"
                     )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_job_business_key "
+                "ON runtime_jobs(type,business_key) WHERE business_key<>''"
+            )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_runtime_job_singleflight "
                 "ON runtime_jobs(type,spec_hash,input_fingerprint,algorithm_version,status,created_at)"
@@ -259,6 +279,8 @@ class UnifiedJobStore:
         spec: Mapping[str, Any],
         *,
         idempotency_key: str = "",
+        business_key: str = "",
+        trigger_actor: str = "",
         input_fingerprint: str = "",
         algorithm_version: str = "",
         deadline_seconds: float = 300,
@@ -270,11 +292,18 @@ class UnifiedJobStore:
         spec_json = _canonical(normalized)
         spec_hash = hashlib.sha256(spec_json.encode("utf-8")).hexdigest()
         key = str(idempotency_key or "").strip()[:200]
+        durable_key = str(business_key or "").strip()[:300]
         fingerprint = str(input_fingerprint or "")[:200]
         algorithm = str(algorithm_version or "")[:120]
         now = _utc_now()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if durable_key:
+                existing = self._submit_business_existing(
+                    connection, job_type, durable_key, spec_hash, trigger_actor, now,
+                )
+                if existing is not None:
+                    return existing, False
             if key:
                 row = connection.execute(
                     "SELECT * FROM runtime_jobs WHERE type=? AND idempotency_key=?",
@@ -288,9 +317,10 @@ class UnifiedJobStore:
                     value["created"] = False
                     value["coalesced"] = True
                     return value, False
-            # Singleflight is deliberately independent from a client supplied
-            # idempotency key.  A scheduler, a manual click and startup
-            # recovery with the same canonical input must share one job.
+            # Legacy callers without an explicit business identity retain
+            # active-only singleflight. Durable workflows must pass
+            # ``business_key``; spec hashes are parameter/integrity evidence,
+            # never the identity of scheduled business work.
             existing_row = connection.execute(
                 "SELECT * FROM runtime_jobs WHERE type=? AND spec_hash=? "
                 "AND input_fingerprint=? AND algorithm_version=? "
@@ -308,7 +338,7 @@ class UnifiedJobStore:
             # the canonical specification, input generation and algorithm are
             # identical.  Do not apply this fallback to legacy callers that
             # have not supplied a real versioned input fingerprint.
-            if fingerprint and algorithm:
+            if not durable_key and fingerprint and algorithm:
                 completed_row = connection.execute(
                     "SELECT * FROM runtime_jobs WHERE type=? AND spec_hash=? "
                     "AND input_fingerprint=? AND algorithm_version=? "
@@ -326,21 +356,24 @@ class UnifiedJobStore:
             job_id = f"job_{uuid.uuid4().hex}"
             connection.execute(
                 "INSERT INTO runtime_jobs "
-                "(id,type,spec_json,spec_hash,idempotency_key,input_fingerprint,algorithm_version,"
-                "status,attempt,max_attempts,deadline_seconds,llm_scope,llm_revision,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'queued',1,?,?,?,?,?,?)",
+                "(id,type,spec_json,spec_hash,idempotency_key,business_key,input_fingerprint,"
+                "algorithm_version,status,attempt,max_attempts,deadline_seconds,llm_scope,llm_revision,"
+                "last_trigger_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,'queued',1,?,?,?,?,?,?,?)",
                 (
                     job_id,
                     str(job_type),
                     spec_json,
                     spec_hash,
                     key,
+                    durable_key,
                     fingerprint,
                     algorithm,
-                    max(1, min(10, int(max_attempts))),
+                    max(1, int(max_attempts)),
                     max(1.0, min(3600.0, float(deadline_seconds))),
                     str(llm_scope)[:40],
                     str(llm_revision)[:120],
+                    now,
                     now,
                     now,
                 ),
@@ -352,9 +385,11 @@ class UnifiedJobStore:
                 "job_queued",
                 {
                     "task_type": job_type,
+                    "business_key": durable_key,
                     "spec_hash": spec_hash,
                     "input_fingerprint": fingerprint,
                     "algorithm_version": algorithm,
+                    "trigger_actor": str(trigger_actor)[:80],
                 },
             )
             row = connection.execute(
@@ -365,6 +400,58 @@ class UnifiedJobStore:
         value["created"] = True
         value["coalesced"] = False
         return value, True
+
+    def _submit_business_existing(
+        self,
+        connection: Any,
+        job_type: str,
+        business_key: str,
+        spec_hash: str,
+        trigger_actor: str,
+        now: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM runtime_jobs WHERE type=? AND business_key=?",
+            (job_type, business_key),
+        ).fetchone()
+        if row is None:
+            return None
+        existing = self._decode_job(row) or {}
+        if existing["spec_hash"] != spec_hash:
+            raise ValueError("业务幂等键已绑定到不同任务参数")
+        current_status = str(existing.get("status") or "")
+        connection.execute(
+            "UPDATE runtime_jobs SET trigger_count=trigger_count+1,"
+            "coalesced_count=coalesced_count+1,last_trigger_at=?,updated_at=? WHERE id=?",
+            (now, now, str(existing["id"])),
+        )
+        if current_status in {"failed", "cancelled"}:
+            attempt = int(existing.get("attempt") or 1)
+            maximum = max(int(existing.get("max_attempts") or 1), attempt + 1)
+            connection.execute(
+                "UPDATE runtime_jobs SET status='queued',progress=0,phase='等待恢复',"
+                "detail='',attempt=?,max_attempts=?,owner='',lease_token='',lease_expires=0,"
+                "heartbeat_at=0,next_retry_at=0,waiting_on='',diagnostic_code='',"
+                "cancel_requested=0,result_artifact_id='',finished_at='',updated_at=? WHERE id=?",
+                (attempt + 1, maximum, now, str(existing["id"])),
+            )
+            self._append_event_conn(
+                connection, str(existing["id"]), attempt + 1, "job_business_resumed",
+                {"business_key": business_key},
+            )
+        self._append_event_conn(
+            connection, str(existing["id"]), int(existing.get("attempt") or 1),
+            "job_trigger_coalesced",
+            {"actor": str(trigger_actor)[:80], "business_key": business_key},
+        )
+        refreshed = connection.execute(
+            "SELECT * FROM runtime_jobs WHERE id=?", (str(existing["id"]),),
+        ).fetchone()
+        value = self._decode_job(refreshed) or {}
+        value.update(
+            created=False, coalesced=True, reused=current_status.startswith("completed"),
+        )
+        return value
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self._conn() as connection:
@@ -613,12 +700,14 @@ class UnifiedJobStore:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT status,attempt,max_attempts,type,llm_scope,llm_revision "
+                "SELECT status,attempt,max_attempts,type,llm_scope,llm_revision,next_retry_at "
                 "FROM runtime_jobs WHERE id=?", (job_id,),
             ).fetchone()
             if current is None:
                 return False
             status = str(current["status"])
+            if float(current["next_retry_at"] or 0) > now:
+                return False
             if status == "interrupted" and self.requires_llm_manual_retry(current):
                 return False
             attempt = int(current["attempt"])
@@ -641,7 +730,7 @@ class UnifiedJobStore:
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET status='running',attempt=?,owner=?,lease_token=?,lease_expires=?,"
                 "heartbeat_at=?,started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,"
-                "phase='开始执行',detail='',updated_at=? WHERE id=? "
+                "phase='开始执行',detail='',next_retry_at=0,waiting_on='',updated_at=? WHERE id=? "
                 "AND status IN ('queued','interrupted') AND lease_expires<=?",
                 (
                     next_attempt, owner, token, lease_deadline(lease_seconds), now,
@@ -702,6 +791,30 @@ class UnifiedJobStore:
                     owner,
                     str(lease_token),
                     time.time(),
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise JobLeaseLost(job_id)
+
+    def completed_unit(
+        self,
+        job_id: str,
+        owner: str,
+        lease_token: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        """Record durable forward progress without conflating it with a heartbeat."""
+
+        current = time.time()
+        with self._conn() as connection:
+            cursor = connection.execute(
+                "UPDATE runtime_jobs SET last_completed_unit_at=?,detail=CASE WHEN ?<>'' "
+                "THEN ? ELSE detail END,updated_at=? WHERE id=? AND owner=? AND lease_token=? "
+                "AND status IN ('running','cancelling') AND lease_expires>?",
+                (
+                    current, str(detail)[:1000], str(detail)[:1000], _utc_now(), job_id,
+                    owner, str(lease_token), current,
                 ),
             )
         if cursor.rowcount != 1:
@@ -831,7 +944,8 @@ class UnifiedJobStore:
             progress = 100 if outcome.status in {"completed", "completed_with_errors"} else None
             connection.execute(
                 "UPDATE runtime_jobs SET status=?,progress=COALESCE(?,progress),phase=?,detail=?,"
-                "result_artifact_id=?,owner='',lease_token='',lease_expires=0,finished_at=?,updated_at=? "
+                "result_artifact_id=?,owner='',lease_token='',lease_expires=0,"
+                "last_completed_unit_at=?,finished_at=?,updated_at=? "
                 "WHERE id=? AND owner=? AND lease_token=?",
                 (
                     outcome.status,
@@ -839,6 +953,7 @@ class UnifiedJobStore:
                     "分析完成" if outcome.status.startswith("completed") else outcome.status,
                     outcome.detail[:1000],
                     outcome.result_artifact_id,
+                    time.time(),
                     _utc_now() if terminal else "",
                     _utc_now(),
                     job_id,
@@ -879,7 +994,7 @@ class UnifiedJobStore:
                 interrupted.append(str(row["id"]))
         return interrupted
 
-    def retry(self, job_id: str) -> dict[str, Any]:
+    def retry(self, job_id: str, *, delay_seconds: float = 0) -> dict[str, Any]:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -896,8 +1011,15 @@ class UnifiedJobStore:
             connection.execute(
                 "UPDATE runtime_jobs SET status='queued',progress=0,phase='等待重试',detail='',"
                 "attempt=?,owner='',lease_token='',lease_expires=0,heartbeat_at=0,cancel_requested=0,"
-                "result_artifact_id='',finished_at='',updated_at=? WHERE id=?",
-                (attempt, _utc_now(), job_id),
+                "result_artifact_id='',finished_at='',next_retry_at=?,waiting_on=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    attempt,
+                    time.time() + max(0.0, float(delay_seconds)),
+                    "retry_backoff" if delay_seconds else "",
+                    _utc_now(),
+                    job_id,
+                ),
             )
             self._append_event_conn(
                 connection,
@@ -1167,6 +1289,12 @@ class JobContext:
             value, phase, detail,
         )
 
+    def completed_unit(self, detail: str = "") -> None:
+        self.ensure_active()
+        self.store.completed_unit(
+            self.job_id, self.runtime.identity.value, self._lease_token, detail=detail,
+        )
+
     def cancelled(self) -> bool:
         if (
             not self._lease_alive.is_set()
@@ -1283,6 +1411,12 @@ class ProcessJobContext:
         self.ensure_active()
         self.store.progress(
             self.job_id, self.owner, self._lease_token, value, phase, detail,
+        )
+
+    def completed_unit(self, detail: str = "") -> None:
+        self.ensure_active()
+        self.store.completed_unit(
+            self.job_id, self.owner, self._lease_token, detail=detail,
         )
 
     def cancelled(self) -> bool:
@@ -1547,6 +1681,7 @@ class UnifiedJobRuntime:
         for job in self.store.list(1000, job_type=job_type):
             if (
                 job["status"] in {"queued", "interrupted"}
+                and float(job.get("next_retry_at") or 0) <= time.time()
                 and job["type"] in self._handlers
                 and not self.store.requires_llm_manual_retry(job)
             ):
@@ -1596,6 +1731,8 @@ class UnifiedJobRuntime:
         spec: Mapping[str, Any],
         *,
         idempotency_key: str = "",
+        business_key: str = "",
+        trigger_actor: str = "",
         input_fingerprint: str = "",
         algorithm_version: str = "",
         deadline_seconds: float = 300,
@@ -1615,6 +1752,8 @@ class UnifiedJobRuntime:
             job_type,
             spec,
             idempotency_key=idempotency_key,
+            business_key=business_key,
+            trigger_actor=trigger_actor,
             input_fingerprint=input_fingerprint,
             algorithm_version=algorithm_version,
             deadline_seconds=deadline_seconds,
@@ -1860,8 +1999,8 @@ class UnifiedJobRuntime:
                 and int(job["attempt"]) < int(job["max_attempts"])
                 and self._is_transient_failure(outcome.detail)
             ):
-                retried = self.store.retry(job_id)
-                retry_delay = min(60.0, 5.0 * (2 ** (int(retried["attempt"]) - 2)))
+                retry_delay = min(60.0, 5.0 * (2 ** (int(job["attempt"]) - 1)))
+                retried = self.store.retry(job_id, delay_seconds=retry_delay)
                 self.store.append_event(
                     job_id,
                     "job_auto_retry_scheduled",
@@ -2034,13 +2173,28 @@ class UnifiedJobRuntime:
                 # The job remains safely interrupted when its local revision
                 # ledger is unavailable; do not make status rendering fail.
                 manual_retry_required = True
+        heartbeat_at = float(job.get("heartbeat_at") or 0)
+        last_completed_unit_at = float(job.get("last_completed_unit_at") or 0)
+        next_retry_at = float(job.get("next_retry_at") or 0)
+        waiting_on = str(job.get("waiting_on") or "")
+        now = time.time()
+        legal_backoff = next_retry_at > now
+        stalled = bool(
+            job.get("status") == "running"
+            and not legal_backoff
+            and heartbeat_at
+            and now - heartbeat_at > max(30.0, min(300.0, float(job["deadline_seconds"]) / 4))
+        )
         return {
             "domain": str(job["type"]).partition(".")[0] or "runtime",
             "id": job["id"],
             "type": job["type"],
+            "business_key": str(job.get("business_key") or ""),
             "status": job["status"],
             "created": bool(job.get("created")),
             "coalesced": bool(job.get("coalesced")),
+            "trigger_count": int(job.get("trigger_count") or 1),
+            "coalesced_count": int(job.get("coalesced_count") or 0),
             "reused": bool(job.get("reused")),
             "outcome": str(job.get("outcome") or ""),
             "input_fingerprint": str(job.get("input_fingerprint") or ""),
@@ -2053,6 +2207,26 @@ class UnifiedJobRuntime:
             "manual_retry_required": manual_retry_required,
             "created_at": job["created_at"],
             "updated_at": job["updated_at"],
+            "started_at": str(job.get("started_at") or ""),
+            "finished_at": str(job.get("finished_at") or ""),
+            "elapsed_seconds": round(max(0.0, elapsed)),
+            "heartbeat_at": heartbeat_at,
+            "last_completed_unit_at": last_completed_unit_at,
+            "backoff": {
+                "active": legal_backoff,
+                "next_retry_at": next_retry_at,
+                "waiting_on": waiting_on,
+            },
+            "stalled": {
+                "is_stalled": stalled,
+                "reason": "worker heartbeat expired" if stalled else "",
+                "diagnostic_code": (
+                    str(job.get("diagnostic_code") or "job_heartbeat_stale") if stalled else ""
+                ),
+                "observed_at": heartbeat_at if stalled else 0,
+                "phase": str(job.get("phase") or ""),
+                "waiting_on": waiting_on,
+            },
             "estimated_remaining_seconds": round(max(0.0, remaining)),
             "can_cancel": job["status"] in ACTIVE_STATUSES,
             "can_retry": (
