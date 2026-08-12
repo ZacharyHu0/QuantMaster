@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台版本资源加载修复",
+                "items": (
+                    (
+                        "PyInstaller 仅在 Windows 构建时加载 PE 文件版本资源模块，修复 Linux "
+                        "质量门禁因没有 pefile 而无法解析打包配置的问题。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.11.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "Windows 应用进程归组",

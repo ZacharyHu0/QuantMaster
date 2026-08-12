@@ -38,6 +38,7 @@ def test_pyinstaller_collects_scipy_array_api_compatibility_modules() -> None:
     assert 'collect_submodules("scipy._external.array_api_compat")' in spec
     assert 'release_scope["VERSION"]' in spec
     assert "version=version_info" in spec
+    assert 'if sys.platform == "win32":' in spec
 
 
 @pytest.mark.parametrize("version", ["1.2", "1.2.3.4", "1.x.3", "-1.2.3"])

@@ -3,35 +3,39 @@
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
-from PyInstaller.utils.win32.versioninfo import (
-    FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
-    VarStruct, VSVersionInfo,
-)
 
 release_scope = {}
 exec((Path(SPECPATH).parent / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
-version_tuple = tuple(int(part) for part in version.split(".")) + (0,)
-version_info = VSVersionInfo(
-    ffi=FixedFileInfo(
-        filevers=version_tuple, prodvers=version_tuple, mask=0x3F, flags=0x0,
-        OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0),
-    ),
-    kids=[
-        StringFileInfo([StringTable("080404B0", [
-            StringStruct("CompanyName", "QuantMaster"),
-            StringStruct("FileDescription", "QuantMaster A股量化研究平台"),
-            StringStruct("FileVersion", version),
-            StringStruct("InternalName", "QuantMaster"),
-            StringStruct("OriginalFilename", "QuantMaster.exe"),
-            StringStruct("ProductName", "QuantMaster"),
-            StringStruct("ProductVersion", version),
-        ])]),
-        VarFileInfo([VarStruct("Translation", [2052, 1200])]),
-    ],
-)
+version_info = None
+if sys.platform == "win32":
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
+        VarStruct, VSVersionInfo,
+    )
+
+    version_tuple = tuple(int(part) for part in version.split(".")) + (0,)
+    version_info = VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=version_tuple, prodvers=version_tuple, mask=0x3F, flags=0x0,
+            OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0),
+        ),
+        kids=[
+            StringFileInfo([StringTable("080404B0", [
+                StringStruct("CompanyName", "QuantMaster"),
+                StringStruct("FileDescription", "QuantMaster A股量化研究平台"),
+                StringStruct("FileVersion", version),
+                StringStruct("InternalName", "QuantMaster"),
+                StringStruct("OriginalFilename", "QuantMaster.exe"),
+                StringStruct("ProductName", "QuantMaster"),
+                StringStruct("ProductVersion", version),
+            ])]),
+            VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+        ],
+    )
 
 datas = [
     ("../quantmaster/server/static", "quantmaster/server/static"),
