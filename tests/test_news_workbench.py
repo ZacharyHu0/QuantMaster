@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -1932,3 +1933,105 @@ def test_news_crawl_submission_uses_versioned_unified_singleflight(tmp_path, mon
     assert public["type"] == "news.crawl"
     assert public["input_fingerprint"] == "news-v1"
     assert public["links"]["self"] == f"/api/v1/jobs/{first['id']}"
+
+
+def test_manual_reanalyze_does_not_reuse_completed_job(tmp_path):
+    from quantmaster.ai.news_jobs import NewsJobs
+    from quantmaster.runtime.jobs import JobOutcome, UnifiedJobRuntime, UnifiedJobStore
+
+    runtime = UnifiedJobRuntime(
+        UnifiedJobStore(tmp_path / "jobs.sqlite"), dispatch=False,
+    )
+    jobs = NewsJobs(runtime)
+    spec = {"mode": "pending", "limit": 10, "batch_size": 2}
+    first, created = jobs.submit_reanalyze(spec)
+    assert created is True
+    assert first["input_fingerprint"] == ""
+
+    owner = "test-owner"
+    assert runtime.store.claim(first["id"], owner)
+    claimed = runtime.store.get(first["id"])
+    token = claimed["lease_token"]
+    artifact = runtime.store.write_artifact(
+        first["id"], "news.reanalyze.result", {"completed": 1},
+        {"schema_version": "1.0"}, owner=owner, lease_token=token,
+    )
+    runtime.store.finish(
+        first["id"], owner, JobOutcome("completed", "done", artifact["id"]),
+        lease_token=token,
+    )
+
+    second, second_created = jobs.submit_reanalyze(spec)
+    assert second_created is True
+    assert second["id"] != first["id"]
+
+
+def test_reanalyze_job_reports_batch_progress_and_partial_failure(monkeypatch):
+    from quantmaster.ai import news_jobs
+
+    class FakeStore:
+        @staticmethod
+        def reset_analysis(_ids):
+            return 0
+
+    class FakeCrawler:
+        store = FakeStore()
+
+        @staticmethod
+        def enrich_pending_events(**_kwargs):
+            yield {"type": "start", "total": 4}
+            yield {
+                "type": "batch", "total": 4, "processed": 2,
+                "completed": 1, "failed": 1,
+            }
+            yield {
+                "type": "complete", "processed": 4, "completed": 3,
+                "failed": 1, "retry_scheduled": 1, "dead_letter": 0,
+                "failure_details": [{"code": "timeout"}],
+                "completed_ids": [1, 2, 3], "claimed": 4,
+            }
+
+    class FakeContext:
+        input_fingerprint = ""
+
+        def __init__(self):
+            self.progress_events = []
+            self.artifact_payload = None
+
+        def progress(self, value, phase, detail=""):
+            self.progress_events.append((value, phase, detail))
+
+        @staticmethod
+        def ensure_active():
+            return None
+
+        @staticmethod
+        def cancelled():
+            return False
+
+        def write_artifact(self, _kind, payload, _metadata):
+            self.artifact_payload = payload
+            return {"id": "artifact-news"}
+
+    monkeypatch.setattr(news_jobs, "AICrawler", FakeCrawler)
+    context = FakeContext()
+    outcome = news_jobs.run_news_reanalyze_job(
+        context, {"mode": "pending", "limit": 4, "batch_size": 2},
+    )
+
+    assert outcome.status == "completed_with_errors"
+    assert "成功 3 条，失败 1 条" in outcome.detail
+    assert context.artifact_payload["failed"] == 1
+    assert any(
+        value == 49 and "已处理 2/4 条" in detail
+        for value, _phase, detail in context.progress_events
+    )
+
+
+def test_news_annotation_ui_polls_real_job_progress():
+    source = (Path(__file__).parents[1] / "quantmaster/server/static/news.js").read_text(
+        encoding="utf-8",
+    )
+    assert "async function watchNewsTask(task, label, onProgress = null)" in source
+    assert "if (onProgress) onProgress(current);" in source
+    assert "const job = await watchNewsTask(task, copy.report, current =>" in source

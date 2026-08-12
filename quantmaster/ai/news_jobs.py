@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 import threading
 import time
 from typing import Any
@@ -135,14 +134,39 @@ def run_news_reanalyze_job(context: JobContext, spec: dict[str, Any]) -> JobOutc
     else:
         reset = 0
     selected_limit = None if mode in {"failed", "dead_letter"} and ids is None else limit
-    result = crawler.enrich_pending(
+    result: dict[str, Any] = {
+        "processed": 0, "completed": 0, "failed": 0,
+        "retry_scheduled": 0, "dead_letter": 0,
+        "failure_details": [], "completed_ids": [], "claimed": 0,
+    }
+    for event in crawler.enrich_pending_events(
         ids=ids,
         limit=selected_limit,
         batch_size=batch_size,
         mode=mode,  # type: ignore[arg-type]
         manual=mode in {"failed", "dead_letter"},
         cancelled=context.cancelled,
-    )
+    ):
+        context.ensure_active()
+        event_type = str(event.get("type") or "")
+        if event_type == "start":
+            total = int(event.get("total") or 0)
+            context.progress(
+                4, "准备资讯重分析",
+                f"已选取 {total} 条可处理资讯" if total else "没有可处理的资讯",
+            )
+        elif event_type == "batch":
+            processed = int(event.get("processed") or 0)
+            total = max(1, int(event.get("total") or 0))
+            completed = int(event.get("completed") or 0)
+            failed = int(event.get("failed") or 0)
+            context.progress(
+                min(95, 4 + (91 * processed // total)),
+                "正在标注资讯",
+                f"已处理 {processed}/{total} 条，成功 {completed} 条，失败 {failed} 条",
+            )
+        elif event_type == "complete":
+            result = {key: value for key, value in event.items() if key != "type"}
     context.ensure_active()
     payload = {"status": "ok", "reset": reset, **result, "mode": mode}
     context.progress(96, "发布重分析结果", "写入不可变任务产物")
@@ -151,7 +175,15 @@ def run_news_reanalyze_job(context: JobContext, spec: dict[str, Any]) -> JobOutc
         payload,
         {"schema_version": "1.0", "lineage": {"algorithm_version": ALGORITHM_VERSION}},
     )
-    return JobOutcome("completed", f"资讯重分析完成：{int(result.get('completed') or 0)} 条", artifact["id"])
+    completed = int(result.get("completed") or 0)
+    failed = int(result.get("failed") or 0)
+    processed = int(result.get("processed") or 0)
+    if processed == 0:
+        detail = "资讯重分析完成：没有可处理的资讯"
+    else:
+        detail = f"资讯重分析完成：成功 {completed} 条，失败 {failed} 条"
+    status = "completed_with_errors" if failed else "completed"
+    return JobOutcome(status, detail, artifact["id"])
 
 
 class NewsJobs:
@@ -226,22 +258,13 @@ class NewsJobs:
             "batch_size": max(1, min(10, int(spec.get("batch_size") or 5))),
             "mode": str(spec.get("mode") or "pending"),
         }
-        try:
-            max_news_id = NewsStore(read_only=True).max_id()
-        except (FileNotFoundError, OSError, RuntimeError, ValueError, sqlite3.Error):
-            # A cold cache is still a valid asynchronous request.  The worker
-            # owns any first-write initialization and will report an empty
-            # reanalysis result rather than making the HTTP route fail.
-            max_news_id = 0
         return self.runtime.submit(
             REANALYZE_TASK_TYPE,
             normalized,
-            input_fingerprint=hashlib.sha256(
-                strict_json_dumps({
-                    "spec": normalized,
-                    "max_news_id": max_news_id,
-                }, sort_keys=True).encode("utf-8"),
-            ).hexdigest(),
+            # A manual queue action may change only analysis_status while the
+            # maximum news id remains stable.  Keep active singleflight by
+            # spec_hash, but never reuse a terminal artifact for a new click.
+            input_fingerprint="",
             algorithm_version="QM_NEWS_REANALYZE_V1",
             deadline_seconds=3600,
             max_attempts=2,

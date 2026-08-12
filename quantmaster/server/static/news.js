@@ -126,18 +126,20 @@
     return true;
   }
 
-  async function watchNewsTask(task, label) {
+  async function watchNewsTask(task, label, onProgress = null) {
     const id = task?.id;
     if (!id) throw new Error('服务未返回资讯任务编号');
     let current = {...task, _label: label};
     state.tasks.set(id, current);
     renderNewsTasks();
+    if (onProgress) onProgress(current);
     while (taskIsActive(current)) {
       const job = await api(current.links?.self || `/api/v1/jobs/${encodeURIComponent(id)}`);
       current = {...job, _label: label};
       if (!taskIsActive(current)) current._finishedAt = Date.now();
       state.tasks.set(id, current);
       renderNewsTasks();
+      if (onProgress) onProgress(current);
       if (taskIsActive(current)) await new Promise(resolve => setTimeout(resolve, 500));
     }
     if (current.manual_retry_required) return current;
@@ -891,7 +893,18 @@
         percent: 0, phase: '任务已入队',
         detail: '可继续处理其他资讯；完成后会自动刷新。', count: '等待执行',
       });
-      void watchNewsTask(task, copy.report).then(job => {
+      const job = await watchNewsTask(task, copy.report, current => {
+        const result = current.result || {};
+        const count = Number(result.processed || 0)
+          ? `成功 ${Number(result.completed || 0)} · 失败 ${Number(result.failed || 0)}`
+          : undefined;
+        setAnnotationProgress({
+          percent: Number(current.progress || 0),
+          phase: current.phase || undefined,
+          detail: current.detail || undefined,
+          count,
+        });
+      });
         const partial = job.status === 'completed_with_errors';
         finishAnnotationProgress(
           partial ? 'warning' : 'success', partial ? '标注部分完成' : copy.complete,
@@ -899,10 +912,6 @@
           Number(job.progress || 100),
         );
         report(partial ? '标注任务部分完成' : copy.report, null, partial ? 'warning' : 'success');
-      }).catch(error => {
-        finishAnnotationProgress('failed', '标注任务中断', error.message);
-        renderNewsTasks();
-      });
     } catch (error) {
       const current = Number(document.getElementById('news-annotation-track').getAttribute('aria-valuenow'));
       finishAnnotationProgress('failed', '标注任务中断', error.message, current);
