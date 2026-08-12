@@ -18,7 +18,7 @@ BASELINE = {
     "quantmaster/automation/channels/weixin.py": 2,
     "quantmaster/automation/commands.py": 2,
     "quantmaster/automation/runtime.py": 2,
-    "quantmaster/automation/service.py": 7,
+    "quantmaster/automation/service.py": 6,
     "quantmaster/backtest/paper_accounts.py": 1,
     "quantmaster/backtest/spec.py": 1,
     "quantmaster/backtest/validation.py": 1,
