@@ -1271,6 +1271,41 @@ def test_feishu_safe_swap_keeps_old_effective_when_listener_will_not_stop(tmp_pa
     assert all("candidate" not in target for target in credentials.values)
 
 
+def test_feishu_safe_swap_restores_old_credentials_when_candidate_never_ready(
+    tmp_path, monkeypatch,
+):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    service.feishu = FeishuBotClient(store, credentials)
+    service.feishu.configure("cli_old", "old-secret")
+    runtime = AutomationRuntime(service)
+    runtime.started = runtime.leader = True
+    monkeypatch.setattr(
+        service.feishu, "verify",
+        lambda *_args: {"status": "success", "state": "connected", "message": "有效"},
+    )
+    restarts = []
+
+    def restart(_channel):
+        account = store.bot_account("feishu")
+        restarts.append(account["account_id"] if account else "")
+        return "applying"
+
+    monkeypatch.setattr(runtime, "stop_channel", lambda _channel: "disabled")
+    monkeypatch.setattr(runtime, "restart_channel", restart)
+    monkeypatch.setattr(runtime, "_wait_feishu_ready", lambda _app_id: "failed")
+
+    with pytest.raises(RuntimeError, match="未在安全时限内就绪"):
+        runtime.replace_feishu("cli_new", "new-secret")
+
+    account = store.bot_account("feishu")
+    assert account["account_id"] == "cli_old"
+    assert credentials.values[account["secret_target"]] == "old-secret"
+    assert restarts == ["cli_new", "cli_old"]
+    assert all("candidate" not in target for target in credentials.values)
+
+
 def test_feishu_check_does_not_restart_channel(tmp_path, monkeypatch):
     from quantmaster.server import automation as automation_api
 

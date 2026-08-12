@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 STANDBY_RETRY_SECONDS = 5.0
 FEISHU_RECONNECT_INITIAL_SECONDS = 2.0
 FEISHU_RECONNECT_MAX_SECONDS = 60.0
+FEISHU_READY_TIMEOUT_SECONDS = 10.0
 
 
 class AutomationRuntime:
@@ -430,6 +432,23 @@ class AutomationRuntime:
             replacement.start()
             return "applying"
 
+    def _wait_feishu_ready(self, app_id: str, timeout: float = FEISHU_READY_TIMEOUT_SECONDS) -> str:
+        """Wait until the candidate listener is genuinely ready or terminally failed."""
+        deadline = time.monotonic() + max(0.01, float(timeout))
+        while time.monotonic() < deadline:
+            account = self.service.store.bot_account("feishu", app_id)
+            with self._lock:
+                thread = self._channel_threads.get("feishu")
+            status = str((account or {}).get("status") or "")
+            if status in {"listening", "connected", "healthy"}:
+                return "effective"
+            if status in {"degraded", "failed", "not_configured", "auth_error"}:
+                return "failed"
+            if thread is None or not thread.is_alive():
+                return "failed"
+            time.sleep(0.05)
+        return "failed"
+
     def replace_feishu(self, app_id: str, app_secret: str) -> dict[str, Any]:
         """Probe, quiesce, commit and switch Feishu credentials as one safe operation."""
         candidate = self.service.prepare_feishu(app_id, app_secret)
@@ -441,8 +460,11 @@ class AutomationRuntime:
         try:
             account = self.service.activate_feishu(candidate)
             runtime_status = self.restart_channel("feishu")
+            if runtime_status == "applying":
+                runtime_status = self._wait_feishu_ready(str(candidate["app_id"]))
             if runtime_status == "failed":
-                raise RuntimeError("新飞书长连接未能安全启动")
+                self.stop_channel("feishu")
+                raise RuntimeError("新飞书长连接未在安全时限内就绪")
         except (CredentialError, OSError, RuntimeError, ValueError):
             self.service.restore_feishu(candidate)
             self.service.discard_feishu(candidate)
