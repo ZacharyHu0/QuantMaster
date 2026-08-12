@@ -18,6 +18,7 @@ from quantmaster.rotation.contracts import (
     RotationRefreshRequest,
 )
 from quantmaster.rotation.service import get_rotation_service, get_rotation_worker
+from quantmaster.rotation.store import RotationIntegrityError
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.server.security import require_csrf
@@ -70,25 +71,26 @@ def _rotation_window(value: int) -> int:
 
 
 def _materialize_group_score(item: dict[str, Any], window: int) -> dict[str, Any]:
-    """Expose the selected window while keeping legacy score and grade fields."""
-    value = dict(item)
-    selected = dict((item.get("scores") or {}).get(str(window)) or {})
-    if not selected:
-        legacy = item.get("score") if isinstance(item.get("score"), dict) else {}
-        selected = {
-            "window": window,
-            "score": legacy.get("score", item.get("rotation_score")),
-            "grade": legacy.get("grade", item.get("grade") or ""),
-            "available_weight": legacy.get("available_weight"),
-            "minimum_weight": legacy.get("minimum_weight"),
-            "items": list(legacy.get("items") or []),
-        }
-    selected["window"] = window
-    value.pop("scores", None)
-    value["score"] = selected
-    value["rotation_score"] = selected.get("score")
-    value["grade"] = str(selected.get("grade") or "")
-    value["score_available_weight"] = selected.get("available_weight")
+    """Expose exactly one selected-window score from the current snapshot contract."""
+    obsolete = {"score", "rotation_score", "grade"}.intersection(item)
+    scores = item.get("scores")
+    selected = scores.get(str(window)) if isinstance(scores, dict) else None
+    required = {"window", "score", "grade", "available_weight", "minimum_weight", "items"}
+    if (
+        obsolete
+        or not isinstance(selected, dict)
+        or not required.issubset(selected)
+        or selected.get("window") != window
+        or not isinstance(selected.get("items"), list)
+    ):
+        identity = str(item.get("code") or item.get("name") or "<unknown>")
+        raise RotationIntegrityError(
+            f"轮动快照项目 {identity} 缺少当前 {window} 日评分结构"
+        )
+    value = {key: raw for key, raw in item.items() if key != "scores"}
+    value["score"] = {key: selected[key] for key in (
+        "window", "score", "grade", "available_weight", "minimum_weight", "items",
+    )}
     return value
 
 
@@ -117,7 +119,7 @@ def _theme_focus_items(
             "excess": _number(current.get("excess_return"), 0.0) > 0,
             "breadth": _number(current.get("advance_ratio"), 0.0) >= 0.5,
             "amount": _number(current.get("amount_activity"), 0.0) > 0,
-            "grade": str(item.get("grade") or "") in {"A", "B"},
+            "grade": str((item.get("score") or {}).get("grade") or "") in {"A", "B"},
         }
         for criterion, label in _THEME_FOCUS_CRITERIA:
             if checks[criterion]:
@@ -137,7 +139,7 @@ def _theme_focus_items(
         current = (item.get("signals") or {}).get(str(window)) or {}
         return (
             -int((item.get("focus") or {}).get("evidence_count") or 0),
-            -_number(item.get("rotation_score")),
+            -_number((item.get("score") or {}).get("score")),
             -_number(current.get("rotation_change_pp")),
             -_number(current.get("excess_return")),
             -_number(item.get("coverage")),
@@ -309,15 +311,16 @@ def rotation_themes(
     request: Request,
     response: Response,
     query: str = Query("", max_length=80),
-    limit: int | None = Query(None, ge=1, le=500),
-    page: int | None = Query(None, ge=1),
-    page_size: int | None = Query(None, ge=1, le=100),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
     stage: str = Query("", max_length=80),
     grade: Literal["", "A", "B", "C", "D"] = "",
     sort: Literal["change", "score", "excess", "amount", "coverage", "name"] = "change",
     order: Literal["asc", "desc"] = "desc",
     window: int = 5,
 ) -> Any:
+    if "limit" in request.query_params:
+        raise HTTPException(422, "limit 已删除；请使用 page 和 page_size")
     window = _rotation_window(window)
     service = get_rotation_service(read_only=True)
     snapshot = service.snapshot_header("themes")
@@ -325,9 +328,10 @@ def rotation_themes(
     _focus_header, focus_values, _focus_page = service.store.snapshot_items_page(
         "themes", sort="focus", order="desc", window=window, page=1, page_size=4,
     )
+    focus_items = [_materialize_group_score(item, window) for item in focus_values]
     data.update(
         {
-            "focus_items": _theme_focus_items(focus_values, window),
+            "focus_items": _theme_focus_items(focus_items, window),
             "focus_definition": {
                 "criteria": [{"id": criterion, "label": label} for criterion, label in _THEME_FOCUS_CRITERIA],
                 "limit": 4,
@@ -335,24 +339,9 @@ def rotation_themes(
             },
         }
     )
-    if page is None and page_size is None:
-        selected_limit = limit or int(service.store.preferences()["theme_limit"])
-        _header, values, pagination = service.store.snapshot_items_page(
-            "themes", query=query, stage=stage, grade=grade, sort="position", order="asc",
-            window=window, page=1, page_size=selected_limit,
-        )
-        data.update(
-            {
-                "items": [_materialize_group_score(item, window) for item in values],
-                "total": pagination["total"],
-                "limit": selected_limit,
-                "window": window,
-            }
-        )
-        return _snapshot_etag(request, response, {"meta": snapshot["meta"], "data": data})
     _header, values, pagination = service.store.snapshot_items_page(
         "themes", query=query, stage=stage, grade=grade, sort=sort, order=order,
-        window=window, page=page or 1, page_size=_page_size(page_size),
+        window=window, page=page, page_size=_page_size(page_size),
     )
     data.update({
         "items": [_materialize_group_score(item, window) for item in values],

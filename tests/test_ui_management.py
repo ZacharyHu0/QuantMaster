@@ -1831,8 +1831,10 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
             "stage": "repair_spread" if change >= 0 else "retreat_watch",
             "stage_label": "修复扩散" if change >= 0 else "退潮观察",
             "stage_sessions": sessions,
-            "rotation_score": 68.4,
-            "grade": "B",
+            "score": {
+                "window": 5, "score": 68.4, "grade": "B",
+                "available_weight": 100, "minimum_weight": 60, "items": [],
+            },
         }
 
     items = [
@@ -1866,7 +1868,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
             selected_codes.update(body["l2_codes"])
         route.fulfill(
             json={
-                "data": {"l2_codes": sorted(selected_codes), "theme_limit": 16},
+                "data": {"l2_codes": sorted(selected_codes)},
             }
         )
 
@@ -2026,8 +2028,11 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
             "stage": "repair_spread" if index < 4 else "unclear",
             "stage_label": "修复扩散" if index < 4 else "方向未明",
             "stage_sessions": 6 - index,
-            "rotation_score": 82.4 - index * 4.1,
-            "grade": "A" if index < 2 else "B",
+            "score": {
+                "window": 5, "score": 82.4 - index * 4.1,
+                "grade": "A" if index < 2 else "B",
+                "available_weight": 100, "minimum_weight": 60, "items": [],
+            },
             "member_count": 36 + index,
             "eligible_count": 32 + index,
             "coverage": 0.88,

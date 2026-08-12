@@ -199,9 +199,9 @@ def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp
 
     assert store.snapshot("temperature") == payload
     assert store.snapshots()[0]["snapshot_id"] == "sample"
-    saved = store.save_preferences({"l2_codes": ["801081.SI", "801081.SI"], "theme_limit": 20})
+    saved = store.save_preferences({"l2_codes": ["801081.SI", "801081.SI"]})
     assert saved["l2_codes"] == ["801081.SI"]
-    assert store.preferences()["theme_limit"] == 20
+    assert "theme_limit" not in store.preferences()
 
     store.replace_taxonomy_nodes([
         {"code": "801081.SI", "name": "半导体", "level": "L2", "parent_code": "801080.SI"}

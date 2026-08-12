@@ -18,7 +18,6 @@ class RotationRefreshRequest(ContractModel):
 
 class RotationPreferencesUpdate(ContractModel):
     l2_codes: list[str] = Field(default_factory=list, max_length=30)
-    theme_limit: int = Field(default=16, ge=8, le=32)
 
 
 class RotationJobSpec(ContractModel):

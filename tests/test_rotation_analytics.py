@@ -329,12 +329,14 @@ def test_group_rotation_respects_coverage_and_member_reconciliation():
     assert len(result["items"]) == 2
     for item in result["items"]:
         assert item["eligible_count"] <= item["member_count"]
-        assert item["grade"] in {"A", "B", "C", "D"}
+        assert item["scores"]["5"]["grade"] in {"A", "B", "C", "D"}
         assert item["positive_ratio"] >= item["strong_ratio"]
         assert item["stage"] in result["summary"]["stages"]
         assert set(item["signals"]) == {"1", "3", "5", "20"}
         assert set(item["scores"]) == {"1", "3", "5", "20"}
-        assert item["rotation_score"] == item["scores"]["5"]["score"]
+        assert "rotation_score" not in item
+        assert "grade" not in item
+        assert "score" not in item
         for signal in item["signals"].values():
             assert signal["rotation_change_pp"] == round(
                 signal["positive_change_pp"] - signal["weak_change_pp"], 2,

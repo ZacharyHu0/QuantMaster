@@ -101,8 +101,26 @@ def test_rotation_preferences_validate_known_l2_codes():
                 "quality": {"status": "complete", "issues": []},
             },
             "data": {"items": [
-                {"code": "801080.SI", "name": "电子", "level": "L1"},
-                {"code": "801081.SI", "name": "半导体", "level": "L2"},
+                {
+                    "code": "801080.SI", "name": "电子", "level": "L1",
+                    "scores": {
+                        str(window): {
+                            "window": window, "score": None, "grade": "",
+                            "available_weight": 0, "minimum_weight": 60, "items": [],
+                        }
+                        for window in (1, 3, 5, 20)
+                    },
+                },
+                {
+                    "code": "801081.SI", "name": "半导体", "level": "L2",
+                    "scores": {
+                        str(window): {
+                            "window": window, "score": None, "grade": "",
+                            "available_weight": 0, "minimum_weight": 60, "items": [],
+                        }
+                        for window in (1, 3, 5, 20)
+                    },
+                },
             ]},
         }
     })
@@ -113,7 +131,7 @@ def test_rotation_preferences_validate_known_l2_codes():
 
     saved = client.put(
         "/api/v1/rotation/preferences",
-        json={"l2_codes": ["801081.SI"], "theme_limit": 20},
+        json={"l2_codes": ["801081.SI"]},
     )
     assert saved.status_code == 200
     assert saved.json()["data"]["l2_codes"] == ["801081.SI"]
@@ -121,7 +139,7 @@ def test_rotation_preferences_validate_known_l2_codes():
     assert [item["code"] for item in after] == ["801080.SI", "801081.SI"]
     unknown = client.put(
         "/api/v1/rotation/preferences",
-        json={"l2_codes": ["999999.SI"], "theme_limit": 16},
+        json={"l2_codes": ["999999.SI"]},
     )
     assert unknown.status_code == 422
 
@@ -286,8 +304,8 @@ def test_group_apis_materialize_selected_window_scores_and_grade_filters():
         }
         return {
             "code": code, "name": name, "level": level, "stage": "unclear",
-            "scores": scores, "score": scores["5"], "rotation_score": 38.0,
-            "grade": "D", "signals": {str(window): {} for window in (1, 3, 5, 20)},
+            "scores": scores,
+            "signals": {str(window): {} for window in (1, 3, 5, 20)},
         }
 
     industry = group_item("801080.SI", "电子", level="L1")
@@ -311,12 +329,14 @@ def test_group_apis_materialize_selected_window_scores_and_grade_filters():
     one_day = client.get("/api/v1/rotation/industries", params={"window": 1}).json()["data"]
     five_day = client.get("/api/v1/rotation/industries", params={"window": 5}).json()["data"]
     assert one_day["window"] == 1
-    assert one_day["items"][0]["rotation_score"] == 72.0
+    assert one_day["items"][0]["score"]["score"] == 72.0
     assert one_day["items"][0]["score"]["grade"] == "A"
-    assert one_day["items"][0]["score_available_weight"] == 100
+    assert one_day["items"][0]["score"]["available_weight"] == 100
     assert "scores" not in one_day["items"][0]
-    assert five_day["items"][0]["rotation_score"] == 38.0
-    assert five_day["items"][0]["grade"] == "D"
+    assert "rotation_score" not in one_day["items"][0]
+    assert "grade" not in one_day["items"][0]
+    assert five_day["items"][0]["score"]["score"] == 38.0
+    assert five_day["items"][0]["score"]["grade"] == "D"
 
     detail = client.get(
         "/api/v1/rotation/industries/801080.SI", params={"window": 1},
@@ -333,18 +353,62 @@ def test_group_apis_materialize_selected_window_scores_and_grade_filters():
         params={"window": 5, "grade": "A", "page": 1, "page_size": 25},
     ).json()["data"]
     assert themes_one["pagination"]["total"] == 1
-    assert themes_one["items"][0]["rotation_score"] == 72.0
+    assert themes_one["items"][0]["score"]["score"] == 72.0
     assert themes_five["pagination"]["total"] == 0
     assert client.get("/api/v1/rotation/industries", params={"window": 2}).status_code == 422
     assert client.get("/api/v1/rotation/themes/BK1001", params={"window": 20}).status_code == 200
 
 
-def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
+@pytest.mark.parametrize("include_current_score", (False, True))
+def test_group_api_rejects_legacy_score_fields_without_fallback(include_current_score):
+    service = get_rotation_service()
+    corrupt = {
+        "code": "BK-BROKEN", "name": "损坏题材", "stage": "unclear",
+        "score": {
+            "window": 5, "score": 88.0, "grade": "A",
+            "available_weight": 100, "minimum_weight": 60, "items": [],
+        },
+        "rotation_score": 88.0, "grade": "A",
+        "signals": {str(window): {} for window in (1, 3, 5, 20)},
+    }
+    if include_current_score:
+        corrupt["scores"] = {
+            "5": {
+                "window": 5, "score": 42.0, "grade": "C",
+                "available_weight": 100, "minimum_weight": 60, "items": [],
+            },
+        }
+    service.store.save_snapshots({
+        "themes": {
+            "meta": {
+                "snapshot_id": "corrupt-current-score",
+                "quality": {"status": "complete", "issues": []},
+            },
+            "data": {"items": [corrupt]},
+        },
+    })
+
+    response = _client().get(
+        "/api/v1/rotation/themes", params={"page": 1, "page_size": 25, "window": 5},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["problem"]["code"] == "unhandled_server_error"
+
+
+def test_rotation_theme_pagination_is_complete_stable_and_rejects_legacy_limit():
     service = get_rotation_service()
     items = [
         {
             "code": f"BK{index:04d}", "name": f"题材 {index:04d}", "stage": "repair_spread",
-            "grade": "A" if index % 2 else "B", "rotation_score": 50.0,
+            "scores": {
+                str(window): {
+                    "window": window, "score": 50.0,
+                    "grade": "A" if index % 2 else "B",
+                    "available_weight": 100, "minimum_weight": 60, "items": [],
+                }
+                for window in (1, 3, 5, 20)
+            },
             "coverage": 1.0, "primary_industry": {"name": "电子"},
             "signals": {
                 str(window): {
@@ -365,13 +429,11 @@ def test_rotation_theme_pagination_is_complete_stable_and_keeps_legacy_limit():
     })
     client = _client()
 
-    legacy = client.get("/api/v1/rotation/themes", params={"limit": 7}).json()["data"]
-    assert legacy["limit"] == 7
-    assert len(legacy["items"]) == 7
-    assert "pagination" not in legacy
+    legacy = client.get("/api/v1/rotation/themes", params={"limit": 7})
+    assert legacy.status_code == 422
 
     first = client.get(
-        "/api/v1/rotation/themes", params={"page": 1, "page_size": 25, "limit": 2},
+        "/api/v1/rotation/themes", params={"page": 1, "page_size": 25},
     ).json()["data"]
     assert first["pagination"] == {
         "page": 1, "page_size": 25, "total": 698, "pages": 28,
@@ -418,8 +480,13 @@ def test_rotation_theme_focus_queue_is_auditable_and_ignores_catalog_filters():
             "name": name,
             "stage": "repair_spread" if change > 0 else "retreat_watch",
             "stage_label": "修复扩散" if change > 0 else "退潮观察",
-            "rotation_score": score,
-            "grade": grade,
+            "scores": {
+                str(window): {
+                    "window": window, "score": score, "grade": grade,
+                    "available_weight": 100, "minimum_weight": 60, "items": [],
+                }
+                for window in (1, 3, 5, 20)
+            },
             "coverage": 0.9,
             "signals": {
                 str(window): {

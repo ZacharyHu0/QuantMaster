@@ -295,9 +295,9 @@ def _snapshot_window_fields(item: dict[str, Any]) -> tuple[list[Any], list[str],
         excess = _optional_number(signal.get("excess_return"))
         amount = _optional_number(signal.get("amount_activity"))
         advance = _optional_number(signal.get("advance_ratio"))
-        grade = str(score.get("grade") or item.get("grade") or "")
+        grade = str(score.get("grade") or "")
         values.extend((
-            _optional_number(score.get("score", item.get("rotation_score"))),
+            _optional_number(score.get("score")),
             change, excess, amount, advance,
         ))
         grades.append(grade)
@@ -324,7 +324,7 @@ def _snapshot_item_row(
     return (
         str(kind), snapshot_id, item_key, position,
         str(item.get("name") or ""), str(item.get("level") or ""),
-        str(item.get("stage") or ""), str(item.get("grade") or ""),
+        str(item.get("stage") or ""), "",
         str(item.get("category") or ""), str(item.get("benchmark") or ""),
         primary_name, *window_values, *grade_values, *focus_values,
         _optional_number(item.get("coverage")), *flow_values,
@@ -535,7 +535,7 @@ class RotationStore:
         )
         connection.execute(
             "INSERT INTO preferences(id,payload_json,updated_at) VALUES(1,?,?)",
-            (strict_json_dumps({"l2_codes": [], "theme_limit": 16}), time.time()),
+            (strict_json_dumps({"l2_codes": []}), time.time()),
         )
 
     @staticmethod
@@ -992,7 +992,6 @@ class RotationStore:
         value = json.loads(str(row["payload_json"])) if row else {}
         return {
             "l2_codes": [str(code) for code in value.get("l2_codes") or []],
-            "theme_limit": int(value.get("theme_limit") or 16),
             "updated_at": float(row["updated_at"]) if row else 0.0,
         }
 
@@ -1002,10 +1001,7 @@ class RotationStore:
         ))
         if len(l2_codes) > 30:
             raise ValueError("最多关注 30 个申万二级行业")
-        theme_limit = int(value.get("theme_limit") or 16)
-        if not 8 <= theme_limit <= 32:
-            raise ValueError("题材首屏数量需在 8–32 之间")
-        payload = {"l2_codes": l2_codes, "theme_limit": theme_limit}
+        payload = {"l2_codes": l2_codes}
         now = time.time()
         with self._preferences() as connection:
             connection.execute(

@@ -1206,13 +1206,6 @@ def _score_group_windows(items: list[dict[str, Any]], kind: str) -> None:
                     "items": evidence,
                 }
 
-    for item in items:
-        default_score = dict((item.get("scores") or {}).get("5") or {})
-        item["score"] = default_score
-        item["rotation_score"] = default_score.get("score")
-        item["grade"] = str(default_score.get("grade") or "")
-
-
 def map_theme_industries(
     themes: dict[str, dict[str, Any]],
     industries: dict[str, dict[str, Any]],
@@ -1568,8 +1561,8 @@ def analyze_group_rotation(
         histories[str(code)] = history_rows
     _score_group_windows(items, kind)
     items.sort(key=lambda item: (
-        -float(item["rotation_score"])
-        if item.get("rotation_score") is not None else math.inf,
+        -float(item["scores"]["5"]["score"])
+        if item["scores"]["5"].get("score") is not None else math.inf,
         -int(item["eligible_count"]),
         item["name"],
     ))
