@@ -185,6 +185,26 @@ def test_task_branch_commit_skips_release_gate(monkeypatch):
     assert pre_commit() == 0
 
 
+def test_main_regular_commit_skips_release_gate(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {"quantmaster/data/storage.py"})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    monkeypatch.setattr(
+        release_sync, "verify_previous_release_synced",
+        lambda: (_ for _ in ()).throw(AssertionError("ordinary commit reached release gate")),
+    )
+    assert pre_commit() == 0
+
+
+def test_main_partial_release_metadata_is_rejected(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: {RELEASE_FILE})
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
+    assert pre_commit() == 1
+
+
 @pytest.mark.parametrize("release_path", [RELEASE_FILE, CHANGELOG_FILE])
 def test_task_branch_rejects_release_metadata(monkeypatch, release_path):
     from scripts.release import sync as release_sync

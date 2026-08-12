@@ -375,8 +375,12 @@ def pre_commit() -> int:
         print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过发布门禁")
         return 0
     required = {RELEASE_FILE, CHANGELOG_FILE}
+    release_paths = required.intersection(paths)
+    if not release_paths:
+        print("[QuantMaster] main 普通提交：未修改发布元数据，跳过发布门禁和自动推送")
+        return 0
     missing = sorted(required - paths)
-    errors = [f"每次提交都必须同时暂存 {path}" for path in missing]
+    errors = [f"发布提交必须同时暂存 {path}" for path in missing]
     if missing:
         return print_errors(errors, "发布元数据不完整，提交已阻止")
 

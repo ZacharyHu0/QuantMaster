@@ -175,7 +175,7 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     if package:
         args.append("--package")
     run(args, cwd=cwd)
-    print("[task] READY: 可 squash 为一个 main release")
+    print("[task] READY: 可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
 
 
 def validate_ready_state(branch: str, status: str, behind: bool, changed: list[str]) -> None:
