@@ -1282,7 +1282,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reload",
         action="store_true",
-        help="监视主站代码并安全热更新（FreeStockDB 保持运行）",
+        help="启用前端按钮触发的安全热更新（FreeStockDB 保持运行）",
     )
     p.add_argument(
         "--no-reload",

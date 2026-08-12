@@ -52,9 +52,7 @@ qm serve                          # 启动 Web 界面 -> http://127.0.0.1:8686
 ```
 
 Windows 仓库用户也可以运行 `scripts\\dev\\serve.cmd --open`。脚本会固定使用项目 `.venv`，并默认
-监视主站 Python 代码：连续写入会等待 30 秒静默，且任意两次重载至少间隔 5 分钟，
-冷却期间的全部修改会积压并合并为下一次安全热更新，
-单独修改发布元数据不会重启 Web worker，FreeStockDB 在整个启动器退出前保持运行；
+启动手动重载监督进程；源码变化不会自动替换 Web worker，FreeStockDB 在整个启动器退出前保持运行；
 HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
 运行 `scripts\\dev\\serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
 `QuantMaster.exe`；脚本启动后会立即退出短暂的 `cmd.exe` 启动器，因此 QuantMaster 是
@@ -62,10 +60,8 @@ HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单
 `QuantMaster Runtime Worker.exe` 与 `QuantMaster Compute Worker.exe`，便于识别热更新、
 持久调度和隔离计算；托管的 `stockdb.exe` 仍由 Runtime Worker 负责启停，并和
 QuantMaster 处于同一 Windows Job Object 生命周期边界内。
-可用 `QM_RELOAD_QUIET_SECONDS`、`QM_RELOAD_MAX_BATCH_SECONDS` 和
-`QM_RELOAD_MIN_INTERVAL_SECONDS` 调整静默、连续写入批次和重载限频窗口。
-需要立刻应用后端修改时，可打开页头版本号弹窗并点击“立即热更新”；手动更新绕过上述
-静默与限频窗口，只安全替换 Web worker，不会启停 FreeStockDB。
+需要应用后端修改时，可打开页头版本号弹窗并点击“立即热更新”；该按钮是唯一的 Web
+worker 重载入口，只安全替换 Web worker，不会启停 FreeStockDB。
 
 启动后点击页头的“帮助”，可在应用内阅读完整手册；也可以直接打开
 `http://127.0.0.1:8686/#help/start`。手册中的市场规则标有核验日期，实盘前仍应以

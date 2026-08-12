@@ -17,14 +17,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 _SO_EXCLUSIVEADDRUSE = getattr(socket_module, "SO_EXCLUSIVEADDRUSE", 0x4)
 
-# A hot-reload change must become a replacement Web generation quickly.  The
-# old 30s quiet window plus a five-minute cooldown made an accepted manual
-# reload look stuck even though the blue/green state machine itself was sound.
-# These values still coalesce editor write bursts, while keeping normal reloads
-# comfortably inside the ten-second readiness target.
-RELOAD_QUIET_SECONDS = 2.0
-RELOAD_MAX_BATCH_SECONDS = 30.0
-RELOAD_MIN_INTERVAL_SECONDS = 5.0
 RELOAD_TRIGGER_PATH_ENV = "QM_SERVER_RELOAD_TRIGGER_PATH"
 RELOAD_READY_SECONDS = 20.0
 RELOAD_DRAIN_SECONDS = 10.0
@@ -261,39 +253,6 @@ def install_windows_console_handler(
     return unregister
 
 
-def _meaningful_reload_paths(paths: set[Path], package_dir: Path) -> list[Path]:
-    """Ignore release bookkeeping when it is the only backend source change."""
-    release_path = (package_dir / "release.py").resolve()
-    return sorted(
-        (path for path in paths if path.resolve() != release_path),
-        key=lambda path: str(path).casefold(),
-    )
-
-
-def _reload_timing_ms() -> tuple[int, int, int]:
-    """Return bounded quiet, batching and minimum reload interval windows."""
-    try:
-        quiet = float(os.environ.get("QM_RELOAD_QUIET_SECONDS", RELOAD_QUIET_SECONDS))
-    except ValueError:
-        quiet = RELOAD_QUIET_SECONDS
-    try:
-        maximum = float(
-            os.environ.get("QM_RELOAD_MAX_BATCH_SECONDS", RELOAD_MAX_BATCH_SECONDS),
-        )
-    except ValueError:
-        maximum = RELOAD_MAX_BATCH_SECONDS
-    try:
-        interval = float(
-            os.environ.get("QM_RELOAD_MIN_INTERVAL_SECONDS", RELOAD_MIN_INTERVAL_SECONDS),
-        )
-    except ValueError:
-        interval = RELOAD_MIN_INTERVAL_SECONDS
-    quiet = min(300.0, max(2.0, quiet))
-    maximum = min(1800.0, max(quiet, maximum))
-    interval = min(1800.0, max(quiet, interval))
-    return round(quiet * 1000), round(maximum * 1000), round(interval * 1000)
-
-
 def _reload_lifecycle_seconds() -> tuple[float, float, float]:
     """Return bounded startup, drain and forced-stop deadlines.
 
@@ -453,41 +412,6 @@ def _bind_reload_socket(config: Any, host: str, port: int) -> Any:
     return listener
 
 
-class _ReloadChangeGate:
-    """Accumulate backend changes and enforce a real minimum reload interval."""
-
-    def __init__(
-        self,
-        package_dir: Path,
-        minimum_interval: float,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.package_dir = package_dir
-        self.minimum_interval = minimum_interval
-        self.clock = clock
-        self.pending: set[Path] = set()
-        self.last_reload_at: float | None = None
-
-    def offer(self, paths: set[Path]) -> list[Path] | None:
-        self.pending.update(_meaningful_reload_paths(paths, self.package_dir))
-        if not self.pending:
-            return None
-        now = self.clock()
-        if (
-            self.last_reload_at is not None
-            and now - self.last_reload_at < self.minimum_interval
-        ):
-            return None
-        ready = sorted(self.pending, key=lambda path: str(path).casefold())
-        self.pending.clear()
-        self.last_reload_at = now
-        return ready
-
-    def clear(self) -> None:
-        """Drop accumulated automatic changes after a manual full worker reload."""
-        self.pending.clear()
-
-
 def manual_reload_trigger_path() -> Path | None:
     """Return the supervisor-owned trigger path when reload mode is active."""
     if os.environ.get("QM_SERVER_RELOAD_WORKER") != "1":
@@ -502,10 +426,17 @@ def request_manual_reload(path: Path) -> None:
     path.write_text(str(time.time_ns()), encoding="ascii")
 
 
-def _run_quiet_uvicorn_reload(
+def _manual_reload_changes(
+    changes: set[Path], trigger_path: Path,
+) -> list[Path] | None:
+    """Accept only the explicit UI trigger; source edits never reload Web."""
+    trigger = trigger_path.resolve()
+    return [trigger] if trigger in {path.resolve() for path in changes} else None
+
+
+def _run_manual_uvicorn_reload(
     uvicorn: Any,
     *,
-    package_dir: Path,
     trigger_path: Path,
     host: str,
     port: int,
@@ -523,32 +454,22 @@ def _run_quiet_uvicorn_reload(
     """
     from uvicorn._subprocess import get_subprocess, spawn
     from uvicorn.supervisors.basereload import BaseReload
-    from uvicorn.supervisors.watchfilesreload import FileFilter
     from watchfiles import watch
 
-    quiet_ms, maximum_ms, interval_ms = _reload_timing_ms()
     ready_seconds, drain_seconds, force_seconds = _reload_lifecycle_seconds()
 
     class QuietReload(BaseReload):
         def __init__(self, config, target, sockets):
             super().__init__(config, target, sockets)
-            self.reloader_name = "QuantMaster watcher"
-            self.watch_filter = FileFilter(config)
-            self.change_gate = _ReloadChangeGate(
-                package_dir,
-                minimum_interval=interval_ms / 1000,
-            )
+            self.reloader_name = "QuantMaster manual reload"
             self._generation_jobs: dict[int, _WindowsGenerationJob] = {}
             self._generation_drains: dict[int, Any] = {}
-            self._last_watchdog_at = 0.0
-            self._unhealthy_checks = 0
             self.watcher = watch(
-                package_dir,
                 trigger_path.parent,
                 watch_filter=None,
                 stop_event=self.should_exit,
-                debounce=maximum_ms,
-                step=quiet_ms,
+                debounce=500,
+                step=250,
                 yield_on_timeout=True,
                 ignore_permission_denied=True,
             )
@@ -617,7 +538,7 @@ def _run_quiet_uvicorn_reload(
             # This is BaseReload.startup with one important difference: the
             # child is given a generation identity before it is spawned.
             from uvicorn.supervisors.basereload import HANDLED_SIGNALS
-            self.reloader_name = self.reloader_name or "QuantMaster watcher"
+            self.reloader_name = self.reloader_name or "QuantMaster manual reload"
             logger.info("Started reloader process [%s] using %s", self.pid, self.reloader_name)
             for handled in HANDLED_SIGNALS:
                 signal.signal(handled, self.signal_handler)
@@ -659,43 +580,12 @@ def _run_quiet_uvicorn_reload(
             finally:
                 self.is_restarting = False
 
-        def _watch_current_generation(self) -> bool:
-            """Return whether the active child passed the bounded watchdog.
-
-            This is intentionally a private, generation-specific liveness
-            probe: a TCP accept alone was the source of the old black-hole
-            behaviour.  Three misses mean the child is no longer serving its
-            event loop, so the normal blue/green replacement path is used.
-            """
-
-            now = time.monotonic()
-            if now - self._last_watchdog_at < 1.0:
-                return True
-            self._last_watchdog_at = now
+        def _maintain_runtime_worker(self) -> None:
+            """Keep the independent runtime worker alive without replacing Web."""
             if worker_supervisor is not None:
                 worker_state = worker_supervisor.ensure_running(bootstrap_rotation=True)
                 if worker_state == "restarted":
                     logger.warning("runtime-worker 异常退出，已请求替代进程")
-            generation = int(getattr(self, "generation", 0))
-            process = getattr(self, "process", None)
-            healthy = bool(
-                process is not None
-                and process.is_alive()
-                and _generation_is_ready(host, port, generation)
-            )
-            if healthy:
-                self._unhealthy_checks = 0
-                return True
-            self._unhealthy_checks += 1
-            if self._unhealthy_checks < 3:
-                return True
-            logger.error(
-                "Web 代次 %s 连续 %s 次心跳失败，准备蓝绿替换",
-                generation,
-                self._unhealthy_checks,
-            )
-            self._unhealthy_checks = 0
-            return False
 
         def shutdown(self) -> None:
             self.should_exit.set()
@@ -709,18 +599,9 @@ def _run_quiet_uvicorn_reload(
 
         def should_restart(self) -> list[Path] | None:
             changes = next(self.watcher)
-            if not self._watch_current_generation():
-                return [trigger_path]
+            self._maintain_runtime_worker()
             changed_paths = {Path(changed_path).resolve() for _change, changed_path in changes}
-            if trigger_path.resolve() in changed_paths:
-                self.change_gate.clear()
-                return [trigger_path]
-            candidates = {
-                changed_path
-                for changed_path in changed_paths
-                if self.watch_filter(Path(changed_path))
-            }
-            return self.change_gate.offer(candidates)
+            return _manual_reload_changes(changed_paths, trigger_path)
 
     config = uvicorn.Config(
         "quantmaster.server.app:app",
@@ -730,8 +611,8 @@ def _run_quiet_uvicorn_reload(
         log_config=None,
         access_log=False,
         reload=True,
-        reload_dirs=[str(package_dir)],
-        reload_includes=["*.py"],
+        reload_dirs=[str(trigger_path.parent)],
+        reload_includes=[trigger_path.name],
     )
     socket = _bind_reload_socket(config, host, port)
     reloader = QuietReload(config, target=_run_web_generation, sockets=[socket])
@@ -769,7 +650,6 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     from quantmaster.runtime.supervisor import get_worker_supervisor
     from quantmaster.runtime.worker import get_runtime_worker
 
-    package_dir = Path(__file__).resolve().parents[1]
     worker_flag = "QM_SERVER_RELOAD_WORKER"
     verbose_flag = "QM_SERVER_RELOAD_VERBOSE"
     control_flag = "QM_FREE_STOCKDB_CONTROL_PATH"
@@ -833,9 +713,8 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
 
     os.environ[verbose_flag] = "1" if is_verbose_logging() else "0"
     try:
-        _run_quiet_uvicorn_reload(
+        _run_manual_uvicorn_reload(
             uvicorn,
-            package_dir=package_dir,
             trigger_path=trigger_path,
             host=host,
             port=port,

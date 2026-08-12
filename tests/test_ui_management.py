@@ -112,7 +112,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator("#release-popover").wait_for(state="visible")
         assert "更新日志" in page.locator("#release-popover").inner_text()
         assert page.get_by_role("button", name="立即热更新").is_visible()
-        assert "绕过自动限频" in page.locator("#release-reload-status").inner_text()
+        assert "仅在点击后" in page.locator("#release-reload-status").inner_text()
         assert page.locator("#release-popover #free-stockdb-release").count() == 0
         stockdb = page.locator("#stockdb-update-trigger")
         stockdb.click()
