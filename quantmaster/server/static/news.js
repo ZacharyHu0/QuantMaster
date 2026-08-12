@@ -69,7 +69,7 @@
 
   async function submitAnnotationTask(mode, ids) {
     const accepted = await secure('/api/v1/news/reanalyze', {
-      method: 'POST', body: {mode, ids: ids?.length ? ids : undefined, limit: 100, batch_size: 5},
+      method: 'POST', body: {mode, ids: ids?.length ? ids : undefined},
     });
     if (!(accepted.job?.id || accepted.id)) throw new Error('服务未返回资讯任务编号');
     return accepted.job || accepted;

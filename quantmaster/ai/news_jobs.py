@@ -125,7 +125,7 @@ def run_news_reanalyze_job(context: JobContext, spec: dict[str, Any]) -> JobOutc
     crawler = AICrawler()
     ids = [int(value) for value in spec.get("ids") or ()] or None
     limit = max(1, min(1000, int(spec.get("limit") or 100)))
-    batch_size = max(1, min(10, int(spec.get("batch_size") or 5)))
+    batch_size = max(1, min(50, int(spec.get("batch_size") or 10)))
     mode = str(spec.get("mode") or "pending")
     if mode not in {"pending", "failed", "dead_letter"}:
         raise ValueError("未知资讯重分析模式")
@@ -252,10 +252,15 @@ class NewsJobs:
         )
 
     def submit_reanalyze(self, spec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        news_config = get_config().news
         normalized = {
             "ids": [int(value) for value in spec.get("ids") or ()],
-            "limit": max(1, min(1000, int(spec.get("limit") or 100))),
-            "batch_size": max(1, min(10, int(spec.get("batch_size") or 5))),
+            "limit": max(1, min(1000, int(
+                spec.get("limit") or news_config.annotation_items_per_run
+            ))),
+            "batch_size": max(1, min(50, int(
+                spec.get("batch_size") or news_config.annotation_batch_size
+            ))),
             "mode": str(spec.get("mode") or "pending"),
         }
         return self.runtime.submit(

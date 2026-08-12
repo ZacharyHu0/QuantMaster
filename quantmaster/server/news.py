@@ -88,8 +88,8 @@ class CrawlRequest(StrictModel):
 
 class ReanalyzeRequest(StrictModel):
     ids: list[int] | None = None
-    limit: int = Field(default=100, ge=1, le=1000)
-    batch_size: int = Field(default=5, ge=1, le=10)
+    limit: int | None = Field(default=None, ge=1, le=1000)
+    batch_size: int | None = Field(default=None, ge=1, le=50)
     mode: Literal["pending", "failed", "dead_letter"] = "pending"
 
     @field_validator("ids")
@@ -369,7 +369,7 @@ def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
         jobs = get_news_jobs()
-        job, created = jobs.submit_reanalyze(value.model_dump())
+        job, created = jobs.submit_reanalyze(value.model_dump(exclude_none=True))
         public = jobs.public(job)
         public["created"] = bool(created)
         public["coalesced"] = bool(job.get("coalesced"))

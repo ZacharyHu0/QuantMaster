@@ -1365,7 +1365,69 @@ def test_annotation_reanalyze_api_enqueues_task(monkeypatch):
     assert response.json()["type"] == "news.reanalyze"
     assert response.json()["links"]["events"].endswith("/events")
     assert captured["spec"] == {
-        "ids": None, "limit": 10, "batch_size": 2, "mode": "pending",
+        "limit": 10, "batch_size": 2, "mode": "pending",
+    }
+
+
+def test_annotation_reanalyze_api_leaves_limits_to_current_settings(monkeypatch):
+    from quantmaster.server import news as news_module
+
+    captured: dict[str, object] = {}
+
+    class FakeJobs:
+        def submit_reanalyze(self, spec):
+            captured["spec"] = spec
+            return ({
+                "id": "job-settings-reanalyze", "type": "news.reanalyze",
+                "status": "queued", "progress": 0, "phase": "等待执行",
+                "detail": "", "links": {},
+            }, True)
+
+        @staticmethod
+        def public(job):
+            return {"domain": "news", **job, "links": {}}
+
+    monkeypatch.setattr(news_module, "get_news_jobs", lambda: FakeJobs())
+    client = TestClient(app)
+    token = _issue_csrf()
+    client.cookies.set("qm_csrf", token)
+    response = client.post(
+        "/api/v1/news/reanalyze", json={"mode": "pending"},
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 202
+    assert captured["spec"] == {"mode": "pending"}
+
+
+def test_news_reanalyze_submission_snapshots_current_annotation_settings(monkeypatch):
+    from types import SimpleNamespace
+
+    from quantmaster.ai.news_jobs import NewsJobs
+
+    class FakeRuntime:
+        def register(self, *_args, **_kwargs):
+            pass
+
+        def submit(self, _task_type, spec, **_kwargs):
+            return ({"id": "job-settings", "spec": spec}, True)
+
+    monkeypatch.setattr(
+        "quantmaster.ai.news_jobs.get_config",
+        lambda: SimpleNamespace(news=SimpleNamespace(
+            annotation_items_per_run=1000,
+            annotation_batch_size=37,
+        )),
+    )
+    monkeypatch.setattr(
+        "quantmaster.ai.news_jobs.NewsStore.max_id", lambda _self: 0,
+    )
+
+    job, created = NewsJobs(FakeRuntime()).submit_reanalyze({"mode": "pending"})
+
+    assert created is True
+    assert job["spec"] == {
+        "ids": [], "limit": 1000, "batch_size": 37, "mode": "pending",
     }
 
 
@@ -1399,7 +1461,7 @@ def test_failed_annotation_reanalyze_preserves_mode_in_task_spec(monkeypatch):
 
     assert response.status_code == 202
     assert calls["spec"] == {
-        "ids": None, "limit": 10, "batch_size": 2, "mode": "failed",
+        "limit": 10, "batch_size": 2, "mode": "failed",
     }
 
 
@@ -1457,6 +1519,7 @@ def test_news_api_csrf_and_ui_contract():
     assert "/static/news.css?rev=" in page
     assert "%%QM_NEWS_" not in page
     chart_source = client.get("/static/news.js").text
+    assert "limit: 100, batch_size: 5" not in chart_source
     news_styles = client.get("/static/news.css").text
     assert "mkChart('news-factor-chart')" in chart_source
     assert "CHART_COLORS.primary" in chart_source
