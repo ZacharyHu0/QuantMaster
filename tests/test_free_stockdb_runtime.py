@@ -326,6 +326,30 @@ def test_managed_update_stops_updater_and_restores_service(tmp_path, monkeypatch
     assert runtime._last_update_date() == "2026-08-07"
 
 
+def test_successful_update_invalidates_stockdb_sdk_clients(monkeypatch) -> None:
+    runtime = FreeStockDBRuntime()
+    invalidated: list[bool] = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source._invalidate_sdk_clients",
+        lambda: invalidated.append(True),
+    )
+    monkeypatch.setattr(
+        "quantmaster.after_close.service.reset_after_close_service", lambda: None,
+    )
+    monkeypatch.setattr(
+        "quantmaster.rotation.etf_research.reset_etf_research_service", lambda: None,
+    )
+    monkeypatch.setattr(runtime, "_record_update", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_emit_update_event", lambda *_args: None)
+
+    assert runtime._finish_success(
+        target="2026-08-07", validation={"warnings": [], "actual_session": "2026-08-07"},
+        code=0, attempt=1, trigger="manual",
+    )
+    assert invalidated == [True]
+
+
 def test_manual_sidecar_update_is_non_blocking_and_coalesces(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     started = threading.Event()

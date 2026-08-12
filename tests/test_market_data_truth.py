@@ -537,6 +537,25 @@ def test_stockdb_daily_without_factor_lineage_is_degraded(monkeypatch):
     assert any("复权因子记录" in issue for issue in quality.issues)
 
 
+def test_stockdb_locally_verified_units_are_not_reported_as_unknown(monkeypatch):
+    frame = _bars(pd.bdate_range("2024-03-01", "2024-03-29"))
+    frame.attrs.update({
+        "unit_status": "verified_local_stockdb_schema_v1",
+        "adjustment_status": "verified",
+    })
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (pd.bdate_range(start, end), "fixture-calendar"),
+    )
+
+    quality = registry._assess_daily_frame(
+        frame, "2024-03-01", "2024-03-29", symbol="600000.SH", source="free-stockdb",
+    )
+
+    assert not any("单位说明" in issue for issue in quality.issues)
+
+
 def test_aware_intraday_query_is_converted_to_shanghai_wall_time():
     assert _compact_time("2024-03-29T01:30:00+00:00", intraday=True) == "20240329093000"
 

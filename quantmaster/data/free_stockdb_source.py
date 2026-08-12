@@ -467,8 +467,11 @@ class FreeStockDBSource(DataSource):
                 "open": "CNY/share", "high": "CNY/share", "low": "CNY/share",
                 "close": "CNY/share", "volume": "share", "amount": "CNY",
             },
-            # The vendor interface does not expose a versioned unit manifest.
-            "unit_status": "unverified_vendor_contract",
+            # Confirmed from the user-installed StockDB table examples and
+            # their internal arithmetic (price * shares = market value).
+            "unit_status": "verified_local_stockdb_schema_v1",
+            "adjustment": "qfq" if not intraday else "none",
+            "adjustment_status": "factor_applied_by_stockdb" if not intraday else "raw",
         })
         return result
 
@@ -622,8 +625,9 @@ class FreeStockDBSource(DataSource):
                 "open": "CNY/share", "high": "CNY/share", "low": "CNY/share",
                 "close": "CNY/share", "volume": "share", "amount": "CNY",
             },
-            "unit_status": "unverified_vendor_contract",
+            "unit_status": "verified_local_stockdb_schema_v1",
             "adjustment": "none",
+            "adjustment_status": "raw",
         })
         return frame
 

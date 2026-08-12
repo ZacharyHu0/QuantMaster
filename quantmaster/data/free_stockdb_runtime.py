@@ -71,6 +71,22 @@ class _RuntimeControl:
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(self.path, timeout=10.0, row_factory=True)
 
+    @staticmethod
+    def _is_locked(exc: sqlite3.OperationalError) -> bool:
+        return "locked" in str(exc).lower() or "busy" in str(exc).lower()
+
+    def _claim_with_retry(self, claim):
+        """Retry only transient SQLite writer contention with a bounded delay."""
+        delay = 0.02
+        for attempt in range(5):
+            try:
+                return claim()
+            except sqlite3.OperationalError as exc:
+                if not self._is_locked(exc) or attempt == 4:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.25)
+
     def write_state(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, ensure_ascii=False, default=str)
         with self._conn() as connection:
@@ -117,23 +133,28 @@ class _RuntimeControl:
         return command_id, True
 
     def claim_command(self) -> dict[str, Any] | None:
-        now = time.time()
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "UPDATE commands SET status='queued',claimed_at=0 "
-                "WHERE status='running' AND claimed_at<?",
-                (now - _OWNER_STALE_SECONDS,),
-            )
-            row = connection.execute(
-                "SELECT * FROM commands WHERE status='queued' ORDER BY created_at LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            connection.execute(
-                "UPDATE commands SET status='running',claimed_at=? WHERE id=?",
-                (now, row["id"]),
-            )
+        def claim():
+            now = time.time()
+            with self._conn() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE commands SET status='queued',claimed_at=0 "
+                    "WHERE status='running' AND claimed_at<?",
+                    (now - _OWNER_STALE_SECONDS,),
+                )
+                row = connection.execute(
+                    "SELECT * FROM commands WHERE status='queued' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                connection.execute(
+                    "UPDATE commands SET status='running',claimed_at=? WHERE id=?",
+                    (now, row["id"]),
+                )
+                return row
+        row = self._claim_with_retry(claim)
+        if row is None:
+            return None
         value = dict(row)
         value["payload"] = json.loads(str(value.pop("payload_json") or "{}"))
         return value
@@ -164,23 +185,28 @@ class _RuntimeControl:
             )
 
     def claim_event(self) -> dict[str, Any] | None:
-        now = time.time()
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "UPDATE events SET status='pending',claimed_at=0 "
-                "WHERE status='processing' AND claimed_at<?",
-                (now - _OWNER_STALE_SECONDS,),
-            )
-            row = connection.execute(
-                "SELECT * FROM events WHERE status='pending' ORDER BY created_at LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            connection.execute(
-                "UPDATE events SET status='processing',claimed_at=? WHERE event_key=?",
-                (now, row["event_key"]),
-            )
+        def claim():
+            now = time.time()
+            with self._conn() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE events SET status='pending',claimed_at=0 "
+                    "WHERE status='processing' AND claimed_at<?",
+                    (now - _OWNER_STALE_SECONDS,),
+                )
+                row = connection.execute(
+                    "SELECT * FROM events WHERE status='pending' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                connection.execute(
+                    "UPDATE events SET status='processing',claimed_at=? WHERE event_key=?",
+                    (now, row["event_key"]),
+                )
+                return row
+        row = self._claim_with_retry(claim)
+        if row is None:
+            return None
         value = dict(row)
         value["payload"] = json.loads(str(value.pop("payload_json") or "{}"))
         return value
@@ -1027,8 +1053,10 @@ class FreeStockDBRuntime:
         # releases.  Do not let a long-lived scan service retain the old client.
         try:
             from quantmaster.after_close.service import reset_after_close_service
+            from quantmaster.data.free_stockdb_source import _invalidate_sdk_clients
             from quantmaster.rotation.etf_research import reset_etf_research_service
 
+            _invalidate_sdk_clients()
             reset_after_close_service()
             reset_etf_research_service()
         except (ImportError, RuntimeError):

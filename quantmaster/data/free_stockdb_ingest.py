@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -70,6 +71,33 @@ _FIELD_UNITS = {
     "name": "text",
 }
 
+# These meanings are evidenced by the locally installed vendor SDK, its table
+# examples, and arithmetic checks in the shipped examples (rather than by
+# projecting a similarly named Tushare field onto StockDB).  They apply to the
+# A-share/ETF K-line tables this adapter reads; futures are deliberately out of
+# scope for this source.
+_FIELD_SEMANTICS = {
+    "open": "CNY per share; raw unless the query explicitly requests fq",
+    "high": "CNY per share; raw unless the query explicitly requests fq",
+    "low": "CNY per share; raw unless the query explicitly requests fq",
+    "close": "CNY per share; raw unless the query explicitly requests fq",
+    "pre_close": "CNY per share; previous session close and adjusted with OHLC",
+    "volume": "shares traded; never adjusted by the StockDB fq transform",
+    "amount": "CNY traded; never adjusted by the StockDB fq transform",
+    "pct_chg": "percent",
+    "amplitude": "percent",
+    "turnover": "percent of float shares",
+    "vol_ratio": "dimensionless ratio",
+    "total_share": "shares outstanding",
+    "float_share": "tradable float shares",
+    "total_mv": "CNY market value",
+    "float_mv": "CNY float market value",
+    "pe_ttm": "dimensionless trailing P/E ratio",
+    "pb": "dimensionless price-to-book ratio",
+    "is_st": "boolean session observation; vendor does not document PIT revision timing",
+    "name": "vendor display name, not a stable security identifier",
+}
+
 
 def _frame_hash(frame: pd.DataFrame) -> str:
     if frame.empty:
@@ -120,6 +148,21 @@ def _atomic_text(path: Path, value: str) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _atomic_frame(path: Path, frame: pd.DataFrame) -> None:
+    """Commit a verified remote fragment without exposing a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        frame.to_parquet(temp, index=True)
+        with temp.open("rb+") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 class StockDBIngestStore:
     """Content-addressed payloads with immutable, small manifest files."""
 
@@ -140,6 +183,70 @@ class StockDBIngestStore:
     @property
     def pins(self) -> Path:
         return self.root / "pins"
+
+    @property
+    def cross_validation(self) -> Path:
+        """Worktree-local durable state for the bounded remote audit lane."""
+        return self.root / "cross-validation"
+
+    @staticmethod
+    def _checkpoint_symbol(symbol: str) -> str:
+        value = re.sub(r"[^A-Za-z0-9._-]+", "_", str(symbol).upper())
+        if not value:
+            raise ValueError("cross-validation checkpoint requires a symbol")
+        return value
+
+    def _cross_validation_item_path(self, request_id: str, symbol: str) -> Path:
+        return self.cross_validation / str(request_id) / "items" / (
+            f"{self._checkpoint_symbol(symbol)}.json"
+        )
+
+    def _cross_validation_frame_path(self, request_id: str, symbol: str) -> Path:
+        return self.cross_validation / str(request_id) / "frames" / (
+            f"{self._checkpoint_symbol(symbol)}.parquet"
+        )
+
+    def cross_validation_item(self, request_id: str, symbol: str) -> dict[str, Any] | None:
+        """Read one completed audit item; malformed state is retried safely."""
+        try:
+            value = json.loads(
+                self._cross_validation_item_path(request_id, symbol).read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def persist_cross_validation_item(
+        self,
+        request_id: str,
+        symbol: str,
+        value: dict[str, Any],
+        *,
+        frame: pd.DataFrame | None = None,
+    ) -> dict[str, Any]:
+        """Atomically upsert one audit item after its identity/time/field checks.
+
+        A verified item owns a small normalized remote fragment.  The manifest
+        is written only after that fragment has been fsync'ed, so a later
+        interrupted batch can reuse completed symbols without another request.
+        """
+        payload = {**value, "request_id": str(request_id), "symbol": str(symbol).upper()}
+        with self._lock:
+            if frame is not None:
+                _atomic_frame(self._cross_validation_frame_path(request_id, symbol), frame)
+                payload["frame"] = self._cross_validation_frame_path(request_id, symbol).name
+            _atomic_text(
+                self._cross_validation_item_path(request_id, symbol),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, default=str),
+            )
+        return payload
+
+    def load_cross_validation_frame(self, request_id: str, symbol: str) -> pd.DataFrame:
+        path = self._cross_validation_frame_path(request_id, symbol)
+        try:
+            return pd.read_parquet(path)
+        except (FileNotFoundError, OSError, ValueError):
+            return pd.DataFrame()
 
     @staticmethod
     def _pin_name(namespace: str, reference_id: str) -> str:
@@ -748,7 +855,13 @@ class StockDBIngestService:
                     latest_total_rows=len(latest),
                     latest_ratio=round(latest_rows / len(latest), 6) if len(latest) else None,
                     missing_reason=missing_reason,
-                    validation=dict(validations.get(column) or {}),
+                    validation={
+                        "semantic": _FIELD_SEMANTICS.get(
+                            column,
+                            "vendor-defined field; no project semantic contract is required",
+                        ),
+                        **dict(validations.get(column) or {}),
+                    },
                 ).to_dict()
             )
         return result
@@ -897,13 +1010,12 @@ class StockDBIngestService:
         }
 
     def _cross_source_validation(self, frame: pd.DataFrame) -> dict[str, Any]:
-        """Validate a small immutable StockDB sample outside any HTTP request.
+        """Validate a StockDB sample, checkpointing each usable remote response.
 
-        A cache hit is preferred for every sample symbol.  Only a worker with a
-        configured token may schedule a remote Tushare call for missing or
-        stale cache evidence.  Network trouble leaves a truthful
-        ``locally_validated`` record; inconsistent successful observations
-        quarantine the generation instead of being repaired per security.
+        Local Tushare cache is always inspected before a remote request.  Each
+        remote response is normalized and range/identity checked before an
+        atomic per-symbol checkpoint is published.  A batch interruption thus
+        keeps earlier verified fragments and retries only missing symbols.
         """
 
         sample = self.cross_validation_sample(frame)
@@ -919,6 +1031,10 @@ class StockDBIngestService:
             "field_checks": {},
             "cache_hits": 0,
             "remote_fetches": 0,
+            "remote_requests_avoided": 0,
+            "completed_items": 0,
+            "reused_items": 0,
+            "item_status": {},
             "reused": False,
         }
         reused = self.store.accepted_cross_validation(sample["content_hash"])
@@ -942,6 +1058,41 @@ class StockDBIngestService:
         from quantmaster.data.tushare_source import TushareSource
 
         start, end = dates[0], dates[-1]
+        # The remote evidence is keyed by the exact requested exchange-date
+        # window, not by a new content hash.  It remains reusable when a
+        # later StockDB ingest needs the same independently observed sessions.
+        request_id = f"dates-{start}-to-{end}"
+
+        def acceptable(symbol: str, observed: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+            if observed is None or observed.empty:
+                return pd.DataFrame(), "empty_response"
+            value = observed.copy()
+            value.index = pd.to_datetime(value.index, errors="coerce").normalize()
+            value = value.loc[~value.index.isna()].sort_index()
+            if value.index.duplicated().any():
+                return pd.DataFrame(), "duplicate_trade_dates"
+            required = {"open", "high", "low", "close", "volume"}
+            missing = sorted(required - set(value.columns))
+            if missing:
+                return pd.DataFrame(), "missing_fields:" + ",".join(missing)
+            expected = pd.DatetimeIndex(pd.to_datetime(dates)).normalize()
+            value = value.loc[value.index.isin(expected)]
+            if len(value) != len(expected):
+                return pd.DataFrame(), "incomplete_trade_dates"
+            numeric = value[list(required)].apply(pd.to_numeric, errors="coerce")
+            if not bool(np.isfinite(numeric).all().all()):
+                return pd.DataFrame(), "nonfinite_required_fields"
+            prices = numeric[["open", "high", "low", "close"]]
+            coherent = (
+                prices.gt(0).all(axis=1)
+                & numeric["volume"].ge(0)
+                & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
+                & numeric["low"].le(prices[["open", "close"]].min(axis=1))
+            )
+            if not bool(coherent.all()):
+                return pd.DataFrame(), "invalid_ohlcv_semantics"
+            value.index.name = "date"
+            return value, ""
 
         def fetch(symbol: str) -> tuple[str, str, pd.DataFrame]:
             source = TushareSource()
@@ -952,25 +1103,66 @@ class StockDBIngestService:
 
         fetched: dict[str, pd.DataFrame] = {}
         failures: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="stockdb-audit") as pool:
-            futures = {pool.submit(fetch, symbol): symbol for symbol in symbols}
+        pending: list[str] = []
+        for symbol in symbols:
+            item = self.store.cross_validation_item(request_id, symbol)
+            if item and item.get("status") == "complete":
+                checkpointed = self.store.load_cross_validation_frame(request_id, symbol)
+                checked, reason = acceptable(symbol, checkpointed)
+                if not checked.empty:
+                    fetched[symbol] = checked
+                    result["reused_items"] += 1
+                    result["remote_requests_avoided"] += 1
+                    result["item_status"][symbol] = "checkpoint"
+                    continue
+                # A corrupt/incomplete checkpoint is never trusted as complete.
+                self.store.persist_cross_validation_item(
+                    request_id, symbol,
+                    {"status": "retry", "reason": f"checkpoint_{reason}"},
+                )
+            pending.append(symbol)
+
+        # At most two independent provider calls run at once.  Completion is
+        # persisted in this loop, rather than after all futures succeed.
+        with ThreadPoolExecutor(
+            max_workers=min(2, max(1, len(pending))),
+            thread_name_prefix="stockdb-audit",
+        ) as pool:
+            futures = {pool.submit(fetch, symbol): symbol for symbol in pending}
             for future in as_completed(futures):
                 symbol = futures[future]
                 try:
                     observed_symbol, origin, remote = future.result()
-                    if remote is None or remote.empty:
-                        raise RuntimeError("Tushare 抽检响应为空")
-                    fetched[observed_symbol] = remote
+                    checked, reason = acceptable(observed_symbol, remote)
+                    if checked.empty:
+                        raise RuntimeError(reason or "Tushare 抽检响应为空")
+                    fetched[observed_symbol] = checked
                     if origin == "cache":
                         result["cache_hits"] += 1
+                        result["remote_requests_avoided"] += 1
                     else:
                         result["remote_fetches"] += 1
+                    self.store.persist_cross_validation_item(
+                        request_id, observed_symbol,
+                        {"status": "complete", "origin": origin, "start": start, "end": end},
+                        frame=checked,
+                    )
+                    result["completed_items"] += 1
+                    result["item_status"][observed_symbol] = origin
                 except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                    failures[symbol] = str(exc)[:240]
+                    reason = str(exc)[:240] or type(exc).__name__
+                    failures[symbol] = reason
+                    self.store.persist_cross_validation_item(
+                        request_id, symbol,
+                        {"status": "retry", "reason": reason, "start": start, "end": end},
+                    )
+                    result["item_status"][symbol] = "retry"
         if failures:
             result["status"] = "locally_validated"
             result["failures"] = failures
-            result["issues"].append(f"{len(failures)} 个抽检证券缺少独立证据")
+            result["issues"].append(
+                f"{len(failures)} 个抽检证券未完成独立证据；已保存其余 {len(fetched)} 项检查点"
+            )
             return result
 
         local = frame.copy()
@@ -984,7 +1176,6 @@ class StockDBIngestService:
         for symbol in symbols:
             left = local.loc[local["symbol"] == symbol].set_index("date").sort_index()
             right = fetched[symbol].copy()
-            right.index = pd.to_datetime(right.index, errors="coerce").normalize()
             joined = left.join(right, how="inner", lsuffix="_stockdb", rsuffix="_tushare")
             if len(joined) != len(dates):
                 mismatches.append(f"{symbol}: 共同抽检交易日不完整")

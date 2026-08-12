@@ -74,6 +74,18 @@ def test_free_stockdb_sdk_supplies_daily_and_minute_bars(monkeypatch) -> None:
     assert client.calls[0]["fq"] == "qfq"
     assert client.calls[1]["frequency"] == "5m"
     assert client.calls[1]["fq"] is None
+    assert daily.attrs["unit_status"] == "verified_local_stockdb_schema_v1"
+    assert daily.attrs["adjustment"] == "qfq"
+
+
+def test_free_stockdb_cross_section_is_raw_with_confirmed_local_units(monkeypatch) -> None:
+    source, _client = _source(monkeypatch)
+
+    frame = source.daily_cross_section(["600519.SH"], "2026-08-05", "2026-08-05")
+
+    assert frame.attrs["unit_status"] == "verified_local_stockdb_schema_v1"
+    assert frame.attrs["adjustment"] == "none"
+    assert frame.attrs["adjustment_status"] == "raw"
 
 
 def test_free_stockdb_native_error_is_normalized_for_source_fallback(monkeypatch) -> None:

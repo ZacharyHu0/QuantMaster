@@ -304,7 +304,9 @@ def _assess_daily_frame(
         invalid_semantics = int((finite & ~semantic).sum())
         if invalid_semantics:
             issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
-    if source.startswith("free-stockdb") and df.attrs.get("unit_status") != "verified":
+    if source.startswith("free-stockdb") and df.attrs.get("unit_status") not in {
+        "verified", "verified_local_stockdb_schema_v1",
+    }:
         issues.append("本地 StockDB 未附带可核验的单位说明，当前按每股价格和人民币金额使用")
     adjustment = "qfq"
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":

@@ -241,6 +241,71 @@ def test_stockdb_cross_validation_reuses_local_tushare_cache_before_network(
     assert evidence["remote_fetches"] == 0
 
 
+def test_stockdb_cross_validation_keeps_completed_remote_items_on_batch_failure(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "fixture-token"
+    dates = pd.bdate_range("2026-07-01", periods=5)
+    frame = pd.concat([
+        pd.DataFrame({
+            "symbol": symbol, "date": dates, "open": price, "high": price + 1,
+            "low": price - 1, "close": price, "volume": 1_000.0, "amount": 10_000.0,
+        })
+        for symbol, price in (("600000.SH", 10.0), ("000001.SZ", 20.0))
+    ], ignore_index=True)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.cached_daily",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def remote(_self, symbol, _start, _end):
+        calls.append(symbol)
+        if symbol == "000001.SZ":
+            raise RuntimeError("tail failure")
+        return frame.loc[frame["symbol"] == symbol].drop(columns="symbol").set_index("date")
+
+    monkeypatch.setattr("quantmaster.data.tushare_source.TushareSource.daily", remote)
+    store = StockDBIngestStore(tmp_path / "ingest")
+    service = StockDBIngestService(source=SimpleNamespace(), store=store)
+
+    first = service._cross_source_validation(frame)
+    request_id = "dates-2026-07-01-to-2026-07-07"
+    assert first["status"] == "locally_validated"
+    assert first["completed_items"] == 1
+    assert store.cross_validation_item(request_id, "600000.SH")["status"] == "complete"
+
+    def finish(_self, symbol, _start, _end):
+        calls.append(symbol)
+        return frame.loc[frame["symbol"] == symbol].drop(columns="symbol").set_index("date")
+
+    monkeypatch.setattr("quantmaster.data.tushare_source.TushareSource.daily", finish)
+    second = service._cross_source_validation(frame)
+    assert second["status"] == "verified"
+    assert second["reused_items"] == 1
+    assert calls.count("600000.SH") == 1
+    assert calls.count("000001.SZ") == 2
+
+
+def test_stockdb_field_contracts_expose_confirmed_local_schema_semantics():
+    frame = pd.DataFrame({
+        "symbol": ["600000.SH"], "date": [pd.Timestamp("2026-08-07")],
+        "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100.0], "amount": [1_000.0],
+    })
+
+    contracts = {
+        item["field"]: item for item in StockDBIngestService.field_contracts(
+            frame, "2026-08-07", asset_class="stock", source="free-stockdb",
+        )
+    }
+
+    assert contracts["amount"]["unit"] == "CNY"
+    assert contracts["volume"]["unit"] == "share"
+    assert contracts["turnover"]["validation"]["semantic"] == "percent of float shares"
+
+
 def test_ingest_prune_uses_publish_time_not_content_id(tmp_path, isolated_config):
     isolated_config.data.free_stockdb_ingest_retain = 10
     store = StockDBIngestStore(tmp_path / "ingest", retain=10)
