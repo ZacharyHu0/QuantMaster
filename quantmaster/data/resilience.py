@@ -20,14 +20,14 @@ import sqlite3
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from importlib import metadata as package_metadata
 from itertools import count
 from pathlib import Path
@@ -140,8 +140,8 @@ def _retry_after_seconds(exc: BaseException, *, now: float | None = None) -> flo
         try:
             target = parsedate_to_datetime(raw)
             if target.tzinfo is None:
-                target = target.replace(tzinfo=timezone.utc)
-            base = datetime.now(timezone.utc).timestamp() if now is None else now
+                target = target.replace(tzinfo=UTC)
+            base = datetime.now(UTC).timestamp() if now is None else now
             return max(0.0, min(target.timestamp() - base, 7 * 86400.0))
         except (TypeError, ValueError, IndexError, OverflowError):
             return None
@@ -574,7 +574,8 @@ class ProviderHealthStore:
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT state,open_until,suppressed,config_revision,failure_class FROM source_health WHERE lane=?",
+                "SELECT state,open_until,suppressed,config_revision,failure_class "
+                "FROM source_health WHERE lane=?",
                 (lane,),
             ).fetchone()
             if row is None or row[0] == "closed":

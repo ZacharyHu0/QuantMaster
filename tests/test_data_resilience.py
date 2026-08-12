@@ -1215,7 +1215,7 @@ def test_http_401_disables_without_retry_and_explains_remediation(isolated_confi
 
     with pytest.raises(httpx.HTTPStatusError):
         provider_call(lane, "unauthorized", unauthorized)
-    with pytest.raises(CircuitOpenError, match="HTTP 401.*令牌"):
+    with pytest.raises(CircuitOpenError, match=r"HTTP 401.*令牌"):
         provider_call(lane, "blocked", unauthorized)
 
     assert calls == 1

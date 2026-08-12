@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-# v1.6.0 adds audited, contract-heavy ingestion and point-in-time orchestration.
+# v1.14.4 adds audited Feishu recovery and runtime diagnostics entry points.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
-BASELINE = 188
+BASELINE = 191
 
 
 def main() -> int:
