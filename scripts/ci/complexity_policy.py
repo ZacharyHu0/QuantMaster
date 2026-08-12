@@ -8,10 +8,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-# Feishu listener ownership is split into independently testable lifecycle steps.
+# Stock research orchestration, web search, and technical scoring now have
+# independently testable lifecycle and decision steps.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
-BASELINE = 177
+BASELINE = 174
 
 
 def main() -> int:

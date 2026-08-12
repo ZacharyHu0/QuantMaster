@@ -117,6 +117,92 @@ def _dimension(key: str, number: str, title: str, *, score: float = 50,
     }
 
 
+def _moving_average_score(
+    *,
+    price: float | None,
+    ma5: float | None,
+    ma10: float | None,
+    ma20: float | None,
+    ma60: float | None,
+    ma120: float | None,
+    ma250: float | None,
+) -> tuple[float, list[str]]:
+    signals: list[str] = []
+    score = 0.0
+    if all(value is not None for value in (ma5, ma10, ma20, ma60)):
+        assert ma5 is not None and ma10 is not None
+        assert ma20 is not None and ma60 is not None
+        if ma5 > ma10 > ma20 > ma60:
+            score += 18
+            signals.append("MA5/10/20/60 呈多头排列。")
+        elif ma5 < ma10 < ma20 < ma60:
+            score -= 18
+            signals.append("MA5/10/20/60 呈空头排列。")
+        else:
+            signals.append("均线交错，趋势尚未形成一致方向。")
+    for long_ma, label in ((ma120, "MA120"), (ma250, "MA250")):
+        if price is not None and long_ma is not None:
+            score += 4 if price >= long_ma else -4
+            signals.append(f"收盘价位于 {label} {'上方' if price >= long_ma else '下方'}。")
+    return score, signals
+
+
+def _momentum_score(
+    *,
+    price: float | None,
+    ma20: float | None,
+    macd_hist: float | None,
+    rsi: float | None,
+    breakout60: bool,
+) -> tuple[float, list[str], list[str]]:
+    score = 0.0
+    signals: list[str] = []
+    risks: list[str] = []
+    if breakout60:
+        score += 5
+        signals.append("收盘价突破此前 60 日高点，仍需量能和后续收盘确认。")
+    if price is not None and ma20 is not None:
+        score += 7 if price >= ma20 else -7
+        signals.append(f"收盘价位于 MA20 {'上方' if price >= ma20 else '下方'}。")
+    if macd_hist is not None:
+        score += 7 if macd_hist > 0 else -7
+        signals.append(f"MACD 柱体为{'正' if macd_hist > 0 else '负'}。")
+    if rsi is not None:
+        if rsi >= 75:
+            score -= 6
+            risks.append("RSI 处于明显超买区，短线回撤敏感度较高。")
+        elif rsi <= 25:
+            score += 2
+            risks.append("RSI 处于明显超卖区，但超卖不等于趋势已经反转。")
+        elif 45 <= rsi <= 65:
+            score += 4
+    return score, signals, risks
+
+
+def _volume_position_score(
+    close: pd.Series,
+    *,
+    volume_ratio: float | None,
+    position20: float | None,
+) -> tuple[float, list[str], list[str]]:
+    score = 0.0
+    signals: list[str] = []
+    risks: list[str] = []
+    if volume_ratio is not None:
+        daily_return = _number(close.pct_change(fill_method=None).iloc[-1]) or 0
+        if volume_ratio >= 1.2:
+            score += 4 if daily_return > 0 else -4
+            signals.append(f"近 5 日均量为 20 日均量的 {volume_ratio:.2f} 倍。")
+        elif volume_ratio < 0.75:
+            signals.append("近期量能偏弱，价格信号的确认度有限。")
+    if position20 is not None:
+        if position20 >= 85:
+            risks.append("价格靠近 20 日区间上沿，追高需等待放量确认。")
+        elif position20 <= 15:
+            risks.append("价格靠近 20 日区间下沿，需防范支撑失效。")
+    return score, signals, risks
+
+
 def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
     """计算均线、MACD、RSI、KDJ、BOLL、ATR 和量价关系。"""
     if bars is None or bars.empty or "close" not in bars:
@@ -200,54 +286,30 @@ def analyze_technical(bars: pd.DataFrame) -> dict[str, Any]:
     prior_high60 = _number(high.shift(1).tail(60).max(), 4) if len(high) > 1 else None
     breakout60 = bool(price is not None and prior_high60 is not None and price > prior_high60)
 
-    signals: list[str] = []
-    risks: list[str] = []
-    score = 50.0
-    if None not in (ma5, ma10, ma20, ma60):
-        if ma5 > ma10 > ma20 > ma60:
-            score += 18
-            signals.append("MA5/10/20/60 呈多头排列。")
-        elif ma5 < ma10 < ma20 < ma60:
-            score -= 18
-            signals.append("MA5/10/20/60 呈空头排列。")
-        else:
-            signals.append("均线交错，趋势尚未形成一致方向。")
-    if None not in (price, ma120):
-        score += 4 if price >= ma120 else -4
-        signals.append(f"收盘价位于 MA120 {'上方' if price >= ma120 else '下方'}。")
-    if None not in (price, ma250):
-        score += 4 if price >= ma250 else -4
-        signals.append(f"收盘价位于 MA250 {'上方' if price >= ma250 else '下方'}。")
-    if breakout60:
-        score += 5
-        signals.append("收盘价突破此前 60 日高点，仍需量能和后续收盘确认。")
-    if price is not None and ma20 is not None:
-        score += 7 if price >= ma20 else -7
-        signals.append(f"收盘价位于 MA20 {'上方' if price >= ma20 else '下方'}。")
-    if macd_hist is not None:
-        score += 7 if macd_hist > 0 else -7
-        signals.append(f"MACD 柱体为{'正' if macd_hist > 0 else '负'}。")
-    if rsi is not None:
-        if rsi >= 75:
-            score -= 6
-            risks.append("RSI 处于明显超买区，短线回撤敏感度较高。")
-        elif rsi <= 25:
-            score += 2
-            risks.append("RSI 处于明显超卖区，但超卖不等于趋势已经反转。")
-        elif 45 <= rsi <= 65:
-            score += 4
-    if volume_ratio is not None:
-        daily_return = _number(close.pct_change(fill_method=None).iloc[-1]) or 0
-        if volume_ratio >= 1.2:
-            score += 4 if daily_return > 0 else -4
-            signals.append(f"近 5 日均量为 20 日均量的 {volume_ratio:.2f} 倍。")
-        elif volume_ratio < 0.75:
-            signals.append("近期量能偏弱，价格信号的确认度有限。")
-    if position20 is not None:
-        if position20 >= 85:
-            risks.append("价格靠近 20 日区间上沿，追高需等待放量确认。")
-        elif position20 <= 15:
-            risks.append("价格靠近 20 日区间下沿，需防范支撑失效。")
+    moving_score, moving_signals = _moving_average_score(
+        price=price,
+        ma5=ma5,
+        ma10=ma10,
+        ma20=ma20,
+        ma60=ma60,
+        ma120=ma120,
+        ma250=ma250,
+    )
+    momentum_score, momentum_signals, momentum_risks = _momentum_score(
+        price=price,
+        ma20=ma20,
+        macd_hist=macd_hist,
+        rsi=rsi,
+        breakout60=breakout60,
+    )
+    volume_score, volume_signals, position_risks = _volume_position_score(
+        close,
+        volume_ratio=volume_ratio,
+        position20=position20,
+    )
+    score = 50.0 + moving_score + momentum_score + volume_score
+    signals = [*moving_signals, *momentum_signals, *volume_signals]
+    risks = [*momentum_risks, *position_risks]
 
     trend = "震荡"
     if None not in (ma5, ma10, ma20) and ma5 > ma10 > ma20:

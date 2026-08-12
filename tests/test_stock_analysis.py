@@ -12,6 +12,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+import quantmaster.analysis.stock as stock_analysis
+import quantmaster.analysis.stock_research as stock_research
 from quantmaster.ai.llm import LLMClient, LLMError
 from quantmaster.analysis.stock import StockAnalysisService, analyze_technical
 from quantmaster.analysis.stock_jobs import StockAnalysisJobs
@@ -151,6 +153,44 @@ def test_technical_analysis_has_full_indicator_set():
     assert {"MA120 / MA250", "20 / 60 日涨跌", "60 日突破"}.issubset(labels)
     assert 0 <= result["score"] <= 100
     assert result["as_of"]
+
+
+def test_technical_score_helpers_preserve_signal_and_risk_branches():
+    moving_score, moving_signals = stock_analysis._moving_average_score(
+        price=120.0,
+        ma5=115.0,
+        ma10=110.0,
+        ma20=105.0,
+        ma60=100.0,
+        ma120=90.0,
+        ma250=80.0,
+    )
+    momentum_score, momentum_signals, momentum_risks = stock_analysis._momentum_score(
+        price=120.0,
+        ma20=105.0,
+        macd_hist=1.0,
+        rsi=80.0,
+        breakout60=True,
+    )
+    close = pd.Series([100.0, 102.0])
+    volume_score, volume_signals, position_risks = stock_analysis._volume_position_score(
+        close,
+        volume_ratio=1.3,
+        position20=90.0,
+    )
+
+    assert moving_score == 26
+    assert moving_signals == [
+        "MA5/10/20/60 呈多头排列。",
+        "收盘价位于 MA120 上方。",
+        "收盘价位于 MA250 上方。",
+    ]
+    assert momentum_score == 13
+    assert "收盘价突破此前 60 日高点" in momentum_signals[0]
+    assert momentum_risks == ["RSI 处于明显超买区，短线回撤敏感度较高。"]
+    assert volume_score == 4
+    assert "1.30 倍" in volume_signals[0]
+    assert position_risks == ["价格靠近 20 日区间上沿，追高需等待放量确认。"]
 
 
 def test_stock_analysis_service_generates_six_dimensions_and_progress():
@@ -1541,6 +1581,33 @@ def test_engine_marks_cached_unsupported_web_search_as_optional_degradation():
     assert any(kind == "source_warning" and payload["source"] == "web_search" for kind, payload in events)
 
 
+def test_engine_counts_recoverable_search_failure_and_continues_queries():
+    class OneFailureLLM(FakeResearchLLM):
+        def web_search(self, query, **kwargs):
+            self.search_calls += 1
+            if self.search_calls == 1:
+                raise LLMError("搜索网关暂时不可用", retryable=True)
+            return super().web_search(query, **kwargs)
+
+    service = build_service()
+    service.deep_loader = FakeDeepLoader()
+    llm = OneFailureLLM()
+    service.llm_factory = lambda: llm
+
+    report = service.analyze_v2("600519", mode="quick")
+
+    search = report["research"]["search"]
+    assert search == {
+        "available": True,
+        "rounds": 3,
+        "queries": 3,
+        "results": 2,
+        "failures": 1,
+        "reason": "ok",
+    }
+    assert any("第 1 轮联网搜索失败" in warning for warning in report["warnings"])
+
+
 def test_feishu_report_splits_every_evidence_under_28kb():
     service = build_service()
     report = service.analyze_v2("600519", mode="quick")
@@ -1739,6 +1806,23 @@ def test_deadline_returns_completed_with_errors_and_rule_dimensions():
     assert report["research"]["completion_status"] == "completed_with_errors"
     assert len(report["dimensions"]) == 6
     assert any("截止时间" in warning for warning in report["warnings"])
+
+
+def test_research_runtime_prioritizes_cancellation_and_marks_deadline(monkeypatch):
+    runtime = stock_research._ResearchRuntime(
+        clock=stock_research._ResearchClock(started=100.0, deadline_seconds=5.0),
+        warnings=[],
+        ledger=EvidenceLedger(),
+    )
+    monkeypatch.setattr(stock_research.time, "monotonic", lambda: 106.0)
+
+    with pytest.raises(InterruptedError, match="已取消"):
+        runtime.ensure_active(lambda: True)
+    assert runtime.deadline_reached is False
+
+    with pytest.raises(TimeoutError, match="达到 5 秒截止时间"):
+        runtime.ensure_active(None)
+    assert runtime.deadline_reached is True
 
 
 def test_deadline_stops_waiting_for_uncooperative_dimension_llm():
