@@ -742,10 +742,35 @@ const runtimeInfo = (() => {
     const storage = runtime.storage || {};
     const scheduler = runtime.scheduler || {};
     const stockdb = runtime.free_stockdb || {};
+    const storageParts = [storage.status || 'unknown'];
+    if (storage.purpose) storageParts.push(storage.purpose);
+    if (storage.instance) storageParts.push(storage.instance);
+    if (storage.access) storageParts.push(storage.access);
+    if (storage.display_path) storageParts.push(storage.display_path);
+    const storageFacts = [];
+    const storageBytes = value => {
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount < 0) return '—';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      const power = Math.min(units.length - 1, Math.floor(Math.log(Math.max(1, amount)) / Math.log(1024)));
+      return `${(amount / (1024 ** power)).toFixed(power > 1 ? 1 : 0)} ${units[power]}`;
+    };
+    if (storage.free_bytes != null) storageFacts.push(`剩余 ${storageBytes(storage.free_bytes)}`);
+    if (storage.estimated_bytes != null) storageFacts.push(`预计 ${storageBytes(storage.estimated_bytes)}`);
+    if (storage.database) storageFacts.push(storage.database);
+    if (storage.journal_mode) storageFacts.push(String(storage.journal_mode).toUpperCase());
+    if (storage.wal_present != null) storageFacts.push(`WAL ${storage.wal_present ? '存在' : '无'}`);
+    if (storage.active_writers != null) storageFacts.push(`写任务 ${storage.active_writers}`);
+    if (storage.last_success_at) storageFacts.push(`最近成功 ${storage.last_success_at}`);
+    if (storage.last_error) storageFacts.push(`最近错误 ${storage.last_error}`);
+    if (storage.affected_tasks != null) storageFacts.push(`受影响任务 ${storage.affected_tasks}`);
+    if (storage.diagnostic_code) storageFacts.push(`诊断 ${storage.diagnostic_code}`);
+    const storageLevel = !readiness.storage_ready || storage.status === 'error'
+      ? 'error' : storage.diagnostic_code || storage.status === 'degraded' ? 'warning' : 'success';
     const values = [
       ['web', 'Web', `${web.host || '127.0.0.1'}:${web.port || '—'} · PID ${web.pid || '—'} · generation ${web.generation || '0'}`, readiness.web_bound ? 'success' : 'error', web.version || ''],
       ['supervisor', 'Supervisor', `${supervisor.status || 'unknown'}${supervisor.worker_pid ? ` · worker PID ${supervisor.worker_pid}` : ''}`, supervisor.available ? 'success' : 'warning', supervisor.reason || ''],
-      ['storage', '本地存储', `${storage.status || 'unknown'} · ${storage.data_root || '—'}`, readiness.storage_ready ? 'success' : 'error', readiness.storage_ready ? '核心存储可用' : '核心存储不可用，Web 操作已阻断。'],
+      ['storage', '本地存储', storageParts.join(' · '), storageLevel, storageFacts.join(' · ') || (readiness.storage_ready ? '核心存储可用' : '核心存储不可用，Web 操作已阻断。')],
       ['free-stockdb', 'free-stockdb', `${stockdb.state || stockdb.status || 'unknown'}${stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : ''}`, ['running', 'ready'].includes(stockdb.state || stockdb.status) ? 'success' : 'warning', stockdb.message || '可选本地数据服务'],
       ['scheduler', 'Scheduler', `${scheduler.status || 'unknown'} · ${scheduler.managed_by || 'runtime-worker'}`, scheduler.status === 'running' ? 'success' : 'warning', '后台调度不影响核心 Web 就绪。'],
     ];

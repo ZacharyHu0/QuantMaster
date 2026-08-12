@@ -780,8 +780,11 @@
     target.innerHTML = jobs.map(job => {
       const device = job.telemetry?.effective_device || job.preflight?.compute?.effective_device || 'cpu';
       const resource = job.resource_class || job.preflight?.resource_class || 'cpu';
+      const checkpoint = job.checkpoint || job.result?.checkpoint || {};
+      const partitionText = checkpoint.persisted != null
+        ? ` · 已持久化 ${checkpoint.persisted}${checkpoint.total != null ? `/${checkpoint.total}` : ''}` : '';
       return `<button type="button" class="lab-job-row ${h(job.status)}" data-job-detail="${h(job.id)}">
-      <span><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(resource.toUpperCase())} · ${h(device)} · ${h(jobPhase(job))} · ${h(formatDate(job.created_at))}</small></span>
+      <span><b>${h(kindLabel[job.kind] || job.kind)}</b><small>${h(resource.toUpperCase())} · ${h(device)} · ${h(jobPhase(job))}${h(partitionText)} · ${h(formatDate(job.created_at))}</small></span>
       <strong>${job.progress || 0}%</strong></button>`;
     }).join('');
   }
@@ -810,7 +813,11 @@
     tray.hidden = !active;
     if (!active) return;
     document.getElementById('lab-task-title').textContent = kindLabel[active.kind] || active.kind;
-    document.getElementById('lab-task-phase').textContent = jobPhase(active);
+    const checkpoint = active.checkpoint || active.result?.checkpoint || {};
+    const partitionText = checkpoint.persisted != null
+      ? ` · 已持久化 ${checkpoint.persisted}${checkpoint.total != null ? `/${checkpoint.total}` : ''}` : '';
+    const retryText = checkpoint.safe_retry_point ? ` · 可从 ${checkpoint.safe_retry_point} 重试` : '';
+    document.getElementById('lab-task-phase').textContent = `${jobPhase(active)}${partitionText}${retryText}`;
     document.getElementById('lab-task-percent').textContent = `${active.progress || 0}%`;
     document.getElementById('lab-task-fill').style.setProperty('--progress', (active.progress || 0) / 100);
     document.getElementById('lab-task-open').dataset.jobDetail = active.id;
@@ -916,6 +923,31 @@
     if (result.sealed_metrics?.net_information_ratio != null) resultItems.push(['密封净 IR', number(result.sealed_metrics.net_information_ratio, 3)]);
     if (result.metrics?.correlation != null) resultItems.push(['相关性', number(result.metrics.correlation, 4)]);
     if (result.metrics?.mse != null) resultItems.push(['验证 MSE', number(result.metrics.mse, 6)]);
+    const checkpoint = result.checkpoint && typeof result.checkpoint === 'object'
+      ? result.checkpoint : {};
+    const storage = result.storage && typeof result.storage === 'object'
+      ? result.storage : (job.preflight?.storage || {});
+    const partitions = result.partitions && typeof result.partitions === 'object'
+      ? result.partitions : {};
+    const persistedRaw = result.persisted_partitions ?? partitions.persisted;
+    const partitionTotalRaw = result.total_partitions ?? partitions.total;
+    const persisted = persistedRaw == null ? NaN : Number(persistedRaw);
+    const partitionTotal = partitionTotalRaw == null ? NaN : Number(partitionTotalRaw);
+    if (result.stage || checkpoint.stage) resultItems.push(['持久化阶段', result.stage || checkpoint.stage]);
+    if (Number.isFinite(persisted)) {
+      resultItems.push(['已持久化分区', Number.isFinite(partitionTotal) ? `${persisted} / ${partitionTotal}` : `${persisted}`]);
+    }
+    if (result.safe_retry_point || checkpoint.safe_retry_point) {
+      resultItems.push(['安全重试点', result.safe_retry_point || checkpoint.safe_retry_point]);
+    }
+    if (storage.purpose) resultItems.push(['存储用途', storage.purpose]);
+    if (storage.instance) resultItems.push(['运行实例', storage.instance]);
+    if (storage.access) resultItems.push(['读写模式', storage.access]);
+    if (storage.display_path) resultItems.push(['存储位置', storage.display_path]);
+    const estimatedBytes = Number(storage.estimated_bytes ?? result.estimated_bytes);
+    const freeBytes = Number(storage.free_bytes ?? result.free_bytes);
+    if (Number.isFinite(estimatedBytes)) resultItems.push(['预计峰值空间', formatBytes(estimatedBytes)]);
+    if (Number.isFinite(freeBytes)) resultItems.push(['卷剩余空间', formatBytes(freeBytes)]);
     const telemetry = job.telemetry || result.telemetry || {};
     if (telemetry.effective_device) resultItems.push(['实际设备', telemetry.effective_device]);
     if (telemetry.gpu_name) resultItems.push(['GPU', telemetry.gpu_name]);
@@ -947,6 +979,19 @@
     }).join('')}</ol>`;
   }
 
+  function latestCheckpoint(job) {
+    if (job?.checkpoint && typeof job.checkpoint === 'object') return job.checkpoint;
+    if (job?.result?.checkpoint && typeof job.result.checkpoint === 'object') return job.result.checkpoint;
+    const event = [...state.jobEvents].reverse().find(item => item.type === 'partition_checkpoint');
+    if (!event) return {};
+    return {
+      stage: event.stage || event.metadata?.stage || event.phase,
+      persisted: event.persisted ?? event.metadata?.persisted,
+      total: event.total ?? event.metadata?.total,
+      safe_retry_point: event.safe_retry_point || event.metadata?.safe_retry_point,
+    };
+  }
+
   function renderJobDetail() {
     const body = document.getElementById('lab-job-drawer-body');
     const job = state.jobDetail;
@@ -962,6 +1007,14 @@
     document.getElementById('lab-job-drawer-title').textContent = title;
     document.getElementById('lab-job-drawer-kicker').textContent = `RESEARCH JOB · ${String(job.id).slice(0, 8).toUpperCase()}`;
     const errorCopy = job.status === 'failed' ? jobErrorCopy(job) : null;
+    const checkpoint = latestCheckpoint(job);
+    const checkpointItems = [];
+    if (checkpoint.stage) checkpointItems.push(['当前持久化阶段', checkpoint.stage]);
+    if (checkpoint.persisted != null) checkpointItems.push([
+      '已持久化分区', checkpoint.total != null
+        ? `${checkpoint.persisted} / ${checkpoint.total}` : String(checkpoint.persisted),
+    ]);
+    if (checkpoint.safe_retry_point) checkpointItems.push(['安全重试点', checkpoint.safe_retry_point]);
     body.innerHTML = `<div class="lab-job-summary">
         <div class="lab-job-summary-row"><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span><strong>${progress}%</strong></div>
         <div class="lab-job-detail-progress"><i style="--progress:${progress / 100}"></i></div>
@@ -974,6 +1027,7 @@
         ${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">安全停止</button>` : ''}
         ${terminalJobStatuses.has(job.status) ? `<button class="primary" type="button" data-retry-job="${h(job.id)}">按原参数重跑</button>` : ''}
       </div>
+      ${checkpointItems.length ? `<section class="lab-job-detail-section"><div class="lab-job-section-head"><span>CHECKPOINT</span><h4>持久化进度</h4></div><dl class="lab-job-result-grid">${checkpointItems.map(item => `<div><dt>${h(item[0])}</dt><dd>${h(item[1])}</dd></div>`).join('')}</dl></section>` : ''}
       <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>INPUT</span><h4>研究参数</h4></div>${renderJobParams(job.params)}</section>
       <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>OUTPUT</span><h4>任务产出</h4></div>${renderJobResult(job)}</section>
       <section class="lab-job-detail-section"><div class="lab-job-section-head"><span>STAGES · ${state.jobEvents.length}</span><h4>执行时间线</h4></div>${renderJobTimeline(state.jobEvents)}</section>

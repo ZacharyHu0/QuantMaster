@@ -218,6 +218,14 @@ class TestBasics:
         assert "secret-token" not in str(payload)
         assert "错误码" in (client.get("/static/app.js").text)
         assert "syncRuntime(data.runtime)" in (client.get("/static/app.js").text)
+        app_script = client.get("/static/app.js").text
+        assert "storage.purpose" in app_script
+        assert "storage.active_writers" in app_script
+        assert "storage.diagnostic_code" in app_script
+        lab_script = client.get("/static/lab.js").text
+        assert "已持久化分区" in lab_script
+        assert "安全重试点" in lab_script
+        assert "预计峰值空间" in lab_script
 
     def test_local_boundary_csrf_and_security_headers(self):
         anonymous = TestClient(app)
