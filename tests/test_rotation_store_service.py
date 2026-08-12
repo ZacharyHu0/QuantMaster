@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,8 +20,10 @@ from quantmaster.rotation.service import (
 from quantmaster.rotation.store import (
     RotationIntegrityError,
     RotationStore,
+    _canonical_metadata_value,
 )
 from quantmaster.runtime.jobs import JobOutcome, UnifiedJobStore
+from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 
 
@@ -212,6 +215,91 @@ def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp
     assert store.runtime_state("scheduled_close") == "2026-07-30"
 
 
+def test_metadata_canonicalization_is_stable_across_nested_scalar_types():
+    value = {
+        "sequence": np.array([np.int64(2), np.nan]),
+        "set": {"b", "a"},
+        "timestamp": pd.Timestamp("2026-08-09T06:59:00+00:00"),
+        "real": np.float64(0.1),
+        "flag": np.bool_(True),
+    }
+
+    assert _canonical_metadata_value(value) == {
+        "flag": True,
+        "real": "0.10000000000000001",
+        "sequence": ["2", None],
+        "set": ["a", "b"],
+        "timestamp": "2026-08-09T06:59:00+00:00",
+    }
+
+
+def test_snapshot_rejects_unidentified_item_before_writing_artifact(tmp_path, monkeypatch):
+    store = RotationStore(tmp_path / "rotation")
+    artifact_writes = []
+    monkeypatch.setattr(
+        store.derived,
+        "put_json",
+        lambda *_args, **_kwargs: artifact_writes.append(True) or {"artifact_id": "unused"},
+    )
+
+    with pytest.raises(RotationIntegrityError, match="themes 快照列表存在无标识项目"):
+        store.save_snapshots({
+            "themes": {
+                "meta": {"snapshot_id": "invalid"},
+                "data": {"items": [{"name": "缺少代码"}]},
+            }
+        })
+
+    assert artifact_writes == []
+    assert store.snapshot("themes") is None
+
+
+def test_snapshot_item_filters_keep_l1_selection_and_expose_corrupt_index(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    items = [
+        {"code": "801010.SI", "name": "农林牧渔", "level": "L1"},
+        {"code": "801081.SI", "name": "半导体", "level": "L2"},
+        {"code": "801082.SI", "name": "其他电子", "level": "L2"},
+    ]
+    store.save_snapshots({
+        "industries": {
+            "meta": {"snapshot_id": "filters"},
+            "data": {"items": items},
+        }
+    })
+
+    header, selected, empty_page = store.snapshot_items_page(
+        "industries", allowed_keys=set(), page_size=999,
+    )
+    assert header is not None
+    assert selected == []
+    assert empty_page == {"page": 1, "page_size": 999, "total": 0, "pages": 1}
+
+    _header, selected, page = store.snapshot_items_page(
+        "industries",
+        allowed_keys={"801081.si"},
+        include_l1=True,
+        page_size=10,
+    )
+    assert [item["code"] for item in selected] == ["801010.SI", "801081.SI"]
+    assert page == {
+        "page": 1,
+        "page_size": 10,
+        "total": 2,
+        "pages": 1,
+        "has_previous": False,
+        "has_next": False,
+    }
+
+    with connect_sqlite(store.cache_path, policy="cache") as connection:
+        connection.execute(
+            "UPDATE snapshot_items SET payload_json='{' "
+            "WHERE kind='industries' AND item_key='801081.SI'"
+        )
+    with pytest.raises(RotationIntegrityError, match="industries 列表索引不是有效 JSON"):
+        store.snapshot_items_page("industries", allowed_keys={"801081.SI"})
+
+
 def test_etf_metadata_history_is_idempotent_and_rejects_identity_conflicts(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     frame = pd.DataFrame(
@@ -269,6 +357,53 @@ def test_etf_metadata_history_file_and_manifest_are_tamper_evident(tmp_path):
 
     with pytest.raises(RotationIntegrityError, match="manifest 哈希不匹配"):
         clean.etf_metadata_history()
+
+
+def test_etf_metadata_history_rejects_resigned_contract_and_observation_identity(tmp_path):
+    frame = pd.DataFrame([{
+        "symbol": "510300.SH",
+        "name": "沪深300ETF",
+        "observed_at": "2026-08-09T06:59:00+00:00",
+    }])
+    obsolete = RotationStore(tmp_path / "obsolete")
+    obsolete.save_etf_metadata(frame)
+    manifest = json.loads(
+        obsolete.etf_metadata_history_manifest_path.read_text(encoding="utf-8")
+    )
+    manifest["artifact"] = "wrong_artifact"
+    manifest.pop("manifest_sha256")
+    manifest["manifest_sha256"] = hashlib.sha256(
+        strict_json_dumps(manifest, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    obsolete.etf_metadata_history_manifest_path.write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(RotationIntegrityError, match="manifest 契约已淘汰或类型错误"):
+        obsolete.etf_metadata_history()
+
+    tampered = RotationStore(tmp_path / "tampered")
+    tampered.save_etf_metadata(frame)
+    history = pd.read_parquet(tampered.etf_metadata_history_path)
+    history.loc[0, "observation_id"] = "forged-observation"
+    history.to_parquet(tampered.etf_metadata_history_path, index=False)
+    manifest = json.loads(
+        tampered.etf_metadata_history_manifest_path.read_text(encoding="utf-8")
+    )
+    manifest["file_sha256"] = hashlib.sha256(
+        tampered.etf_metadata_history_path.read_bytes()
+    ).hexdigest()
+    manifest["logical_sha256"] = tampered._history_logical_hash(history)
+    manifest.pop("manifest_sha256")
+    manifest["manifest_sha256"] = hashlib.sha256(
+        strict_json_dumps(manifest, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    tampered.etf_metadata_history_manifest_path.write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(RotationIntegrityError, match="观察身份或内容哈希不匹配"):
+        tampered.etf_metadata_history()
 
 
 def test_legacy_etf_metadata_history_without_manifest_fails_closed(tmp_path):

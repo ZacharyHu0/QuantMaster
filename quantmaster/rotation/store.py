@@ -14,6 +14,8 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import singledispatch
 from io import BufferedRandom
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,23 @@ _ETF_METADATA_DERIVED_COLUMNS = frozenset(
     {"observation_id", "observation_content_sha256", "observation_integrity"}
 )
 _ETF_METADATA_LOCK = threading.RLock()
+_SNAPSHOT_WINDOWS = (1, 3, 5, 20)
+_SNAPSHOT_ITEM_COLUMNS = (
+    "kind,snapshot_id,item_key,position,name,level,stage,grade,category,benchmark,"
+    "primary_industry_name,score_1,change_1,excess_1,amount_1,advance_1,score_3,"
+    "change_3,excess_3,amount_3,advance_3,score_5,change_5,excess_5,amount_5,"
+    "advance_5,score_20,change_20,excess_20,amount_20,advance_20,grade_1,grade_3,"
+    "grade_5,grade_20,focus_1,focus_3,focus_5,focus_20,coverage,flow_1,flow_3,"
+    "flow_5,flow_20,daily_flow,flow,streak,payload_json"
+)
+
+
+@dataclass
+class _SnapshotWriteBatch:
+    headers: list[tuple[Any, ...]]
+    items: list[tuple[Any, ...]]
+    details: list[tuple[Any, ...]]
+    artifacts: list[tuple[str, str, str, str]]
 
 
 class RotationIntegrityError(RuntimeError):
@@ -121,60 +140,99 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+@singledispatch
 def _canonical_metadata_value(value: Any) -> Any:
-    if value is None:
+    """Return one stable JSON value for an otherwise unsupported scalar."""
+    converted = _optional_metadata_conversion(value, "item")
+    if converted is not _UNCONVERTED and converted is not value:
+        return _canonical_metadata_value(converted)
+    if not isinstance(value, (str, bytes)):
+        converted = _optional_metadata_conversion(value, "tolist")
+        if converted is not _UNCONVERTED and converted is not value:
+            return _canonical_metadata_value(converted)
+    if _metadata_value_is_missing(value):
         return None
-    if isinstance(value, dict):
-        return {
-            str(key): _canonical_metadata_value(item)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        }
-    if isinstance(value, (set, frozenset)):
-        return sorted(
-            (_canonical_metadata_value(item) for item in value),
-            key=lambda item: strict_json_dumps(item, sort_keys=True),
-        )
-    if isinstance(value, (list, tuple)):
-        return [_canonical_metadata_value(item) for item in value]
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if hasattr(value, "item"):
-        try:
-            value = value.item()
-        except (TypeError, ValueError):
-            pass
-    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
-        try:
-            converted = value.tolist()
-        except (TypeError, ValueError):
-            pass
-        else:
-            if converted is not value:
-                return _canonical_metadata_value(converted)
-    if isinstance(value, bool):
+    if isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, numbers.Integral):
-        return str(int(value))
-    if isinstance(value, numbers.Real):
-        try:
-            if pd.isna(value):
-                return None
-            return format(float(value), ".17g")
-        except (TypeError, ValueError, OverflowError):
-            return str(value)
+    return _canonical_metadata_fallback(value)
+
+
+@_canonical_metadata_value.register(type(None))
+def _canonical_none(_value: None) -> None:
+    return None
+
+
+@_canonical_metadata_value.register(dict)
+def _canonical_mapping(value: dict[Any, Any]) -> dict[str, Any]:
+    return {
+        str(key): _canonical_metadata_value(item)
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+    }
+
+
+@_canonical_metadata_value.register(set)
+@_canonical_metadata_value.register(frozenset)
+def _canonical_set(value: set[Any] | frozenset[Any]) -> list[Any]:
+    return sorted(
+        (_canonical_metadata_value(item) for item in value),
+        key=lambda item: strict_json_dumps(item, sort_keys=True),
+    )
+
+
+@_canonical_metadata_value.register(list)
+@_canonical_metadata_value.register(tuple)
+def _canonical_sequence(value: list[Any] | tuple[Any, ...]) -> list[Any]:
+    return [_canonical_metadata_value(item) for item in value]
+
+
+@_canonical_metadata_value.register(pd.Timestamp)
+def _canonical_timestamp(value: pd.Timestamp) -> str:
+    return value.isoformat()
+
+
+@_canonical_metadata_value.register(bool)
+def _canonical_bool(value: bool) -> bool:
+    return value
+
+
+@_canonical_metadata_value.register(numbers.Integral)
+def _canonical_integral(value: numbers.Integral) -> str:
+    return str(int(value))
+
+
+@_canonical_metadata_value.register(numbers.Real)
+def _canonical_real(value: numbers.Real) -> str | None:
     try:
         if pd.isna(value):
             return None
+        return format(float(value), ".17g")
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
+
+
+_UNCONVERTED = object()
+
+
+def _optional_metadata_conversion(value: Any, method: str) -> Any:
+    conversion = getattr(value, method, None)
+    if conversion is None:
+        return _UNCONVERTED
+    try:
+        return conversion()
     except (TypeError, ValueError):
-        pass
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    if hasattr(value, "isoformat"):
-        try:
-            return value.isoformat()
-        except (TypeError, ValueError):
-            pass
-    return str(value)
+        return _UNCONVERTED
+
+
+def _metadata_value_is_missing(value: Any) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _canonical_metadata_fallback(value: Any) -> Any:
+    converted = _optional_metadata_conversion(value, "isoformat")
+    return str(value) if converted is _UNCONVERTED else converted
 
 
 def _metadata_content_hash(row: dict[str, Any]) -> str:
@@ -197,6 +255,197 @@ def _metadata_observation_id(symbol: str, observed_at: str) -> str:
             sort_keys=True,
         )
     )
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_focus_score(
+    change: float | None,
+    excess: float | None,
+    amount: float | None,
+    advance: float | None,
+    grade: str,
+) -> int:
+    return sum((
+        change is not None and change > 0,
+        excess is not None and excess > 0,
+        advance is not None and advance >= 0.5,
+        amount is not None and amount > 0,
+        grade in {"A", "B"},
+    ))
+
+
+def _snapshot_window_fields(item: dict[str, Any]) -> tuple[list[Any], list[str], list[int]]:
+    signals = item.get("signals") if isinstance(item.get("signals"), dict) else {}
+    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
+    values: list[Any] = []
+    grades: list[str] = []
+    focus: list[int] = []
+    for window in _SNAPSHOT_WINDOWS:
+        signal = signals.get(str(window))
+        score = scores.get(str(window))
+        signal = signal if isinstance(signal, dict) else {}
+        score = score if isinstance(score, dict) else {}
+        change = _optional_number(signal.get("rotation_change_pp"))
+        excess = _optional_number(signal.get("excess_return"))
+        amount = _optional_number(signal.get("amount_activity"))
+        advance = _optional_number(signal.get("advance_ratio"))
+        grade = str(score.get("grade") or item.get("grade") or "")
+        values.extend((
+            _optional_number(score.get("score", item.get("rotation_score"))),
+            change, excess, amount, advance,
+        ))
+        grades.append(grade)
+        focus.append(_snapshot_focus_score(change, excess, amount, advance, grade))
+    return values, grades, focus
+
+
+def _snapshot_item_row(
+    kind: str,
+    snapshot_id: str,
+    position: int,
+    raw_item: dict[str, Any],
+) -> tuple[Any, ...]:
+    item = dict(raw_item)
+    item_key = str(item.get("code") or item.get("symbol") or "").upper()
+    if not item_key:
+        raise RotationIntegrityError(f"{kind} 快照列表存在无标识项目")
+    primary = item.get("primary_industry")
+    primary_name = str(primary.get("name") or "") if isinstance(primary, dict) else ""
+    window_values, grade_values, focus_values = _snapshot_window_fields(item)
+    flows = item.get("flows") if isinstance(item.get("flows"), dict) else {}
+    flow_values = [_optional_number(flows.get(str(window))) for window in _SNAPSHOT_WINDOWS]
+    selected_flow = flow_values[2]
+    return (
+        str(kind), snapshot_id, item_key, position,
+        str(item.get("name") or ""), str(item.get("level") or ""),
+        str(item.get("stage") or ""), str(item.get("grade") or ""),
+        str(item.get("category") or ""), str(item.get("benchmark") or ""),
+        primary_name, *window_values, *grade_values, *focus_values,
+        _optional_number(item.get("coverage")), *flow_values,
+        _optional_number(item.get("flow")),
+        _optional_number(selected_flow if selected_flow is not None else item.get("flow")),
+        _optional_number(item.get("flow_streak_sessions")), strict_json_dumps(item),
+    )
+
+
+def _snapshot_detail_rows(
+    kind: str,
+    snapshot_id: str,
+    details: Any,
+) -> list[tuple[str, str, str, str]]:
+    if not isinstance(details, dict):
+        return []
+    return [
+        (str(kind), snapshot_id, str(key).upper(), strict_json_dumps(value))
+        for key, value in details.items()
+        if isinstance(value, dict)
+    ]
+
+
+def _selected_snapshot_keys(
+    allowed_keys: set[str] | None,
+    include_l1: bool,
+) -> tuple[str, list[str]] | None:
+    if allowed_keys is None:
+        return "", []
+    keys = sorted({str(value).upper() for value in allowed_keys})
+    if not keys:
+        return ("level='L1'", []) if include_l1 else None
+    placeholders = ",".join("?" for _ in keys)
+    if include_l1:
+        return f"(level='L1' OR item_key IN ({placeholders}))", keys
+    return f"item_key IN ({placeholders})", keys
+
+
+def _snapshot_item_filters(
+    kind: str,
+    snapshot_id: str,
+    *,
+    query: str,
+    level: str,
+    allowed_keys: set[str] | None,
+    include_l1: bool,
+    stage: str,
+    category: str,
+    grade: str,
+    window: int,
+) -> tuple[str, list[Any]] | None:
+    clauses = ["kind=?", "snapshot_id=?"]
+    params: list[Any] = [str(kind), snapshot_id]
+    needle = str(query).strip().casefold()
+    if needle:
+        clauses.append(
+            "(lower(name) LIKE ? OR lower(item_key) LIKE ? "
+            "OR lower(primary_industry_name) LIKE ? OR lower(benchmark) LIKE ?)"
+        )
+        like = f"%{needle}%"
+        params.extend((like, like, like, like))
+    if level:
+        clauses.append("level=?")
+        params.append(str(level))
+    key_filter = _selected_snapshot_keys(allowed_keys, include_l1)
+    if key_filter is None:
+        return None
+    key_clause, keys = key_filter
+    if key_clause:
+        clauses.append(key_clause)
+        params.extend(keys)
+    for column, value in (("stage", stage), ("category", category)):
+        if value:
+            clauses.append(f"{column}=?")
+            params.append(str(value))
+    if grade:
+        clauses.append(f"grade_{window}=?")
+        params.append(str(grade))
+    return " WHERE " + " AND ".join(clauses), params
+
+
+def _snapshot_item_order(sort: str, order: str, window: int) -> str:
+    columns = {
+        "position": "position",
+        "name": "name COLLATE NOCASE",
+        "score": f"score_{window}",
+        "change": f"change_{window}",
+        "excess": f"excess_{window}",
+        "amount": f"amount_{window}",
+        "coverage": "coverage",
+        "flow": f"flow_{window}",
+        "daily": "daily_flow",
+        "streak": "streak",
+        "focus": f"focus_{window}",
+    }
+    if str(sort) == "focus":
+        return (
+            f"focus_{window} DESC, score_{window} DESC, change_{window} DESC, "
+            f"excess_{window} DESC, coverage DESC, name COLLATE NOCASE ASC, item_key ASC"
+        )
+    selected = columns.get(str(sort), "position")
+    direction = "DESC" if str(order).lower() == "desc" else "ASC"
+    return (
+        f"CASE WHEN {selected} IS NULL THEN 1 ELSE 0 END ASC, "
+        f"{selected} {direction}, item_key ASC"
+    )
+
+
+def _empty_snapshot_page(page_size: int) -> dict[str, Any]:
+    return {"page": 1, "page_size": page_size, "total": 0, "pages": 1}
+
+
+def _snapshot_page_meta(page: int, page_size: int, total: int, pages: int) -> dict[str, Any]:
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": pages,
+        "has_previous": page > 1,
+        "has_next": page < pages,
+    }
 
 
 class RotationStore:
@@ -415,119 +664,58 @@ class RotationStore:
         with self._preferences() as connection:
             migrate_schema(connection, ((1, self._preferences_v1),))
 
-    def save_snapshots(self, payloads: dict[str, dict[str, Any]]) -> None:
-        """Commit a coherent set of views with list rows outside the JSON header.
+    @staticmethod
+    def _indexed_snapshot_items(
+        kind: str,
+        snapshot_id: str,
+        items: Any,
+    ) -> list[tuple[Any, ...]]:
+        if not isinstance(items, list):
+            return []
+        return [
+            _snapshot_item_row(str(kind), snapshot_id, position, raw_item)
+            for position, raw_item in enumerate(items)
+            if isinstance(raw_item, dict)
+        ]
 
-        Internal aggregate readers can still call :meth:`snapshot`, while list
-        APIs call :meth:`snapshot_items_page` and deserialize only the requested
-        rows.  The header and all list/detail rows are replaced atomically.
-        """
-
-        rows: list[tuple[Any, ...]] = []
-        item_rows: list[tuple[Any, ...]] = []
-        detail_rows: list[tuple[Any, ...]] = []
-        derived_artifacts: list[tuple[str, str, str, str]] = []
-        for kind, raw_payload in payloads.items():
-            payload = dict(raw_payload)
-            meta = dict(payload.get("meta") or {})
-            data = dict(payload.get("data") or {})
-            snapshot_id = str(meta.get("snapshot_id") or "")
-            items = data.pop("items", None)
-            details = data.pop("details", None)
-            compact = {"meta": meta, "data": data}
-            text = strict_json_dumps(compact)
-            rows.append((
-                str(kind), snapshot_id, str(meta.get("as_of") or ""),
-                str(meta.get("generated_at") or ""), text, _hash_text(text),
-                int(isinstance(items, list)), int(isinstance(details, dict)),
-            ))
-            if isinstance(items, list):
-                for position, raw_item in enumerate(items):
-                    if not isinstance(raw_item, dict):
-                        continue
-                    item = dict(raw_item)
-                    item_key = str(item.get("code") or item.get("symbol") or "").upper()
-                    if not item_key:
-                        raise RotationIntegrityError(f"{kind} 快照列表存在无标识项目")
-                    signals = item.get("signals") if isinstance(item.get("signals"), dict) else {}
-                    scores = item.get("scores") if isinstance(item.get("scores"), dict) else {}
-                    primary = item.get("primary_industry")
-                    primary_name = (
-                        str(primary.get("name") or "") if isinstance(primary, dict) else ""
-                    )
-
-                    def number(value: Any) -> float | None:
-                        try:
-                            return float(value)
-                        except (TypeError, ValueError):
-                            return None
-
-                    window_values: list[float | None] = []
-                    grade_values: list[str] = []
-                    focus_values: list[int] = []
-                    for window in (1, 3, 5, 20):
-                        signal = signals.get(str(window)) if isinstance(signals, dict) else {}
-                        score = scores.get(str(window)) if isinstance(scores, dict) else {}
-                        signal = signal if isinstance(signal, dict) else {}
-                        score = score if isinstance(score, dict) else {}
-                        change = number(signal.get("rotation_change_pp"))
-                        excess = number(signal.get("excess_return"))
-                        amount = number(signal.get("amount_activity"))
-                        advance = number(signal.get("advance_ratio"))
-                        window_values.extend((
-                            number(score.get("score", item.get("rotation_score"))),
-                            change, excess, amount, advance,
-                        ))
-                        grade_values.append(str(score.get("grade") or item.get("grade") or ""))
-                        focus_values.append(sum((
-                            change is not None and change > 0,
-                            excess is not None and excess > 0,
-                            advance is not None and advance >= 0.5,
-                            amount is not None and amount > 0,
-                            str(score.get("grade") or item.get("grade") or "") in {"A", "B"},
-                        )))
-                    flows = item.get("flows") if isinstance(item.get("flows"), dict) else {}
-                    flow_values = [
-                        number(flows.get(str(window))) if isinstance(flows, dict) else None
-                        for window in (1, 3, 5, 20)
-                    ]
-                    selected_flow = flow_values[2]
-                    item_rows.append((
-                        str(kind), snapshot_id, item_key, position,
-                        str(item.get("name") or ""), str(item.get("level") or ""),
-                        str(item.get("stage") or ""), str(item.get("grade") or ""),
-                        str(item.get("category") or ""), str(item.get("benchmark") or ""),
-                        primary_name, *window_values, *grade_values, *focus_values,
-                        number(item.get("coverage")), *flow_values,
-                        number(item.get("flow")),
-                        number(selected_flow if selected_flow is not None else item.get("flow")),
-                        number(item.get("flow_streak_sessions")), strict_json_dumps(item),
-                    ))
-            if isinstance(details, dict):
-                for key, value in details.items():
-                    if isinstance(value, dict):
-                        detail_rows.append((
-                            str(kind), snapshot_id, str(key).upper(), strict_json_dumps(value),
-                        ))
-            artifact = self.derived.put_json(compact, schema_version="2")
-            derived_artifacts.append((
-                str(kind),
-                str(artifact["artifact_id"]),
-                str(meta.get("input_fingerprint") or ""),
-                str(meta.get("algorithm_version") or ""),
-            ))
-
-        item_columns = (
-            "kind,snapshot_id,item_key,position,name,level,stage,grade,category,benchmark,"
-            "primary_industry_name,score_1,change_1,excess_1,amount_1,advance_1,score_3,"
-            "change_3,excess_3,amount_3,advance_3,score_5,change_5,excess_5,amount_5,"
-            "advance_5,score_20,change_20,excess_20,amount_20,advance_20,grade_1,grade_3,"
-            "grade_5,grade_20,focus_1,focus_3,"
-            "focus_5,focus_20,coverage,flow_1,flow_3,flow_5,flow_20,daily_flow,flow,streak,payload_json"
+    def _prepare_snapshot(
+        self,
+        kind: str,
+        raw_payload: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], list[tuple[Any, ...]], list[tuple[Any, ...]], tuple[str, ...]]:
+        payload = dict(raw_payload)
+        meta = dict(payload.get("meta") or {})
+        data = dict(payload.get("data") or {})
+        snapshot_id = str(meta.get("snapshot_id") or "")
+        items = data.pop("items", None)
+        details = data.pop("details", None)
+        compact = {"meta": meta, "data": data}
+        text = strict_json_dumps(compact)
+        header = (
+            str(kind), snapshot_id, str(meta.get("as_of") or ""),
+            str(meta.get("generated_at") or ""), text, _hash_text(text),
+            int(isinstance(items, list)), int(isinstance(details, dict)),
         )
+        indexed_items = self._indexed_snapshot_items(str(kind), snapshot_id, items)
+        detail_rows = _snapshot_detail_rows(str(kind), snapshot_id, details)
+        artifact = self.derived.put_json(compact, schema_version="2")
+        artifact_row = (
+            str(kind),
+            str(artifact["artifact_id"]),
+            str(meta.get("input_fingerprint") or ""),
+            str(meta.get("algorithm_version") or ""),
+        )
+        return (
+            header,
+            indexed_items,
+            detail_rows,
+            artifact_row,
+        )
+
+    def _write_snapshot_batch(self, batch: _SnapshotWriteBatch) -> None:
         with self._cache() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            for kind, *_rest in rows:
+            for kind, *_rest in batch.headers:
                 connection.execute("DELETE FROM snapshot_items WHERE kind=?", (kind,))
                 connection.execute("DELETE FROM snapshot_details WHERE kind=?", (kind,))
             connection.executemany(
@@ -538,27 +726,26 @@ class RotationStore:
                 "generated_at=excluded.generated_at,payload_json=excluded.payload_json,"
                 "content_sha256=excluded.content_sha256,items_indexed=excluded.items_indexed,"
                 "details_indexed=excluded.details_indexed",
-                rows,
+                batch.headers,
             )
-            if item_rows:
+            if batch.items:
                 connection.executemany(
-                    "INSERT INTO snapshot_items(" + item_columns + ") VALUES("
+                    "INSERT INTO snapshot_items(" + _SNAPSHOT_ITEM_COLUMNS + ") VALUES("
                     + ",".join("?" for _ in range(48)) + ")",
-                    item_rows,
+                    batch.items,
                 )
-            if detail_rows:
+            if batch.details:
                 connection.executemany(
                     "INSERT INTO snapshot_details(kind,snapshot_id,item_key,payload_json) "
                     "VALUES(?,?,?,?)",
-                    detail_rows,
+                    batch.details,
                 )
-        # The immutable objects are fsync'ed before they are registered.  Only
-        # after the indexed cache commits do we advance all affected current
-        # pointers in one catalog transaction.
+
+    def _publish_snapshot_batch(self, artifacts: list[tuple[str, str, str, str]]) -> None:
         self.derived.publish_snapshots(
-            "rotation", {kind: artifact_id for kind, artifact_id, _fp, _algo in derived_artifacts},
+            "rotation", {kind: artifact_id for kind, artifact_id, _fp, _algo in artifacts},
         )
-        for kind, artifact_id, input_fingerprint, algorithm_version in derived_artifacts:
+        for kind, artifact_id, input_fingerprint, algorithm_version in artifacts:
             if input_fingerprint and algorithm_version:
                 self.derived.record_node(
                     f"rotation.{kind}",
@@ -567,6 +754,27 @@ class RotationStore:
                     algorithm_version,
                     output_artifact_id=artifact_id,
                 )
+
+    def save_snapshots(self, payloads: dict[str, dict[str, Any]]) -> None:
+        """Commit a coherent set of views with list rows outside the JSON header.
+
+        Internal aggregate readers can still call :meth:`snapshot`, while list
+        APIs call :meth:`snapshot_items_page` and deserialize only the requested
+        rows.  The header and all list/detail rows are replaced atomically.
+        """
+
+        batch = _SnapshotWriteBatch([], [], [], [])
+        for kind, raw_payload in payloads.items():
+            header, items, details, artifact = self._prepare_snapshot(kind, raw_payload)
+            batch.headers.append(header)
+            batch.items.extend(items)
+            batch.details.extend(details)
+            batch.artifacts.append(artifact)
+        self._write_snapshot_batch(batch)
+        # The immutable objects are fsync'ed before they are registered.  Only
+        # after the indexed cache commits do we advance all affected current
+        # pointers in one catalog transaction.
+        self._publish_snapshot_batch(batch.artifacts)
 
     def snapshot(self, kind: str) -> dict[str, Any] | None:
         try:
@@ -659,6 +867,38 @@ class RotationStore:
         except json.JSONDecodeError as exc:
             raise RotationIntegrityError(f"{kind} 明细快照不是有效 JSON") from exc
 
+    def _read_snapshot_items_page(
+        self,
+        where: str,
+        params: list[Any],
+        order_by: str,
+        page: int,
+        page_size: int,
+    ) -> tuple[list[sqlite3.Row], dict[str, Any]]:
+        with self._cache() as connection:
+            total = int(connection.execute(
+                "SELECT COUNT(*) FROM snapshot_items" + where, tuple(params),
+            ).fetchone()[0])
+            pages = max(1, (total + page_size - 1) // page_size)
+            current = min(page, pages)
+            offset = (current - 1) * page_size
+            rows = connection.execute(
+                "SELECT payload_json FROM snapshot_items"
+                + where
+                + " ORDER BY "
+                + order_by
+                + " LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
+        return rows, _snapshot_page_meta(current, page_size, total, pages)
+
+    @staticmethod
+    def _decode_snapshot_items(kind: str, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        try:
+            return [json.loads(str(row["payload_json"])) for row in rows]
+        except json.JSONDecodeError as exc:
+            raise RotationIntegrityError(f"{kind} 列表索引不是有效 JSON") from exc
+
     def snapshot_items_page(
         self,
         kind: str,
@@ -681,105 +921,39 @@ class RotationStore:
         selected_window = int(window)
         if selected_window not in {1, 3, 5, 20}:
             raise ValueError("轮动观察窗口仅支持 1、3、5、20 日")
+        selected_size = max(1, min(500, int(page_size)))
         header = self.snapshot_header(kind)
         if header is None:
-            return None, [], {"page": 1, "page_size": page_size, "total": 0, "pages": 1}
+            return None, [], _empty_snapshot_page(page_size)
         snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
-        clauses = ["kind=?", "snapshot_id=?"]
-        params: list[Any] = [str(kind), snapshot_id]
-        needle = str(query).strip().casefold()
-        if needle:
-            clauses.append(
-                "(lower(name) LIKE ? OR lower(item_key) LIKE ? "
-                "OR lower(primary_industry_name) LIKE ? OR lower(benchmark) LIKE ?)"
-            )
-            like = f"%{needle}%"
-            params.extend((like, like, like, like))
-        if level:
-            clauses.append("level=?")
-            params.append(str(level))
-        if allowed_keys is not None:
-            keys = sorted({str(value).upper() for value in allowed_keys})
-            if not keys:
-                if include_l1:
-                    clauses.append("level='L1'")
-                else:
-                    return header, [], {"page": 1, "page_size": page_size, "total": 0, "pages": 1}
-            elif include_l1:
-                clauses.append("(level='L1' OR item_key IN (" + ",".join("?" for _ in keys) + "))")
-                params.extend(keys)
-            else:
-                clauses.append("item_key IN (" + ",".join("?" for _ in keys) + ")")
-                params.extend(keys)
-        for column, value in (("stage", stage), ("category", category)):
-            if value:
-                clauses.append(f"{column}=?")
-                params.append(str(value))
-        if grade:
-            clauses.append(f"grade_{selected_window}=?")
-            params.append(str(grade))
-        where = " WHERE " + " AND ".join(clauses)
-        columns = {
-            "position": "position",
-            "name": "name COLLATE NOCASE",
-            "score": f"score_{selected_window}",
-            "change": f"change_{selected_window}",
-            "excess": f"excess_{selected_window}",
-            "amount": f"amount_{selected_window}",
-            "coverage": "coverage",
-            "flow": f"flow_{selected_window}",
-            "daily": "daily_flow",
-            "streak": "streak",
-            "focus": f"focus_{selected_window}",
-        }
-        selected = columns.get(str(sort), "position")
-        direction = "DESC" if str(order).lower() == "desc" else "ASC"
-        if str(sort) == "focus":
-            order_by = (
-                f"focus_{selected_window} DESC, score_{selected_window} DESC, "
-                f"change_{selected_window} DESC, excess_{selected_window} DESC, "
-                "coverage DESC, name COLLATE NOCASE ASC, item_key ASC"
-            )
-        else:
-            order_by = (
-                f"CASE WHEN {selected} IS NULL THEN 1 ELSE 0 END ASC, "
-                f"{selected} {direction}, item_key ASC"
-            )
+        filters = _snapshot_item_filters(
+            kind,
+            snapshot_id,
+            query=query,
+            level=level,
+            allowed_keys=allowed_keys,
+            include_l1=include_l1,
+            stage=stage,
+            category=category,
+            grade=grade,
+            window=selected_window,
+        )
+        if filters is None:
+            return header, [], _empty_snapshot_page(page_size)
+        where, params = filters
         selected_page = max(1, int(page))
-        selected_size = max(1, min(500, int(page_size)))
         try:
-            with self._cache() as connection:
-                total = int(connection.execute(
-                    "SELECT COUNT(*) FROM snapshot_items" + where, tuple(params),
-                ).fetchone()[0])
-                pages = max(1, (total + selected_size - 1) // selected_size)
-                current = min(selected_page, pages)
-                offset = (current - 1) * selected_size
-                rows = connection.execute(
-                    "SELECT payload_json FROM snapshot_items"
-                    + where
-                    + " ORDER BY "
-                    + order_by
-                    + " LIMIT ? OFFSET ?",
-                    (*params, selected_size, offset),
-                ).fetchall()
+            rows, pagination = self._read_snapshot_items_page(
+                where,
+                params,
+                _snapshot_item_order(sort, order, selected_window),
+                selected_page,
+                selected_size,
+            )
         except (FileNotFoundError, sqlite3.OperationalError):
-            return header, [], {
-                "page": 1, "page_size": selected_size, "total": 0,
-                "pages": 1, "has_previous": False, "has_next": False,
-            }
-        try:
-            values = [json.loads(str(row["payload_json"])) for row in rows]
-        except json.JSONDecodeError as exc:
-            raise RotationIntegrityError(f"{kind} 列表索引不是有效 JSON") from exc
-        return header, values, {
-            "page": current,
-            "page_size": selected_size,
-            "total": total,
-            "pages": pages,
-            "has_previous": current > 1,
-            "has_next": current < pages,
-        }
+            pagination = _snapshot_page_meta(1, selected_size, 0, 1)
+            return header, [], pagination
+        return header, self._decode_snapshot_items(kind, rows), pagination
 
     def snapshot_item_categories(self, kind: str) -> list[str]:
         header = self.snapshot_header(kind)
@@ -1339,7 +1513,7 @@ class RotationStore:
         finally:
             temp.unlink(missing_ok=True)
 
-    def _read_verified_etf_metadata_history(self) -> pd.DataFrame:
+    def _read_etf_metadata_history_manifest(self) -> dict[str, Any]:
         if not self.etf_metadata_history_manifest_path.is_file():
             raise RotationIntegrityError(
                 "ETF 元数据历史缺少完整性 manifest；旧历史不得静默升级为可信证据"
@@ -1350,6 +1524,8 @@ class RotationStore:
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RotationIntegrityError("ETF 元数据历史 manifest 损坏") from exc
+        if not isinstance(manifest, dict):
+            raise RotationIntegrityError("ETF 元数据历史 manifest 损坏")
         claimed_manifest_hash = str(manifest.pop("manifest_sha256", ""))
         actual_manifest_hash = _hash_text(strict_json_dumps(manifest, sort_keys=True))
         if claimed_manifest_hash != actual_manifest_hash:
@@ -1359,6 +1535,9 @@ class RotationStore:
             or manifest.get("artifact") != "etf_metadata_history"
         ):
             raise RotationIntegrityError("ETF 元数据历史 manifest 契约已淘汰或类型错误")
+        return manifest
+
+    def _read_etf_metadata_history_file(self, manifest: dict[str, Any]) -> pd.DataFrame:
         if _hash_file(self.etf_metadata_history_path) != manifest.get("file_sha256"):
             raise RotationIntegrityError("ETF 元数据历史文件哈希与 manifest 不匹配")
         try:
@@ -1374,14 +1553,27 @@ class RotationStore:
         }
         if not required.issubset(history.columns):
             raise RotationIntegrityError("ETF 元数据历史缺少不可变观察字段")
+        return history
+
+    def _validate_etf_metadata_observations(self, history: pd.DataFrame) -> None:
         prepared = self._prepare_etf_metadata_observations(history)
-        if (
-            prepared["observation_id"].tolist() != history["observation_id"].astype(str).tolist()
-            or prepared["observation_content_sha256"].tolist()
-            != history["observation_content_sha256"].astype(str).tolist()
-            or not history["observation_integrity"].astype(str).eq("verified").all()
-        ):
+        identities_match = (
+            prepared["observation_id"].tolist()
+            == history["observation_id"].astype(str).tolist()
+        )
+        content_hashes_match = (
+            prepared["observation_content_sha256"].tolist()
+            == history["observation_content_sha256"].astype(str).tolist()
+        )
+        observations_verified = history["observation_integrity"].astype(str).eq("verified").all()
+        if not identities_match or not content_hashes_match or not observations_verified:
             raise RotationIntegrityError("ETF 元数据历史观察身份或内容哈希不匹配")
+
+    def _validate_etf_metadata_manifest_rows(
+        self,
+        history: pd.DataFrame,
+        manifest: dict[str, Any],
+    ) -> None:
         if len(history) != int(manifest.get("row_count") or -1):
             raise RotationIntegrityError("ETF 元数据历史行数与 manifest 不匹配")
         if history["observation_id"].nunique() != int(
@@ -1390,6 +1582,12 @@ class RotationStore:
             raise RotationIntegrityError("ETF 元数据历史观察数与 manifest 不匹配")
         if self._history_logical_hash(history) != manifest.get("logical_sha256"):
             raise RotationIntegrityError("ETF 元数据历史逻辑哈希与 manifest 不匹配")
+
+    def _read_verified_etf_metadata_history(self) -> pd.DataFrame:
+        manifest = self._read_etf_metadata_history_manifest()
+        history = self._read_etf_metadata_history_file(manifest)
+        self._validate_etf_metadata_observations(history)
+        self._validate_etf_metadata_manifest_rows(history, manifest)
         return history
 
     def _quarantine_legacy_etf_metadata_history(self) -> None:
