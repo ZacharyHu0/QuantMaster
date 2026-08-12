@@ -971,14 +971,32 @@ def test_successful_fallback_without_truth_contract_is_recorded_as_degraded(
 
 
 def test_different_provider_lanes_execute_in_parallel():
-    barrier = threading.Barrier(2, timeout=2)
+    scheduler = ProviderScheduler()
+    release = threading.Event()
+    both_entered = threading.Event()
+    entered: set[str] = set()
+    lock = threading.Lock()
 
-    def call(lane):
-        return provider_call(lane, f"parallel-{lane}", lambda: barrier.wait() or lane)
+    def blocked(lane: str) -> str:
+        with lock:
+            entered.add(lane)
+            if len(entered) == 2:
+                both_entered.set()
+        assert release.wait(10.0)
+        return lane
 
+    lanes = ["akshare:eastmoney", "yahoo"]
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(call, ["akshare:eastmoney", "yahoo"]))
-    assert len(results) == 2
+        pending = [
+            pool.submit(scheduler.call, lane, f"parallel-{lane}", lambda lane=lane: blocked(lane))
+            for lane in lanes
+        ]
+        try:
+            assert both_entered.wait(10.0)
+        finally:
+            release.set()
+
+        assert [item.result(timeout=10.0) for item in pending] == lanes
 
 
 def test_provider_scheduler_enforces_global_network_concurrency_ceiling():
