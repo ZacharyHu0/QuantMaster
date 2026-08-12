@@ -927,6 +927,34 @@ def test_feishu_runtime_retries_eof_and_persists_degraded_diagnostic(
     assert "app_secret=***" in account["last_error"]
 
 
+def test_feishu_runtime_uses_client_failure_state_when_available(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.save_bot_account(channel="feishu", account_id="cli_app", status="configured")
+    stop_event = threading.Event()
+
+    def listen(_on_message, _received_stop):
+        raise RuntimeError("bad credentials")
+
+    runtime = runtime_module.AutomationRuntime(SimpleNamespace(
+        store=store,
+        feishu=SimpleNamespace(
+            listen_forever=listen,
+            failure_state=lambda _exc: "invalid_credentials",
+        ),
+        weixin=SimpleNamespace(),
+    ))
+    runtime._channel_stops["feishu"] = stop_event
+
+    runtime._channel_worker("feishu")
+
+    assert store.bot_account("feishu")["status"] == "invalid_credentials"
+
+
 def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):
     import threading
     from types import SimpleNamespace
