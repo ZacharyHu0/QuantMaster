@@ -1474,6 +1474,58 @@ def test_incomplete_limit_window_is_formally_locked_until_full_retry_commits(tmp
     assert market["score"] == 0
 
 
+def test_durable_item_queue_keeps_committed_items_and_only_recovers_pending(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    first = NewsItem(source="sina_live", provider_item_id="one", title="first", content="one")
+    second = NewsItem(source="sina_live", provider_item_id="two", title="second", content="two")
+    batch = FetchBatch(
+        source_id="sina_live", articles=[
+            FetchedArticle(source="sina_live", provider_item_id="one", title="first", content="one"),
+            FetchedArticle(source="sina_live", provider_item_id="two", title="second", content="two"),
+        ], previous_watermark="old", watermark="two", complete=True,
+    )
+    window = store.sources.register_ingest_batch(batch, "durable-two-items")
+    # Simulate an interruption after the first atomic row commit.
+    first.ingest_window_id = second.ingest_window_id = window
+    first.ingest_batch_id = second.ingest_batch_id = "durable-two-items"
+    assert store.save([first]) == 1
+    pending = store.sources.pending_ingest_items("sina_live")
+    assert [row["provider_item_id"] for row in pending] == ["two"]
+    store.sources.record_batch(batch)
+    assert store.sources.state("sina_live")["watermark"] != "two"
+    with pytest.raises(NewsContractError, match="durable queue"):
+        store.sources.complete_ingest_window(window, "durable-two-items")
+
+    reopened = NewsStore(tmp_path / "news.sqlite")
+    # Recovery must never redownload/rewrite the completed business key.
+    assert [row["provider_item_id"] for row in reopened.sources.pending_ingest_items("sina_live")] == ["two"]
+    assert reopened.save([second]) == 1
+    assert reopened.sources.pending_ingest_items("sina_live") == []
+    reopened.sources.complete_ingest_window(window, "durable-two-items")
+
+
+def test_item_failure_diagnostic_redacts_credentials_and_has_parser_metadata(tmp_path):
+    sources = NewsSourceStore(tmp_path / "news.sqlite")
+    sources.record_item_diagnostic(
+        "sina_live", stage="detail_fetch", diagnostic_code="unexpected_content_type",
+        raw_response_ref="https://example.test/a?api_key=secret&cursor=1",
+        content_type="text/html; charset=gb18030", encoding="gb18030",
+        parser_version="sina-v2", detail="response body intentionally omitted",
+    )
+    with sources._conn() as connection:
+        row = connection.execute(
+            "SELECT stage,diagnostic_code,raw_response_ref,content_type,encoding,parser_version,detail "
+            "FROM news_ingest_failure_diagnostics",
+        ).fetchone()
+    assert tuple(row[:2]) == ("detail_fetch", "unexpected_content_type")
+    assert "secret" not in row[2]
+    assert "api_key=<redacted>" in row[2]
+    assert tuple(row[3:]) == (
+        "text/html; charset=gb18030", "gb18030", "sina-v2",
+        "response body intentionally omitted",
+    )
+
+
 def test_append_only_raw_manifest_keeps_prior_feed_batch_factor_eligible(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     now = time.time()

@@ -341,6 +341,28 @@ class NewsSourceStore:
                     FOREIGN KEY(batch_id) REFERENCES news_ingest_batches(batch_id));
                 CREATE INDEX IF NOT EXISTS idx_news_runs_source
                     ON news_source_runs(source_id,started_at DESC);
+                CREATE TABLE IF NOT EXISTS news_ingest_item_queue (
+                    window_id TEXT NOT NULL,batch_id TEXT NOT NULL,source_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN
+                        ('discovered','detail_pending','detail_fetched','normalized','stored',
+                         'analysis_pending','analyzed','failed')),
+                    provider_item_id TEXT NOT NULL DEFAULT '',article_url TEXT NOT NULL DEFAULT '',
+                    published_at TEXT NOT NULL DEFAULT '',parser_version TEXT NOT NULL DEFAULT '1',
+                    attempts INTEGER NOT NULL DEFAULT 0,last_error_code TEXT NOT NULL DEFAULT '',
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(window_id,item_key),
+                    FOREIGN KEY(window_id) REFERENCES news_ingest_windows(window_id));
+                CREATE INDEX IF NOT EXISTS idx_news_ingest_item_queue_pending
+                    ON news_ingest_item_queue(source_id,status,updated_at);
+                CREATE TABLE IF NOT EXISTS news_ingest_failure_diagnostics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,source_id TEXT NOT NULL,
+                    window_id TEXT NOT NULL DEFAULT '',item_key TEXT NOT NULL DEFAULT '',
+                    stage TEXT NOT NULL,diagnostic_code TEXT NOT NULL,
+                    raw_response_ref TEXT NOT NULL DEFAULT '',content_type TEXT NOT NULL DEFAULT '',
+                    encoding TEXT NOT NULL DEFAULT '',parser_version TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',recorded_at REAL NOT NULL);
+                CREATE INDEX IF NOT EXISTS idx_news_ingest_failure_diagnostics_source
+                    ON news_ingest_failure_diagnostics(source_id,recorded_at DESC);
                 CREATE TABLE IF NOT EXISTS news_source_state (
                     source_id TEXT PRIMARY KEY,watermark TEXT NOT NULL DEFAULT '',
                     pending_watermark TEXT NOT NULL DEFAULT '',
@@ -515,7 +537,9 @@ class NewsSourceStore:
                 "COALESCE(st.consecutive_failures,0) AS consecutive_failures,"
                 "COALESCE(st.last_error_code,'') AS last_error_code,"
                 "COALESCE(st.last_error,'') AS last_error,"
-                "COALESCE(st.last_success_at,'') AS last_success_at "
+                "COALESCE(st.last_success_at,'') AS last_success_at,"
+                "(SELECT COUNT(*) FROM news_ingest_item_queue q WHERE q.source_id=s.id "
+                "AND q.status NOT IN ('stored','analyzed')) AS durable_queue_depth "
                 f"FROM news_sources s LEFT JOIN news_source_state st ON st.source_id=s.id "
                 f"{clause} ORDER BY built_in DESC,s.rowid",
                 params,
@@ -686,6 +710,79 @@ class NewsSourceStore:
                 )
         return True
 
+    @staticmethod
+    def _queue_item_key(article: Any) -> str:
+        """Return a source business key, never a content-derived identity.
+
+        Provider IDs are authoritative when supplied.  Some HTML/RSS sources do
+        not expose one, so the source URL plus publication value is the stable
+        recovery key; title is only a last-resort display key.
+        """
+        provider_id = str(getattr(article, "provider_item_id", "") or "").strip()
+        if provider_id:
+            return f"id:{provider_id}"
+        url = str(getattr(article, "url", "") or "").strip()
+        published = str(getattr(article, "published_at", "") or "").strip()
+        if url:
+            return f"url:{url}|published:{published}"
+        return f"title:{str(getattr(article, 'title', '') or '').strip()}|published:{published}"
+
+    @staticmethod
+    def _sanitized_response_ref(value: str) -> str:
+        """Keep a local evidence reference while removing credential-bearing URLs."""
+        raw = str(value or "").strip().replace("\\", "/")
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.hostname:
+            safe_query = "&".join(
+                f"{key}=<redacted>" if re.search(r"token|secret|key|auth|signature", key, re.I)
+                else key
+                for key, _ in parse_qsl(parsed.query, keep_blank_values=True)
+            )
+            # Rebuild netloc so userinfo is never retained.
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc = f"{netloc}:{parsed.port}"
+            return parsed._replace(netloc=netloc, query=safe_query).geturl()[:500]
+        return raw[:500]
+
+    def record_item_diagnostic(
+        self, source_id: str, *, stage: str, diagnostic_code: str,
+        raw_response_ref: str = "", content_type: str = "", encoding: str = "",
+        parser_version: str = "", detail: str = "", window_id: str = "",
+        item_key: str = "",
+    ) -> None:
+        """Persist compact, copy-safe failure evidence; never retain response bodies."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO news_ingest_failure_diagnostics("
+                "source_id,window_id,item_key,stage,diagnostic_code,raw_response_ref,"
+                "content_type,encoding,parser_version,detail,recorded_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, window_id, item_key, stage[:40], diagnostic_code[:80],
+                 self._sanitized_response_ref(raw_response_ref), content_type[:120],
+                 encoding[:80], parser_version[:80], detail[:500], time.time()),
+            )
+
+    def pending_ingest_items(self, source_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Durable recovery view; completed items are intentionally never returned."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM news_ingest_item_queue WHERE source_id=? "
+                "AND status NOT IN ('stored','analyzed') ORDER BY updated_at,item_key LIMIT ?",
+                (source_id, max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def ingest_queue_depth(self, source_id: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM news_ingest_item_queue WHERE source_id=? "
+                "AND status NOT IN ('stored','analyzed')", (source_id,),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
     def register_ingest_batch(self, batch: FetchBatch, batch_id: str) -> str:
         """Persist an immutable provider batch and attach its durable window identity."""
         durable_batch_id = str(batch_id or uuid.uuid4().hex)
@@ -788,6 +885,34 @@ class NewsSourceStore:
                     "completed_batch_id=? WHERE window_id=? AND status='pending'",
                     (recorded_at, durable_batch_id, window_id),
                 )
+            for article in batch.articles:
+                item_key = self._queue_item_key(article)
+                existing_item = conn.execute(
+                    "SELECT provider_item_id,article_url,published_at FROM news_ingest_item_queue "
+                    "WHERE window_id=? AND item_key=?",
+                    (window_id, item_key),
+                ).fetchone()
+                values = (
+                    window_id, durable_batch_id, source_id, item_key, "normalized",
+                    str(article.provider_item_id or ""), str(article.url or ""),
+                    str(article.published_at or ""), str(article.parser_version or "1"),
+                    recorded_at,
+                )
+                if existing_item is not None and tuple(existing_item) != values[5:8]:
+                    raise NewsContractError(
+                        "资讯恢复队列业务键对应的来源字段发生冲突",
+                        code="ingest_item_identity_conflict",
+                    )
+                conn.execute(
+                    "INSERT INTO news_ingest_item_queue("
+                    "window_id,batch_id,source_id,item_key,status,provider_item_id,article_url,"
+                    "published_at,parser_version,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(window_id,item_key) DO UPDATE SET "
+                    "batch_id=excluded.batch_id,parser_version=excluded.parser_version,"
+                    "updated_at=CASE WHEN news_ingest_item_queue.status IN ('stored','analyzed') "
+                    "THEN news_ingest_item_queue.updated_at ELSE excluded.updated_at END",
+                    values,
+                )
         for article in batch.articles:
             article.ingest_window_id = window_id
             article.ingest_batch_id = durable_batch_id
@@ -819,6 +944,15 @@ class NewsSourceStore:
                     "完整资讯批次尚未全部持久化，拒绝释放正式窗口",
                     code="window_articles_not_persisted",
                 )
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM news_ingest_item_queue WHERE window_id=? "
+                "AND status NOT IN ('stored','analyzed')", (window_id,),
+            ).fetchone()
+            if int(remaining[0] if remaining else 0):
+                raise NewsContractError(
+                    "资讯窗口仍有未完成的 durable queue 条目，拒绝推进水位",
+                    code="window_pending_items",
+                )
             conn.execute(
                 "UPDATE news_ingest_windows SET status='complete',completed_at=?,"
                 "completed_batch_id=? WHERE window_id=? AND status='pending'",
@@ -835,8 +969,68 @@ class NewsSourceStore:
                     "SELECT complete FROM news_ingest_batches WHERE window_id=? AND batch_id=?",
                     (window_id, batch_id),
                 ).fetchone()
-            if complete is not None and bool(complete["complete"]):
+                pending = conn.execute(
+                    "SELECT 1 FROM news_ingest_item_queue WHERE window_id=? "
+                    "AND status NOT IN ('stored','analyzed') LIMIT 1", (window_id,),
+                ).fetchone()
+            # Partial commits are an expected crash-recovery state.  Do not
+            # turn them into a failed write; leave the window fenced until the
+            # remaining business-key entries are durably stored.
+            if complete is not None and bool(complete["complete"]) and pending is None:
                 self.complete_ingest_window(window_id, batch_id)
+
+    def mark_ingest_items_stored(self, items: builtins.list[Any]) -> None:
+        """Advance each normalized item independently after its news row commits.
+
+        This is deliberately separate from window completion: an interruption in
+        the tail of a batch leaves the already committed rows durable and only
+        the remaining queue entries recoverable.
+        """
+        if not items:
+            return
+        with self._conn() as conn:
+            for item in items:
+                window_id = str(getattr(item, "ingest_window_id", "") or "")
+                if not window_id:
+                    continue
+                key = self._queue_item_key(item)
+                changed = conn.execute(
+                    "UPDATE news_ingest_item_queue SET status='stored',updated_at=?,"
+                    "last_error_code='' WHERE window_id=? AND item_key=? "
+                    "AND status NOT IN ('stored','analyzed')",
+                    (time.time(), window_id, key),
+                ).rowcount
+                if not changed:
+                    exists = conn.execute(
+                        "SELECT status FROM news_ingest_item_queue WHERE window_id=? AND item_key=?",
+                        (window_id, key),
+                    ).fetchone()
+                    if exists is None:
+                        raise NewsContractError(
+                            "持久化资讯未在 durable queue 中登记",
+                            code="ingest_item_queue_missing",
+                        )
+
+    def mark_ingest_item_failed(
+        self, item: Any, *, stage: str, diagnostic_code: str, detail: str = "",
+    ) -> None:
+        window_id = str(getattr(item, "ingest_window_id", "") or "")
+        if not window_id:
+            return
+        key = self._queue_item_key(item)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE news_ingest_item_queue SET status='failed',attempts=attempts+1,"
+                "last_error_code=?,updated_at=? WHERE window_id=? AND item_key=?",
+                (diagnostic_code[:80], time.time(), window_id, key),
+            )
+        self.record_item_diagnostic(
+            str(getattr(item, "source", "") or ""), stage=stage,
+            diagnostic_code=diagnostic_code, raw_response_ref=str(
+                getattr(item, "raw_cache_key", "") or getattr(item, "url", "") or ""
+            ), parser_version=str(getattr(item, "parser_version", "") or ""),
+            detail=detail, window_id=window_id, item_key=key,
+        )
 
     def record_batch(self, batch: FetchBatch) -> None:
         now = _utc_iso()
@@ -850,6 +1044,18 @@ class NewsSourceStore:
             error_code = error_code or "watermark_not_reached"
             message = message or "批次不完整，拒绝推进 committed 水位"
         with self._conn() as conn:
+            pending_queue = conn.execute(
+                "SELECT COUNT(*) FROM news_ingest_item_queue WHERE source_id=? "
+                "AND status NOT IN ('stored','analyzed')", (batch.source_id,),
+            ).fetchone()
+            if batch.complete and int(pending_queue[0] if pending_queue else 0):
+                # The queue is the recovery fence.  A complete provider page is
+                # not enough to release a watermark if its durable items were
+                # not all committed.
+                committed_watermark = batch.previous_watermark
+                health = "degraded"
+                error_code = "durable_queue_pending"
+                message = "存在尚未落盘的资讯条目，watermark 保持不变"
             conn.execute(
                 "INSERT INTO news_source_state("
                 "source_id,watermark,pending_watermark,backfill_cursor,"

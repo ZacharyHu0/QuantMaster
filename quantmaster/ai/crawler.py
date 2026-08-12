@@ -709,6 +709,27 @@ class NewsStore:
                     saved += 1
                 except sqlite3.IntegrityError:
                     continue
+        # Queue progress is item-granular.  A tail failure cannot erase the
+        # rows that committed before it, and recovery will select only queue
+        # entries not represented by a durable news business key.
+        persisted_items: list[NewsItem] = []
+        with self._conn() as conn:
+            for item in items:
+                if not item.ingest_window_id or not item.ingest_batch_id:
+                    continue
+                if item.provider_item_id:
+                    row = conn.execute(
+                        "SELECT 1 FROM news WHERE source_id=? AND provider_item_id=? LIMIT 1",
+                        (item.source, item.provider_item_id),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT 1 FROM news WHERE source_id=? AND url=? AND published_at=? LIMIT 1",
+                        (item.source, item.url, item.published_at),
+                    ).fetchone()
+                if row is not None:
+                    persisted_items.append(item)
+        self.sources.mark_ingest_items_stored(persisted_items)
         self.sources.complete_persisted_ingest_batches(ingest_identities)
         return saved
 
