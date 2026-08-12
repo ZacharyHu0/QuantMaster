@@ -24,3 +24,18 @@ def test_project_python_uses_primary_worktree(monkeypatch, tmp_path):
     interpreter.touch()
     monkeypatch.setattr(run, "primary_root", lambda: primary)
     assert run.project_python() == Path(interpreter)
+
+
+def test_artifact_root_is_task_scoped_outside_linked_checkout(monkeypatch, tmp_path):
+    primary = tmp_path / "primary"
+    worktree = primary / ".worktrees" / "feature"
+    monkeypatch.setattr(run, "ROOT", worktree)
+    monkeypatch.setattr(run, "primary_root", lambda: primary)
+    assert run.artifact_root() == primary / ".artifacts" / "worktrees" / "feature"
+
+
+def test_artifact_root_keeps_primary_artifact_contract(monkeypatch, tmp_path):
+    primary = tmp_path / "primary"
+    monkeypatch.setattr(run, "ROOT", primary)
+    monkeypatch.setattr(run, "primary_root", lambda: primary)
+    assert run.artifact_root() == primary / ".artifacts"

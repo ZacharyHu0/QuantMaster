@@ -133,7 +133,11 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
             print("[task] unknown paths force full validation: " + ", ".join(impact.unknown))
         run([python, "scripts/ci/run.py", "--full"], cwd=cwd)
     elif impact.mode == "selected":
-        temp = cwd / ".artifacts/pytest" / f"impact-{uuid.uuid4().hex[:10]}"
+        primary = primary_root(cwd)
+        temp = (
+            primary / ".artifacts" / "worktrees" / cwd.name
+            / "pytest" / f"impact-{uuid.uuid4().hex[:10]}"
+        )
         run([
             python, "-m", "pytest", "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),

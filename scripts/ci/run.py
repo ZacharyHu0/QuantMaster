@@ -12,11 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACTS = ROOT / ".artifacts"
-PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
-PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
-PACKAGE_ROOT = ARTIFACTS / "packages"
-RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 
 
 def primary_root() -> Path:
@@ -33,6 +28,21 @@ def primary_root() -> Path:
         return ROOT
     common = Path(result.stdout.strip())
     return common.parent.resolve() if common.name == ".git" else ROOT
+
+
+def artifact_root() -> Path:
+    """Keep task artifacts outside the checkout Git must later remove."""
+    primary = primary_root()
+    if ROOT == primary:
+        return primary / ".artifacts"
+    return primary / ".artifacts" / "worktrees" / ROOT.name
+
+
+ARTIFACTS = artifact_root()
+PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
+PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
+PACKAGE_ROOT = ARTIFACTS / "packages"
+RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 
 
 def project_python() -> Path:
