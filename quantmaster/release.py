@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.14.0"
+VERSION = "1.14.1"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,34 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "跨平台 CI 与服务重载",
+                "items": (
+                    (
+                        "Windows 控制台关闭处理器测试可在没有 ctypes.WinDLL 的 Linux Python"
+                        " 上显式注入模拟入口，修复完整覆盖率分片失败。"
+                    ),
+                    (
+                        "Web reload 改为仅在明确请求时启用，普通 qm serve 不再默认启动"
+                        "重载监督进程。"
+                    ),
+                ),
+            },
+            {
+                "title": "ETF 研究布局",
+                "items": (
+                    (
+                        "扩大 ETF 研究结论区可用宽度并收紧内部留白，改善高信息密度内容"
+                        "和窄屏缩放下的阅读与溢出表现。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.14.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "设置布局与模型检测",
