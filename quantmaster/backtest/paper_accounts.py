@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +21,14 @@ from quantmaster.backtest.execution import (
     executable_buy_shares,
     quote_open,
     sell_cost,
+)
+from quantmaster.backtest.paper_market import (
+    CalendarEvidence,
+    DailyBarEvidence,
+    inspect_local_daily_bars,
+    market_for_symbol,
+    market_timezone,
+    select_next_open_bar,
 )
 from quantmaster.backtest.spec import (
     FactorStrategySpec,
@@ -38,6 +47,42 @@ from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_
 
 logger = logging.getLogger(__name__)
 PAPER_SCHEMA_VERSION = 5
+ORDER_TERMINAL_STATUSES = frozenset({
+    "filled", "cancelled", "expired", "rejected", "superseded", "skipped",
+})
+ORDER_WAITING_STATUSES = frozenset({
+    "waiting_market_open", "waiting_price", "waiting_market_data", "waiting_external",
+})
+_ABORTED = {"cancelled", "expired", "rejected", "superseded"}
+ORDER_TRANSITIONS = {
+    "proposed": frozenset({"queued", "accepted", "cancelled", "rejected", "superseded"}),
+    "created": frozenset({"accepted", "cancelled", "rejected", "superseded"}),
+    "accepted": frozenset({"open", *ORDER_WAITING_STATUSES, *_ABORTED}),
+    "queued": frozenset({
+        "open", "blocked", *ORDER_WAITING_STATUSES, "partially_filled",
+        "filled", "skipped", *_ABORTED,
+    }),
+    "open": frozenset({"partially_filled", "filled", *ORDER_WAITING_STATUSES, *_ABORTED}),
+    "blocked": frozenset({
+        "blocked", "open", *ORDER_WAITING_STATUSES, "partially_filled",
+        "filled", "skipped", *_ABORTED,
+    }),
+    "partially_filled": frozenset({
+        "partially_filled", "filled", "open", *ORDER_WAITING_STATUSES, *_ABORTED,
+    }),
+    "waiting_market_open": frozenset({
+        "waiting_market_open", "open", "partially_filled", "filled", "skipped", *_ABORTED,
+    }),
+    "waiting_price": frozenset({
+        "waiting_price", "open", "partially_filled", "filled", "skipped", *_ABORTED,
+    }),
+    "waiting_market_data": frozenset({
+        "waiting_market_data", "open", "partially_filled", "filled", "skipped", *_ABORTED,
+    }),
+    "waiting_external": frozenset({
+        "waiting_external", "open", "partially_filled", "filled", "skipped", *_ABORTED,
+    }),
+}
 
 
 def utc_now() -> str:
@@ -160,6 +205,69 @@ class PaperStore:
                 "source_name TEXT PRIMARY KEY,account_id TEXT NOT NULL UNIQUE,"
                 "migrated_at TEXT NOT NULL,"
                 "FOREIGN KEY(account_id) REFERENCES paper_accounts(id))"
+            )
+            order_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_orders)")
+            }
+            order_additions = {
+                "requested_qty": "REAL",
+                "filled_qty": "REAL NOT NULL DEFAULT 0",
+                "remaining_qty": "REAL",
+                "avg_fill_price": "REAL",
+                "waiting_reason": "TEXT NOT NULL DEFAULT ''",
+                "next_check_at": "TEXT NOT NULL DEFAULT ''",
+                "last_progress_at": "TEXT NOT NULL DEFAULT ''",
+                "last_processed_at": "TEXT NOT NULL DEFAULT ''",
+                "integrity_code": "TEXT NOT NULL DEFAULT ''",
+                "version": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in order_additions.items():
+                if name not in order_columns:
+                    conn.execute(
+                        f"ALTER TABLE paper_orders ADD COLUMN {name} {declaration}"
+                    )
+            run_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(paper_auto_runs)")
+            }
+            run_additions = {
+                "last_progress_at": "REAL NOT NULL DEFAULT 0",
+                "diagnostic_code": "TEXT NOT NULL DEFAULT ''",
+                "reclaim_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in run_additions.items():
+                if name not in run_columns:
+                    conn.execute(
+                        f"ALTER TABLE paper_auto_runs ADD COLUMN {name} {declaration}"
+                    )
+            execute_sql_script(
+                conn,
+                """
+                CREATE TABLE IF NOT EXISTS paper_order_fills (
+                    id TEXT PRIMARY KEY, order_id TEXT NOT NULL,
+                    fill_key TEXT NOT NULL UNIQUE, filled_at TEXT NOT NULL,
+                    quantity REAL NOT NULL CHECK(quantity > 0),
+                    price REAL NOT NULL CHECK(price > 0),
+                    fee REAL NOT NULL DEFAULT 0 CHECK(fee >= 0),
+                    market_ref TEXT NOT NULL DEFAULT '',
+                    rule_version TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(order_id) REFERENCES paper_orders(id));
+                CREATE INDEX IF NOT EXISTS idx_paper_order_fills
+                    ON paper_order_fills(order_id,filled_at,id);
+                CREATE TABLE IF NOT EXISTS paper_order_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL,
+                    from_status TEXT NOT NULL, to_status TEXT NOT NULL,
+                    event_code TEXT NOT NULL, details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(order_id) REFERENCES paper_orders(id));
+                CREATE INDEX IF NOT EXISTS idx_paper_order_events
+                    ON paper_order_events(order_id,id);
+                """,
+            )
+            conn.execute(
+                "UPDATE paper_orders SET integrity_code='legacy_fill_unproven' "
+                "WHERE status='filled' AND shares>0 AND requested_qty IS NULL "
+                "AND integrity_code=''"
             )
 
         with self._conn() as conn:
@@ -515,7 +623,21 @@ class PaperStore:
                     return None
                 if str(row["status"]) == "failed" and float(row["next_retry_at"] or 0) > current:
                     return None
-            attempts = int(row["attempts"] or 0) + 1 if row is not None else 1
+            reclaimed = bool(
+                row is not None
+                and str(row["status"]) == "running"
+                and float(row["lease_expires"] or 0) <= current
+            )
+            # Reclaiming an expired lease resumes the same business attempt.
+            # Counting a worker crash as a fresh business retry permanently
+            # stranded legacy rows that had already reached the retry ceiling.
+            attempts = (
+                int(row["attempts"] or 0)
+                if reclaimed
+                else int(row["attempts"] or 0) + 1
+                if row is not None
+                else 1
+            )
             if attempts > 6:
                 return None
             token = uuid.uuid4().hex
@@ -528,6 +650,9 @@ class PaperStore:
                 "attempts=excluded.attempts,next_retry_at=0,lease_owner=excluded.lease_owner,"
                 "lease_expires=excluded.lease_expires,lease_token=excluded.lease_token,"
                 "heartbeat_at=excluded.heartbeat_at,last_error='',failure_code='',"
+                "last_progress_at=excluded.heartbeat_at,"
+                "diagnostic_code=CASE WHEN ? THEN 'lease_reclaimed' ELSE '' END,"
+                "reclaim_count=reclaim_count+CASE WHEN ? THEN 1 ELSE 0 END,"
                 "updated_at=excluded.updated_at",
                 (
                     run_date,
@@ -538,6 +663,8 @@ class PaperStore:
                     token,
                     current,
                     utc_now(),
+                    int(reclaimed),
+                    int(reclaimed),
                 ),
             )
         return token
@@ -555,12 +682,14 @@ class PaperStore:
         current = time.time() if now is None else float(now)
         with self._conn() as conn:
             changed = conn.execute(
-                "UPDATE paper_auto_runs SET heartbeat_at=?,lease_expires=?,updated_at=? "
+                "UPDATE paper_auto_runs SET heartbeat_at=?,lease_expires=?,last_progress_at=?,"
+                "diagnostic_code='',updated_at=? "
                 "WHERE run_date=? AND account_id=? AND status='running' AND lease_owner=? "
                 "AND lease_token=? AND lease_expires>?",
                 (
                     current,
                     current + max(15.0, float(lease_seconds)),
+                    current,
                     utc_now(),
                     run_date,
                     account_id,
@@ -570,6 +699,24 @@ class PaperStore:
                 ),
             ).rowcount
         return bool(changed)
+
+    def auto_run_lease_current(
+        self,
+        run_date: str,
+        account_id: str,
+        owner: str,
+        token: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM paper_auto_runs WHERE run_date=? AND account_id=? "
+                "AND status='running' AND lease_owner=? AND lease_token=? AND lease_expires>?",
+                (run_date, account_id, owner, token, current),
+            ).fetchone()
+        return row is not None
 
     def complete_auto_run(
         self,
@@ -687,6 +834,135 @@ class PaperStore:
         value["result"] = json.loads(value.pop("result_json") or "{}")
         return value
 
+    def scan_auto_run_health(
+        self,
+        *,
+        now: float | None = None,
+        heartbeat_grace: float = 120.0,
+    ) -> list[dict]:
+        current = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_auto_runs WHERE status IN ('running','failed','manual_recovery')"
+            ).fetchall()
+        issues = []
+        for raw in rows:
+            row = dict(raw)
+            code = ""
+            if row["status"] == "running" and float(row.get("lease_expires") or 0) <= current:
+                code = "lease_expired"
+            elif row["status"] == "running" and not str(row.get("lease_owner") or ""):
+                code = "owner_missing"
+            elif (
+                row["status"] == "running"
+                and current - float(row.get("heartbeat_at") or 0) > heartbeat_grace
+            ):
+                code = "heartbeat_stale"
+            elif row["status"] == "failed" and float(row.get("next_retry_at") or 0) <= 0:
+                code = "next_attempt_missing"
+            elif row["status"] == "manual_recovery":
+                code = str(row.get("failure_code") or "manual_recovery")
+            if code:
+                if code in {"fill_quantity_conflict", "fill_average_conflict"}:
+                    with self._conn() as conn:
+                        conn.execute(
+                            "UPDATE paper_orders SET integrity_code=?,updated_at=? WHERE id=?",
+                            (code, utc_now(), row["id"]),
+                        )
+                row["diagnostic_code"] = code
+                issues.append(row)
+        return issues
+
+    def scan_order_health(self, *, now: str | None = None) -> list[dict]:
+        current = now or utc_now()
+        with self._conn() as conn:
+            orders = conn.execute(
+                "SELECT * FROM paper_orders WHERE status NOT IN "
+                "('filled','cancelled','expired','rejected','superseded','skipped')"
+            ).fetchall()
+            aggregates = {
+                str(row[0]): (float(row[1] or 0), float(row[2] or 0))
+                for row in conn.execute(
+                    "SELECT order_id,SUM(quantity),SUM(quantity*price) "
+                    "FROM paper_order_fills GROUP BY order_id"
+                ).fetchall()
+            }
+        issues = []
+        for raw in orders:
+            row = dict(raw)
+            code = ""
+            if row["status"] in ORDER_WAITING_STATUSES and not row.get("waiting_reason"):
+                code = "waiting_reason_missing"
+            elif row["status"] in ORDER_WAITING_STATUSES and not row.get("next_check_at"):
+                code = "next_check_missing"
+            elif row.get("next_check_at") and str(row["next_check_at"]) <= current:
+                code = "next_check_due"
+            total, notional = aggregates.get(str(row["id"]), (0.0, 0.0))
+            filled = float(row.get("filled_qty") or 0)
+            avg = row.get("avg_fill_price")
+            if abs(total - filled) > 1e-9:
+                code = "fill_quantity_conflict"
+            elif total > 0 and (avg is None or abs(float(avg) - notional / total) > 1e-9):
+                code = "fill_average_conflict"
+            if code:
+                row["diagnostic_code"] = code
+                issues.append(row)
+        return issues
+
+    def reconcile_order_ledgers(self, account_id: str) -> dict:
+        ledger = self.ledger(account_id)
+        trades = ledger.trades()
+        ledger_by_key = {}
+        if not trades.empty and "idempotency_key" in trades:
+            ledger_by_key = {
+                str(row["idempotency_key"]): row
+                for _, row in trades.loc[trades["idempotency_key"].notna()].iterrows()
+            }
+        repaired = conflicts = 0
+        for order in self.orders(account_id=account_id, limit=2000):
+            fills = order.get("fills") or []
+            order_conflict = False
+            for fill in fills:
+                key = str(fill["fill_key"])
+                trade = ledger_by_key.get(key)
+                if trade is None:
+                    record = TradeRecord(
+                        date=str(fill["filled_at"])[:10], symbol=str(order["symbol"]),
+                        side=str(order["side"]), price=float(fill["price"]),
+                        shares=float(fill["quantity"]), fee=float(fill["fee"]),
+                        note=f"paper fill {fill['id']}",
+                    )
+                    if ledger.add_trade(record, idempotency_key=key):
+                        repaired += 1
+                    continue
+                if (
+                    abs(float(fill["quantity"]) - float(trade["shares"])) > 1e-9
+                    or abs(float(fill["price"]) - float(trade["price"])) > 1e-9
+                    or abs(float(fill["fee"]) - float(trade["fee"])) > 1e-9
+                    or str(trade["symbol"]) != str(order["symbol"])
+                    or str(trade["side"]) != str(order["side"])
+                ):
+                    order_conflict = True
+            if order_conflict:
+                with self._conn() as conn:
+                    conn.execute(
+                        "UPDATE paper_orders SET integrity_code='ledger_fill_conflict',"
+                        "updated_at=? WHERE id=?",
+                        (utc_now(), order["id"]),
+                    )
+                conflicts += 1
+            legacy_trade = ledger_by_key.get(str(order["idempotency_key"]))
+            if legacy_trade is not None and not fills:
+                # A ledger row alone does not prove the current order quantity contract.
+                with self._conn() as conn:
+                    conn.execute(
+                        "UPDATE paper_orders SET integrity_code='ledger_trade_unproven',"
+                        "updated_at=? WHERE id=?",
+                        (utc_now(), order["id"]),
+                    )
+                conflicts += 1
+        return {"repaired": repaired, "conflicts": conflicts}
+
     def create_cycle(
         self,
         account: dict,
@@ -773,7 +1049,264 @@ class PaperStore:
                 f"SELECT * FROM paper_orders WHERE {where} ORDER BY created_at,symbol LIMIT ?",
                 (param, max(1, min(limit, 2000))),
             ).fetchall()
+        values = []
+        for row in rows:
+            value = dict(row)
+            value["fills"] = self.order_fills(str(value["id"]))
+            values.append(value)
+        return values
+
+    def order_fills(self, order_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_order_fills WHERE order_id=? ORDER BY filled_at,id",
+                (order_id,),
+            ).fetchall()
         return [dict(row) for row in rows]
+
+    def mark_orders_processed(self, order_ids: list[str], session: str) -> int:
+        if not order_ids:
+            return 0
+        placeholders = ",".join("?" for _ in order_ids)
+        now = utc_now()
+        with self._conn() as conn:
+            changed = conn.execute(
+                f"UPDATE paper_orders SET last_processed_at=?,last_progress_at=?,updated_at=?,"
+                f"version=version+1 WHERE id IN ({placeholders})",
+                (session, now, now, *order_ids),
+            ).rowcount
+        return int(changed)
+
+    @staticmethod
+    def _validate_order_transition(current: str, target: str) -> None:
+        if current == target and current in ORDER_TERMINAL_STATUSES:
+            return
+        if target not in ORDER_TRANSITIONS.get(current, frozenset()):
+            raise ValueError(f"订单状态不能从 {current} 转为 {target}")
+
+    def transition_order(
+        self,
+        order_id: str,
+        status: str,
+        *,
+        waiting_reason: str = "",
+        next_check_at: str = "",
+        event_code: str = "state_transition",
+        details: dict | None = None,
+        expected_version: int | None = None,
+    ) -> dict:
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM paper_orders WHERE id=?", (order_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            current = str(row["status"])
+            version = int(row["version"] or 0)
+            if expected_version is not None and version != expected_version:
+                raise ValueError("订单版本已变化，请重新读取后重试")
+            self._validate_order_transition(current, status)
+            if status in ORDER_WAITING_STATUSES and not waiting_reason.strip():
+                raise ValueError("等待状态必须提供具体 waiting_reason")
+            changed = conn.execute(
+                "UPDATE paper_orders SET status=?,waiting_reason=?,next_check_at=?,"
+                "last_progress_at=?,updated_at=?,version=version+1 WHERE id=? AND version=?",
+                (
+                    status,
+                    waiting_reason[:200] if status in ORDER_WAITING_STATUSES else "",
+                    next_check_at if status in ORDER_WAITING_STATUSES else "",
+                    now,
+                    now,
+                    order_id,
+                    version,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("订单状态并发变化，请重新读取后重试")
+            conn.execute(
+                "INSERT INTO paper_order_events(order_id,from_status,to_status,event_code,"
+                "details_json,created_at) VALUES (?,?,?,?,?,?)",
+                (order_id, current, status, event_code[:80], canonical_json(details or {}), now),
+            )
+            updated = conn.execute(
+                "SELECT * FROM paper_orders WHERE id=?", (order_id,),
+            ).fetchone()
+        return dict(updated)
+
+    def record_fill(
+        self,
+        order_id: str,
+        *,
+        fill_key: str,
+        quantity: float,
+        price: float,
+        fee: float = 0,
+        filled_at: str | None = None,
+        market_ref: str = "",
+        rule_version: str = "",
+        requested_qty: float | None = None,
+        processed_session: str = "",
+    ) -> tuple[dict, bool]:
+        quantity, price, fee = float(quantity), float(price), float(fee)
+        self._validate_fill_values(fill_key, quantity, price, fee)
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            duplicate = conn.execute(
+                "SELECT order_id,quantity,price,fee,market_ref,rule_version "
+                "FROM paper_order_fills WHERE fill_key=?", (fill_key,),
+            ).fetchone()
+            if duplicate is not None:
+                self._validate_duplicate_fill(
+                    duplicate, order_id=order_id, quantity=quantity, price=price,
+                    fee=fee, market_ref=market_ref, rule_version=rule_version,
+                )
+                row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+                if row is None:
+                    raise KeyError("模拟订单不存在")
+                return dict(row), False
+            row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            current = str(row["status"])
+            if current in ORDER_TERMINAL_STATUSES:
+                raise ValueError(f"终态订单 {current} 不能新增成交")
+            existing_requested = row["requested_qty"]
+            total_requested = (
+                float(existing_requested) if existing_requested is not None
+                else float(requested_qty) if requested_qty is not None
+                else None
+            )
+            if total_requested is None or not math.isfinite(total_requested) or total_requested <= 0:
+                raise ValueError("记录成交前必须确定 requested_qty")
+            filled_before = float(row["filled_qty"] or 0)
+            if quantity > total_requested - filled_before + 1e-9:
+                raise ValueError("成交数量超过订单剩余数量")
+            conn.execute(
+                "INSERT INTO paper_order_fills(id,order_id,fill_key,filled_at,quantity,price,fee,"
+                "market_ref,rule_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    uuid.uuid4().hex, order_id, fill_key, filled_at or now,
+                    quantity, price, fee, market_ref[:500], rule_version[:80], now,
+                ),
+            )
+            aggregate = conn.execute(
+                "SELECT SUM(quantity),SUM(quantity*price),SUM(fee) FROM paper_order_fills "
+                "WHERE order_id=?", (order_id,),
+            ).fetchone()
+            filled_qty = float(aggregate[0] or 0)
+            remaining_qty = max(0.0, total_requested - filled_qty)
+            avg_price = float(aggregate[1] or 0) / filled_qty
+            next_status = "filled" if remaining_qty <= 1e-9 else "partially_filled"
+            self._validate_order_transition(current, next_status)
+            conn.execute(
+                "UPDATE paper_orders SET status=?,requested_qty=?,filled_qty=?,remaining_qty=?,"
+                "avg_fill_price=?,shares=?,price=?,fee=?,waiting_reason='',next_check_at='',"
+                "last_progress_at=?,last_processed_at=?,integrity_code='',updated_at=?,"
+                "version=version+1 WHERE id=?",
+                (
+                    next_status, total_requested, filled_qty, remaining_qty, avg_price,
+                    filled_qty, avg_price, float(aggregate[2] or 0), now,
+                    processed_session or str(filled_at or now)[:10], now, order_id,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO paper_order_events(order_id,from_status,to_status,event_code,"
+                "details_json,created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    order_id, current, next_status, "fill_recorded",
+                    canonical_json({"fill_key": fill_key, "quantity": quantity}), now,
+                ),
+            )
+            updated = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+        return dict(updated), True
+
+    @staticmethod
+    def _validate_fill_values(fill_key: str, quantity: float, price: float, fee: float) -> None:
+        if not fill_key.strip():
+            raise ValueError("fill_key 不能为空")
+        if not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("成交数量必须为正有限数")
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("成交价格必须为正有限数")
+        if not math.isfinite(fee) or fee < 0:
+            raise ValueError("成交费用必须为非负有限数")
+
+    @staticmethod
+    def _validate_duplicate_fill(
+        duplicate: sqlite3.Row,
+        *,
+        order_id: str,
+        quantity: float,
+        price: float,
+        fee: float,
+        market_ref: str,
+        rule_version: str,
+    ) -> None:
+        if str(duplicate["order_id"]) != order_id:
+            raise ValueError("fill_key 已属于另一订单")
+        evidence_conflicts = (
+            abs(float(duplicate["quantity"]) - quantity) > 1e-9,
+            abs(float(duplicate["price"]) - price) > 1e-9,
+            abs(float(duplicate["fee"]) - fee) > 1e-9,
+            bool(market_ref and str(duplicate["market_ref"]) != market_ref[:500]),
+            bool(rule_version and str(duplicate["rule_version"]) != rule_version[:80]),
+        )
+        if any(evidence_conflicts):
+            raise ValueError("重复 fill_key 的成交证据冲突")
+
+    def establish_order_quantity(
+        self,
+        order_id: str,
+        *,
+        side: str,
+        requested_qty: float,
+        expected_version: int,
+    ) -> dict:
+        """Persist immutable execution intent before the cross-database ledger write."""
+
+        quantity = float(requested_qty)
+        if side not in {"buy", "sell"}:
+            raise ValueError("订单方向必须是 buy/sell")
+        if not math.isfinite(quantity) or quantity <= 0:
+            raise ValueError("requested_qty 必须为正有限数")
+        now = utc_now()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM paper_orders WHERE id=?", (order_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            if int(row["version"] or 0) != int(expected_version):
+                raise ValueError("订单版本已变化，请重新读取后重试")
+            existing = row["requested_qty"]
+            if existing is not None:
+                if str(row["side"]) != side or abs(float(existing) - quantity) > 1e-9:
+                    raise ValueError("订单执行数量已经锁定")
+                return dict(row)
+            changed = conn.execute(
+                "UPDATE paper_orders SET side=?,requested_qty=?,filled_qty=0,remaining_qty=?,"
+                "last_progress_at=?,updated_at=?,version=version+1 WHERE id=? AND version=? "
+                "AND requested_qty IS NULL",
+                (side, quantity, quantity, now, now, order_id, expected_version),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("订单执行数量并发变化，请重新读取后重试")
+            conn.execute(
+                "INSERT INTO paper_order_events(order_id,from_status,to_status,event_code,"
+                "details_json,created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    order_id, row["status"], row["status"], "quantity_established",
+                    canonical_json({"side": side, "requested_qty": quantity}), now,
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM paper_orders WHERE id=?", (order_id,),
+            ).fetchone()
+        return dict(updated)
 
     def confirm(self, cycle_id: str) -> dict:
         cycle = self.cycle(cycle_id)
@@ -825,12 +1358,38 @@ class PaperStore:
         fee: float = 0,
         reason: str = "",
     ) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE paper_orders SET status=?,side=?,shares=?,price=?,fee=?,reason=?,"
-                "updated_at=? WHERE id=?",
-                (status, side, shares, price, fee, reason, utc_now(), order_id),
+        if status == "filled":
+            with self._conn() as conn:
+                row = conn.execute(
+                    "SELECT idempotency_key FROM paper_orders WHERE id=?", (order_id,),
+                ).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            self.record_fill(
+                order_id,
+                fill_key=str(row["idempotency_key"]),
+                quantity=shares,
+                price=price,
+                fee=fee,
+                requested_qty=shares,
+                rule_version="paper-open-v1",
             )
+            return
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM paper_orders WHERE id=?", (order_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            self._validate_order_transition(str(row["status"]), status)
+            changed = conn.execute(
+                "UPDATE paper_orders SET status=?,side=?,shares=?,price=?,fee=?,reason=?,"
+                "last_progress_at=?,updated_at=?,version=version+1 WHERE id=?",
+                (status, side, shares, price, fee, reason, utc_now(), utc_now(), order_id),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("订单状态更新失败")
 
     def update_cycle_status(self, cycle_id: str, status: str, execution_date: str = "") -> dict:
         finished = utc_now() if status in {"completed", "superseded"} else ""
@@ -1262,12 +1821,19 @@ class PaperService:
         sells = float(eligible.loc[eligible["side"] == "sell", "shares"].sum())
         return max(0.0, buys - sells)
 
-    def process(
+    def process(  # noqa: C901, RUF100 -- ordered matching stages share one lease fence
         self,
         account_id: str,
         *,
         panel: dict[str, pd.DataFrame] | None = None,
+        calendar_evidence: CalendarEvidence | dict[str, CalendarEvidence] | None = None,
+        observed_at: datetime | None = None,
+        lease_guard: Callable[[], bool] | None = None,
     ) -> dict:
+        def require_lease() -> None:
+            if lease_guard is not None and not lease_guard():
+                raise RuntimeError("paper_auto_lease_lost")
+
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
@@ -1288,11 +1854,32 @@ class PaperService:
         ledger = self.store.ledger(account_id)
         held = [position.symbol for position in ledger.positions() if position.shares > 0]
         symbols = sorted(set(cycle["target_weights"]) | set(held))
+        markets = {market_for_symbol(symbol) for symbol in symbols}
+        if len(markets) != 1:
+            raise ValueError("mixed_market_account_requires_manual_recovery")
+        calendar = (
+            calendar_evidence.get(next(iter(markets)).value)
+            if isinstance(calendar_evidence, dict)
+            else calendar_evidence
+        )
+        decision_at = observed_at
         if panel is None:
-            from quantmaster.data import refresh_panel
+            from quantmaster.data import read_panel, refresh_panel
 
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
-            market_envelope = refresh_panel(symbols, start, market_date().isoformat())
+            end = market_date().isoformat()
+            market_envelope = read_panel(symbols, start, end)
+            if market_envelope.quality.partial or market_envelope.quality.missing_symbols:
+                if calendar is None:
+                    raise ValueError("本地行情存在缺口，但缺少已验证交易日历，拒绝远程补齐")
+                for symbol in symbols:
+                    gap = inspect_local_daily_bars(symbol, start, end, calendar)
+                    missing = [value.isoformat() for value in gap.missing_sessions]
+                    if missing:
+                        refresh_panel(
+                            [symbol], min(missing), max(missing), mode="incremental",
+                        )
+                market_envelope = read_panel(symbols, start, end)
             panel = market_envelope.require_data()
             if (
                 market_envelope.quality.status != "verified"
@@ -1305,19 +1892,90 @@ class PaperService:
                 )
                 self.store.set_warning(account_id, message, pause=True)
                 raise ValueError(message)
+            if calendar is None:
+                quality = market_envelope.quality
+                sessions = sorted({
+                    pd.Timestamp(value).date()
+                    for frame in panel.values()
+                    for value in frame.index
+                })
+                calendar = CalendarEvidence.build(
+                    market_for_symbol(symbols[0]), sessions,
+                    source=str(quality.calendar_source or ""),
+                    verified=quality.status == "verified" and not quality.partial,
+                )
+            decision_at = datetime.now(UTC)
+        elif calendar is None or observed_at is None:
+            raise ValueError("注入 panel 必须同时提供已验证 calendar_evidence 与 observed_at")
+        if calendar is None or not calendar.verified or not calendar.source:
+            raise ValueError("交易日历证据未验证")
+        if decision_at is None or decision_at.tzinfo is None:
+            raise ValueError("行情 observed_at 必须包含时区")
         close, open_prices = panel.get("close"), panel.get("open")
         if close is None or open_prices is None or close.empty or open_prices.empty:
             raise ValueError("缺少开盘价或昨收价，订单继续等待")
         dates = pd.DatetimeIndex(close.index).sort_values()
-        after = pd.Timestamp(cycle["execution_date"] or cycle["signal_date"])
-        eligible_dates = dates[dates > after]
-        if eligible_dates.empty:
-            return {
-                "status": "waiting_open",
-                "cycle": cycle,
-                "message": "信号后的下一交易日开盘价尚未到达，未写入成交。",
+        orders = [
+            order for order in cycle["orders"]
+            if order["status"] in {
+                "queued", "blocked", "partially_filled", *ORDER_WAITING_STATUSES,
             }
-        execution = eligible_dates[0]
+        ]
+        ready_orders, selected_sessions = [], set()
+        for order in orders:
+            symbol = str(order["symbol"])
+            cursor = str(
+                order.get("last_processed_at") or cycle["execution_date"] or cycle["signal_date"]
+            )
+            bars = [
+                DailyBarEvidence(
+                    symbol, pd.Timestamp(value).date(), float(raw), decision_at,
+                    "panel-fixture" if observed_at is not None else "local-cache",
+                )
+                for value, raw in open_prices.get(symbol, pd.Series(dtype=float)).items()
+                if pd.notna(raw)
+            ]
+            selected = select_next_open_bar(
+                bars, after_session=cursor, decision_at=decision_at, evidence=calendar,
+            )
+            if selected is None:
+                next_session = calendar.next_session(cursor)
+                future_session = bool(
+                    next_session
+                    and next_session > decision_at.astimezone(market_timezone(calendar.market)).date()
+                )
+                waiting_status = (
+                    "waiting_market_open" if future_session else "waiting_market_data"
+                )
+                require_lease()
+                self.store.transition_order(
+                    order["id"], waiting_status,
+                    waiting_reason=(
+                        f"symbol={symbol};required={next_session};local_checked=true;"
+                        f"latest={max((bar.session for bar in bars), default='none')}"
+                    ),
+                    next_check_at=(
+                        datetime.combine(
+                            next_session, datetime.min.time(),
+                            market_timezone(calendar.market),
+                        ).isoformat()
+                        if next_session else decision_at.isoformat()
+                    ),
+                    event_code="market_not_open" if future_session else "market_data_gap",
+                )
+                continue
+            ready_orders.append(order)
+            selected_sessions.add(selected.session)
+        orders = ready_orders
+        if not orders:
+            return {
+                "status": "waiting_market_data",
+                "cycle": cycle,
+                "message": "首个未处理交易日行情不完整，订单继续等待。",
+            }
+        if len(selected_sessions) != 1:
+            raise ValueError("订单恢复游标不一致，需要人工检查")
+        execution = pd.Timestamp(next(iter(selected_sessions)))
         execution_date = execution.strftime("%Y-%m-%d")
         previous_dates = dates[dates < execution]
         previous = previous_dates[-1] if len(previous_dates) else None
@@ -1328,8 +1986,8 @@ class PaperService:
         total_assets, cash = float(report["total_assets"]), float(report["cash"])
         current = {position.symbol: position.shares for position in ledger.positions()}
         trade_config = get_config().trade
-        orders = [order for order in cycle["orders"] if order["status"] in {"queued", "blocked"}]
         ledger_trades = ledger.trades()
+        recovered_blocked: list[dict[str, str]] = []
         if not ledger_trades.empty and "idempotency_key" in ledger_trades:
             existing = {
                 str(row["idempotency_key"]): row
@@ -1337,10 +1995,35 @@ class PaperService:
             }
             pending_orders = []
             for order in orders:
+                fill_key = f"{order['idempotency_key']}:{execution_date}:open:v2"
+                trade = existing.get(fill_key)
+                if trade is not None:
+                    require_lease()
+                    recovered, _ = self.store.record_fill(
+                        order["id"], fill_key=fill_key,
+                        quantity=float(trade["shares"]), price=float(trade["price"]),
+                        fee=float(trade["fee"]), filled_at=f"{execution_date}T09:30:00",
+                        market_ref=f"bar:{order['symbol']}:{execution_date}:open",
+                        rule_version="paper-open-v2",
+                        requested_qty=(
+                            float(order["requested_qty"])
+                            if order.get("requested_qty") is not None
+                            else float(trade["shares"])
+                        ),
+                        processed_session=execution_date,
+                    )
+                    if float(recovered.get("remaining_qty") or 0) > 1e-9:
+                        recovered_blocked.append({
+                            "symbol": str(order["symbol"]),
+                            "side": str(trade["side"]),
+                            "reason": "partial_fill_remaining",
+                        })
+                    continue
                 trade = existing.get(order["idempotency_key"])
                 if trade is None:
                     pending_orders.append(order)
                     continue
+                require_lease()
                 self.store.update_order(
                     order["id"],
                     status="filled",
@@ -1368,32 +2051,45 @@ class PaperService:
                 else current_shares
             )
             diff = target_shares - current_shares
-            side = "buy" if diff > 0 else "sell" if diff < 0 else "hold"
+            calculated_side = "buy" if diff > 0 else "sell" if diff < 0 else "hold"
+            side = (
+                str(order["side"])
+                if order.get("requested_qty") is not None
+                else calculated_side
+            )
+            remaining = order.get("remaining_qty")
+            desired_shares = (
+                float(remaining)
+                if order.get("requested_qty") is not None and remaining is not None
+                else abs(diff)
+            )
             desired_value = abs(target_value - current_shares * open_value)
             executable.append(
                 (
                     order,
                     side,
-                    abs(diff),
+                    desired_shares,
                     desired_value,
                     open_value,
                     previous_value,
                 )
             )
         executable.sort(key=lambda item: 0 if item[1] == "sell" else 1)
-        filled, blocked = [], []
+        filled, blocked = [], list(recovered_blocked)
         for order, side, desired_shares, desired_value, raw_open, previous_close in executable:
             symbol = order["symbol"]
             if side == "hold" or desired_shares <= 0:
+                require_lease()
                 self.store.update_order(order["id"], status="skipped", side="hold")
                 continue
             quote = quote_open(symbol, side, raw_open, previous_close, trade_config)
             if quote.blocked_reason:
-                self.store.update_order(
-                    order["id"],
-                    status="blocked",
-                    side=side,
-                    reason=quote.blocked_reason,
+                require_lease()
+                self.store.transition_order(
+                    order["id"], "waiting_price",
+                    waiting_reason=f"{quote.blocked_reason}:{symbol}:{execution_date}",
+                    next_check_at=decision_at.isoformat(),
+                    event_code="price_rule_wait",
                 )
                 blocked.append({"symbol": symbol, "side": side, "reason": quote.blocked_reason})
                 continue
@@ -1403,29 +2099,40 @@ class PaperService:
                 if shares < float(current.get(symbol, 0.0)) - 1e-9:
                     shares = math.floor(shares / trade_config.lot_size) * trade_config.lot_size
                 if shares <= 0:
-                    self.store.update_order(
-                        order["id"],
-                        status="blocked",
-                        side=side,
-                        reason="t_plus_one",
+                    require_lease()
+                    self.store.transition_order(
+                        order["id"], "waiting_external",
+                        waiting_reason=f"t_plus_one:{symbol}:{execution_date}",
+                        next_check_at=decision_at.isoformat(),
+                        event_code="settlement_wait",
                     )
                     blocked.append({"symbol": symbol, "side": side, "reason": "t_plus_one"})
                     continue
                 amount = shares * quote.execution_price
                 fee = sell_cost(amount, trade_config)
             else:
-                shares = executable_buy_shares(cash, desired_value, raw_open, trade_config)
+                shares = min(
+                    desired_shares,
+                    executable_buy_shares(cash, desired_value, raw_open, trade_config),
+                )
                 if shares <= 0:
-                    self.store.update_order(
-                        order["id"],
-                        status="blocked",
-                        side=side,
-                        reason="insufficient_cash",
+                    require_lease()
+                    self.store.transition_order(
+                        order["id"], "waiting_external",
+                        waiting_reason=f"insufficient_cash:{symbol}",
+                        next_check_at=decision_at.isoformat(),
+                        event_code="risk_wait",
                     )
                     blocked.append({"symbol": symbol, "side": side, "reason": "insufficient_cash"})
                     continue
                 amount = shares * quote.execution_price
                 fee = buy_cost(amount, trade_config)
+            if order.get("requested_qty") is None:
+                require_lease()
+                order = self.store.establish_order_quantity(
+                    order["id"], side=side, requested_qty=desired_shares,
+                    expected_version=int(order.get("version") or 0),
+                )
             trade = TradeRecord(
                 date=execution_date,
                 symbol=symbol,
@@ -1435,22 +2142,36 @@ class PaperService:
                 fee=round(fee, 2),
                 note=f"paper cycle {cycle['id']}",
             )
-            written = ledger.add_trade(trade, idempotency_key=order["idempotency_key"])
-            self.store.update_order(
-                order["id"],
-                status="filled",
-                side=side,
-                shares=shares,
+            fill_key = f"{order['idempotency_key']}:{execution_date}:open:v2"
+            require_lease()
+            written = ledger.add_trade(trade, idempotency_key=fill_key)
+            require_lease()
+            updated_order, _fill_written = self.store.record_fill(
+                order["id"], fill_key=fill_key, quantity=shares,
                 price=trade.price,
                 fee=trade.fee,
+                filled_at=f"{execution_date}T09:30:00",
+                market_ref=f"bar:{symbol}:{execution_date}:open",
+                rule_version="paper-open-v2",
+                requested_qty=float(order["requested_qty"]),
+                processed_session=execution_date,
             )
-            if side == "buy":
-                cash -= amount + fee
-                current[symbol] = current.get(symbol, 0.0) + shares
-            else:
-                cash += amount - fee
-                current[symbol] = max(0.0, current.get(symbol, 0.0) - shares)
+            if written:
+                if side == "buy":
+                    cash -= amount + fee
+                    current[symbol] = current.get(symbol, 0.0) + shares
+                else:
+                    cash += amount - fee
+                    current[symbol] = max(0.0, current.get(symbol, 0.0) - shares)
+            if float(updated_order.get("remaining_qty") or 0) > 1e-9:
+                blocked.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "reason": "partial_fill_remaining",
+                })
             filled.append({**trade.__dict__, "written": written})
+        require_lease()
+        self.store.mark_orders_processed([str(order["id"]) for order in orders], execution_date)
         status = "blocked" if blocked else "completed"
         cycle = self.store.update_cycle_status(cycle["id"], status, execution_date)
         final_report = ledger_report(ledger, prices=valuation, as_of=execution_date)
@@ -1547,6 +2268,7 @@ class PaperService:
         account_id: str,
         *,
         expected_signal_date: str | None = None,
+        lease_guard: Callable[[], bool] | None = None,
     ) -> dict:
         """Process one auto account and create/confirm its newest due proposal."""
         account = self.store.account(account_id)
@@ -1558,7 +2280,9 @@ class PaperService:
                 "account_id": account_id,
                 "message": "账户未启用自动交易。",
             }
-        processed = self.process(account_id)
+        processed = self.process(account_id, lease_guard=lease_guard)
+        if lease_guard is not None and not lease_guard():
+            raise RuntimeError("paper_auto_lease_lost")
         proposal = self.propose(account_id)
         signal_date = str(proposal.get("signal_date") or "")
         if expected_signal_date and signal_date < expected_signal_date:

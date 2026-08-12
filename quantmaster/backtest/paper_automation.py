@@ -134,9 +134,18 @@ class PaperAutomationWorker:
                     self.identity.value,
                     token,
                 ) as lease_alive:
+                    def lease_current(
+                        account_id: str = account_id,
+                        token: str = token,
+                    ) -> bool:
+                        return lease_alive.is_set() and self.service.store.auto_run_lease_current(
+                            run_date, account_id, self.identity.value, token,
+                        )
+
                     result = self.service.run_auto_account(
                         account_id,
                         expected_signal_date=run_date,
+                        lease_guard=lease_current,
                     )
                     completed = lease_alive.is_set() and self.service.store.complete_auto_run(
                         run_date,

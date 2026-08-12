@@ -16,6 +16,7 @@ from quantmaster.backtest.paper_accounts import (
     PaperStore,
 )
 from quantmaster.backtest.paper_automation import PaperAutomationWorker
+from quantmaster.backtest.paper_market import CalendarEvidence, PaperMarket
 from quantmaster.backtest.spec import (
     BacktestSpec,
     DecisionStrategySpec,
@@ -274,6 +275,23 @@ def make_paper_service(tmp_path, name="日频验证", *, rebalance="D"):
     return PaperService(store), account
 
 
+def validated_panel(panel):
+    sessions = sorted({
+        pd.Timestamp(value).date()
+        for frame in panel.values()
+        for value in frame.index
+    })
+    return {
+        "panel": panel,
+        "calendar_evidence": CalendarEvidence.build(
+            PaperMarket.CN, sessions, source="test:verified-calendar",
+        ),
+        "observed_at": datetime.combine(
+            sessions[-1], datetime.max.time(), ZoneInfo("Asia/Shanghai"),
+        ),
+    }
+
+
 def test_paper_confirmation_does_not_write_before_next_open(tmp_path):
     service, account = make_paper_service(tmp_path)
     signal_panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
@@ -287,8 +305,8 @@ def test_paper_confirmation_does_not_write_before_next_open(tmp_path):
     assert confirmed["status"] == "confirmed"
     assert ledger.trades().empty
 
-    waiting = service.process(account["id"], panel=signal_panel)
-    assert waiting["status"] == "waiting_open"
+    waiting = service.process(account["id"], **validated_panel(signal_panel))
+    assert waiting["status"] == "waiting_market_data"
     assert ledger.trades().empty
 
 
@@ -297,7 +315,7 @@ def test_paper_executes_t_plus_one_open_and_never_overdraws(tmp_path):
     dates = pd.bdate_range("2024-01-01", periods=6)
     proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
     service.store.confirm(proposal["id"])
-    result = service.process(account["id"], panel=price_panel(dates))
+    result = service.process(account["id"], **validated_panel(price_panel(dates)))
     trades = service.store.ledger(account["id"]).trades()
 
     assert result["status"] == "completed"
@@ -314,7 +332,7 @@ def test_backtest_and_paper_share_first_open_fill_semantics(tmp_path):
     panel = price_panel(dates)
     proposal = service.propose(account["id"], panel={key: value.iloc[:-1] for key, value in panel.items()})
     service.store.confirm(proposal["id"])
-    paper_result = service.process(account["id"], panel=panel)
+    paper_result = service.process(account["id"], **validated_panel(panel))
     paper_trade = paper_result["filled"][0]
 
     weights = pd.DataFrame(float("nan"), index=dates, columns=panel["close"].columns)
@@ -343,16 +361,18 @@ def test_limit_up_order_stays_blocked_and_retries_next_session(tmp_path):
     blocked_panel = price_panel([*signal_dates, monday], first=(9.0, 10.0))
     blocked_panel["open"].loc[monday, "000001.SZ"] = 11.0
     blocked_panel["close"].loc[monday, "000001.SZ"] = 11.0
-    blocked = service.process(account["id"], panel=blocked_panel)
+    blocked = service.process(account["id"], **validated_panel(blocked_panel))
     assert blocked["status"] == "blocked"
     assert blocked["blocked"][0]["reason"] == "limit_up"
+    blocked_order = service.store.orders(cycle_id=proposal["id"])[0]
+    assert blocked_order["status"] == "waiting_price"
     assert service.store.ledger(account["id"]).trades().empty
 
     tuesday = monday + pd.offsets.BDay(1)
     retry_panel = price_panel([*signal_dates, monday, tuesday], first=(9.0, 10.0))
     retry_panel["close"].loc[monday, "000001.SZ"] = 11.0
     retry_panel["open"].loc[tuesday, "000001.SZ"] = 10.8
-    retried = service.process(account["id"], panel=retry_panel)
+    retried = service.process(account["id"], **validated_panel(retry_panel))
     assert retried["status"] == "completed"
     assert set(service.store.ledger(account["id"]).trades()["date"]) == {str(tuesday.date())}
 
@@ -639,7 +659,7 @@ def test_auto_account_runs_daily_without_manual_buttons_and_is_idempotent(tmp_pa
     monkeypatch.setattr(
         service,
         "process",
-        lambda account_id: processed.append(account_id) or {"status": "completed"},
+        lambda account_id, **_kwargs: processed.append(account_id) or {"status": "completed"},
     )
     monkeypatch.setattr(
         service,
@@ -736,6 +756,196 @@ def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
     assert latest["status"] == "manual_recovery"
     assert latest["attempts"] == 6
     assert store.recover_auto_run("2026-10-09", account_id) is True
+
+
+def test_paper_order_state_machine_requires_reason_and_rejects_invalid_transition(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    proposal = service.propose(
+        account["id"], panel=price_panel(pd.bdate_range("2024-01-01", periods=5)),
+    )
+    order = service.store.confirm(proposal["id"])["orders"][0]
+
+    with pytest.raises(ValueError, match="waiting_reason"):
+        service.store.transition_order(order["id"], "waiting_market_data")
+    waiting = service.store.transition_order(
+        order["id"],
+        "waiting_market_data",
+        waiting_reason="missing_open:000001.SZ:2024-01-08",
+        next_check_at="2024-01-08T01:30:00+00:00",
+    )
+    assert waiting["status"] == "waiting_market_data"
+    assert waiting["waiting_reason"].startswith("missing_open")
+    assert waiting["version"] == 1
+    with pytest.raises(ValueError, match="不能从"):
+        service.store.transition_order(order["id"], "proposed")
+
+
+def test_paper_order_partial_fills_are_idempotent_and_arithmetically_consistent(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    proposal = service.propose(
+        account["id"], panel=price_panel(pd.bdate_range("2024-01-01", periods=5)),
+    )
+    confirmed = service.store.confirm(proposal["id"])
+    order = confirmed["orders"][0]
+
+    partial, written = service.store.record_fill(
+        order["id"], fill_key="fill-1", quantity=400, price=10, fee=5,
+        requested_qty=1_000, market_ref="bar:000001.SZ:2024-01-08:open",
+        rule_version="paper-open-v2",
+    )
+    duplicate, duplicate_written = service.store.record_fill(
+        order["id"], fill_key="fill-1", quantity=400, price=10, fee=5,
+        requested_qty=1_000,
+    )
+    filled, second_written = service.store.record_fill(
+        order["id"], fill_key="fill-2", quantity=600, price=12, fee=7,
+        requested_qty=1_000,
+    )
+
+    assert written is True and duplicate_written is False and second_written is True
+    assert partial["status"] == duplicate["status"] == "partially_filled"
+    assert filled["status"] == "filled"
+    assert filled["filled_qty"] == 1_000
+    assert filled["remaining_qty"] == 0
+    assert filled["avg_fill_price"] == pytest.approx(11.2)
+    assert filled["fee"] == 12
+    assert len(service.store.order_fills(order["id"])) == 2
+    with pytest.raises(ValueError, match="成交证据冲突"):
+        service.store.record_fill(
+            order["id"], fill_key="fill-1", quantity=401, price=10, fee=5,
+            requested_qty=1_000,
+        )
+    with pytest.raises(ValueError, match="终态订单"):
+        service.store.record_fill(
+            order["id"], fill_key="fill-3", quantity=1, price=12,
+            requested_qty=1_001,
+        )
+
+
+def test_paper_auto_run_health_distinguishes_expired_lease_and_reclaim(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("租约诊断").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    account_id = account["id"]
+    first = store.claim_auto_run("2026-02-13", account_id, "worker-one", now=100)
+    assert first
+    issues = store.scan_auto_run_health(now=200)
+    assert issues[0]["diagnostic_code"] == "lease_expired"
+
+    second = store.claim_auto_run("2026-02-13", account_id, "worker-two", now=200)
+    assert second and second != first
+    latest = store.latest_auto_run(account_id)
+    assert latest["diagnostic_code"] == "lease_reclaimed"
+    assert latest["reclaim_count"] == 1
+    assert store.scan_auto_run_health(now=201) == []
+
+
+def test_paper_auto_run_reclaims_expired_lease_at_retry_ceiling(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("租约重领边界").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    account_id = account["id"]
+    first = store.claim_auto_run("2026-02-13", account_id, "dead-worker", now=100)
+    assert first
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_auto_runs SET attempts=6,lease_expires=101,heartbeat_at=100 "
+            "WHERE run_date='2026-02-13' AND account_id=?",
+            (account_id,),
+        )
+
+    reclaimed = store.claim_auto_run(
+        "2026-02-13", account_id, "replacement-worker", now=200,
+    )
+
+    assert reclaimed and reclaimed != first
+    latest = store.latest_auto_run(account_id)
+    assert latest["status"] == "running"
+    assert latest["attempts"] == 6
+    assert latest["diagnostic_code"] == "lease_reclaimed"
+    assert latest["reclaim_count"] == 1
+
+
+def test_paper_process_recovers_ledger_fill_after_lease_loss(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(
+        account["id"], panel=price_panel(dates[:-1]),
+    )
+    service.store.confirm(proposal["id"])
+    ledger = service.store.ledger(account["id"])
+    original_add = ledger.add_trade
+    ledger_written = False
+
+    def add_then_lose_lease(trade, idempotency_key=None):
+        nonlocal ledger_written
+        written = original_add(trade, idempotency_key=idempotency_key)
+        ledger_written = True
+        return written
+
+    monkeypatch.setattr(service.store, "ledger", lambda _account_id: ledger)
+    monkeypatch.setattr(ledger, "add_trade", add_then_lose_lease)
+    with pytest.raises(RuntimeError, match="lease_lost"):
+        service.process(
+            account["id"], **validated_panel(price_panel(dates)),
+            lease_guard=lambda: not ledger_written,
+        )
+    assert len(ledger.trades()) == 1
+    assert service.store.order_fills(proposal["orders"][0]["id"]) == []
+
+    monkeypatch.setattr(ledger, "add_trade", original_add)
+    recovered = service.process(
+        account["id"], **validated_panel(price_panel(dates)), lease_guard=lambda: True,
+    )
+
+    assert recovered["status"] == "completed"
+    assert len(ledger.trades()) == 1
+    fills = service.store.order_fills(proposal["orders"][0]["id"])
+    assert len(fills) == 1
+    assert fills[0]["fill_key"].endswith(f":{dates[-1].date()}:open:v2")
+
+
+def test_process_rejects_uncontracted_fixture_and_lease_loss_before_write(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+    with pytest.raises(ValueError, match="calendar_evidence"):
+        service.process(account["id"], panel=price_panel(dates))
+    with pytest.raises(RuntimeError, match="lease_lost"):
+        service.process(
+            account["id"], **validated_panel(price_panel(dates)), lease_guard=lambda: False,
+        )
+    assert service.store.ledger(account["id"]).trades().empty
+
+
+def test_order_health_scan_and_ledger_reconciliation_do_not_invent_fills(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    proposal = service.propose(
+        account["id"], panel=price_panel(pd.bdate_range("2024-01-01", periods=5)),
+    )
+    order = service.store.confirm(proposal["id"])["orders"][0]
+    service.store.transition_order(
+        order["id"], "waiting_market_data",
+        waiting_reason="missing_open", next_check_at="2024-01-08T01:00:00+00:00",
+    )
+    assert service.store.scan_order_health(now="2024-01-09T00:00:00+00:00")[0][
+        "diagnostic_code"
+    ] == "next_check_due"
+
+    service.store.ledger(account["id"]).add_trade(
+        TradeRecord("2024-01-08", order["symbol"], "buy", 10, 100),
+        idempotency_key=order["idempotency_key"],
+    )
+    result = service.store.reconcile_order_ledgers(account["id"])
+    assert result == {"repaired": 0, "conflicts": 1}
+    assert service.store.order_fills(order["id"]) == []
+    refreshed = service.store.orders(account_id=account["id"])[0]
+    assert refreshed["integrity_code"] == "ledger_trade_unproven"
 
 
 def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):

@@ -4,6 +4,7 @@ import threading
 
 import pytest
 
+from quantmaster.runtime.maintenance import maintenance_barrier
 from quantmaster.runtime.worker_ipc import (
     RuntimeCommandServer,
     WorkerCommandUnavailable,
@@ -57,3 +58,42 @@ def test_runtime_worker_command_channel_fails_fast_when_no_worker_exists(tmp_pat
             timeout=0.1,
             root=tmp_path / "no-worker",
         )
+
+
+def test_maintenance_command_token_is_held_by_worker_handler(tmp_path):
+    lease = None
+
+    def handler(operation, payload):
+        nonlocal lease
+        if operation == "maintenance.enter":
+            lease = maintenance_barrier.enter(payload["reason"])
+            return {"token": lease.token, **maintenance_barrier.status()}
+        if operation == "maintenance.status":
+            return {
+                "valid": bool(lease and lease.token == payload["token"]),
+                **maintenance_barrier.status(),
+            }
+        if operation == "maintenance.exit":
+            maintenance_barrier.exit(lease)
+            lease = None
+            return {"released": True}
+        return {}
+
+    server = RuntimeCommandServer(handler, root=tmp_path / "runtime")
+    server.start()
+    try:
+        entered = call_worker_command(
+            "maintenance.enter", {"reason": "test"}, root=tmp_path / "runtime",
+        )
+        assert maintenance_barrier.frozen
+        assert call_worker_command(
+            "maintenance.status", {"token": entered["token"]}, root=tmp_path / "runtime",
+        )["valid"]
+        call_worker_command(
+            "maintenance.exit", {"token": entered["token"]}, root=tmp_path / "runtime",
+        )
+        assert not maintenance_barrier.active
+    finally:
+        if lease is not None:
+            maintenance_barrier.exit(lease)
+        server.stop()

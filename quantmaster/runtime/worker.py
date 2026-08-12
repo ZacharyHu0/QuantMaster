@@ -274,10 +274,46 @@ class RuntimeWorker:
                 except (OSError, RuntimeError, ValueError, TypeError):
                     logger.warning("市场总览快照发布失败", exc_info=True)
 
+            maintenance_lease = None
+
             def handle_command(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
                 """Perform Web-submitted data mutations in this worker only."""
 
+                nonlocal maintenance_lease
+
                 try:
+                    if operation == "maintenance.enter":
+                        if maintenance_lease is not None:
+                            raise ValueError("已有维护租约")
+                        maintenance_lease = maintenance_barrier.enter(
+                            str(payload.get("reason") or "external maintenance"),
+                            timeout=float(payload.get("timeout") or 30),
+                        )
+                        return {
+                            "token": maintenance_lease.token,
+                            "worker_id": self._worker_id,
+                            "pid": os.getpid(),
+                            **maintenance_barrier.status(),
+                        }
+                    if operation == "maintenance.status":
+                        token = str(payload.get("token") or "")
+                        return {
+                            "valid": bool(
+                                maintenance_lease is not None
+                                and maintenance_lease.token == token
+                                and maintenance_barrier.frozen
+                            ),
+                            "worker_id": self._worker_id,
+                            "pid": os.getpid(),
+                            **maintenance_barrier.status(),
+                        }
+                    if operation == "maintenance.exit":
+                        token = str(payload.get("token") or "")
+                        if maintenance_lease is None or maintenance_lease.token != token:
+                            raise ValueError("维护租约 token 无效")
+                        lease, maintenance_lease = maintenance_lease, None
+                        maintenance_barrier.exit(lease)
+                        return {"released": True, **maintenance_barrier.status()}
                     if operation == "data.refresh.preview":
                         return data_refresh_manager.preview(
                             str(payload.get("scope") or "market"),
