@@ -558,11 +558,9 @@ def feishu_config(value: FeishuConfigIn, request: Request) -> dict:
     """保存飞书企业自建应用 Bot 凭据；App Secret 只进入系统凭据库。"""
     _require_csrf(request)
     try:
-        result = service().configure_feishu(value.app_id, value.app_secret.get_secret_value())
-        runtime_status = get_runtime().restart_channel("feishu")
+        result = get_runtime().replace_feishu(value.app_id, value.app_secret.get_secret_value())
         return {
             **result,
-            "runtime_status": runtime_status,
             "restart_required": False,
             "warnings": ([result["verification"]["message"]]
                          if result["verification"]["status"] == "warning" else []),
@@ -610,16 +608,6 @@ def feishu_check(request: Request) -> dict:
     credential_ready = stages["credential"].get("state") in {
         "connected", "network_error", "tls_error", "rate_limited",
     }
-    if account and credential_ready and runtime_detail["status"] == "running" and not channel_alive:
-        runtime.restart_channel("feishu")
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            time.sleep(0.25)
-            runtime_detail = runtime.status()
-            channel_alive = bool(runtime_detail["channels"].get("feishu"))
-            refreshed_status = (service().store.bot_account("feishu") or {}).get("status")
-            if refreshed_status in {"listening", "degraded"} or not channel_alive:
-                break
     refreshed = service().store.bot_account("feishu") or account or {}
     websocket_status = str(refreshed.get("status") or "")
     if not account or not credential_ready:

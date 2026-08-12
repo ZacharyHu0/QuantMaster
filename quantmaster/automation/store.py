@@ -361,6 +361,27 @@ class AutomationStore:
                 (channel, account_id),
             )
 
+    def replace_bot_accounts(self, channel: str, accounts: list[dict]) -> None:
+        """Atomically replace one channel's credential metadata projection."""
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM bot_accounts WHERE channel=?", (channel,))
+            for account in accounts:
+                conn.execute(
+                    "INSERT INTO bot_accounts "
+                    "(id,channel,account_id,user_id,base_url,secret_target,status,last_error,"
+                    "last_validated_at,cursor,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        f"{channel}:{account['account_id']}", channel, account["account_id"],
+                        str(account.get("user_id") or ""), str(account.get("base_url") or ""),
+                        str(account.get("secret_target") or ""),
+                        str(account.get("status") or "configured"),
+                        str(account.get("last_error") or "")[:500],
+                        str(account.get("last_validated_at") or ""),
+                        str(account.get("cursor") or ""), utc_now(),
+                    ),
+                )
+
     def update_bot_cursor(self, channel: str, account_id: str, cursor: str) -> None:
         with self._conn() as conn:
             conn.execute(

@@ -22,7 +22,7 @@ from quantmaster.automation.news import CRITICAL_PATTERNS, importance_score, new
 from quantmaster.automation.policy import policy_allows, resolved_policy
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
-from quantmaster.credentials import CredentialError
+from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.runtime.jobs import (
     JobContext,
     JobOutcome,
@@ -215,33 +215,63 @@ class AutomationService:
         return self.weixin.poll_login(session_id, verify_code)
 
     def configure_feishu(self, app_id: str, app_secret: str) -> dict:
+        candidate = self.prepare_feishu(app_id, app_secret)
+        try:
+            account = self.activate_feishu(candidate)
+        except (CredentialError, OSError, RuntimeError, ValueError):
+            self.discard_feishu(candidate)
+            raise
+        self.finish_feishu(candidate)
+        verification = candidate["verification"]
+        return {**self.feishu.public_account(account), "verification": verification}
+
+    def prepare_feishu(self, app_id: str, app_secret: str) -> dict[str, Any]:
+        app_id, app_secret = app_id.strip(), app_secret.strip()
+        if not app_id or not app_secret:
+            raise ValueError("飞书 App ID 和 App Secret 均不能为空")
         verification = self.feishu.verify(app_id, app_secret)
-        if verification["status"] == "error":
+        if verification["status"] != "success":
             raise ValueError(verification["message"])
-        previous = self.store.bot_accounts("feishu")
-        account = self.feishu.configure(app_id, app_secret)
-        for item in previous:
-            if item["account_id"] == account["account_id"]:
-                continue
-            target = item.get("secret_target") or ""
-            if target:
+        target = f"{CredentialStore.feishu_target(app_id)}:candidate:{uuid.uuid4().hex[:12]}"
+        self.feishu.credentials.set(target, app_secret)
+        if self.feishu.credentials.get(target) != app_secret:
+            self.feishu.credentials.delete(target)
+            raise CredentialError("飞书候选凭据写入后校验失败")
+        return {
+            "app_id": app_id, "secret_target": target,
+            "verification": verification,
+            "previous": self.store.bot_accounts("feishu"),
+        }
+
+    def activate_feishu(self, candidate: dict[str, Any]) -> dict:
+        account = {
+            "account_id": candidate["app_id"], "user_id": "",
+            "base_url": "https://open.feishu.cn",
+            "secret_target": candidate["secret_target"], "status": "configured",
+            "last_error": "", "last_validated_at": datetime.now(UTC).isoformat(), "cursor": "",
+        }
+        self.store.replace_bot_accounts("feishu", [account])
+        self.store.clear_channel_removal_marker("feishu")
+        return self.store.bot_account("feishu", str(candidate["app_id"])) or account
+
+    def restore_feishu(self, candidate: dict[str, Any]) -> None:
+        self.store.replace_bot_accounts("feishu", list(candidate.get("previous") or []))
+
+    def discard_feishu(self, candidate: dict[str, Any]) -> None:
+        try:
+            self.feishu.credentials.delete(str(candidate.get("secret_target") or ""))
+        except CredentialError:
+            pass
+
+    def finish_feishu(self, candidate: dict[str, Any]) -> None:
+        active = str(candidate.get("secret_target") or "")
+        for item in candidate.get("previous") or []:
+            target = str(item.get("secret_target") or "")
+            if target and target != active:
                 try:
                     self.feishu.credentials.delete(target)
                 except CredentialError:
                     pass
-        self.store.delete_other_bot_accounts("feishu", account["account_id"])
-        validation_state = str(verification.get("state") or (
-            "connected" if verification["status"] == "success" else "network_error"
-        ))
-        self.store.set_bot_validation(
-            "feishu", account["account_id"], validation_state,
-            "" if validation_state == "connected" else verification["message"],
-        )
-        account = self.store.bot_account("feishu", account["account_id"]) or account
-        return {
-            **self.feishu.public_account(account),
-            "verification": verification,
-        }
 
     def remove_feishu(self) -> dict:
         accounts = self.store.delete_bot_accounts("feishu")

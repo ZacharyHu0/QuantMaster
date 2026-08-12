@@ -20,6 +20,7 @@ from quantmaster.automation.migration import automation_contract_migrator
 from quantmaster.automation.models import ActorContext, AlertEvent
 from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
+from quantmaster.automation.runtime import AutomationRuntime
 from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
@@ -1179,9 +1180,10 @@ def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monke
 
     result = service.configure_feishu("cli_first", "secret-one")
     assert result["verification"]["status"] == "success"
-    assert credentials.values["bot:feishu:cli_first"] == "secret-one"
+    first = store.bot_account("feishu")
+    assert credentials.values[first["secret_target"]] == "secret-one"
     service.configure_feishu("cli_second", "secret-two")
-    assert "bot:feishu:cli_first" not in credentials.values
+    assert first["secret_target"] not in credentials.values
     assert store.bot_account("feishu")["account_id"] == "cli_second"
 
     removed = service.remove_feishu()
@@ -1236,6 +1238,64 @@ def test_automation_migrator_audits_incomplete_feishu_without_secret_write(
     assert migrated["secret_target"] == ""
     assert migrated["status"] == "not_configured"
     assert migrated["last_error"] == "credential_migration_required"
+
+
+def test_feishu_safe_swap_keeps_old_effective_when_listener_will_not_stop(tmp_path, monkeypatch):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    service.feishu = FeishuBotClient(store, credentials)
+    service.feishu.configure("cli_old", "old-secret")
+    runtime = AutomationRuntime(service)
+    runtime.started = runtime.leader = True
+    monkeypatch.setattr(
+        service.feishu, "verify",
+        lambda *_args: {"status": "success", "state": "connected", "message": "有效"},
+    )
+
+    class StuckThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            return None
+
+    runtime._channel_threads["feishu"] = StuckThread()
+
+    with pytest.raises(RuntimeError, match="未在安全时限内退出"):
+        runtime.replace_feishu("cli_new", "new-secret")
+
+    account = store.bot_account("feishu")
+    assert account["account_id"] == "cli_old"
+    assert credentials.values[account["secret_target"]] == "old-secret"
+    assert all("candidate" not in target for target in credentials.values)
+
+
+def test_feishu_check_does_not_restart_channel(tmp_path, monkeypatch):
+    from quantmaster.server import automation as automation_api
+
+    local_store = AutomationStore(tmp_path / "automation.sqlite")
+    local_service = AutomationService(
+        local_store, OutboxDispatcher(local_store, RecordingGateway()),
+    )
+
+    class Runtime:
+        service = local_service
+
+        def status(self):
+            return {"status": "running", "channels": {"feishu": False}}
+
+        def restart_channel(self, _channel):
+            pytest.fail("credential check must not restart the formal channel")
+
+    monkeypatch.setattr(automation_api, "get_runtime", lambda: Runtime())
+    client = TestClient(app)
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    response = client.post(
+        "/api/v1/automation/channels/feishu/check",
+        headers={"X-CSRF-Token": token},
+    )
+    assert response.status_code == 200
 
 
 def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):

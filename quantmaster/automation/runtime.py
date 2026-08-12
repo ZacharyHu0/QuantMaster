@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from quantmaster.automation.channels.feishu import feishu_connection_error
 from quantmaster.automation.service import AutomationService
 from quantmaster.config import get_config
+from quantmaster.credentials import CredentialError
 
 logger = logging.getLogger(__name__)
 STANDBY_RETRY_SECONDS = 5.0
@@ -403,6 +404,10 @@ class AutomationRuntime:
             stop_event.set()
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
+            if thread.is_alive():
+                with self._lock:
+                    self._channel_threads[channel] = thread
+                return "failed"
         with self._lock:
             self._channel_stops[channel] = threading.Event()
             if not get_config().automation.enabled or not self.started:
@@ -425,6 +430,32 @@ class AutomationRuntime:
             replacement.start()
             return "applying"
 
+    def replace_feishu(self, app_id: str, app_secret: str) -> dict[str, Any]:
+        """Probe, quiesce, commit and switch Feishu credentials as one safe operation."""
+        candidate = self.service.prepare_feishu(app_id, app_secret)
+        previous = list(candidate.get("previous") or [])
+        stopped = self.stop_channel("feishu")
+        if stopped == "failed":
+            self.service.discard_feishu(candidate)
+            raise RuntimeError("旧飞书长连接未在安全时限内退出；未切换凭据")
+        try:
+            account = self.service.activate_feishu(candidate)
+            runtime_status = self.restart_channel("feishu")
+            if runtime_status == "failed":
+                raise RuntimeError("新飞书长连接未能安全启动")
+        except (CredentialError, OSError, RuntimeError, ValueError):
+            self.service.restore_feishu(candidate)
+            self.service.discard_feishu(candidate)
+            if previous:
+                self.restart_channel("feishu")
+            raise
+        self.service.finish_feishu(candidate)
+        return {
+            **self.service.feishu.public_account(account),
+            "verification": candidate["verification"],
+            "runtime_status": runtime_status,
+        }
+
     def stop_channel(self, channel: str) -> str:
         if channel not in self._channel_stops:
             raise ValueError(f"未知消息通道: {channel}")
@@ -433,6 +464,10 @@ class AutomationRuntime:
             self._channel_stops[channel].set()
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=5)
+            if thread.is_alive():
+                with self._lock:
+                    self._channel_threads[channel] = thread
+                return "failed"
         with self._lock:
             self._channel_stops[channel] = threading.Event()
         return "disabled"
