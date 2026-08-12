@@ -208,10 +208,16 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
 def check_tushare(token: str) -> dict[str, Any]:
     started = time.perf_counter()
     if not token:
-        return _result("error", "尚未配置 Tushare Token", started)
+        return _result(
+            "error", "尚未配置 Tushare Token", started,
+            provider_status="auth_invalid", capability="provider_auth",
+        )
     if importlib.util.find_spec("tushare") is None:
-        return _result("error", "缺少 tushare 依赖，请安装 quantmaster[tushare]", started,
-                       category="missing-dependency")
+        return _result(
+            "error", "缺少 tushare 依赖，请安装 quantmaster[tushare]", started,
+            category="missing-dependency", provider_status="capability_missing",
+            capability="sdk", capability_reason="dependency_missing",
+        )
     try:
         import tushare as ts
 
@@ -219,19 +225,39 @@ def check_tushare(token: str) -> dict[str, Any]:
         frame = pro.trade_cal(exchange="SSE", start_date="20240102", end_date="20240103")
         from quantmaster.data.resilience import PROVIDER_HEALTH
 
-        PROVIDER_HEALTH.success("tushare")
-        return _result("success", f"Token 可用，返回 {len(frame)} 个交易日历记录", started)
+        PROVIDER_HEALTH.success("tushare:trade_cal")
+        return _result(
+            "success", f"Token 可用，trade_cal 返回 {len(frame)} 个交易日历记录", started,
+            provider_status="available", capability="trade_cal",
+        )
     except Exception as exc:  # tushare 将服务端错误包装为通用 Exception
-        text = str(exc).lower()
-        if any(word in text for word in ("token", "invalid", "无效", "登录")):
+        from quantmaster.data.resilience import (
+            PROVIDER_HEALTH,
+            classify_provider_failure,
+        )
+        from quantmaster.rotation.status import canonical_provider_status
+
+        failure = classify_provider_failure(exc)
+        provider_status = canonical_provider_status(failure)
+        PROVIDER_HEALTH.failure("tushare:trade_cal", exc, immediate=True)
+        if provider_status == "auth_invalid":
             category, message, status = "invalid-token", "Token 无效", "error"
-        elif any(word in text for word in ("积分", "权限", "permission", "privilege", "2000")):
+        elif provider_status == "permission_missing":
             category, message, status = (
-                "permission", "Token 有效但缺少 trade_cal 权限（当前接口要求 2000 积分）", "error"
+                "permission", "Token 已被识别，但当前账号缺少 trade_cal 接口权限", "warning"
+            )
+        elif provider_status == "capability_missing":
+            category, message, status = (
+                "capability", "当前 tushare SDK 缺少 trade_cal 能力", "warning"
             )
         else:
-            category, message, status = "network", "Tushare 网络或服务检测失败；仍可保存", "warning"
-        return _result(status, message, started, category=category)
+            category, message, status = (
+                provider_status, "Tushare 网络或服务检测失败；其他接口状态保持独立", "warning"
+            )
+        return _result(
+            status, message, started, category=category,
+            provider_status=provider_status, capability="trade_cal",
+        )
 
 
 def check_storage(data: DataSettings) -> dict[str, Any]:

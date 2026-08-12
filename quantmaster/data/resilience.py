@@ -50,6 +50,18 @@ class EmptyProviderResponse(RuntimeError):
     """提供商完成请求但没有返回任何可用数据。"""
 
 
+class ProviderContractChanged(RuntimeError):
+    """The endpoint responded, but its documented schema is no longer usable."""
+
+
+class ProviderCapabilityMissing(RuntimeError):
+    """A deterministic capability gap isolated to one provider lane."""
+
+    def __init__(self, message: str, *, reason: str = "provider_unsupported"):
+        self.reason = reason
+        super().__init__(message)
+
+
 class ProviderTimeoutError(TimeoutError):
     """One scheduled upstream call exceeded its shared hard deadline."""
 
@@ -62,7 +74,7 @@ class ProviderTimeoutError(TimeoutError):
 
 _PERMANENT_FAILURES = frozenset({
     "permission", "authentication", "capability_missing",
-    "http_401_authentication", "http_403_permission",
+    "http_401_authentication", "http_403_permission", "contract_changed",
 })
 
 
@@ -72,6 +84,10 @@ def classify_provider_failure(exc: BaseException) -> str:
     text = str(exc).lower()
     if isinstance(exc, EmptyProviderResponse):
         return "empty_response"
+    if isinstance(exc, ProviderContractChanged):
+        return "contract_changed"
+    if isinstance(exc, (ProviderCapabilityMissing, ModuleNotFoundError)):
+        return "capability_missing"
     if (
         getattr(exc, "winerror", None) == 10013
         or "winerror 10013" in text
@@ -84,6 +100,8 @@ def classify_provider_failure(exc: BaseException) -> str:
     )):
         return "capability_missing"
     status = _http_status(exc)
+    if status in {404, 410}:
+        return "capability_missing"
     if status == 401:
         return "http_401_authentication"
     if status == 403:
@@ -100,9 +118,15 @@ def classify_provider_failure(exc: BaseException) -> str:
     )):
         return "permission"
     if any(value in text for value in (
-        "unauthorized", "invalid token", "token invalid", "认证失败", "未配置 tushare_token",
+        "unauthorized", "invalid token", "token invalid", "token无效", "token 无效",
+        "认证失败", "令牌无效", "未配置 tushare_token",
     )):
         return "authentication"
+    if any(value in text for value in (
+        "missing columns", "missing column", "缺少字段", "缺少代码或名称列",
+        "schema changed", "contract changed", "响应结构", "页面结构",
+    )):
+        return "contract_changed"
     if "429" in text or "rate limit" in text or "too many requests" in text:
         return "rate_limit"
     if re.search(r"\b5\d\d\b", text):
@@ -113,6 +137,20 @@ def classify_provider_failure(exc: BaseException) -> str:
     )):
         return "transient_network"
     return "transient_upstream"
+
+
+def provider_capability_reason(exc: BaseException) -> str:
+    """Describe deterministic capability absence without changing its state family."""
+
+    if isinstance(exc, ProviderCapabilityMissing):
+        return exc.reason
+    if isinstance(exc, ModuleNotFoundError):
+        return "dependency_missing"
+    if isinstance(exc, AttributeError) or "has no attribute" in str(exc).lower():
+        return "sdk_method_missing"
+    if _http_status(exc) in {404, 410}:
+        return "endpoint_removed"
+    return "provider_unsupported"
 
 
 def _http_status(exc: BaseException) -> int | None:
@@ -150,7 +188,10 @@ def _retry_after_seconds(exc: BaseException, *, now: float | None = None) -> flo
 def _provider_revision(lane: str) -> str:
     provider = lane.partition(":")[0]
     version = ""
-    package = {"akshare": "akshare", "ths": "akshare", "yahoo": "yfinance"}.get(provider)
+    package = {
+        "akshare": "akshare", "ths": "akshare", "yahoo": "yfinance",
+        "tushare": "tushare",
+    }.get(provider)
     if package:
         try:
             version = package_metadata.version(package)
@@ -590,10 +631,9 @@ class ProviderHealthStore:
                         (revision, lane),
                     )
                     return
-                if not probe:
-                    conn.execute(
-                        "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
-                    raise CircuitOpenError(_disabled_message(lane, str(row[4] or "")))
+                conn.execute(
+                    "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
+                raise CircuitOpenError(_disabled_message(lane, str(row[4] or "")))
             if not probe and float(row[1]) > now:
                 conn.execute(
                     "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
@@ -610,8 +650,6 @@ class ProviderHealthStore:
 
     def check_available(self, lane: str, *, probe: bool = False) -> None:
         """Fail fast for a known open circuit without reserving a half-open probe."""
-        if probe:
-            return
         now = time.time()
         with self._lock, self._conn() as conn:
             row = conn.execute(
@@ -622,7 +660,7 @@ class ProviderHealthStore:
                 return
             if row[0] == "disabled" and _provider_revision(lane) != str(row[2] or ""):
                 return
-            if row[0] == "disabled" or float(row[1]) > now:
+            if row[0] == "disabled" or (not probe and float(row[1]) > now):
                 conn.execute(
                     "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,)
                 )
@@ -666,8 +704,13 @@ class ProviderHealthStore:
         permanent = failure_class in _PERMANENT_FAILURES
         status = _http_status(exc)
         diagnostic = failure_class
+        if failure_class == "capability_missing":
+            diagnostic = f"capability_missing:{provider_capability_reason(exc)}"
         if status is not None:
-            diagnostic = f"http_{status}"
+            diagnostic = (
+                f"capability_missing:{provider_capability_reason(exc)}"
+                if failure_class == "capability_missing" else f"http_{status}"
+            )
         retry_after = max(0.0, float(retry_after or 0.0))
         with self._lock, self._conn() as conn:
             row = conn.execute(
@@ -785,6 +828,8 @@ def _disabled_message(lane: str, failure_class: str = "") -> str:
         return f"{lane} 返回 HTTP 401，令牌无效或缺失；请在设置中更新凭据后探测"
     if failure_class == "http_403_permission":
         return f"{lane} 返回 HTTP 403，当前凭据没有该接口权限；请开通权限或改用本地数据"
+    if failure_class == "contract_changed":
+        return f"{lane} 响应合同已变化；请更新 SDK 或适配器后重新探测"
     return f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测"
 
 

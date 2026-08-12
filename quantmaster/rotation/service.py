@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.industry import load_cached_industry_map
+from quantmaster.data.industry import load_cached_industry_map  # noqa: F401
 from quantmaster.data.instruments import InstrumentStore
 from quantmaster.data.storage import BarStore
 from quantmaster.rotation.analytics import (
@@ -35,6 +35,11 @@ from quantmaster.rotation.analytics import (
     market_temperature_reference_dates,
 )
 from quantmaster.rotation.contracts import RotationJobSpec
+from quantmaster.rotation.status import (
+    data_status_payload,
+    provider_status_payload,
+    taxonomy_identity,
+)
 from quantmaster.rotation.store import (
     RotationIntegrityError,
     RotationStore,
@@ -58,6 +63,29 @@ from quantmaster.trading_sessions import resolve_session_target
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
+
+
+def _provider_health_for_sources(sources: list[str]) -> dict[str, dict[str, Any]]:
+    """Return only lanes relevant to the snapshot; failures remain non-blocking here."""
+
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+
+    families = {
+        str(source).partition(":")[0].casefold()
+        for source in sources if str(source).partition(":")[0]
+    }
+    aliases = {"eastmoney-concept": "akshare", "ths": "ths"}
+    families.update(aliases.get(source, "") for source in sources)
+    families.discard("")
+    relevant_capabilities = {
+        "eastmoney-concept", "dc-concept", "concept", "index-classify",
+        "index-member", "industry",
+    }
+    return {
+        lane: value for lane, value in PROVIDER_HEALTH.status().items()
+        if lane.partition(":")[0].casefold() in families
+        or lane.partition(":")[2].casefold() in relevant_capabilities
+    }
 
 
 def _utc_now() -> str:
@@ -554,9 +582,8 @@ class RotationDataLoader:
 
 
 def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Collapse near-identical concepts at Jaccard >= .85 while retaining aliases."""
+    """Preserve provider taxonomy identity; similarity is not a crosswalk."""
     result: dict[str, dict[str, Any]] = {}
-    memberships: list[tuple[str, set[str]]] = []
     for raw in sorted(themes, key=lambda item: str(item.get("code") or "")):
         code = str(raw.get("code") or "").strip().upper()
         name = str(raw.get("name") or "").strip()
@@ -566,15 +593,6 @@ def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any
         }
         if not code or not name or not members:
             continue
-        duplicate = ""
-        for existing_code, existing_members in memberships:
-            union = members | existing_members
-            if union and len(members & existing_members) / len(union) >= 0.85:
-                duplicate = existing_code
-                break
-        if duplicate:
-            result[duplicate].setdefault("aliases", []).append(name)
-            continue
         result[code] = {
             "code": code,
             "name": name,
@@ -583,8 +601,12 @@ def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any
             "members": sorted(members),
             "aliases": list(dict.fromkeys(str(value) for value in raw.get("aliases") or [])),
             "source": str(raw.get("source") or "eastmoney-concept"),
+            "taxonomy_id": str(raw.get("taxonomy_id") or ""),
+            "effective_date": str(raw.get("effective_date") or raw.get("as_of") or ""),
+            "membership_semantics": str(
+                raw.get("membership_semantics") or "current_snapshot"
+            ),
         }
-        memberships.append((code, members))
     return result
 
 
@@ -598,8 +620,10 @@ def _load_l1_groups(store: RotationStore, expected_count: int) -> dict[str, dict
     dedicated_count = sum(len(node.get("members") or []) for node in dedicated_l1.values())
     return (
         dedicated_l1
-        if dedicated_count >= max(1000, round(expected_count * 0.70))
-        else strict_l1_groups(load_cached_industry_map())
+        if dedicated_count >= max(1, round(expected_count * 0.70))
+        # A legacy name-only mapping cannot prove that it is SW2021.  Never
+        # silently promote Eastmoney/StockDB names into the SWS namespace.
+        else strict_l1_groups({}, taxonomy_id="sws:industry:2021")
     )
 
 
@@ -740,12 +764,19 @@ class RotationService:
         quality: dict[str, Any],
         sources: list[str],
         expected_as_of: str = "",
+        purpose: str = "display",
+        remote_fills: int = 0,
+        pending: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         theme_taxonomy = next((
             source for source in sources
-            if source in {"eastmoney-concept", "tushare:dc-concept", "ths:concept"}
-        ), "eastmoney-concept")
-        return {
+            if source in {
+                "eastmoney-concept", "tushare:dc-concept", "ths:concept",
+                "free-stockdb:concept",
+            }
+        ), "")
+        theme_identity = taxonomy_identity(theme_taxonomy, kind="concept")
+        result = {
             "snapshot_id": snapshot_id,
             "schema_version": 2,
             "as_of": as_of,
@@ -755,7 +786,7 @@ class RotationService:
             "algorithm_version": ALGORITHM_VERSION,
             "taxonomy_versions": {
                 "industry": "SW2021",
-                "theme": theme_taxonomy,
+                "theme": theme_identity.get("taxonomy_id") or "unresolved",
             },
             "quality": quality,
             "sources": sources,
@@ -764,6 +795,23 @@ class RotationService:
             "stale_reasons": list(quality.get("issues") or [])
             if str(quality.get("status") or "") == "stale" else [],
         }
+        result["status"] = {
+            "data": data_status_payload(
+                quality=quality,
+                sources=sources,
+                as_of=as_of,
+                expected_as_of=expected_as_of,
+                purpose=purpose,
+                remote_fills=remote_fills,
+                pending=pending,
+                taxonomy={
+                    "industry": taxonomy_identity("SW2021", kind="industry"),
+                    "theme": theme_identity,
+                },
+            ),
+            "providers": provider_status_payload(_provider_health_for_sources(sources)),
+        }
+        return result
 
     @staticmethod
     def _scope_snapshot_kinds(scope: str) -> tuple[str, ...]:
@@ -795,6 +843,48 @@ class RotationService:
                 "generations": [], "as_of": "", "source": "unavailable",
                 "expected_count": 0, "available": False,
             }
+
+    def _validate_temporal_taxonomy(self, spec: RotationJobSpec) -> None:
+        """Reject latest/current-only taxonomy evidence for historical consumers."""
+
+        if spec.purpose not in {"historical_replay", "formal_research"}:
+            return
+        try:
+            cutoff = datetime.fromisoformat(spec.knowledge_cutoff.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("knowledge_cutoff 必须是 ISO-8601 时间") from exc
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        cutoff_epoch = cutoff.timestamp()
+        declared = {
+            value.strip() for value in spec.taxonomy_id.split(",") if value.strip()
+        }
+        needs_industry = spec.scope in {"all", "close", "industries"}
+        needs_themes = spec.scope in {"all", "close", "themes"}
+        evidence: list[dict[str, Any]] = []
+        if needs_industry:
+            evidence.extend(self.store.taxonomy_evidence())
+        if needs_themes:
+            evidence.extend(self.store.theme_evidence())
+        if not evidence:
+            raise ValueError("历史用途没有可用的 taxonomy observation")
+        for item in evidence:
+            taxonomy_id = str(item.get("taxonomy_id") or "")
+            semantics = str(item.get("membership_semantics") or "")
+            observed_at = float(item.get("observed_at_epoch") or 0)
+            if taxonomy_id not in declared:
+                raise ValueError(f"历史用途拒绝未声明 taxonomy：{taxonomy_id or 'unresolved'}")
+            if semantics not in {"historical_intervals", "dated_snapshot"}:
+                raise ValueError(f"历史用途拒绝 current-only taxonomy：{taxonomy_id}")
+            if not observed_at or observed_at > cutoff_epoch:
+                raise ValueError(f"taxonomy observation 晚于 knowledge_cutoff：{taxonomy_id}")
+            effective_date = str(item.get("effective_date") or "")[:10]
+            if semantics == "dated_snapshot" and effective_date != spec.as_of:
+                raise ValueError(
+                    f"dated taxonomy 不适用于 {spec.as_of}：{taxonomy_id} @ {effective_date or 'unknown'}"
+                )
+            if semantics == "historical_intervals" and not item.get("membership_records"):
+                raise ValueError(f"taxonomy 缺少成员有效期：{taxonomy_id}")
 
     def input_fingerprint(
         self,
@@ -927,11 +1017,16 @@ class RotationService:
                 for row in theme_generations
             )
         )
+        industry_pending = self.store.has_pending_theme_sync(("sws:industry:2021",))
+        theme_pending = self.store.has_pending_theme_sync((
+            "eastmoney-concept", "tushare:dc-concept", "ths:concept",
+        ))
         return {
             "market": need_market and (market_missing or market_stale),
             "industries": scope in {"all", "close", "industries"}
-            and not bool(self.store.taxonomy_nodes()),
-            "themes": scope in {"all", "close", "themes"} and not themes_fresh,
+            and (not bool(self.store.taxonomy_nodes()) or industry_pending),
+            "themes": scope in {"all", "close", "themes"}
+            and (not themes_fresh or theme_pending),
             "etf": scope in {"all", "etf"} and not self.store.etf_path.is_file(),
         }
 
@@ -944,6 +1039,9 @@ class RotationService:
         quality: dict[str, Any],
         sources: list[str],
         expected_as_of: str = "",
+        purpose: str = "display",
+        remote_fills: int = 0,
+        pending: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "meta": self._meta(
@@ -953,6 +1051,9 @@ class RotationService:
                 quality=quality,
                 sources=sources,
                 expected_as_of=expected_as_of,
+                purpose=purpose,
+                remote_fills=remote_fills,
+                pending=pending,
             ),
             "data": data,
         }
@@ -1015,6 +1116,7 @@ class RotationService:
             # proves no remote supplement is due.
             and (spec.source != "auto" or not any(remote_required.values()))
         ):
+            self._validate_temporal_taxonomy(spec)
             progress(100, "复用已发布快照", "本地输入 generation 未变化；未读取行情或访问 provider")
             checkpoint_node("source", {
                 "cache_hit": True,
@@ -1081,20 +1183,32 @@ class RotationService:
                     ),
                 ))
             if remote_required["industries"]:
-                operations.append((
-                    "industries",
-                    "申万行业层级",
-                    lambda: provider.sync_industry_taxonomy(progress, cancelled),
-                ))
+                if spec.as_of:
+                    operations.append((
+                        "industries", "申万行业层级",
+                        lambda: provider.sync_industry_taxonomy(
+                            progress, cancelled, as_of=spec.as_of,
+                        ),
+                    ))
+                else:
+                    operations.append((
+                        "industries", "申万行业层级",
+                        lambda: provider.sync_industry_taxonomy(progress, cancelled),
+                    ))
             if remote_required["themes"]:
                 theme_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
-                operations.append((
-                    "themes",
-                    "细分题材目录",
-                    lambda: provider.sync_themes(
-                        progress, cancelled, **theme_kwargs,
-                    ),
-                ))
+                if spec.as_of and spec.purpose in {"historical_replay", "formal_research"}:
+                    operations.append((
+                        "themes", "细分题材目录",
+                        lambda: provider.sync_themes(
+                            progress, cancelled, purpose=spec.purpose, **theme_kwargs,
+                        ),
+                    ))
+                else:
+                    operations.append((
+                        "themes", "细分题材目录",
+                        lambda: provider.sync_themes(progress, cancelled, **theme_kwargs),
+                    ))
             if remote_required["etf"]:
                 etf_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
                 operations.append((
@@ -1119,7 +1233,6 @@ class RotationService:
                     issues = [
                         str(issue) for issue in provider_results[key].get("issues") or []
                     ]
-                    provider_issues[key].extend(issues)
                     provider_warnings.extend(issues)
                     # A successful probe of an unchanged local catalog is a
                     # freshness observation, not a new input generation.  It
@@ -1134,6 +1247,8 @@ class RotationService:
                     quality_status = str(
                         provider_results[key].get("quality_status") or "complete"
                     ).lower()
+                    if quality_status in {"partial", "failed", "unavailable"}:
+                        provider_issues[key].extend(issues)
                     observed_as_of = str(
                         provider_results[key].get("as_of")
                         or provider_results[key].get("expected_as_of")
@@ -1153,9 +1268,8 @@ class RotationService:
                         cpu_ms=(time.process_time() - started_cpu) * 1000,
                         remote_calls=1,
                     )
-                    logger.warning("%s 同步失败，板块联动将使用本地覆盖", label, exc_info=True)
+                    logger.info("%s 上游不可用；将按本地数据覆盖判定可用性：%s", label, exc)
                     warning = f"{label}同步失败：{str(exc)[:160]}"
-                    provider_issues[key].append(warning)
                     provider_warnings.append(warning)
             if operations:
                 # Provider writes are visible through local catalogs.  Rebuild
@@ -1173,6 +1287,7 @@ class RotationService:
             "remote_operations": sorted(provider_results),
             "source_generations": list(local_state.get("generations") or []),
         })
+        self._validate_temporal_taxonomy(spec)
         compute_kinds = set(scope_snapshot_kinds) - matching_snapshot_kinds()
         if not compute_kinds:
             # A remote freshness probe can be required even when it ultimately
@@ -1353,6 +1468,8 @@ class RotationService:
                 quality=temperature_quality,
                 sources=list(dict.fromkeys(temperature_sources)),
                 expected_as_of=expected_as_of,
+                purpose=spec.purpose,
+                remote_fills=int(bool(provider_results.get("market"))),
             )
         if "structure" in compute_kinds:
             progress(compute_base + 7, "计算市场风格", "比较强势与低位样本收益分布")
@@ -1377,6 +1494,8 @@ class RotationService:
                 quality=structure_quality,
                 sources=sources,
                 expected_as_of=expected_as_of,
+                purpose=spec.purpose,
+                remote_fills=int(bool(provider_results.get("market"))),
             )
 
         l1_groups: dict[str, dict[str, Any]] = {}
@@ -1418,6 +1537,13 @@ class RotationService:
                     quality=industry_quality,
                     sources=[*sources, "SW2021"],
                     expected_as_of=expected_as_of,
+                    purpose=spec.purpose,
+                    remote_fills=int(
+                        provider_results.get("industries", {}).get("fresh") or 0
+                    ),
+                    pending=dict(
+                        provider_results.get("industries", {}).get("pending") or {}
+                    ),
                 )
             else:
                 # This defensive branch is normally unreachable because an
@@ -1441,6 +1567,13 @@ class RotationService:
                     quality=industry_quality,
                     sources=["SW2021"],
                     expected_as_of=expected_as_of,
+                    purpose=spec.purpose,
+                    remote_fills=int(
+                        provider_results.get("industries", {}).get("fresh") or 0
+                    ),
+                    pending=dict(
+                        provider_results.get("industries", {}).get("pending") or {}
+                    ),
                 )
             checkpoint_node("industries", {
                 "as_of": as_of,
@@ -1490,6 +1623,8 @@ class RotationService:
                 provider_quality = str(
                     provider_results.get("themes", {}).get("quality_status") or "complete"
                 )
+                if provider_quality == "complete":
+                    theme_provider_issues = []
                 catalog_expected = int(
                     provider_results.get("themes", {}).get("catalog") or len(themes)
                 )
@@ -1539,6 +1674,9 @@ class RotationService:
                 quality=theme_quality,
                 sources=list(dict.fromkeys([*sources, *theme_sources])),
                 expected_as_of=expected_as_of,
+                purpose=spec.purpose,
+                remote_fills=int(provider_results.get("themes", {}).get("fresh") or 0),
+                pending=dict(provider_results.get("themes", {}).get("pending") or {}),
             )
             checkpoint_node("themes", {
                 "as_of": as_of,
@@ -1590,6 +1728,8 @@ class RotationService:
                 generated_at=generated_at,
                 quality=etf_quality,
                 sources=etf_sources,
+                purpose=spec.purpose,
+                remote_fills=int(bool(provider_results.get("etf"))),
             )
             checkpoint_node("etf", {
                 "as_of": str(etf_data.get("as_of") or as_of),
@@ -1651,7 +1791,7 @@ class RotationService:
             not in {"complete"}
         ]
         outcome = "unchanged" if not changed else (
-            "partial" if provider_warnings or non_complete else "updated"
+            "partial" if non_complete else "updated"
         )
         # A partial DAG update deliberately leaves unrelated current pointers
         # untouched.  The task-level identity must therefore include every
@@ -1697,22 +1837,16 @@ class RotationService:
             "etf_flows": "尚未生成 ETF 资金快照",
             "taxonomy": "尚未建立申万行业目录",
         }
+        quality = _status_quality("cold", issues=[messages.get(kind, "尚无快照")])
         return {
-            "meta": {
-                "snapshot_id": "",
-                "schema_version": 2,
-                "as_of": "",
-                "generated_at": "",
-                "algorithm_version": ALGORITHM_VERSION,
-            "taxonomy_versions": {
-                    "industry": "SW2021", "theme": "eastmoney-concept",
-                },
-                "quality": _status_quality("cold", issues=[messages.get(kind, "尚无快照")]),
-                "sources": [],
-                "input_fingerprint": "",
-                "stale": False,
-                "stale_reasons": [],
-            },
+            "meta": RotationService._meta(
+                snapshot_id="",
+                as_of="",
+                generated_at="",
+                quality=quality,
+                sources=[],
+                purpose="display",
+            ),
             "data": {"as_of": "", "items": [], "message": messages.get(kind, "尚无快照")},
         }
 
@@ -1769,6 +1903,14 @@ class RotationService:
                 # v0.13.0 snapshots serialized an unknown denominator as 0%.  Keep
                 # them readable while correcting the public meaning immediately.
                 quality["coverage"] = None
+            # Provider health is live operational state.  Never freeze it into
+            # a data snapshot: a recovered lane must update in place without
+            # changing the independently computed data usability.
+            status = meta.get("status")
+            if isinstance(status, dict):
+                status["providers"] = provider_status_payload(
+                    _provider_health_for_sources(list(meta.get("sources") or []))
+                )
             return value
         except RotationIntegrityError:
             logger.error("板块联动快照完整性失败 kind=%s", kind, exc_info=True)
@@ -2215,9 +2357,13 @@ class RotationWorker:
 
     def submit(self, spec: RotationJobSpec) -> dict[str, Any]:
         input_fingerprint, _state = self.service.input_fingerprint(spec)
+        payload = spec.model_dump(mode="json")
+        if spec.purpose == "current_analysis" and not spec.knowledge_cutoff and not spec.taxonomy_id:
+            for key in ("purpose", "knowledge_cutoff", "taxonomy_id"):
+                payload.pop(key, None)
         job, _created = self.runtime.submit(
             ROTATION_TASK_TYPE,
-            spec.model_dump(mode="json"),
+            payload,
             input_fingerprint=input_fingerprint,
             algorithm_version=ALGORITHM_VERSION,
             deadline_seconds=3600,

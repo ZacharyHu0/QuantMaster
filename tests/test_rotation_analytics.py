@@ -515,13 +515,16 @@ def test_stage_rules_are_deterministic_at_boundaries():
 
 
 def test_strict_l1_taxonomy_drops_mixed_and_unknown_labels():
-    groups = strict_l1_groups({
+    mapping = {
         "600001.SH": "电子",
         "600002.SH": "半导体",
         "600003.SH": "东方财富概念",
         "00700.HK": "电子",
-    })
+    }
+    unresolved = strict_l1_groups(mapping)
+    groups = strict_l1_groups(mapping, taxonomy_id="sws:industry:2021")
 
+    assert sum(len(item["members"]) for item in unresolved.values()) == 0
     assert groups["801080.SI"]["members"] == ["600001.SH"]
     assert sum(len(item["members"]) for item in groups.values()) == 1
 

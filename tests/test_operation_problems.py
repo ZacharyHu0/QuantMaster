@@ -50,6 +50,10 @@ def test_provider_health_problem_reports_remote_failures_and_local_blocks(monkey
     assert problem["local_blocks"] == 7
     assert problem["title"] == "Tushare（基金目录）已停止自动请求"
     assert problem["message"] == "当前账号没有读取这项数据的权限。"
+    assert problem["severity"] == "info"
+    assert problem["provider_status"] == "permission_missing"
+    assert problem["capability"] == "etf_basic"
+    assert problem["diagnostic_id"].startswith("provider:tushare:etf_basic:")
     assert "permission denied" not in str(problem)
 
 

@@ -655,11 +655,69 @@ class RotationStore:
                     f"ALTER TABLE snapshot_items ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
                 )
 
+    @staticmethod
+    def _cache_v6(connection: sqlite3.Connection) -> None:
+        """Attach explicit identity to legacy current snapshots without inventing dates."""
+
+        taxonomy_rows = connection.execute(
+            "SELECT code,payload_json FROM taxonomy_nodes"
+        ).fetchall()
+        for row in taxonomy_rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("taxonomy_id"):
+                continue
+            # Legacy rows came from the dedicated index_classify/member path,
+            # but lack retained membership intervals.  Preserve that limitation.
+            if str(payload.get("source") or "").upper() != "SW2021":
+                continue
+            payload.update({
+                "taxonomy_id": "sws:industry:2021",
+                "authority": "申万",
+                "version": "2021",
+                "code_type": "sw_index_code",
+                "membership_semantics": "current_snapshot",
+            })
+            connection.execute(
+                "UPDATE taxonomy_nodes SET payload_json=? WHERE code=?",
+                (strict_json_dumps(payload), str(row["code"])),
+            )
+
+        identities = {
+            "eastmoney-concept": "eastmoney:concept:live",
+            "tushare:dc-concept": "eastmoney:concept:live",
+            "ths:concept": "ths:concept:live",
+            "free-stockdb:concept": "stockdb:concept:declared",
+        }
+        theme_rows = connection.execute(
+            "SELECT code,payload_json FROM theme_catalog"
+        ).fetchall()
+        for row in theme_rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or payload.get("taxonomy_id"):
+                continue
+            taxonomy_id = identities.get(str(payload.get("source") or ""))
+            if not taxonomy_id:
+                continue
+            payload.update({
+                "taxonomy_id": taxonomy_id,
+                "membership_semantics": "current_snapshot",
+            })
+            connection.execute(
+                "UPDATE theme_catalog SET payload_json=? WHERE code=?",
+                (strict_json_dumps(payload), str(row["code"])),
+            )
+
     def _initialize(self) -> None:
         with self._cache() as connection:
             migrate_schema(connection, (
                 (1, self._cache_v1), (2, self._cache_v2), (3, self._cache_v3),
-                (4, self._cache_v4), (5, self._cache_v5),
+                (4, self._cache_v4), (5, self._cache_v5), (6, self._cache_v6),
             ))
         with self._preferences() as connection:
             migrate_schema(connection, ((1, self._preferences_v1),))
@@ -1057,6 +1115,29 @@ class RotationStore:
                 result.append(item)
         return result
 
+    def taxonomy_evidence(self, level: str | None = None) -> list[dict[str, Any]]:
+        """Return taxonomy payloads with their persisted knowledge timestamp."""
+        with self._cache() as connection:
+            if level:
+                rows = connection.execute(
+                    "SELECT payload_json,observed_at FROM taxonomy_nodes "
+                    "WHERE level=? ORDER BY code",
+                    (str(level).upper(),),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload_json,observed_at FROM taxonomy_nodes ORDER BY level,code"
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                item = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                result.append({**item, "observed_at_epoch": float(row["observed_at"])})
+        return result
+
     def replace_themes(self, themes: list[dict[str, Any]]) -> None:
         rows = []
         observed_at = time.time()
@@ -1098,6 +1179,22 @@ class RotationStore:
                 continue
             if isinstance(item, dict):
                 result.append(item)
+        return result
+
+    def theme_evidence(self) -> list[dict[str, Any]]:
+        """Return concept payloads with their persisted knowledge timestamp."""
+        with self._cache() as connection:
+            rows = connection.execute(
+                "SELECT payload_json,observed_at FROM theme_catalog ORDER BY name,code"
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                item = json.loads(str(row["payload_json"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                result.append({**item, "observed_at_epoch": float(row["observed_at"])})
         return result
 
     def begin_theme_sync(
@@ -1146,6 +1243,21 @@ class RotationStore:
             "items": items,
             "attempted_count": attempted_count,
         }
+
+    def has_pending_theme_sync(self, sources: tuple[str, ...]) -> bool:
+        """Report unfinished partitions without touching provider health state."""
+        if not sources:
+            return False
+        placeholders = ",".join("?" for _ in sources)
+        with self._cache() as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM theme_sync_runs r WHERE r.source IN ({placeholders}) "
+                "AND (r.status IN ('running','incomplete') OR EXISTS ("
+                "SELECT 1 FROM theme_sync_items i WHERE i.run_id=r.id "
+                "AND i.status!='complete')) LIMIT 1",
+                tuple(sources),
+            ).fetchone()
+        return row is not None
 
     def save_theme_sync_item(
         self,

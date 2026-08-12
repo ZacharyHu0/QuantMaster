@@ -13,6 +13,7 @@ from quantmaster.backtest.quality import (
     assess_signal_quality as assess_signal_quality,
 )
 from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.rotation.status import canonical_provider_status
 from quantmaster.runtime.problems import OperationProblem as OperationProblem
 from quantmaster.runtime.problems import Problem, make_problem
 
@@ -83,13 +84,13 @@ def _provider_name(lane: object) -> str:
 
 def _provider_failure_message(failure_class: str, *, disabled: bool) -> str:
     messages = {
-        "permission": "当前账号没有读取这项数据的权限。",
-        "authentication": "数据源的账号或密钥未通过验证。",
-        "rate_limit": "在线数据源请求过于频繁，系统已暂停继续请求。",
+        "permission_missing": "当前账号没有读取这项数据的权限。",
+        "auth_invalid": "数据源的账号或密钥未通过验证。",
+        "rate_limited": "在线数据源请求过于频繁，系统已暂停继续请求。",
         "capability_missing": "当前数据源不支持这项数据，系统已停止重复请求。",
-        "empty_response": "数据源没有返回可用记录，系统将继续保留本地数据。",
-        "transient_network": "暂时无法连接在线数据源，系统将继续使用本地数据。",
-        "upstream_5xx": "在线数据源暂时不可用，系统将继续使用本地数据。",
+        "network": "暂时无法连接在线数据源，系统将继续使用本地数据。",
+        "5xx": "在线数据源暂时不可用，系统将继续使用本地数据。",
+        "contract_changed": "在线数据合同已变化，系统已停止重复提交不兼容请求。",
     }
     return messages.get(
         failure_class,
@@ -156,11 +157,16 @@ def collect_health_report() -> dict[str, Any]:
                 continue
             remaining = max(0, int(float(item.get("open_until") or 0) - datetime.now().timestamp()))
             disabled = state == "disabled"
-            failure_class = str(item.get("failure_class") or "transient_upstream")
+            raw_failure_class = str(item.get("failure_class") or "transient_upstream")
+            failure_class = canonical_provider_status(raw_failure_class)
             provider_name = _provider_name(lane)
+            diagnostic_code = _clean(item.get("diagnostic_code") or raw_failure_class, 80)
             issues.append(make_problem(
                 "provider_disabled" if disabled else "provider_circuit_open",
-                severity="warning",
+                # Provider health is an independent operational projection.
+                # The consuming data view decides whether missing data is a
+                # warning/error; an upstream-only issue remains informational.
+                severity="info",
                 source="行情数据源",
                 title=f"{provider_name}{'已停止自动请求' if disabled else '已暂停请求'}",
                 message=_provider_failure_message(failure_class, disabled=disabled),
@@ -174,8 +180,14 @@ def collect_health_report() -> dict[str, Any]:
                 problem_id=f"provider:{lane}",
                 state=state,
                 failure_class=failure_class,
+                provider_status=failure_class,
+                capability=str(lane).partition(":")[2] or str(lane),
+                diagnostic_code=diagnostic_code,
+                diagnostic_id=f"provider:{lane}:{diagnostic_code}",
                 last_success=float(item.get("last_success") or 0),
+                last_failure=float(item.get("last_failure") or 0),
                 next_probe_at=float(item.get("next_probe_at") or 0),
+                retry_after_at=float(item.get("retry_after_at") or 0),
                 remote_failures=int(item.get("failures") or 0),
                 local_blocks=int(item.get("suppressed") or 0),
                 can_continue=True,

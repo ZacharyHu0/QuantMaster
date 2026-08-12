@@ -23,6 +23,7 @@ from quantmaster.data.resilience import (
     CircuitOpenError,
     EndpointFrameCache,
     LocalOnlyDataAccessError,
+    ProviderContractChanged,
     ProviderScheduler,
     ProviderTimeoutError,
     TushareRateLimiter,
@@ -1147,6 +1148,26 @@ def test_disabled_status_is_read_only_and_allows_a_changed_credential(isolated_c
 
     isolated_config.data.tushare_token = "new-token"
     assert PROVIDER_HEALTH.disabled_status(lane) is None
+
+
+def test_explicit_health_probe_cannot_repeat_a_deterministic_failure(isolated_config):
+    lane = "tushare:contract-probe-test"
+    calls = 0
+
+    def changed_contract():
+        nonlocal calls
+        calls += 1
+        raise ProviderContractChanged("dc_member missing columns: con_code")
+
+    with pytest.raises(ProviderContractChanged):
+        provider_call(lane, "first", changed_contract, probe=True)
+    with pytest.raises(CircuitOpenError):
+        provider_call(lane, "health-loop", changed_contract, probe=True)
+
+    assert calls == 1
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["state"] == "disabled"
+    assert health["failure_class"] == "contract_changed"
 
 
 def test_source_health_removes_obsolete_tushare_ths_lane():

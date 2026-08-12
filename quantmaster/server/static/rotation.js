@@ -209,6 +209,7 @@
   }
 
   function updateMeta(kind, meta) {
+    renderSourceStatus(meta);
     const target = document.querySelector(`[data-rotation-asof="${kind}"]`);
     if (target) {
       const values = target.querySelectorAll('dd');
@@ -231,6 +232,59 @@
       const source = sources.slice(0, 2).map(sourceLabel).join(' · ') || '本地缓存';
       line.innerHTML = `${qualityMarkup(meta)}<span>${esc(meta.as_of || '尚无日期')}</span><span>${esc(source)}</span>`;
     }
+  }
+
+  const DATA_STATUS_LABELS = {
+    local_hit:'本地完整命中',local_stale_accepted:'本地旧快照可用',
+    local_plus_remote_complete:'本地 + 远程补齐完整',remote_complete:'远程补齐完整',
+    partial_coverage:'部分覆盖',unavailable:'数据不可用',
+  };
+  const PROVIDER_STATUS_LABELS = {
+    available:'可用',rate_limited:'限流',auth_invalid:'认证无效',
+    permission_missing:'接口权限不足',capability_missing:'能力缺失',network:'网络异常',
+    '5xx':'上游 5xx',contract_changed:'接口合同变化',
+  };
+  function readableTime(value) {
+    const seconds = Number(value || 0);
+    return seconds > 0 ? new Date(seconds * 1000).toLocaleString('zh-CN',{hour12:false}) : '—';
+  }
+  function renderSourceStatus(meta) {
+    const status = meta?.status || {}, data = status.data || {}, providers = status.providers || [];
+    const coverage = data.coverage || {}, provenance = data.provenance || {}, pending = data.pending || {};
+    const taxonomy = provenance.taxonomy || {};
+    const identities = [taxonomy.theme?.taxonomy_id, taxonomy.industry?.taxonomy_id];
+    const identity = identities.find(value => value && !String(value).startsWith('unresolved:'))
+      || identities.find(Boolean) || '—';
+    const complete = Number(coverage.complete || 0), total = Number(coverage.total || 0);
+    const dataState = document.querySelector('[data-rotation-data-state]');
+    if (dataState) {
+      dataState.textContent = DATA_STATUS_LABELS[data.resolution] || '等待快照';
+      dataState.dataset.state = data.state || 'unavailable';
+    }
+    const rows = document.querySelectorAll('[data-rotation-data-summary] dd');
+    if (rows[0]) rows[0].textContent = identity;
+    if (rows[1]) rows[1].textContent = data.as_of || '—';
+    if (rows[2]) rows[2].textContent = total ? `${complete}/${total}` : '分母待确认';
+    if (rows[3]) rows[3].textContent = `本地 ${Number(provenance.local_hits || 0)} · 远程 ${Number(provenance.remote_fills || 0)}`;
+    const progress = document.querySelector('[data-rotation-data-progress]');
+    if (progress) {
+      progress.max = Math.max(1,total); progress.value = Math.min(complete,Math.max(1,total));
+      progress.setAttribute('aria-valuetext',total ? `${complete}/${total} 完成` : '覆盖分母待确认');
+    }
+    const missing = coverage.missing_partitions || [], affected = data.affected_views || [];
+    const detail = document.querySelector('[data-rotation-data-detail]');
+    if (detail) detail.innerHTML = `<dl><div><dt>缺失分区</dt><dd>${esc(missing.join('、') || '无')}</dd></div><div><dt>Pending queue</dt><dd>${Number(pending.retryable || 0)} 待重试 / ${Number(pending.total || 0)} 总项</dd></div><div><dt>影响页面/任务</dt><dd>${esc(affected.join('、') || '无')}</dd></div></dl>`;
+    const providerState = document.querySelector('[data-rotation-provider-state]');
+    const failures = providers.filter(item => item.state !== 'available');
+    if (providerState) providerState.textContent = failures.length ? `${failures.length} 项待恢复` : providers.length ? '全部可用' : '未涉及远程来源';
+    const providerSummary = document.querySelector('[data-rotation-provider-summary]');
+    if (providerSummary) providerSummary.innerHTML = failures.length
+      ? `<p>当前数据状态独立；${failures.length} 项上游能力不会在本地完整时阻断页面。</p>`
+      : '<p>没有影响当前数据用途的上游问题。</p>';
+    const providerDetail = document.querySelector('[data-rotation-provider-detail]');
+    if (providerDetail) providerDetail.innerHTML = providers.length ? providers.map(item => `<section><div><strong>${esc(item.provider)} · ${esc(item.capability)}</strong><span>${esc(PROVIDER_STATUS_LABELS[item.state] || item.state)}</span></div><dl><div><dt>恢复/探测</dt><dd>${esc(readableTime(item.retry_after_at || item.next_probe_at))}</dd></div><div><dt>最近成功/失败</dt><dd>${esc(readableTime(item.last_success_at))} / ${esc(readableTime(item.last_failure_at))}</dd></div><div><dt>诊断码</dt><dd><code>${esc(item.diagnostic_code || '—')}</code> <button type="button" class="rotation-status-copy" data-copy-provider-code="${esc(item.diagnostic_code || '')}" aria-label="复制 ${esc(item.provider)} 脱敏诊断码">复制</button></dd></div></dl></section>`).join('') : '<p>暂无上游诊断。</p>';
+    const live = document.getElementById('rotation-status-live');
+    if (live) live.textContent = data.resolution ? `${DATA_STATUS_LABELS[data.resolution] || data.resolution}，${complete}/${total || '未知'} 完成` : '等待页面数据';
   }
 
   function issuesMarkup(meta) {
@@ -1393,7 +1447,7 @@
     try {
       const allowed = new Set(['all','market','industries','themes','etf']);
       const selected = allowed.has(scope) ? scope : 'all';
-      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'local'});
+      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'auto',purpose:'current_analysis'});
       await monitorRefresh(job,selected,button,idle);
     } catch (error) {
       clearActiveJob();
@@ -1501,6 +1555,13 @@
   }
 
   document.addEventListener('click', event => {
+    const diagnostic = event.target.closest('[data-copy-provider-code]');
+    if (diagnostic) {
+      navigator.clipboard?.writeText(diagnostic.dataset.copyProviderCode || '');
+      diagnostic.textContent = '已复制';
+      setTimeout(() => { diagnostic.textContent = '复制'; },1000);
+      return;
+    }
     const market = event.target.closest('[data-market-page]');
     if (market) { setMarketPage(market.dataset.marketPage); return; }
     const rotation = event.target.closest('[data-rotation-page]');

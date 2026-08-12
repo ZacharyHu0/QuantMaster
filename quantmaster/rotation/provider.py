@@ -809,7 +809,9 @@ class RotationProvider:
             ],
         }
 
-    def sync_industry_taxonomy(self, progress, cancelled) -> dict[str, Any]:
+    def sync_industry_taxonomy(
+        self, progress, cancelled, *, as_of: str = "",
+    ) -> dict[str, Any]:
         """Fetch L1/L2 memberships per L1 so provider row limits cannot truncate the market."""
         classes = self._tushare_call(
             "index_classify",
@@ -827,64 +829,40 @@ class RotationProvider:
             if strict_l1.get(str(row.get("index_code") or "").strip().upper())
             == str(row.get("industry_name") or "").strip()
         ]
+        directory_key = str(as_of or market_date())[:10]
+        staging = self.store.begin_theme_sync(
+            "sws:industry:2021", directory_key, len(rows),
+        )
+        run_id = str(staging["run_id"])
+        completed_partitions: dict[str, dict[str, Any]] = dict(staging["items"])
+        nodes.update(self._staged_industry_nodes(completed_partitions))
+        pending_codes: list[str] = []
         for index, row in enumerate(rows, start=1):
             if cancelled():
                 raise InterruptedError("申万行业同步已取消")
             l1_code = str(row.get("index_code") or "").strip().upper()
             l1_name = str(row.get("industry_name") or "").strip()
-            if strict_l1.get(l1_code) != l1_name:
-                continue
-            try:
-                members = self._tushare_call(
-                    "index_member_all",
-                    30,
-                    l1_code=l1_code,
-                    is_new="Y",
-                    fields="l1_code,l1_name,l2_code,l2_name,ts_code,is_new",
+            if l1_code in completed_partitions:
+                progress(
+                    29 + round(10 * index / max(1, len(rows))),
+                    "恢复申万层级",
+                    f"{index}/{len(rows)} · 已缓存 {l1_name}",
                 )
-            except RotationProviderCallError as exc:
-                logger.warning(
-                    "申万行业 %s 成分同步失败，保留旧目录：%s",
-                    l1_name,
-                    _compact_error(exc),
-                )
-                for code, item in previous.items():
-                    if code == l1_code or str(item.get("parent_code") or "") == l1_code:
-                        nodes[code] = item
                 continue
-            l1_members: list[str] = []
-            l2: dict[str, dict[str, Any]] = {}
-            for _, member in members.iterrows():
-                symbol = _symbol(member.get("ts_code"))
-                if not symbol:
-                    continue
-                l1_members.append(symbol)
-                l2_code = str(member.get("l2_code") or "").strip().upper()
-                l2_name = str(member.get("l2_name") or "").strip()
-                if l2_code and l2_name:
-                    node = l2.setdefault(
-                        l2_code,
-                        {
-                            "code": l2_code,
-                            "name": l2_name,
-                            "level": "L2",
-                            "parent_code": l1_code,
-                            "members": [],
-                            "source": "SW2021",
-                        },
-                    )
-                    node["members"].append(symbol)
-            nodes[l1_code] = {
-                "code": l1_code,
-                "name": l1_name,
-                "level": "L1",
-                "parent_code": "",
-                "members": sorted(set(l1_members)),
-                "source": "SW2021",
-            }
-            for code, node in l2.items():
-                node["members"] = sorted(set(node["members"]))
-                nodes[code] = node
+            partition_nodes, error = self._fetch_industry_partition(
+                l1_code=l1_code, l1_name=l1_name, as_of=directory_key,
+                previous=previous,
+            )
+            if error:
+                pending_codes.append(l1_code)
+                self.store.save_theme_sync_item(
+                    run_id, l1_code, l1_name, error=error,
+                )
+            else:
+                self.store.save_theme_sync_item(
+                    run_id, l1_code, l1_name, payload={"nodes": partition_nodes},
+                )
+            nodes.update({str(node["code"]): node for node in partition_nodes})
             progress(
                 29 + round(10 * index / max(1, len(rows))),
                 "同步申万层级",
@@ -892,10 +870,105 @@ class RotationProvider:
             )
         if nodes:
             self.store.replace_taxonomy_nodes(list(nodes.values()))
+        if pending_codes:
+            self.store.fail_theme_sync(
+                run_id, [f"待补齐申万分区 {len(pending_codes)}/{len(rows)}"],
+            )
+        else:
+            self.store.reuse_published_theme_sync(run_id, [])
         return {
             "l1": sum(item.get("level") == "L1" for item in nodes.values()),
             "l2": sum(item.get("level") == "L2" for item in nodes.values()),
+            "fresh": max(0, len(rows) - len(pending_codes) - len(completed_partitions)),
+            "quality_status": "partial" if pending_codes else "complete",
+            "pending": {
+                "total": len(rows),
+                "completed": len(rows) - len(pending_codes),
+                "retryable": len(pending_codes),
+                "items": pending_codes,
+            },
         }
+
+    @staticmethod
+    def _staged_industry_nodes(
+        partitions: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            str(item["code"]): item
+            for payload in partitions.values()
+            for item in payload.get("nodes") or []
+            if isinstance(item, dict) and item.get("code")
+        }
+
+    def _fetch_industry_partition(
+        self, *, l1_code: str, l1_name: str, as_of: str,
+        previous: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], str]:
+        try:
+            members = self._tushare_call(
+                "index_member_all", 30, l1_code=l1_code,
+                fields="l1_code,l1_name,l2_code,l2_name,ts_code,in_date,out_date,is_new",
+            )
+        except RotationProviderCallError as exc:
+            error = _compact_error(exc)
+            logger.debug("申万行业分区 %s 待补齐：%s", l1_name, error)
+            retained = [
+                item for code, item in previous.items()
+                if code == l1_code or str(item.get("parent_code") or "") == l1_code
+            ]
+            return retained, error
+        return self._industry_partition_nodes(
+            members, l1_code=l1_code, l1_name=l1_name, as_of=as_of,
+        ), ""
+
+    @staticmethod
+    def _industry_partition_nodes(
+        members: pd.DataFrame, *, l1_code: str, l1_name: str, as_of: str,
+    ) -> list[dict[str, Any]]:
+        """Normalize one SWS partition while retaining membership intervals."""
+
+        records: list[dict[str, str]] = []
+        l2: dict[str, dict[str, Any]] = {}
+        comparable_as_of = as_of.replace("-", "")
+        for _, member in members.iterrows():
+            symbol = _symbol(member.get("ts_code"))
+            if not symbol:
+                continue
+            in_date = str(member.get("in_date") or "")[:10]
+            out_date = str(member.get("out_date") or "")[:10]
+            if (
+                (in_date and in_date.replace("-", "") > comparable_as_of)
+                or (out_date and out_date.replace("-", "") <= comparable_as_of)
+            ):
+                continue
+            membership = {
+                "symbol": symbol, "valid_from": in_date, "valid_to": out_date,
+            }
+            records.append(membership)
+            l2_code = str(member.get("l2_code") or "").strip().upper()
+            l2_name = str(member.get("l2_name") or "").strip()
+            if not l2_code or not l2_name:
+                continue
+            node = l2.setdefault(l2_code, {
+                "code": l2_code, "name": l2_name, "level": "L2",
+                "parent_code": l1_code, "members": [], "membership_records": [],
+                "source": "SW2021", "taxonomy_id": "sws:industry:2021",
+                "code_type": "sw_index_code",
+                "membership_semantics": "historical_intervals",
+                "effective_from": in_date, "effective_to": out_date,
+            })
+            node["members"].append(symbol)
+            node["membership_records"].append(membership)
+        l1 = {
+            "code": l1_code, "name": l1_name, "level": "L1", "parent_code": "",
+            "members": sorted({item["symbol"] for item in records}),
+            "membership_records": records, "source": "SW2021",
+            "taxonomy_id": "sws:industry:2021", "code_type": "sw_index_code",
+            "membership_semantics": "historical_intervals", "effective_date": as_of,
+        }
+        for node in l2.values():
+            node["members"] = sorted(set(node["members"]))
+        return [l1, *(node for node in l2.values() if node.get("members"))]
 
     @staticmethod
     def _themes_from_source(
@@ -964,8 +1037,15 @@ class RotationProvider:
         previous_matching = list(previous_code.values())
         themes: dict[str, dict[str, Any]] = {}
         rows = [row for _, row in boards.iterrows()]
+        directory_key = str(market_date())[:10]
+        staging = self.store.begin_theme_sync(
+            _EASTMONEY_THEME_SOURCE, directory_key, len(rows),
+        )
+        run_id = str(staging["run_id"])
+        themes.update(staging["items"])
         fresh_count = 0
         member_failures = 0
+        failed_codes: list[str] = []
         for index, row in enumerate(rows, start=1):
             if cancelled():
                 raise InterruptedError("东方财富概念扫描已取消")
@@ -973,6 +1053,8 @@ class RotationProvider:
             raw_code = str(row.get("板块代码") or row.get("代码") or "").strip().upper()
             code = raw_code or f"EMC_{hashlib.sha1(name.encode('utf-8')).hexdigest()[:10].upper()}"
             if not name:
+                continue
+            if code in themes:
                 continue
             member_symbol = raw_code if raw_code.startswith("BK") and raw_code[2:].isdigit() else name
             try:
@@ -992,16 +1074,26 @@ class RotationProvider:
                     "members": sorted(set(values)),
                     "aliases": [],
                     "source": _EASTMONEY_THEME_SOURCE,
+                    "taxonomy_id": "eastmoney:concept:live",
+                    "effective_date": directory_key,
+                    "membership_semantics": "current_snapshot",
                 }
+                self.store.save_theme_sync_item(
+                    run_id, code, name, payload=themes[code],
+                )
                 fresh_count += 1
                 member_failures = 0
             except ThemeSourceUnavailable as exc:
                 member_failures += 1
+                failed_codes.append(code)
+                self.store.save_theme_sync_item(
+                    run_id, code, name, error=_compact_error(exc),
+                )
                 old = previous_code.get(code) or previous_name.get(name)
                 if old:
                     themes[code] = old
-                logger.warning(
-                    "概念 %s 成分同步失败，保留旧快照：%s",
+                logger.debug(
+                    "东方财富概念分区 %s 待补齐：%s",
                     name,
                     _compact_error(exc),
                 )
@@ -1013,7 +1105,8 @@ class RotationProvider:
                     "扫描细分题材",
                     f"东方财富 {index}/{len(rows)} · 成功 {fresh_count}",
                 )
-        if not fresh_count:
+        if not themes:
+            self.store.fail_theme_sync(run_id, ["东方财富概念成分连续不可用"])
             raise ThemeSourceUnavailable("东方财富概念成分连续不可用")
         unprocessed = {
             str(item.get("code") or ""): item
@@ -1021,11 +1114,23 @@ class RotationProvider:
             if str(item.get("code") or "") not in themes
         }
         self.store.replace_themes([*themes.values(), *unprocessed.values()])
+        if failed_codes:
+            self.store.fail_theme_sync(
+                run_id, [f"待补齐东方财富概念 {len(failed_codes)}/{len(rows)}"],
+            )
+        else:
+            self.store.reuse_published_theme_sync(run_id, [])
         return {
             "catalog": len(rows),
             "available": len(themes),
             "fresh": fresh_count,
             "source": _EASTMONEY_THEME_SOURCE,
+            "coverage": round(len(themes) / max(1, len(rows)), 4),
+            "quality_status": "partial" if failed_codes else "complete",
+            "pending": {
+                "total": len(rows), "completed": len(themes),
+                "retryable": len(failed_codes), "items": failed_codes,
+            },
             "issues": [],
         }
 
@@ -1072,14 +1177,22 @@ class RotationProvider:
         previous_matching = list(previous_code.values())
         themes: dict[str, dict[str, Any]] = {}
         rows = [row for _, row in boards.drop_duplicates("ts_code").iterrows()]
+        staging = self.store.begin_theme_sync(
+            _TUSHARE_THEME_SOURCE, trade_date, len(rows),
+        )
+        run_id = str(staging["run_id"])
+        themes.update(staging["items"])
         fresh_count = 0
         member_failures = 0
+        failed_codes: list[str] = []
         for index, row in enumerate(rows, start=1):
             if cancelled():
                 raise InterruptedError("Tushare DC 概念扫描已取消")
             code = str(row.get("ts_code") or "").strip().upper()
             name = str(row.get("name") or "").strip()
             if not code or not name:
+                continue
+            if code in themes:
                 continue
             try:
                 members = self._tushare_call(
@@ -1103,16 +1216,26 @@ class RotationProvider:
                     "members": sorted(set(values)),
                     "aliases": [],
                     "source": _TUSHARE_THEME_SOURCE,
+                    "taxonomy_id": "eastmoney:concept:live",
+                    "effective_date": trade_date,
+                    "membership_semantics": "dated_snapshot",
                 }
+                self.store.save_theme_sync_item(
+                    run_id, code, name, payload=themes[code],
+                )
                 fresh_count += 1
                 member_failures = 0
             except (RotationProviderCallError, ThemeSourceUnavailable) as exc:
                 member_failures += 1
+                failed_codes.append(code)
+                self.store.save_theme_sync_item(
+                    run_id, code, name, error=_compact_error(exc),
+                )
                 old = previous_code.get(code) or previous_name.get(name)
                 if old:
                     themes[code] = old
-                logger.warning(
-                    "Tushare DC 概念 %s 成分同步失败，保留同源旧快照：%s",
+                logger.debug(
+                    "Tushare DC 概念分区 %s 待补齐：%s",
                     name,
                     _compact_error(exc),
                 )
@@ -1124,7 +1247,8 @@ class RotationProvider:
                     "扫描细分题材",
                     f"Tushare DC {index}/{len(rows)} · 成功 {fresh_count}",
                 )
-        if not fresh_count:
+        if not themes:
+            self.store.fail_theme_sync(run_id, ["Tushare DC 概念成分连续不可用"])
             raise ThemeSourceUnavailable("Tushare DC 概念成分连续不可用")
         unprocessed = {
             str(item.get("code") or ""): item
@@ -1132,37 +1256,41 @@ class RotationProvider:
             if str(item.get("code") or "") not in themes
         }
         self.store.replace_themes([*themes.values(), *unprocessed.values()])
+        if failed_codes:
+            self.store.fail_theme_sync(
+                run_id, [f"待补齐 Tushare DC 概念 {len(failed_codes)}/{len(rows)}"],
+            )
+        else:
+            self.store.reuse_published_theme_sync(run_id, [])
         return {
             "catalog": len(rows),
             "available": len(themes),
             "fresh": fresh_count,
             "source": _TUSHARE_THEME_SOURCE,
             "trade_date": trade_date,
+            "coverage": round(len(themes) / max(1, len(rows)), 4),
+            "quality_status": "partial" if failed_codes else "complete",
+            "pending": {
+                "total": len(rows), "completed": len(themes),
+                "retryable": len(failed_codes), "items": failed_codes,
+            },
             "issues": ["东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"],
         }
 
     def _ths_page(self, client, code: str, page: int) -> str:
-        """Fetch one public THS concept page with a bounded provider-side retry."""
+        """Fetch one THS page; shared resilience owns all retry/backoff policy."""
         url = f"http://q.10jqka.com.cn/gn/detail/code/{code}/page/{page}/"
 
         def fetch() -> str:
-            last_error: Exception | None = None
-            for attempt in range(3):
-                delay = 0.5 - (time.monotonic() - self._ths_last_request)
-                if delay > 0:
-                    time.sleep(delay)
-                self._ths_last_request = time.monotonic()
-                try:
-                    response = client.get(url)
-                    response.raise_for_status()
-                    if not response.text.strip():
-                        raise RuntimeError("同花顺页面为空")
-                    return response.text
-                except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
-                    last_error = exc
-                    if attempt < 2:
-                        time.sleep(2**attempt)
-            raise RuntimeError(str(last_error or "同花顺页面请求失败"))
+            delay = 0.5 - (time.monotonic() - self._ths_last_request)
+            if delay > 0:
+                time.sleep(delay)
+            self._ths_last_request = time.monotonic()
+            response = client.get(url)
+            response.raise_for_status()
+            if not response.text.strip():
+                raise RuntimeError("同花顺页面为空")
+            return response.text
 
         return provider_call(
             "ths:concept",
@@ -1251,52 +1379,16 @@ class RotationProvider:
                 "issues": audit_issues,
             }
 
-        previous_ths = {
-            str(item.get("code") or ""): item
-            for item in previous_items
-            if str(item.get("source") or "") == _THS_THEME_SOURCE and str(item.get("code") or "")
-        }
-        can_reuse_published_partial = (
-            int(staging.get("attempted_count") or 0) >= len(rows)
-            and partial_required <= len(previous_ths) < required
-            and set(previous_ths) == set(themes)
-        )
-        if can_reuse_published_partial:
-            audit_issues = [
-                (
-                    f"同花顺完整题材仅覆盖 {len(previous_ths)}/{len(rows)}；未达到完整"
-                    f"目录门槛 {required}，继续使用已验证的受限目录。"
-                ),
-                "东方财富与 Tushare 目录不可用；失败或分页不完整的题材未写入目录。",
-            ]
-            self.store.reuse_published_theme_sync(run_id, audit_issues)
-            return {
-                "catalog": len(rows),
-                "available": len(previous_ths),
-                "fresh": 0,
-                "source": _THS_THEME_SOURCE,
-                "coverage": round(len(previous_ths) / max(1, len(rows)), 4),
-                "quality_status": "partial",
-                "issues": audit_issues,
-            }
-
-        # A previous complete traversal may already contain enough individually
-        # verified themes for a useful cold-start snapshot.  Reuse it instead of
-        # repeating thousands of pages known to require an authenticated THS
-        # session.  Never replace an existing published catalog with this subset.
-        if (
-            not previous_items
-            and int(staging.get("attempted_count") or 0) >= len(rows)
-            and partial_required <= len(themes) < required
-        ):
-            return publish_partial([])
+        # Completed partitions are restored above.  Failed partitions remain
+        # pending and are retried; a previous full traversal must never turn a
+        # partial catalog into a permanent no-op.
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
             ),
             "Referer": "http://q.10jqka.com.cn/gn/",
         }
-        # THS is the final public fallback when the configured providers are
+        # THS is the final public provider when the configured providers are
         # unavailable.  Do not inherit a stale machine-wide proxy here: such
         # proxies can return a 200 HTML interstitial that looks like a valid
         # response but contains no constituent table.
@@ -1345,6 +1437,8 @@ class RotationProvider:
                         "members": members,
                         "aliases": [],
                         "source": _THS_THEME_SOURCE,
+                        "taxonomy_id": "ths:concept:live",
+                        "membership_semantics": "current_snapshot",
                     }
                     themes[code] = payload
                     self.store.save_theme_sync_item(
@@ -1393,9 +1487,13 @@ class RotationProvider:
         }
 
     def sync_themes(
-        self, progress, cancelled, *, as_of: str = "",
+        self, progress, cancelled, *, as_of: str = "", purpose: str = "current_analysis",
     ) -> dict[str, Any]:  # pragma: no cover - 网络
-        """Refresh one coherent concept taxonomy through configured fallbacks."""
+        """Refresh one coherent concept taxonomy through explicit provider succession."""
+        if as_of and purpose in {"historical_replay", "formal_research"}:
+            raise ThemeSourceUnavailable(
+                "历史用途拒绝使用当前时刻概念成员；需要 dated_snapshot 或成员有效期"
+            )
         previous_items = self.store.themes()
         free_stockdb_error: ThemeSourceUnavailable | None = None
         if get_config().data.primary_provider == "free-stockdb":
@@ -1405,8 +1503,8 @@ class RotationProvider:
                 raise
             except ThemeSourceUnavailable as exc:
                 free_stockdb_error = exc
-                logger.warning(
-                    "free-stockdb 概念目录不可用，尝试东方财富后备源：%s",
+                logger.info(
+                    "free-stockdb 概念目录不可用，尝试东方财富独立 taxonomy：%s",
                     _compact_error(exc),
                 )
         try:
@@ -1418,8 +1516,8 @@ class RotationProvider:
         except InterruptedError:
             raise
         except ThemeSourceUnavailable as eastmoney_error:
-            logger.warning(
-                "东方财富概念目录不可用，尝试 Tushare DC 后备源：%s",
+            logger.info(
+                "东方财富概念目录不可用，尝试 Tushare DC 同口径目录：%s",
                 _compact_error(eastmoney_error),
             )
             disabled_dc = PROVIDER_HEALTH.disabled_status("tushare:dc-concept")
@@ -1440,8 +1538,8 @@ class RotationProvider:
                     raise
                 except (RotationProviderCallError, ThemeSourceUnavailable) as exc:
                     tushare_error = exc
-                    logger.warning(
-                        "Tushare DC 题材目录不可用，尝试同花顺后备源：%s",
+                    logger.info(
+                        "Tushare DC 题材目录不可用，尝试同花顺独立 taxonomy：%s",
                         _compact_error(tushare_error),
                     )
             try:

@@ -502,6 +502,118 @@ def test_theme_staging_keeps_old_catalog_until_atomic_quality_commit(tmp_path):
     assert resumed["attempted_count"] == 1
 
 
+def test_pending_sync_items_remain_due_until_each_partition_completes(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    staging = store.begin_theme_sync("eastmoney-concept", "2026-08-13", 2)
+    store.save_theme_sync_item(
+        staging["run_id"], "BK0001", "完整项",
+        payload={
+            "code": "BK0001", "name": "完整项", "members": ["600000.SH"],
+            "source": "eastmoney-concept",
+        },
+    )
+    store.save_theme_sync_item(
+        staging["run_id"], "BK0002", "待补项", error="rate limited",
+    )
+    store.fail_theme_sync(staging["run_id"], ["待补齐 1/2"])
+
+    assert store.has_pending_theme_sync(("eastmoney-concept",)) is True
+    resumed = store.begin_theme_sync("eastmoney-concept", "2026-08-13", 2)
+    assert set(resumed["items"]) == {"BK0001"}
+
+    store.save_theme_sync_item(
+        staging["run_id"], "BK0002", "待补项",
+        payload={
+            "code": "BK0002", "name": "待补项", "members": ["000001.SZ"],
+            "source": "eastmoney-concept",
+        },
+    )
+    store.reuse_published_theme_sync(staging["run_id"], [])
+    assert store.has_pending_theme_sync(("eastmoney-concept",)) is False
+
+
+def test_legacy_taxonomy_backfill_adds_identity_without_inventing_effective_dates(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    with store._cache() as connection:
+        connection.execute("PRAGMA user_version=5")
+        connection.execute(
+            "INSERT OR REPLACE INTO taxonomy_nodes"
+            "(code,level,parent_code,payload_json,observed_at) VALUES(?,?,?,?,?)",
+            (
+                "801080.SI", "L1", "",
+                strict_json_dumps({
+                    "code": "801080.SI", "name": "电子", "level": "L1",
+                    "source": "SW2021", "members": ["600000.SH"],
+                }),
+                1_700_000_000,
+            ),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO theme_catalog"
+            "(code,name,payload_json,observed_at) VALUES(?,?,?,?)",
+            (
+                "BK0001", "旧概念",
+                strict_json_dumps({
+                    "code": "BK0001", "name": "旧概念", "members": ["600000.SH"],
+                    "source": "free-stockdb:concept",
+                }),
+                1_700_000_000,
+            ),
+        )
+
+    migrated = RotationStore(tmp_path / "rotation")
+    industry = migrated.taxonomy_nodes()[0]
+    theme = migrated.themes()[0]
+    assert industry["taxonomy_id"] == "sws:industry:2021"
+    assert industry["membership_semantics"] == "current_snapshot"
+    assert "effective_date" not in industry
+    assert theme["taxonomy_id"] == "stockdb:concept:declared"
+    assert theme["membership_semantics"] == "current_snapshot"
+    assert "effective_date" not in theme
+
+
+def test_historical_taxonomy_requires_pit_membership_and_knowledge_cutoff(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    node = {
+        "code": "801080.SI", "name": "电子", "level": "L1",
+        "parent_code": "", "members": ["600000.SH"], "source": "SW2021",
+        "taxonomy_id": "sws:industry:2021",
+        "membership_semantics": "historical_intervals",
+        "membership_records": [{
+            "symbol": "600000.SH", "valid_from": "20200101", "valid_to": "",
+        }],
+    }
+    store.replace_taxonomy_nodes([node])
+    with store._cache() as connection:
+        connection.execute(
+            "UPDATE taxonomy_nodes SET observed_at=?", (1_700_000_000,),
+        )
+    valid = RotationJobSpec(
+        scope="industries", purpose="historical_replay", as_of="2024-01-02",
+        knowledge_cutoff="2024-01-03T00:00:00+08:00",
+        taxonomy_id="sws:industry:2021",
+    )
+    service._validate_temporal_taxonomy(valid)
+
+    with store._cache() as connection:
+        connection.execute(
+            "UPDATE taxonomy_nodes SET observed_at=?", (2_000_000_000,),
+        )
+    with pytest.raises(ValueError, match="knowledge_cutoff"):
+        service._validate_temporal_taxonomy(valid)
+
+    current_only = dict(node)
+    current_only["membership_semantics"] = "current_snapshot"
+    store.replace_taxonomy_nodes([current_only])
+    with store._cache() as connection:
+        connection.execute(
+            "UPDATE taxonomy_nodes SET observed_at=?", (1_700_000_000,),
+        )
+    with pytest.raises(ValueError, match="current-only"):
+        service._validate_temporal_taxonomy(valid)
+
+
 def test_rotation_charts_use_adaptive_axes_and_scoped_zoom():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
@@ -738,15 +850,19 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         "_expected_market_session",
         lambda: str(close.index[-1].date()),
     )
-    industry_names = ("电子", "计算机", "机械设备", "医药生物")
-    industry_map = {
-        symbol: industry_names[index // 10]
-        for index, symbol in enumerate(close.columns)
-    }
-    monkeypatch.setattr(
-        "quantmaster.rotation.service.load_cached_industry_map",
-        lambda: industry_map,
+    industries = (
+        ("801080.SI", "电子"), ("801750.SI", "计算机"),
+        ("801890.SI", "机械设备"), ("801150.SI", "医药生物"),
     )
+    store.replace_taxonomy_nodes([
+        {
+            "code": code, "name": name, "level": "L1", "parent_code": "",
+            "members": list(close.columns[index * 10 : (index + 1) * 10]),
+            "source": "SW2021", "taxonomy_id": "sws:industry:2021",
+            "membership_semantics": "dated_snapshot",
+        }
+        for index, (code, name) in enumerate(industries)
+    ])
     store.replace_themes([
         {
             "code": "BK1001", "name": "主题一",
@@ -796,7 +912,7 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert "tushare:fund_share" in temperature["meta"]["sources"]
     assert "local:news" in temperature["meta"]["sources"]
     assert len(industries["data"]["items"]) == 4
-    assert len(themes["data"]["items"]) == 1
+    assert len(themes["data"]["items"]) == 2
     assert set(industries["data"]["items"][0]["signals"]) == {"1", "3", "5", "20"}
     assert themes["data"]["items"][0]["primary_industry"] is not None
     assert "tushare:fund_nav" in etf_flows["meta"]["sources"]

@@ -1,9 +1,4 @@
-"""Strict industry taxonomy helpers used by rotation analytics.
-
-The legacy ``industry_map.json`` may contain several unrelated taxonomies.  Rotation
-only accepts exact SW2021 level-one names here; level-two nodes are loaded from the
-dedicated rotation taxonomy store and never alter level-one totals.
-"""
+"""Strict industry taxonomy helpers used by rotation analytics."""
 
 from __future__ import annotations
 
@@ -47,8 +42,13 @@ SW2021_L1: tuple[tuple[str, str], ...] = (
 _L1_CODE_BY_NAME = {name: code for code, name in SW2021_L1}
 
 
-def strict_l1_groups(mapping: Mapping[str, str]) -> dict[str, dict[str, Any]]:
-    """Return only exact SW2021 L1 memberships from a possibly mixed cache."""
+def strict_l1_groups(
+    mapping: Mapping[str, str], *, taxonomy_id: str = "",
+) -> dict[str, dict[str, Any]]:
+    """Return SW2021 memberships only when the caller proves that taxonomy."""
+
+    if mapping and taxonomy_id != "sws:industry:2021":
+        return strict_l1_groups({}, taxonomy_id="sws:industry:2021")
     grouped: dict[str, list[str]] = {code: [] for code, _ in SW2021_L1}
     for symbol, raw_name in mapping.items():
         name = str(raw_name).strip()
@@ -63,6 +63,11 @@ def strict_l1_groups(mapping: Mapping[str, str]) -> dict[str, dict[str, Any]]:
             "parent_code": "",
             "members": sorted(set(grouped[code])),
             "source": "SW2021",
+            "taxonomy_id": "sws:industry:2021",
+            "authority": "申万",
+            "version": "2021",
+            "code_type": "sw_index_code",
+            "membership_semantics": "dated_snapshot",
         }
         for code, name in SW2021_L1
     }
@@ -92,6 +97,13 @@ def merge_l2_groups(
             "parent_code": parent,
             "members": sorted(allowed),
             "source": "SW2021",
+            "taxonomy_id": "sws:industry:2021",
+            "authority": "申万",
+            "version": "2021",
+            "code_type": "sw_index_code",
+            "membership_semantics": str(
+                node.get("membership_semantics") or "dated_snapshot"
+            ),
         }
     return result
 
@@ -108,10 +120,21 @@ def taxonomy_payload(
             "parent_code": str(node.get("parent_code") or ""),
             "member_count": len(node.get("members") or []),
             "source": str(node.get("source") or "SW2021"),
+            "taxonomy_id": str(node.get("taxonomy_id") or "sws:industry:2021"),
+            "code_type": str(node.get("code_type") or "sw_index_code"),
+            "effective_from": str(node.get("effective_from") or ""),
+            "effective_to": str(node.get("effective_to") or ""),
+            "membership_semantics": str(
+                node.get("membership_semantics") or "dated_snapshot"
+            ),
         }
 
     return {
         "version": "SW2021",
+        "taxonomy_id": "sws:industry:2021",
+        "authority": "申万",
+        "kind": "industry",
+        "code_type": "sw_index_code",
         "l1": [public(node) for node in l1_groups.values()],
         "l2": [public(node) for node in l2_groups.values()],
     }

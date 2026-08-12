@@ -2354,6 +2354,12 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
 
         page.get_by_role("tab", name="轮动总览", exact=True).click()
         page.locator("#rotation-overview-view").wait_for(state="visible")
+        playwright_sync.expect(page.get_by_role("heading", name="数据与上游状态")).to_be_visible()
+        playwright_sync.expect(page.get_by_role("heading", name="当前数据")).to_be_visible()
+        playwright_sync.expect(page.get_by_role("heading", name="上游来源")).to_be_visible()
+        assert page.locator("[data-rotation-data-progress]").get_attribute("aria-label")
+        assert page.locator(".rotation-source-status details").count() == 2
+        assert page.locator(".toast", has_text="上游").count() == 0
         assert page.url.endswith("#observe/rotation")
         _wait_for_text(page.locator("#rotation-overview-content"), "等待")
         assert page.locator("#rotation-overview-view #rotation-industry-scatter").count() == 0
@@ -2379,6 +2385,8 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         assert page.url.endswith("#observe/etfs")
 
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        status_width = page.locator(".rotation-source-status").bounding_box()["width"]
+        assert status_width <= 390
         assert page_errors == []
         browser.close()
 

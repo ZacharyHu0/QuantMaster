@@ -227,6 +227,25 @@
 
 <!-- ================= 轮动 ================= -->
 <section class="tab" id="tab-rotation">
+  <section class="rotation-source-status" aria-labelledby="rotation-source-status-title">
+    <div class="rotation-source-status-head">
+      <div><span class="rotation-eyebrow">DATA READINESS</span><h2 id="rotation-source-status-title">数据与上游状态</h2></div>
+      <span id="rotation-status-live" role="status" aria-live="polite" aria-atomic="true">等待页面数据</span>
+    </div>
+    <div class="rotation-source-status-grid">
+      <article aria-labelledby="rotation-current-data-title">
+        <div class="rotation-status-title"><h3 id="rotation-current-data-title">当前数据</h3><span data-rotation-data-state>等待快照</span></div>
+        <dl data-rotation-data-summary><div><dt>Taxonomy</dt><dd>—</dd></div><div><dt>适用日期</dt><dd>—</dd></div><div><dt>覆盖</dt><dd>0/0</dd></div><div><dt>补齐</dt><dd>本地 0 · 远程 0</dd></div></dl>
+        <progress data-rotation-data-progress max="1" value="0" aria-label="当前数据覆盖进度"></progress>
+        <details><summary>缺失分区、pending queue 与影响范围</summary><div data-rotation-data-detail class="rotation-status-detail">尚无状态详情。</div></details>
+      </article>
+      <article aria-labelledby="rotation-provider-title">
+        <div class="rotation-status-title"><h3 id="rotation-provider-title">上游来源</h3><span data-rotation-provider-state>尚未探测</span></div>
+        <div data-rotation-provider-summary class="rotation-provider-summary"><p>本地数据可独立保持页面健康；展开后查看能力与恢复时间。</p></div>
+        <details><summary>能力、限流、权限与诊断</summary><div data-rotation-provider-detail class="rotation-status-detail">暂无上游诊断。</div></details>
+      </article>
+    </div>
+  </section>
   <section class="rotation-view" id="rotation-overview-view" data-rotation-view="overview" role="tabpanel" aria-labelledby="rotation-overview-tab">
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">ROTATION WORKBENCH</span><h2>轮动总览</h2>

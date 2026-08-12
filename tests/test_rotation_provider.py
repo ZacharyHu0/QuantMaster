@@ -241,11 +241,57 @@ def test_provider_builds_strict_l1_l2_taxonomy(tmp_path):
         lambda: False,
     )
 
-    assert result == {"l1": 1, "l2": 2}
+    assert result["l1"] == 1
+    assert result["l2"] == 2
+    assert result["pending"] == {
+        "total": 1, "completed": 1, "retryable": 0, "items": [],
+    }
     l1 = store.taxonomy_nodes("L1")[0]
     assert l1["members"] == ["000001.SZ", "600001.SH"]
     assert {item["parent_code"] for item in store.taxonomy_nodes("L2")} == {"801080.SI"}
     assert updates[-1][0] == 39
+
+
+def test_provider_filters_industry_membership_at_historical_as_of(tmp_path):
+    class HistoricalTushare(FakeTushare):
+        def _call(self, endpoint, ttl, **params):
+            if endpoint != "index_member_all":
+                return super()._call(endpoint, ttl, **params)
+            self.calls.append((endpoint, params))
+            return pd.DataFrame([
+                {
+                    "l1_code": "801080.SI", "l1_name": "电子",
+                    "l2_code": "801081.SI", "l2_name": "半导体",
+                    "ts_code": "600001.SH", "in_date": "20200101",
+                    "out_date": "", "is_new": "Y",
+                },
+                {
+                    "l1_code": "801080.SI", "l1_name": "电子",
+                    "l2_code": "801081.SI", "l2_name": "半导体",
+                    "ts_code": "000001.SZ", "in_date": "20250101",
+                    "out_date": "", "is_new": "Y",
+                },
+            ])
+
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, HistoricalTushare())
+
+    provider.sync_industry_taxonomy(
+        lambda *_: None, lambda: False, as_of="2024-06-30",
+    )
+
+    assert store.taxonomy_nodes("L1")[0]["members"] == ["600001.SH"]
+    assert store.taxonomy_nodes("L1")[0]["membership_semantics"] == "historical_intervals"
+
+
+def test_historical_themes_reject_current_only_providers(tmp_path):
+    provider = RotationProvider(RotationStore(tmp_path / "rotation"), FakeTushare())
+
+    with pytest.raises(ThemeSourceUnavailable, match="历史用途拒绝"):
+        provider.sync_themes(
+            lambda *_: None, lambda: False,
+            as_of="2024-06-30", purpose="historical_replay",
+        )
 
 
 def test_broad_etf_classifier_rejects_sector_and_offshore_products():
@@ -641,6 +687,7 @@ def test_provider_skips_missing_stockdb_calendar_and_continues_remote_sync(
 def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
     tmp_path, monkeypatch, caplog,
 ):
+    caplog.set_level("INFO")
     monkeypatch.setitem(sys.modules, "akshare", None)
     monkeypatch.setattr(
         "quantmaster.rotation.provider.get_config",
@@ -668,13 +715,14 @@ def test_provider_falls_back_to_tushare_dc_concepts_as_one_taxonomy(
     assert result["issues"] == [
         "东方财富概念接口不可用，已自动切换为 Tushare DC 概念目录。"
     ]
-    fallback_records = [
+    succession_records = [
         record for record in caplog.records
-        if "尝试 Tushare DC 后备源" in record.getMessage()
+        if "尝试 Tushare DC 同口径目录" in record.getMessage()
     ]
-    assert len(fallback_records) == 1
-    assert fallback_records[0].exc_info is None
-    assert fallback_records[0].getMessage().partition("：")[2]
+    assert len(succession_records) == 1
+    assert succession_records[0].levelname == "INFO"
+    assert succession_records[0].exc_info is None
+    assert succession_records[0].getMessage().partition("：")[2]
     themes = store.themes()
     assert {item["code"] for item in themes} == {"BK0816.DC", "BK1184.DC"}
     assert {item["source"] for item in themes} == {"tushare:dc-concept"}
@@ -841,7 +889,7 @@ def test_ths_cold_start_can_publish_only_individually_complete_partial_catalog(
     assert any("受限目录" in issue for issue in result["issues"])
 
 
-def test_ths_refresh_reuses_fully_traversed_published_partial_catalog(
+def test_ths_refresh_retries_only_pending_partitions(
     tmp_path, monkeypatch,
 ):
     class FakeAkshare:
@@ -874,17 +922,20 @@ def test_ths_refresh_reuses_fully_traversed_published_partial_catalog(
     first = provider._sync_ths_themes(lambda *args: None, lambda: False, [])
     assert first["quality_status"] == "partial"
 
-    def unexpected_client(*args, **kwargs):
-        raise AssertionError("已完整遍历的受限目录不应再次访问题材详情页")
+    calls: list[str] = []
 
-    monkeypatch.setattr("quantmaster.rotation.provider.httpx.Client", unexpected_client)
+    def recovered_page(_client, code, _page):
+        calls.append(code)
+        return html
+
+    monkeypatch.setattr(provider, "_ths_page", recovered_page)
     second = provider._sync_ths_themes(
         lambda *args: None, lambda: False, store.themes(),
     )
 
-    assert second["quality_status"] == "partial"
+    assert second["quality_status"] == "complete"
     assert second["catalog"] == 100
-    assert second["available"] == 75
-    assert second["coverage"] == 0.75
-    assert len(store.themes()) == 75
-    assert any("继续使用已验证的受限目录" in issue for issue in second["issues"])
+    assert second["available"] == 100
+    assert second["coverage"] == 1.0
+    assert len(store.themes()) == 100
+    assert calls == [f"30{index:04d}" for index in range(75, 100)]

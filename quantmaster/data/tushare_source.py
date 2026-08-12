@@ -28,6 +28,7 @@ from quantmaster.data.base import DataCapability, DataSource, Market, normalize_
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
     EndpointFrameCache,
+    ProviderContractChanged,
     bypass_endpoint_cache,
     endpoint_cache_bypassed,
     provider_call,
@@ -184,7 +185,9 @@ class TushareSource(DataSource):
                 raise EmptyProviderResponse(f"{endpoint} 返回空数据")
             missing = [column for column in required_columns if column not in frame.columns]
             if missing:
-                raise ValueError(f"{endpoint} 响应缺少必需列: {', '.join(missing)}")
+                raise ProviderContractChanged(
+                    f"{endpoint} 响应缺少必需列: {', '.join(missing)}"
+                )
             self.cache.put(
                 endpoint,
                 clean,
