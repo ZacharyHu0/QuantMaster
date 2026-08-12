@@ -135,6 +135,17 @@ function normalizeProblem(value, fallback = {}) {
     items:Array.isArray(raw.items) ? raw.items.map(String) : [],
     remote_failures:optionalCount(raw.remote_failures ?? fallback.remote_failures),
     local_blocks:optionalCount(raw.local_blocks ?? fallback.local_blocks),
+    provider:String(raw.provider || fallback.provider || ''),
+    endpoint:String(raw.endpoint || fallback.endpoint || ''),
+    model:String(raw.model || fallback.model || ''),
+    occurred_at:String(raw.occurred_at || fallback.occurred_at || ''),
+    last_success_at:String(raw.last_success_at || fallback.last_success_at || ''),
+    diagnostic_id:String(raw.diagnostic_id || fallback.diagnostic_id || ''),
+    error_category:String(raw.error_category || fallback.error_category || ''),
+    http_status:optionalCount(raw.http_status ?? fallback.http_status),
+    retry_status:String(raw.retry_status || fallback.retry_status || ''),
+    next_retry_at:String(raw.next_retry_at || fallback.next_retry_at || ''),
+    response_summary:String(raw.response_summary || fallback.response_summary || ''),
   };
 }
 function ingestResponseProblems(data, scope = 'operation') {
@@ -598,6 +609,16 @@ const runtimeInfo = (() => {
     if (entry.requestId) rows.push(`<dt>请求编号</dt><dd><span class="runtime-request"><code>${esc(entry.requestId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.requestId)}" aria-label="复制请求编号 ${esc(entry.requestId)}">复制</button></span></dd>`);
     if (entry.remoteFailures !== null) rows.push(`<dt>远端失败</dt><dd>${entry.remoteFailures} 次</dd>`);
     if (entry.localBlocks !== null) rows.push(`<dt>本地拦截</dt><dd>${entry.localBlocks} 次</dd>`);
+    if (entry.provider) rows.push(`<dt>Provider</dt><dd>${esc(entry.provider)}</dd>`);
+    if (entry.endpoint) rows.push(`<dt>端点（已脱敏）</dt><dd><code>${esc(entry.endpoint)}</code></dd>`);
+    if (entry.model) rows.push(`<dt>模型</dt><dd>${esc(entry.model)}</dd>`);
+    if (entry.errorCategory) rows.push(`<dt>错误分类</dt><dd>${esc(entry.errorCategory)}</dd>`);
+    if (entry.httpStatus !== null) rows.push(`<dt>HTTP 状态</dt><dd>${entry.httpStatus}</dd>`);
+    if (entry.occurredAt) rows.push(`<dt>发生时间</dt><dd>${esc(new Date(entry.occurredAt).toLocaleString('zh-CN', {hour12:false}))}</dd>`);
+    if (entry.lastSuccessAt) rows.push(`<dt>最近成功</dt><dd>${esc(new Date(entry.lastSuccessAt).toLocaleString('zh-CN', {hour12:false}))}</dd>`);
+    if (entry.retryStatus) rows.push(`<dt>重试状态</dt><dd>${esc(entry.retryStatus)}${entry.nextRetryAt ? ` · ${esc(new Date(entry.nextRetryAt).toLocaleString('zh-CN', {hour12:false}))}` : ''}</dd>`);
+    if (entry.responseSummary) rows.push(`<dt>响应摘要</dt><dd>${esc(entry.responseSummary)}</dd>`);
+    if (entry.diagnosticId) rows.push(`<dt>诊断请求码</dt><dd><span class="runtime-request"><code>${esc(entry.diagnosticId)}</code><button class="runtime-copy" type="button" data-copy-request="${esc(entry.diagnosticId)}" aria-label="复制诊断请求码">复制</button></span></dd>`);
     return rows.length ? `<details class="runtime-diagnostics"><summary>诊断信息</summary><dl class="runtime-diagnostics-grid">${rows.join('')}</dl></details>` : '';
   }
   function render() {
@@ -634,6 +655,12 @@ const runtimeInfo = (() => {
       detail:compactText(meta.detail), action:compactText(meta.action, 220),
       path:compactText(meta.path, 220), requestId:compactText(meta.requestId, 80),
       remoteFailures:optionalCount(meta.remoteFailures), localBlocks:optionalCount(meta.localBlocks),
+      provider:compactText(meta.provider, 40), endpoint:compactText(meta.endpoint, 220),
+      model:compactText(meta.model, 120), occurredAt:compactText(meta.occurredAt, 80),
+      lastSuccessAt:compactText(meta.lastSuccessAt, 80), diagnosticId:compactText(meta.diagnosticId, 80),
+      errorCategory:compactText(meta.errorCategory, 80), httpStatus:optionalCount(meta.httpStatus),
+      retryStatus:compactText(meta.retryStatus, 100), nextRetryAt:compactText(meta.nextRetryAt, 80),
+      responseSummary:compactText(meta.responseSummary, 180),
       revision, scope:compactText(meta.scope, 80), persistent:Boolean(meta.persistent),
       iso:now.toISOString(),
       time:now.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
@@ -663,6 +690,11 @@ const runtimeInfo = (() => {
         key:`persistent:${scope}:${problem.id}`, scope, persistent:true,
         revision:problem.revision, remoteFailures:problem.remote_failures,
         localBlocks:problem.local_blocks,
+        provider:problem.provider, endpoint:problem.endpoint, model:problem.model,
+        occurredAt:problem.occurred_at, lastSuccessAt:problem.last_success_at,
+        diagnosticId:problem.diagnostic_id, errorCategory:problem.error_category,
+        httpStatus:problem.http_status, retryStatus:problem.retry_status,
+        nextRetryAt:problem.next_retry_at, responseSummary:problem.response_summary,
       },
     ));
     render();

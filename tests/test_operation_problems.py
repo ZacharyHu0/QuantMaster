@@ -53,6 +53,32 @@ def test_provider_health_problem_reports_remote_failures_and_local_blocks(monkey
     assert "permission denied" not in str(problem)
 
 
+def test_llm_health_problem_keeps_safe_diagnostic_context(monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.ai.llm.llm_provider_health",
+        lambda: [{
+            "status": "degraded", "provider": "openai-compatible",
+            "endpoint": "https://gateway.example/v1", "model": "test-model",
+            "error_code": "http_429", "error_category": "rate_limit",
+            "message": "触发限流或额度限制", "response_summary": "上游返回了错误响应（内容已隐藏）",
+            "last_request_id": "llm-diagnostic-42", "http_status": 429,
+            "retry_after_seconds": 15, "retry_status": "等待退避重试",
+            "next_retry_at": "2026-08-13T00:00:15+00:00", "occurred_at": "2026-08-13T00:00:00+00:00",
+            "last_success_at": "2026-08-12T23:59:00+00:00",
+        }],
+    )
+
+    report = collect_health_report()
+    problem = next(item for item in report["issues"] if item["id"] == "llm:openai-compatible:test-model")
+
+    assert problem["code"] == "http_429"
+    assert problem["diagnostic_id"] == "llm-diagnostic-42"
+    assert problem["endpoint"] == "https://gateway.example/v1"
+    assert problem["http_status"] == 429
+    assert problem["retry_status"] == "等待退避重试"
+    assert problem["can_continue"] is True
+
+
 def test_missing_required_price_field_blocks_backtest():
     panel = price_panel()
     panel.pop("open")

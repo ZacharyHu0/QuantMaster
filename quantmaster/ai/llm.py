@@ -19,9 +19,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import socket
+import ssl
 import threading
 import time
+import uuid
 from collections import deque
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -38,6 +42,119 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 _WEB_SEARCH_CAPABILITIES: dict[tuple[str, str, str], dict[str, Any]] = {}
 _WEB_SEARCH_CAPABILITIES_LOCK = threading.RLock()
 _WEB_SEARCH_NEGATIVE_TTL_SECONDS = 300.0
+logger = logging.getLogger(__name__)
+
+
+def _redacted_endpoint(url: str) -> str:
+    """Return an operator-useful URL without credentials or query data."""
+    try:
+        value = httpx.URL(str(url))
+        host = value.host or "unknown-host"
+        port = f":{value.port}" if value.port else ""
+        path = value.path.rstrip("/") or "/"
+        if path.count("/") > 2:
+            path = "/".join(path.split("/")[:3]) + "/…"
+        return f"{value.scheme}://{host}{port}{path}"
+    except (TypeError, ValueError):
+        return "已隐藏的模型端点"
+
+
+def _safe_response_summary(value: object) -> str:
+    """Never expose upstream response bodies, prompts, or sensitive query data."""
+    return "上游返回了错误响应（内容已隐藏）" if str(value or "").strip() else ""
+
+
+class _LLMProviderHealth:
+    """In-memory, safe provider health projection for the background drawer."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._entries: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    @staticmethod
+    def _key(config: LLMConfig) -> tuple[str, str, str]:
+        endpoint = config.base_url.rstrip("/") or (
+            "https://api.anthropic.com/v1" if config.provider == "anthropic"
+            else "https://api.openai.com/v1"
+        )
+        return (str(config.provider), _redacted_endpoint(endpoint), str(config.model))
+
+    def success(self, config: LLMConfig, request_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            provider, endpoint, model = self._key(config)
+            item = self._entries.setdefault((provider, endpoint, model), {
+                "provider": provider, "endpoint": endpoint, "model": model,
+            })
+            item.update({
+                "status": "healthy", "last_success_at": now, "last_request_id": request_id,
+                "error_code": "", "error_category": "", "message": "",
+                "http_status": None, "retry_after_seconds": None, "next_retry_at": "",
+                "retry_status": "无需退避",
+            })
+
+    def failure(self, config: LLMConfig, error: LLMError) -> None:
+        now = datetime.now(UTC)
+        with self._lock:
+            provider, endpoint, model = self._key(config)
+            item = self._entries.setdefault((provider, endpoint, model), {
+                "provider": provider, "endpoint": endpoint, "model": model,
+            })
+            delay = error.retry_after
+            next_retry = ""
+            if error.retryable:
+                delay = max(1.0, float(delay if delay is not None else 15.0))
+                next_retry = datetime.fromtimestamp(now.timestamp() + delay, UTC).isoformat()
+            item.update({
+                "status": "degraded", "occurred_at": now.isoformat(),
+                "last_request_id": error.request_id, "error_code": error.code,
+                "error_category": error.category, "message": "模型服务请求未完成",
+                "response_summary": _safe_response_summary(error.response_summary),
+                "http_status": error.status_code, "retry_after_seconds": delay,
+                "next_retry_at": next_retry,
+                "retry_status": "等待退避重试" if next_retry else "不自动重试",
+            })
+
+    def register(self, config: LLMConfig) -> None:
+        with self._lock:
+            provider, endpoint, model = self._key(config)
+            self._entries.setdefault((provider, endpoint, model), {
+                "provider": provider, "endpoint": endpoint, "model": model,
+                "status": "unknown", "retry_status": "尚未检测",
+                "last_success_at": "", "last_request_id": "",
+            })
+
+    def status(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(item) for item in self._entries.values()]
+
+
+_LLM_PROVIDER_HEALTH = _LLMProviderHealth()
+
+
+def llm_provider_health() -> list[dict[str, Any]]:
+    """Public, secret-free LLM health entries; absence means no calls observed."""
+    return _LLM_PROVIDER_HEALTH.status()
+
+
+def llm_diagnostic_details(config: LLMConfig, error: LLMError) -> dict[str, Any]:
+    """Single safe contract used by settings checks, jobs, logs and health UI."""
+    provider, endpoint, model = _LLM_PROVIDER_HEALTH._key(config)
+    return {
+        "provider": provider, "endpoint": endpoint, "model": model,
+        "error_code": error.code, "error_category": error.category,
+        "diagnostic_id": error.request_id, "http_status": error.status_code,
+        "retryable": error.retryable, "retry_after_seconds": error.retry_after,
+        "response_summary": error.response_summary,
+    }
+
+
+def record_llm_failure(config: LLMConfig, error: LLMError) -> None:
+    _LLM_PROVIDER_HEALTH.failure(config, error)
+    logger.warning(
+        "LLM provider request failed diagnostic_id=%s provider=%s code=%s category=%s http_status=%s",
+        error.request_id, config.provider, error.code, error.category, error.status_code,
+    )
 
 
 class _HTTPClientPool:
@@ -215,12 +332,18 @@ class LLMError(RuntimeError):
         retryable: bool = False,
         status_code: int | None = None,
         retry_after: float | None = None,
+        category: str = "unknown",
+        request_id: str = "",
+        response_summary: str = "",
     ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.status_code = status_code
         self.retry_after = retry_after
+        self.category = category
+        self.request_id = request_id or f"llm-{uuid.uuid4().hex[:12]}"
+        self.response_summary = _safe_response_summary(response_summary)
 
 
 _RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
@@ -253,37 +376,59 @@ def _request_timeout(read_timeout: float) -> httpx.Timeout:
 
 
 def _transport_error(exc: httpx.HTTPError, read_timeout: float) -> LLMError:
+    request_id = f"llm-{uuid.uuid4().hex[:12]}"
+    if isinstance(exc, httpx.ConnectError):
+        cause = exc.__cause__
+        if isinstance(cause, socket.gaierror):
+            return LLMError("模型服务域名无法解析", code="dns_error", retryable=True,
+                            category="dns", request_id=request_id)
+        if isinstance(cause, ssl.SSLError) or "certificate" in str(exc).casefold():
+            return LLMError("模型服务 TLS 或证书校验失败", code="tls_error", retryable=False,
+                            category="tls", request_id=request_id)
+        text = str(exc).casefold()
+        if "refused" in text or "10061" in text:
+            return LLMError("模型服务拒绝连接", code="connection_refused", retryable=True,
+                            category="tcp", request_id=request_id)
     if isinstance(exc, httpx.ReadTimeout):
         return LLMError(
             f"模型在 {read_timeout:.0f} 秒内未返回结果",
-            code="read_timeout",
-            retryable=True,
+            code="read_timeout", retryable=True, category="timeout", request_id=request_id,
         )
     if isinstance(exc, httpx.ConnectTimeout):
-        return LLMError("连接模型服务超时", code="connect_timeout", retryable=True)
+        return LLMError("连接模型服务超时", code="connect_timeout", retryable=True,
+                        category="timeout", request_id=request_id)
+    if isinstance(exc, httpx.WriteTimeout):
+        return LLMError("发送模型请求超时", code="write_timeout", retryable=True,
+                        category="timeout", request_id=request_id)
+    if isinstance(exc, httpx.PoolTimeout):
+        return LLMError("模型连接池等待超时", code="pool_timeout", retryable=True,
+                        category="timeout", request_id=request_id)
     if isinstance(exc, httpx.TimeoutException):
-        return LLMError("模型请求超时", code="request_timeout", retryable=True)
+        return LLMError("模型请求超时", code="request_timeout", retryable=True,
+                        category="timeout", request_id=request_id)
     return LLMError(
-        f"无法连接模型服务：{type(exc).__name__}",
-        code="network_error",
-        retryable=True,
+        "模型服务网络连接失败", code="network_error", retryable=True,
+        category="network", request_id=request_id,
     )
 
 
 def _api_error(provider: str, response: httpx.Response) -> LLMError:
     status = int(response.status_code)
     retryable = status in _RETRYABLE_STATUSES
-    label = "暂时不可用" if retryable else "请求失败"
-    detail = response.text.strip().replace("\n", " ")[:500]
+    labels = {
+        401: ("鉴权失败", "authentication"), 403: ("访问被拒绝", "authorization"),
+        404: ("接口或模型不存在", "model_or_endpoint"), 422: ("请求合同不兼容", "request_contract"),
+        429: ("触发限流或额度限制", "rate_limit"),
+    }
+    label, category = labels.get(
+        status, ("上游服务暂时不可用", "upstream_gateway") if status >= 500 else ("请求失败", "http"),
+    )
     message = f"{provider} API {label}（HTTP {status}）"
-    if detail:
-        message += f"：{detail}"
     return LLMError(
-        message,
-        code=f"http_{status}",
-        retryable=retryable,
-        status_code=status,
-        retry_after=_retry_after(response),
+        message, code=f"http_{status}", retryable=retryable, status_code=status,
+        retry_after=_retry_after(response), category=category,
+        request_id=response.headers.get("x-request-id") or response.headers.get("request-id") or "",
+        response_summary=_safe_response_summary(response.text),
     )
 
 
@@ -453,6 +598,7 @@ class LLMClient:
         self._uses_runtime_config = config is None
         self.config = config or get_config().llm
         self._concurrency_scope = concurrency_scope
+        _LLM_PROVIDER_HEALTH.register(self.config)
         if not self.config.api_key and self.config.provider != "openai-compatible":
             raise LLMError(
                 "未配置 LLM API key。请设置环境变量 ANTHROPIC_API_KEY / OPENAI_API_KEY / "
@@ -517,12 +663,17 @@ class LLMClient:
             reject_http_llm_transport()
             if execution_lease_cancelled():
                 raise InterruptedError("LLM execution lease cancelled after diagnostic response")
+            _LLM_PROVIDER_HEALTH.success(self.config, f"llm-{uuid.uuid4().hex[:12]}")
             return response
         except TimeoutError as exc:
             raise LLMError(
                 f"模型请求排队超过 {self._queue_timeout():.0f} 秒",
-                code="queue_timeout", retryable=True,
+                code="queue_timeout", retryable=True, category="timeout",
             ) from exc
+        except httpx.HTTPError as exc:
+            error = _transport_error(exc, float(self.config.timeout))
+            record_llm_failure(self.config, error)
+            raise error from exc
 
     # ---- 底层请求 ----
 
@@ -857,13 +1008,23 @@ class LLMClient:
         read_timeout = max(1.0, float(timeout or self.config.timeout))
         effort = str(reasoning_effort or self.config.reasoning_effort)
         selected_model = str(model or self.config.model).strip()
-        if self.config.provider == "anthropic":
-            return self._request_anthropic(
-                messages, system, read_timeout, effort, selected_model,
-            )
-        return self._request_openai(
-            messages, system, read_timeout, effort, selected_model,
-        )
+        request_id = f"llm-{uuid.uuid4().hex[:12]}"
+        try:
+            if self.config.provider == "anthropic":
+                result = self._request_anthropic(
+                    messages, system, read_timeout, effort, selected_model,
+                )
+            else:
+                result = self._request_openai(
+                    messages, system, read_timeout, effort, selected_model,
+                )
+        except LLMError as exc:
+            if not exc.request_id:
+                exc.request_id = request_id
+            record_llm_failure(self.config, exc)
+            raise
+        _LLM_PROVIDER_HEALTH.success(self.config, request_id)
+        return result
 
     def chat_json(
         self, prompt: str, system: str | None = None, *, timeout: float | None = None,

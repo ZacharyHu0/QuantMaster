@@ -8,11 +8,49 @@ import pytest
 from quantmaster.ai.llm import (
     LLMClient,
     LLMError,
+    _api_error,
     _HTTPClientPool,
     _LLMRequestGate,
+    _transport_error,
+    llm_diagnostic_details,
     parse_json_reply,
 )
 from quantmaster.config import LLMConfig
+
+
+def test_llm_diagnostic_contract_redacts_endpoint_and_response_body():
+    config = LLMConfig(
+        provider="openai-compatible", model="private-model", api_key="sk-secret-value",
+        base_url="https://gateway.example/v1?token=private-query",
+    )
+    response = httpx.Response(
+        429, headers={"x-request-id": "upstream-correlation"},
+        text='{"error":"Bearer secret-token prompt=private"}',
+    )
+    error = _api_error("OpenAI 协议", response)
+    details = llm_diagnostic_details(config, error)
+
+    assert error.code == "http_429"
+    assert error.category == "rate_limit"
+    assert details["diagnostic_id"] == "upstream-correlation"
+    assert details["endpoint"] == "https://gateway.example/v1"
+    assert "secret" not in repr(details).casefold()
+    assert "private-query" not in repr(details)
+    assert details["response_summary"] == "上游返回了错误响应（内容已隐藏）"
+
+
+@pytest.mark.parametrize(("exception", "code", "category"), [
+    (httpx.ReadTimeout("read"), "read_timeout", "timeout"),
+    (httpx.ConnectTimeout("connect"), "connect_timeout", "timeout"),
+    (httpx.WriteTimeout("write"), "write_timeout", "timeout"),
+    (httpx.PoolTimeout("pool"), "pool_timeout", "timeout"),
+])
+def test_llm_transport_timeout_categories(exception, code, category):
+    error = _transport_error(exception, 12)
+    assert error.code == code
+    assert error.category == category
+    assert error.retryable is True
+    assert error.request_id.startswith("llm-")
 
 
 class TestParseJsonReply:

@@ -32,6 +32,38 @@ _PROVIDER_NAMES = {
     "yahoo": "Yahoo Finance",
     "ths": "同花顺",
 }
+
+
+def _llm_action(category: str, *, retryable: bool, retry_status: str) -> str:
+    actions = {
+        "dns": "检查域名、DNS 和网络代理设置后重试。",
+        "tcp": "确认模型服务监听地址和端口，检查防火墙后重试。",
+        "tls": "检查 HTTPS 地址、证书链和系统时间；不要关闭证书验证。",
+        "timeout": "检查服务负载与超时配置；当前请求可在退避后重试。",
+        "authentication": "检查 API Key 是否有效；不要在此页面粘贴或记录密钥。",
+        "authorization": "确认该密钥拥有当前模型或接口的访问权限。",
+        "model_or_endpoint": "检查脱敏端点、API 协议和模型 ID 是否存在。",
+        "request_contract": "网关不接受当前请求合同；检查模型协议和参数兼容性。",
+        "rate_limit": "等待额度或限流窗口恢复，并降低并发或请求频率。",
+        "upstream_gateway": "上游网关暂时异常；稍后重试或查看网关运行状态。",
+        "response_contract": "上游响应不符合模型协议；检查网关兼容性。",
+    }
+    fallback = "查看本机服务日志并使用诊断请求码检索该次失败。"
+    if retryable and retry_status:
+        return f"{actions.get(category, fallback)} {retry_status}。"
+    return actions.get(category, fallback)
+
+
+def _llm_title(category: str) -> str:
+    labels = {
+        "dns": "模型服务 DNS 解析失败", "tcp": "模型服务连接被拒绝",
+        "tls": "模型服务 TLS 证书失败", "timeout": "模型服务请求超时",
+        "authentication": "模型服务鉴权失败", "authorization": "模型服务无访问权限",
+        "model_or_endpoint": "模型或接口不存在", "request_contract": "模型请求合同不兼容",
+        "rate_limit": "模型服务限流或额度不足", "upstream_gateway": "模型上游网关故障",
+        "response_contract": "模型服务响应合同错误",
+    }
+    return labels.get(category, "模型服务请求失败")
 _CAPABILITY_NAMES = {
     "index-cons": "指数成分",
     "csindex": "指数成分",
@@ -82,6 +114,38 @@ def _component_failure(name: str) -> Problem:
 def collect_health_report() -> dict[str, Any]:
     """聚合全局后台健康与当前任务；任一子系统失败不影响其余状态。"""
     issues: list[Problem] = []
+
+    # LLM issues are informational health projections only: unrelated jobs
+    # remain visible and runnable even while a provider is degraded.
+    try:
+        from quantmaster.ai.llm import llm_provider_health
+
+        for item in llm_provider_health():
+            if item.get("status") not in {"degraded", "healthy"}:
+                continue
+            category = str(item.get("error_category") or "unknown")
+            provider = _clean(item.get("provider") or "LLM", 40)
+            model = _clean(item.get("model") or "未指定模型", 120)
+            retry_status = _clean(item.get("retry_status") or "", 80)
+            healthy = item.get("status") == "healthy"
+            issues.append(make_problem(
+                str(item.get("error_code") or "llm_healthy"), severity="info" if healthy else "warning",
+                source="模型服务", title="模型服务运行正常" if healthy else _llm_title(category),
+                message=(f"{provider} · {model}：最近请求成功" if healthy else
+                         f"{provider} · {model}：{_clean(item.get('message') or '请求失败')}"),
+                action="LLM 故障不会阻断不依赖模型的后台任务。" if healthy else _llm_action(
+                    category, retryable=bool(item.get("retry_after_seconds")), retry_status=retry_status,
+                ),
+                problem_id=f"llm:{provider}:{model}", can_continue=True,
+                provider=provider, endpoint=_clean(item.get("endpoint"), 220), model=model,
+                occurred_at=item.get("occurred_at"), last_success_at=item.get("last_success_at"),
+                diagnostic_id=_clean(item.get("last_request_id"), 80),
+                error_category=category, http_status=item.get("http_status"),
+                retry_status=retry_status, next_retry_at=item.get("next_retry_at"),
+                response_summary=_clean(item.get("response_summary"), 180),
+            ))
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        issues.append(_component_failure("模型服务"))
 
     try:
         from quantmaster.data.resilience import PROVIDER_HEALTH

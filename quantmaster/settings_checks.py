@@ -56,7 +56,13 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         url = f"{base.rstrip('/')}/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    from quantmaster.ai.llm import LLMClient
+    from quantmaster.ai.llm import (
+        LLMClient,
+        LLMError,
+        _api_error,
+        llm_diagnostic_details,
+        record_llm_failure,
+    )
     from quantmaster.config import LLMConfig
 
     client = LLMClient(LLMConfig(
@@ -78,11 +84,15 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
                 url, headers=headers, timeout=settings.timeout, follow_redirects=False,
             )
             if response.status_code in {401, 403}:
-                return _result("error", "API Key 无效或无权读取模型列表", started,
-                               http_status=response.status_code, models=[])
+                error = _api_error("模型目录", response)
+                record_llm_failure(client.config, error)
+                return _result("error", "API Key 无效或无权读取模型列表", started, models=[],
+                               **llm_diagnostic_details(client.config, error))
             if response.status_code == 404:
-                return _result("error", "模型列表地址不存在，请检查 API 根地址", started,
-                               http_status=404, models=[])
+                error = _api_error("模型目录", response)
+                record_llm_failure(client.config, error)
+                return _result("error", "模型列表地址不存在，请检查 API 根地址", started, models=[],
+                               **llm_diagnostic_details(client.config, error))
             response.raise_for_status()
             payload = response.json()
             for item in payload.get("data", payload.get("models", [])):
@@ -102,10 +112,18 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         message = f"已读取 {len(models)} 个模型；列表不代表聊天接口兼容性"
         return _result("success", message, started, models=models,
                        selected_present=settings.model in models)
-    except httpx.TimeoutException:
-        return _result("warning", "请求超时；这不会阻止保存设置", started, models=[])
-    except (httpx.HTTPError, ValueError) as exc:
-        return _result("warning", f"联网检测失败：{type(exc).__name__}", started, models=[])
+    except LLMError as exc:
+        record_llm_failure(client.config, exc)
+        return _result(
+            "warning", "模型目录检测失败；这不会阻止保存设置", started, models=[],
+            **llm_diagnostic_details(client.config, exc),
+        )
+    except (httpx.HTTPError, ValueError):
+        error = LLMError("模型目录响应无法解析", code="response_contract_error",
+                         retryable=True, category="response_contract")
+        record_llm_failure(client.config, error)
+        return _result("warning", "模型目录检测失败；这不会阻止保存设置", started, models=[],
+                       **llm_diagnostic_details(client.config, error))
 
 
 def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
@@ -114,7 +132,13 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
     if settings.provider in {"anthropic", "openai"} and not api_key:
         return _result("error", "尚未配置 API Key", started, supported=False, sources=[])
 
-    from quantmaster.ai.llm import LLMClient, LLMError, reset_web_search_capability
+    from quantmaster.ai.llm import (
+        LLMClient,
+        LLMError,
+        llm_diagnostic_details,
+        record_llm_failure,
+        reset_web_search_capability,
+    )
     from quantmaster.config import LLMConfig
 
     config = LLMConfig(
@@ -149,9 +173,9 @@ def check_llm_web_search(settings: LLMSettings, api_key: str = "") -> dict[str, 
             message = "搜索响应未完整结束"
         else:
             message = "搜索能力检测失败"
-        return _result(
-            "warning", message, started, supported=None, sources=[], error_code=exc.code,
-        )
+        record_llm_failure(client.config, exc)
+        return _result("warning", message, started, supported=None, sources=[],
+                       **llm_diagnostic_details(client.config, exc))
 
     capability = client.web_search_status()
     supported = capability.get("supported") is True
