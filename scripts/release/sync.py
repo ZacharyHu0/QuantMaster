@@ -357,23 +357,27 @@ def run_local_ci() -> int:
     return int(result.returncode)
 
 
+def _non_main_commit(paths: set[str], branch: str) -> int:
+    release_paths = sorted({RELEASE_FILE, CHANGELOG_FILE}.intersection(paths))
+    if release_paths:
+        return print_errors(
+            [
+                "任务分支不得修改发布元数据；完成 ready 后在 main 的 squash release 中更新："
+                + ", ".join(release_paths)
+            ],
+            "任务提交包含发布文件，提交已阻止",
+        )
+    print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过发布门禁")
+    return 0
+
+
 def pre_commit() -> int:
     paths = staged_paths()
     if not paths:
         return 0
     branch = current_branch()
     if branch != "main":
-        release_paths = sorted({RELEASE_FILE, CHANGELOG_FILE}.intersection(paths))
-        if release_paths:
-            return print_errors(
-                [
-                    "任务分支不得修改发布元数据；完成 ready 后在 main 的 squash release 中更新："
-                    + ", ".join(release_paths)
-                ],
-                "任务提交包含发布文件，提交已阻止",
-            )
-        print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过发布门禁")
-        return 0
+        return _non_main_commit(paths, branch)
     required = {RELEASE_FILE, CHANGELOG_FILE}
     release_paths = required.intersection(paths)
     if not release_paths:
