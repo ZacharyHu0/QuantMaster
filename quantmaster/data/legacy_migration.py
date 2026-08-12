@@ -62,6 +62,8 @@ def register_builtin_migrations() -> None:
     """Load domain adapters only when migration management is explicitly used."""
     from quantmaster.after_close.migration import after_close_legacy_migrator
     from quantmaster.ai.news_migration import news_contract_migrator
+    from quantmaster.automation.migration import automation_contract_migrator
+    from quantmaster.backtest.paper_legacy_migration import PaperLegacyMigrator
     from quantmaster.data.legacy_migrations import market_data_legacy_migrator
     from quantmaster.decision.migration import decision_legacy_migrator
 
@@ -70,6 +72,8 @@ def register_builtin_migrations() -> None:
         decision_legacy_migrator,
         after_close_legacy_migrator,
         news_contract_migrator,
+        automation_contract_migrator,
+        PaperLegacyMigrator(),
     ):
         existing = _MIGRATORS.get(migrator.name)
         if existing is None:

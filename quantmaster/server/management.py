@@ -20,7 +20,6 @@ from fastapi import (
 )
 from pydantic import Field
 
-import quantmaster.automation.migration  # noqa: F401
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
 from quantmaster.data.legacy_migration import (

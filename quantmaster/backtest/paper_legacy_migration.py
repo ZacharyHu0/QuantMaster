@@ -5,24 +5,12 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
 
+from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
-
-
-@dataclass(frozen=True)
-class MigrationRecord:
-    """Structural match for ``data.legacy_migration.MigrationRecord``."""
-
-    record_key: str
-    outcome: str
-    diagnostic_code: str = ""
-    unknown_fields: tuple[str, ...] = ()
-    detail: str = ""
-
 
 SOURCE_NAME = "ledger_paper.sqlite"
 PAPER_DATABASE = "paper.sqlite"
