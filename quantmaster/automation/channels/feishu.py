@@ -95,6 +95,36 @@ def _task_name(task: asyncio.Task) -> str:
         return ""
 
 
+def _track_lark_ws_tasks(channel) -> None:
+    """Register tasks created on the SDK's private loop for this channel owner."""
+    try:
+        from lark_oapi.ws import client as ws_client_module
+
+        ws_loop = getattr(ws_client_module, "loop", None)
+    except ImportError:
+        return
+    if ws_loop is None or ws_loop.is_closed():
+        return
+    previous_factory = ws_loop.get_task_factory()
+    tasks: set[asyncio.Task] = set()
+
+    def task_factory(loop, coroutine, context=None):
+        if previous_factory is not None:
+            try:
+                task = previous_factory(loop, coroutine, context=context)
+            except TypeError:  # pragma: no cover - compatibility with older factories
+                task = previous_factory(loop, coroutine)
+        else:
+            task = asyncio.Task(coroutine, loop=loop, context=context)
+        tasks.add(task)
+        return task
+
+    ws_loop.set_task_factory(task_factory)
+    channel._qm_lark_ws_loop = ws_loop
+    channel._qm_lark_ws_tasks = tasks
+    channel._qm_lark_previous_task_factory = previous_factory
+
+
 async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
     """Drain lark-oapi 1.x private WS tasks before its loop is stopped.
 
@@ -103,17 +133,15 @@ async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
     otherwise destroyed while pending.  Keep this compatibility boundary here
     instead of patching site-packages or hiding the resulting warnings.
     """
+    ws_loop = getattr(channel, "_qm_lark_ws_loop", None)
+    owned_tasks = getattr(channel, "_qm_lark_ws_tasks", None)
+    previous_factory = getattr(channel, "_qm_lark_previous_task_factory", None)
+    if ws_loop is None or ws_loop.is_closed():
+        return False
     ws = getattr(channel, "_ws_client", None)
     if ws is None:
-        return False
-    ws_loop = None
-    try:
-        from lark_oapi.ws import client as ws_client_module
-
-        ws_loop = getattr(ws_client_module, "loop", None)
-    except ImportError:
-        return False
-    if ws_loop is None or ws_loop.is_closed():
+        if not ws_loop.is_running() and ws_loop.get_task_factory() is not previous_factory:
+            ws_loop.set_task_factory(previous_factory)
         return False
 
     # A normal local shutdown must never enter the SDK's reconnect loop.
@@ -155,10 +183,14 @@ async def _drain_lark_ws_tasks(channel, timeout: float = 2.0) -> bool:
             logger.warning("飞书 SDK 缓存协程未能在退出前完整回收", exc_info=True)
 
     async def drain() -> list[asyncio.Task]:
+        # The owner stops registration before shutdown work starts, so cleanup
+        # tasks cannot be mistaken for SDK transport tasks.
+        if ws_loop.get_task_factory() is not previous_factory:
+            ws_loop.set_task_factory(previous_factory)
         current = asyncio.current_task()
         roots: list[asyncio.Task] = []
         background: list[asyncio.Task] = []
-        for task in asyncio.all_tasks(ws_loop):
+        for task in tuple(owned_tasks or ()):
             if task is current or task.done():
                 continue
             # WSClient.start() blocks on this sentinel via run_until_complete.
@@ -214,6 +246,14 @@ class FeishuBotClient:
     def __init__(self, store: AutomationStore, credentials: CredentialStore | None = None):
         self.store = store
         self.credentials = credentials or CredentialStore()
+        self._lifecycle_lock = threading.RLock()
+        self._listener_generation = 0
+        self._active_generation = 0
+        self._active_channel = None
+        self._active_loop: asyncio.AbstractEventLoop | None = None
+        self._active_stop_event: threading.Event | None = None
+        self._active_app_id = ""
+        self._closing_generation = 0
 
     def configure(self, app_id: str, app_secret: str) -> dict:
         app_id, app_secret = app_id.strip(), app_secret.strip()
@@ -405,8 +445,14 @@ class FeishuBotClient:
             raise RuntimeError("飞书发送成功但响应缺少 message_id")
         return message_id
 
-    def listen_forever(self, on_message: Callable[[ActorContext, str], None],
-                       stop_event: threading.Event) -> None:
+    async def listen(self, on_message: Callable[[ActorContext, str], None],
+                     stop_event: threading.Event) -> None:
+        """Own one Feishu listener until ``stop_event`` is set.
+
+        This is the canonical async lifecycle API.  The task that calls it owns
+        the SDK channel and is the only task allowed to close that channel.
+        ``listen_forever`` is only a synchronous thread bridge.
+        """
         if not self.is_configured():
             # Direct calls are also harmless: no SDK import, WebSocket or retry loop.
             return
@@ -425,6 +471,7 @@ class FeishuBotClient:
         normalize_third_party_logger("Lark")
         app_id, secret = self.credentials_value()
         channel = None
+        generation = 0
 
         def bot_mention(mention) -> bool:
             identity = getattr(channel, "bot_identity", None) if channel is not None else None
@@ -505,7 +552,7 @@ class FeishuBotClient:
                 await lifecycle_event(event)
 
         async def serve() -> None:
-            nonlocal channel
+            nonlocal channel, generation
             # 允许普通群消息进入本地上下文缓存；是否回复由上面的真实 @ 检查决定。
             options = {"app_id": app_id, "app_secret": secret}
             if LogLevel is not None:
@@ -514,6 +561,19 @@ class FeishuBotClient:
                 options["policy"] = PolicyConfig(
                     require_mention=False, respond_to_mention_all=False)
             channel = FeishuChannel(**options)
+            _track_lark_ws_tasks(channel)
+            running_loop = asyncio.get_running_loop()
+            with self._lifecycle_lock:
+                if self._active_channel is not None:
+                    raise RuntimeError("飞书 Bot 已由另一监听任务持有")
+                self._listener_generation += 1
+                generation = self._listener_generation
+                self._active_generation = generation
+                self._active_channel = channel
+                self._active_loop = running_loop
+                self._active_stop_event = stop_event
+                self._active_app_id = app_id
+                self._closing_generation = 0
             channel.on("message", receive)
             # 新版 SDK 用 botAdded 归一化会话进入/入群事件，同时保留 raw 兜底；
             # 旧 SDK 和测试替身没有这些事件名时不做猜测性注册。
@@ -532,17 +592,98 @@ class FeishuBotClient:
                 await channel.start_background(timeout=30)
                 self.store.set_bot_status("feishu", app_id, "listening")
                 logger.info("飞书 Bot 长连接已就绪")
-                await asyncio.to_thread(stop_event.wait)
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.05)
             finally:
-                try:
-                    await _drain_lark_ws_tasks(channel)
-                    await channel.stop_background()
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    if not stop_event.is_set():
-                        raise
-                    logger.info("飞书 Bot 长连接关闭时 SDK 已先行释放资源")
-                if stop_event.is_set():
-                    self.store.set_bot_status("feishu", app_id, "configured")
-                    logger.info("飞书 Bot 长连接已停止")
+                await self._aclose_owned(channel, generation)
 
-        asyncio.run(serve())
+        await serve()
+
+    async def _wait_generation_closed(self, generation: int) -> None:
+        while True:
+            with self._lifecycle_lock:
+                if self._active_generation != generation:
+                    return
+            await asyncio.sleep(0.01)
+
+    async def _aclose_owned(self, channel, generation: int) -> None:
+        """Close a channel on the event loop that created its listener."""
+        with self._lifecycle_lock:
+            if self._active_generation != generation or self._active_channel is not channel:
+                return
+            if self._closing_generation == generation:
+                wait_for_owner = True
+            else:
+                self._closing_generation = generation
+                wait_for_owner = False
+            app_id = self._active_app_id
+            stop_event = self._active_stop_event
+            normal_shutdown = bool(stop_event and stop_event.is_set())
+        if wait_for_owner:
+            await self._wait_generation_closed(generation)
+            return
+        if stop_event is not None:
+            stop_event.set()
+        close_error: BaseException | None = None
+        try:
+            await _drain_lark_ws_tasks(channel)
+            await channel.stop_background()
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if not normal_shutdown:
+                close_error = exc
+            else:
+                logger.info("飞书 Bot 长连接关闭时 SDK 已先行释放资源")
+        finally:
+            with self._lifecycle_lock:
+                if self._active_generation == generation:
+                    self._active_generation = 0
+                    self._active_channel = None
+                    self._active_loop = None
+                    self._active_stop_event = None
+                    self._active_app_id = ""
+                    self._closing_generation = 0
+            if normal_shutdown and app_id:
+                self.store.set_bot_status("feishu", app_id, "configured")
+                logger.info("飞书 Bot 长连接已停止")
+        if close_error is not None:
+            raise close_error
+
+    async def aclose(self) -> None:
+        """Request listener shutdown and await closure without changing loops.
+
+        A caller on the listener loop closes the SDK directly.  Callers on a
+        Web/supervisor loop only signal the listener owner and wait for it; they
+        never close another generation's channel.
+        """
+        with self._lifecycle_lock:
+            generation = self._active_generation
+            channel = self._active_channel
+            owner_loop = self._active_loop
+            stop_event = self._active_stop_event
+        if not generation or channel is None:
+            return
+        if stop_event is not None:
+            stop_event.set()
+        if owner_loop is asyncio.get_running_loop():
+            await self._aclose_owned(channel, generation)
+            return
+        await self._wait_generation_closed(generation)
+
+    def close(self) -> None:
+        """Synchronous shutdown bridge for non-async process owners."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
+            return
+        raise RuntimeError("运行中的事件循环必须使用 await FeishuBotClient.aclose()")
+
+    def listen_forever(self, on_message: Callable[[ActorContext, str], None],
+                       stop_event: threading.Event) -> None:
+        """Run :meth:`listen` from a dedicated synchronous owner thread."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.listen(on_message, stop_event))
+            return
+        raise RuntimeError("运行中的事件循环必须使用 await FeishuBotClient.listen(...)")

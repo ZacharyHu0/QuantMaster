@@ -736,7 +736,10 @@ def test_feishu_sdk_tasks_are_drained_before_private_loop_closes(monkeypatch):
 
     from lark_oapi.ws import client as ws_client_module
 
-    from quantmaster.automation.channels.feishu import _drain_lark_ws_tasks
+    from quantmaster.automation.channels.feishu import (
+        _drain_lark_ws_tasks,
+        _track_lark_ws_tasks,
+    )
 
     ws_loop = asyncio.new_event_loop()
     cache_loop = asyncio.new_event_loop()
@@ -778,9 +781,6 @@ def test_feishu_sdk_tasks_are_drained_before_private_loop_closes(monkeypatch):
     async def disconnect():
         events.append("disconnected")
 
-    worker = threading.Thread(target=run_ws_loop, daemon=True)
-    worker.start()
-    assert ready.wait(1)
     monkeypatch.setattr(ws_client_module, "loop", ws_loop)
     cache_task = cache_loop.create_task(background("cache"), name="sdk-cache")
     ws = SimpleNamespace(
@@ -790,6 +790,10 @@ def test_feishu_sdk_tasks_are_drained_before_private_loop_closes(monkeypatch):
     )
 
     channel = SimpleNamespace(_ws_client=ws)
+    _track_lark_ws_tasks(channel)
+    worker = threading.Thread(target=run_ws_loop, daemon=True)
+    worker.start()
+    assert ready.wait(1)
     assert asyncio.run(_drain_lark_ws_tasks(channel, timeout=1)) is True
     assert thread_finished.wait(1)
     worker.join(timeout=1)
@@ -804,6 +808,124 @@ def test_feishu_sdk_tasks_are_drained_before_private_loop_closes(monkeypatch):
     assert set(events) == {
         "ping-stopped", "receive-stopped", "disconnected", "select-stopped",
     }
+
+
+def test_feishu_async_listener_can_close_from_its_owner_loop(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    import threading
+    from types import SimpleNamespace
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    client = FeishuBotClient(store, MemoryCredentials())
+    client.configure("cli_app", "secret")
+    events = []
+
+    class FakeFeishuChannel:
+        def __init__(self, **_kwargs):
+            self._ws_client = None
+
+        def on(self, _event, _handler):
+            pass
+
+        async def start_background(self, *, timeout):
+            events.append(("start", timeout, asyncio.get_running_loop()))
+
+        async def stop_background(self):
+            events.append(("stop", None, asyncio.get_running_loop()))
+
+    monkeypatch.setitem(
+        sys.modules, "lark_oapi.channel",
+        SimpleNamespace(FeishuChannel=FakeFeishuChannel),
+    )
+
+    async def exercise():
+        stop_event = threading.Event()
+        listener = asyncio.create_task(client.listen(lambda *_: None, stop_event))
+        while client._active_channel is None:
+            await asyncio.sleep(0)
+        await client.aclose()
+        await listener
+
+    asyncio.run(exercise())
+
+    assert [event[0] for event in events] == ["start", "stop"]
+    assert events[0][2] is events[1][2]
+    assert client._active_channel is None
+    assert store.bot_account("feishu")["status"] == "configured"
+
+
+def test_feishu_sync_bridges_reject_a_running_loop_without_creating_coroutines(
+        tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    client = FeishuBotClient(store, MemoryCredentials())
+    client.configure("cli_app", "secret")
+    called = []
+    monkeypatch.setattr(asyncio, "run", lambda _coro: called.append(True))
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match=r"await FeishuBotClient\.listen"):
+            client.listen_forever(lambda *_: None, threading.Event())
+        with pytest.raises(RuntimeError, match=r"await FeishuBotClient\.aclose"):
+            client.close()
+
+    # Use Runner directly because this test deliberately guards asyncio.run.
+    with asyncio.Runner() as runner:
+        runner.run(exercise())
+    assert called == []
+
+
+def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    import threading
+    from types import SimpleNamespace
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    client = FeishuBotClient(store, MemoryCredentials())
+    client.configure("cli_app", "secret")
+    stop_calls = []
+    started = threading.Event()
+
+    class FakeFeishuChannel:
+        def __init__(self, **_kwargs):
+            self._ws_client = None
+
+        def on(self, _event, _handler):
+            pass
+
+        async def start_background(self, *, timeout):
+            assert timeout == 30
+            started.set()
+
+        async def stop_background(self):
+            stop_calls.append(threading.current_thread().name)
+
+    monkeypatch.setitem(
+        sys.modules, "lark_oapi.channel",
+        SimpleNamespace(FeishuChannel=FakeFeishuChannel),
+    )
+    stop_event = threading.Event()
+    owner = threading.Thread(
+        target=client.listen_forever,
+        args=(lambda *_: None, stop_event),
+        name="feishu-owner",
+    )
+    owner.start()
+    assert started.wait(1)
+
+    async def close_twice():
+        await asyncio.gather(client.aclose(), client.aclose())
+
+    asyncio.run(close_twice())
+    owner.join(timeout=1)
+
+    assert not owner.is_alive()
+    assert stop_calls == ["feishu-owner"]
+    assert client._active_channel is None
 
 
 def test_feishu_config_verifies_replaces_and_removes_credentials(tmp_path, monkeypatch):
