@@ -16,10 +16,8 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG_PATHS = [
-    Path("config.yaml"),
-    Path.home() / ".quantmaster" / "config.yaml",
-]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATHS = [WORKSPACE_ROOT / "config.yaml"]
 
 
 @dataclass
@@ -176,6 +174,22 @@ class Config:
     lab: LabConfig = field(default_factory=LabConfig)
     config_version: int = 1
     managed_by_gui: bool = False
+    config_path: Path | None = field(default=None, repr=False)
+    workspace_root: Path = field(default=WORKSPACE_ROOT, repr=False)
+
+    def resolve_local_path(self, value: str | Path, *, label: str) -> Path:
+        """Resolve an instance path against explicit config provenance, never cwd."""
+
+        text = os.fspath(value).strip()
+        if not text or "\x00" in text:
+            raise ValueError(f"{label}路径无效")
+        path = Path(text).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        anchor = self.config_path.parent if self.config_path is not None else self.workspace_root
+        if not anchor.is_absolute():
+            raise ValueError(f"{label}缺少绝对 workspace/config provenance")
+        return (anchor / path).resolve()
 
     @property
     def data_root(self) -> Path:
@@ -188,7 +202,15 @@ class Config:
         their explicit startup phase instead.
         """
 
-        return Path(self.data.root)
+        return self.resolve_local_path(self.data.root, label="data root")
+
+    @property
+    def free_stockdb_root(self) -> Path:
+        """Return the managed runtime root bound to this config instance."""
+
+        return self.resolve_local_path(
+            self.data.free_stockdb_root, label="free-stockdb runtime",
+        )
 
     def ensure_data_root(self) -> Path:
         """Create the configured data root from an explicit writer context."""
@@ -200,6 +222,8 @@ class Config:
 
 def _apply_dict(obj: Any, data: dict) -> None:
     for key, value in data.items():
+        if key in {"config_path", "workspace_root"}:
+            continue
         if not hasattr(obj, key):
             continue
         current = getattr(obj, key)
@@ -349,13 +373,24 @@ def load_config(
     """
     cfg = Config()
     explicit = path or os.environ.get("QM_CONFIG_PATH", "").strip()
-    candidates = [Path(explicit)] if explicit else DEFAULT_CONFIG_PATHS
+    if explicit:
+        configured = Path(explicit).expanduser()
+        candidates = [
+            configured.resolve() if configured.is_absolute()
+            else (WORKSPACE_ROOT / configured).resolve()
+        ]
+    else:
+        candidates = DEFAULT_CONFIG_PATHS
     raw: dict = {}
+    selected: Path | None = None
     for candidate in candidates:
         if candidate.is_file():
             with open(candidate, encoding="utf-8") as f:
                 raw = yaml.safe_load(f) or {}
+            selected = candidate.resolve()
             break
+    cfg.config_path = selected
+    cfg.workspace_root = WORKSPACE_ROOT
     managed = bool(raw.get("managed_by_gui", False))
     if managed:
         _apply_env(cfg)

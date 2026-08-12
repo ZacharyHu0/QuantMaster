@@ -66,15 +66,13 @@ def _invalidate_sdk_clients() -> None:
 
 def resolve_free_stockdb_sdk_path(value: str | None = None) -> Path | None:
     """Resolve an explicit SDK path or discover it beside the managed runtime."""
-    cfg = get_config().data
+    config = get_config()
+    cfg = config.data
     configured = str(cfg.free_stockdb_sdk_path if value is None else value).strip()
     if configured:
-        path = Path(configured).expanduser()
-        resolved = path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+        resolved = config.resolve_local_path(configured, label="free-stockdb SDK")
         return resolved if resolved.is_file() else resolved / "stock_sdk.py"
-    root = Path(cfg.free_stockdb_root).expanduser()
-    root = root.resolve() if root.is_absolute() else (Path.cwd() / root).resolve()
-    candidate = root / "pybao" / "stock_sdk.py"
+    candidate = config.free_stockdb_root / "pybao" / "stock_sdk.py"
     return candidate if candidate.is_file() else None
 
 

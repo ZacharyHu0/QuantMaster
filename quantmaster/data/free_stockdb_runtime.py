@@ -244,8 +244,7 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _root() -> Path:
-        value = Path(get_config().data.free_stockdb_root).expanduser()
-        return value.resolve() if value.is_absolute() else (Path.cwd() / value).resolve()
+        return get_config().free_stockdb_root
 
     @classmethod
     def _paths(cls) -> tuple[Path, Path, Path]:
@@ -719,9 +718,7 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _vendor_cache_path() -> Path:
-        root = Path(get_config().data.root).expanduser()
-        root = root.resolve() if root.is_absolute() else (Path.cwd() / root).resolve()
-        return root / "free_stockdb_vendor_notice.json"
+        return get_config().data_root / "free_stockdb_vendor_notice.json"
 
     @staticmethod
     def _parse_vendor_notice(document: str) -> dict[str, str]:
