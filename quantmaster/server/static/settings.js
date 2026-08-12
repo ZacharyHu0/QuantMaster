@@ -314,7 +314,7 @@
     if (input.id === 'feishu-app-secret' || input.id === 'weixin-verify-code') return;
     markDependentChecksStale(input);
     if (input.dataset.confirmCloud !== undefined && input.checked) {
-      const confirmed = window.confirm('允许匿名云端样本会扩大数据出站范围。每次实际发送仍需确认，是否继续？');
+      const confirmed = window.confirm('打开后，云端样本会直接发送给当前模型服务，不再逐次询问。是否允许自动发送？');
       if (!confirmed) {
         input.checked = false;
         return;

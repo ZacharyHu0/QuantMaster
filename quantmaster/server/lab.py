@@ -152,6 +152,7 @@ class Deployment(ContractModel):
 
 class SuggestionRequest(ContractModel):
     use_cloud: bool = False
+    outbound_confirmed: bool = False
     sample_consent: bool = False
     anonymous_sample: dict[str, Any] | None = None
 
@@ -304,6 +305,12 @@ def deploy(version_id: str, body: Deployment) -> dict:
 def suggest(version_id: str, body: SuggestionRequest, response: Response) -> dict:
     try:
         if body.use_cloud:
+            if not get_config().lab.allow_cloud_sample and not body.outbound_confirmed:
+                raise LabError(
+                    "OUTBOUND_CONFIRMATION_REQUIRED",
+                    "当前设置要求每次发送云端样本前单独确认",
+                    action="确认本次发送，或在设置中打开自动发送匿名云端样本",
+                )
             from quantmaster.lab.llm_jobs import get_lab_llm_jobs
             from quantmaster.runtime.jobs import UnifiedJobRuntime
 

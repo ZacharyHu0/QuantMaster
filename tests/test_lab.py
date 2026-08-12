@@ -78,6 +78,51 @@ def _panel(days=190, symbols=5):
     }
 
 
+def test_cloud_suggestion_confirmation_follows_auto_send_setting(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    from starlette.responses import Response
+
+    from quantmaster.runtime.jobs import UnifiedJobRuntime
+    from quantmaster.server import lab as lab_api
+
+    response = lab_api.suggest(
+        "factor-1", lab_api.SuggestionRequest(use_cloud=True), Response(),
+    )
+    assert response.status_code == 409
+    assert json.loads(response.body)["error"]["code"] == "OUTBOUND_CONFIRMATION_REQUIRED"
+
+    submitted = []
+    jobs = SimpleNamespace(submit=lambda *args: (submitted.append(args) or ({"id": "job-1"}, True)))
+    monkeypatch.setattr("quantmaster.lab.llm_jobs.get_lab_llm_jobs", lambda: jobs)
+    monkeypatch.setattr(UnifiedJobRuntime, "public", staticmethod(lambda job: job))
+
+    accepted = lab_api.suggest(
+        "factor-1",
+        lab_api.SuggestionRequest(use_cloud=True, outbound_confirmed=True),
+        Response(),
+    )
+    assert accepted == {"id": "job-1"}
+    assert submitted
+
+    cfg.lab.allow_cloud_sample = True
+    accepted = lab_api.suggest(
+        "factor-2", lab_api.SuggestionRequest(use_cloud=True), Response(),
+    )
+    assert accepted == {"id": "job-1"}
+
+
+def test_cloud_sample_ui_describes_and_enforces_two_state_contract():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    index = (root / "quantmaster/server/static/index.html").read_text(encoding="utf-8")
+    settings_script = (root / "quantmaster/server/static/settings.js").read_text(encoding="utf-8")
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    assert "关闭时每次发送前单独确认；打开后直接发送" in index
+    assert "不再逐次询问" in settings_script
+    assert "research.allow_cloud_sample" in lab_script
+    assert "outbound_confirmed:outboundConfirmed" in lab_script
+
+
 class _SequenceLLMClient:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)

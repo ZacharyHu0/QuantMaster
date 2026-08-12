@@ -102,5 +102,5 @@ lab:
   daily_budget_hours: 10.0
   max_workers: 2            # 全局并行任务上限；重型研究建议 1-2，最多 4
   device: auto              # auto | cpu | cuda | mps
-  allow_cloud_sample: false # 仍需每次请求单独确认，默认只发送指标与结构
+  allow_cloud_sample: false # 关闭时逐次确认；打开后匿名云端样本自动发送
   ai_python_mining_enabled: false # 受限 Python AutoMiner 需显式启用

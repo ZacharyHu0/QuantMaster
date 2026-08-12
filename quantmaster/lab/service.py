@@ -168,6 +168,7 @@ class LabService:
                 "window": [cfg.window_start, cfg.window_end],
                 "weekly_days": cfg.weekly_days,
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
+                "allow_cloud_sample": cfg.allow_cloud_sample,
             },
             "recent_jobs": self.store.jobs(8, summary=True),
             "recent_experiments": self.store.list_experiments(6, summary=True),

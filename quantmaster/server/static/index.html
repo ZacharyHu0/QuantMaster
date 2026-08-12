@@ -1443,7 +1443,7 @@
               <label>每日重型研究预算（小时）<input name="lab.daily_budget_hours" type="number" min="0.5" max="24" step="0.5" required></label>
               <label>并行研究任务数<input name="lab.max_workers" type="number" min="1" max="4" step="1" required><small>默认 2；重型模型较多时可降为 1。</small></label>
               <label>计算设备<select name="lab.device" required><option value="auto">自动选择</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">Apple MPS</option></select></label>
-              <label class="toggle-field field-wide"><span><strong>允许匿名云端样本</strong><small>高风险开关；实际发送前仍需每次单独确认。</small></span><input name="lab.allow_cloud_sample" data-confirm-cloud type="checkbox" role="switch"></label>
+              <label class="toggle-field field-wide"><span><strong>自动发送匿名云端样本</strong><small>关闭时每次发送前单独确认；打开后直接发送，不再额外询问。</small></span><input name="lab.allow_cloud_sample" data-confirm-cloud type="checkbox" role="switch"></label>
               <label class="toggle-field field-wide"><span><strong>启用受限 Python AutoMiner</strong><small>启用后允许手动运行，并在每周首个研究日自动运行一次；候选仍须人工批准。</small></span><input name="lab.ai_python_mining_enabled" type="checkbox" role="switch"></label>
             </div>
           </details>

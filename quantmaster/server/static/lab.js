@@ -1667,9 +1667,11 @@
         }, '生成 AI 修正建议')) return;
         const versionId = suggest.dataset.suggestVersion || suggest.dataset.suggestCloudVersion;
         const cloud = Boolean(suggest.dataset.suggestCloudVersion);
-        if (cloud && !window.confirm('云端建议会把因子表达式与本地验证摘要发送给当前模型服务，是否继续？')) return;
+        const automaticCloudSend = Boolean(research.allow_cloud_sample);
+        const outboundConfirmed = cloud && (automaticCloudSend || window.confirm('云端建议会把因子表达式与本地验证摘要发送给当前模型服务，是否继续？'));
+        if (cloud && !outboundConfirmed) return;
         const result = await request(`/api/v1/lab/factors/${versionId}/suggestions`, {
-          method:'POST', body:JSON.stringify({use_cloud:cloud}),
+          method:'POST', body:JSON.stringify({use_cloud:cloud, outbound_confirmed:outboundConfirmed}),
         });
         const detail = await request(`/api/v1/lab/factors/${versionId}`);
         if (cloud) {
