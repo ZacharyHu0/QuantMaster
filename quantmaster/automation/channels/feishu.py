@@ -14,7 +14,7 @@ from quantmaster.automation.models import ActorContext
 from quantmaster.automation.store import AutomationStore
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError, CredentialStore
-from quantmaster.logging_config import normalize_third_party_logger
+from quantmaster.logging_config import normalize_third_party_logger, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,55 @@ def _safe_feishu_error(value: object) -> str:
         r"\1***", message,
     )
     return message[:500]
+
+
+def feishu_connection_error(exc: BaseException) -> dict[str, object]:
+    """Classify a Feishu transport failure without exposing credentials.
+
+    This intentionally classifies from the exception chain rather than importing
+    SDK-private exception types: lark-oapi may surface failures from requests,
+    websockets, ssl, or its own wrapper classes.
+    """
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+
+    text = " | ".join(
+        f"{type(item).__name__}: {item}" for item in chain
+    ).casefold()
+    if any(token in text for token in (
+        "certificate verify failed", "self signed", "self-signed", "unknown ca",
+        "unable to get local issuer", "certificate has expired", "hostname mismatch",
+        "x509",
+    )):
+        kind, retryable = "tls_certificate", False
+    elif any(token in text for token in ("tls", "ssl", "handshake")):
+        kind, retryable = "tls_handshake", True
+    elif "eof" in text or "server disconnected" in text:
+        kind, retryable = "connection_eof", True
+    elif any(token in text for token in ("timed out", "timeout")):
+        kind, retryable = "network_timeout", True
+    elif any(token in text for token in (
+        "connection reset", "connection aborted", "connection refused",
+        "connection closed", "network is unreachable", "bad access",
+    )):
+        kind, retryable = "network_connection", True
+    else:
+        kind, retryable = "unknown", False
+
+    summary = redact_sensitive_text(" | ".join(
+        f"{type(item).__name__}: {item}" for item in chain
+    ))
+    summary = " ".join(summary.split())
+    return {
+        "kind": kind,
+        "retryable": retryable,
+        "summary": summary[:500],
+    }
 
 
 def _task_name(task: asyncio.Task) -> str:
@@ -259,16 +308,22 @@ class FeishuBotClient:
                 "state": state, "message": message,
                 "latency_ms": round((time.perf_counter() - started) * 1000),
             }
-        except httpx.ConnectError:
+        except (httpx.HTTPError, ValueError) as exc:
+            diagnostic = feishu_connection_error(exc)
+            logger.warning(
+                "飞书凭据联网验证失败 kind=%s；TLS 校验未被绕过。详情已脱敏记录",
+                diagnostic["kind"], exc_info=True,
+            )
+            state = "network_error" if diagnostic["kind"] in {
+                "connection_eof", "network_timeout", "network_connection",
+            } else "tls_error"
             return {
-                "status": "warning", "state": "network_error",
-                "message": "飞书网络不可达；凭据可保存后重试",
-                "latency_ms": round((time.perf_counter() - started) * 1000),
-            }
-        except (httpx.TransportError, ValueError):
-            return {
-                "status": "warning", "state": "tls_error",
-                "message": "飞书 TLS/传输验证失败；请检查系统时间、证书和网络",
+                "status": "warning", "state": state,
+                "message": (
+                    "飞书网络不可达；凭据可保存后重试"
+                    if state == "network_error"
+                    else "飞书 TLS/传输验证失败；请检查系统时间、证书和网络"
+                ),
                 "latency_ms": round((time.perf_counter() - started) * 1000),
             }
 

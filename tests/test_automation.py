@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.ai.crawler import NewsItem
-from quantmaster.automation.channels.feishu import FeishuBotClient
+from quantmaster.automation.channels.feishu import FeishuBotClient, feishu_connection_error
 from quantmaster.automation.channels.weixin import WeixinClawBotClient
 from quantmaster.automation.commands import BotCommandRouter
 from quantmaster.automation.delivery import OutboxDispatcher, format_alert, format_feishu_card
@@ -868,6 +868,63 @@ def test_feishu_public_state_is_redacted_and_tracks_validation(tmp_path):
     assert "super-secret-token" not in str(public)
     assert "abc123" not in str(public)
     assert "***" in public["last_error"]
+
+
+@pytest.mark.parametrize(("exc", "kind", "retryable"), [
+    (RuntimeError("EOF while reading from server"), "connection_eof", True),
+    (RuntimeError("[SSL: CERTIFICATE_VERIFY_FAILED] self signed certificate"),
+     "tls_certificate", False),
+    (RuntimeError("connection reset by peer"), "network_connection", True),
+])
+def test_feishu_connection_errors_are_classified_without_secrets(exc, kind, retryable):
+    exc.__cause__ = RuntimeError("app_secret=not-for-logs")
+
+    result = feishu_connection_error(exc)
+
+    assert result["kind"] == kind
+    assert result["retryable"] is retryable
+    assert "not-for-logs" not in result["summary"]
+    assert "app_secret=***" in result["summary"]
+
+
+def test_feishu_runtime_retries_eof_and_persists_degraded_diagnostic(
+        tmp_path, monkeypatch,
+):
+    import threading
+    from types import SimpleNamespace
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    store.save_bot_account(channel="feishu", account_id="cli_app", status="configured")
+    attempts = []
+    recovered = threading.Event()
+    stop_event = threading.Event()
+
+    def listen(_on_message, received_stop):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("EOF while reading from server app_secret=do-not-log")
+        recovered.set()
+        received_stop.set()
+
+    runtime = runtime_module.AutomationRuntime(SimpleNamespace(
+        store=store,
+        feishu=SimpleNamespace(listen_forever=listen),
+        weixin=SimpleNamespace(),
+    ))
+    runtime._channel_stops["feishu"] = stop_event
+    monkeypatch.setattr(runtime_module, "FEISHU_RECONNECT_INITIAL_SECONDS", 0.001)
+
+    runtime._channel_worker("feishu")
+
+    assert recovered.is_set()
+    assert len(attempts) == 2
+    account = store.bot_account("feishu")
+    assert account["status"] == "degraded"
+    assert "connection_eof" in account["last_error"]
+    assert "do-not-log" not in account["last_error"]
+    assert "app_secret=***" in account["last_error"]
 
 
 def test_runtime_standby_automatically_takes_over_expired_lease(monkeypatch):

@@ -9,11 +9,14 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from quantmaster.automation.channels.feishu import feishu_connection_error
 from quantmaster.automation.service import AutomationService
 from quantmaster.config import get_config
 
 logger = logging.getLogger(__name__)
 STANDBY_RETRY_SECONDS = 5.0
+FEISHU_RECONNECT_INITIAL_SECONDS = 2.0
+FEISHU_RECONNECT_MAX_SECONDS = 60.0
 
 
 class AutomationRuntime:
@@ -128,28 +131,50 @@ class AutomationRuntime:
 
     def _channel_worker(self, channel: str) -> None:
         stop_event = self._channel_stops[channel]
-        try:
-            if channel == "weixin":
-                self.service.weixin.poll_forever(self._handle_message, stop_event)
-            else:
-                self.service.feishu.listen_forever(self._handle_message, stop_event)
-        except Exception as exc:  # pragma: no cover - 外部 SDK/网络错误路径
-            normal_close = self._channel_stops[channel].is_set() or any(
-                token in str(exc).casefold()
-                for token in ("normal closure", "closed normally", "close code 1000")
-            )
-            if normal_close:
-                logger.info("%s Bot 接收线程正常退出", channel)
-                return
-            logger.exception("%s Bot 接收线程异常退出", channel)
-            account = self.service.store.bot_account(channel)
-            if account:
-                if channel == "feishu":
-                    state = self.service.feishu.failure_state(exc)
-                    error = self.service.feishu.safe_error(exc)
+        retry_delay = FEISHU_RECONNECT_INITIAL_SECONDS
+        while not stop_event.is_set():
+            try:
+                if channel == "weixin":
+                    self.service.weixin.poll_forever(self._handle_message, stop_event)
                 else:
-                    state, error = "degraded", str(exc)
-                self.service.store.set_bot_status(channel, account["account_id"], state, error)
+                    self.service.feishu.listen_forever(self._handle_message, stop_event)
+                return
+            except Exception as exc:  # pragma: no cover - 外部 SDK/网络错误路径
+                normal_close = stop_event.is_set() or any(
+                    token in str(exc).casefold()
+                    for token in ("normal closure", "closed normally", "close code 1000")
+                )
+                if normal_close:
+                    logger.info("%s Bot 接收线程正常退出", channel)
+                    return
+
+                diagnostic = (feishu_connection_error(exc) if channel == "feishu" else {
+                    "kind": "unknown", "retryable": False, "summary": str(exc)[:500],
+                })
+                account = self.service.store.bot_account(channel)
+                if account:
+                    state = (
+                        self.service.feishu.failure_state(exc)
+                        if channel == "feishu" else "degraded"
+                    )
+                    self.service.store.set_bot_status(
+                        channel, account["account_id"], state,
+                        f"{diagnostic['kind']}: {diagnostic['summary']}",
+                    )
+                if channel != "feishu" or not diagnostic["retryable"]:
+                    logger.exception(
+                        "%s Bot 接收线程异常退出 kind=%s；详情已脱敏记录",
+                        channel, diagnostic["kind"],
+                    )
+                    return
+
+                logger.warning(
+                    "飞书 Bot 连接中断 kind=%s；%.0f 秒后重连，TLS 校验未被绕过",
+                    diagnostic["kind"], retry_delay, exc_info=True,
+                )
+                if stop_event.wait(retry_delay):
+                    return
+                retry_delay = min(retry_delay * 2, FEISHU_RECONNECT_MAX_SECONDS)
 
     def start_channels(self) -> dict[str, bool]:
         """启动已配置的直连 Bot；重复调用不会创建重复监听线程。"""
