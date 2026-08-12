@@ -56,32 +56,48 @@ def list_llm_models(settings: LLMSettings, api_key: str = "") -> dict[str, Any]:
         url = f"{base.rstrip('/')}/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
+    from quantmaster.ai.llm import LLMClient
+    from quantmaster.config import LLMConfig
+
+    client = LLMClient(LLMConfig(
+        provider=settings.provider,
+        model=settings.model,
+        api_key=api_key,
+        base_url=settings.base_url,
+        reasoning_effort=settings.reasoning_effort,
+        max_tokens=settings.max_tokens,
+        temperature=settings.temperature,
+        timeout=settings.timeout,
+        max_concurrency=settings.max_concurrency,
+        queue_timeout=settings.queue_timeout,
+    ))
     models: list[str] = []
     try:
-        with httpx.Client(timeout=settings.timeout, follow_redirects=False) as client:
-            for _ in range(20):
-                response = client.get(url, headers=headers)
-                if response.status_code in {401, 403}:
-                    return _result("error", "API Key 无效或无权读取模型列表", started,
-                                   http_status=response.status_code, models=[])
-                if response.status_code == 404:
-                    return _result("error", "模型列表地址不存在，请检查 API 根地址", started,
-                                   http_status=404, models=[])
-                response.raise_for_status()
-                payload = response.json()
-                for item in payload.get("data", payload.get("models", [])):
-                    model_id = item.get("id") if isinstance(item, dict) else str(item)
-                    if model_id:
-                        models.append(str(model_id))
-                if provider != "anthropic" or not payload.get("has_more"):
-                    break
-                last_id = payload.get("last_id")
-                if not last_id:
-                    break
-                # Anthropic 使用 after_id 游标分页；保持用户原有 base URL。
-                url = str(httpx.URL(f"{base.rstrip('/')}/models").copy_add_param(
-                    "after_id", str(last_id)
-                ))
+        for _ in range(20):
+            response = client.guarded_get(
+                url, headers=headers, timeout=settings.timeout, follow_redirects=False,
+            )
+            if response.status_code in {401, 403}:
+                return _result("error", "API Key 无效或无权读取模型列表", started,
+                               http_status=response.status_code, models=[])
+            if response.status_code == 404:
+                return _result("error", "模型列表地址不存在，请检查 API 根地址", started,
+                               http_status=404, models=[])
+            response.raise_for_status()
+            payload = response.json()
+            for item in payload.get("data", payload.get("models", [])):
+                model_id = item.get("id") if isinstance(item, dict) else str(item)
+                if model_id:
+                    models.append(str(model_id))
+            if provider != "anthropic" or not payload.get("has_more"):
+                break
+            last_id = payload.get("last_id")
+            if not last_id:
+                break
+            # Anthropic 使用 after_id 游标分页；保持用户原有 base URL。
+            url = str(httpx.URL(f"{base.rstrip('/')}/models").copy_add_param(
+                "after_id", str(last_id)
+            ))
         models = sorted(set(models), key=str.casefold)
         message = f"已读取 {len(models)} 个模型；列表不代表聊天接口兼容性"
         return _result("success", message, started, models=models,

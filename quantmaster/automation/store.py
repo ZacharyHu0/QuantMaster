@@ -532,7 +532,7 @@ class AutomationStore:
 
     def compact_conversation(
             self, *, channel: str, account_id: str, chat_id: str,
-            message_ids: list[str], memory: dict,
+            message_ids: list[str], memory: dict, expected_source_count: int | None = None,
     ) -> int:
         """原子保存话题记忆并删除已被该记忆覆盖的原文。"""
         unique_ids = list(dict.fromkeys(value for value in message_ids if value))
@@ -546,6 +546,12 @@ class AutomationStore:
                 "WHERE channel=? AND account_id=? AND chat_id=?",
                 (channel, account_id, chat_id),
             ).fetchone()
+            if (
+                expected_source_count is not None
+                and int((existing or {"source_count": 0})["source_count"])
+                != int(expected_source_count)
+            ):
+                return 0
             present = conn.execute(
                 "SELECT COUNT(*) AS count FROM conversation_messages WHERE channel=? "
                 f"AND account_id=? AND chat_id=? AND message_id IN ({placeholders})",

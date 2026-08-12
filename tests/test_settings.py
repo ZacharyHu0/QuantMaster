@@ -479,7 +479,7 @@ def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypa
     assert remote.get("/api/v1/settings/free-stockdb/vendor-notice").status_code == 403
 
 
-def test_settings_web_search_probe_route_persists_safe_state(
+def test_settings_web_search_probe_route_enqueues_isolated_task(
     monkeypatch, tmp_path,
 ):
     from quantmaster.server import management
@@ -487,17 +487,30 @@ def test_settings_web_search_probe_route_persists_safe_state(
     captured = []
     manager = ConfigManager(tmp_path / "config.yaml", tmp_path / "backups", FakeCredentials())
 
-    def fake_check(settings, api_key):
-        captured.append((settings.model, bool(api_key)))
-        return {
-            "status": "success",
-            "message": "原生联网搜索可用",
-            "latency_ms": 12,
-            "checked_at": "2026-07-31T00:00:00+00:00",
-            "details": {"supported": True, "sources": []},
-        }
+    class FakeSettingsJobs:
+        def submit_diagnostic(self, kind, document, *, api_key):
+            captured.append((kind, document.llm.model, bool(api_key)))
+            return ({
+                "id": "job-settings-check", "type": "settings.diagnostic",
+                "status": "queued", "progress": 0, "phase": "等待执行",
+                "detail": "", "links": {},
+            }, True)
 
-    monkeypatch.setattr("quantmaster.settings_checks.check_llm_web_search", fake_check)
+        @staticmethod
+        def public(job):
+            return {
+                "domain": "settings", **job,
+                "links": {
+                    "self": "/api/v1/jobs/job-settings-check",
+                    "events": "/api/v1/jobs/job-settings-check/events",
+                    "cancel": "/api/v1/jobs/job-settings-check/cancel",
+                    "retry": "/api/v1/jobs/job-settings-check/retry",
+                },
+            }
+
+    monkeypatch.setattr(
+        "quantmaster.server.settings_jobs.get_settings_jobs", lambda: FakeSettingsJobs(),
+    )
     monkeypatch.setattr(management, "settings_manager", manager)
     client = TestClient(app)
     settings = client.get("/api/v1/settings").json()
@@ -513,20 +526,15 @@ def test_settings_web_search_probe_route_persists_safe_state(
         headers={"X-CSRF-Token": settings["csrf_token"]},
     )
 
-    assert response.status_code == 200
-    assert response.json()["details"]["supported"] is True
-    assert response.json()["stale"] is False
-    assert captured and captured[0][0] == settings["llm"]["model"]
-    restored = client.get("/api/v1/settings").json()["checks"]["llm-web-search"]
-    assert restored["checked_at"] == "2026-07-31T00:00:00+00:00"
-    assert restored["stale"] is False
-    assert "secret" not in manager.check_state_path.read_text(encoding="utf-8").lower()
-
-    update = _update(manager)
-    update.llm.model = "changed-after-check"
-    manager.save(update)
-    stale = client.get("/api/v1/settings").json()["checks"]["llm-web-search"]
-    assert stale["stale"] is True
+    assert response.status_code == 202
+    task = response.json()
+    assert task["domain"] == "settings"
+    assert task["type"] == "settings.diagnostic"
+    assert task["status"] == "queued"
+    assert task["links"]["cancel"].endswith("/cancel")
+    assert captured == [("llm-web-search", settings["llm"]["model"], False)]
+    # The request never probes a provider or persists a result synchronously.
+    assert not manager.check_state_path.exists()
     set_config(None)
 
 

@@ -1324,105 +1324,94 @@ def test_non_retryable_annotation_error_enters_dead_letter_immediately(tmp_path)
     assert detail["analysis_attempts"] == 1
 
 
-def test_annotation_stream_api_contract(monkeypatch):
+def test_annotation_reanalyze_api_enqueues_task(monkeypatch):
     from quantmaster.server import news as news_module
 
-    class FakeStore:
-        def reset_analysis(self, ids):
-            return len(ids or [])
+    captured: dict[str, object] = {}
 
-    class FakeCrawler:
-        def __init__(self):
-            self.store = FakeStore()
+    class FakeJobs:
+        def submit_reanalyze(self, spec):
+            captured["spec"] = spec
+            return ({
+                "id": "job-news-reanalyze", "type": "news.reanalyze",
+                "status": "queued", "progress": 0, "phase": "等待执行",
+                "detail": "", "links": {},
+            }, True)
 
-        def enrich_pending_events(self, **kwargs):
-            yield {"type": "start", "total": 2, "processed": 0,
-                   "completed": 0, "failed": 0, "batch_count": 1}
-            yield {"type": "batch", "batch": 1, "batch_count": 1,
-                   "processed": 2, "total": 2, "completed": 2, "failed": 0,
-                   "batch_completed": 2, "batch_failed": 0,
-                   "completed_ids": [1, 2], "updated_items": [], "error": ""}
-            yield {"type": "complete", "processed": 2, "completed": 2,
-                   "failed": 0, "completed_ids": [1, 2]}
+        @staticmethod
+        def public(job):
+            return {
+                "domain": "news", **job,
+                "links": {
+                    "self": "/api/v1/jobs/job-news-reanalyze",
+                    "events": "/api/v1/jobs/job-news-reanalyze/events",
+                    "cancel": "/api/v1/jobs/job-news-reanalyze/cancel",
+                    "retry": "/api/v1/jobs/job-news-reanalyze/retry",
+                },
+            }
 
-    monkeypatch.setattr(news_module, "AICrawler", FakeCrawler)
+    monkeypatch.setattr(news_module, "get_news_jobs", lambda: FakeJobs())
     client = TestClient(app)
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
-    with client.stream(
-        "POST", "/api/v1/news/reanalyze/stream",
+    response = client.post(
+        "/api/v1/news/reanalyze",
         json={"limit": 10, "batch_size": 2}, headers={"X-CSRF-Token": token},
-    ) as response:
-        events = [json.loads(line) for line in response.iter_lines() if line]
-        assert response.status_code == 200
-        assert response.headers["X-Accel-Buffering"] == "no"
-    assert [event["type"] for event in events] == ["start", "batch", "complete"]
+    )
+
+    assert response.status_code == 202
+    assert response.json()["domain"] == "news"
+    assert response.json()["type"] == "news.reanalyze"
+    assert response.json()["links"]["events"].endswith("/events")
+    assert captured["spec"] == {
+        "ids": None, "limit": 10, "batch_size": 2, "mode": "pending",
+    }
 
 
-def test_failed_annotation_stream_requeues_only_failed_items(monkeypatch):
+def test_failed_annotation_reanalyze_preserves_mode_in_task_spec(monkeypatch):
     from quantmaster.server import news as news_module
 
     calls: dict[str, object] = {}
 
-    class FakeCrawler:
-        def __init__(self):
-            self.store = object()
+    class FakeJobs:
+        def submit_reanalyze(self, spec):
+            calls["spec"] = spec
+            return ({
+                "id": "job-failed-reanalyze", "type": "news.reanalyze",
+                "status": "queued", "progress": 0, "phase": "等待执行",
+                "detail": "", "links": {},
+            }, True)
 
-        def enrich_pending_events(self, **kwargs):
-            calls["enrich"] = kwargs
-            yield {"type": "start", "total": 1, "processed": 0,
-                   "completed": 0, "failed": 0, "batch_count": 1}
-            yield {"type": "complete", "processed": 1, "completed": 1,
-                   "failed": 0, "completed_ids": [17]}
+        @staticmethod
+        def public(job):
+            return {"domain": "news", **job, "links": {}}
 
-    monkeypatch.setattr(news_module, "AICrawler", FakeCrawler)
+    monkeypatch.setattr(news_module, "get_news_jobs", lambda: FakeJobs())
     client = TestClient(app)
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
-    with client.stream(
-        "POST", "/api/v1/news/reanalyze/stream",
+    response = client.post(
+        "/api/v1/news/reanalyze",
         json={"mode": "failed", "limit": 10, "batch_size": 2},
         headers={"X-CSRF-Token": token},
-    ) as response:
-        events = [json.loads(line) for line in response.iter_lines() if line]
+    )
 
-    assert response.status_code == 200
-    assert calls["enrich"] == {
-        "ids": None, "limit": None, "batch_size": 2,
-        "mode": "failed", "manual": True,
+    assert response.status_code == 202
+    assert calls["spec"] == {
+        "ids": None, "limit": 10, "batch_size": 2, "mode": "failed",
     }
-    assert events[-1]["completed_ids"] == [17]
 
 
-def test_empty_failed_retry_does_not_process_unattempted_items(monkeypatch):
-    from quantmaster.server import news as news_module
-
-    class FakeCrawler:
-        def __init__(self):
-            self.store = object()
-
-        def enrich_pending_events(self, **kwargs):
-            assert kwargs["mode"] == "failed"
-            assert kwargs["manual"] is True
-            yield {"type": "start", "total": 0, "processed": 0,
-                   "completed": 0, "failed": 0, "batch_count": 0}
-            yield {"type": "complete", "processed": 0, "completed": 0,
-                   "failed": 0, "completed_ids": []}
-
-    monkeypatch.setattr(news_module, "AICrawler", FakeCrawler)
+def test_reanalyze_stream_route_removed():
     client = TestClient(app)
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
-    with client.stream(
-        "POST", "/api/v1/news/reanalyze/stream",
+    response = client.post(
+        "/api/v1/news/reanalyze/stream",
         json={"mode": "failed", "limit": 10, "batch_size": 2},
         headers={"X-CSRF-Token": token},
-    ) as response:
-        events = [json.loads(line) for line in response.iter_lines() if line]
-
-    assert response.status_code == 200
-    assert [event["type"] for event in events] == ["start", "complete"]
-    assert events[-1]["processed"] == 0
+    )
+    assert response.status_code == 404
 
 
 def test_news_api_csrf_and_ui_contract():
@@ -1788,6 +1777,20 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
                 "links": {"self": "/api/v1/jobs/job-news"},
             }
 
+        def submit_source_run(self, source_id, *, skip_llm):
+            job, created = self.submit(
+                sources=[source_id], group="", limit=30, skip_llm=skip_llm,
+            )
+            job["type"] = "news.source_run"
+            return job, created
+
+        def submit_reanalyze(self, spec):
+            job, created = self.submit(**spec)
+            job["type"] = "news.reanalyze"
+            if str(spec.get("mode") or "pending") == "pending" and spec.get("ids"):
+                job["reset"] = len(spec["ids"])
+            return job, created
+
     monkeypatch.setattr(news_module, "get_news_jobs", lambda: RouteNewsJobs())
     request = object()
     source = news_module.SourceValue.model_validate(source_value())
@@ -1811,7 +1814,7 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     assert news_module.source_delete("source-1", request) == {"deleted": "source-1"}
     assert news_module.source_test("source-1", request)["items"][0]["content"] == "body"
     source_job = news_module.source_run("source-1", request, skip_llm=True)
-    assert source_job["type"] == "news.crawl"
+    assert source_job["type"] == "news.source_run"
     assert source_job["skip_llm"] is True
 
     with pytest.raises(news_module.HTTPException) as missing_source:

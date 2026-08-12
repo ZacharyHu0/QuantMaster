@@ -28,7 +28,7 @@ from quantmaster.trading_sessions import daily_signal_cutoff
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
-LAB_SCHEMA_VERSION = 10
+LAB_SCHEMA_VERSION = 11
 
 
 def _collision_safe_factor_name(
@@ -163,6 +163,8 @@ class LabStore:
                     error_code TEXT NOT NULL DEFAULT '', error_json TEXT NOT NULL DEFAULT '{}',
                     telemetry_json TEXT NOT NULL DEFAULT '{}',
                     cancel_requested INTEGER NOT NULL DEFAULT 0, worker TEXT NOT NULL DEFAULT '',
+                    llm_scope TEXT NOT NULL DEFAULT '', llm_revision TEXT NOT NULL DEFAULT '',
+                    cancellation_reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '',
                     heartbeat_at TEXT NOT NULL DEFAULT '', finished_at TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS lab_job_events (
@@ -305,6 +307,9 @@ class LabStore:
                 ("error_code", "TEXT NOT NULL DEFAULT ''"),
                 ("error_json", "TEXT NOT NULL DEFAULT '{}'"),
                 ("telemetry_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("llm_scope", "TEXT NOT NULL DEFAULT ''"),
+                ("llm_revision", "TEXT NOT NULL DEFAULT ''"),
+                ("cancellation_reason", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in job_columns:
                     conn.execute(f"ALTER TABLE lab_jobs ADD COLUMN {name} {declaration}")
@@ -1317,14 +1322,23 @@ class LabStore:
     ) -> dict:
         job_id, now = uuid.uuid4().hex, utc_now()
         admission = dict(preflight or {})
+        llm_scope = llm_revision = ""
+        if kind in {"discover_llm", "discover_python"}:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            coordinator = get_llm_execution_coordinator()
+            coordinator.register_lab_store(self)
+            llm_scope = "global"
+            llm_revision = coordinator.revision(llm_scope)
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO lab_jobs "
-                "(id,kind,status,params_json,dataset_id,resource_class,preflight_json,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "(id,kind,status,params_json,dataset_id,resource_class,preflight_json,"
+                "llm_scope,llm_revision,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     job_id, kind, "queued", canonical_json(params), dataset_id,
-                    str(admission.get("resource_class") or "cpu"), canonical_json(admission), now,
+                    str(admission.get("resource_class") or "cpu"), canonical_json(admission),
+                    llm_scope, llm_revision, now,
                 ),
             )
         self.append_event(job_id, {
@@ -1332,6 +1346,78 @@ class LabStore:
             "resource_class": str(admission.get("resource_class") or "cpu"),
         })
         return self.job(job_id) or {}
+
+    def interrupt_legacy_llm(self) -> int:
+        """Require an explicit retry for old discovery rows without a revision."""
+        with self._conn() as conn:
+            changed = conn.execute(
+                "UPDATE lab_jobs SET status='interrupted',phase='需要手动重试',"
+                "detail='旧 AI 发现任务缺少执行版本，已安全中断',finished_at=? "
+                "WHERE kind IN ('discover_llm','discover_python') "
+                "AND status IN ('queued','interrupted') AND llm_revision='' "
+                "AND phase<>'需要手动重试'",
+                (utc_now(),),
+            ).rowcount
+        return int(changed)
+
+    def interrupt_stale_llm(self) -> int:
+        """Do not resume discovery work created under an expired AI revision.
+
+        A configuration rotation normally cancels these rows immediately.  This
+        startup recovery covers the narrow crash/lock window where the durable
+        revision changed but the Lab ledger was unavailable for that update.
+        Such work must be retried explicitly with the current configuration;
+        it must never be silently rebound to a new provider setup.
+        """
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        coordinator = get_llm_execution_coordinator()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id,llm_scope,llm_revision FROM lab_jobs "
+                "WHERE kind IN ('discover_llm','discover_python') "
+                "AND status IN ('queued','interrupted') "
+                "AND cancel_requested=0 AND llm_revision<>'' "
+                "AND phase<>'需要手动重试'"
+            ).fetchall()
+            stale_ids = [
+                str(row["id"])
+                for row in rows
+                if not coordinator.current(
+                    str(row["llm_scope"] or "global"), str(row["llm_revision"]),
+                )
+            ]
+            changed = 0
+            for job_id in stale_ids:
+                changed += conn.execute(
+                    "UPDATE lab_jobs SET status='interrupted',phase='需要手动重试',"
+                    "detail='AI 配置版本已过期，请按当前配置重新运行',"
+                    "cancellation_reason='configuration_revision_expired',finished_at=? "
+                    "WHERE id=? AND status IN ('queued','interrupted') "
+                    "AND cancel_requested=0",
+                    (utc_now(), job_id),
+                ).rowcount
+        return int(changed)
+
+    def cancel_stale_llm(self, scope: str, revision: str, reason: str) -> dict[str, int]:
+        """Fence Lab's own ledger when settings rotate an LLM scope."""
+        now = utc_now()
+        with self._conn() as conn:
+            queued = conn.execute(
+                "UPDATE lab_jobs SET status='cancelled',cancel_requested=1,"
+                "cancellation_reason=?,phase='已取消',detail=?,finished_at=? "
+                "WHERE kind IN ('discover_llm','discover_python') AND status IN ('queued','interrupted') "
+                "AND llm_scope=? AND llm_revision<>?",
+                (reason[:240], reason[:1000], now, scope, revision),
+            ).rowcount
+            running = conn.execute(
+                "UPDATE lab_jobs SET status='cancelling',cancel_requested=1,"
+                "cancellation_reason=?,phase='正在安全停止',detail=? "
+                "WHERE kind IN ('discover_llm','discover_python') AND status IN ('running','cancelling') "
+                "AND llm_scope=? AND llm_revision<>?",
+                (reason[:240], reason[:1000], scope, revision),
+            ).rowcount
+        return {"queued_cancelled": int(queued), "running_cancelling": int(running)}
 
     def claim_next(
         self,
@@ -1363,6 +1449,7 @@ class LabStore:
             )
             row = conn.execute(
                 "SELECT id FROM lab_jobs WHERE status IN ('queued','interrupted') "
+                "AND NOT (kind IN ('discover_llm','discover_python') AND llm_revision='') "
                 "AND (? OR params_json NOT LIKE '%\"_scheduled\":true%') "
                 f"{resource_sql} ORDER BY created_at LIMIT 1",
                 (int(allow_scheduled), *resource_params),
@@ -1598,7 +1685,7 @@ class LabStore:
         progress = max(0, min(100, int(progress)))
         detail = str(detail)[:1000]
         with self._conn() as conn:
-            where = "id=? AND status='running'"
+            where = "id=? AND status IN ('running','cancelling')"
             params: list[Any] = [progress, phase, detail, now, job_id]
             if expected_worker:
                 where += " AND worker=?"
@@ -1619,7 +1706,7 @@ class LabStore:
     def heartbeat_job(self, job_id: str, worker: str = "") -> bool:
         """只刷新执行器心跳，不向事件时间线写入高频噪声。"""
         with self._conn() as conn:
-            where = "id=? AND status='running'"
+            where = "id=? AND status IN ('running','cancelling')"
             params: list[Any] = [utc_now(), job_id]
             if worker:
                 where += " AND worker=?"
@@ -1633,7 +1720,7 @@ class LabStore:
         with self._conn() as conn:
             changed = conn.execute(
                 "UPDATE lab_jobs SET cancel_requested=1 WHERE id=? "
-                "AND status IN ('queued','running','paused','interrupted')", (job_id,),
+                "AND status IN ('queued','running','cancelling','paused','interrupted')", (job_id,),
             ).rowcount
         if not changed and self.job(job_id) is None:
             raise KeyError("任务不存在")
@@ -1688,15 +1775,29 @@ class LabStore:
                 now, now, job_id,
             ]
             if expected_worker:
-                where += " AND worker=? AND status='running'"
+                where += " AND worker=? AND status IN ('running','cancelling')"
                 params.append(expected_worker)
             changed = conn.execute(
-                "UPDATE lab_jobs SET status=?,progress=?,phase=?,detail=?,result_json=?,error=?,"
-                "error_code=?,error_json=?,telemetry_json=?,"
+                "UPDATE lab_jobs SET "
+                "status=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE ? END,"
+                "progress=CASE WHEN cancel_requested=1 THEN progress ELSE ? END,"
+                "phase=CASE WHEN cancel_requested=1 THEN '已取消' ELSE ? END,"
+                "detail=CASE WHEN cancel_requested=1 THEN "
+                "COALESCE(NULLIF(cancellation_reason,''),'任务已取消；已丢弃迟到结果') ELSE ? END,"
+                "result_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
+                "error=CASE WHEN cancel_requested=1 THEN '' ELSE ? END,"
+                "error_code=CASE WHEN cancel_requested=1 THEN '' ELSE ? END,"
+                "error_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
+                "telemetry_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
                 f"finished_at=?,heartbeat_at=? WHERE {where}", params,
             ).rowcount
         if not changed:
             return False
+        completed = self.job(job_id) or {}
+        status = str(completed.get("status") or status)
+        progress = int(completed.get("progress") or progress)
+        phase = str(completed.get("phase") or phase)
+        detail = str(completed.get("detail") or detail)
         self.append_event(job_id, {
             "type": status, "progress": progress,
             "phase": phase, "detail": detail[:300],
@@ -1708,7 +1809,7 @@ class LabStore:
         if source is None:
             raise KeyError("任务不存在")
         if source["status"] not in {
-            "paused", "completed", "completed_with_warnings", "failed", "cancelled",
+            "paused", "completed", "completed_with_warnings", "failed", "cancelled", "interrupted",
         }:
             raise ValueError("只能按相同参数重新运行已结束的任务")
         params = dict(source.get("params") or {})

@@ -23,6 +23,7 @@
     fillingForm: false,
     weixinLoginTimer: null,
     lastRuntime: null,
+    diagnosticTasks: {},
   };
   const form = document.getElementById('settings-form');
   let freeStockDbPollTimer = null;
@@ -514,6 +515,66 @@
     }
   }
 
+  function renderDiagnosticTask(kind, task) {
+    const el = document.querySelector(`[data-check-result="${kind}"]`);
+    if (!el) return;
+    const active = ['queued', 'running', 'cancelling'].includes(task.status);
+    const action = active && task.links?.cancel
+      ? `<button type="button" class="check-task-cancel" data-settings-task-cancel="${html(task.id)}">取消</button>`
+      : '';
+    el.className = `check-result checking ${task.status === 'cancelling' ? 'stale' : ''}`;
+    el.removeAttribute('data-checked');
+    el.innerHTML = `<div class="check-summary"><div><strong>${html(task.phase || 'LLM 检测任务')}</strong><span>${html(task.detail || task.status)}</span></div><small>任务 ${html(String(task.id || '').slice(-8))} · ${Number(task.progress || 0)}%</small></div>${action}`;
+  }
+
+  function delay(ms) {
+    return new Promise(resolve => window.setTimeout(resolve, ms));
+  }
+
+  async function watchDiagnosticTask(kind, initial) {
+    let task = initial;
+    state.diagnosticTasks[kind] = task.id;
+    while (state.diagnosticTasks[kind] === task.id) {
+      renderDiagnosticTask(kind, task);
+      if (!['queued', 'running', 'cancelling'].includes(task.status)) break;
+      await delay(500);
+      try {
+        task = await request(task.links?.self || `/api/v1/jobs/${encodeURIComponent(task.id)}`);
+      } catch (error) {
+        renderCheck(kind, {status: 'warning', stale: true, message: `任务状态暂不可读取：${error.message}`});
+        return;
+      }
+    }
+    if (state.diagnosticTasks[kind] !== task.id) return;
+    delete state.diagnosticTasks[kind];
+    if (task.status === 'completed' && task.result) {
+      // A result is published only after its revision/lease fence succeeds.
+      renderCheck(kind, task.result.result || task.result);
+      return;
+    }
+    renderCheck(kind, {
+      status: 'warning', stale: true,
+      message: task.status === 'cancelled' || task.status === 'interrupted'
+        ? '检测已取消；请按当前设置重新检测。'
+        : `检测未完成：${task.detail || task.phase || task.status}`,
+    });
+  }
+
+  async function watchRuntimeApply(initial) {
+    let task = initial;
+    while (['queued', 'running', 'cancelling'].includes(task.status)) {
+      await delay(500);
+      try {
+        task = await request(task.links?.self || `/api/v1/jobs/${encodeURIComponent(task.id)}`);
+      } catch (_) {
+        return;
+      }
+    }
+    if (task.status !== 'completed' || !task.result) return;
+    const applied = task.result.result || task.result;
+    if (applied.runtime) renderRuntime(applied.runtime);
+  }
+
   document.querySelectorAll('.check-button').forEach(button => {
     button.addEventListener('click', async () => {
       const kind = button.dataset.check;
@@ -529,13 +590,34 @@
         const data = await request(`/api/v1/settings/check/${kind}`, {
           method: 'POST', body: {...documentPayload(false), secrets: documentPayload(true).secrets},
         });
-        renderCheck(kind, data);
+        if (data.type === 'settings.diagnostic' && data.id) {
+          renderDiagnosticTask(kind, data);
+          void watchDiagnosticTask(kind, data);
+        } else {
+          renderCheck(kind, data);
+        }
       } catch (error) {
         renderCheck(kind, {status: 'error', message: error.message});
       } finally {
         button.disabled = false;
       }
     });
+  });
+
+  document.addEventListener('click', async event => {
+    const button = event.target.closest('[data-settings-task-cancel]');
+    if (!button) return;
+    const taskId = button.dataset.settingsTaskCancel;
+    const kind = Object.entries(state.diagnosticTasks)
+      .find(([, id]) => id === taskId)?.[0];
+    if (!taskId || !kind) return;
+    button.disabled = true;
+    try {
+      const task = await request(`/api/v1/jobs/${encodeURIComponent(taskId)}/cancel`, {method: 'POST'});
+      void watchDiagnosticTask(kind, task);
+    } catch (error) {
+      renderCheck(kind, {status: 'warning', stale: true, message: error.message});
+    }
   });
 
   function markInvalidFields() {
@@ -609,12 +691,15 @@
       state.savedRevision = revision;
       if (state.editRevision === revision && result.settings) fillForm(state.config);
       renderRuntime(result.runtime);
+      if (result.runtime_apply?.id) void watchRuntimeApply(result.runtime_apply);
       const suffix = (result.restart_required || []).length
         ? `；${result.restart_required.join(' / ')} 重启后生效` : '';
       const degraded = Object.entries(result.apply_status || {})
         .filter(([, value]) => value?.status === 'degraded')
         .map(([name]) => name === 'automation' ? '自动化运行态异常' : '研究 Worker 运行态异常');
-      const allWarnings = [...(result.warnings || []), ...degraded];
+      const cancellation = result.llm_cancellation?.scopes?.length
+        ? ['旧模型任务已逻辑取消；已发出的网络请求会在 timeout 内结束'] : [];
+      const allWarnings = [...(result.warnings || []), ...degraded, ...cancellation];
       const warnings = allWarnings.length ? `；${allWarnings.join('；')}` : '';
       const time = new Date().toLocaleTimeString('zh-CN', {hour12: false, hour: '2-digit', minute: '2-digit'});
       setSaveState('saved', `已自动保存 ${time}${suffix}${warnings}`);

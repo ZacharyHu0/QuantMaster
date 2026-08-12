@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,11 @@ class LabWorker:
         return min(4, max(1, int(get_config().lab.max_workers)))
 
     def start(self) -> None:
+        # Discovery rows live in the Lab ledger rather than the generic jobs
+        # ledger, so register it before any settings rotation can occur.
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        get_llm_execution_coordinator().register_lab_store(self.service.store)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 self._accepting.set()
@@ -49,6 +55,8 @@ class LabWorker:
             # drain 后重新启用时，旧任务可能仍在正常收尾；此时不能把它们误判为
             # 上一进程遗留任务。只有当前实例确实没有活动任务时才恢复 stale 任务。
             if not self._active_job_ids:
+                self.service.store.interrupt_legacy_llm()
+                self.service.store.interrupt_stale_llm()
                 self.service.store.interrupt_stale()
                 recovered = self.service.store.recover_orphaned_records()
                 if any(recovered.values()):
@@ -172,10 +180,21 @@ class LabWorker:
         lease_alive = threading.Event()
         lease_alive.set()
 
+        def _llm_current() -> bool:
+            scope = str(job.get("llm_scope") or "")
+            if not scope:
+                return True
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            return get_llm_execution_coordinator().current(
+                scope, str(job.get("llm_revision") or ""),
+            )
+
         def cancelled() -> bool:
             return (
                 self._stop.is_set() or not lease_alive.is_set()
                 or self.service.store.is_cancel_requested(job_id)
+                or not _llm_current()
             )
 
         heartbeat_stop = threading.Event()
@@ -199,7 +218,21 @@ class LabWorker:
             if callable(preflight):
                 admission = preflight(str(job["kind"]), dict(job.get("params") or {}))
                 require_runnable(admission)
-            result = self.service.run_job(job, progress=progress, cancelled=cancelled)
+            scope = str(job.get("llm_scope") or "")
+            revision = str(job.get("llm_revision") or "")
+            if scope:
+                if not revision:
+                    raise InterruptedError("旧 AI 发现任务缺少执行版本")
+                from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+                with get_llm_execution_coordinator().lease(
+                    SimpleNamespace(job_id=job_id, cancelled=cancelled), scope, revision,
+                ):
+                    result = self.service.run_job(job, progress=progress, cancelled=cancelled)
+                if not _llm_current():
+                    raise InterruptedError("LLM 配置版本已更新")
+            else:
+                result = self.service.run_job(job, progress=progress, cancelled=cancelled)
             if lease_alive.is_set():
                 self.service.store.finish_job(
                     job_id, result=result,

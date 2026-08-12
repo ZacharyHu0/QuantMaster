@@ -182,6 +182,7 @@ class RuntimeWorker:
             from quantmaster.data.maintenance import data_refresh_manager
             from quantmaster.data.repair import get_data_repair_manager
             from quantmaster.lab.capabilities import publish_capabilities
+            from quantmaster.lab.llm_jobs import get_lab_llm_jobs
             from quantmaster.lab.worker import get_worker
             from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
             from quantmaster.ai.news_jobs import get_news_jobs
@@ -191,6 +192,7 @@ class RuntimeWorker:
             from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
             from quantmaster.runtime.worker_ipc import RuntimeCommandServer, WorkerCommandError
             from quantmaster.server.diagnostics import start_diagnostics_sampler
+            from quantmaster.server.settings_jobs import get_settings_jobs
 
             # This installs only the bundled offline catalogue.  It must not
             # trigger a remote catalogue refresh at worker startup.
@@ -205,6 +207,8 @@ class RuntimeWorker:
             after_close_worker = get_after_close_jobs()
             etf_research_worker = get_etf_research_jobs()
             news_worker = get_news_jobs()
+            settings_worker = get_settings_jobs()
+            lab_llm_worker = get_lab_llm_jobs()
 
             def publish_lab_capabilities() -> None:
                 try:
@@ -265,12 +269,16 @@ class RuntimeWorker:
                 after_close_worker.pause()
                 etf_research_worker.pause()
                 news_worker.pause()
+                settings_worker.pause()
+                lab_llm_worker.runtime.pause()
 
             def resume() -> None:
                 stock_analysis_worker.resume()
                 after_close_worker.resume()
                 etf_research_worker.resume()
                 news_worker.resume()
+                settings_worker.resume()
+                lab_llm_worker.runtime.resume()
                 runtime.start()
                 research_worker.start()
                 data_refresh_manager.start()
@@ -299,6 +307,8 @@ class RuntimeWorker:
                         and after_close_worker.idle
                         and etf_research_worker.idle
                         and news_worker.idle
+                        and settings_worker.idle
+                        and lab_llm_worker.runtime.idle
                     ),
                 )
             )
@@ -308,6 +318,8 @@ class RuntimeWorker:
             after_close_worker.start()
             etf_research_worker.start()
             news_worker.start()
+            settings_worker.start()
+            lab_llm_worker.runtime.start()
             start_diagnostics_sampler()
             free_stockdb_runtime.start_event_bridge()
             data_refresh_manager.start()
@@ -369,11 +381,13 @@ class RuntimeWorker:
             from quantmaster.data.maintenance import data_refresh_manager
             from quantmaster.data.repair import get_data_repair_manager
             from quantmaster.lab.worker import get_worker
+            from quantmaster.lab.llm_jobs import shutdown_lab_llm_jobs
             from quantmaster.ai.news_jobs import shutdown_news_jobs
             from quantmaster.research.jobs import get_research_job_manager
             from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
             from quantmaster.rotation.service import get_rotation_worker
             from quantmaster.server.diagnostics import stop_diagnostics_sampler
+            from quantmaster.server.settings_jobs import shutdown_settings_jobs
 
             command_server, self._command_server = self._command_server, None
             if command_server is not None:
@@ -393,6 +407,8 @@ class RuntimeWorker:
             shutdown_after_close_jobs()
             shutdown_etf_research_jobs()
             shutdown_news_jobs()
+            shutdown_settings_jobs()
+            shutdown_lab_llm_jobs()
             if self._unregister_maintenance is not None:
                 self._unregister_maintenance()
                 self._unregister_maintenance = None

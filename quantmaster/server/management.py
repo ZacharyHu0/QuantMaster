@@ -271,6 +271,49 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _llm_cancellation_after_save(
+    saved: dict[str, Any], *, llm_secret_changed: bool = False,
+) -> dict[str, Any]:
+    """Rotate only scopes invalidated by an already-persisted settings change."""
+    changed = {str(value) for value in saved.get("changed_fields") or ()}
+    global_changed = llm_secret_changed or any(value.startswith("llm.") for value in changed)
+    news_changed = any(value.startswith("news.annotation_") for value in changed)
+    if not global_changed and not news_changed:
+        return {"scopes": [], "queued_cancelled": 0, "running_cancelling": 0}
+    from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+    rotation = get_llm_execution_coordinator().rotate(
+        global_scope=global_changed,
+        news_scope=global_changed or news_changed,
+        reason="settings_saved",
+    )
+    # A cancelled settings diagnostic never reaches its handler/finally block.
+    # Clear its opaque temporary credential reference immediately after the
+    # ledger cancellation converges.
+    try:
+        from quantmaster.server.settings_jobs import get_settings_jobs
+
+        get_settings_jobs().cleanup_cancelled_credentials()
+    except (CredentialError, OSError, RuntimeError, ValueError):
+        logger.warning("已取消设置检测的临时凭据清理延后", exc_info=True)
+    scopes = ([] if not global_changed else ["global"]) + (
+        ["news"] if global_changed or news_changed else []
+    )
+    return {
+        "scopes": scopes,
+        "queued_cancelled": int(rotation["queued_cancelled"]),
+        "running_cancelling": int(rotation["running_cancelling"]),
+    }
+
+
+def _queue_runtime_apply(saved: dict[str, Any]) -> dict[str, Any]:
+    from quantmaster.server.settings_jobs import get_settings_jobs
+
+    jobs = get_settings_jobs()
+    task, _created = jobs.submit_apply(saved)
+    return jobs.public(task)
+
+
 @router.get("/settings")
 def get_settings(request: Request, response: Response) -> dict:
     _require_local(request)
@@ -574,7 +617,13 @@ def validate_settings(request: Request, document: SettingsDocument) -> dict:
 def save_settings(request: Request, update: SettingsUpdate) -> dict:
     _require_csrf(request)
     try:
-        result = _apply_runtime(settings_manager.save(update))
+        result = settings_manager.save(update)
+        result["llm_cancellation"] = _llm_cancellation_after_save(
+            result,
+            llm_secret_changed=update.secrets.llm.action in {"replace", "clear"},
+        )
+        result["runtime_apply"] = _queue_runtime_apply(result)
+        result["runtime"] = _runtime_status()
     except CredentialError as exc:
         raise HTTPException(409, str(exc)) from None
     except ValueError as exc:
@@ -604,6 +653,7 @@ def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutat
 def check_setting(
     kind: Literal["llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
     request: Request,
+    response: Response,
     body: Annotated[dict[str, Any] | None, Body()] = None,
 ) -> dict:
     _require_csrf(request)
@@ -635,11 +685,17 @@ def check_setting(
         tushare_secret = ""
     else:
         tushare_secret = current.data.tushare_token
-    if kind == "llm-models":
-        result = list_llm_models(document.llm, llm_secret)
-    elif kind == "llm-web-search":
-        result = check_llm_web_search(document.llm, llm_secret)
-    elif kind == "tushare":
+    if kind in {"llm-models", "llm-web-search"}:
+        from quantmaster.server.settings_jobs import get_settings_jobs
+
+        try:
+            jobs = get_settings_jobs()
+            task, _created = jobs.submit_diagnostic(kind, document, api_key=llm_secret)
+        except CredentialError as exc:
+            raise HTTPException(409, str(exc)) from None
+        response.status_code = 202
+        return jobs.public(task)
+    if kind == "tushare":
         result = check_tushare(tushare_secret)
     elif kind == "storage":
         result = check_storage(document.data)
@@ -689,7 +745,11 @@ def snapshot_diff(snapshot_id: str, request: Request) -> dict:
 def rollback_snapshot(snapshot_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return _apply_runtime(settings_manager.rollback(snapshot_id))
+        result = settings_manager.rollback(snapshot_id)
+        result["llm_cancellation"] = _llm_cancellation_after_save(result)
+        result["runtime_apply"] = _queue_runtime_apply(result)
+        result["runtime"] = _runtime_status()
+        return result
     except FileNotFoundError:
         raise _public_error(404, "设置快照不存在", "回滚设置快照失败") from None
     except ValueError:
@@ -731,14 +791,17 @@ def get_migration(task_id: str, request: Request) -> dict:
         task = migration_manager.get(task_id)
         if task.get("status") == "completed" and task_id not in _applied_migrations:
             _applied_migrations.add(task_id)
-            task["apply"] = _apply_runtime(
+            # A migration status read is still a request-plane operation.  It
+            # may trigger a runtime reconfiguration, but must never wait for
+            # automation/Lab workers to stop or restart.
+            task["apply"] = _queue_runtime_apply(
                 {
                     "status": "ok",
                     "changed_fields": ["data.root"],
                     "restart_required": [],
                     "warnings": [],
                 }
-            ).get("apply_status")
+            )
         return task
     except KeyError:
         raise _public_error(404, "数据迁移任务不存在", "读取数据迁移任务失败") from None
@@ -909,7 +972,11 @@ def _rewrite_universe_references(old_name: str, new_name: str) -> tuple[list[str
     if not changed:
         return [], None
     update = SettingsUpdate.model_validate(document.model_dump())
-    return changed, _apply_runtime(settings_manager.save(update))
+    saved = settings_manager.save(update)
+    saved["llm_cancellation"] = _llm_cancellation_after_save(saved)
+    saved["runtime_apply"] = _queue_runtime_apply(saved)
+    saved["runtime"] = _runtime_status()
+    return changed, saved
 
 
 def _validate_replacement(name: str, references: list[dict[str, str]]) -> str:

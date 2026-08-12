@@ -85,6 +85,7 @@ class StockAnalysisJobs:
             deadline_seconds=(
                 DEEP_DEADLINE_SECONDS if mode == "deep" else QUICK_DEADLINE_SECONDS
             ),
+            llm_scope="global",
         )
 
     @staticmethod

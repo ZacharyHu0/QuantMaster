@@ -75,7 +75,7 @@ class CredentialStore:
         keyring, errors = self._backend()
         try:
             return keyring.get_password(self.SERVICE, target)
-        except (OSError, RuntimeError, errors.KeyringError) as exc:
+        except Exception as exc:  # Windows Credential Manager may raise pywin32-only errors.
             raise CredentialError("读取系统凭据失败") from exc
 
     def set(self, target: str, value: str) -> None:
@@ -84,7 +84,7 @@ class CredentialStore:
         keyring, errors = self._backend()
         try:
             keyring.set_password(self.SERVICE, target, value)
-        except (OSError, RuntimeError, errors.KeyringError) as exc:
+        except Exception as exc:  # keep every backend-specific failure at this boundary
             raise CredentialError("写入系统凭据失败") from exc
 
     def delete(self, target: str) -> None:
@@ -93,5 +93,5 @@ class CredentialStore:
             keyring.delete_password(self.SERVICE, target)
         except errors.PasswordDeleteError:
             return
-        except (OSError, RuntimeError, errors.KeyringError) as exc:
+        except Exception as exc:  # includes WinError 1312 on some keyring backends
             raise CredentialError("删除系统凭据失败") from exc

@@ -289,6 +289,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
     """Apply the local security boundary, request context and migration lock."""
     from quantmaster.data.migration import migration_manager
     from quantmaster.data.resilience import local_only_data_access
+    from quantmaster.runtime.llm import enter_http_request, leave_http_request
     from quantmaster.runtime.maintenance import maintenance_barrier
     from quantmaster.server.security import (
         SecurityViolation,
@@ -300,6 +301,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
+    llm_request_token = enter_http_request()
     allowed = (
         path
         in {
@@ -408,37 +410,41 @@ async def request_context_and_migration_lock(request: Request, call_next):
                 "error_id": request_id,
             },
         )
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-QM-Worker-Generation"] = os.environ.get("QM_WEB_GENERATION", "0")
-    duration_ms = (time.perf_counter() - started) * 1000
-    response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
     try:
-        route = getattr(request.scope.get("route"), "path", None) or path
-        get_runtime_metrics_recorder = __import__(
-            "quantmaster.runtime.metrics", fromlist=["get_runtime_metrics_recorder"],
-        ).get_runtime_metrics_recorder
-        get_runtime_metrics_recorder().record_request(
-            route=str(route),
-            method=request.method,
-            status_code=response.status_code,
-            duration_ms=duration_ms,
-            response_bytes=int(response.headers.get("content-length") or 0),
-        )
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
-        # Observability must never turn a successful page read into a failure.
-        pass
-    if path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
-    apply_security_headers(response)
-    if response.status_code >= 400:
-        logger.warning(
-            "接口返回失败 request_id=%s method=%s path=%s status=%s",
-            request_id,
-            request.method,
-            path,
-            response.status_code,
-        )
-    return response
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-QM-Worker-Generation"] = os.environ.get("QM_WEB_GENERATION", "0")
+        duration_ms = (time.perf_counter() - started) * 1000
+        response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
+        if path != "/api/v1/health/ready":
+            try:
+                route = getattr(request.scope.get("route"), "path", None) or path
+                get_runtime_metrics_recorder = __import__(
+                    "quantmaster.runtime.metrics", fromlist=["get_runtime_metrics_recorder"],
+                ).get_runtime_metrics_recorder
+                get_runtime_metrics_recorder().record_request(
+                    route=str(route),
+                    method=request.method,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                    response_bytes=int(response.headers.get("content-length") or 0),
+                )
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+                # Observability must never turn a successful page read into a failure.
+                pass
+        if path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+        apply_security_headers(response)
+        if response.status_code >= 400:
+            logger.warning(
+                "接口返回失败 request_id=%s method=%s path=%s status=%s",
+                request_id,
+                request.method,
+                path,
+                response.status_code,
+            )
+        return response
+    finally:
+        leave_http_request(llm_request_token)
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1973,40 +1979,6 @@ def mine_genetic(req: MineRequest) -> dict:
         panel = market_envelope.require_data()
         miner = GeneticMiner(population=req.population, generations=req.generations, seed=req.seed)
         mined = miner.mine(panel, top_n=req.top_n, progress=False)
-    except MarketDataUnavailable:
-        raise
-    except Exception as e:
-        raise HTTPException(400, str(e)) from e
-    return {
-        "factors": [m.__dict__ for m in mined],
-        "data_quality": market_envelope.quality.to_dict(),
-        "universe_evidence": universe_snapshot.to_dict(),
-    }
-
-
-class MineLLMRequest(ContractModel):
-    universe: str = "demo"
-    start: str = "2022-01-01"
-    end: str | None = None
-    n: int = 8
-    rounds: int = 2
-
-
-@app.post("/api/v1/research/mining/llm")
-def mine_llm(req: MineLLMRequest) -> dict:
-    from quantmaster.data import read_panel
-    from quantmaster.data.universe import load_universe_analysis_snapshot
-    from quantmaster.factors.mining import LLMFactorMiner
-
-    end = _default_close_data_end(req.end)
-    try:
-        universe_snapshot = load_universe_analysis_snapshot(
-            req.universe, as_of=end if req.end else None,
-        )
-        market_envelope = read_panel(list(universe_snapshot.symbols), req.start, end)
-        panel = market_envelope.require_data()
-        miner = LLMFactorMiner()
-        mined = miner.mine(panel, n=req.n, rounds=req.rounds)
     except MarketDataUnavailable:
         raise
     except Exception as e:

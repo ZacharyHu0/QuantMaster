@@ -1068,9 +1068,13 @@ class LabService:
             on_event=relay,
             cancelled=cancelled,
         )
+        if cancelled and cancelled():
+            raise InterruptedError("AI 因子发现已取消或 LLM 配置已更新")
         mined = [item for item in report.factors if not item.error]
         versions = []
         for rank, item in enumerate(mined, start=1):
+            if cancelled and cancelled():
+                raise InterruptedError("AI 因子发现已取消或 LLM 配置已更新")
             spec = FactorSpec(
                 slug=_slug("llm", item.expression),
                 name=f"AI 候选 {rank}",
@@ -1207,6 +1211,8 @@ class LabService:
             )
 
             def checkpoint(candidate) -> None:
+                if cancelled and cancelled():
+                    raise InterruptedError("AutoMiner 已取消或 LLM 配置已更新")
                 self.store.save_mining_candidate(run_id, candidate.to_dict())
 
             miner = PythonFactorMiner()
@@ -1234,6 +1240,8 @@ class LabService:
             }
             versions = []
             for order, candidate in enumerate(report.finalists, start=1):
+                if cancelled and cancelled():
+                    raise InterruptedError("AutoMiner 已取消或 LLM 配置已更新")
                 non_pit_features = sorted(
                     name for name in candidate.required_features
                     if grades.get(name) == "research_only"
@@ -1365,6 +1373,11 @@ class LabService:
             if progress:
                 progress(97, f"AutoMiner 完成 · {len(versions)} 个候选待人工审批")
             return result
+        except InterruptedError:
+            self.store.update_mining_run(
+                run_id, status="cancelled", result={"cancelled": True},
+            )
+            raise
         except Exception as exc:
             self.store.update_mining_run(
                 run_id, status="failed", result={"error": str(exc)[:1000]},
@@ -1946,12 +1959,21 @@ class LabService:
                 raise ValueError("设置中心尚未允许发送匿名样本")
             outbound["anonymous_sample"] = sample or {}
         if use_cloud:
+            from quantmaster.runtime.llm import require_execution_lease
+
+            require_execution_lease()
             payload = self._cloud_suggestion(outbound)
+            require_execution_lease()
         else:
             payload = self._local_suggestion(spec, report)
         ExpressionFactor(str(payload["expression"]))
         payload["provider"] = "cloud" if use_cloud else "local"
         payload["sample_shared"] = bool(sample_consent)
+        # The durable generic task owns the final fence.  Keep this check
+        # immediately adjacent to the Lab-ledger write as well, so a rotated
+        # provider response cannot create a user-visible pending suggestion.
+        if use_cloud:
+            require_execution_lease()
         return self.store.save_suggestion(
             version_id, version["content_hash"], payload, outbound)
 

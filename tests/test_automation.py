@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -368,15 +369,20 @@ def test_contextual_chat_compacts_long_history_into_topic_memory(tmp_path, monke
 
     monkeypatch.setattr("quantmaster.ai.llm.LLMClient", FakeLLMClient)
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    replies: list[str] = []
+    monkeypatch.setattr(service, "reply", lambda _actor, value: replies.append(value))
     actor = ActorContext(
         channel="feishu", account_id="cli_app", target="oc_group",
         chat_type="group", sender_id="ou_owner", sender_name="管理员",
         message_id="om_current", reply_text="贵州茅台是不是太贵了？",
     )
 
-    answer = service.contextual_chat(actor, "这个估值分歧具体是什么？")
-
-    assert "600519" in answer
+    accepted = service.contextual_chat(actor, "这个估值分歧具体是什么？")
+    assert "后台回答队列" in accepted
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not replies:
+        time.sleep(0.01)
+    assert replies and "600519" in replies[0]
     memory = store.conversation_memory(
         channel="feishu", account_id="cli_app", chat_id="oc_group",
     )
@@ -389,6 +395,8 @@ def test_contextual_chat_compacts_long_history_into_topic_memory(tmp_path, monke
     assert "已压缩的话题记忆" in captured["answer_prompt"]
     assert "600519" in captured["answer_prompt"]
     assert "不可信资料" in captured["system"]
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_official_holding_news_has_high_priority():

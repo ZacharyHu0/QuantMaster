@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import Field
 from starlette.responses import JSONResponse
 
@@ -301,8 +301,17 @@ def deploy(version_id: str, body: Deployment) -> dict:
 
 
 @router.post("/factors/{version_id}/suggestions")
-def suggest(version_id: str, body: SuggestionRequest) -> dict:
+def suggest(version_id: str, body: SuggestionRequest, response: Response) -> dict:
     try:
+        if body.use_cloud:
+            from quantmaster.lab.llm_jobs import get_lab_llm_jobs
+            from quantmaster.runtime.jobs import UnifiedJobRuntime
+
+            job, _created = get_lab_llm_jobs().submit(
+                version_id, body.sample_consent, body.anonymous_sample,
+            )
+            response.status_code = 202
+            return UnifiedJobRuntime.public(job)
         return get_lab_service().suggest_revision(
             version_id, use_cloud=body.use_cloud,
             sample_consent=body.sample_consent, sample=body.anonymous_sample,

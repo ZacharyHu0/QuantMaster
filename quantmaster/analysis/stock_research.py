@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import math
@@ -2201,7 +2202,13 @@ class StockResearchEngine:
             executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stock-dimension")
             try:
                 for key in pending_keys:
-                    futures[executor.submit(infer, key)] = key
+                    # A durable LLM lease is carried by ContextVar.  Each
+                    # dimension needs its own copied context because one
+                    # context cannot run concurrently in two threads.
+                    task_context = contextvars.copy_context()
+                    futures[executor.submit(
+                        lambda key=key, ctx=task_context: ctx.run(infer, key),
+                    )] = key
                 remaining = max(0.01, deadline_at - time.monotonic())
                 for future in as_completed(futures, timeout=remaining):
                     key = futures[future]
@@ -2311,7 +2318,10 @@ class StockResearchEngine:
                     )
 
                 review_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stock-review")
-                output = review_executor.submit(review_call).result(timeout=max(0.01, remaining))
+                task_context = contextvars.copy_context()
+                output = review_executor.submit(
+                    lambda: task_context.run(review_call),
+                ).result(timeout=max(0.01, remaining))
                 allowed = {item["id"] for item in ledger.all()}
                 review = _validated_final_review(output, allowed, fallback)
                 final_reviewed = True
@@ -2336,7 +2346,10 @@ class StockResearchEngine:
                         )
 
                     remaining = deadline_at - time.monotonic()
-                    deep_output = review_executor.submit(deep_review_call).result(
+                    task_context = contextvars.copy_context()
+                    deep_output = review_executor.submit(
+                        lambda: task_context.run(deep_review_call),
+                    ).result(
                         timeout=max(0.01, remaining)
                     )
                     deep_review = _validated_deep_final_audit(deep_output, allowed)

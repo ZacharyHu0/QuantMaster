@@ -866,17 +866,6 @@
       </form>
       <div class="hint">随机生成表达式树 → 按 |RankIC| 适应度进化。耗时与 代数×种群 成正比。</div>
     </div>
-    <div class="panel">
-      <h3>LLM 挖掘（需配置 ANTHROPIC_API_KEY / OPENAI_API_KEY）</h3>
-      <form class="controls" id="llm-form">
-        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-        <label>开始<input name="start" type="date" value="2022-01-01"></label>
-        <label>每轮个数<input name="n" type="number" value="8" min="2" max="20"></label>
-        <label>轮数<input name="rounds" type="number" value="2" min="1" max="5"></label>
-        <button class="primary" type="submit">开始挖掘</button>
-      </form>
-      <div class="hint">LLM 提出表达式 → 本地 AST 校验 + 数据验证 IC，多轮反馈迭代。</div>
-    </div>
   </div>
   <div id="mine-out"></div>
 </section>

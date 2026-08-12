@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -39,6 +39,10 @@ ALLOWED_TASKS = {
 UNFILTERED_KINDS = {"task_failure", "task_report"}
 NEWS_PIPELINE_TASKS = {"fast_news_scan", "official_news_scan", "periodic_news_scan"}
 NEWS_TASKS = {*NEWS_PIPELINE_TASKS, "news_digest", "news_dead_letter_recovery"}
+# Only these automation jobs can reach the news annotation model.  Digest
+# delivery is deliberately not revision-scoped: an annotation setting change
+# must not cancel unrelated local notification work.
+LLM_NEWS_TASKS = {*NEWS_PIPELINE_TASKS, "news_dead_letter_recovery"}
 NEWS_TASK_LABELS = {
     "fast_news_scan": "快讯扫描",
     "official_news_scan": "官方资讯扫描",
@@ -137,7 +141,11 @@ class AutomationService:
         )
         for name in sorted(ALLOWED_TASKS):
             self.jobs.register(f"automation.{name}", self._unified_task_handler)
-        self._conversation_lock = threading.Lock()
+        # Natural-language replies and memory compaction are deliberately
+        # durable jobs.  Bot/web ingress must never hold a request or channel
+        # handler thread while it waits for a provider response.
+        self.jobs.register("automation.contextual_chat", self._chat_handler)
+        self.jobs.register("automation.conversation_compaction", self._compact_handler)
 
     # ---------- 状态与策略 ----------
 
@@ -614,7 +622,7 @@ class AutomationService:
             return {"indices": items, "latest_event": next(iter(self.store.recent_events(1)), None)}
         raise ValueError("view 仅支持 market/selection/news/ledger/jobs/alerts")
 
-    def _compact_conversation_if_needed(self, actor: ActorContext, client) -> dict:
+    def _compact_conversation_if_needed(self, actor: ActorContext, client, cancelled=None) -> dict:
         stats = self.store.conversation_stats(
             channel=actor.channel, account_id=actor.account_id, chat_id=actor.target,
         )
@@ -669,26 +677,40 @@ class AutomationService:
         )
         if not isinstance(compacted, dict) or not isinstance(compacted.get("topics"), list):
             raise ValueError("群聊压缩结果缺少 topics")
+        if cancelled and cancelled():
+            raise InterruptedError("群聊压缩已取消或 LLM 配置已更新")
         self.store.compact_conversation(
             channel=actor.channel, account_id=actor.account_id, chat_id=actor.target,
             message_ids=batch_ids, memory=compacted,
+            expected_source_count=int(memory.get("source_count") or 0),
         )
         return self.store.conversation_memory(
             channel=actor.channel, account_id=actor.account_id, chat_id=actor.target,
         )
 
-    def maintain_conversation(self, actor: ActorContext, client=None) -> dict:
+    def maintain_conversation(self, actor: ActorContext, client=None, cancelled=None) -> dict:
         """在群聊被点名后维护话题记忆；失败时保留全部原文。"""
         empty = {"memory": {}, "source_count": 0, "updated_at": ""}
         if actor.channel != "feishu" or actor.chat_type != "group":
             return empty
+        if client is None:
+            self.jobs.submit(
+                "automation.conversation_compaction", {"actor": asdict(actor)},
+                idempotency_key=f"compact:{actor.route_key}", deadline_seconds=300,
+                max_attempts=1, llm_scope="global",
+            )
+            return self.store.conversation_memory(
+                channel=actor.channel, account_id=actor.account_id, chat_id=actor.target,
+            )
         try:
-            if client is None:
-                from quantmaster.ai.llm import LLMClient
-
-                client = LLMClient()
-            with self._conversation_lock:
-                return self._compact_conversation_if_needed(actor, client)
+            # Read a snapshot, call the model, then perform a store-side CAS.
+            # A process-wide conversation lock must never cover remote I/O.
+            return self._compact_conversation_if_needed(actor, client, cancelled)
+        except InterruptedError:
+            # A revision fence is not a recoverable summarisation failure.
+            # Let the durable job converge to cancelled without persisting a
+            # stale memory snapshot or sending a follow-up answer.
+            raise
         except Exception:
             logger.exception("群聊话题记忆压缩失败，保留原文继续运行")
             return self.store.conversation_memory(
@@ -729,6 +751,14 @@ class AutomationService:
         return result
 
     def contextual_chat(self, actor: ActorContext, text: str) -> str:
+        job, _created = self.jobs.submit(
+            "automation.contextual_chat", {"actor": asdict(actor), "text": str(text)[:2000]},
+            idempotency_key=f"chat:{actor.message_id or uuid.uuid4().hex}",
+            deadline_seconds=300, max_attempts=1, llm_scope="global",
+        )
+        return f"已加入后台回答队列（任务 {job['id'][-8:]}），完成后将自动发送。"
+
+    def _contextual_chat_now(self, actor: ActorContext, text: str, cancelled=None) -> str:
         """只回答已点名的问题，并结合话题记忆、相关讨论及最近对话。"""
         target = self.store.target_by_route(actor.channel, actor.account_id, actor.target)
         if not target:
@@ -741,7 +771,7 @@ class AutomationService:
             memory = {"memory": {}, "source_count": 0, "updated_at": ""}
             context: list[dict[str, str]] = []
             if actor.channel == "feishu" and actor.chat_type == "group":
-                memory = self.maintain_conversation(actor, client)
+                memory = self.maintain_conversation(actor, client, cancelled)
                 rows = self.store.conversation_context(
                     channel=actor.channel, account_id=actor.account_id, chat_id=actor.target,
                     exclude_message_id=actor.message_id, limit=120,
@@ -766,15 +796,43 @@ class AutomationService:
                 prompt += f"用户正在回复的消息：{actor.reply_text[:1200]}\n\n"
             prompt += f"当前点名 QuantMaster 的问题：{text[:2000]}"
             answer = client.chat(prompt, system=system).strip()
+            if cancelled and cancelled():
+                raise InterruptedError("对话已取消或 LLM 配置已更新")
             if not answer:
                 raise RuntimeError("LLM 返回空内容")
             return answer[:3500]
+        except InterruptedError:
+            # Do not turn a cancelled model call into a fallback reply.
+            raise
         except Exception:
             logger.exception("Bot 上下文回答失败")
             return (
                 "我收到了这条 @ 消息，但自然语言回答服务暂时不可用，没有执行任何操作。"
                 "你仍可以尝试「大盘怎么样」「查看任务」，或发送「帮助」。"
             )
+
+    def _chat_handler(self, context: JobContext, spec: dict) -> JobOutcome:
+        actor = ActorContext(**dict(spec["actor"]))
+        answer = self._contextual_chat_now(actor, str(spec["text"]), context.cancelled)
+        context.ensure_active()
+        self.reply(actor, answer)
+        artifact = context.write_artifact(
+            "automation.chat", {"schema_version": "1.0", "answer": answer},
+            {"schema_version": "1.0", "lineage": {"route": actor.route_key}},
+        )
+        return JobOutcome("completed", "对话已发送", artifact["id"])
+
+    def _compact_handler(self, context: JobContext, spec: dict) -> JobOutcome:
+        actor = ActorContext(**dict(spec["actor"]))
+        from quantmaster.ai.llm import LLMClient
+
+        memory = self._compact_conversation_if_needed(actor, LLMClient(), context.cancelled)
+        context.ensure_active()
+        artifact = context.write_artifact(
+            "automation.conversation", {"schema_version": "1.0", "memory": memory},
+            {"schema_version": "1.0", "lineage": {"route": actor.route_key}},
+        )
+        return JobOutcome("completed", "对话记忆已压缩", artifact["id"])
 
     def run_task(
         self,
@@ -802,6 +860,7 @@ class AutomationService:
             idempotency_key=idempotency_key,
             deadline_seconds=deadlines[name],
             max_attempts=3,
+            llm_scope="news" if name in LLM_NEWS_TASKS else "",
         )
         return {
             "status": "accepted" if created else str(job["status"]),
@@ -819,11 +878,12 @@ class AutomationService:
         context.progress(5, "准备自动化任务", name)
         try:
             task = getattr(self, f"_task_{name}")
-            result = (
-                task(as_of=str(spec.get("as_of") or ""))
-                if name == "daily_close_pipeline"
-                else task()
-            )
+            if name == "daily_close_pipeline":
+                result = task(as_of=str(spec.get("as_of") or ""))
+            elif name in LLM_NEWS_TASKS:
+                result = task(cancelled=context.cancelled)
+            else:
+                result = task()
             context.ensure_active()
             context.progress(90, "保存任务结果", name)
             self._after_task_success(context.job_id, name, result)
@@ -1070,11 +1130,13 @@ class AutomationService:
         watchlist.update(load_universe_analysis(get_config().automation.primary_universe))
         return holdings, watchlist
 
-    def _scan_news(self, group: str) -> dict:
+    def _scan_news(self, group: str, *, cancelled=None) -> dict:
         from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
 
         crawler = AICrawler(store=NewsStore())
-        result = crawler.run(group=group)
+        result = crawler.run(group=group, cancelled=cancelled)
+        if cancelled and cancelled():
+            raise InterruptedError("资讯扫描已取消或 LLM 配置已更新")
         holdings, watchlist = self._news_context()
         events = []
         candidate_ids = {
@@ -1082,6 +1144,8 @@ class AutomationService:
             *result.get("annotation", {}).get("completed_ids", []),
         }
         for item_id in sorted(candidate_ids):
+            if cancelled and cancelled():
+                raise InterruptedError("资讯扫描已取消或 LLM 配置已更新")
             row_id = int(item_id)
             row = crawler.store.detail(row_id)
             if row is None:
@@ -1109,19 +1173,21 @@ class AutomationService:
         result["events"] = len(events)
         return result
 
-    def _task_fast_news_scan(self) -> dict:
-        return self._scan_news("fast")
+    def _task_fast_news_scan(self, *, cancelled=None) -> dict:
+        return self._scan_news("fast", cancelled=cancelled)
 
-    def _task_official_news_scan(self) -> dict:
-        return self._scan_news("official")
+    def _task_official_news_scan(self, *, cancelled=None) -> dict:
+        return self._scan_news("official", cancelled=cancelled)
 
-    def _task_periodic_news_scan(self) -> dict:
-        return self._scan_news("periodic")
+    def _task_periodic_news_scan(self, *, cancelled=None) -> dict:
+        return self._scan_news("periodic", cancelled=cancelled)
 
-    def _task_news_dead_letter_recovery(self) -> dict:
+    def _task_news_dead_letter_recovery(self, *, cancelled=None) -> dict:
         from quantmaster.ai.crawler import AICrawler
 
-        return AICrawler().recover_dead_letters(limit=20, batch_size=5)
+        return AICrawler().recover_dead_letters(
+            limit=20, batch_size=5, cancelled=cancelled,
+        )
 
     def _task_daily_close_pipeline(self, *, as_of: str = "") -> dict:
         from quantmaster.data import read_stock_names, refresh_panel

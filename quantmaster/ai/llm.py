@@ -113,7 +113,7 @@ class _LLMRequestGate:
         self._timeout_count = 0
 
     @contextmanager
-    def slot(self, limit: int, queue_timeout: float):
+    def slot(self, limit: int, queue_timeout: float, *, cancelled=None):
         value = max(1, int(limit))
         timeout = max(1.0, min(300.0, float(queue_timeout)))
         ticket = object()
@@ -121,13 +121,24 @@ class _LLMRequestGate:
             self._waiting.append(ticket)
             deadline = time.monotonic() + timeout
             while self._waiting[0] is not ticket or self._active >= value:
+                if cancelled is not None and cancelled():
+                    self._waiting.remove(ticket)
+                    self._condition.notify_all()
+                    raise InterruptedError("llm_queue_cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._waiting.remove(ticket)
                     self._timeout_count += 1
                     self._condition.notify_all()
                     raise TimeoutError("llm_queue_timeout")
-                self._condition.wait(remaining)
+                # An active configuration rotation must be observed while a
+                # task waits in the FIFO gate, rather than after a full queue
+                # timeout.  The provider call itself remains unkillable.
+                self._condition.wait(min(0.1, remaining))
+            if cancelled is not None and cancelled():
+                self._waiting.remove(ticket)
+                self._condition.notify_all()
+                raise InterruptedError("llm_queue_cancelled")
             self._waiting.popleft()
             self._active += 1
         try:
@@ -463,11 +474,47 @@ class LLMClient:
         return max(1.0, min(300.0, float(config.queue_timeout)))
 
     def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        from quantmaster.runtime.llm import execution_lease_cancelled, reject_http_llm_transport
+
+        reject_http_llm_transport()
+        if execution_lease_cancelled():
+            raise InterruptedError("LLM execution lease cancelled before dispatch")
         try:
-            with self._request_gate().slot(self._max_concurrency(), self._queue_timeout()):
+            with self._request_gate().slot(
+                self._max_concurrency(), self._queue_timeout(),
+                cancelled=execution_lease_cancelled,
+            ):
                 key = (self.config.provider, self.config.base_url.rstrip("/"))
                 with _HTTP_CLIENT_POOL.client(key) as client:
-                    return client.post(url, **kwargs)
+                    response = client.post(url, **kwargs)
+            reject_http_llm_transport()
+            if execution_lease_cancelled():
+                raise InterruptedError("LLM execution lease cancelled after response")
+            return response
+        except TimeoutError as exc:
+            raise LLMError(
+                f"模型请求排队超过 {self._queue_timeout():.0f} 秒",
+                code="queue_timeout", retryable=True,
+            ) from exc
+
+    def guarded_get(self, url: str, **kwargs: Any) -> httpx.Response:
+        """Run a provider diagnostic probe under the same guard and gate."""
+        from quantmaster.runtime.llm import execution_lease_cancelled, reject_http_llm_transport
+
+        reject_http_llm_transport()
+        if execution_lease_cancelled():
+            raise InterruptedError("LLM execution lease cancelled before diagnostic dispatch")
+        try:
+            with self._request_gate().slot(
+                self._max_concurrency(), self._queue_timeout(),
+                cancelled=execution_lease_cancelled,
+            ):
+                with httpx.Client(follow_redirects=True) as client:
+                    response = client.get(url, **kwargs)
+            reject_http_llm_transport()
+            if execution_lease_cancelled():
+                raise InterruptedError("LLM execution lease cancelled after diagnostic response")
+            return response
         except TimeoutError as exc:
             raise LLMError(
                 f"模型请求排队超过 {self._queue_timeout():.0f} 秒",

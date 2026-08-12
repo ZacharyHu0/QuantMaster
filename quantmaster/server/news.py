@@ -5,13 +5,11 @@ from __future__ import annotations
 import logging
 import hashlib
 import sqlite3
-from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
 from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from quantmaster.ai.crawler import AICrawler, NewsStore
@@ -292,9 +290,12 @@ def source_run(source_id: str, request: Request, skip_llm: bool = False) -> dict
     try:
         if NewsSourceStore().get(source_id) is None:
             raise KeyError("资讯来源不存在")
-        return _submit_crawl(
-            CrawlRequest(sources=[source_id], limit=30, skip_llm=skip_llm),
-        )
+        jobs = get_news_jobs()
+        job, created = jobs.submit_source_run(source_id, skip_llm=skip_llm)
+        public = jobs.public(job)
+        public["created"] = bool(created)
+        public["coalesced"] = bool(job.get("coalesced"))
+        return public
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -363,68 +364,18 @@ def news_crawl(request: Request, value: CrawlRequest | None = None,
         raise _error(exc) from exc
 
 
-@router.post("/reanalyze")
+@router.post("/reanalyze", status_code=202)
 def news_reanalyze(value: ReanalyzeRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
-        crawler = AICrawler()
-        if value.mode == "dead_letter":
-            return crawler.recover_dead_letters(
-                ids=value.ids,
-                limit=None if value.ids is None else value.limit,
-                batch_size=value.batch_size,
-                manual=True,
-            )
-        if value.mode == "failed":
-            return crawler.retry_failed(
-                ids=value.ids,
-                limit=None if value.ids is None else value.limit,
-                batch_size=value.batch_size,
-            )
-        if value.ids is None:
-            return crawler.enrich_pending(limit=value.limit, batch_size=value.batch_size)
-        reset = crawler.store.reset_analysis(value.ids)
-        return {
-            "reset": reset,
-            **crawler.enrich_pending(
-                ids=value.ids, limit=value.limit, batch_size=value.batch_size,
-            ),
-        }
+        jobs = get_news_jobs()
+        job, created = jobs.submit_reanalyze(value.model_dump())
+        public = jobs.public(job)
+        public["created"] = bool(created)
+        public["coalesced"] = bool(job.get("coalesced"))
+        return public
     except Exception as exc:
         raise _error(exc) from exc
-
-
-@router.post("/reanalyze/stream")
-def news_reanalyze_stream(value: ReanalyzeRequest, request: Request) -> StreamingResponse:
-    """逐批发送真实标注进度；每个 batch 事件都包含刚刚落库的资讯。"""
-    _require_csrf(request)
-    crawler = AICrawler()
-    selected_ids = value.ids
-    if value.mode == "pending" and value.ids is not None:
-        crawler.store.reset_analysis(value.ids)
-
-    def generate() -> Iterator[str]:
-        try:
-            for event in crawler.enrich_pending_events(
-                ids=selected_ids,
-                limit=(
-                    len(selected_ids) if selected_ids is not None
-                    else None if value.mode in {"failed", "dead_letter"}
-                    else value.limit
-                ),
-                batch_size=value.batch_size,
-                mode=value.mode,
-                manual=value.mode in {"failed", "dead_letter"},
-            ):
-                yield strict_json_dumps(event) + "\n"
-        except Exception as exc:
-            error = _error(exc)
-            yield strict_json_dumps({"type": "error", "message": error.detail}) + "\n"
-
-    return StreamingResponse(
-        generate(), media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @router.get("/{item_id}")

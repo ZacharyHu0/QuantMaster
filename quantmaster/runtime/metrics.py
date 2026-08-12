@@ -182,9 +182,9 @@ _METRICS: RuntimeMetrics | None = None
 _METRICS_LOCK = threading.Lock()
 
 
-def get_runtime_metrics() -> RuntimeMetrics:
+def get_runtime_metrics(path: str | Path | None = None) -> RuntimeMetrics:
     global _METRICS
-    path = get_config().data_root / "runtime_metrics.sqlite"
+    path = Path(path) if path else get_config().data_root / "runtime_metrics.sqlite"
     with _METRICS_LOCK:
         if _METRICS is None or _METRICS.path != path:
             _METRICS = RuntimeMetrics(path)
@@ -225,8 +225,18 @@ class RuntimeMetricsRecorder:
         # than let observability recreate the page-freeze failure mode.
         if os.environ.get("QM_WEB_PROCESS") == "1":
             return
+        # Bind a sample to the configuration generation that accepted it.
+        # Otherwise an item queued before a data-root switch could wake after
+        # that switch and create the *new* root from an old HTTP request.
+        # Web reads must never mutate a cold root indirectly through metrics.
         try:
-            self._queue.put_nowait({"kind": "request", **values})
+            metrics_path = str(get_config().data_root / "runtime_metrics.sqlite")
+        except (OSError, RuntimeError, ValueError):
+            return
+        try:
+            self._queue.put_nowait({
+                "kind": "request", "metrics_path": metrics_path, **values,
+            })
         except queue.Full:
             return
         self._ensure_worker()
@@ -235,7 +245,13 @@ class RuntimeMetricsRecorder:
         if os.environ.get("QM_WEB_PROCESS") == "1":
             return
         try:
-            self._queue.put_nowait({"kind": "node", "node": node, **values})
+            metrics_path = str(get_config().data_root / "runtime_metrics.sqlite")
+        except (OSError, RuntimeError, ValueError):
+            return
+        try:
+            self._queue.put_nowait({
+                "kind": "node", "node": node, "metrics_path": metrics_path, **values,
+            })
         except queue.Full:
             return
         self._ensure_worker()
@@ -246,8 +262,9 @@ class RuntimeMetricsRecorder:
             if item is None:
                 return
             try:
-                metrics = get_runtime_metrics()
                 kind = item.pop("kind", "")
+                metrics_path = item.pop("metrics_path", "")
+                metrics = get_runtime_metrics(metrics_path or None)
                 if kind == "request":
                     metrics.record_request(**item)
                 elif kind == "node":

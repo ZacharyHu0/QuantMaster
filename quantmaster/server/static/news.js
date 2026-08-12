@@ -21,6 +21,7 @@
     eventFocusLoadedDays: null,
     eventFocusRequest: 0,
     eventFocusRetryDays: 7,
+    tasks: new Map(),
   };
 
   const feed = document.getElementById('news-out');
@@ -66,33 +67,97 @@
     return window.QuantMasterManagement.request(path, options);
   }
 
-  const refreshActiveStates = new Set(['queued', 'running', 'cancelling', 'interrupted']);
+  async function submitAnnotationTask(mode, ids) {
+    const accepted = await secure('/api/v1/news/reanalyze', {
+      method: 'POST', body: {mode, ids: ids?.length ? ids : undefined, limit: 100, batch_size: 5},
+    });
+    if (!(accepted.job?.id || accepted.id)) throw new Error('服务未返回资讯任务编号');
+    return accepted.job || accepted;
+  }
 
-  async function waitForRefreshJob(initial, onProgress = () => {}) {
-    let job = initial;
-    let after = 0;
-    while (refreshActiveStates.has(String(job?.status || ''))) {
-      let latestEvent = null;
-      try {
-        const events = await api(
-          `/api/v1/jobs/${encodeURIComponent(job.id)}/events?after=${after}&limit=100`,
-          {cache: 'no-store'},
-        );
-        const items = Array.isArray(events?.items) ? events.items : [];
-        if (items.length) {
-          after = Math.max(after, ...items.map(item => Number(item.seq || 0)));
-          latestEvent = items.at(-1);
-        }
-      } catch (_) { /* status polling remains the recovery path. */ }
-      onProgress(job, latestEvent);
-      await new Promise(resolve => window.setTimeout(resolve, 650));
-      job = await api(`/api/v1/jobs/${encodeURIComponent(job.id)}`, {cache: 'no-store'});
+  function taskIsActive(task) {
+    return ['queued', 'running', 'cancelling'].includes(task.status)
+      || (task.status === 'interrupted' && !task.manual_retry_required);
+  }
+
+  function retainRecentNewsTasks() {
+    const terminal = [...state.tasks.values()]
+      .filter(task => !taskIsActive(task))
+      .sort((left, right) => Number(right._finishedAt || 0) - Number(left._finishedAt || 0));
+    for (const task of terminal.slice(4)) state.tasks.delete(task.id);
+  }
+
+  function renderNewsTasks() {
+    retainRecentNewsTasks();
+    const tasks = [...state.tasks.values()];
+    if (!tasks.length) return false;
+    const live = document.getElementById('news-live-state');
+    const failed = tasks.some(task => !taskIsActive(task) &&
+      !['completed', 'completed_with_errors'].includes(task.status));
+    live.className = `news-live-state ${failed ? 'degraded' : 'ready'}`;
+    live.innerHTML = tasks.map(task => {
+      const label = task._label || '资讯任务';
+      const message = `${label}：${task.phase || task.status}${task.detail ? ` · ${task.detail}` : ''}`;
+      const cancel = taskIsActive(task) && task.status !== 'cancelling'
+        ? ` <button type="button" data-news-task-cancel="${html(task.id)}">取消</button>` : '';
+      const retry = task.manual_retry_required && task.can_retry
+        ? ` <button type="button" data-news-task-retry="${html(task.id)}">按当前配置重试</button>` : '';
+      return `<span class="news-task-state"><i></i>${html(message)}${cancel}${retry}</span>`;
+    }).join(' ');
+    live.onclick = async event => {
+      const button = event.target.closest('[data-news-task-cancel]');
+      const task = button && state.tasks.get(button.dataset.newsTaskCancel);
+      if (task) {
+        await secure(task.links?.cancel || `/api/v1/jobs/${encodeURIComponent(task.id)}/cancel`, {method: 'POST'});
+        state.tasks.set(task.id, {...task, status: 'cancelling', phase: '正在取消'});
+        renderNewsTasks();
+        return;
+      }
+      const retryButton = event.target.closest('[data-news-task-retry]');
+      const retryTask = retryButton && state.tasks.get(retryButton.dataset.newsTaskRetry);
+      if (!retryTask) return;
+      const retried = await secure(
+        retryTask.links?.retry || `/api/v1/jobs/${encodeURIComponent(retryTask.id)}/retry`,
+        {method: 'POST'},
+      );
+      void watchNewsTask({...retried, _label: retryTask._label}, retryTask._label).catch(error =>
+        report(`${retryTask._label || '资讯任务'}未完成`, error));
+    };
+    return true;
+  }
+
+  async function watchNewsTask(task, label) {
+    const id = task?.id;
+    if (!id) throw new Error('服务未返回资讯任务编号');
+    let current = {...task, _label: label};
+    state.tasks.set(id, current);
+    renderNewsTasks();
+    while (taskIsActive(current)) {
+      const job = await api(current.links?.self || `/api/v1/jobs/${encodeURIComponent(id)}`);
+      current = {...job, _label: label};
+      if (!taskIsActive(current)) current._finishedAt = Date.now();
+      state.tasks.set(id, current);
+      renderNewsTasks();
+      if (taskIsActive(current)) await new Promise(resolve => setTimeout(resolve, 500));
     }
-    onProgress(job);
-    if (!['completed', 'completed_with_warnings'].includes(String(job?.status || ''))) {
-      throw new Error(job?.detail || job?.error || '资讯刷新未完成');
+    if (current.manual_retry_required) return current;
+    if (current.status !== 'completed' && current.status !== 'completed_with_errors') {
+      const finishedAt = current._finishedAt;
+      window.setTimeout(() => {
+        if (state.tasks.get(id)?._finishedAt !== finishedAt) return;
+        state.tasks.delete(id);
+        if (!renderNewsTasks()) renderSourceHealth();
+      }, 15000);
+      throw new Error(current.detail || `${label}未完成`);
     }
-    return job;
+    await Promise.all([loadFeed(), loadStats(), loadEventFocus(), loadSources()]);
+    const finishedAt = current._finishedAt;
+    window.setTimeout(() => {
+      if (state.tasks.get(id)?._finishedAt !== finishedAt) return;
+      state.tasks.delete(id);
+      if (!renderNewsTasks()) renderSourceHealth();
+    }, 15000);
+    return current;
   }
 
   function elapsedText() {
@@ -136,14 +201,6 @@
     setAnnotationProgress({percent, phase, detail});
     clearTimeout(state.annotationHideTimer);
     state.annotationHideTimer = setTimeout(() => { panel.hidden = true; }, 7000);
-  }
-
-  async function streamAnnotationEvents(mode, ids, onEvent) {
-    return window.QuantMasterNDJSON('/api/v1/news/reanalyze/stream', {
-      method: 'POST', credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode, ids: ids?.length ? ids : undefined, limit: 100, batch_size: 5}),
-    }, onEvent);
   }
 
   function localDate(value) {
@@ -526,6 +583,7 @@
       return `<div class="news-source-health-row" title="${html(source.last_error || '')}"><i class="${html(status)}"></i><span>${html(source.name)}</span><time>${stamp ? `${stamp.day} ${stamp.time}` : '未运行'}</time></div>`;
     }).join('') : '<span class="news-muted">没有已启用的来源</span>';
     const failed = enabled.filter(source => source.last_status === 'failed').length;
+    if (renderNewsTasks()) return;
     const live = document.getElementById('news-live-state');
     live.className = `news-live-state ${failed ? 'degraded' : 'ready'}`;
     live.innerHTML = `<i></i>${failed ? `${failed} 个来源异常` : `${enabled.length} 个来源已启用`}`;
@@ -704,19 +762,10 @@
 
   sourceForm.querySelector('[data-source-run]').onclick = async () => {
     if (!state.selectedSource) return;
-    const button = sourceForm.querySelector('[data-source-run]');
-    button.disabled = true;
     try {
-      const submitted = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
-      report(submitted.coalesced ? '已关联到进行中的来源采集' : '来源采集已在后台启动', null, 'success');
-      const completed = await waitForRefreshJob(submitted, job => {
-        button.textContent = `采集中 ${Math.max(0, Number(job.progress || 0))}%`;
-      });
-      const result = completed.result || {};
-      report(`采集完成：新增 ${result.saved || 0} 条`, null, 'success');
-      await Promise.all([loadSources(), loadFeed(), loadStats(), loadEventFocus()]);
+      const result = await secure(`/api/v1/news/sources/${encodeURIComponent(state.selectedSource.id)}/run`, {method: 'POST'});
+      void watchNewsTask(result, '来源采集任务').catch(() => renderNewsTasks());
     } catch (error) { report('来源采集失败', error); }
-    finally { button.disabled = false; button.textContent = '立即采集'; }
   };
 
   sourceForm.querySelector('[data-source-clear-token]').onclick = () => {
@@ -791,14 +840,8 @@
     button.disabled = true;
     button.textContent = '同步中…';
     try {
-      const submitted = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
-      report(submitted.coalesced ? '已关联到进行中的资讯刷新' : '资讯刷新已在后台启动', null, 'success');
-      const completed = await waitForRefreshJob(submitted, job => {
-        button.textContent = `同步中 ${Math.max(0, Number(job.progress || 0))}%`;
-      });
-      const result = completed.result || {};
-      report(`同步完成：抓取 ${result.fetched || 0} 条，新增 ${result.saved || 0} 条`, null, 'success');
-      await Promise.all([loadFeed(), loadStats(), loadEventFocus(), loadSources()]);
+      const result = await secure('/api/v1/news/crawl', {method: 'POST', body: {limit: 30}});
+      void watchNewsTask(result, '资讯同步任务').catch(() => renderNewsTasks());
     } catch (error) { report('同步失败', error); }
     finally { button.disabled = false; button.textContent = '立即同步'; }
   };
@@ -842,75 +885,24 @@
     button.setAttribute('aria-busy', 'true');
     setActionLabel(button, copy.active);
     startAnnotationProgress({phase: copy.preparing, detail: copy.reading});
-    let finalEvent = null;
     try {
-      await streamAnnotationEvents(mode, ids, update => {
-        if (update.type === 'error') throw new Error(update.message || '标注流异常中断');
-        if (update.type === 'start') {
-          const total = Number(update.total || 0);
-          setActionLabel(button, total ? `${copy.active} 0/${total}` : copy.empty);
-          setAnnotationProgress({
-            percent: total ? 0 : 100,
-            phase: total ? `共 ${total} 条 · ${update.batch_count} 个批次` : copy.empty,
-            detail: total ? '每个批次完成后会立即写入并刷新事件流。' :
-              (update.reason || copy.emptyDetail),
-            count: `0 / ${total}`,
-          });
-        }
-        if (update.type === 'batch') {
-          const processed = Number(update.processed || 0);
-          const total = Number(update.total || 0);
-          const percent = total ? processed / total * 100 : 100;
-          setActionLabel(button, `${copy.active} ${processed}/${total}`);
-          setAnnotationProgress({
-            percent,
-            phase: `第 ${update.batch} / ${update.batch_count} 批已写入`,
-            detail: update.error
-              ? `本批完成 ${update.batch_completed} 条，失败 ${update.batch_failed} 条：${update.error}`
-              : `本批 ${update.batch_completed} 条已完成，事件流与消息面统计正在刷新。`,
-            count: `完成 ${update.completed} · 失败 ${update.failed} · ${processed} / ${total}`,
-          });
-          mergeAnnotationItems(update.updated_items || []);
-          clearTimeout(state.annotationStatsTimer);
-          state.annotationStatsTimer = setTimeout(() => {
-            loadStats();
-            loadEventFocus();
-          }, 160);
-        }
-        if (update.type === 'complete') finalEvent = update;
+      const task = await submitAnnotationTask(mode, ids);
+      setAnnotationProgress({
+        percent: 0, phase: '任务已入队',
+        detail: '可继续处理其他资讯；完成后会自动刷新。', count: '等待执行',
       });
-      finalEvent ||= {processed: 0, completed: 0, failed: 0};
-      const failed = Number(finalEvent.failed || 0);
-      const processed = Number(finalEvent.processed || 0);
-      const completed = Number(finalEvent.completed || 0);
-      const emptyDetail = finalEvent.reason || copy.emptyDetail;
-      const failureDestination = mode === 'dead_letter' ? '重新暂停自动重试' : '进入退避重试';
-      document.getElementById('news-annotation-count').textContent =
-        `完成 ${completed} · 失败 ${failed} · ${processed} / ${processed}`;
-      finishAnnotationProgress(
-        failed ? 'warning' : 'success',
-        processed ? copy.complete : copy.empty,
-        failed ? `${completed} 条完成，${failed} 条${failureDestination}。` :
-          processed ? `${completed} 条结果已全部写入事件流。` : emptyDetail,
-      );
-      report(
-        processed ? `${copy.report}：${completed}/${processed}` : emptyDetail,
-        null, failed ? 'warning' : 'success',
-      );
-      if (failed) {
-        const recoveryAction = mode === 'dead_letter'
-          ? '已完成结果可以使用；失败项仍可手动恢复，自动任务会等待下一个窗口。'
-          : '已完成结果可以使用；可点击“重试失败项”再次分析失败资讯。';
-        window.QuantMasterRunInfo.add('warning', '资讯分析', '部分资讯标注失败', {
-          detail:`完成 ${completed} 条，失败 ${failed} 条；失败项已${failureDestination}。`,
-          action:recoveryAction,
-          key:'news:annotation:partial',
-        });
-      }
-      const [, stats] = await Promise.all([loadFeed(), loadStats(), loadEventFocus()]);
-      if (!failed && Number(stats?.queue?.failed || 0) === 0) {
-        window.QuantMasterRunInfo.resolve('news:annotation:partial');
-      }
+      void watchNewsTask(task, copy.report).then(job => {
+        const partial = job.status === 'completed_with_errors';
+        finishAnnotationProgress(
+          partial ? 'warning' : 'success', partial ? '标注部分完成' : copy.complete,
+          job.detail || (partial ? '部分资讯需要重试。' : '结果已写入并刷新。'),
+          Number(job.progress || 100),
+        );
+        report(partial ? '标注任务部分完成' : copy.report, null, partial ? 'warning' : 'success');
+      }).catch(error => {
+        finishAnnotationProgress('failed', '标注任务中断', error.message);
+        renderNewsTasks();
+      });
     } catch (error) {
       const current = Number(document.getElementById('news-annotation-track').getAttribute('aria-valuenow'));
       finishAnnotationProgress('failed', '标注任务中断', error.message, current);

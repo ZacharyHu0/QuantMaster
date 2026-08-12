@@ -234,7 +234,7 @@ class PythonFactorMiner:
 
         for round_number in range(1, rounds + 1):
             if cancelled and cancelled():
-                break
+                raise InterruptedError("研究任务已请求取消")
             remaining = candidate_limit - len(candidates)
             if remaining <= 0:
                 break
@@ -248,12 +248,14 @@ class PythonFactorMiner:
                     features=feature_catalog, feedback=feedback, horizon=horizon,
                 )
                 completed += 1
+            except InterruptedError:
+                raise
             except Exception as exc:
                 warnings.append({"code": "llm_round_failed", "message": str(exc)[:500]})
                 continue
             for raw in proposals:
                 if cancelled and cancelled():
-                    break
+                    raise InterruptedError("研究任务已请求取消")
                 code = str(raw.get("code") or "").strip()
                 try:
                     candidate_id = validate_python_factor(code)["sha256"][:16]
@@ -350,6 +352,8 @@ class PythonFactorMiner:
                     candidate.status = "validated"
                     feedback.append({"name": candidate.name, "status": "validated",
                                      "valid_metrics": candidate.valid_metrics})
+                except InterruptedError:
+                    raise
                 except Exception as exc:
                     candidate.status, candidate.error = "rejected", str(exc)[:1000]
                     feedback.append({"name": candidate.name, "status": "rejected",
@@ -380,7 +384,7 @@ class PythonFactorMiner:
         test_features = _feature_slice(features, split, "test")
         for candidate in selected:
             if cancelled and cancelled():
-                break
+                raise InterruptedError("研究任务已请求取消")
             try:
                 values = self.runner.execute(candidate.code, test_features, candidate.selected_params)
                 candidate.test_metrics = _candidate_metrics(values, test_features["close"], horizon)

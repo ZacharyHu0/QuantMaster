@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import threading
 import time
 from typing import Any
@@ -13,8 +14,12 @@ from quantmaster.config import get_config
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.runtime.json import strict_json_dumps
 
-TASK_TYPE = "news.crawl"
-ALGORITHM_VERSION = "QM_NEWS_CRAWL_V3"
+CRAWL_TASK_TYPE = "news.crawl"
+SOURCE_RUN_TASK_TYPE = "news.source_run"
+REANALYZE_TASK_TYPE = "news.reanalyze"
+TASK_TYPE = CRAWL_TASK_TYPE  # stable import for existing callers
+_TASK_TYPES = frozenset({CRAWL_TASK_TYPE, SOURCE_RUN_TASK_TYPE, REANALYZE_TASK_TYPE})
+ALGORITHM_VERSION = "QM_NEWS_CRAWL_V4"
 
 
 def _canonical_source_state(
@@ -83,6 +88,7 @@ def run_news_crawl_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
         group=str(spec.get("group") or "") or None,
         limit=max(1, min(100, int(spec.get("limit") or 30))),
         skip_llm=bool(spec.get("skip_llm")),
+        cancelled=context.cancelled,
     )
     context.ensure_active()
     context.progress(96, "发布资讯结果", "写入不可变任务产物")
@@ -108,15 +114,65 @@ def run_news_crawl_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
     return JobOutcome("completed", detail, artifact["id"])
 
 
+def run_news_source_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+    """Source-specific crawl keeps its own durable task identity."""
+    return run_news_crawl_job(context, spec)
+
+
+def run_news_reanalyze_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+    """Reanalyze in the worker, never via a request-held stream."""
+    context.progress(2, "准备资讯重分析", "申领待标注资讯")
+    context.ensure_active()
+    crawler = AICrawler()
+    ids = [int(value) for value in spec.get("ids") or ()] or None
+    limit = max(1, min(1000, int(spec.get("limit") or 100)))
+    batch_size = max(1, min(10, int(spec.get("batch_size") or 5)))
+    mode = str(spec.get("mode") or "pending")
+    if mode not in {"pending", "failed", "dead_letter"}:
+        raise ValueError("未知资讯重分析模式")
+    if mode == "pending" and ids is not None:
+        reset = crawler.store.reset_analysis(ids)
+    else:
+        reset = 0
+    selected_limit = None if mode in {"failed", "dead_letter"} and ids is None else limit
+    result = crawler.enrich_pending(
+        ids=ids,
+        limit=selected_limit,
+        batch_size=batch_size,
+        mode=mode,  # type: ignore[arg-type]
+        manual=mode in {"failed", "dead_letter"},
+        cancelled=context.cancelled,
+    )
+    context.ensure_active()
+    payload = {"status": "ok", "reset": reset, **result, "mode": mode}
+    context.progress(96, "发布重分析结果", "写入不可变任务产物")
+    artifact = context.write_artifact(
+        "news.reanalyze.result",
+        payload,
+        {"schema_version": "1.0", "lineage": {"algorithm_version": ALGORITHM_VERSION}},
+    )
+    return JobOutcome("completed", f"资讯重分析完成：{int(result.get('completed') or 0)} 条", artifact["id"])
+
+
 class NewsJobs:
     def __init__(self, runtime: UnifiedJobRuntime | None = None):
         self.runtime = runtime or UnifiedJobRuntime(
             UnifiedJobStore(get_config().data_root / "jobs.sqlite"), max_workers=1,
         )
         self.runtime.register(
-            TASK_TYPE,
+            CRAWL_TASK_TYPE,
             run_news_crawl_job,
             process_entrypoint="quantmaster.ai.news_jobs:run_news_crawl_job",
+        )
+        self.runtime.register(
+            SOURCE_RUN_TASK_TYPE,
+            run_news_source_job,
+            process_entrypoint="quantmaster.ai.news_jobs:run_news_source_job",
+        )
+        self.runtime.register(
+            REANALYZE_TASK_TYPE,
+            run_news_reanalyze_job,
+            process_entrypoint="quantmaster.ai.news_jobs:run_news_reanalyze_job",
         )
 
     def submit(
@@ -134,22 +190,75 @@ class NewsJobs:
             "skip_llm": bool(skip_llm),
         }
         return self.runtime.submit(
-            TASK_TYPE,
+            CRAWL_TASK_TYPE,
             spec,
             input_fingerprint=_input_fingerprint(spec),
             algorithm_version=ALGORITHM_VERSION,
             deadline_seconds=3600,
             max_attempts=2,
+            llm_scope="" if skip_llm else "news",
+        )
+
+    def submit_source_run(
+        self, source_id: str, *, skip_llm: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        spec = {
+            "sources": [str(source_id)],
+            "group": "",
+            "limit": 30,
+            "skip_llm": bool(skip_llm),
+            "source_run": True,
+        }
+        return self.runtime.submit(
+            SOURCE_RUN_TASK_TYPE,
+            spec,
+            input_fingerprint=_input_fingerprint(spec),
+            algorithm_version=ALGORITHM_VERSION,
+            deadline_seconds=3600,
+            max_attempts=2,
+            llm_scope="" if skip_llm else "news",
+        )
+
+    def submit_reanalyze(self, spec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        normalized = {
+            "ids": [int(value) for value in spec.get("ids") or ()],
+            "limit": max(1, min(1000, int(spec.get("limit") or 100))),
+            "batch_size": max(1, min(10, int(spec.get("batch_size") or 5))),
+            "mode": str(spec.get("mode") or "pending"),
+        }
+        try:
+            max_news_id = NewsStore(read_only=True).max_id()
+        except (FileNotFoundError, OSError, RuntimeError, ValueError, sqlite3.Error):
+            # A cold cache is still a valid asynchronous request.  The worker
+            # owns any first-write initialization and will report an empty
+            # reanalysis result rather than making the HTTP route fail.
+            max_news_id = 0
+        return self.runtime.submit(
+            REANALYZE_TASK_TYPE,
+            normalized,
+            input_fingerprint=hashlib.sha256(
+                strict_json_dumps({
+                    "spec": normalized,
+                    "max_news_id": max_news_id,
+                }, sort_keys=True).encode("utf-8"),
+            ).hexdigest(),
+            algorithm_version="QM_NEWS_REANALYZE_V1",
+            deadline_seconds=3600,
+            max_attempts=2,
+            llm_scope="news",
         )
 
     def get(self, job_id: str) -> dict[str, Any]:
         value = self.runtime.store.get(job_id)
-        if str(value.get("type") or "") != TASK_TYPE:
+        if str(value.get("type") or "") not in _TASK_TYPES:
             raise KeyError(job_id)
         return value
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
-        return self.runtime.store.list(limit, job_type=TASK_TYPE)
+        return [
+            value for value in self.runtime.store.list(max(1, min(1000, int(limit) * 3)))
+            if str(value.get("type") or "") in _TASK_TYPES
+        ][:limit]
 
     def public(self, value: dict[str, Any]) -> dict[str, Any]:
         public = self.runtime.public(value)

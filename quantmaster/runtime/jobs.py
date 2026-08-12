@@ -156,6 +156,8 @@ class UnifiedJobStore:
                     lease_token TEXT NOT NULL DEFAULT '',
                     heartbeat_at REAL NOT NULL DEFAULT 0,
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    llm_scope TEXT NOT NULL DEFAULT '', llm_revision TEXT NOT NULL DEFAULT '',
+                    cancellation_reason TEXT NOT NULL DEFAULT '',
                     deadline_seconds REAL NOT NULL DEFAULT 300,
                     result_artifact_id TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -196,6 +198,9 @@ class UnifiedJobStore:
                 "input_fingerprint": "TEXT NOT NULL DEFAULT ''",
                 "algorithm_version": "TEXT NOT NULL DEFAULT ''",
                 "lease_token": "TEXT NOT NULL DEFAULT ''",
+                "llm_scope": "TEXT NOT NULL DEFAULT ''",
+                "llm_revision": "TEXT NOT NULL DEFAULT ''",
+                "cancellation_reason": "TEXT NOT NULL DEFAULT ''",
             }.items():
                 if name not in columns:
                     connection.execute(
@@ -257,6 +262,8 @@ class UnifiedJobStore:
         algorithm_version: str = "",
         deadline_seconds: float = 300,
         max_attempts: int = 2,
+        llm_scope: str = "",
+        llm_revision: str = "",
     ) -> tuple[dict[str, Any], bool]:
         normalized = dict(spec)
         spec_json = _canonical(normalized)
@@ -319,8 +326,8 @@ class UnifiedJobStore:
             connection.execute(
                 "INSERT INTO runtime_jobs "
                 "(id,type,spec_json,spec_hash,idempotency_key,input_fingerprint,algorithm_version,"
-                "status,attempt,max_attempts,deadline_seconds,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,'queued',1,?,?,?,?)",
+                "status,attempt,max_attempts,deadline_seconds,llm_scope,llm_revision,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'queued',1,?,?,?,?,?,?)",
                 (
                     job_id,
                     str(job_type),
@@ -331,6 +338,8 @@ class UnifiedJobStore:
                     algorithm,
                     max(1, min(10, int(max_attempts))),
                     max(1.0, min(3600.0, float(deadline_seconds))),
+                    str(llm_scope)[:40],
+                    str(llm_revision)[:120],
                     now,
                     now,
                 ),
@@ -477,16 +486,138 @@ class UnifiedJobStore:
                 recovered.append(str(row["id"]))
         return recovered
 
+    @staticmethod
+    def _field(value: Mapping[str, Any] | Any, name: str) -> Any:
+        try:
+            return value.get(name) if hasattr(value, "get") else value[name]
+        except (KeyError, IndexError):
+            return ""
+
+    @classmethod
+    def _legacy_llm_without_revision(cls, job: Mapping[str, Any] | Any) -> bool:
+        """Identify only persisted task kinds that may invoke a model.
+
+        A skip-LLM crawl and settings.apply are normal recoverable jobs.  Older
+        model work without a revision, however, must never silently resume
+        against a different credential or provider configuration.
+        """
+        if str(cls._field(job, "llm_scope") or "") and str(cls._field(job, "llm_revision") or ""):
+            return False
+        task_type = str(cls._field(job, "type") or "")
+        if task_type in {
+            "news.reanalyze", "settings.diagnostic", "market.stock_analysis",
+            "lab.discover_llm", "lab.cloud_suggestion",
+            "automation.contextual_chat", "automation.conversation_compaction",
+            "automation.fast_news_scan", "automation.official_news_scan",
+            "automation.periodic_news_scan", "automation.news_dead_letter_recovery",
+        }:
+            return True
+        if task_type not in {"news.crawl", "news.source_run"}:
+            return False
+        spec = cls._field(job, "spec")
+        if not isinstance(spec, Mapping):
+            try:
+                spec = json.loads(str(cls._field(job, "spec_json") or "{}"))
+            except (TypeError, ValueError):
+                return True
+        return not bool(spec.get("skip_llm"))
+
+    def interrupt_legacy_llm(self) -> int:
+        """Mark unrevisioned legacy provider work for an explicit manual retry."""
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT * FROM runtime_jobs WHERE llm_scope='' AND status "
+                "IN ('queued','interrupted') AND phase<>'需要手动重试'"
+            ).fetchall()
+            affected: list[str] = []
+            for row in rows:
+                if not self._legacy_llm_without_revision(row):
+                    continue
+                connection.execute(
+                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
+                    "phase='需要手动重试',detail='legacy LLM job has no execution revision',updated_at=? WHERE id=?",
+                    (_utc_now(), row["id"]),
+                )
+                self._append_event_conn(
+                    connection, str(row["id"]), int(row["attempt"]), "job_interrupted",
+                    {"reason": "legacy_llm_job_missing_revision"},
+                )
+                affected.append(str(row["id"]))
+        return len(affected)
+
+    def requires_llm_manual_retry(self, job: Mapping[str, Any] | Any) -> bool:
+        if self._legacy_llm_without_revision(job):
+            return True
+        scope = str(self._field(job, "llm_scope") or "")
+        if not scope:
+            return False
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        return not get_llm_execution_coordinator().current(
+            scope, str(self._field(job, "llm_revision") or ""),
+        )
+
+    def interrupt_stale_llm(self) -> int:
+        """Force an explicit retry for queued work from a rotated revision."""
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        coordinator = get_llm_execution_coordinator()
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id,attempt,llm_scope,llm_revision FROM runtime_jobs "
+                "WHERE llm_scope<>'' AND status IN ('queued','interrupted') "
+                "AND phase<>'需要手动重试'"
+            ).fetchall()
+            affected: list[str] = []
+            for row in rows:
+                if coordinator.current(str(row["llm_scope"]), str(row["llm_revision"])):
+                    continue
+                connection.execute(
+                    "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
+                    "cancel_requested=0,phase='需要手动重试',"
+                    "detail='LLM configuration revision is stale',updated_at=? WHERE id=?",
+                    (_utc_now(), row["id"]),
+                )
+                self._append_event_conn(
+                    connection, str(row["id"]), int(row["attempt"]), "job_interrupted",
+                    {"reason": "stale_llm_revision"},
+                )
+                affected.append(str(row["id"]))
+        return len(affected)
+
+    def attach_retry_revision(self, job_id: str) -> dict[str, Any]:
+        """Bind an explicit retry to the current opaque execution revision."""
+        job = self.get(job_id)
+        scope = str(job.get("llm_scope") or "")
+        if not scope and not self._legacy_llm_without_revision(job):
+            return job
+        scope = "news" if scope == "news" or str(job.get("type") or "").startswith("news.") else "global"
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        revision = get_llm_execution_coordinator().revision(scope)
+        with self._conn() as connection:
+            connection.execute(
+                "UPDATE runtime_jobs SET llm_scope=?,llm_revision=?,cancellation_reason='',"
+                "detail='已按当前 LLM 配置手动重试',updated_at=? WHERE id=?",
+                (scope, revision, _utc_now(), job_id),
+            )
+        return self.get(job_id)
+
     def claim(self, job_id: str, owner: str, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
         now = time.time()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT status,attempt,max_attempts FROM runtime_jobs WHERE id=?", (job_id,),
+                "SELECT status,attempt,max_attempts,type,llm_scope,llm_revision "
+                "FROM runtime_jobs WHERE id=?", (job_id,),
             ).fetchone()
             if current is None:
                 return False
             status = str(current["status"])
+            if status == "interrupted" and self.requires_llm_manual_retry(current):
+                return False
             attempt = int(current["attempt"])
             if status not in {"queued", "interrupted"}:
                 return False
@@ -601,6 +732,36 @@ class UnifiedJobStore:
             )
         return self.get(job_id)
 
+    def cancel_stale_llm(self, scope: str, revision: str, reason: str) -> dict[str, int]:
+        """Cancel queued stale work and signal active requests to converge safely."""
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id,attempt,status FROM runtime_jobs WHERE llm_scope=? AND llm_revision<>? "
+                "AND status IN ('queued','interrupted','running','cancelling')",
+                (str(scope), str(revision)),
+            ).fetchall()
+            now = _utc_now()
+            for row in rows:
+                terminal = str(row["status"]) in {"queued", "interrupted"}
+                connection.execute(
+                    "UPDATE runtime_jobs SET status=?,cancel_requested=1,cancellation_reason=?,"
+                    "phase='正在取消',detail='LLM configuration changed',"
+                    "finished_at=CASE WHEN ? THEN ? ELSE finished_at END,updated_at=? WHERE id=?",
+                    (
+                        "cancelled" if terminal else "cancelling", str(reason)[:240],
+                        int(terminal), now, now, row["id"],
+                    ),
+                )
+                self._append_event_conn(
+                    connection, str(row["id"]), int(row["attempt"]),
+                    "job_cancel_requested", {"reason": str(reason)[:240]},
+                )
+        return {
+            "queued_cancelled": sum(str(row["status"]) in {"queued", "interrupted"} for row in rows),
+            "running_cancelling": sum(str(row["status"]) in {"running", "cancelling"} for row in rows),
+        }
+
     def cancelled(
         self, job_id: str, owner: str = "", lease_token: str = "",
     ) -> bool:
@@ -642,12 +803,27 @@ class UnifiedJobStore:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT attempt FROM runtime_jobs WHERE id=? AND owner=? AND lease_token=? "
+                "SELECT attempt,cancel_requested,llm_scope,llm_revision FROM runtime_jobs "
+                "WHERE id=? AND owner=? AND lease_token=? "
                 "AND status IN ('running','cancelling') AND lease_expires>?",
                 (job_id, owner, str(lease_token), time.time()),
             ).fetchone()
             if row is None:
                 raise JobLeaseLost(job_id)
+            # Cancellation and configuration rotation are durable fences, not
+            # advisory UI state.  A provider can return in the tiny interval
+            # between a handler's final ``ensure_active`` and this terminal
+            # ledger update; never let that late result revive the task.
+            stale_revision = False
+            scope = str(row["llm_scope"] or "")
+            if scope:
+                from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+                stale_revision = not get_llm_execution_coordinator().current(
+                    scope, str(row["llm_revision"] or ""),
+                )
+            if bool(row["cancel_requested"]) or stale_revision:
+                outcome = JobOutcome("cancelled", "任务已取消；已丢弃迟到结果")
             terminal = outcome.status in TERMINAL_STATUSES
             progress = 100 if outcome.status in {"completed", "completed_with_errors"} else None
             connection.execute(
@@ -969,6 +1145,8 @@ class JobContext:
         self.deadline_seconds = float(job["deadline_seconds"])
         self._deadline_at = time.monotonic() + self.deadline_seconds
         self._lease_alive = lease_alive
+        self.llm_scope = str(job.get("llm_scope") or "")
+        self.llm_revision = str(job.get("llm_revision") or "")
 
     def emit(self, event_type: str, payload: Mapping[str, Any] | None = None) -> int:
         self.ensure_active()
@@ -987,6 +1165,11 @@ class JobContext:
     def cancelled(self) -> bool:
         if not self._lease_alive.is_set() or self.runtime.stopping:
             return True
+        if self.llm_scope and self.llm_revision:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            if not get_llm_execution_coordinator().current(self.llm_scope, self.llm_revision):
+                return True
         return self.store.cancelled(
             self.job_id, self.runtime.identity.value, self._lease_token,
         )
@@ -1000,6 +1183,11 @@ class JobContext:
             raise JobLeaseLost(self.job_id)
         if self.runtime.stopping:
             raise InterruptedError("worker stopped")
+        if self.llm_scope and self.llm_revision:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            if not get_llm_execution_coordinator().current(self.llm_scope, self.llm_revision):
+                raise InterruptedError("LLM configuration revision is no longer current")
         if self.store.cancelled(
             self.job_id, self.runtime.identity.value, self._lease_token,
         ):
@@ -1070,6 +1258,8 @@ class ProcessJobContext:
         self.attempt = int(job["attempt"])
         self.deadline_seconds = float(job["deadline_seconds"])
         self._deadline_at = time.monotonic() + self.deadline_seconds
+        self.llm_scope = str(job.get("llm_scope") or "")
+        self.llm_revision = str(job.get("llm_revision") or "")
 
     def emit(self, event_type: str, payload: Mapping[str, Any] | None = None) -> int:
         self.ensure_active()
@@ -1095,6 +1285,11 @@ class ProcessJobContext:
             raise JobDeadlineExceeded(
                 f"任务尝试超过截止时间 {self.deadline_seconds:.0f} 秒"
             )
+        if self.llm_scope and self.llm_revision:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            if not get_llm_execution_coordinator().current(self.llm_scope, self.llm_revision):
+                raise InterruptedError("LLM configuration revision is no longer current")
         if self.store.cancelled(self.job_id, self.owner, self._lease_token):
             raise InterruptedError("job cancelled")
 
@@ -1165,7 +1360,15 @@ def _run_process_handler(
         os.environ["QM_COMPUTE_CHILD"] = "1"
         handler = _resolve_process_entrypoint(entrypoint)
         context = ProcessJobContext(store_path, job_id, owner, lease_token)
-        outcome = handler(context, dict(spec))
+        if context.llm_scope:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            with get_llm_execution_coordinator().lease(
+                context, context.llm_scope, context.llm_revision,
+            ):
+                outcome = handler(context, dict(spec))
+        else:
+            outcome = handler(context, dict(spec))
         if not isinstance(outcome, JobOutcome):
             raise TypeError("进程任务 handler 必须返回 JobOutcome")
         context.ensure_active()
@@ -1215,6 +1418,9 @@ class UnifiedJobRuntime:
         )
         self._dispatcher_stop = threading.Event()
         self._dispatcher: threading.Thread | None = None
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        get_llm_execution_coordinator().register_store(self.store)
 
     @property
     def stopping(self) -> bool:
@@ -1268,8 +1474,14 @@ class UnifiedJobRuntime:
         if not self._dispatch_enabled or self.stopping:
             return
         self.store.recover_expired()
+        self.store.interrupt_legacy_llm()
+        self.store.interrupt_stale_llm()
         for job in self.store.list(1000, job_type=job_type):
-            if job["status"] in {"queued", "interrupted"} and job["type"] in self._handlers:
+            if (
+                job["status"] in {"queued", "interrupted"}
+                and job["type"] in self._handlers
+                and not self.store.requires_llm_manual_retry(job)
+            ):
                 self._schedule(job["id"])
 
     def _dispatch_loop(self) -> None:
@@ -1318,11 +1530,17 @@ class UnifiedJobRuntime:
         algorithm_version: str = "",
         deadline_seconds: float = 300,
         max_attempts: int = 2,
+        llm_scope: str = "",
     ) -> tuple[dict[str, Any], bool]:
         if self.stopping:
             raise RuntimeError("任务运行时正在维护或已经停止")
         if job_type not in self._handlers:
             raise ValueError(f"任务类型未注册：{job_type}")
+        llm_revision = ""
+        if llm_scope:
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            llm_revision = get_llm_execution_coordinator().revision(llm_scope)
         job, created = self.store.submit(
             job_type,
             spec,
@@ -1331,6 +1549,8 @@ class UnifiedJobRuntime:
             algorithm_version=algorithm_version,
             deadline_seconds=deadline_seconds,
             max_attempts=max_attempts,
+            llm_scope=llm_scope,
+            llm_revision=llm_revision,
         )
         self.start()
         if self._dispatch_enabled and job["status"] in {"queued", "interrupted"}:
@@ -1484,7 +1704,15 @@ class UnifiedJobRuntime:
                         raise InterruptedError("job cancelled")
                 else:
                     context = JobContext(self, job, lease_alive)
-                    outcome = registration.handler(context, dict(job["spec"]))
+                    if context.llm_scope:
+                        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+                        with get_llm_execution_coordinator().lease(
+                            context, context.llm_scope, context.llm_revision,
+                        ):
+                            outcome = registration.handler(context, dict(job["spec"]))
+                    else:
+                        outcome = registration.handler(context, dict(job["spec"]))
                     context.ensure_active()
             except JobLeaseLost:
                 return
@@ -1554,6 +1782,7 @@ class UnifiedJobRuntime:
         if self.stopping:
             raise RuntimeError("任务运行时正在维护或已经停止")
         job = self.store.retry(job_id)
+        job = self.store.attach_retry_revision(job_id)
         self.start()
         if self._dispatch_enabled:
             self._schedule(job_id, reschedule_after_active=True)
@@ -1597,6 +1826,21 @@ class UnifiedJobRuntime:
             )
         else:
             remaining = max(0.0, float(job["deadline_seconds"]) - elapsed)
+        manual_retry_required = False
+        if str(job.get("status") or "") == "interrupted":
+            try:
+                manual_retry_required = UnifiedJobStore._legacy_llm_without_revision(job)
+                scope = str(job.get("llm_scope") or "")
+                if scope:
+                    from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+                    manual_retry_required = not get_llm_execution_coordinator().current(
+                        scope, str(job.get("llm_revision") or ""),
+                    )
+            except (OSError, RuntimeError, sqlite3.Error):
+                # The job remains safely interrupted when its local revision
+                # ledger is unavailable; do not make status rendering fail.
+                manual_retry_required = True
         return {
             "domain": str(job["type"]).partition(".")[0] or "runtime",
             "id": job["id"],
@@ -1613,6 +1857,7 @@ class UnifiedJobRuntime:
             "detail": job.get("detail") or "",
             "attempt": int(job["attempt"]),
             "cancel_requested": bool(job.get("cancel_requested")),
+            "manual_retry_required": manual_retry_required,
             "created_at": job["created_at"],
             "updated_at": job["updated_at"],
             "estimated_remaining_seconds": round(max(0.0, remaining)),

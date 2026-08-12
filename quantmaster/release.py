@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,33 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "LLM 请求后台隔离",
+                "items": (
+                    (
+                        "资讯采集与重分析、Quant Lab、个股分析、自动化对话和设置检测统一改为"
+                        "可查询、可取消、可恢复的持久任务；浏览器请求不再等待模型网络调用。"
+                    ),
+                    (
+                        "LLM 配置与资讯标注配置各自使用持久 revision 围栏；保存设置会立即逻辑取消"
+                        "旧任务，迟到的模型响应不能再发布资讯、建议、消息或检测结论。"
+                    ),
+                    (
+                        "新增全局与资讯域的 LLM 诊断、FIFO 取消检查和 HTTP 请求层保护；"
+                        "设置保存、模拟盘和本地缓存读取在模型排队或执行时保持可用。"
+                    ),
+                    (
+                        "设置热应用与模型检测分离为独立后台队列；Windows Credential Manager 异常"
+                        "统一转换为可处理的凭据错误，读取公开设置不会再隐式写入凭据库。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.9.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "资讯扫描频率设置",

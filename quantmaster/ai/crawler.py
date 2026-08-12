@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from quantmaster.ai.llm import LLMClient, LLMError
 from quantmaster.ai.news_claims import (
@@ -1832,6 +1832,7 @@ class AICrawler:
         items: list[NewsItem],
         batch_number: int,
         cfg: Any,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Process one claimed provider batch without mutating shared progress counters."""
         written_ids: list[int] = []
@@ -1842,12 +1843,16 @@ class AICrawler:
             with _claim_heartbeat(
                 self.store.claims, batch.token, self.identity.value,
             ) as lease_alive:
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("news annotation cancelled")
                 parsed = self.client.chat_json(
                     self._annotation_prompt(items), system=EXTRACT_SYSTEM,
                     timeout=cfg.annotation_timeout,
                     reasoning_effort=cfg.annotation_reasoning_effort,
                     model=cfg.annotation_model or None,
                 )
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("news annotation cancelled")
                 if not isinstance(parsed, list) or len(parsed) != len(items):
                     raise ValueError("LLM 标注结果数量与输入不一致")
                 if any(not isinstance(result, dict) for result in parsed):
@@ -1873,6 +1878,10 @@ class AICrawler:
                     claim_token=batch.token,
                     claim_owner=self.identity.value,
                 )
+        except InterruptedError:
+            # A configuration rotation is neither a provider failure nor a
+            # dead letter.  The finally block releases its claim immediately.
+            raise
         except sqlite3.Error as exc:
             # Persistence contention is infrastructure failure, not another
             # failed model attempt.  Leave the rows pending and release their
@@ -1937,12 +1946,13 @@ class AICrawler:
         *,
         mode: ClaimMode = "pending",
         manual: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Iterator[dict]:
         """Claim and process one fixed queue window, yielding durable progress."""
         with NewsPipelineLock(self.store.path):
             yield from self._enrich_pending_events_unlocked(
                 limit=limit, ids=ids, batch_size=batch_size,
-                mode=mode, manual=manual,
+                mode=mode, manual=manual, cancelled=cancelled,
             )
 
     def _enrich_pending_events_unlocked(
@@ -1951,6 +1961,7 @@ class AICrawler:
         *,
         mode: ClaimMode = "pending",
         manual: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> Iterator[dict]:
         """Run one queue window while the database-wide pipeline lock is held."""
         cfg = get_config().news
@@ -1993,6 +2004,8 @@ class AICrawler:
 
         def submit_next() -> bool:
             nonlocal batch_number, claimed, recovered_leases, remaining_ids
+            if cancelled is not None and cancelled():
+                raise InterruptedError("news annotation cancelled")
             if claimed >= total:
                 return False
             batch = self.store.claims.claim(
@@ -2021,7 +2034,7 @@ class AICrawler:
                 is_official=row["is_official"], db_id=row["id"],
             ) for row in chunk]
             future = executor.submit(
-                self._process_annotation_batch, batch, items, batch_number, cfg,
+                self._process_annotation_batch, batch, items, batch_number, cfg, cancelled,
             )
             futures[future] = (batch_number, batch)
             return True
@@ -2030,10 +2043,18 @@ class AICrawler:
             while len(futures) < concurrency and submit_next():
                 pass
             while futures:
-                done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("news annotation cancelled")
+                done, _ = wait(
+                    tuple(futures), timeout=0.1, return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
                 for future in sorted(done, key=lambda value: futures[value][0]):
                     futures.pop(future)
                     outcome = future.result()
+                    if cancelled is not None and cancelled():
+                        raise InterruptedError("news annotation cancelled")
                     chunk_completed = len(outcome["completed_ids"])
                     chunk_failed = int(outcome["item_count"]) - chunk_completed
                     chunk_retry_scheduled = int(outcome["retry_scheduled"])
@@ -2070,8 +2091,11 @@ class AICrawler:
                         pass
         finally:
             for future, (_, batch) in futures.items():
-                if future.cancel():
+                future.cancel()
+                try:
                     self.store.claims.release(batch.token, self.identity.value)
+                except Exception:
+                    logger.warning("资讯取消时释放分析租约失败", exc_info=True)
             executor.shutdown(wait=True, cancel_futures=True)
         result = {
             "processed": processed, "completed": completed,
@@ -2096,6 +2120,7 @@ class AICrawler:
         *,
         mode: ClaimMode = "pending",
         manual: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
         result = {
             "processed": 0, "completed": 0, "failed": 0,
@@ -2104,6 +2129,7 @@ class AICrawler:
         }
         for event in self.enrich_pending_events(
             limit=limit, ids=ids, batch_size=batch_size, mode=mode, manual=manual,
+            cancelled=cancelled,
         ):
             if event["type"] == "complete":
                 result = {key: value for key, value in event.items() if key != "type"}
@@ -2126,6 +2152,7 @@ class AICrawler:
         self, ids: list[int] | None = None, limit: int | None = 20, batch_size: int = 5,
         *,
         manual: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> dict:
         if not manual and not self.store.llm_recently_healthy():
             return {
@@ -2135,19 +2162,22 @@ class AICrawler:
             }
         result = self.enrich_pending(
             ids=ids, limit=limit, batch_size=batch_size,
-            mode="dead_letter", manual=manual,
+            mode="dead_letter", manual=manual, cancelled=cancelled,
         )
         return {"status": "ok", "selected": result["claimed"], **result}
 
     def run(self, sources: list[str] | None = None, limit: int = 30,
-            skip_llm: bool = False, group: str | None = None) -> dict:
+            skip_llm: bool = False, group: str | None = None,
+            cancelled: Callable[[], bool] | None = None) -> dict:
         with NewsPipelineLock(self.store.path):
             return self._run_unlocked(
                 sources=sources, limit=limit, skip_llm=skip_llm, group=group,
+                cancelled=cancelled,
             )
 
     def _run_unlocked(self, sources: list[str] | None = None, limit: int = 30,
-                      skip_llm: bool = False, group: str | None = None) -> dict:
+                      skip_llm: bool = False, group: str | None = None,
+                      cancelled: Callable[[], bool] | None = None) -> dict:
         before_id = self.store.max_id()
         configs: list[dict] = []
         if sources:
@@ -2164,6 +2194,8 @@ class AICrawler:
         errors: dict[str, str] = {}
         source_results: list[dict] = []
         for source in configs:
+            if cancelled is not None and cancelled():
+                raise InterruptedError("news crawl cancelled")
             source_id = source["id"]
             run_id = self.source_store.start_run(source_id) if self.source_store.get(source_id) else ""
             try:
@@ -2200,6 +2232,8 @@ class AICrawler:
                     "health": batch.health, "watermark": batch.watermark,
                     "complete": batch.complete, "ingest_window_id": window_id,
                 })
+            except InterruptedError:
+                raise
             except Exception as exc:
                 logger.warning("资讯来源抓取失败 source=%s", source_id, exc_info=True)
                 code = exc.code if isinstance(exc, NewsProviderError) else type(exc).__name__.casefold()
@@ -2215,8 +2249,10 @@ class AICrawler:
         }
         llm_cfg = get_config().llm
         can_annotate = self._client is not None or bool(llm_cfg.api_key or llm_cfg.base_url)
+        if cancelled is not None and cancelled():
+            raise InterruptedError("news crawl cancelled")
         if (not skip_llm and get_config().news.annotation_enabled and can_annotate):
-            annotation = self.enrich_pending()
+            annotation = self.enrich_pending(cancelled=cancelled)
         else:
             try:
                 self.store.publish_dashboard_materializations()

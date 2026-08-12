@@ -3403,20 +3403,6 @@ document.getElementById('gp-form').onsubmit = async e => {
   } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
   busy(form, false);
 };
-document.getElementById('llm-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('mine-out');
-  out.innerHTML = '<div class="msg">LLM 生成并验证中…</div>';
-  try {
-    const fd = new FormData(form);
-    const data = await post('/api/v1/research/mining/llm', {
-      universe: fd.get('universe'), start: fd.get('start'), n: +fd.get('n'), rounds: +fd.get('rounds') });
-    out.innerHTML = renderMined(data.factors, f =>
-      `<td>${f.valid ? '✅ 达标' : '—'} ${esc(f.rationale || '')}</td>`);
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-
 /* ---------- 资讯 ---------- */
 async function loadNews() {
   const out = document.getElementById('news-out');

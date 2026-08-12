@@ -31,7 +31,7 @@ class FakeClient:
     def __exit__(self, *args):
         return None
 
-    def get(self, url, headers):
+    def get(self, url, headers, **_kwargs):
         self.calls.append((str(url), headers))
         return self.responses.pop(0)
 
@@ -44,7 +44,7 @@ def response(status, payload):
 def test_openai_model_list(monkeypatch):
     FakeClient.calls = []
     FakeClient.responses = [response(200, {"data": [{"id": "gpt-z"}, {"id": "gpt-a"}]})]
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
     result = list_llm_models(LLMSettings(provider="openai", model="gpt-a"), "secret")
     assert result["status"] == "success"
     assert result["details"]["models"] == ["gpt-a", "gpt-z"]
@@ -58,7 +58,7 @@ def test_anthropic_paginates_with_after_id(monkeypatch):
         response(200, {"data": [{"id": "claude-a"}], "has_more": True, "last_id": "cursor 1"}),
         response(200, {"data": [{"id": "claude-b"}], "has_more": False}),
     ]
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
     result = list_llm_models(LLMSettings(provider="anthropic", model="manual"), "secret")
     assert result["details"]["models"] == ["claude-a", "claude-b"]
     assert FakeClient.calls[1][0].endswith(("after_id=cursor%201", "after_id=cursor+1"))
@@ -69,7 +69,7 @@ def test_anthropic_paginates_with_after_id(monkeypatch):
 def test_compatible_gateway_allows_no_key(monkeypatch):
     FakeClient.calls = []
     FakeClient.responses = [response(200, {"models": [{"id": "local-model"}]})]
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
     settings = LLMSettings(provider="openai-compatible", model="local-model",
                            base_url="http://127.0.0.1:11434/v1/chat/completions")
     result = list_llm_models(settings)
@@ -80,7 +80,7 @@ def test_compatible_gateway_allows_no_key(monkeypatch):
 def test_unauthorized_and_legacy_endpoint_normalization(monkeypatch):
     FakeClient.calls = []
     FakeClient.responses = [response(401, {"error": "do not expose"})]
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.Client", FakeClient)
+    monkeypatch.setattr("quantmaster.ai.llm.httpx.Client", FakeClient)
     result = list_llm_models(LLMSettings(provider="openai", model="x"), "bad-key")
     assert result["status"] == "error"
     assert result["details"]["http_status"] == 401

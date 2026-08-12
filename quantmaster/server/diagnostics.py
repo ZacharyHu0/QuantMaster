@@ -33,8 +33,10 @@ def _refresh() -> None:
     try:
         report = collect_health_report()
         from quantmaster.operational_diagnostics import safe_operational_metrics
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
 
         report["components"] = safe_operational_metrics()
+        report["llm"] = get_llm_execution_coordinator().diagnostics()
     except Exception:  # final diagnostic boundary: never break liveness/readiness
         logger.warning("完整诊断收集失败", exc_info=True)
         report = {

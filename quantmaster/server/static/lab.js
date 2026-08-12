@@ -21,6 +21,7 @@
     search: '',
     selectedModel: 'ridge',
     suggestion: null,
+    suggestionTask: null,
     timer: null,
     formsDirty: false,
     selectedJobId: '',
@@ -1125,12 +1126,43 @@
   function renderCopilot(detail) {
     const target = document.getElementById('lab-copilot');
     const suggestion = state.suggestion;
+    const task = state.suggestionTask;
+    const taskHtml = task ? `<div class="lab-suggestion"><span>CLOUD TASK · ${h(task.status)}</span><p>${h(task.phase || task.detail || '正在排队')}</p><small>${Number(task.progress || 0)}% · ${h(String(task.id || '').slice(-8))}</small>
+      <div class="lab-job-drawer-actions">${['queued','running','cancelling'].includes(task.status) ? `<button class="danger" type="button" data-cancel-job="${h(task.id)}">取消</button>` : ''}</div></div>` : '';
     target.innerHTML = `<div class="lab-copilot-mark">AI</div><h4>研究 Copilot</h4>
       <p>仅把表达式结构与本地验证指标交给助手。建议不会覆盖原版本，也不会自动批准。</p>
       <button class="lab-button lab-button-quiet lab-copilot-action" type="button" data-suggest-version="${h(detail.id)}">生成本地修正建议</button>
-      ${suggestion ? `<div class="lab-suggestion"><span>SUGGESTED PATCH</span><code>${h(suggestion.expression)}</code><p>${h(suggestion.rationale)}</p>
+      <button class="lab-button lab-button-quiet lab-copilot-action" type="button" data-suggest-cloud-version="${h(detail.id)}">生成云端修正建议</button>
+      ${taskHtml}${suggestion ? `<div class="lab-suggestion"><span>SUGGESTED PATCH</span><code>${h(suggestion.expression)}</code><p>${h(suggestion.rationale)}</p>
         ${(suggestion.risks || []).length ? `<ul>${suggestion.risks.map(risk => `<li>${h(risk)}</li>`).join('')}</ul>` : ''}
         <button class="lab-button lab-button-primary lab-copilot-action" type="button" data-apply-suggestion="${h(suggestion.id)}">应用为新版本</button></div>` : ''}`;
+  }
+
+  async function watchCloudSuggestion(task, versionId) {
+    state.suggestionTask = task;
+    while (state.suggestionTask?.id === task.id && ['queued','running','cancelling'].includes(task.status)) {
+      await new Promise(resolve => window.setTimeout(resolve, 600));
+      try {
+        task = await request(task.links?.self || `/api/v1/jobs/${encodeURIComponent(task.id)}`);
+      } catch (error) {
+        task = {...task, status:'failed', detail:error.message};
+      }
+      if (state.selectedVersion === versionId) {
+        const detail = await request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}`);
+        renderCopilot(detail);
+      }
+    }
+    if (state.suggestionTask?.id !== task.id) return;
+    state.suggestionTask = null;
+    if (task.status === 'completed' && task.result?.result) {
+      state.suggestion = task.result.result;
+    } else if (task.status !== 'completed') {
+      announce(`云端修正建议${statusLabel[task.status] || task.status}；请按当前设置重新提交。`);
+    }
+    if (state.selectedVersion === versionId) {
+      const detail = await request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}`);
+      renderCopilot(detail);
+    }
   }
 
   function renderExperiments() {
@@ -1625,7 +1657,7 @@
         await request(`/api/v1/lab/factors/${deploy.dataset.deployVersion}/deploy`, {method:'POST', body:JSON.stringify({universe:research.universe || 'csi800', horizon, profile, scope, actor:'web'})});
         await Promise.all([refreshOverview(), refreshFactors(), refreshMiningRuns()]);
       } catch (error) { showError('Champion 切换失败', error); }
-      const suggest = event.target.closest('[data-suggest-version]');
+      const suggest = event.target.closest('[data-suggest-version], [data-suggest-cloud-version]');
       if (suggest) try {
         suggest.disabled = true;
         const research = state.overview?.research || {};
@@ -1633,8 +1665,21 @@
           universe:research.universe || 'csi800', start:research.start || '2015-01-01',
           end:new Date().toISOString().slice(0,10),
         }, '生成 AI 修正建议')) return;
-        state.suggestion = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}/suggestions`, {method:'POST', body:JSON.stringify({use_cloud:false})});
-        const detail = await request(`/api/v1/lab/factors/${suggest.dataset.suggestVersion}`);
+        const versionId = suggest.dataset.suggestVersion || suggest.dataset.suggestCloudVersion;
+        const cloud = Boolean(suggest.dataset.suggestCloudVersion);
+        if (cloud && !window.confirm('云端建议会把因子表达式与本地验证摘要发送给当前模型服务，是否继续？')) return;
+        const result = await request(`/api/v1/lab/factors/${versionId}/suggestions`, {
+          method:'POST', body:JSON.stringify({use_cloud:cloud}),
+        });
+        const detail = await request(`/api/v1/lab/factors/${versionId}`);
+        if (cloud) {
+          state.suggestion = null;
+          state.suggestionTask = result;
+          renderCopilot(detail);
+          void watchCloudSuggestion(result, versionId);
+          return;
+        }
+        state.suggestion = result;
         renderCopilot(detail);
       } catch (error) { showError('修正建议生成失败', error); } finally { suggest.disabled = false; }
       const apply = event.target.closest('[data-apply-suggestion]');
