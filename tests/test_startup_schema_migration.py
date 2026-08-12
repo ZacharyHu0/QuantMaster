@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import gc
 
 import pytest
 
@@ -84,13 +85,12 @@ def test_startup_schema_migrator_inspects_applies_and_is_idempotent(tmp_path):
 def test_startup_schema_rollback_restores_pre_migration_versions(tmp_path):
     _legacy_databases(tmp_path)
     backup = tmp_path / "backup"
-    backup.mkdir()
-    for filename in ("jobs.sqlite", "backtests.sqlite", "paper.sqlite"):
-        with sqlite3.connect(tmp_path / filename) as source:
-            with sqlite3.connect(backup / filename) as destination:
-                source.backup(destination)
     migrator = StartupSchemaMigrator()
+    from quantmaster.data.migration import backup_sqlite_tree
+
+    backup_sqlite_tree(tmp_path, backup, extra_paths=migrator.backup_paths)
     list(migrator.migrate_batch(tmp_path, after_key="", limit=3))
+    gc.collect()
 
     migrator.rollback(tmp_path, backup)
 

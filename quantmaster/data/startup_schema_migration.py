@@ -163,6 +163,7 @@ def _upgrade(domain: str, path: Path, root: Path) -> None:
 
 class StartupSchemaMigrator:
     name = "startup-schemas"
+    backup_paths = ("backtests.sqlite", "jobs.sqlite", "paper.sqlite")
 
     def inspect(self, root: Path) -> Iterable[MigrationRecord]:
         records: list[MigrationRecord] = []
@@ -209,14 +210,10 @@ class StartupSchemaMigrator:
         return tuple(records)
 
     def rollback(self, root: Path, backup_root: Path) -> None:
+        from quantmaster.data.migration import restore_backup_path
+
         for _domain, filename in _DOMAINS:
-            source = backup_root / filename
-            if not source.is_file():
-                continue
-            destination = root / filename
-            with closing(connect_sqlite(source, read_only=True)) as backup:
-                with closing(connect_sqlite(destination)) as current:
-                    backup.backup(current)
+            restore_backup_path(root, backup_root, filename)
 
 
 startup_schema_migrator = StartupSchemaMigrator()
