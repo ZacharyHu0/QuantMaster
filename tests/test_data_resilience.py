@@ -203,7 +203,7 @@ def test_akshare_exponential_retry(isolated_config, monkeypatch):
             raise ConnectionError("temporary")
         return "ok"
 
-    monkeypatch.setattr("quantmaster.data.resilience.time.sleep", sleeps.append)
+    monkeypatch.setattr("quantmaster.data.resilience._retry_sleep", sleeps.append)
     assert akshare_call("test", flaky) == "ok"
     assert attempts == 3
     assert sleeps == [0.25, 0.5]
@@ -225,8 +225,8 @@ def test_online_provider_switches_block_direct_calls(isolated_config):
 def test_tushare_rate_limit_is_shared_in_data_root(isolated_config, monkeypatch):
     isolated_config.data.tushare_calls_per_minute = 600
     sleeps: list[float] = []
-    monkeypatch.setattr("quantmaster.data.resilience.time.time", lambda: 1000.0)
-    monkeypatch.setattr("quantmaster.data.resilience.time.sleep", sleeps.append)
+    monkeypatch.setattr("quantmaster.data.resilience._wall_time", lambda: 1000.0)
+    monkeypatch.setattr("quantmaster.data.resilience._rate_limit_sleep", sleeps.append)
     limiter = TushareRateLimiter()
     limiter.wait()
     limiter.wait()
@@ -1260,7 +1260,7 @@ def test_transient_5xx_uses_bounded_shared_provider_backoff(isolated_config, mon
             response.raise_for_status()
         return "ok"
 
-    monkeypatch.setattr("quantmaster.data.resilience.time.sleep", sleeps.append)
+    monkeypatch.setattr("quantmaster.data.resilience._retry_sleep", sleeps.append)
     assert provider_call("yahoo:5xx-backoff", "retry", flaky) == "ok"
     assert calls == 3
     assert sleeps == [0.25, 0.3]

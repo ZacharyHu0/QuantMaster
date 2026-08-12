@@ -42,6 +42,18 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def _retry_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _rate_limit_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _wall_time() -> float:
+    return time.time()
+
+
 class CircuitOpenError(RuntimeError):
     """数据源处于冷却期；调用方应立即尝试备用源或本地缓存。"""
 
@@ -922,7 +934,7 @@ def provider_call[T](
                     lane, attempt, attempts, delay, exc,
                 )
                 if delay:
-                    time.sleep(delay)
+                    _retry_sleep(delay)
         raise AssertionError("unreachable")
 
     return _run_scheduled_provider(lane, key, scheduled)
@@ -973,7 +985,7 @@ class TushareRateLimiter:
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT next_call FROM rate_state WHERE name='global'").fetchone()
-                now = time.time()
+                now = _wall_time()
                 next_call = float(row[0]) if row else self._next_call
                 reserved = max(now, next_call)
                 conn.execute(
@@ -982,9 +994,9 @@ class TushareRateLimiter:
                 )
                 conn.commit()
             self._next_call = reserved + interval
-            delay = reserved - time.time()
+            delay = reserved - _wall_time()
         if delay > 0:
-            time.sleep(delay)
+            _rate_limit_sleep(delay)
 
 
 TUSHARE_LIMITER = TushareRateLimiter()

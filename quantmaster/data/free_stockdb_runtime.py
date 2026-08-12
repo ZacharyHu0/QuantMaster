@@ -28,6 +28,10 @@ from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 
+
+def _monotonic() -> float:
+    return time.monotonic()
+
 _VENDOR_HOME = "https://a.123128.xyz/"
 _VENDOR_NOTICE_TTL = 6 * 60 * 60
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
@@ -539,8 +543,8 @@ class FreeStockDBRuntime:
                 )
                 return False
             launcher = self._process
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and not self._stop.is_set():
+            deadline = _monotonic() + 10
+            while _monotonic() < deadline and not self._stop.is_set():
                 if self._listening():
                     self._daemon_started = True
                     self._record_process_owner(executable)

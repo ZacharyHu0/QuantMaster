@@ -221,7 +221,7 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(runtime, "_listening", lambda: next(listening))
     monkeypatch.setattr(runtime, "_launch_service_process", launch)
     monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.time.monotonic", lambda: next(monotonic),
+        "quantmaster.data.free_stockdb_runtime._monotonic", lambda: next(monotonic),
     )
 
     assert runtime._start_service() is True
