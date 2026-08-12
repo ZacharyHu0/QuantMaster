@@ -15,13 +15,14 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import pandas as pd
+from anyio import to_thread
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -627,10 +628,10 @@ def _progress_stream(
         _web_blocking_slots.release()
         raise
 
-    def generate() -> Iterator[str]:
+    async def generate() -> AsyncIterator[str]:
         try:
             while True:
-                event = events.get()
+                event = await to_thread.run_sync(events.get, abandon_on_cancel=True)
                 if event is None:
                     break
                 yield strict_json_dumps(jsonable_encoder(event)) + "\n"
