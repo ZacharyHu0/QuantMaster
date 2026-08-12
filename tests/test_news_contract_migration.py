@@ -70,6 +70,21 @@ def test_explicit_migration_preserves_row_fields_and_leaves_unknowns_blank(tmp_p
         "pboc", "同标题", "原始正文", '["600000.SH"]', '["银行"]',
     )
     assert all(value in {None, "", 0} for value in row[5:])
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+    assert not any("legacy" in name or "migration_v3" in name for name in tables)
+
+
+def test_current_store_rejects_permanent_legacy_archive_tables(tmp_path):
+    path = tmp_path / "news.sqlite"
+    NewsStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE news_legacy_v3(id INTEGER)")
+
+    with pytest.raises(NewsSchemaMigrationRequired, match="退休归档表"):
+        NewsStore(path)
 
 
 def test_migration_is_idempotent_and_current_title_collision_is_not_identity(tmp_path):

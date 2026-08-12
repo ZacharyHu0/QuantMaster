@@ -225,39 +225,39 @@ def _create_news_schema(connection: sqlite3.Connection, *, legacy: bool) -> None
         connection.execute(statement)
 
 
-def _archive_legacy_title_identity_table(connection: sqlite3.Connection) -> None:
-    """Preserve v3 tables, then copy into v4 without the lossy title identity."""
+def _rebuild_legacy_title_identity_table(connection: sqlite3.Connection) -> None:
+    """Rebuild v3 in-transaction; the runner backup is the sole legacy archive."""
     row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='news'"
     ).fetchone()
     normalized = re.sub(r"\s+", "", str(row[0] if row else "").casefold())
     if "unique(source,title,published_at)" not in normalized:
         return
-    archive_names = (
-        "news_legacy_v3",
-        "news_analysis_symbols_legacy_v3",
-        "news_analysis_sectors_legacy_v3",
-        "news_revisions_legacy_v3",
+    staging_names = (
+        "news_migration_v3",
+        "news_analysis_symbols_migration_v3",
+        "news_analysis_sectors_migration_v3",
+        "news_revisions_migration_v3",
     )
-    placeholders = ",".join("?" for _ in archive_names)
+    placeholders = ",".join("?" for _ in staging_names)
     conflicts = connection.execute(
         f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
-        archive_names,
+        staging_names,
     ).fetchall()
     if conflicts:
         names = ", ".join(str(item[0]) for item in conflicts)
-        raise RuntimeError(f"资讯 v3 保留式迁移发现归档表冲突：{names}")
+        raise RuntimeError(f"资讯 v3 迁移发现 staging 表冲突：{names}")
 
-    connection.execute("ALTER TABLE news RENAME TO news_legacy_v3")
+    connection.execute("ALTER TABLE news RENAME TO news_migration_v3")
     connection.execute(
         "ALTER TABLE news_analysis_symbols "
-        "RENAME TO news_analysis_symbols_legacy_v3"
+        "RENAME TO news_analysis_symbols_migration_v3"
     )
     connection.execute(
         "ALTER TABLE news_analysis_sectors "
-        "RENAME TO news_analysis_sectors_legacy_v3"
+        "RENAME TO news_analysis_sectors_migration_v3"
     )
-    connection.execute("ALTER TABLE news_revisions RENAME TO news_revisions_legacy_v3")
+    connection.execute("ALTER TABLE news_revisions RENAME TO news_revisions_migration_v3")
     _create_news_schema(connection, legacy=False)
     column_names = [
         str(info[1]) for info in connection.execute("PRAGMA table_info(news)")
@@ -265,15 +265,15 @@ def _archive_legacy_title_identity_table(connection: sqlite3.Connection) -> None
     columns_sql = ",".join(f'"{name}"' for name in column_names)
     connection.execute(
         f"INSERT INTO news({columns_sql}) "
-        f"SELECT {columns_sql} FROM news_legacy_v3"
+        f"SELECT {columns_sql} FROM news_migration_v3"
     )
     connection.execute(
         "INSERT INTO news_analysis_symbols(news_id,symbol) "
-        "SELECT news_id,symbol FROM news_analysis_symbols_legacy_v3"
+        "SELECT news_id,symbol FROM news_analysis_symbols_migration_v3"
     )
     connection.execute(
         "INSERT INTO news_analysis_sectors(news_id,sector) "
-        "SELECT news_id,sector FROM news_analysis_sectors_legacy_v3"
+        "SELECT news_id,sector FROM news_analysis_sectors_migration_v3"
     )
     connection.execute(
         "INSERT INTO news_revisions("
@@ -281,8 +281,10 @@ def _archive_legacy_title_identity_table(connection: sqlite3.Connection) -> None
         "fetched_at,evidence_binding_hash,recorded_at) "
         "SELECT id,news_id,revision_number,title,content,"
         "content_hash,raw_cache_key,fetched_at,'',recorded_at "
-        "FROM news_revisions_legacy_v3 ORDER BY id"
+        "FROM news_revisions_migration_v3 ORDER BY id"
     )
+    for name in reversed(staging_names):
+        connection.execute(f"DROP TABLE {name}")
 
 
 def _rebuild_dimensions(
@@ -335,6 +337,11 @@ def require_current_news_schema(connection: sqlite3.Connection) -> None:
         raise NewsSchemaMigrationRequired(
             "资讯数据库缺少当前表，需先执行一次性迁移：" + ",".join(missing_tables)
         )
+    retired = sorted(name for name in tables if "legacy" in name or "migration_v3" in name)
+    if retired:
+        raise NewsSchemaMigrationRequired(
+            "资讯当前库仍含退休归档表，需迁移至外部备份：" + ",".join(retired)
+        )
     row = connection.execute(
         "SELECT value FROM news_store_meta WHERE key='schema_version'"
     ).fetchone()
@@ -380,7 +387,7 @@ def migrate_legacy_news_schema(
         )
     _create_news_schema(connection, legacy=current < NEWS_SCHEMA_VERSION)
     if current < NEWS_SCHEMA_VERSION:
-        _archive_legacy_title_identity_table(connection)
+        _rebuild_legacy_title_identity_table(connection)
         _create_news_schema(connection, legacy=False)
         _rebuild_dimensions(
             connection,
