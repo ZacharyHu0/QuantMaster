@@ -6,7 +6,6 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass
 from pathlib import Path
 
 from quantmaster.ai.crawler import _normalize_sectors
@@ -16,19 +15,19 @@ from quantmaster.ai.news_storage import (
     migrate_legacy_news_schema,
     require_current_news_schema,
 )
+from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
-try:
-    from quantmaster.data.legacy_migration import MigrationRecord
-except ModuleNotFoundError:  # The shared runner is integrated as an independent task.
-    @dataclass(frozen=True)
-    class MigrationRecord:  # type: ignore[no-redef]
-        record_key: str
-        outcome: str
-        diagnostic_code: str = ""
-        unknown_fields: tuple[str, ...] = ()
-        detail: str = ""
-
+NEWS_ARCHIVE_TABLES = (
+    "news_revisions_legacy_v3",
+    "news_analysis_sectors_legacy_v3",
+    "news_analysis_symbols_legacy_v3",
+    "news_legacy_v3",
+)
+_ARCHIVE_KEYS = {
+    table: f"archive:{index:02d}:{table}"
+    for index, table in enumerate(NEWS_ARCHIVE_TABLES, start=1)
+}
 
 _OPTIONAL_EVIDENCE_FIELDS = (
     "content_scope",
@@ -69,6 +68,47 @@ def _schema_version(connection: sqlite3.Connection) -> int:
         return int(row[0]) if row else 0
     except (TypeError, ValueError) as exc:
         raise RuntimeError("news_schema_version_invalid") from exc
+
+
+def _archive_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = _tables(connection)
+    return {
+        table: int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        for table in NEWS_ARCHIVE_TABLES
+        if table in tables
+    }
+
+
+def _archive_record(table: str, count: int, *, applied: bool) -> MigrationRecord:
+    return MigrationRecord(
+        record_key=_ARCHIVE_KEYS[table],
+        outcome="converted",
+        diagnostic_code=(
+            "news_archive_retired" if applied else "news_archive_retirement_required"
+        ),
+        detail=f"table={table}; row_count={count}",
+    )
+
+
+def _active_runner_backup(root: Path, expected: dict[str, int]) -> Path | None:
+    state = root / "legacy_contract_migrations.sqlite"
+    if not state.is_file():
+        return None
+    try:
+        with closing(connect_sqlite(state, row_factory=True, read_only=True)) as connection:
+            row = connection.execute(
+                "SELECT backup_path FROM migration_runs WHERE domain='news' "
+                "AND mode='apply' AND status IN ('backing_up','running','pausing') "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        candidate = Path(str(row[0])) / "news.sqlite" if row and row[0] else None
+        if candidate is None or not candidate.is_file():
+            return None
+        with closing(connect_sqlite(candidate, read_only=True)) as connection:
+            counts = _archive_counts(connection)
+    except (OSError, sqlite3.Error):
+        return None
+    return candidate if all(counts.get(table) == count for table, count in expected.items()) else None
 
 
 def _invalid_dimension(row: sqlite3.Row, columns: set[str]) -> MigrationRecord | None:
@@ -120,8 +160,38 @@ def _record(row: sqlite3.Row, columns: set[str]) -> MigrationRecord:
     )
 
 
+def _retire_archive_batch(
+    root: Path, connection: sqlite3.Connection, archives: dict[str, int],
+    after_key: str, limit: int,
+) -> tuple[MigrationRecord, ...]:
+    if _active_runner_backup(root, archives) is None:
+        raise RuntimeError(
+            "news_archive_backup_missing: 拒绝在 runner 可恢复备份外退休归档表"
+        )
+    selected = [
+        table for table in NEWS_ARCHIVE_TABLES
+        if table in archives and _ARCHIVE_KEYS[table] > after_key
+    ][:max(1, int(limit))]
+    if not selected:
+        return ()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for table in selected:
+            connection.execute(f'DROP TABLE "{table}"')
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("news_archive_retirement_fk_conflict")
+        connection.commit()
+    except (RuntimeError, sqlite3.Error):
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys=ON")
+    return tuple(_archive_record(table, archives[table], applied=True) for table in selected)
+
+
 class NewsContractMigrator:
-    """Migrate only ``news.sqlite`` current rows; archives are never counted twice."""
+    """Migrate current rows, then retire only the four exact v3 archive tables."""
 
     name = "news"
 
@@ -150,6 +220,12 @@ class NewsContractMigrator:
                         f"数据库版本 {current} 高于当前 {NEWS_SCHEMA_VERSION}",
                     ),
                 )
+            archives = _archive_counts(connection)
+            if archives:
+                return tuple(
+                    _archive_record(table, archives[table], applied=False)
+                    for table in NEWS_ARCHIVE_TABLES if table in archives
+                )
             columns = _columns(connection, "news")
             rows = connection.execute("SELECT * FROM news ORDER BY id").fetchall()
             return tuple(_record(row, columns) for row in rows)
@@ -174,6 +250,11 @@ class NewsContractMigrator:
             # Source DDL belongs to this explicit migration, never store construction.
             NewsSourceStore(path, initialize=True)
         with closing(connect_sqlite(path, row_factory=True)) as connection:
+            archives = _archive_counts(connection)
+            if archives:
+                return _retire_archive_batch(root, connection, archives, after_key, limit)
+            if after_key.startswith("archive:"):
+                return ()
             require_current_news_schema(connection)
             columns = _columns(connection, "news")
             last_id = 0

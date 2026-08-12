@@ -337,7 +337,13 @@ def require_current_news_schema(connection: sqlite3.Connection) -> None:
         raise NewsSchemaMigrationRequired(
             "资讯数据库缺少当前表，需先执行一次性迁移：" + ",".join(missing_tables)
         )
-    retired = sorted(name for name in tables if "legacy" in name or "migration_v3" in name)
+    retired_names = {
+        "news_legacy_v3",
+        "news_analysis_symbols_legacy_v3",
+        "news_analysis_sectors_legacy_v3",
+        "news_revisions_legacy_v3",
+    }
+    retired = sorted(retired_names & tables)
     if retired:
         raise NewsSchemaMigrationRequired(
             "资讯当前库仍含退休归档表，需迁移至外部备份：" + ",".join(retired)

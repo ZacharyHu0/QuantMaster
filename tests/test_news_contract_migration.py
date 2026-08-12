@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from quantmaster.ai.crawler import NewsItem, NewsStore
-from quantmaster.ai.news_migration import NewsContractMigrator
+from quantmaster.ai.news_migration import NEWS_ARCHIVE_TABLES, NewsContractMigrator
 from quantmaster.ai.news_storage import NewsSchemaMigrationRequired
 
 
@@ -28,6 +29,36 @@ def _legacy_database(path, *, symbols="[]", sectors="[]"):
                 symbols, sectors, "其他", 0.2, "原摘要", 1786240800,
             ),
         )
+
+
+def _archive_database(path: Path, counts=(1, 2, 3, 4)) -> None:
+    NewsStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        for table, count in zip(NEWS_ARCHIVE_TABLES, counts, strict=True):
+            connection.execute(f'CREATE TABLE "{table}"(id INTEGER PRIMARY KEY)')
+            connection.executemany(
+                f'INSERT INTO "{table}"(id) VALUES (?)',
+                ((index,) for index in range(1, count + 1)),
+            )
+
+
+def _runner_backup(root: Path, run_id: str = "run") -> Path:
+    source = root / "news.sqlite"
+    destination = root / "backups" / "legacy-contracts" / run_id / "news.sqlite"
+    destination.parent.mkdir(parents=True)
+    with sqlite3.connect(source) as current, sqlite3.connect(destination) as backup:
+        current.backup(backup)
+    with sqlite3.connect(root / "legacy_contract_migrations.sqlite") as connection:
+        connection.execute(
+            "CREATE TABLE migration_runs (domain TEXT,mode TEXT,status TEXT,"
+            "backup_path TEXT,created_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO migration_runs VALUES ('news','apply','running',?,'2026-08-13')",
+            (str(destination.parent),),
+        )
+    return destination
 
 
 def test_store_construction_does_not_migrate_old_schema(tmp_path):
@@ -83,6 +114,83 @@ def test_current_store_rejects_permanent_legacy_archive_tables(tmp_path):
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE news_legacy_v3(id INTEGER)")
 
+    with pytest.raises(NewsSchemaMigrationRequired, match="退休归档表"):
+        NewsStore(path)
+
+
+def test_archive_dry_run_reports_each_exact_table_and_does_not_count_current_rows(tmp_path):
+    path = tmp_path / "news.sqlite"
+    _archive_database(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO news(source,title,content) VALUES ('current','current','current')"
+        )
+
+    records = list(NewsContractMigrator().inspect(tmp_path))
+
+    assert len(records) == 4
+    assert [record.record_key.rpartition(":")[2] for record in records] == list(
+        NEWS_ARCHIVE_TABLES
+    )
+    assert [record.detail for record in records] == [
+        f"table={table}; row_count={count}"
+        for table, count in zip(NEWS_ARCHIVE_TABLES, (1, 2, 3, 4), strict=True)
+    ]
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert connection.execute("SELECT COUNT(*) FROM news").fetchone()[0] == 1
+    assert set(NEWS_ARCHIVE_TABLES) <= tables
+
+
+def test_archive_apply_requires_runner_backup_and_is_transactional_and_idempotent(tmp_path):
+    path = tmp_path / "news.sqlite"
+    _archive_database(path)
+    migrator = NewsContractMigrator()
+    with pytest.raises(RuntimeError, match="news_archive_backup_missing"):
+        list(migrator.migrate_batch(tmp_path, after_key="", limit=4))
+    _runner_backup(tmp_path)
+
+    first = list(migrator.migrate_batch(tmp_path, after_key="", limit=2))
+    assert [record.diagnostic_code for record in first] == [
+        "news_archive_retired", "news_archive_retired",
+    ]
+    assert [record.detail for record in first] == [
+        "table=news_revisions_legacy_v3; row_count=1",
+        "table=news_analysis_sectors_legacy_v3; row_count=2",
+    ]
+    second = list(migrator.migrate_batch(
+        tmp_path, after_key=first[-1].record_key, limit=2,
+    ))
+    assert len(second) == 2
+    assert list(migrator.migrate_batch(
+        tmp_path, after_key=second[-1].record_key, limit=2,
+    )) == []
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert not set(NEWS_ARCHIVE_TABLES) & tables
+    NewsStore(path)
+
+
+def test_archive_rollback_restores_exact_tables_and_counts(tmp_path):
+    path = tmp_path / "news.sqlite"
+    _archive_database(path)
+    backup_root = _runner_backup(tmp_path).parent
+    migrator = NewsContractMigrator()
+    records = list(migrator.migrate_batch(tmp_path, after_key="", limit=4))
+    assert len(records) == 4
+
+    migrator.rollback(tmp_path, backup_root)
+
+    with sqlite3.connect(path) as connection:
+        assert [
+            connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            for table in NEWS_ARCHIVE_TABLES
+        ] == [1, 2, 3, 4]
     with pytest.raises(NewsSchemaMigrationRequired, match="退休归档表"):
         NewsStore(path)
 
