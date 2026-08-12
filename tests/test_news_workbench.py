@@ -1112,6 +1112,64 @@ def test_annotation_batches_use_news_specific_concurrency(tmp_path, isolated_con
     assert maximum == 3
 
 
+def test_concurrent_llm_results_serialize_before_claim_reads(tmp_path, monkeypatch):
+    """Successful provider batches must not deadlock while upgrading SQLite locks."""
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = NewsStore(tmp_path / "news.sqlite")
+    store.save([
+        NewsItem(source="test", title="并发落库 1", content="模型已返回 1"),
+        NewsItem(source="test", title="并发落库 2", content="模型已返回 2"),
+    ])
+    first = store.claims.claim(
+        owner="worker", task_type="news:pending", mode="pending", limit=1,
+    )
+    second = store.claims.claim(
+        owner="worker", task_type="news:pending", mode="pending", limit=1,
+    )
+    assert len(first.ids) == len(second.ids) == 1
+
+    barrier = threading.Barrier(2)
+    original_owns = store.claims.owns
+
+    def synchronized_owns(news_id, token, owner, *, now=None, connection=None):
+        # On the broken deferred path neither connection owns a write lock at
+        # this point, so both readers are deliberately aligned before their
+        # incompatible lock upgrades.  BEGIN IMMEDIATE makes this branch
+        # unreachable and the second batch waits before reading its claim.
+        if connection is not None and not connection.in_transaction:
+            barrier.wait(timeout=2)
+        return original_owns(
+            news_id, token, owner, now=now, connection=connection,
+        )
+
+    monkeypatch.setattr(store.claims, "owns", synchronized_owns)
+
+    def persist(batch, summary):
+        item_id = batch.ids[0]
+        item = NewsItem(
+            source="test", title=summary, content=summary, db_id=item_id,
+            summary=summary, confidence=0.8, analysis_status="complete",
+        )
+        return store.update_analyses(
+            [(item_id, item)], claim_token=batch.token, claim_owner="worker",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(persist, first, "已落库 1"),
+            executor.submit(persist, second, "已落库 2"),
+        ]
+        written = [future.result(timeout=5) for future in futures]
+
+    assert sorted(item_id for batch in written for item_id in batch) == sorted([
+        first.ids[0], second.ids[0],
+    ])
+    assert len(store.query(status="complete", limit=10)["items"]) == 2
+
+
 def test_annotation_failure_uses_structured_code_and_provider_backoff(tmp_path):
     class SlowLLM:
         def chat_json(self, prompt, system=None, **kwargs):

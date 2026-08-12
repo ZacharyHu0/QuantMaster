@@ -12,8 +12,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import math
 import re
@@ -272,10 +272,10 @@ class NewsStore:
             self._migrate()
         self.claims = NewsClaimStore(self.path, read_only=self.read_only)
 
-    def _conn(self) -> sqlite3.Connection:
+    def _conn(self, *, write_intent: bool = False) -> sqlite3.Connection:
         return connect_sqlite(
             self.path,
-            timeout=0.25 if self.read_only else 5.0,
+            timeout=0.25 if self.read_only else (30.0 if write_intent else 5.0),
             row_factory=True,
             read_only=self.read_only,
         )
@@ -749,7 +749,8 @@ class NewsStore:
         claim_owner: str = "",
     ) -> bool:
         item.sectors = _normalize_sectors(item.sectors)
-        with self._conn() as conn:
+        with self._conn(write_intent=True) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             return self._update_analysis(
                 conn, item_id, item, claim_token=claim_token, claim_owner=claim_owner,
             )
@@ -801,7 +802,13 @@ class NewsStore:
     ) -> list[int]:
         """Fence and persist one provider batch in a single SQLite transaction."""
         written: list[int] = []
-        with self._conn() as connection:
+        with self._conn(write_intent=True) as connection:
+            # Claims must be checked only after this writer owns the reserved
+            # lock.  A deferred transaction lets concurrent annotation batches
+            # all read their claims first and then deadlock while upgrading to
+            # writers; SQLite reports that upgrade cycle immediately as
+            # ``database is locked`` even with a busy timeout configured.
+            connection.execute("BEGIN IMMEDIATE")
             for item_id, item in items:
                 item.sectors = _normalize_sectors(item.sectors)
                 if self._update_analysis(
@@ -832,7 +839,11 @@ class NewsStore:
                 provider_delay = min(max(0.0, candidate), 7 * 86400.0)
         except (TypeError, ValueError, OverflowError):
             provider_delay = 0.0
-        with self._conn() as conn:
+        with self._conn(write_intent=True) as conn:
+            # Serialize the read/modify/write attempt counter for the same
+            # reason as successful analysis persistence.  A database lock is
+            # infrastructure contention, not another failed model attempt.
+            conn.execute("BEGIN IMMEDIATE")
             for item_id in item_ids:
                 if claim_token and not self.claims.owns(
                     item_id, claim_token, claim_owner, connection=conn,

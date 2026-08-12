@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "资讯 LLM 结果落库修复",
+                "items": (
+                    (
+                        "资讯并发标注在读取租约前先取得 SQLite 写权并按批次串行提交；"
+                        "模型已正常返回的结果不再因延迟事务锁升级冲突丢失或误入死信。"
+                    ),
+                    (
+                        "成功结果和失败记账的写事务使用有界 30 秒等待，"
+                        "多个标注线程会等待前一批原子提交，而不是把数据库竞争算作模型失败。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.8.1",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "Windows 重载端口隔离修复",
