@@ -211,7 +211,7 @@ def test_windows_reload_listener_uses_exclusive_address(monkeypatch):
             "setsockopt",
             (
                 lifecycle.socket_module.SOL_SOCKET,
-                lifecycle.socket_module.SO_EXCLUSIVEADDRUSE,
+                lifecycle._SO_EXCLUSIVEADDRUSE,
                 1,
             ),
         ),

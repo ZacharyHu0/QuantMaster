@@ -876,7 +876,7 @@ def test_version_pinned_news_sentiment_is_never_silently_reinterpreted():
 
     assert registry.resolve("news_sentiment").version == "2.0.0"
     assert registry.resolve("news_sentiment", version="2.0.0").version == "2.0.0"
-    with pytest.raises(KeyError, match="news_sentiment@1.0.0"):
+    with pytest.raises(KeyError, match=r"news_sentiment@1\.0\.0"):
         registry.resolve("news_sentiment", version="1.0.0")
 
 

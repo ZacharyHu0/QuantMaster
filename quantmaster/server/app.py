@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -107,8 +107,8 @@ async def lifespan(_: FastAPI):
     _configure_reload_worker_logging()
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.logging_config import current_log_path
-    from quantmaster.runtime.worker import get_runtime_worker
     from quantmaster.runtime.supervisor import get_worker_supervisor
+    from quantmaster.runtime.worker import get_runtime_worker
     from quantmaster.server.management import capture_runtime_baseline
 
     capture_runtime_baseline()
@@ -1067,8 +1067,18 @@ def _market_overview_response(
             "schema_version": 2,
             "algorithm_version": "QM_MARKET_OVERVIEW_V2",
             "input_fingerprint": snapshot_id,
-            "as_of": max((str(item.get("as_of") or "") for values in result.values() for item in values), default=""),
-            "generated_at": max((str(item.get("checked_at") or "") for values in result.values() for item in values), default=""),
+            "as_of": max(
+                (str(item.get("as_of") or "") for values in result.values() for item in values),
+                default="",
+            ),
+            "generated_at": max(
+                (
+                    str(item.get("checked_at") or "")
+                    for values in result.values()
+                    for item in values
+                ),
+                default="",
+            ),
             "stale": bool(stale_total or missing_total),
             "stale_reasons": [value for value in stale_reasons if value],
             "quality": {"status": quality_status},
@@ -1109,7 +1119,7 @@ def _market_snapshot_etag(
         sort_keys=True,
     )
     etag = '"' + hashlib.sha256(
-        f"{snapshot_id}\n{canonical_query}".encode("utf-8")
+        f"{snapshot_id}\n{canonical_query}".encode()
     ).hexdigest() + '"'
     headers = {
         "ETag": etag,

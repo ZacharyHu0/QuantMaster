@@ -20,7 +20,6 @@ from quantmaster.runtime.derived import DerivedArtifactCatalog, DerivedArtifactI
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
 
-
 DOMAIN = "market"
 SNAPSHOT_TYPE = "overview"
 SCHEMA_VERSION = "1"

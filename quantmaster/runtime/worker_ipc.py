@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import tempfile
 import threading
 from collections.abc import Callable, Mapping
 from multiprocessing.connection import AuthenticationError, Client, Listener
@@ -46,7 +47,10 @@ def worker_command_endpoint(root: str | Path | None = None) -> str:
     digest = _root_digest(base)[:24]
     if os.name == "nt":
         return rf"\\.\pipe\quantmaster-runtime-{digest}"
-    return str(base / f".quantmaster-runtime-{digest}.sock")
+    endpoint = base / f".quantmaster-runtime-{digest}.sock"
+    if len(os.fsencode(endpoint)) <= 100:
+        return str(endpoint)
+    return str(Path(tempfile.gettempdir()) / f"quantmaster-runtime-{digest}.sock")
 
 
 def _authkey(root: Path) -> bytes:

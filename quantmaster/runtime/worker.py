@@ -173,6 +173,7 @@ class RuntimeWorker:
             get_config().ensure_data_root()
 
             from quantmaster.after_close.jobs import get_after_close_jobs
+            from quantmaster.ai.news_jobs import get_news_jobs
             from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
             from quantmaster.automation.runtime import get_runtime
             from quantmaster.backtest.paper_automation import get_paper_automation_worker
@@ -185,7 +186,6 @@ class RuntimeWorker:
             from quantmaster.lab.llm_jobs import get_lab_llm_jobs
             from quantmaster.lab.worker import get_worker
             from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
-            from quantmaster.ai.news_jobs import get_news_jobs
             from quantmaster.research.jobs import get_research_job_manager
             from quantmaster.rotation.etf_jobs import get_etf_research_jobs
             from quantmaster.rotation.service import get_rotation_worker
@@ -373,6 +373,7 @@ class RuntimeWorker:
             if not self._started:
                 return
             from quantmaster.after_close.jobs import shutdown_after_close_jobs
+            from quantmaster.ai.news_jobs import shutdown_news_jobs
             from quantmaster.analysis.stock_jobs import shutdown_stock_analysis_jobs
             from quantmaster.automation.runtime import get_runtime
             from quantmaster.backtest.paper_automation import get_paper_automation_worker
@@ -380,9 +381,8 @@ class RuntimeWorker:
             from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
             from quantmaster.data.maintenance import data_refresh_manager
             from quantmaster.data.repair import get_data_repair_manager
-            from quantmaster.lab.worker import get_worker
             from quantmaster.lab.llm_jobs import shutdown_lab_llm_jobs
-            from quantmaster.ai.news_jobs import shutdown_news_jobs
+            from quantmaster.lab.worker import get_worker
             from quantmaster.research.jobs import get_research_job_manager
             from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
             from quantmaster.rotation.service import get_rotation_worker

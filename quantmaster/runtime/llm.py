@@ -13,9 +13,10 @@ import threading
 import time
 import uuid
 import weakref
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite

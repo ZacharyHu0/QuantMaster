@@ -536,7 +536,9 @@ class UnifiedJobStore:
                     continue
                 connection.execute(
                     "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
-                    "phase='需要手动重试',detail='legacy LLM job has no execution revision',updated_at=? WHERE id=?",
+                    "phase='需要手动重试',"
+                    "detail='legacy LLM job has no execution revision',"
+                    "updated_at=? WHERE id=?",
                     (_utc_now(), row["id"]),
                 )
                 self._append_event_conn(

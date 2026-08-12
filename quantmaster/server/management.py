@@ -70,7 +70,10 @@ def _require_runtime_worker() -> dict[str, Any]:
     )
 
 
-def _data_refresh_worker_command(operation: str, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _data_refresh_worker_command(
+    operation: str,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Forward a mutation to the worker instead of writing its ledger in Web."""
 
     from quantmaster.runtime.worker_ipc import (
@@ -660,11 +663,9 @@ def check_setting(
     from quantmaster.settings_checks import (
         check_data_sources,
         check_lab,
-        check_llm_web_search,
         check_server,
         check_storage,
         check_tushare,
-        list_llm_models,
     )
 
     document, mutations = _check_document(body or {})

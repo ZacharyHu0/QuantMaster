@@ -965,7 +965,10 @@ def _build_group_aggregation(
     if amount_values is not None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            liquidity_values = np.nanmedian(amount_values[max(0, current_position - 19):current_position + 1], axis=0)
+            liquidity_values = np.nanmedian(
+                amount_values[max(0, current_position - 19) : current_position + 1],
+                axis=0,
+            )
         liquidity[np.isfinite(liquidity_values)] = liquidity_values[np.isfinite(liquidity_values)]
     rows = {
         code: _GroupRow(code, raw, symbols, symbol_positions, member_count, index)
@@ -992,7 +995,8 @@ def _representatives_from_group_aggregation(
     names: dict[str, str],
 ) -> list[dict[str, Any]]:
     lookup = {
-        int(position): symbol for symbol, position in zip(row.symbols, row.symbol_positions)
+        int(position): symbol
+        for symbol, position in zip(row.symbols, row.symbol_positions, strict=True)
     }
     candidates = [
         int(position) for position in row.symbol_positions
@@ -1236,7 +1240,6 @@ def analyze_group_rotation(
     names = names or {}
     trend = trend if trend is not None else compute_trend_matrices(close)
     masks = _state_masks(trend)
-    positive_mask = masks["strong_up"] | masks["up"]
     valid_dates = trend.eligible.sum(axis=1)
     valid_dates = valid_dates[valid_dates > 0]
     if valid_dates.empty:

@@ -26,10 +26,18 @@ def test_generations_fingerprint_artifacts_and_atomic_pointer(tmp_path):
         source_generations=catalog.source_generations("stockdb"),
     )
     artifact = catalog.put_json({"schema_version": 2, "items": [{"code": "A"}]})
-    catalog.record_node("rotation.themes", "all", fingerprint, "rotation-v3", output_artifact_id=artifact["artifact_id"])
-    assert catalog.node_cache_hit("rotation.themes", "all", fingerprint, "rotation-v3")["artifact"]["artifact_id"] == artifact["artifact_id"]
+    catalog.record_node(
+        "rotation.themes",
+        "all",
+        fingerprint,
+        "rotation-v3",
+        output_artifact_id=artifact["artifact_id"],
+    )
+    cached = catalog.node_cache_hit("rotation.themes", "all", fingerprint, "rotation-v3")
+    assert cached["artifact"]["artifact_id"] == artifact["artifact_id"]
     catalog.publish_snapshot("rotation", "themes", artifact["artifact_id"])
-    assert catalog.current_snapshot("rotation", "themes")["artifact"]["artifact_id"] == artifact["artifact_id"]
+    current = catalog.current_snapshot("rotation", "themes")
+    assert current["artifact"]["artifact_id"] == artifact["artifact_id"]
     assert catalog.read_json(artifact["artifact_id"])["items"][0]["code"] == "A"
 
     industries = catalog.put_json({"schema_version": 2, "items": [{"code": "801080.SI"}]})
@@ -38,7 +46,8 @@ def test_generations_fingerprint_artifacts_and_atomic_pointer(tmp_path):
         "industries": industries["artifact_id"],
     })
     assert set(published) == {"themes", "industries"}
-    assert catalog.current_snapshot("rotation", "industries")["artifact"]["artifact_id"] == industries["artifact_id"]
+    current = catalog.current_snapshot("rotation", "industries")
+    assert current["artifact"]["artifact_id"] == industries["artifact_id"]
 
 
 def test_parquet_artifacts_are_verified_before_reading(tmp_path):

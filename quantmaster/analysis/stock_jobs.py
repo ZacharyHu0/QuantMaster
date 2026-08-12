@@ -19,8 +19,8 @@ from quantmaster.runtime.jobs import (
     ArtifactIntegrityError,
     JobContext,
     JobOutcome,
-    UnifiedJobStore,
     UnifiedJobRuntime,
+    UnifiedJobStore,
 )
 
 STOCK_ANALYSIS_TASK_TYPE = "market.stock_analysis"

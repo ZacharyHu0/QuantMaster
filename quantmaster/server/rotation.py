@@ -169,7 +169,7 @@ def _snapshot_etag(
         sorted((str(key), str(value)) for key, value in request.query_params.multi_items()),
         sort_keys=True,
     )
-    digest = hashlib.sha256(f"{snapshot_id}\n{canonical_query}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{snapshot_id}\n{canonical_query}".encode()).hexdigest()
     etag = f'"{digest}"'
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = "private, max-age=0, must-revalidate"
@@ -207,7 +207,7 @@ def get_rotation_job(job_id: str) -> dict[str, Any]:
     try:
         value = get_rotation_worker().runtime.store.get(job_id)
     except KeyError:
-        raise KeyError(job_id)
+        raise KeyError(job_id) from None
     if str(value.get("type") or "") != "rotation.refresh":
         raise KeyError(job_id)
     return value

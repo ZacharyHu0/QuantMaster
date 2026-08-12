@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import hashlib
+import logging
 import sqlite3
 from datetime import datetime
 from typing import Any, Literal
@@ -198,7 +198,7 @@ def _snapshot_etag(
         return payload
     canonical = strict_json_dumps(parameters, sort_keys=True)
     etag = '"' + hashlib.sha256(
-        f"{snapshot_id}\n{canonical}".encode("utf-8"),
+        f"{snapshot_id}\n{canonical}".encode(),
     ).hexdigest() + '"'
     response.headers["ETag"] = etag
     requested = str(request.headers.get("if-none-match") or "")

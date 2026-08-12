@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import numbers
 import os
 import sqlite3
 import tempfile
 import threading
 import time
 import uuid
-import numbers
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BufferedRandom
@@ -690,7 +690,8 @@ class RotationStore:
         needle = str(query).strip().casefold()
         if needle:
             clauses.append(
-                "(lower(name) LIKE ? OR lower(item_key) LIKE ? OR lower(primary_industry_name) LIKE ? OR lower(benchmark) LIKE ?)"
+                "(lower(name) LIKE ? OR lower(item_key) LIKE ? "
+                "OR lower(primary_industry_name) LIKE ? OR lower(benchmark) LIKE ?)"
             )
             like = f"%{needle}%"
             params.extend((like, like, like, like))
@@ -755,7 +756,11 @@ class RotationStore:
                 current = min(selected_page, pages)
                 offset = (current - 1) * selected_size
                 rows = connection.execute(
-                    "SELECT payload_json FROM snapshot_items" + where + " ORDER BY " + order_by + " LIMIT ? OFFSET ?",
+                    "SELECT payload_json FROM snapshot_items"
+                    + where
+                    + " ORDER BY "
+                    + order_by
+                    + " LIMIT ? OFFSET ?",
                     (*params, selected_size, offset),
                 ).fetchall()
         except (FileNotFoundError, sqlite3.OperationalError):

@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.data.free_stockdb_contracts import (
     StockDBArtifactIdentity,
     StockDBCatalogSnapshot,
@@ -26,6 +25,7 @@ from quantmaster.data.free_stockdb_contracts import (
     StockDBIngestSnapshot,
 )
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
+from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.research.contracts import content_hash
 from quantmaster.runtime.derived import DerivedArtifactCatalog
 
@@ -1019,7 +1019,11 @@ class StockDBIngestService:
             field: {
                 "rows": stat["rows"],
                 "matching_ratio": round(stat["matched"] / max(1, stat["rows"]), 6),
-                "tolerance": _CROSS_PRICE_TOLERANCE if field in {"open", "high", "low", "close"} else _CROSS_UNIT_TOLERANCE,
+                "tolerance": (
+                    _CROSS_PRICE_TOLERANCE
+                    if field in {"open", "high", "low", "close"}
+                    else _CROSS_UNIT_TOLERANCE
+                ),
             }
             for field, stat in sorted(totals.items())
         }

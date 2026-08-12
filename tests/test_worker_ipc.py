@@ -6,7 +6,13 @@ from quantmaster.runtime.worker_ipc import (
     RuntimeCommandServer,
     WorkerCommandUnavailable,
     call_worker_command,
+    worker_command_endpoint,
 )
+
+
+def test_worker_command_endpoint_stays_within_unix_socket_path_limit(tmp_path):
+    root = tmp_path / ("deep-path-" * 20)
+    assert len(worker_command_endpoint(root).encode()) <= 100
 
 
 def test_runtime_worker_command_channel_round_trips_without_web_writes(tmp_path):

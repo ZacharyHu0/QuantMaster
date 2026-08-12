@@ -844,8 +844,10 @@ class LabStore:
                     json_extract(result_json, '$.version_status') AS result_version_status,
                     json_extract(result_json, '$.device') AS result_device,
                     json_extract(result_json, '$.telemetry.effective_device') AS telemetry_device,
-                    json_extract(result_json, '$.telemetry.samples_per_second') AS telemetry_samples_per_second,
-                    json_extract(result_json, '$.telemetry.peak_gpu_memory_mb') AS telemetry_peak_gpu_memory_mb,
+                    json_extract(result_json, '$.telemetry.samples_per_second')
+                        AS telemetry_samples_per_second,
+                    json_extract(result_json, '$.telemetry.peak_gpu_memory_mb')
+                        AS telemetry_peak_gpu_memory_mb,
                     json_extract(result_json, '$.train_samples') AS result_train_samples,
                     json_extract(result_json, '$.validation_samples') AS result_validation_samples
                 """
@@ -1094,8 +1096,10 @@ class LabStore:
                     json_extract(config_json, '$.protocol.fold_test_days') AS config_fold_test_days,
                     json_extract(result_json, '$.version_id') AS result_version_id,
                     json_extract(result_json, '$.candidate') AS result_candidate,
-                    json_array_length(COALESCE(json_extract(result_json, '$.trials'), '[]')) AS result_trial_count,
-                    CASE WHEN json_type(result_json, '$.sealed_metrics') IS NULL THEN 0 ELSE 1 END AS result_sealed
+                    json_array_length(COALESCE(json_extract(result_json, '$.trials'), '[]'))
+                        AS result_trial_count,
+                    CASE WHEN json_type(result_json, '$.sealed_metrics') IS NULL
+                        THEN 0 ELSE 1 END AS result_sealed
                 """
             else:
                 columns = "*"

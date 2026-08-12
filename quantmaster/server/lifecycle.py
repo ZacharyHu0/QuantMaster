@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_SO_EXCLUSIVEADDRUSE = getattr(socket_module, "SO_EXCLUSIVEADDRUSE", 0x4)
 
 # A hot-reload change must become a replacement Web generation quickly.  The
 # old 30s quiet window plus a five-minute cooldown made an accepted manual
@@ -432,7 +433,7 @@ def _bind_reload_socket(config: Any, host: str, port: int) -> Any:
     try:
         listener.setsockopt(
             socket_module.SOL_SOCKET,
-            socket_module.SO_EXCLUSIVEADDRUSE,
+            _SO_EXCLUSIVEADDRUSE,
             1,
         )
         listener.bind((host, int(port)))

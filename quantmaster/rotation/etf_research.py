@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.data.free_stockdb_contracts import StockDBIngestSnapshot
 from quantmaster.data.free_stockdb_ingest import (
     STOCKDB_INGEST_SCHEMA_VERSION,
@@ -27,7 +26,7 @@ from quantmaster.data.free_stockdb_ingest import (
 from quantmaster.data.free_stockdb_ingest import _frame_hash as _stockdb_frame_hash
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
-from quantmaster.data.resilience import PROVIDER_HEALTH
+from quantmaster.data.resilience import PROVIDER_HEALTH, remote_io_allowed
 from quantmaster.research.contracts import content_hash
 from quantmaster.rotation.etf_models import (
     ETF_RESEARCH_MODEL_VERSION,
@@ -1247,11 +1246,10 @@ class EtfResearchService:
                 }
         cached = pd.DataFrame()
         try:
-            from quantmaster.rotation.store import RotationStore
+            metadata_store = self._rotation_evidence_store()
         except ImportError:
             cached = pd.DataFrame()
         else:
-            metadata_store = self._rotation_evidence_store()
             cached = (
                 metadata_store.etf_metadata_history()
                 if hasattr(metadata_store, "etf_metadata_history")

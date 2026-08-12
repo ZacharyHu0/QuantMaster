@@ -7,9 +7,10 @@ import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite

@@ -604,7 +604,8 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
     assert created.status_code == 202
     assert created.json()["status"] == "running"
     assert created.json()["links"]["self"] == "/api/v1/jobs/job-1"
-    assert client.get("/api/v1/jobs", params={"domain": "data", "limit": 1}).json()["items"][0]["status"] == "interrupted"
+    jobs = client.get("/api/v1/jobs", params={"domain": "data", "limit": 1}).json()
+    assert jobs["items"][0]["status"] == "interrupted"
     assert client.post("/api/v1/jobs/job-1/retry", headers=headers).json()["status"] == "running"
 
 

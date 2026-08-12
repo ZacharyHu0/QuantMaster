@@ -72,7 +72,7 @@ class CredentialStore:
             raise CredentialError("无法初始化系统凭据库") from exc
 
     def get(self, target: str) -> str | None:
-        keyring, errors = self._backend()
+        keyring, _errors = self._backend()
         try:
             return keyring.get_password(self.SERVICE, target)
         except Exception as exc:  # Windows Credential Manager may raise pywin32-only errors.
@@ -81,7 +81,7 @@ class CredentialStore:
     def set(self, target: str, value: str) -> None:
         if not value:
             raise CredentialError("不能保存空凭据")
-        keyring, errors = self._backend()
+        keyring, _errors = self._backend()
         try:
             keyring.set_password(self.SERVICE, target, value)
         except Exception as exc:  # keep every backend-specific failure at this boundary

@@ -25,7 +25,11 @@ from quantmaster.rotation.analytics import analyze_group_rotation, compute_trend
 from quantmaster.runtime.derived import DerivedArtifactCatalog
 
 
-def _fixture(days: int, symbols: int, groups: int) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]]]:
+def _fixture(
+    days: int,
+    symbols: int,
+    groups: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, Any]]]:
     rng = np.random.default_rng(20260811)
     dates = pd.bdate_range("2025-01-02", periods=days)
     columns = [f"{600000 + index:06d}.SH" for index in range(symbols)]
@@ -123,7 +127,10 @@ def run_benchmark(*, scenario: str, runs: int, days: int, symbols: int, groups: 
         if scenario in {"all", "noop"}:
             measured = _measure(
                 "noop", max(10, runs),
-                lambda: catalog.node_cache_hit("benchmark.themes", "all", fingerprint, "benchmark-v1") is not None,
+                lambda: catalog.node_cache_hit(
+                    "benchmark.themes", "all", fingerprint, "benchmark-v1",
+                )
+                is not None,
             )
             assert measured.pop("value") is True
             measured["remote_calls"] = 0
@@ -143,7 +150,11 @@ def run_benchmark(*, scenario: str, runs: int, days: int, symbols: int, groups: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=("all", "cold", "warm", "noop", "incremental", "rebuild"), default="all")
+    parser.add_argument(
+        "--scenario",
+        choices=("all", "cold", "warm", "noop", "incremental", "rebuild"),
+        default="all",
+    )
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--days", type=int, default=180)
     parser.add_argument("--symbols", type=int, default=480)
