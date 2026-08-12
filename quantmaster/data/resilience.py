@@ -20,6 +20,8 @@ import sqlite3
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -58,7 +60,10 @@ class ProviderTimeoutError(TimeoutError):
         super().__init__(f"{lane} 在 {timeout:g} 秒内未返回，已暂停该数据源并尝试备用数据")
 
 
-_PERMANENT_FAILURES = frozenset({"permission", "authentication", "capability_missing"})
+_PERMANENT_FAILURES = frozenset({
+    "permission", "authentication", "capability_missing",
+    "http_401_authentication", "http_403_permission",
+})
 
 
 def classify_provider_failure(exc: BaseException) -> str:
@@ -78,6 +83,15 @@ def classify_provider_failure(exc: BaseException) -> str:
         "has no attribute", "接口不存在", "endpoint not found", "not implemented",
     )):
         return "capability_missing"
+    status = _http_status(exc)
+    if status == 401:
+        return "http_401_authentication"
+    if status == 403:
+        return "http_403_permission"
+    if status == 429:
+        return "http_429_rate_limit"
+    if status is not None and 500 <= status <= 599:
+        return f"http_{status}_upstream"
     if any(value in text for value in (
         "no permission", "permission denied", "无权限", "没有权限", "访问权限", "权限不足",
         "forbidden", "积分不足",
@@ -97,6 +111,38 @@ def classify_provider_failure(exc: BaseException) -> str:
     )):
         return "transient_network"
     return "transient_upstream"
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Extract a status without depending on one HTTP client implementation."""
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    if value is None:
+        value = getattr(exc, "status_code", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_after_seconds(exc: BaseException, *, now: float | None = None) -> float | None:
+    """Parse HTTP Retry-After (delta or RFC date) without ever trusting a bad value."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    raw = str(headers.get("Retry-After") or headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), 7 * 86400.0))
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(raw)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+            base = datetime.now(timezone.utc).timestamp() if now is None else now
+            return max(0.0, min(target.timestamp() - base, 7 * 86400.0))
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
 
 
 def _provider_revision(lane: str) -> str:
@@ -234,6 +280,7 @@ class ProviderScheduler:
         self._queues: dict[str, queue.PriorityQueue] = {}
         self._lanes: set[str] = set()
         self._active_lanes: set[str] = set()
+        self._active_providers: dict[str, int] = {}
         self._inflight: dict[tuple[str, str], _ScheduledCall] = {}
         self._timeout_counts: dict[str, int] = {}
         self._sequence = count()
@@ -251,6 +298,11 @@ class ProviderScheduler:
         # conservative shared two-call pool keeps a newly added source from
         # bypassing the external provider budget.
         return "external"
+
+    @staticmethod
+    def _provider(lane: str) -> str:
+        """Provider identity is the shared budget boundary, never an endpoint label."""
+        return str(lane).partition(":")[0].casefold()
 
     def _ensure_family(self, family: str) -> queue.PriorityQueue:
         with self._lock:
@@ -283,12 +335,19 @@ class ProviderScheduler:
                 # shared: a duplicate lane yields back to the priority queue
                 # instead of holding an external-provider thread hostage.
                 with self._lock:
-                    if item.lane in self._active_lanes:
+                    provider = self._provider(item.lane)
+                    # The provider's family budget applies to all of its lanes;
+                    # a new endpoint cannot create an unbounded executor.
+                    if (
+                        item.lane in self._active_lanes
+                        or self._active_providers.get(provider, 0) >= self.FAMILY_WORKERS[family]
+                    ):
                         item.sequence = next(self._sequence)
                         work.put(item)
                         rescheduled = True
                     else:
                         self._active_lanes.add(item.lane)
+                        self._active_providers[provider] = self._active_providers.get(provider, 0) + 1
                         owns_lane = True
                 if rescheduled:
                     time.sleep(0.001)
@@ -321,6 +380,12 @@ class ProviderScheduler:
                 with self._lock:
                     if owns_lane:
                         self._active_lanes.discard(item.lane)
+                        provider = self._provider(item.lane)
+                        remaining = self._active_providers.get(provider, 1) - 1
+                        if remaining > 0:
+                            self._active_providers[provider] = remaining
+                        else:
+                            self._active_providers.pop(provider, None)
                     if not rescheduled and self._inflight.get((item.lane, item.key)) is item:
                         self._inflight.pop((item.lane, item.key), None)
                 work.task_done()
@@ -383,6 +448,8 @@ class ProviderScheduler:
             "hard_timeout_seconds": self.MAX_CALL_SECONDS,
             "network_concurrency_limit": self.MAX_NETWORK_CONCURRENCY,
             "network_active": active_network,
+            "provider_concurrency_limits": dict(self.FAMILY_WORKERS),
+            "active_providers": dict(self._active_providers),
             "timeout_count": sum(item["timeout_count"] for item in lane_status.values()),
             "lanes": lane_status,
         }
@@ -411,13 +478,16 @@ class ProviderHealthStore:
             "open_until REAL NOT NULL DEFAULT 0,last_failure REAL NOT NULL DEFAULT 0,"
             "last_success REAL NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',"
             "suppressed INTEGER NOT NULL DEFAULT 0,failure_class TEXT NOT NULL DEFAULT '',"
-            "config_revision TEXT NOT NULL DEFAULT '',probe_started REAL NOT NULL DEFAULT 0)"
+            "config_revision TEXT NOT NULL DEFAULT '',probe_started REAL NOT NULL DEFAULT 0,"
+            "retry_after REAL NOT NULL DEFAULT 0,diagnostic_code TEXT NOT NULL DEFAULT '')"
         )
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(source_health)")}
         for name, definition in (
             ("failure_class", "TEXT NOT NULL DEFAULT ''"),
             ("config_revision", "TEXT NOT NULL DEFAULT ''"),
             ("probe_started", "REAL NOT NULL DEFAULT 0"),
+            ("retry_after", "REAL NOT NULL DEFAULT 0"),
+            ("diagnostic_code", "TEXT NOT NULL DEFAULT ''"),
         ):
             if name not in columns:
                 conn.execute(f"ALTER TABLE source_health ADD COLUMN {name} {definition}")
@@ -478,6 +548,7 @@ class ProviderHealthStore:
                     )
                 value["permanent"] = value["state"] == "disabled"
                 value["next_probe_at"] = float(value.get("open_until") or 0)
+                value["retry_after_at"] = float(value.get("retry_after") or 0)
                 result[str(value["lane"])] = value
         return result
 
@@ -501,7 +572,7 @@ class ProviderHealthStore:
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT state,open_until,suppressed,config_revision FROM source_health WHERE lane=?",
+                "SELECT state,open_until,suppressed,config_revision,failure_class FROM source_health WHERE lane=?",
                 (lane,),
             ).fetchone()
             if row is None or row[0] == "closed":
@@ -519,7 +590,7 @@ class ProviderHealthStore:
                 if not probe:
                     conn.execute(
                         "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
-                    raise CircuitOpenError(f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测")
+                    raise CircuitOpenError(_disabled_message(lane, str(row[4] or "")))
             if not probe and float(row[1]) > now:
                 conn.execute(
                     "UPDATE source_health SET suppressed=suppressed+1 WHERE lane=?", (lane,))
@@ -541,7 +612,7 @@ class ProviderHealthStore:
         now = time.time()
         with self._lock, self._conn() as conn:
             row = conn.execute(
-                "SELECT state,open_until,config_revision FROM source_health WHERE lane=?",
+                "SELECT state,open_until,config_revision,failure_class FROM source_health WHERE lane=?",
                 (lane,),
             ).fetchone()
             if row is None or row[0] == "closed":
@@ -554,9 +625,7 @@ class ProviderHealthStore:
                 )
                 conn.commit()
                 if row[0] == "disabled":
-                    raise CircuitOpenError(
-                        f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测"
-                    )
+                    raise CircuitOpenError(_disabled_message(lane, str(row[3] or "")))
                 remaining = max(1, round(float(row[1]) - now))
                 raise CircuitOpenError(f"{lane} 暂停请求，约 {remaining} 秒后探测")
 
@@ -572,15 +641,19 @@ class ProviderHealthStore:
             conn.execute(
                 "INSERT INTO source_health "
                 "(lane,state,failures,open_count,open_until,last_success,last_error,suppressed,"
-                "failure_class,config_revision,probe_started) "
-                "VALUES (?,'closed',0,0,0,?,'',0,'',?,0) "
+                "failure_class,config_revision,probe_started,retry_after,diagnostic_code) "
+                "VALUES (?,'closed',0,0,0,?,'',0,'',?,0,0,'') "
                 "ON CONFLICT(lane) DO UPDATE SET state='closed',failures=0,open_count=0,"
                 "open_until=0,last_success=excluded.last_success,last_error='',suppressed=0,"
-                "failure_class='',config_revision=excluded.config_revision,probe_started=0",
+                "failure_class='',config_revision=excluded.config_revision,probe_started=0,"
+                "retry_after=0,diagnostic_code=''",
                 (lane, now, _provider_revision(lane)),
             )
 
-    def failure(self, lane: str, exc: BaseException, *, immediate: bool = False) -> None:
+    def failure(
+        self, lane: str, exc: BaseException, *, immediate: bool = False,
+        retry_after: float | None = None,
+    ) -> None:
         from quantmaster.logging_config import redact_sensitive_text
 
         now = time.time()
@@ -588,6 +661,11 @@ class ProviderHealthStore:
         summary = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1***@", summary)[:300]
         failure_class = classify_provider_failure(exc)
         permanent = failure_class in _PERMANENT_FAILURES
+        status = _http_status(exc)
+        diagnostic = failure_class
+        if status is not None:
+            diagnostic = f"http_{status}"
+        retry_after = max(0.0, float(retry_after or 0.0))
         with self._lock, self._conn() as conn:
             row = conn.execute(
                 "SELECT failures,open_count,state FROM source_health WHERE lane=?", (lane,)
@@ -600,15 +678,16 @@ class ProviderHealthStore:
                 conn.execute(
                     "INSERT INTO source_health "
                     "(lane,state,failures,open_count,open_until,last_failure,last_error,"
-                    "failure_class,config_revision,probe_started) "
-                    "VALUES (?,'disabled',?,?,0,?,?,?,?,0) "
+                    "failure_class,config_revision,probe_started,retry_after,diagnostic_code) "
+                    "VALUES (?,'disabled',?,?,0,?,?,?,?,0,0,?) "
                     "ON CONFLICT(lane) DO UPDATE SET state='disabled',failures=excluded.failures,"
                     "open_count=excluded.open_count,open_until=0,last_failure=excluded.last_failure,"
                     "last_error=excluded.last_error,failure_class=excluded.failure_class,"
-                    "config_revision=excluded.config_revision,probe_started=0",
+                    "config_revision=excluded.config_revision,probe_started=0,retry_after=0,"
+                    "diagnostic_code=excluded.diagnostic_code",
                     (
                         lane, failures, open_count, now, summary, failure_class,
-                        _provider_revision(lane),
+                        _provider_revision(lane), diagnostic,
                     ),
                 )
                 if not row or str(row[2]) != "disabled":
@@ -616,20 +695,23 @@ class ProviderHealthStore:
                 return
             if should_open:
                 open_count += 1
-                cooldown = (300, 900, 1800)[min(open_count - 1, 2)]
+                cooldown = max(
+                    (300, 900, 1800)[min(open_count - 1, 2)], retry_after,
+                )
                 conn.execute(
                     "INSERT INTO source_health "
                     "(lane,state,failures,open_count,open_until,last_failure,last_error,"
-                    "failure_class,config_revision,probe_started) "
-                    "VALUES (?,'open',?,?,?,?,?,?,?,0) "
+                    "failure_class,config_revision,probe_started,retry_after,diagnostic_code) "
+                    "VALUES (?,'open',?,?,?,?,?,?,?,0,?,?) "
                     "ON CONFLICT(lane) DO UPDATE SET state='open',failures=excluded.failures,"
                     "open_count=excluded.open_count,open_until=excluded.open_until,"
                     "last_failure=excluded.last_failure,last_error=excluded.last_error,"
                     "failure_class=excluded.failure_class,config_revision=excluded.config_revision,"
-                    "probe_started=0",
+                    "probe_started=0,retry_after=excluded.retry_after,"
+                    "diagnostic_code=excluded.diagnostic_code",
                     (
                         lane, failures, open_count, now + cooldown, now, summary,
-                        failure_class, _provider_revision(lane),
+                        failure_class, _provider_revision(lane), now + retry_after, diagnostic,
                     ),
                 )
                 logger.warning(
@@ -638,12 +720,13 @@ class ProviderHealthStore:
                 conn.execute(
                     "INSERT INTO source_health "
                     "(lane,state,failures,open_count,open_until,last_failure,last_error,"
-                    "failure_class,config_revision,probe_started) "
-                    "VALUES (?,'closed',?,0,0,?,?,?,?,0) "
+                    "failure_class,config_revision,probe_started,retry_after,diagnostic_code) "
+                    "VALUES (?,'closed',?,0,0,?,?,?,?,0,0,?) "
                     "ON CONFLICT(lane) DO UPDATE SET failures=excluded.failures,"
                     "last_failure=excluded.last_failure,last_error=excluded.last_error,"
-                    "failure_class=excluded.failure_class,config_revision=excluded.config_revision",
-                    (lane, failures, now, summary, failure_class, _provider_revision(lane)),
+                    "failure_class=excluded.failure_class,config_revision=excluded.config_revision,"
+                    "retry_after=0,diagnostic_code=excluded.diagnostic_code",
+                    (lane, failures, now, summary, failure_class, _provider_revision(lane), diagnostic),
                 )
 
     def reset(self, lane: str) -> dict[str, dict]:
@@ -672,11 +755,34 @@ def _hard_connectivity_error(exc: BaseException) -> bool:
 
 def _rate_limited(exc: BaseException) -> bool:
     text = str(exc).lower()
-    return "429" in text or "rate limit" in text or "too many requests" in text
+    return _http_status(exc) == 429 or "429" in text or "rate limit" in text or "too many requests" in text
 
 
 def _permanent_failure(exc: BaseException) -> bool:
     return classify_provider_failure(exc) in _PERMANENT_FAILURES
+
+
+def _retryable_failure(exc: BaseException) -> bool:
+    """Only network/DNS/TLS and upstream 5xx failures earn another request."""
+    value = classify_provider_failure(exc)
+    return value in {"transient_network", "transient_upstream", "upstream_5xx"} or (
+        value.startswith("http_") and value.endswith("_upstream")
+    )
+
+
+def _retry_delay(attempt: int) -> float:
+    cfg = get_config().data
+    initial = max(0.0, float(cfg.provider_retry_backoff))
+    ceiling = max(initial, float(cfg.provider_retry_max_backoff))
+    return min(ceiling, initial * (2 ** max(0, attempt - 1)))
+
+
+def _disabled_message(lane: str, failure_class: str = "") -> str:
+    if failure_class == "http_401_authentication":
+        return f"{lane} 返回 HTTP 401，令牌无效或缺失；请在设置中更新凭据后探测"
+    if failure_class == "http_403_permission":
+        return f"{lane} 返回 HTTP 403，当前凭据没有该接口权限；请开通权限或改用本地数据"
+    return f"{lane} 已因权限、认证或能力缺失停用；请更新配置后探测"
 
 
 def _run_scheduled_provider[T](lane: str, key: str, func: Callable[[], T]) -> T:
@@ -722,6 +828,8 @@ def provider_call[T](
     *,
     probe: bool = False,
     empty_opens: bool = False,
+    retry_attempts: int | None = None,
+    retry_backoff: float | None = None,
 ) -> T:
     """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
     _require_remote_io(lane)
@@ -732,24 +840,42 @@ def provider_call[T](
         # 在真正轮到上游执行时再次看熔断状态；否则高并发会在首个失败
         # 打开熔断器前把大量请求预先排进队列。
         PROVIDER_HEALTH.before_call(lane, probe=probe)
-        try:
-            result = func()
-            if empty_opens and (result is None or getattr(result, "empty", False)):
-                raise EmptyProviderResponse(f"{lane} 返回空数据")
-        except (CircuitOpenError, ProviderTimeoutError):
-            raise
-        except BaseException as exc:
-            # 必须在上游 worker 取下一项前写入熔断状态，才能真正阻止
-            # 已排队的错误风暴；同 key 合并时也只记录一次。
-            PROVIDER_HEALTH.failure(
-                lane, exc,
-                immediate=(
+        attempts = max(1, int(
+            get_config().data.provider_retry_attempts if retry_attempts is None else retry_attempts
+        ))
+        for attempt in range(1, attempts + 1):
+            try:
+                result = func()
+                if empty_opens and (result is None or getattr(result, "empty", False)):
+                    raise EmptyProviderResponse(f"{lane} 返回空数据")
+                return result
+            except (CircuitOpenError, ProviderTimeoutError):
+                raise
+            except BaseException as exc:
+                retry_after = _retry_after_seconds(exc)
+                immediate = (
                     _hard_connectivity_error(exc) or _rate_limited(exc)
                     or isinstance(exc, EmptyProviderResponse) or _permanent_failure(exc)
-                ),
-            )
-            raise
-        return result
+                )
+                # 429 requires an upstream-directed pause, and 401/403 must
+                # never burn retry budget.  Only transient transport/5xx
+                # failures retry, bounded by the shared provider contract.
+                if immediate or not _retryable_failure(exc) or attempt >= attempts:
+                    PROVIDER_HEALTH.failure(
+                        lane, exc, immediate=immediate, retry_after=retry_after,
+                    )
+                    raise
+                delay = _retry_delay(attempt) if retry_backoff is None else min(
+                    max(0.0, float(get_config().data.provider_retry_max_backoff)),
+                    max(0.0, float(retry_backoff)) * (2 ** (attempt - 1)),
+                )
+                logger.debug(
+                    "%s 瞬态失败（%s/%s），%.2f 秒后在同一 provider 预算内重试: %s",
+                    lane, attempt, attempts, delay, exc,
+                )
+                if delay:
+                    time.sleep(delay)
+        raise AssertionError("unreachable")
 
     return _run_scheduled_provider(lane, key, scheduled)
 
@@ -762,56 +888,21 @@ def akshare_call[T](
     probe: bool = False,
     **kwargs,
 ) -> T:
-    """执行 AKShare 请求，失败时按配置做指数退避重试。"""
-    _require_remote_io(lane)
-    cfg = get_config().data
-    _require_provider_enabled("akshare", probe=probe)
-    attempts = max(1, int(cfg.akshare_retries))
-    backoff = max(0.0, float(cfg.akshare_retry_backoff))
+    """AKShare adapter; retry/circuit/singleflight are owned by provider_call."""
     key = label + ":" + hashlib.sha256(
         json.dumps(
             {"args": args, "kwargs": kwargs}, sort_keys=True,
             ensure_ascii=False, default=str,
         ).encode("utf-8")
     ).hexdigest()[:16]
-    for attempt in range(1, attempts + 1):
-        try:
-            PROVIDER_HEALTH.check_available(lane, probe=probe)
-
-            def scheduled(attempt_number: int = attempt) -> T:
-                PROVIDER_HEALTH.before_call(lane, probe=probe)
-                try:
-                    result = func(*args, **kwargs)
-                except (CircuitOpenError, ProviderTimeoutError):
-                    raise
-                except Exception as exc:
-                    immediate = (
-                        _hard_connectivity_error(exc) or _rate_limited(exc)
-                        or _permanent_failure(exc)
-                    )
-                    if immediate or attempt_number >= attempts:
-                        PROVIDER_HEALTH.failure(lane, exc, immediate=immediate)
-                    raise
-                return result
-
-            return _run_scheduled_provider(lane, key, scheduled)
-        except CircuitOpenError:
-            raise
-        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            immediate = (
-                _hard_connectivity_error(exc) or _rate_limited(exc)
-                or _permanent_failure(exc)
-            )
-            if immediate or attempt >= attempts:
-                raise
-            delay = backoff * (2 ** (attempt - 1))
-            logger.debug(
-                "AKShare %s 失败（%s/%s），%.2f 秒后重试: %s",
-                label, attempt, attempts, delay, exc,
-            )
-            if delay:
-                time.sleep(delay)
-    raise AssertionError("unreachable")
+    # Keep the former AKShare knobs as an explicit per-provider overlay while
+    # preserving the one implementation of the retry contract.
+    cfg = get_config().data
+    return provider_call(
+        lane, key, lambda: func(*args, **kwargs), probe=probe,
+        retry_attempts=max(1, int(cfg.akshare_retries)),
+        retry_backoff=max(0.0, float(cfg.akshare_retry_backoff)),
+    )
 
 
 class TushareRateLimiter:

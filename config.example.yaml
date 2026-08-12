@@ -53,6 +53,9 @@ data:
   intraday_cache_minutes: 5  # 当日分钟线缓存刷新间隔
   akshare_retries: 3         # AKShare 请求失败后的总尝试次数
   akshare_retry_backoff: 0.8 # 重试退避：0.8s、1.6s……
+  provider_retry_attempts: 3 # DNS/TLS/5xx 等瞬态失败的统一总尝试次数
+  provider_retry_backoff: 0.8
+  provider_retry_max_backoff: 8
   provider_timeout: 45       # 单次数据源任务含排队的硬截止（1–300 秒）
   tushare_calls_per_minute: 120 # 2000 积分档保守限速，可按实际权限调整
   tushare_cache_days: 1      # Tushare 当期原始响应缓存；历史区间自动长期缓存

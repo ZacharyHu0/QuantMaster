@@ -1183,6 +1183,68 @@ def test_rate_limit_opens_recoverable_circuit(isolated_config):
     assert health["permanent"] is False
 
 
+def test_retry_after_is_persisted_as_the_provider_recovery_deadline(isolated_config):
+    lane = "yahoo:retry-after-test"
+    response = httpx.Response(
+        429, headers={"Retry-After": "75"},
+        request=httpx.Request("GET", "https://example.test/chart"),
+    )
+    before = time.time()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        provider_call(lane, "retry-after", response.raise_for_status)
+
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["failure_class"] == "http_429_rate_limit"
+    assert health["diagnostic_code"] == "http_429"
+    assert health["retry_after_at"] >= before + 74
+    assert health["next_probe_at"] >= health["retry_after_at"]
+
+
+def test_http_401_disables_without_retry_and_explains_remediation(isolated_config):
+    lane = "tushare:http-auth-test"
+    calls = 0
+    response = httpx.Response(
+        401, request=httpx.Request("GET", "https://example.test/pro"),
+    )
+
+    def unauthorized():
+        nonlocal calls
+        calls += 1
+        response.raise_for_status()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        provider_call(lane, "unauthorized", unauthorized)
+    with pytest.raises(CircuitOpenError, match="HTTP 401.*令牌"):
+        provider_call(lane, "blocked", unauthorized)
+
+    assert calls == 1
+    assert PROVIDER_HEALTH.status(lane)[lane]["failure_class"] == "http_401_authentication"
+
+
+def test_transient_5xx_uses_bounded_shared_provider_backoff(isolated_config, monkeypatch):
+    isolated_config.data.provider_retry_attempts = 3
+    isolated_config.data.provider_retry_backoff = 0.25
+    isolated_config.data.provider_retry_max_backoff = 0.3
+    sleeps: list[float] = []
+    calls = 0
+    response = httpx.Response(
+        503, request=httpx.Request("GET", "https://example.test/upstream"),
+    )
+
+    def flaky():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            response.raise_for_status()
+        return "ok"
+
+    monkeypatch.setattr("quantmaster.data.resilience.time.sleep", sleeps.append)
+    assert provider_call("yahoo:5xx-backoff", "retry", flaky) == "ok"
+    assert calls == 3
+    assert sleeps == [0.25, 0.3]
+
+
 def test_windows_socket_access_error_is_transient_network(isolated_config):
     error = OSError(10013, "以一种访问权限不允许的方式做了一个访问套接字的尝试。")
     error.winerror = 10013

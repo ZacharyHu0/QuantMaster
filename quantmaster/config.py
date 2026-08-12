@@ -68,6 +68,9 @@ class DataConfig:
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
     akshare_retries: int = 3              # 单次 AKShare 请求总尝试次数
     akshare_retry_backoff: float = 0.8    # 指数退避初始秒数（0.8/1.6/...）
+    provider_retry_attempts: int = 3      # 所有远程 provider 共享的瞬态故障总尝试次数
+    provider_retry_backoff: float = 0.8   # 瞬态故障退避初始秒数（有上限）
+    provider_retry_max_backoff: float = 8.0
     provider_timeout: float = 45.0        # 单次上游任务含排队的硬截止秒数
     tushare_calls_per_minute: int = 120   # 2000 积分档保守全局限速
     tushare_cache_days: int = 1           # Tushare 当期接口响应缓存天数
@@ -267,6 +270,12 @@ def _apply_env(cfg: Config) -> None:
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(
         env.get("QM_AKSHARE_RETRY_BACKOFF", cfg.data.akshare_retry_backoff))
+    cfg.data.provider_retry_attempts = int(
+        env.get("QM_PROVIDER_RETRY_ATTEMPTS", cfg.data.provider_retry_attempts))
+    cfg.data.provider_retry_backoff = float(
+        env.get("QM_PROVIDER_RETRY_BACKOFF", cfg.data.provider_retry_backoff))
+    cfg.data.provider_retry_max_backoff = float(
+        env.get("QM_PROVIDER_RETRY_MAX_BACKOFF", cfg.data.provider_retry_max_backoff))
     cfg.data.provider_timeout = float(
         env.get("QM_DATA_PROVIDER_TIMEOUT", cfg.data.provider_timeout))
     cfg.data.tushare_calls_per_minute = int(
