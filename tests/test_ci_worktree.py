@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.ci import run
 
 
@@ -15,7 +17,30 @@ def test_primary_root_uses_git_common_directory(monkeypatch, tmp_path):
         returncode = 0
         stdout = str(common)
 
-    monkeypatch.setattr(run.subprocess, "run", lambda *args, **kwargs: Result())
+    captured = {}
+    monkeypatch.setattr(run, "ROOT", tmp_path / "standalone")
+    monkeypatch.setattr(
+        run.subprocess, "run",
+        lambda *args, **kwargs: captured.update(kwargs) or Result(),
+    )
+    assert run.primary_root() == primary.resolve()
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_primary_root_reads_unicode_linked_worktree_pointer(monkeypatch, tmp_path):
+    primary = tmp_path / "研究" / "Quant"
+    worktree = primary / ".worktrees" / "task"
+    git_dir = primary / ".git" / "worktrees" / "task"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {git_dir.as_posix()}\n", encoding="utf-8")
+    monkeypatch.setattr(run, "ROOT", worktree)
+    monkeypatch.setattr(
+        run.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("Git fallback should not run"),
+    )
+
     assert run.primary_root() == primary.resolve()
 
 

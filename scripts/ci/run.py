@@ -19,13 +19,21 @@ if str(ROOT) not in sys.path:
 
 def primary_root() -> Path:
     """Return the primary checkout even when CI runs inside a linked worktree."""
+    git_pointer = ROOT / ".git"
+    if git_pointer.is_file():
+        line = git_pointer.read_text(encoding="utf-8").strip()
+        if line.startswith("gitdir: "):
+            worktree_git_dir = Path(line.removeprefix("gitdir: "))
+            if worktree_git_dir.parent.name == "worktrees":
+                return worktree_git_dir.parents[2].resolve()
     result = subprocess.run(
         [
             "git", "-c", f"safe.directory={ROOT.as_posix()}",
             "rev-parse", "--path-format=absolute", "--git-common-dir",
         ],
         cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", check=False,
+        errors="replace",
+        check=False,
     )
     if result.returncode:
         return ROOT
