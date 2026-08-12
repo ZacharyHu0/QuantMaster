@@ -48,8 +48,21 @@ def test_repository_release_metadata_is_consistent():
         (ROOT / RELEASE_FILE).read_text(encoding="utf-8"),
         (ROOT / CHANGELOG_FILE).read_text(encoding="utf-8"),
         today=release_today(),
+        require_today=False,
     )
     assert errors == []
+
+
+def test_check_worktree_accepts_an_already_published_historical_date(tmp_path, monkeypatch):
+    from scripts.release import sync as release_sync
+
+    release, changelog = valid_sources()
+    (tmp_path / "quantmaster").mkdir()
+    (tmp_path / RELEASE_FILE).write_text(release, encoding="utf-8")
+    (tmp_path / CHANGELOG_FILE).write_text(changelog, encoding="utf-8")
+    monkeypatch.setattr(release_sync, "ROOT", tmp_path)
+
+    assert release_sync.check_worktree() == 0
 
 
 def test_validate_metadata_accepts_matching_release():

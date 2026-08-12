@@ -727,7 +727,7 @@ def status() -> int:
 def check_worktree() -> int:
     release_source = (ROOT / RELEASE_FILE).read_text(encoding="utf-8")
     changelog_source = (ROOT / CHANGELOG_FILE).read_text(encoding="utf-8")
-    errors = validate_metadata(release_source, changelog_source, require_today=True)
+    errors = validate_metadata(release_source, changelog_source, require_today=False)
     if print_errors(errors, "发布元数据校验失败"):
         return 1
     version = release_assignments(release_source)["VERSION"]
