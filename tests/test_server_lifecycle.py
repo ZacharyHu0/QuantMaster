@@ -35,6 +35,37 @@ def test_parent_watcher_stops_without_requesting_shutdown(monkeypatch):
     assert requested == []
 
 
+def test_windows_console_handler_routes_ctrl_c_to_coordinated_shutdown(monkeypatch):
+    import ctypes
+
+    callbacks = {}
+
+    class Function:
+        argtypes = None
+        restype = None
+
+        def __call__(self, handler, enabled):
+            callbacks["handler"] = handler if enabled else None
+            return True
+
+    class Kernel:
+        SetConsoleCtrlHandler = Function()
+
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: Kernel())
+    requested = []
+    complete = threading.Event()
+    complete.set()
+
+    unregister = lifecycle.install_windows_console_handler(
+        lambda: requested.append(True), complete,
+    )
+
+    assert callbacks["handler"](0) == 1
+    assert requested == [True]
+    unregister()
+
+
 def test_run_uvicorn_foreground_releases_handlers(monkeypatch):
     calls = []
 

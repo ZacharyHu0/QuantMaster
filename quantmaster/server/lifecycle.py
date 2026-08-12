@@ -233,7 +233,10 @@ def install_windows_console_handler(
     import ctypes
     from ctypes import wintypes
 
-    handled_events = {2, 5, 6}  # CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT
+    # CTRL_C_EVENT must go through the same coordinated path as a console
+    # close.  Returning False lets Python raise KeyboardInterrupt in only one
+    # process while Uvicorn's reload parent and its workers remain alive.
+    handled_events = {0, 2, 5, 6}
     handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -508,6 +511,7 @@ def _run_quiet_uvicorn_reload(
     port: int,
     log_level: str,
     worker_supervisor: Any | None = None,
+    shutdown_requested: threading.Event | None = None,
 ) -> None:
     """Run a bounded blue/green reload supervisor.
 
@@ -730,10 +734,30 @@ def _run_quiet_uvicorn_reload(
         reload_includes=["*.py"],
     )
     socket = _bind_reload_socket(config, host, port)
+    reloader = QuietReload(config, target=_run_web_generation, sockets=[socket])
+    stop_watcher: threading.Thread | None = None
+    watcher_stop = threading.Event()
+    if shutdown_requested is not None:
+        def request_reloader_shutdown() -> None:
+            while not watcher_stop.wait(0.1):
+                if shutdown_requested.is_set():
+                    reloader.should_exit.set()
+                    return
+
+        stop_watcher = threading.Thread(
+            target=request_reloader_shutdown,
+            name="qm-reload-console-stop",
+            daemon=True,
+        )
+        stop_watcher.start()
     try:
-        QuietReload(config, target=_run_web_generation, sockets=[socket]).run()
+        reloader.run()
     except KeyboardInterrupt:  # pragma: no cover - interactive terminal path
-        pass
+        reloader.should_exit.set()
+    finally:
+        watcher_stop.set()
+        if stop_watcher is not None:
+            stop_watcher.join(timeout=1.0)
 
 
 def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
@@ -774,6 +798,7 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     os.environ[trigger_flag] = str(trigger_path)
     cleanup_lock = threading.Lock()
     cleanup_complete = threading.Event()
+    shutdown_requested = threading.Event()
 
     def cleanup_sidecar() -> None:
         with cleanup_lock:
@@ -798,7 +823,10 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
         daemon=True,
     )
     parent_watcher.start()
-    unregister_handler = install_windows_console_handler(cleanup_sidecar, cleanup_complete)
+    def request_shutdown() -> None:
+        shutdown_requested.set()
+
+    unregister_handler = install_windows_console_handler(request_shutdown, cleanup_complete)
     os.environ[worker_flag] = "1"
     os.environ[web_flag] = "1"
     from quantmaster.logging_config import is_verbose_logging
@@ -813,6 +841,7 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
             port=port,
             log_level=log_level,
             worker_supervisor=worker_supervisor,
+            shutdown_requested=shutdown_requested,
         )
     finally:
         # 只有整个启动器退出才停止数据库；Web worker 的多次热替换不会经过这里。
