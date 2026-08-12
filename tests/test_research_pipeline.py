@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import ClassVar
 
 import numpy as np
@@ -59,6 +60,29 @@ def _verified_empty_suspension_snapshot(monkeypatch):
             "file_sha256": "f" * 64,
         },
     )
+
+
+def test_catalog_legacy_migration_rolls_back_when_schema_upgrade_fails(
+    tmp_path, monkeypatch,
+):
+    from quantmaster.research.catalog import ResearchCatalog
+
+    path = tmp_path / "legacy-catalog.sqlite"
+
+    def broken_schema(connection):
+        connection.execute("CREATE TABLE partial_upgrade (id INTEGER)")
+        raise sqlite3.OperationalError("upgrade failed")
+
+    monkeypatch.setattr(ResearchCatalog, "_schema_v1", staticmethod(broken_schema))
+
+    with pytest.raises(sqlite3.OperationalError, match="upgrade failed"):
+        ResearchCatalog.migrate_legacy_database(path)
+
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert "partial_upgrade" not in tables
 
 
 def synthetic_bars(days: int = 80, symbols: int = 4) -> pd.DataFrame:

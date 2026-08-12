@@ -168,6 +168,8 @@ def _prepare_copy(source: Path, destination: Path, staging: Path, marker: Path) 
 
 
 def _copy_and_insert(root: Path, source: Path, store, account_id: str) -> MigrationRecord:
+    from quantmaster.portfolio.ledger import Ledger
+
     destination = store.ledger_path(account_id)
     staging = destination.with_name(f".{destination.name}.migration-staging")
     marker = destination.with_name(".legacy-paper-copy-ready")
@@ -176,6 +178,7 @@ def _copy_and_insert(root: Path, source: Path, store, account_id: str) -> Migrat
         return recovered
     try:
         _prepare_copy(source, destination, staging, marker)
+        Ledger.migrate_legacy_database(destination)
         _insert_import(store, account_id)
         marker.unlink(missing_ok=True)
     except sqlite3.IntegrityError:

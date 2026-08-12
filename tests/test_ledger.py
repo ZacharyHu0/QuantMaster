@@ -1,6 +1,7 @@
 """实盘账本与收益统计测试。"""
 
 import math
+import sqlite3
 
 import pytest
 
@@ -11,6 +12,25 @@ from quantmaster.portfolio.performance import xirr
 def _trade(date, symbol, side, price, shares, fee=0.0):
     return TradeRecord(date=date, symbol=symbol, side=side,
                        price=price, shares=shares, fee=fee)
+
+
+def test_legacy_migration_rolls_back_when_schema_upgrade_fails(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.sqlite"
+
+    def broken_schema(connection):
+        connection.execute("CREATE TABLE partial_upgrade (id INTEGER)")
+        raise sqlite3.OperationalError("upgrade failed")
+
+    monkeypatch.setattr(Ledger, "_schema_v1", staticmethod(broken_schema))
+
+    with pytest.raises(sqlite3.OperationalError, match="upgrade failed"):
+        Ledger.migrate_legacy_database(path)
+
+    with sqlite3.connect(path) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert "partial_upgrade" not in tables
 
 
 class TestFIFO:
