@@ -12,6 +12,7 @@ from scripts.dev.tasks import (
     remove_primary_venv_link,
     remove_verified_residual,
     select_impact,
+    task_changed_paths,
     validate_ready_state,
 )
 
@@ -89,6 +90,23 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
 
 def test_ready_state_allows_task_changelog_updates():
     validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+
+
+def test_task_changed_paths_excludes_inherited_main_history(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    observed = []
+
+    def lines(args, *, cwd):
+        observed.append((args, cwd))
+        return ["quantmaster/data/reference_market.py"]
+
+    monkeypatch.setattr(tasks, "git_lines", lines)
+
+    assert task_changed_paths(tmp_path) == ["quantmaster/data/reference_market.py"]
+    assert observed == [(
+        ["diff", "--name-only", "--diff-filter=ACMR", "main...HEAD"], tmp_path,
+    )]
 
 
 def test_prepare_pytest_cache_precreates_directory(tmp_path):

@@ -120,6 +120,12 @@ def changed_paths(cwd: Path, *, staged: bool, base: str) -> list[str]:
     return sorted(set(committed + working + untracked))
 
 
+def task_changed_paths(cwd: Path) -> list[str]:
+    """Return committed changes introduced by this task, not inherited main history."""
+
+    return git_lines(["diff", "--name-only", "--diff-filter=ACMR", "main...HEAD"], cwd=cwd)
+
+
 def run(command: list[str], *, cwd: Path) -> None:
     print(f"[task] {' '.join(command)}", flush=True)
     primary = primary_root(cwd)
@@ -313,8 +319,8 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
             check=False,
         ).returncode
     )
-    changed = changed_paths(cwd, staged=False, base="origin/main")
-    validate_ready_state(branch, status, behind, changed)
+    task_changes = task_changed_paths(cwd)
+    validate_ready_state(branch, status, behind, task_changes)
     args = [str(project_python(cwd)), "scripts/ci/run.py", "--full"]
     if ui:
         args.append("--ui")
