@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -112,6 +114,41 @@ def run_shards() -> None:
             future.result()
 
 
+def smoke_fresh_wheel() -> None:
+    """Install the wheel in an isolated environment and exercise the CLI."""
+
+    wheels = sorted((ROOT / "dist").glob("quantmaster-*.whl"))
+    if not wheels:
+        raise SystemExit("[local-ci] wheel build did not produce a wheel")
+    with tempfile.TemporaryDirectory(prefix="quantmaster-wheel-") as raw_temp:
+        temp = Path(raw_temp)
+        wheel = temp / wheels[-1].name
+        shutil.copy2(wheels[-1], wheel)
+        target = temp / "site"
+        run_external(
+            "fresh wheel install",
+            [str(PYTHON), "-m", "pip", "install", "--no-deps", "--target", str(target), str(wheel)],
+            cwd=temp,
+        )
+        smoke_env = os.environ.copy()
+        smoke_env["QM_CONFIG_PATH"] = os.devnull
+        smoke_env["QM_DATA_ROOT"] = str(temp / "data")
+        smoke_env["PYTHONPATH"] = str(target)
+        invoke = "from quantmaster.cli import main; raise SystemExit(main(ARGS))"
+        run_external(
+            "fresh wheel CLI help",
+            [str(PYTHON), "-c", invoke.replace("ARGS", "['--help']")],
+            cwd=temp,
+            env=smoke_env,
+        )
+        run_external(
+            "fresh wheel doctor",
+            [str(PYTHON), "-c", invoke.replace("ARGS", "['doctor', '--deep']")],
+            cwd=temp,
+            env=smoke_env,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ui", action="store_true", help="also run Chromium management tests")
@@ -181,6 +218,7 @@ def main() -> int:
 
     if args.package or args.all:
         run("wheel build", ["-m", "build"])
+        smoke_fresh_wheel()
         run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm", "packaging/quantmaster.spec"])
         exe = ROOT / "dist" / "QuantMaster.exe"
         if exe.exists():

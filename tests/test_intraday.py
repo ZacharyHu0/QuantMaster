@@ -1,5 +1,6 @@
 """分钟线标准化、按频率持久化与缓存复用。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 import pandas as pd
@@ -14,6 +15,20 @@ from quantmaster.data.base import (
     normalize_daily,
 )
 from quantmaster.data.storage import BarStore, IntradayBarStore
+
+
+def test_distinct_first_use_locks_share_a_new_directory(tmp_path):
+    store = IntradayBarStore("5m", root=tmp_path / "intraday")
+
+    def write(symbol: str) -> None:
+        index = pd.date_range("2024-01-02 09:30", periods=2, freq="5min")
+        store.put(symbol, pd.DataFrame({"close": [1.0, 1.1]}, index=index))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(write, ["600000.SH", "000001.SZ"]))
+
+    assert store.get("600000.SH") is not None
+    assert store.get("000001.SZ") is not None
 
 
 def test_normalize_chinese_intraday_columns():

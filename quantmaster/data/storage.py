@@ -112,8 +112,13 @@ class _BarLock(AbstractContextManager["_BarLock"]):
         try:
             state = _FILE_LOCK_STATE.get(self.key)
             if state is None:
+                # Resolve confinement only after the shared directory exists.
+                # On Windows two first-use symbols can otherwise race while
+                # Path.resolve() observes the directory being created.
+                lock_root = self.root / ".locks"
+                lock_root.mkdir(parents=True, exist_ok=True)
                 lock_path = confined_path(
-                    self.root / ".locks",
+                    lock_root,
                     f"{_safe_name(self.symbol)}.lock",
                     label="行情缓存锁",
                 )

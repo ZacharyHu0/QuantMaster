@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.10.4"
+VERSION = "1.10.5"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "干净安装依赖修复",
+                "items": (
+                    (
+                        "将 rotation 核心分析直接使用的 SciPy 纳入正式运行依赖，修复从 wheel "
+                        "全新安装后 qm doctor --deep 因缺少 scipy 无法启动的问题。"
+                    ),
+                    (
+                        "本地发布门禁新增隔离 wheel 安装、CLI help 与深度 doctor 冒烟检查，"
+                        "在提交前覆盖 GitHub 的干净安装路径。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.10.4",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "本地 CI 与静态类型门禁",
