@@ -1308,7 +1308,7 @@
             <div class="contract-migration-heading"><div><h4 id="contract-migration-title">历史合同一次性迁移</h4><p>先只读检查，再在暂停写入和可恢复备份下分批转换。无法确认的可选字段保持为空，并保留具体调查结果。</p></div><span class="state-pill" id="contract-migration-write-state">未暂停写入</span></div>
             <div class="contract-migration-controls">
               <label>迁移类型<select id="contract-migration-domain" aria-label="历史合同迁移类型"><option value="">暂无可用迁移</option></select></label>
-              <label>执行方式<select id="contract-migration-mode"><option value="dry_run">只读检查（推荐）</option><option value="apply">备份并迁移</option></select></label>
+              <label>执行方式<select id="contract-migration-mode"><option value="dry_run">只读检查</option></select></label>
               <button class="ghost" id="contract-migration-start" type="button">开始只读检查</button>
             </div>
             <div class="contract-migration-status" id="contract-migration-status" aria-live="polite">

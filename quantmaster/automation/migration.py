@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from sqlite3 import Connection
@@ -120,6 +119,7 @@ def _add_missing_columns(
 
 class AutomationContractMigrator:
     name = "automation-contract-v9"
+    backup_paths = ("automation.sqlite",)
 
     @staticmethod
     def _path(root: Path) -> Path:
@@ -273,7 +273,9 @@ class AutomationContractMigrator:
         source = backup_root / "automation.sqlite"
         if not source.is_file():
             raise RuntimeError("automation migration backup missing")
-        shutil.copy2(source, self._path(root))
+        from quantmaster.data.migration import restore_backup_path
+
+        restore_backup_path(root, backup_root, "automation.sqlite")
 
 
 automation_contract_migrator = AutomationContractMigrator()

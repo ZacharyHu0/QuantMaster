@@ -1507,12 +1507,13 @@
     diagnostic.hidden = !task.diagnostic_code;
     diagnostic.textContent = task.diagnostic_code ? `诊断码 ${task.diagnostic_code}` : '';
     const writeState = document.getElementById('contract-migration-write-state');
-    writeState.textContent = task.write_paused ? '业务写入已暂停' : '业务写入未暂停';
+    writeState.textContent = task.write_paused
+      ? '离线停写已验证' : '未处于离线停写窗口';
     writeState.className = `state-pill ${task.write_paused ? 'sell' : ''}`;
     const active = ['queued', 'backing_up', 'running', 'pausing'].includes(task.status);
     document.getElementById('contract-migration-pause').hidden = !active || task.status === 'pausing';
-    document.getElementById('contract-migration-resume').hidden = !['paused', 'failed'].includes(task.status);
-    document.getElementById('contract-migration-rollback').hidden = !(task.mode === 'apply' && task.status === 'completed' && task.backup_path);
+    document.getElementById('contract-migration-resume').hidden = true;
+    document.getElementById('contract-migration-rollback').hidden = true;
     const investigation = document.getElementById('contract-migration-investigation');
     const list = investigation.querySelector('ol');
     const unknown = Array.isArray(task.unknown_results) ? task.unknown_results : [];
@@ -1558,15 +1559,10 @@
     }
   }
 
-  document.getElementById('contract-migration-mode').addEventListener('change', event => {
-    document.getElementById('contract-migration-start').textContent =
-      event.target.value === 'apply' ? '备份并迁移' : '开始只读检查';
-  });
   document.getElementById('contract-migration-start').addEventListener('click', async event => {
     const domain = document.getElementById('contract-migration-domain').value;
     const mode = document.getElementById('contract-migration-mode').value;
     if (!domain) return;
-    if (mode === 'apply' && !window.confirm('将先暂停业务写入并创建可恢复备份。确认开始？')) return;
     event.target.disabled = true;
     try {
       renderContractMigration(await request('/api/v1/data/contract-migrations', {

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -277,6 +276,7 @@ def _migration_record(outcome: dict[str, Any]) -> MigrationRecord:
 
 class DecisionLegacyMigrator:
     name = "decision"
+    backup_paths = ("decisions.sqlite",)
 
     @staticmethod
     def _path(root: str | Path) -> Path:
@@ -311,7 +311,9 @@ class DecisionLegacyMigrator:
         source = Path(backup_root) / "decisions.sqlite"
         if not source.is_file():
             raise FileNotFoundError("决策快照备份不存在")
-        shutil.copy2(source, self._path(root))
+        from quantmaster.data.migration import restore_backup_path
+
+        restore_backup_path(Path(root), Path(backup_root), "decisions.sqlite")
 
 
 decision_legacy_migrator = DecisionLegacyMigrator()

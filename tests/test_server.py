@@ -556,6 +556,8 @@ class TestBasics:
         assert "if (safeLevel === 'error') setExpanded(true)" not in app_script
         assert "window.QuantMasterAPI" in app_script
         assert "/api/v1/data/contract-migrations" in settings_script
+        assert '<option value="apply">' not in resp.text
+        assert "离线停写已验证" in settings_script
         assert "estimated_remaining_seconds" in settings_script
         assert "unknown_results" in settings_script
         assert ".contract-migration-counts" in settings_styles

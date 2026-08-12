@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import sqlite3
 import tempfile
 from collections.abc import Callable, Iterable
@@ -648,6 +647,14 @@ class MarketDataLegacyMigrator:
     """Adapter for the repository-wide resumable legacy migration runner."""
 
     name = "market_data"
+    backup_paths = (
+        "bars", "security_master.sqlite", "stock_names.json", "industry_map.json",
+        "migration_quarantine/market_data",
+        "rotation/etf_metadata_history.parquet",
+        "rotation/etf_metadata_history.manifest.json",
+        "rotation/etf_observations.parquet",
+        "etf-research/evidence/adjustment_factors.parquet",
+    )
     _domains: tuple[Callable[..., list[MigrationRow]], ...] = (
         migrate_bar_filenames,
         migrate_instrument_names,
@@ -685,43 +692,10 @@ class MarketDataLegacyMigrator:
 
     def rollback(self, root: str | Path, backup_root: str | Path) -> None:
         """Restore only market-data paths from a runner-created data-root backup."""
-        destination, backup = Path(root), Path(backup_root)
-        for relative in (
-            Path("bars"), Path("security_master.sqlite"), Path("stock_names.json"),
-            Path("industry_map.json"), Path("migration_quarantine") / "market_data",
-        ):
-            source = backup / relative
-            target = destination / relative
-            if not source.exists():
-                continue
-            if source.is_dir():
-                if target.exists():
-                    shutil.rmtree(target)
-                shutil.copytree(source, target)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-        quarantine = destination / "migration_quarantine" / "market_data" / "rotation_artifacts"
-        for relative in (
-            Path("rotation/etf_metadata_history.parquet"),
-            Path("rotation/etf_metadata_history.manifest.json"),
-            Path("rotation/etf_observations.parquet"),
-            Path("etf-research/evidence/adjustment_factors.parquet"),
-        ):
-            source = quarantine / relative
-            target = destination / relative
-            if source.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                source.unlink()
-        for directory in sorted(
-            (path for path in quarantine.rglob("*") if path.is_dir()),
-            key=lambda path: len(path.parts), reverse=True,
-        ) if quarantine.is_dir() else ():
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
+        from quantmaster.data.migration import restore_backup_path
+
+        for relative in self.backup_paths:
+            restore_backup_path(Path(root), Path(backup_root), relative)
 
 
 def _as_record(value: MigrationRow) -> MigrationRecord:

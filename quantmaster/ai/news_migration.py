@@ -101,12 +101,18 @@ def _active_runner_backup(root: Path, expected: dict[str, int]) -> Path | None:
                 "AND mode='apply' AND status IN ('backing_up','running','pausing') "
                 "ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
-        candidate = Path(str(row[0])) / "news.sqlite" if row and row[0] else None
+        backup_root = Path(str(row[0])) if row and row[0] else None
+        if backup_root is None:
+            return None
+        from quantmaster.data.migration import validate_backup_tree
+
+        validate_backup_tree(backup_root)
+        candidate = backup_root / "news.sqlite"
         if candidate is None or not candidate.is_file():
             return None
         with closing(connect_sqlite(candidate, read_only=True)) as connection:
             counts = _archive_counts(connection)
-    except (OSError, sqlite3.Error):
+    except (OSError, RuntimeError, sqlite3.Error, ValueError):
         return None
     return candidate if all(counts.get(table) == count for table, count in expected.items()) else None
 
@@ -194,6 +200,7 @@ class NewsContractMigrator:
     """Migrate current rows, then retire only the four exact v3 archive tables."""
 
     name = "news"
+    backup_paths = ("news.sqlite",)
 
     @staticmethod
     def _path(root: Path) -> Path:
@@ -270,10 +277,9 @@ class NewsContractMigrator:
         source = backup_root / "news.sqlite"
         if not source.is_file():
             raise FileNotFoundError("资讯迁移备份不存在")
-        destination = self._path(root)
-        with closing(connect_sqlite(source, read_only=True)) as backup:
-            with closing(connect_sqlite(destination)) as current:
-                backup.backup(current)
+        from quantmaster.data.migration import restore_backup_path
+
+        restore_backup_path(root, backup_root, "news.sqlite")
 
 
 news_contract_migrator = NewsContractMigrator()

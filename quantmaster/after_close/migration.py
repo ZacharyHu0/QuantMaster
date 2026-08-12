@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -130,6 +129,7 @@ def migrate_after_close_batch(
 
 class AfterCloseLegacyMigrator:
     name = "after_close"
+    backup_paths = ("after_close.sqlite",)
 
     def inspect(self, root: str | Path) -> Iterable[dict[str, Any]]:
         return (_as_record(item) for item in inspect_after_close_snapshots(root))
@@ -146,7 +146,9 @@ class AfterCloseLegacyMigrator:
         source = Path(backup_root) / "after_close.sqlite"
         if not source.is_file():
             raise FileNotFoundError("盘后快照备份不存在")
-        shutil.copy2(source, Path(root) / "after_close.sqlite")
+        from quantmaster.data.migration import restore_backup_path
+
+        restore_backup_path(Path(root), Path(backup_root), "after_close.sqlite")
 
 
 def _as_record(value: dict[str, Any]) -> MigrationRecord:

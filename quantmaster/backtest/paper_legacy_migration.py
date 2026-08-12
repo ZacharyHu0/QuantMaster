@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from collections.abc import Iterable
@@ -23,6 +24,7 @@ UNKNOWN_FIELDS = (
     "source_backtest_id",
 )
 DIAGNOSTIC_CODE = "paper_metadata_unrecoverable"
+ACCOUNT_ID = uuid.uuid5(uuid.NAMESPACE_URL, "quantmaster:paper-ledger:v1").hex
 
 
 class LegacyLedgerEvidence(NamedTuple):
@@ -130,22 +132,60 @@ def _insert_import(store, account_id: str) -> None:
         )
 
 
+def _recover_registered_copy(
+    root: Path, account_id: str, destination: Path, staging: Path, marker: Path,
+) -> MigrationRecord | None:
+    existing = _existing_account(root)
+    if not existing:
+        return None
+    if existing != account_id:
+        return _record(LegacyLedgerEvidence("conflict", f"历史登记指向非预期账户 {existing}"))
+    if not destination.exists() and staging.is_file():
+        os.replace(staging, destination)
+    if not destination.is_file():
+        return _record(LegacyLedgerEvidence("conflict", "登记已提交但账本 staging 丢失"))
+    if _inspect_source(destination).outcome == "conflict":
+        return _record(LegacyLedgerEvidence("conflict", "登记已提交但账本无法通过完整性校验"))
+    marker.unlink(missing_ok=True)
+    return _record(LegacyLedgerEvidence("unchanged", f"已迁移到账户 {account_id}"))
+
+
+def _prepare_copy(source: Path, destination: Path, staging: Path, marker: Path) -> None:
+    if destination.exists():
+        if (
+            not marker.is_file()
+            or marker.read_text(encoding="utf-8") != SOURCE_NAME
+            or _inspect_source(destination).outcome == "conflict"
+        ):
+            raise ValueError("目标账本已存在且没有可验证的迁移 marker")
+        return
+    if not staging.exists():
+        _copy_ledger(source, staging)
+    elif _inspect_source(staging).outcome == "conflict":
+        raise ValueError("纸交易迁移 staging 无效")
+    marker.write_text(SOURCE_NAME, encoding="utf-8")
+    os.replace(staging, destination)
+
+
 def _copy_and_insert(root: Path, source: Path, store, account_id: str) -> MigrationRecord:
     destination = store.ledger_path(account_id)
-    if destination.exists():
-        return _record(LegacyLedgerEvidence("conflict", "目标账本路径已存在，拒绝覆盖"))
+    staging = destination.with_name(f".{destination.name}.migration-staging")
+    marker = destination.with_name(".legacy-paper-copy-ready")
+    recovered = _recover_registered_copy(root, account_id, destination, staging, marker)
+    if recovered is not None:
+        return recovered
     try:
-        _copy_ledger(source, destination)
+        _prepare_copy(source, destination, staging, marker)
         _insert_import(store, account_id)
+        marker.unlink(missing_ok=True)
     except sqlite3.IntegrityError:
         existing = _existing_account(root)
         if not existing:
-            _remove_destination(destination)
             raise
-        _remove_destination(destination)
+        if existing == account_id:
+            marker.unlink(missing_ok=True)
         return _record(LegacyLedgerEvidence("unchanged", f"已迁移到账户 {existing}"))
     except (OSError, sqlite3.Error, ValueError):
-        _remove_destination(destination)
         raise
     return _record(_inspect_source(source))
 
@@ -154,6 +194,7 @@ class PaperLegacyMigrator:
     """Import ledger facts once without inventing a current trading strategy."""
 
     name = "paper-ledger"
+    backup_paths = (PAPER_DATABASE, ACCOUNT_ROOT)
 
     def inspect(self, root: Path) -> Iterable[MigrationRecord]:
         source = root / SOURCE_NAME
@@ -182,27 +223,13 @@ class PaperLegacyMigrator:
         from quantmaster.backtest.paper_accounts import PaperStore
 
         store = PaperStore(root / PAPER_DATABASE, root / ACCOUNT_ROOT)
-        account_id = uuid.uuid4().hex
-        return (_copy_and_insert(root, source, store, account_id),)
+        return (_copy_and_insert(root, source, store, ACCOUNT_ID),)
 
     def rollback(self, root: Path, backup_root: Path) -> None:
-        paper_backup = backup_root / PAPER_DATABASE
-        if not paper_backup.is_file():
-            raise ValueError("paper.sqlite 备份不存在")
-        account_id = _existing_account(root)
-        if account_id:
-            ledger_dir = root / ACCOUNT_ROOT / account_id
-            ledger = ledger_dir / "ledger.sqlite"
-            if ledger.is_file():
-                ledger.unlink()
-            if ledger_dir.is_dir() and not any(ledger_dir.iterdir()):
-                ledger_dir.rmdir()
-        destination = root / PAPER_DATABASE
-        staging = destination.with_name(f".{destination.name}.paper-rollback")
-        if staging.exists():
-            staging.unlink()
-        _copy_ledger(paper_backup, staging)
-        staging.replace(destination)
+        from quantmaster.data.migration import restore_backup_path
+
+        restore_backup_path(root, backup_root, PAPER_DATABASE)
+        restore_backup_path(root, backup_root, ACCOUNT_ROOT)
 
 
 def register_paper_legacy_migrator() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from quantmaster.config import get_config
-from quantmaster.data.migration import backup_sqlite_tree
+from quantmaster.data.migration import backup_sqlite_tree, validate_backup_tree
 from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -42,6 +43,52 @@ class DomainMigrator(Protocol):
     ) -> Iterable[MigrationRecord]: ...
 
     def rollback(self, root: Path, backup_root: Path) -> None: ...
+
+
+@dataclass(frozen=True)
+class OfflineMaintenanceEvidence:
+    confirmed_root: Path
+    writer_stopped: bool
+    evidence: str
+
+
+class _ProcessLease:
+    """OS-released cross-process lease; a stale file is not mistaken for a held lock."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = path.open("a+b")
+        self._handle.seek(0)
+        if self._handle.read(1) == b"":
+            self._handle.write(b"0")
+            self._handle.flush()
+        self._handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:  # pragma: no cover - Windows is the supported desktop runtime
+                import fcntl
+                fcntl.flock(  # type: ignore[attr-defined]
+                    self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,  # type: ignore[attr-defined]
+                )
+        except (OSError, BlockingIOError) as exc:
+            self._handle.close()
+            raise LegacyMigrationError("另一个进程正在执行离线迁移") from exc
+
+    def close(self) -> None:
+        if self._handle.closed:
+            return
+        self._handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:  # pragma: no cover
+            import fcntl
+            fcntl.flock(  # type: ignore[attr-defined]
+                self._handle.fileno(), fcntl.LOCK_UN,  # type: ignore[attr-defined]
+            )
+        self._handle.close()
 
 
 _MIGRATORS: dict[str, DomainMigrator] = {}
@@ -99,11 +146,13 @@ class LegacyMigrationManager:
         root: str | Path | None = None,
         *,
         backup: Callable[[Path, Path], None] | None = None,
+        offline_evidence: OfflineMaintenanceEvidence | None = None,
     ) -> None:
         self.root = Path(root or get_config().data_root).resolve()
         self.state_path = self.root / "legacy_contract_migrations.sqlite"
         self.backup_root = self.root / "backups" / "legacy-contracts"
         self._backup = backup or self._backup_sqlite_files
+        self._offline_evidence = offline_evidence
         self._lock = threading.RLock()
         self._threads: dict[str, threading.Thread] = {}
         self._leases: dict[str, MaintenanceLease] = {}
@@ -179,6 +228,8 @@ class LegacyMigrationManager:
             raise LegacyMigrationError("mode 仅支持 dry_run/apply")
         if not 1 <= int(batch_size) <= 5000:
             raise LegacyMigrationError("batch_size 必须在 1..5000")
+        if mode == "apply":
+            self._require_offline_evidence()
         self._initialize()
         with self._conn() as connection:
             active = connection.execute(
@@ -217,6 +268,9 @@ class LegacyMigrationManager:
             raise KeyError(run_id)
         value = dict(row)
         value["write_paused"] = bool(value["write_paused"])
+        value["maintenance_mode"] = (
+            "offline_writer_stop_verified" if value["write_paused"] else "not_active"
+        )
         with self._lock:
             pause_requested = run_id in self._pause_requests
         if pause_requested and value["status"] in {"queued", "backing_up", "running"}:
@@ -269,6 +323,9 @@ class LegacyMigrationManager:
 
     def resume(self, run_id: str, *, batch_size: int = 250) -> dict:
         self._initialize()
+        task = self.get(run_id)
+        if task["mode"] == "apply":
+            self._require_offline_evidence()
         with self._conn() as connection:
             changed = connection.execute(
                 "UPDATE migration_runs SET status='queued',phase='等待续跑',error='',"
@@ -290,11 +347,14 @@ class LegacyMigrationManager:
     def rollback(self, run_id: str) -> dict:
         self._initialize()
         task = self.get(run_id)
-        if task["mode"] != "apply" or task["status"] != "completed":
-            raise LegacyMigrationError("只有已完成且有备份的 apply 迁移可以回滚")
+        self._require_offline_evidence()
+        if task["mode"] != "apply" or task["status"] not in {"completed", "failed", "paused"}:
+            raise LegacyMigrationError("只有 completed/failed/paused 且有备份的 apply 迁移可以回滚")
         backup_path = Path(task["backup_path"])
         if not backup_path.is_dir():
             raise LegacyMigrationError("迁移备份不存在，拒绝回滚")
+        validate_backup_tree(backup_path)
+        process_lease = self._process_lease()
         lease = maintenance_barrier.enter(f"legacy_migration_rollback:{task['domain']}", timeout=30)
         try:
             with maintenance_barrier.authorize(lease):
@@ -313,33 +373,20 @@ class LegacyMigrationManager:
             raise
         finally:
             maintenance_barrier.exit(lease)
+            process_lease.close()
         return self.get(run_id)
 
     def _run(self, run_id: str, batch_size: int) -> None:
         task = self.get(run_id)
         migrator = _MIGRATORS[task["domain"]]
         lease: MaintenanceLease | None = None
+        process_lease: _ProcessLease | None = None
         started = time.monotonic()
         try:
             if task["mode"] == "apply":
-                lease = maintenance_barrier.enter(
-                    f"legacy_migration:{task['domain']}", timeout=30,
+                lease, process_lease = self._run_apply(
+                    run_id, task, migrator, batch_size, started,
                 )
-                with maintenance_barrier.authorize(lease):
-                    with self._lock:
-                        self._leases[run_id] = lease
-                    backup = Path(task["backup_path"]) if task["backup_path"] else self.backup_root / run_id
-                    if not backup.is_dir():
-                        self._set(
-                            run_id, status="backing_up", phase="创建可恢复备份",
-                            write_paused=1, backup_path=str(backup),
-                        )
-                        self._backup(self.root, backup)
-                    total = int(task["total"] or 0) or sum(1 for _ in migrator.inspect(self.root))
-                    self._set(
-                        run_id, status="running", phase="分批转换历史记录", total=total,
-                    )
-                    self._apply_batches(run_id, task, migrator, batch_size, started)
                 return
             else:
                 total = sum(1 for _ in migrator.inspect(self.root))
@@ -390,6 +437,43 @@ class LegacyMigrationManager:
                 finally:
                     with self._lock:
                         self._leases.pop(run_id, None)
+            if process_lease is not None:
+                process_lease.close()
+
+    def _run_apply(
+        self, run_id: str, task: dict, migrator: DomainMigrator,
+        batch_size: int, started: float,
+    ) -> tuple[MaintenanceLease, _ProcessLease]:
+        self._require_offline_evidence()
+        process_lease = self._process_lease()
+        lease = maintenance_barrier.enter(f"legacy_migration:{task['domain']}", timeout=30)
+        try:
+            with maintenance_barrier.authorize(lease):
+                with self._lock:
+                    self._leases[run_id] = lease
+                backup = (
+                    Path(task["backup_path"])
+                    if task["backup_path"] else self.backup_root / run_id
+                )
+                if backup.is_dir():
+                    validate_backup_tree(backup)
+                else:
+                    self._set(
+                        run_id, status="backing_up", phase="创建可恢复备份",
+                        write_paused=1, backup_path=str(backup),
+                    )
+                    self._backup(self.root, backup)
+                    validate_backup_tree(backup)
+                total = int(task["total"] or 0) or sum(1 for _ in migrator.inspect(self.root))
+                self._set(run_id, status="running", phase="分批转换历史记录", total=total)
+                self._apply_batches(run_id, task, migrator, batch_size, started)
+        except (OSError, RuntimeError, sqlite3.Error, ValueError):
+            maintenance_barrier.exit(lease)
+            process_lease.close()
+            with self._lock:
+                self._leases.pop(run_id, None)
+            raise
+        return lease, process_lease
 
     def _apply_batches(
         self, run_id: str, task: dict, migrator: DomainMigrator, batch_size: int,
@@ -492,9 +576,35 @@ class LegacyMigrationManager:
 
     @staticmethod
     def _backup_sqlite_files(root: Path, target: Path) -> None:
+        task_domain = ""
+        # target is <backup-root>/<run-id>; the manager resolves the run below.
+        state = root / "legacy_contract_migrations.sqlite"
+        if state.is_file():
+            with connect_sqlite(state, read_only=True) as connection:
+                row = connection.execute(
+                    "SELECT domain FROM migration_runs WHERE id=?", (target.name,),
+                ).fetchone()
+                task_domain = str(row[0]) if row else ""
+        migrator = _MIGRATORS.get(task_domain)
+        extras = tuple(getattr(migrator, "backup_paths", ())) if migrator else ()
         backup_sqlite_tree(
-            root, target, exclude={"legacy_contract_migrations.sqlite"},
+            root, target, exclude={"legacy_contract_migrations.sqlite"}, extra_paths=extras,
         )
+
+    def _require_offline_evidence(self) -> None:
+        evidence = self._offline_evidence
+        if (
+            evidence is None
+            or evidence.confirmed_root.resolve() != self.root
+            or not evidence.writer_stopped
+            or not evidence.evidence.strip()
+        ):
+            raise LegacyMigrationError(
+                "apply/resume/rollback 仅允许离线维护：需精确 data root、已停写证据与跨进程 lease"
+            )
+
+    def _process_lease(self) -> _ProcessLease:
+        return _ProcessLease(self.root / ".legacy-contract-maintenance.lock")
 
 
 legacy_migration_manager = LegacyMigrationManager()

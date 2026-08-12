@@ -6,6 +6,7 @@ import pytest
 
 from quantmaster.backtest.paper_accounts import PaperService, PaperStore
 from quantmaster.backtest.paper_legacy_migration import (
+    ACCOUNT_ID,
     DIAGNOSTIC_CODE,
     SOURCE_NAME,
     UNKNOWN_FIELDS,
@@ -104,3 +105,29 @@ def test_paper_migrator_conflict_does_not_create_current_data(tmp_path):
     assert applied[0].outcome == "conflict"
     assert not (tmp_path / "paper.sqlite").exists()
     assert not (tmp_path / "accounts").exists()
+
+
+def test_paper_migrator_recovers_copy_before_registration_without_orphan(
+    tmp_path, monkeypatch,
+):
+    _legacy_ledger(tmp_path / SOURCE_NAME)
+    migrator = PaperLegacyMigrator()
+    from quantmaster.backtest import paper_legacy_migration as module
+
+    real_insert = module._insert_import
+    monkeypatch.setattr(module, "_insert_import", lambda *_: (_ for _ in ()).throw(OSError("crash")))
+    with pytest.raises(OSError, match="crash"):
+        list(migrator.migrate_batch(tmp_path, after_key="", limit=1))
+
+    ledger = tmp_path / "paper_accounts" / ACCOUNT_ID / "ledger.sqlite"
+    marker = ledger.with_name(".legacy-paper-copy-ready")
+    assert ledger.is_file()
+    assert marker.is_file()
+    assert not list((tmp_path / "paper_accounts").rglob("*migration-staging*"))
+
+    monkeypatch.setattr(module, "_insert_import", real_insert)
+    result = list(migrator.migrate_batch(tmp_path, after_key="", limit=1))
+    assert result[0].outcome == "blank"
+    assert not marker.exists()
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "paper_accounts")
+    assert [item["id"] for item in store.accounts(include_archived=True)] == [ACCOUNT_ID]

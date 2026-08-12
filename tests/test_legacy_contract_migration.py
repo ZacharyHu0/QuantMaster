@@ -11,8 +11,15 @@ from quantmaster.data.legacy_migration import (
     LegacyMigrationError,
     LegacyMigrationManager,
     MigrationRecord,
+    OfflineMaintenanceEvidence,
     register_migrator,
     registered_migrations,
+)
+from quantmaster.data.migration import (
+    BACKUP_MARKER,
+    backup_sqlite_tree,
+    restore_backup_path,
+    validate_backup_tree,
 )
 
 
@@ -59,8 +66,16 @@ def wait_finished(manager: LegacyMigrationManager, run_id: str) -> dict:
     raise AssertionError(manager.get(run_id))
 
 
+def offline_manager(root, **kwargs):
+    return LegacyMigrationManager(
+        root,
+        offline_evidence=OfflineMaintenanceEvidence(root.resolve(), True, "test writer stopped"),
+        **kwargs,
+    )
+
+
 def test_status_read_does_not_create_state_database(tmp_path):
-    manager = LegacyMigrationManager(tmp_path)
+    manager = offline_manager(tmp_path)
     assert manager.latest() is None
     assert not manager.state_path.exists()
 
@@ -95,7 +110,7 @@ def test_apply_backs_up_before_batches_and_can_rollback(tmp_path, fixture_migrat
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE evidence(value TEXT)")
         connection.execute("INSERT INTO evidence VALUES('before')")
-    manager = LegacyMigrationManager(tmp_path)
+    manager = offline_manager(tmp_path)
     task = manager.create(fixture_migrator.name, mode="apply", batch_size=2)
     result = wait_finished(manager, task["id"])
     assert result["status"] == "completed"
@@ -108,7 +123,11 @@ def test_apply_backs_up_before_batches_and_can_rollback(tmp_path, fixture_migrat
 
 
 def test_only_one_active_run_and_resume_from_last_batch(tmp_path, fixture_migrator, monkeypatch):
-    manager = LegacyMigrationManager(tmp_path, backup=lambda *_: time.sleep(0.1))
+    def slow_backup(root, target):
+        time.sleep(0.1)
+        backup_sqlite_tree(root, target, exclude={"legacy_contract_migrations.sqlite"})
+
+    manager = offline_manager(tmp_path, backup=slow_backup)
     first = manager.create(fixture_migrator.name, mode="apply", batch_size=1)
     with pytest.raises(LegacyMigrationError, match="已有"):
         manager.create(fixture_migrator.name, mode="dry_run")
@@ -119,11 +138,12 @@ def test_pause_request_crosses_maintenance_write_fence(tmp_path, fixture_migrato
     backup_started = threading.Event()
     release_backup = threading.Event()
 
-    def blocking_backup(*_):
+    def blocking_backup(root, target):
         backup_started.set()
         assert release_backup.wait(2)
+        backup_sqlite_tree(root, target, exclude={"legacy_contract_migrations.sqlite"})
 
-    manager = LegacyMigrationManager(tmp_path, backup=blocking_backup)
+    manager = offline_manager(tmp_path, backup=blocking_backup)
     task = manager.create(fixture_migrator.name, mode="apply", batch_size=1)
     assert backup_started.wait(2)
     pausing = manager.pause(task["id"])
@@ -160,10 +180,10 @@ def test_resume_reuses_backup_and_continues_after_last_key(tmp_path, fixture_mig
         target.mkdir(parents=True)
         backups.append(target)
 
-    manager = LegacyMigrationManager(tmp_path, backup=backup)
+    manager = offline_manager(tmp_path, backup=backup)
     manager._initialize()
     backup = manager.backup_root / "resume"
-    backup.mkdir(parents=True)
+    backup_sqlite_tree(tmp_path, backup, exclude={"legacy_contract_migrations.sqlite"})
     now = "2026-01-01T00:00:00+00:00"
     import sqlite3
 
@@ -184,6 +204,111 @@ def test_resume_reuses_backup_and_continues_after_last_key(tmp_path, fixture_mig
     assert result["checked"] == 3
     assert result["last_batch"] == 3
     assert backups == []
+
+
+def test_apply_rejects_online_manager_without_writer_stop_evidence(tmp_path, fixture_migrator):
+    manager = LegacyMigrationManager(tmp_path)
+    with pytest.raises(LegacyMigrationError, match="离线维护"):
+        manager.create(fixture_migrator.name, mode="apply")
+
+
+def test_backup_staging_marker_and_recursive_backup_exclusion(tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "source.sqlite") as connection:
+        connection.execute("CREATE TABLE values_table(value TEXT)")
+    nested = tmp_path / "backups" / "legacy-contracts" / "old"
+    nested.mkdir(parents=True)
+    with sqlite3.connect(nested / "recursive.sqlite") as connection:
+        connection.execute("CREATE TABLE forbidden(value TEXT)")
+    target = tmp_path / "backups" / "legacy-contracts" / "new"
+
+    backup_sqlite_tree(tmp_path, target, exclude={"legacy_contract_migrations.sqlite"})
+
+    assert (target / BACKUP_MARKER).is_file()
+    assert (target / "source.sqlite").is_file()
+    assert not (target / "backups").exists()
+    validate_backup_tree(target)
+
+
+def test_old_partial_final_backup_is_rejected_and_new_run_can_backup(tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "automation.sqlite") as connection:
+        connection.execute("CREATE TABLE evidence(value TEXT)")
+    family = tmp_path / "backups" / "legacy-contracts"
+    partial = family / "failed-old-run"
+    partial.mkdir(parents=True)
+    (partial / "_runtime").mkdir()
+    (partial / "backups").mkdir()
+
+    with pytest.raises(ValueError, match="未完成"):
+        validate_backup_tree(partial)
+    with pytest.raises(ValueError, match="未完成"):
+        backup_sqlite_tree(tmp_path, partial)
+
+    fresh = family / "fresh-run"
+    backup_sqlite_tree(tmp_path, fresh)
+    assert (fresh / "automation.sqlite").is_file()
+    assert not (fresh / "backups").exists()
+    assert not (fresh / "_runtime").exists()
+
+
+def test_incomplete_staging_is_discarded_and_rebuilt_not_reused(tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "source.sqlite") as connection:
+        connection.execute("CREATE TABLE evidence(value TEXT)")
+        connection.execute("INSERT INTO evidence VALUES('current')")
+    target = tmp_path / "backups" / "legacy-contracts" / "run"
+    staging = target.with_name(".run.staging")
+    staging.mkdir(parents=True)
+    (staging / "partial.txt").write_text("partial", encoding="utf-8")
+
+    backup_sqlite_tree(tmp_path, target)
+
+    assert not staging.exists()
+    assert not (target / "partial.txt").exists()
+    assert validate_backup_tree(target)["schema_version"] == 1
+
+
+def test_restore_declared_absent_path_and_refuse_uncovered_path(tmp_path):
+    backup = tmp_path / "backup"
+    backup_sqlite_tree(tmp_path, backup, extra_paths=("bars",))
+    bars = tmp_path / "bars"
+    bars.mkdir()
+    (bars / "new.parquet").write_text("new", encoding="utf-8")
+
+    restore_backup_path(tmp_path, backup, "bars")
+    assert not bars.exists()
+    (tmp_path / "uncovered").mkdir()
+    with pytest.raises(ValueError, match="未覆盖"):
+        restore_backup_path(tmp_path, backup, "uncovered")
+
+
+def test_sqlite_restore_removes_stale_wal_and_shm(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    database = tmp_path / "facts.sqlite"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE facts(value TEXT)")
+        connection.execute("INSERT INTO facts VALUES('before')")
+        connection.commit()
+    backup = tmp_path / "backup"
+    backup_sqlite_tree(tmp_path, backup)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("UPDATE facts SET value='after'")
+        connection.commit()
+    database.with_name(database.name + "-wal").write_bytes(b"stale")
+    database.with_name(database.name + "-shm").write_bytes(b"stale")
+
+    restore_backup_path(tmp_path, backup, "facts.sqlite")
+
+    assert not database.with_name(database.name + "-wal").exists()
+    assert not database.with_name(database.name + "-shm").exists()
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT value FROM facts").fetchone()[0] == "before"
 
 
 def test_unknown_domain_is_rejected_without_creating_state(tmp_path):

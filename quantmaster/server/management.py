@@ -991,7 +991,7 @@ class MigrationCreate(ContractModel):
 
 class LegacyMigrationCreate(ContractModel):
     domain: str = Field(min_length=1, max_length=80)
-    mode: Literal["dry_run", "apply"] = "dry_run"
+    mode: Literal["dry_run"] = "dry_run"
     batch_size: int = Field(default=250, ge=1, le=5000)
 
 
@@ -1052,7 +1052,7 @@ def create_contract_migration(request: Request, value: LegacyMigrationCreate) ->
     _require_csrf(request)
     try:
         return legacy_migration_manager.create(
-            value.domain, mode=value.mode, batch_size=value.batch_size,
+            value.domain, mode="dry_run", batch_size=value.batch_size,
         )
     except LegacyMigrationError:
         raise _public_error(
@@ -1083,23 +1083,13 @@ def pause_contract_migration(run_id: str, request: Request) -> dict:
 @router.post("/data/contract-migrations/{run_id}/resume", status_code=202)
 def resume_contract_migration(run_id: str, request: Request) -> dict:
     _require_csrf(request)
-    try:
-        return legacy_migration_manager.resume(run_id)
-    except KeyError:
-        raise _public_error(404, "历史合同迁移不存在", "续跑历史合同迁移失败") from None
-    except LegacyMigrationError:
-        raise _public_error(409, "历史合同迁移当前无法续跑", "续跑历史合同迁移失败") from None
+    raise _public_error(409, "apply 续跑仅允许离线维护命令", "续跑历史合同迁移失败")
 
 
 @router.post("/data/contract-migrations/{run_id}/rollback", status_code=202)
 def rollback_contract_migration(run_id: str, request: Request) -> dict:
     _require_csrf(request)
-    try:
-        return legacy_migration_manager.rollback(run_id)
-    except KeyError:
-        raise _public_error(404, "历史合同迁移不存在", "回滚历史合同迁移失败") from None
-    except LegacyMigrationError:
-        raise _public_error(409, "历史合同迁移当前无法回滚", "回滚历史合同迁移失败") from None
+    raise _public_error(409, "回滚仅允许离线维护命令", "回滚历史合同迁移失败")
 
 
 class DataRefreshRequest(ContractModel):

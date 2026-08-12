@@ -44,11 +44,14 @@ def _archive_database(path: Path, counts=(1, 2, 3, 4)) -> None:
 
 
 def _runner_backup(root: Path, run_id: str = "run") -> Path:
-    source = root / "news.sqlite"
-    destination = root / "backups" / "legacy-contracts" / run_id / "news.sqlite"
-    destination.parent.mkdir(parents=True)
-    with sqlite3.connect(source) as current, sqlite3.connect(destination) as backup:
-        current.backup(backup)
+    backup_root = root / "backups" / "legacy-contracts" / run_id
+    from quantmaster.data.migration import backup_sqlite_tree
+
+    backup_sqlite_tree(
+        root, backup_root, exclude={"legacy_contract_migrations.sqlite"},
+        extra_paths=("news.sqlite",),
+    )
+    destination = backup_root / "news.sqlite"
     with sqlite3.connect(root / "legacy_contract_migrations.sqlite") as connection:
         connection.execute(
             "CREATE TABLE migration_runs (domain TEXT,mode TEXT,status TEXT,"
@@ -183,6 +186,11 @@ def test_archive_rollback_restores_exact_tables_and_counts(tmp_path):
     migrator = NewsContractMigrator()
     records = list(migrator.migrate_batch(tmp_path, after_key="", limit=4))
     assert len(records) == 4
+    # SQLite restore is an offline operation: close any cached NewsStore handle
+    # created by the fixture before replacing the database and its sidecars.
+    import gc
+
+    gc.collect()
 
     migrator.rollback(tmp_path, backup_root)
 

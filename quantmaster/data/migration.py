@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -129,15 +130,187 @@ def _copy_sqlite(source: Path, target: Path) -> None:
                 raise MigrationError(f"SQLite 校验失败: {source.name}")
 
 
-def backup_sqlite_tree(source_root: Path, target_root: Path, *, exclude: set[str] | None = None) -> None:
-    """Create verified SQLite backups without copying WAL/SHM sidecars."""
-    target_root.mkdir(parents=True, exist_ok=False)
-    excluded = exclude or set()
-    for source in sorted(source_root.rglob("*.sqlite")):
-        if target_root in source.parents or source.name in excluded:
+BACKUP_MARKER = "backup-complete.json"
+
+
+def _backup_manifest(root: Path) -> dict:
+    marker = root / BACKUP_MARKER
+    if not marker.is_file():
+        raise MigrationError("备份未完成或完成标记丢失")
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationError("备份完成标记无效") from exc
+    if value.get("schema_version") != 1 or not isinstance(value.get("entries"), list):
+        raise MigrationError("备份完成标记无效")
+    return value
+
+
+def validate_backup_tree(root: Path) -> dict:
+    """Require a finalized marker and re-check every backed-up SQLite database."""
+    value = _backup_manifest(root)
+    for entry in value["entries"]:
+        if entry.get("kind") != "sqlite" or not entry.get("exists"):
             continue
-        destination = target_root / source.relative_to(source_root)
+        path = root / str(entry["path"])
+        if not path.is_file():
+            raise MigrationError(f"备份文件丢失: {entry['path']}")
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if not result or result[0] != "ok":
+                raise MigrationError(f"SQLite 备份校验失败: {entry['path']}")
+    return value
+
+
+def _backup_sqlite_entries(
+    source_root: Path, staging: Path, excluded: set[str], backup_family: Path,
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for source in sorted(source_root.rglob("*")):
+        if not source.is_file() or source.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
+            continue
+        resolved = source.resolve()
+        if (
+            backup_family == resolved
+            or backup_family in resolved.parents
+            or source.name in excluded
+            or _is_sqlite_sidecar(source)
+        ):
+            continue
+        relative = source.relative_to(source_root)
+        _copy_sqlite(source, staging / relative)
+        entries.append({"path": relative.as_posix(), "kind": "sqlite", "exists": True})
+    return entries
+
+
+def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str, object]:
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise MigrationError(f"额外备份路径越界: {raw}")
+    source = source_root / relative
+    exists = source.exists()
+    kind = (
+        "sqlite" if relative.suffix.lower() in {".sqlite", ".sqlite3", ".db"}
+        else "directory" if source.is_dir() else "file"
+    )
+    entry: dict[str, object] = {
+        "path": relative.as_posix(), "kind": kind, "exists": exists,
+    }
+    if not exists:
+        return entry
+    destination = staging / relative
+    if kind == "sqlite":
         _copy_sqlite(source, destination)
+    elif source.is_dir():
+        def ignore_sqlite(directory: str, names: list[str]) -> set[str]:
+            ignored: set[str] = set()
+            for name in names:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise MigrationError(f"额外备份路径包含符号链接: {raw}")
+                if (
+                    path.is_file()
+                    and (path.suffix.lower() in {".sqlite", ".sqlite3", ".db"} or _is_sqlite_sidecar(path))
+                ):
+                    ignored.add(name)
+            return ignored
+
+        shutil.copytree(source, destination, dirs_exist_ok=True, ignore=ignore_sqlite)
+    elif source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    else:
+        raise MigrationError(f"额外备份路径类型不受支持: {raw}")
+    return entry
+
+
+def backup_sqlite_tree(
+    source_root: Path,
+    target_root: Path,
+    *,
+    exclude: set[str] | None = None,
+    extra_paths: tuple[str, ...] = (),
+) -> None:
+    """Atomically publish a verified backup; an unmarked staging tree is never reusable."""
+    source_root, target_root = source_root.resolve(), target_root.resolve()
+    if target_root.exists():
+        validate_backup_tree(target_root)
+        return
+    staging = target_root.with_name(f".{target_root.name}.staging")
+    if staging.exists():
+        if (staging / BACKUP_MARKER).is_file():
+            validate_backup_tree(staging)
+            os.replace(staging, target_root)
+            return
+        # This exact-run staging tree has no completion marker and is not a backup.
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=False)
+    excluded = set(exclude or ())
+    backup_family = source_root / "backups" / "legacy-contracts"
+    entries: list[dict[str, object]] = []
+    try:
+        entries.extend(_backup_sqlite_entries(source_root, staging, excluded, backup_family))
+        for raw in sorted(set(extra_paths)):
+            if any(item["path"] == Path(raw).as_posix() for item in entries):
+                continue
+            entries.append(_backup_extra_entry(source_root, staging, raw))
+        marker = {
+            "schema_version": 1,
+            "source_root": str(source_root),
+            "completed_at": datetime.now(UTC).isoformat(),
+            "entries": entries,
+        }
+        (staging / BACKUP_MARKER).write_text(
+            json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        validate_backup_tree(staging)
+        os.replace(staging, target_root)
+    except (OSError, sqlite3.Error, MigrationError, ValueError, TypeError):
+        # Preserve staging as concrete interruption evidence; never reinterpret it as complete.
+        raise
+
+
+def restore_sqlite_backup(source: Path, destination: Path) -> None:
+    """Restore one SQLite image without retaining stale WAL/SHM state."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.with_name(f".{destination.name}.restore-staging")
+    if staging.exists():
+        staging.unlink()
+    _copy_sqlite(source, staging)
+    for suffix in ("-wal", "-shm", "-journal"):
+        destination.with_name(destination.name + suffix).unlink(missing_ok=True)
+    os.replace(staging, destination)
+
+
+def restore_backup_path(root: Path, backup_root: Path, relative: str) -> None:
+    """Restore a declared path, removing it only when the manifest proves it was absent."""
+    root, backup_root = root.resolve(), backup_root.resolve()
+    manifest = validate_backup_tree(backup_root)
+    entry = next((item for item in manifest["entries"] if item.get("path") == relative), None)
+    if entry is None:
+        raise MigrationError(f"备份未覆盖路径，拒绝回滚: {relative}")
+    source, destination = backup_root / relative, root / relative
+    if not entry.get("exists"):
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink(missing_ok=True)
+        return
+    if entry.get("kind") == "sqlite":
+        restore_sqlite_backup(source, destination)
+    elif entry.get("kind") == "directory":
+        staging = destination.with_name(f".{destination.name}.restore-staging")
+        if staging.exists():
+            shutil.rmtree(staging)
+        shutil.copytree(source, staging)
+        if destination.exists():
+            shutil.rmtree(destination)
+        os.replace(staging, destination)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_name(f".{destination.name}.restore-staging")
+        shutil.copy2(source, staging)
+        os.replace(staging, destination)
 
 
 class DataMigrationManager:
