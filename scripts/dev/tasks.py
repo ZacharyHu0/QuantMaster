@@ -117,7 +117,12 @@ def changed_paths(cwd: Path, *, staged: bool, base: str) -> list[str]:
 
 def run(command: list[str], *, cwd: Path) -> None:
     print(f"[task] {' '.join(command)}", flush=True)
-    subprocess.run(command, cwd=cwd, check=True)
+    primary = primary_root(cwd)
+    artifacts = primary / ".artifacts" / "worktrees" / cwd.name
+    env = os.environ.copy()
+    env["RUFF_CACHE_DIR"] = str(artifacts / "cache" / "ruff")
+    env["MYPY_CACHE_DIR"] = str(artifacts / "cache" / "mypy")
+    subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
 def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impact:
@@ -139,7 +144,8 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
             / "pytest" / f"impact-{uuid.uuid4().hex[:10]}"
         )
         run([
-            python, "-m", "pytest", "--full", *impact.tests,
+            python, "-m", "pytest", "-o", f"cache_dir={temp.parent / 'cache'}",
+            "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),
         ], cwd=cwd)
     elif impact.mode == "docs":

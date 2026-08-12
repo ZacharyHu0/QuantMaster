@@ -43,6 +43,11 @@ PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
 PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
 PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
+PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
+
+
+def pytest_args(*args: str) -> list[str]:
+    return ["-m", "pytest", "-o", f"cache_dir={PYTEST_CACHE}", *args]
 
 
 def project_python() -> Path:
@@ -65,7 +70,11 @@ PYTHON = project_python()
 def run(label: str, args: list[str], *, env: dict[str, str] | None = None) -> None:
     command = [str(PYTHON), *args]
     print(f"\n[local-ci] {label}: {' '.join(command)}", flush=True)
-    completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
+    effective_env = os.environ.copy()
+    effective_env["RUFF_CACHE_DIR"] = str(ARTIFACTS / "cache" / "ruff")
+    effective_env["MYPY_CACHE_DIR"] = str(ARTIFACTS / "cache" / "mypy")
+    effective_env.update(env or {})
+    completed = subprocess.run(command, cwd=ROOT, env=effective_env, check=False)
     if completed.returncode:
         raise SystemExit(f"[local-ci] FAILED: {label} (exit {completed.returncode})")
 
@@ -86,9 +95,7 @@ def run_external(
 def pytest_shard(shard: int) -> None:
     run(
         f"full test shard {shard}/3",
-        [
-            "-m",
-            "pytest",
+        pytest_args(
             "--full",
             "--splits",
             "3",
@@ -103,7 +110,7 @@ def pytest_shard(shard: int) -> None:
             "--durations=30",
             "--basetemp",
             str(RUN_ROOT / f"full-{shard}"),
-        ],
+        ),
     )
 
 
@@ -221,12 +228,12 @@ def main() -> int:
     if args.refresh_durations:
         run(
             "refresh full-suite durations",
-            [
-                "-m", "pytest", "--full", "--ignore=tests/test_ui_management.py",
+            pytest_args(
+                "--full", "--ignore=tests/test_ui_management.py",
                 "--store-durations", "--clean-durations", "--durations-path",
                 str(PYTEST_DURATIONS), "--timeout=180", "--durations=30",
                 "--basetemp", str(RUN_ROOT / "duration-sample"),
-            ],
+            ),
         )
     elif args.full or args.all:
         if args.serial:
@@ -237,13 +244,13 @@ def main() -> int:
     else:
         run(
             "core tests",
-            [
-                "-m", "pytest", "tests/test_architecture.py",
+            pytest_args(
+                "tests/test_architecture.py",
                 "tests/test_runtime_foundations.py", "tests/test_runtime_jobs.py",
                 "tests/test_release_sync.py", "tests/test_settings.py",
                 "--timeout=180", "--durations=30", "--basetemp",
                 str(RUN_ROOT / "fast"),
-            ],
+            ),
         )
 
     if args.ui or args.all:
@@ -251,8 +258,10 @@ def main() -> int:
         ui_env["QM_RUN_UI"] = "1"
         run(
             "Chromium management",
-            ["-m", "pytest", "tests/test_ui_management.py", "--timeout=180",
-             "--basetemp", str(RUN_ROOT / "ui")],
+            pytest_args(
+                "tests/test_ui_management.py", "--timeout=180",
+                "--basetemp", str(RUN_ROOT / "ui"),
+            ),
             env=ui_env,
         )
 

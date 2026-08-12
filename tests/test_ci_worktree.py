@@ -39,3 +39,28 @@ def test_artifact_root_keeps_primary_artifact_contract(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "ROOT", primary)
     monkeypatch.setattr(run, "primary_root", lambda: primary)
     assert run.artifact_root() == primary / ".artifacts"
+
+
+def test_pytest_args_override_checkout_cache_dir(monkeypatch, tmp_path):
+    cache = tmp_path / "external-cache"
+    monkeypatch.setattr(run, "PYTEST_CACHE", cache)
+    assert run.pytest_args("tests/test_one.py") == [
+        "-m", "pytest", "-o", f"cache_dir={cache}", "tests/test_one.py",
+    ]
+
+
+def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    captured = {}
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(
+        run.subprocess, "run",
+        lambda *args, **kwargs: captured.update(kwargs) or Result(),
+    )
+    run.run("test", ["-c", "pass"])
+    assert captured["env"]["RUFF_CACHE_DIR"] == str(artifacts / "cache" / "ruff")
+    assert captured["env"]["MYPY_CACHE_DIR"] == str(artifacts / "cache" / "mypy")
