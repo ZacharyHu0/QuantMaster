@@ -1613,7 +1613,9 @@ class UnifiedJobRuntime:
             name=f"qm-compute-{str(job['type']).replace('.', '-')}-{str(job['id'])[-8:]}",
             daemon=False,
         )
-        process.start()
+        from quantmaster.runtime.windows_app import start_windows_role_process
+
+        start_windows_role_process(process, "Compute Worker")
         deadline = time.monotonic() + float(job["deadline_seconds"])
         try:
             while process.is_alive():

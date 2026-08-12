@@ -18,10 +18,10 @@ if not exist "%QM_LAUNCHER%" (
     echo QuantMaster named launcher could not be prepared; falling back to Python.
     set "QM_LAUNCHER=%QM_PYTHON%"
 )
-rem The repository launcher enables Web hot reload by default.  The reload
-rem supervisor owns free-stockdb, so replacing the Web worker never restarts it.
+rem Keep cmd.exe out of the long-running app tree.  Once this short launcher
+rem exits, QuantMaster becomes the visible root and owns stockdb/workers.
 rem Pass --no-reload for the traditional single-process mode.
-"%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*
+start "QuantMaster" /b "%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*
 set "QM_EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 

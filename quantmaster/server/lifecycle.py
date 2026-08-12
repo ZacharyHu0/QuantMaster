@@ -567,7 +567,9 @@ def _run_quiet_uvicorn_reload(
                     ),
                     sockets=self.sockets,
                 )
-                process.start()
+                from quantmaster.runtime.windows_app import start_windows_role_process
+
+                start_windows_role_process(process, "Web Worker")
                 self._generation_drains[id(process)] = drain_event
                 job = _attach_generation_job(process)
                 if job is not None:

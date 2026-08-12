@@ -198,7 +198,9 @@ class WorkerSupervisor:
             daemon=False,
         )
         try:
-            process.start()
+            from quantmaster.runtime.windows_app import start_windows_role_process
+
+            start_windows_role_process(process, "Runtime Worker")
         except (OSError, RuntimeError):
             self._release_lock()
             self._owned = False

@@ -57,7 +57,11 @@ Windows 仓库用户也可以运行 `scripts\\dev\\serve.cmd --open`。脚本会
 单独修改发布元数据不会重启 Web worker，FreeStockDB 在整个启动器退出前保持运行；
 HTML、CSS 和 JavaScript 改动直接刷新页面即可看到。需要传统单进程模式时
 运行 `scripts\\dev\\serve.cmd --no-reload`。脚本会在 `.venv/Scripts` 自动准备带项目图标和版本信息的
-`QuantMaster.exe`；监督进程和热更新 worker 在 Windows 任务管理器中都显示为 QuantMaster。
+`QuantMaster.exe`；脚本启动后会立即退出短暂的 `cmd.exe` 启动器，因此 QuantMaster 是
+可见的进程树根。任务管理器会分别显示 `QuantMaster Web Worker.exe`、
+`QuantMaster Runtime Worker.exe` 与 `QuantMaster Compute Worker.exe`，便于识别热更新、
+持久调度和隔离计算；托管的 `stockdb.exe` 仍由 Runtime Worker 负责启停，并和
+QuantMaster 处于同一 Windows Job Object 生命周期边界内。
 可用 `QM_RELOAD_QUIET_SECONDS`、`QM_RELOAD_MAX_BATCH_SECONDS` 和
 `QM_RELOAD_MIN_INTERVAL_SECONDS` 调整静默、连续写入批次和重载限频窗口。
 需要立刻应用后端修改时，可打开页头版本号弹窗并点击“立即热更新”；手动更新绕过上述
