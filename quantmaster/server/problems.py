@@ -24,6 +24,48 @@ def _clean(value: object, limit: int = 300) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+_PROVIDER_NAMES = {
+    "free-stockdb": "本地 StockDB",
+    "tushare": "Tushare",
+    "akshare": "AKShare",
+    "yfinance": "Yahoo Finance",
+    "yahoo": "Yahoo Finance",
+    "ths": "同花顺",
+}
+_CAPABILITY_NAMES = {
+    "index-cons": "指数成分",
+    "csindex": "指数成分",
+    "index_weight": "指数成分权重",
+    "etf_basic": "基金目录",
+    "eastmoney-spot": "实时行情",
+}
+
+
+def _provider_name(lane: object) -> str:
+    raw = str(lane or "").strip()
+    provider, _, capability = raw.partition(":")
+    name = _PROVIDER_NAMES.get(provider.casefold(), provider or "行情数据源")
+    purpose = _CAPABILITY_NAMES.get(capability.casefold(), "")
+    return f"{name}（{purpose}）" if purpose else name
+
+
+def _provider_failure_message(failure_class: str, *, disabled: bool) -> str:
+    messages = {
+        "permission": "当前账号没有读取这项数据的权限。",
+        "authentication": "数据源的账号或密钥未通过验证。",
+        "rate_limit": "在线数据源请求过于频繁，系统已暂停继续请求。",
+        "capability_missing": "当前数据源不支持这项数据，系统已停止重复请求。",
+        "empty_response": "数据源没有返回可用记录，系统将继续保留本地数据。",
+        "transient_network": "暂时无法连接在线数据源，系统将继续使用本地数据。",
+        "upstream_5xx": "在线数据源暂时不可用，系统将继续使用本地数据。",
+    }
+    return messages.get(
+        failure_class,
+        "数据源连续请求失败，系统已停止重复请求。"
+        if disabled else "数据源暂时不可用，系统已暂停请求并保留本地数据。",
+    )
+
+
 def _component_failure(name: str) -> Problem:
     logger.warning("后台健康探针失败 component=%s", name, exc_info=True)
     return make_problem(
@@ -51,12 +93,13 @@ def collect_health_report() -> dict[str, Any]:
             remaining = max(0, int(float(item.get("open_until") or 0) - datetime.now().timestamp()))
             disabled = state == "disabled"
             failure_class = str(item.get("failure_class") or "transient_upstream")
+            provider_name = _provider_name(lane)
             issues.append(make_problem(
                 "provider_disabled" if disabled else "provider_circuit_open",
                 severity="warning",
                 source="行情数据源",
-                title=f"{lane} {'已停用' if disabled else '暂停请求'}",
-                message=_clean(item.get("last_error")) or f"数据源处于 {state} 状态",
+                title=f"{provider_name}{'已停止自动请求' if disabled else '已暂停请求'}",
+                message=_provider_failure_message(failure_class, disabled=disabled),
                 action=(
                     "更新对应凭据或依赖后，在后台诊断中执行一次手工探测。"
                     if disabled else (

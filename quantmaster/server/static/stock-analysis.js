@@ -430,7 +430,7 @@
       analysisId:data.analysis_id, jobId:data.job_id, query, mode,
       status:data.status || 'queued', phase:'任务已提交，等待取数', startedAt:Date.now(), eta:null,
     };
-    if (!run.analysisId || !run.jobId) throw new Error('统一任务接口未返回 analysis_id / job_id');
+    if (!run.analysisId || !run.jobId) throw new Error('后台没有返回可跟踪的分析任务，请稍后重试。');
     activeRun = run;
     saveRun(run);
     pollRun(run, activeToken);

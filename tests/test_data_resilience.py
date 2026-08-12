@@ -90,6 +90,20 @@ def test_local_only_context_rejects_provider_call():
         provider_call("akshare:local-only-test", "blocked", lambda: "unexpected")
 
 
+def test_local_only_context_rejects_akshare_retry_entrypoint():
+    called = False
+
+    def unexpected():
+        nonlocal called
+        called = True
+        return "remote"
+
+    with local_only_data_access(), pytest.raises(LocalOnlyDataAccessError):
+        akshare_call("local-only-test", unexpected)
+
+    assert called is False
+
+
 def test_public_history_reader_enforces_local_only_without_http_middleware(tmp_path, monkeypatch):
     """A future helper inside the reader cannot silently restore provider I/O."""
 

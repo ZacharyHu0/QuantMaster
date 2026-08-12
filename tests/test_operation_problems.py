@@ -48,6 +48,9 @@ def test_provider_health_problem_reports_remote_failures_and_local_blocks(monkey
 
     assert problem["remote_failures"] == 2
     assert problem["local_blocks"] == 7
+    assert problem["title"] == "Tushare（基金目录）已停止自动请求"
+    assert problem["message"] == "当前账号没有读取这项数据的权限。"
+    assert "permission denied" not in str(problem)
 
 
 def test_missing_required_price_field_blocks_backtest():

@@ -11,6 +11,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pandas as pd
+
 from quantmaster.config import get_config
 from quantmaster.research.contracts import content_hash
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date
@@ -484,8 +486,69 @@ def rename_universe(name: str, new_name: str) -> None:
     source.unlink()
 
 
-def index_universe(index_symbol: str = "000300.SH") -> list[str]:  # pragma: no cover - 网络
-    """从指数成分构建候选（如沪深300）。"""
-    from quantmaster.data.akshare_source import AkshareSource
+def _cached_index_members(index_symbol: str) -> list[str]:
+    """Read a complete local CSI300/500 snapshot without refreshing it."""
+    from quantmaster.data.index_membership import (
+        EXPECTED_INDEX_MEMBERS,
+        load_cached_csi800_records,
+    )
 
-    return AkshareSource().index_members(index_symbol)
+    symbol = str(index_symbol).strip().upper()
+    expected = EXPECTED_INDEX_MEMBERS.get(symbol)
+    if expected is None:
+        return []
+    target = pd.Timestamp(market_date()).normalize()
+    start = (target - pd.DateOffset(months=12)).replace(day=1)
+    records = load_cached_csi800_records(
+        start.strftime("%Y-%m-%d"), target.strftime("%Y-%m-%d"), pull=False,
+    )
+    subset = records.loc[
+        (records["index_code"] == symbol) & (records["trade_date"] <= target)
+    ]
+    if subset.empty:
+        return []
+    latest = subset["trade_date"].max()
+    current = subset.loc[subset["trade_date"] == latest]
+    acquired = current["acquired_at"].max()
+    if pd.notna(acquired):
+        current = current.loc[current["acquired_at"] == acquired]
+    members = sorted(set(current["symbol"].dropna().astype(str)))
+    return members if len(members) == expected else []
+
+
+def index_universe(index_symbol: str = "000300.SH") -> list[str]:  # pragma: no cover - 网络
+    """从指数成分构建候选；本地快照优先，缺失时才请求在线来源。"""
+    symbol = str(index_symbol).strip().upper()
+    local = _cached_index_members(symbol)
+    if local:
+        return local
+
+    errors: list[str] = []
+    try:
+        from quantmaster.data.tushare_source import TushareSource
+
+        end = market_date().isoformat()
+        start = (pd.Timestamp(end) - pd.DateOffset(months=12)).strftime("%Y-%m-%d")
+        frame = TushareSource().index_weights(symbol, start, end)
+        if frame is not None and not frame.empty:
+            date_column = "trade_date" if "trade_date" in frame else None
+            latest = frame[date_column].max() if date_column else None
+            current = frame.loc[frame[date_column] == latest] if date_column else frame
+            member_column = "component_symbol" if "component_symbol" in current else "symbol"
+            members = sorted(set(current[member_column].dropna().astype(str)))
+            if members:
+                return members
+        errors.append("Tushare 没有返回可用的指数成分")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        errors.append(f"Tushare：{exc}")
+
+    try:
+        from quantmaster.data.akshare_source import AkshareSource
+
+        return AkshareSource().index_members(symbol)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        errors.append(f"AKShare：{exc}")
+    raise RuntimeError(
+        "本地没有完整的指数成分快照，在线补充也未成功。"
+        "请先在数据管理中刷新指数成分后再试。"
+    )

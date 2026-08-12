@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from quantmaster.data.universe import (
+    index_universe,
     list_universes,
     load_universe,
     load_universe_analysis_snapshot,
@@ -15,6 +16,33 @@ from quantmaster.data.universe import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def test_index_universe_uses_complete_local_snapshot_before_remote(
+    isolated_config, monkeypatch,
+):
+    import pandas as pd
+
+    records = pd.DataFrame({
+        "index_code": ["000300.SH"] * 300,
+        "symbol": [f"{600000 + value:06d}.SH" for value in range(300)],
+        "trade_date": [pd.Timestamp("2026-08-01")] * 300,
+        "acquired_at": [pd.Timestamp("2026-08-01", tz="UTC")] * 300,
+    })
+    monkeypatch.setattr(
+        "quantmaster.data.index_membership.load_cached_csi800_records",
+        lambda *_args, **_kwargs: records,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.index_weights",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应联网")),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.akshare_source.AkshareSource.index_members",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应联网")),
+    )
+
+    assert len(index_universe("000300.SH")) == 300
 
 
 def test_custom_universe_history_is_point_in_time_and_content_hashed(isolated_config):

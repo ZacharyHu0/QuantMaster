@@ -138,8 +138,8 @@ def test_stockdb_missing_amount_stays_explicitly_degraded(monkeypatch):
     assert quality.formal_eligible is False
 
 
-def test_degraded_stockdb_candidate_falls_through_to_verified_provider(
-    tmp_path, monkeypatch,
+def test_usable_stockdb_data_does_not_fan_out_to_remote_provider(
+    tmp_path, isolated_config, monkeypatch,
 ):
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
     local = _bars(dates, 10.0)
@@ -199,10 +199,57 @@ def test_degraded_stockdb_candidate_falls_through_to_verified_provider(
         "normal",
     )
 
-    assert calls == ["free-stockdb-test", "tushare-fallback"]
-    assert result["close"].eq(20.0).all()
-    assert store.metadata("600000.SH")["last_source"] == "tushare-fallback"
-    assert json.loads(store.metadata("600000.SH")["quality_json"])["status"] == "verified"
+    assert calls == ["free-stockdb-test"]
+    assert result["close"].eq(10.0).all()
+    assert store.metadata("600000.SH")["last_source"] == "free-stockdb-test"
+    assert json.loads(store.metadata("600000.SH")["quality_json"])["status"] == "degraded"
+
+
+def test_usable_stockdb_increment_does_not_fan_out_to_remote_provider(
+    tmp_path, isolated_config, monkeypatch,
+):
+    dates = pd.bdate_range("2026-07-20", "2026-08-07")
+    local = _bars(dates)
+    local.attrs.update(
+        unit_status="unverified_vendor_contract",
+        adjustment_status="unverified_vendor_contract",
+    )
+    calls: list[str] = []
+
+    class LocalStockDB(DataSource):
+        name = "free-stockdb-test"
+        markets = (Market.CN,)
+
+        def daily(self, _symbol, _start, _end):
+            calls.append(self.name)
+            return local
+
+    class Remote(DataSource):
+        name = "tushare-fallback"
+        markets = (Market.CN,)
+
+        def daily(self, _symbol, _start, _end):
+            calls.append(self.name)
+            raise AssertionError("本地增量可用时不应联网")
+
+    monkeypatch.setattr(
+        registry,
+        "_request_factories",
+        lambda **_kwargs: {Market.CN: [LocalStockDB, Remote]},
+    )
+    monkeypatch.setattr(
+        registry, "_local_sessions", lambda _start, _end: (dates, "local-calendar"),
+    )
+    store = BarStore(root=tmp_path / "bars")
+
+    saved, errors, changed = registry._fetch_segment(
+        "600000.SH", "2026-07-20", "2026-08-07", "right", None, store, "normal",
+    )
+
+    assert saved is not None and not saved.empty
+    assert changed is True
+    assert errors == []
+    assert calls == ["free-stockdb-test"]
 
 
 def test_stockdb_native_batch_path_never_supplements_contract_evidence(
@@ -487,7 +534,7 @@ def test_stockdb_daily_without_factor_lineage_is_degraded(monkeypatch):
 
     assert quality.status == "degraded"
     assert quality.adjustment == "qfq_requested_unverified"
-    assert any("因子链" in issue for issue in quality.issues)
+    assert any("复权因子记录" in issue for issue in quality.issues)
 
 
 def test_aware_intraday_query_is_converted_to_shanghai_wall_time():
@@ -681,7 +728,7 @@ def test_intraday_frequency_contract_rejects_unbounded_values(monkeypatch):
     )
 
     assert quality.status == "unavailable"
-    assert any("无法验证分钟频率" in issue for issue in quality.issues)
+    assert any("无法确认分钟行情的时间间隔" in issue for issue in quality.issues)
 
 
 def test_finite_but_impossible_daily_ohlcv_is_unavailable(monkeypatch):
@@ -699,7 +746,7 @@ def test_finite_but_impossible_daily_ohlcv_is_unavailable(monkeypatch):
     )
 
     assert quality.status == "unavailable"
-    assert any("语义无效" in issue for issue in quality.issues)
+    assert any("价格高低关系或成交量不合理" in issue for issue in quality.issues)
 
 
 def test_all_sources_empty_raises_structured_unavailable(tmp_path, monkeypatch):

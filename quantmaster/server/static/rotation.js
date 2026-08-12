@@ -196,13 +196,25 @@
     return `<span class="rotation-quality" data-status="${esc(status)}" title="${esc(title)}">${esc(QUALITY_LABELS[status] || status)}${dimensionText}${coverageText}</span>`;
   }
 
+  function sourceLabel(value) {
+    const raw = String(value || '').trim();
+    const lower = raw.toLowerCase();
+    if (lower.startsWith('free-stockdb')) return '本地 StockDB';
+    if (lower.startsWith('local') || lower.startsWith('research_lake')) return '本地数据缓存';
+    if (lower.startsWith('tushare')) return 'Tushare';
+    if (lower.startsWith('akshare')) return 'AKShare';
+    if (lower.startsWith('ths')) return '同花顺';
+    if (lower.startsWith('eastmoney')) return '东方财富';
+    return raw.replace(/[-_:]+/g, ' ');
+  }
+
   function updateMeta(kind, meta) {
     const target = document.querySelector(`[data-rotation-asof="${kind}"]`);
     if (target) {
       const values = target.querySelectorAll('dd');
       if (values[0]) values[0].textContent = meta?.as_of || '尚无快照';
-      if (values[1] && kind === 'temperature') values[1].textContent = meta?.algorithm_version || '等待快照';
-      if (values[1] && kind === 'overview') values[1].textContent = meta?.algorithm_version || '等待快照';
+      if (values[1] && kind === 'temperature') values[1].textContent = meta ? '本地快照已生成' : '等待快照';
+      if (values[1] && kind === 'overview') values[1].textContent = meta ? '本地快照已生成' : '等待快照';
       if (values[1] && kind === 'themes') {
         const source = (meta?.sources || []).find(value => String(value).includes('concept'));
         const labels = {'eastmoney-concept':'东方财富概念','tushare:dc-concept':'Tushare DC 概念','ths:concept':'同花顺概念'};
@@ -216,7 +228,7 @@
       if (kind === 'themes') sources.sort((left, right) => (
         Number(String(right).includes('concept')) - Number(String(left).includes('concept'))
       ));
-      const source = sources.slice(0, 2).join(' · ') || '本地缓存';
+      const source = sources.slice(0, 2).map(sourceLabel).join(' · ') || '本地缓存';
       line.innerHTML = `${qualityMarkup(meta)}<span>${esc(meta.as_of || '尚无日期')}</span><span>${esc(source)}</span>`;
     }
   }

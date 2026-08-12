@@ -290,7 +290,9 @@ def _assess_daily_frame(
         finite = numeric.map(math.isfinite).all(axis=1)
         invalid_numeric = int((~finite).sum())
         if invalid_numeric:
-            issues.append(f"存在 {invalid_numeric} 行非有限 OHLCV")
+            issues.append(
+                f"存在 {invalid_numeric} 行无法识别的开盘、最高、最低、收盘或成交量"
+            )
         prices = numeric[["open", "high", "low", "close"]]
         semantic = (
             prices.gt(0).all(axis=1)
@@ -301,13 +303,13 @@ def _assess_daily_frame(
         )
         invalid_semantics = int((finite & ~semantic).sum())
         if invalid_semantics:
-            issues.append(f"存在 {invalid_semantics} 行价格/OHLC 关系或成交量语义无效")
+            issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
     if source.startswith("free-stockdb") and df.attrs.get("unit_status") != "verified":
-        issues.append("free-stockdb 未提供版本化单位证明，按股/元契约降级使用")
+        issues.append("本地 StockDB 未附带可核验的单位说明，当前按每股价格和人民币金额使用")
     adjustment = "qfq"
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
         adjustment = "qfq_requested_unverified"
-        issues.append("free-stockdb 日线请求了前复权，但未随行情返回可验证因子链")
+        issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
     boundary_tolerance = pd.Timedelta(days=14)
     if pd.isna(observed_start) or pd.isna(observed_end):
         issues.append("没有有效交易日期")
@@ -469,7 +471,7 @@ def _assess_intraday_frame(
     issues: list[str] = []
     frequency_minutes = _MINUTE_FREQUENCY_MINUTES.get(frequency, 0)
     if frequency_minutes <= 0:
-        issues.append(f"无法验证分钟频率：{frequency}")
+        issues.append("无法确认分钟行情的时间间隔")
     units, unit_issue = _unit_contract(symbol)
     if unit_issue:
         issues.append(unit_issue)
@@ -483,7 +485,7 @@ def _assess_intraday_frame(
     raw_index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
     timezone = str(raw_index.tz or "Asia/Shanghai")
     if raw_index.tz is None:
-        issues.append("分钟时间戳为 naive，按 Asia/Shanghai 解释")
+        issues.append("分钟行情没有注明时区，当前按北京时间解释")
         wall_index = raw_index
     else:
         wall_index = raw_index.tz_convert("Asia/Shanghai").tz_localize(None)
@@ -501,7 +503,9 @@ def _assess_intraday_frame(
         finite = numeric.map(math.isfinite).all(axis=1)
         invalid_numeric = int((~finite).sum())
         if invalid_numeric:
-            issues.append(f"存在 {invalid_numeric} 行非有限 OHLCV")
+            issues.append(
+                f"存在 {invalid_numeric} 行无法识别的开盘、最高、最低、收盘或成交量"
+            )
         prices = numeric[["open", "high", "low", "close"]]
         semantic = (
             prices.gt(0).all(axis=1)
@@ -512,7 +516,7 @@ def _assess_intraday_frame(
         )
         invalid_semantics = int((finite & ~semantic).sum())
         if invalid_semantics:
-            issues.append(f"存在 {invalid_semantics} 行价格/OHLC 关系或成交量语义无效")
+            issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
     requested_start = _shanghai_wall_time(start)
     requested_end = _shanghai_wall_time(end)
     if frequency == "1d":
@@ -900,6 +904,20 @@ def _align_increment(
     return merged[~merged.index.duplicated(keep="last")].sort_index()
 
 
+def _accept_local_stockdb_without_remote_upgrade(
+    source: DataSource,
+    quality: BarDataQuality,
+) -> bool:
+    """Accept structurally complete local rows despite evidence-only warnings."""
+    return bool(
+        quality.status == "degraded"
+        and not quality.stale
+        and not quality.partial
+        and source.name.startswith("free-stockdb")
+        and get_config().data.primary_provider == "free-stockdb"
+    )
+
+
 def _full_refresh(
     symbol: str,
     start: str,
@@ -951,6 +969,12 @@ def _full_refresh(
             )
             storage_source = source.name
             if quality.status == "verified":
+                return persist(frame, quality, storage_source)
+            # StockDB is the configured local source of truth. Its SDK does
+            # not provide an independently versioned unit/adjustment manifest,
+            # so usable rows remain explicitly degraded. That evidence-only
+            # downgrade must not fan out to every remote provider.
+            if _accept_local_stockdb_without_remote_upgrade(source, quality):
                 return persist(frame, quality, storage_source)
             errors.append(
                 f"{factory.__name__}: 数据完整但真实性契约为 {quality.status}，继续后备源"
@@ -1061,6 +1085,8 @@ def _fetch_segment(
                     best = (source, merged, frame, fresh_latest)
                 continue
             if evaluated[1].status == "verified":
+                return save(source, merged, frame, evaluated)
+            if _accept_local_stockdb_without_remote_upgrade(source, evaluated[1]):
                 return save(source, merged, frame, evaluated)
             errors.append(
                 f"{factory.__name__}: 增量真实性契约为 {evaluated[1].status}，继续后备源"

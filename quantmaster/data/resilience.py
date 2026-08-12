@@ -690,6 +690,13 @@ def _run_scheduled_provider[T](lane: str, key: str, func: Callable[[], T]) -> T:
     return result
 
 
+def _require_remote_io(lane: str) -> None:
+    if not remote_io_allowed():
+        raise LocalOnlyDataAccessError(
+            f"页面读取只能使用本地快照；{lane} 如需更新，请提交后台刷新任务"
+        )
+
+
 def provider_call[T](
     lane: str,
     key: str,
@@ -699,10 +706,7 @@ def provider_call[T](
     empty_opens: bool = False,
 ) -> T:
     """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
-    if not remote_io_allowed():
-        raise LocalOnlyDataAccessError(
-            f"页面读取禁止访问上游数据源: {lane}；请读取本地快照或提交刷新任务"
-        )
+    _require_remote_io(lane)
     PROVIDER_HEALTH.check_available(lane, probe=probe)
 
     def scheduled() -> T:
@@ -740,6 +744,7 @@ def akshare_call[T](
     **kwargs,
 ) -> T:
     """执行 AKShare 请求，失败时按配置做指数退避重试。"""
+    _require_remote_io(lane)
     cfg = get_config().data
     attempts = max(1, int(cfg.akshare_retries))
     backoff = max(0.0, float(cfg.akshare_retry_backoff))

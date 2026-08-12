@@ -156,6 +156,30 @@ function ingestResponseProblems(data, scope = 'operation') {
   ));
   return problems;
 }
+function humanSourceName(value) {
+  const raw = String(value || '').trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return '';
+  if (lower.startsWith('free-stockdb')) return '本地 StockDB';
+  if (lower.startsWith('local-cache') || lower.startsWith('research_lake')) return '本地数据缓存';
+  if (lower.startsWith('tushare')) return 'Tushare';
+  if (lower.startsWith('akshare')) return 'AKShare';
+  if (lower.startsWith('yfinance') || lower.startsWith('yahoo')) return 'Yahoo Finance';
+  if (lower.startsWith('ths')) return '同花顺';
+  if (lower.startsWith('eastmoney')) return '东方财富';
+  return raw.replace(/[-_:]+/g, ' ');
+}
+function humanAdjustment(value) {
+  const labels = {qfq:'前复权', hfq:'后复权', none:'未复权',
+    qfq_requested_unverified:'前复权（复权记录尚未核验）'};
+  return labels[String(value || '').toLowerCase()] || String(value || '');
+}
+function humanUnit(field, unit) {
+  const fields = {open:'开盘价', high:'最高价', low:'最低价', close:'收盘价',
+    volume:'成交量', amount:'成交额'};
+  const units = {'CNY/share':'元/股', CNY:'元', share:'股', point:'点'};
+  return `${fields[field] || field}=${units[unit] || unit}`;
+}
 function dataProvenanceSummary(data) {
   if (!data || typeof data !== 'object') return '';
   const raw = data.provenance || data.market_provenance
@@ -171,7 +195,7 @@ function dataProvenanceSummary(data) {
       || item.evidence_manifest_id || '',
     ).trim();
     if (!source && !identity) return '';
-    return `${source || '证据'}${identity ? ` #${identity.slice(0, 12)}` : ''}`;
+    return humanSourceName(source) || '本地证据';
   }).filter(Boolean);
   return [...new Set(labels)].slice(0, 4).join('；');
 }
@@ -198,8 +222,8 @@ function ingestDataQuality(data, scope = 'operation') {
     quality.effective_as_of || quality.observed_end || quality.actual_end || '',
   ).slice(0, 19);
   const sources = Array.isArray(quality.sources)
-    ? quality.sources.map(String).filter(Boolean)
-    : [quality.provider, quality.source].filter(Boolean).map(String);
+    ? quality.sources.map(humanSourceName).filter(Boolean)
+    : [quality.provider, quality.source].filter(Boolean).map(humanSourceName);
   const issues = Array.isArray(quality.issues)
     ? quality.issues.map(item => typeof item === 'string' ? item : item?.message || item?.code)
       .filter(Boolean)
@@ -210,10 +234,10 @@ function ingestDataQuality(data, scope = 'operation') {
   const coverage = Number(quality.coverage_ratio);
   const adjustment = String(quality.adjustment || '').trim();
   const units = Array.isArray(quality.units)
-    ? quality.units.slice(0, 4).map(item => Array.isArray(item) ? `${item[0]}=${item[1]}` : String(item))
+    ? quality.units.slice(0, 4).map(item => Array.isArray(item) ? humanUnit(item[0], item[1]) : String(item))
       .filter(Boolean).join(', ')
     : quality.units && typeof quality.units === 'object'
-      ? Object.entries(quality.units).slice(0, 4).map(([field, unit]) => `${field}=${unit}`)
+      ? Object.entries(quality.units).slice(0, 4).map(([field, unit]) => humanUnit(field, unit))
         .filter(Boolean).join(', ')
       : '';
   const provenance = dataProvenanceSummary(data);
@@ -222,7 +246,7 @@ function ingestDataQuality(data, scope = 'operation') {
     sources.length ? `来源 ${sources.join(' → ')}` : '',
     Number.isFinite(coverage) ? `覆盖率 ${(coverage * 100).toFixed(2)}%` : '',
     missing ? `${missing} 个标的缺失` : '',
-    adjustment ? `复权 ${adjustment}` : '',
+    adjustment ? `价格口径 ${humanAdjustment(adjustment)}` : '',
     units ? `单位 ${units}` : '',
     provenance ? `证据链 ${provenance}` : '',
   ].filter(Boolean).join('；') || '当前结果使用了未完整或已过期的数据证据。';
