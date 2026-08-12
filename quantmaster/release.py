@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.14.4"
+VERSION = "1.14.5"
 RELEASE_DATE = "2026-08-13"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,34 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "数据恢复与错误契约",
+                "items": (
+                    (
+                        "free-stockdb 摄取会保留并校验可用的部分数据，在远端补齐失败时"
+                        "明确报告缺口，同时避免丢弃已经验证的本地证据。"
+                    ),
+                    (
+                        "Web API、后台任务与前端统一采用结构化错误契约，稳定暴露错误代码、"
+                        "摘要、可重试状态与恢复建议，减少不同入口之间的错误语义漂移。"
+                    ),
+                ),
+            },
+            {
+                "title": "轮动分析可维护性",
+                "items": (
+                    (
+                        "轮动分析将市场温度、板块信号、ETF 资金证据与申赎统计拆为可独立测试"
+                        "的决策步骤，保持现有结果字段、错误语义和历史窗口不变。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.14.4",
+        "date": "2026-08-13",
         "sections": (
             {
                 "title": "运行时诊断与自动化可靠性",
