@@ -94,6 +94,32 @@ def test_storage_status_reports_wal_without_consuming_sidecars(
     assert {path: path.read_bytes() for path in (control, wal, shm)} == before
 
 
+def test_storage_status_resolves_relative_stockdb_root_from_config_not_cwd(
+    isolated_config, monkeypatch, tmp_path,
+):
+    config_root = tmp_path / "configured-workspace"
+    unrelated_cwd = tmp_path / "unrelated-cwd"
+    root = config_root / "runtime" / "free-stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    _control_database(control)
+    unrelated_cwd.mkdir()
+    isolated_config.workspace_root = config_root.resolve()
+    isolated_config.config_path = None
+    isolated_config.data.free_stockdb_root = "runtime/free-stockdb"
+    monkeypatch.chdir(unrelated_cwd)
+    monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
+    monkeypatch.setattr(
+        "quantmaster.server.storage_status._owner_writer_count", lambda _root: 0,
+    )
+
+    result = storage_status()
+
+    assert result["diagnostic_code"] == "SQLITE_OK"
+    assert result["database"] == ".quantmaster-control.sqlite"
+    assert result["display_path"] == "<configured-instance>/.quantmaster-control.sqlite"
+    assert not (unrelated_cwd / "runtime" / "free-stockdb").exists()
+
+
 def test_runtime_status_exposes_storage_contract_without_absolute_path(
     isolated_config, monkeypatch,
 ):

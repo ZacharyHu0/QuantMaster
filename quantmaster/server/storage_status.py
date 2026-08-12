@@ -22,8 +22,7 @@ from quantmaster.runtime.sqlite import connect_sqlite_diagnostic
 
 
 def _configured_stockdb_root() -> Path:
-    value = Path(get_config().data.free_stockdb_root).expanduser()
-    return value.resolve() if value.is_absolute() else (Path.cwd() / value).resolve()
+    return get_config().free_stockdb_root
 
 
 def _control_path() -> Path:
