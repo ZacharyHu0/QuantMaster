@@ -19,7 +19,7 @@ import traceback
 import uuid
 import zlib
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +42,7 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 DEFAULT_LEASE_SECONDS = 30.0
+DEFAULT_RUNTIME_DRAIN_SECONDS = 5.0
 INLINE_ARTIFACT_LIMIT = 128 * 1024
 _CPU_JOB_GATE = threading.Semaphore(1)
 
@@ -1134,6 +1135,7 @@ class JobContext:
         runtime: UnifiedJobRuntime,
         job: dict[str, Any],
         lease_alive: threading.Event,
+        generation: int,
     ):
         self.runtime = runtime
         self.store = runtime.store
@@ -1147,6 +1149,7 @@ class JobContext:
         self.deadline_seconds = float(job["deadline_seconds"])
         self._deadline_at = time.monotonic() + self.deadline_seconds
         self._lease_alive = lease_alive
+        self._generation = int(generation)
         self.llm_scope = str(job.get("llm_scope") or "")
         self.llm_revision = str(job.get("llm_revision") or "")
 
@@ -1165,7 +1168,10 @@ class JobContext:
         )
 
     def cancelled(self) -> bool:
-        if not self._lease_alive.is_set() or self.runtime.stopping:
+        if (
+            not self._lease_alive.is_set()
+            or not self.runtime.execution_allowed(self._generation)
+        ):
             return True
         if self.llm_scope and self.llm_revision:
             from quantmaster.runtime.llm import get_llm_execution_coordinator
@@ -1183,8 +1189,8 @@ class JobContext:
             )
         if not self._lease_alive.is_set():
             raise JobLeaseLost(self.job_id)
-        if self.runtime.stopping:
-            raise InterruptedError("worker stopped")
+        if not self.runtime.execution_allowed(self._generation):
+            raise InterruptedError("worker generation is draining or stopped")
         if self.llm_scope and self.llm_revision:
             from quantmaster.runtime.llm import get_llm_execution_coordinator
 
@@ -1411,9 +1417,17 @@ class UnifiedJobRuntime:
             max_workers=max(1, min(8, int(max_workers))),
             thread_name_prefix="qm-unified-job",
         )
-        self._active: set[str] = set()
-        self._reschedule_after_active: set[str] = set()
+        self._active: set[tuple[str, int]] = set()
+        self._running: set[tuple[str, int]] = set()
+        self._futures: dict[tuple[str, int], Future[None]] = {}
+        self._retry_timers: dict[tuple[str, int], threading.Timer] = {}
+        self._reschedule_after_active: set[tuple[str, int]] = set()
+        self._generation = 1
+        self._phase = "running"
+        self._shutdown_deadline_at = 0.0
+        self._shutdown_timeouts: list[dict[str, Any]] = []
         self._lock = threading.RLock()
+        self._activity_changed = threading.Condition(self._lock)
         self._started = False
         self._paused = threading.Event()
         self._stop = threading.Event()
@@ -1431,7 +1445,31 @@ class UnifiedJobRuntime:
 
     @property
     def stopping(self) -> bool:
-        return self._stop.is_set() or self._paused.is_set()
+        with self._lock:
+            return self._phase != "running"
+
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def execution_allowed(self, generation: int) -> bool:
+        """Return whether an already-started atomic unit may still commit.
+
+        A draining generation may finish its current unit.  Pausing or a
+        drain deadline rotates the generation, fencing late provider results
+        at both this cooperative boundary and the durable lease boundary.
+        """
+
+        with self._lock:
+            return (
+                int(generation) == self._generation
+                and self._phase in {"running", "draining"}
+            )
+
+    def _accepting_generation(self, generation: int) -> bool:
+        with self._lock:
+            return int(generation) == self._generation and self._phase == "running"
 
     @property
     def dispatch_enabled(self) -> bool:
@@ -1443,6 +1481,29 @@ class UnifiedJobRuntime:
     def idle(self) -> bool:
         with self._lock:
             return not self._active
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a sanitized owner-local lifecycle snapshot for diagnostics."""
+
+        with self._lock:
+            current = self._generation
+            active = sum(generation == current for _job_id, generation in self._active)
+            converging = len(self._active) - active
+            remaining = (
+                max(0.0, self._shutdown_deadline_at - time.monotonic())
+                if self._shutdown_deadline_at else 0.0
+            )
+            return {
+                "status": self._phase,
+                "generation": current,
+                "accepting": self._phase == "running",
+                "active_tasks": active,
+                "converging_tasks": converging,
+                "scheduled_tasks": max(0, len(self._active) - len(self._running)),
+                "retry_timers": len(self._retry_timers),
+                "shutdown_deadline_remaining_seconds": round(remaining, 3),
+                "timeout_issues": [dict(item) for item in self._shutdown_timeouts[-10:]],
+            }
 
     def register(
         self,
@@ -1523,6 +1584,8 @@ class UnifiedJobRuntime:
                 if not self._paused.is_set():
                     return
             self._paused.clear()
+            self._phase = "running"
+            self._shutdown_deadline_at = 0.0
             self._started = True
         self._dispatch_pending()
         self._start_dispatcher()
@@ -1564,16 +1627,52 @@ class UnifiedJobRuntime:
             self._schedule(job["id"])
         return job, created
 
-    def _schedule(self, job_id: str, *, reschedule_after_active: bool = False) -> None:
+    def _schedule(
+        self,
+        job_id: str,
+        *,
+        generation: int | None = None,
+        reschedule_after_active: bool = False,
+    ) -> None:
         with self._lock:
-            if self.stopping:
+            scheduled_generation = self._generation if generation is None else int(generation)
+            if not self._accepting_generation(scheduled_generation):
                 return
-            if job_id in self._active:
+            key = (job_id, scheduled_generation)
+            if key in self._active:
                 if reschedule_after_active:
-                    self._reschedule_after_active.add(job_id)
+                    self._reschedule_after_active.add(key)
                 return
-            self._active.add(job_id)
-        self._executor.submit(self._run, job_id)
+            self._active.add(key)
+            try:
+                future = self._executor.submit(self._run, job_id, scheduled_generation)
+            except RuntimeError:
+                # shutdown() may win immediately after the accepting check.
+                # The durable row remains queued; never leak a phantom active
+                # task or attempt to submit again from this old generation.
+                self._active.discard(key)
+                self._activity_changed.notify_all()
+                logger.info(
+                    "Unified job submit skipped during shutdown job_id=%s generation=%s",
+                    job_id,
+                    scheduled_generation,
+                )
+                return
+            self._futures[key] = future
+            def completed(
+                value: Future[None], scheduled_key: tuple[str, int] = key,
+            ) -> None:
+                self._future_done(scheduled_key, value)
+
+            future.add_done_callback(completed)
+
+    def _future_done(self, key: tuple[str, int], future: Future[None]) -> None:
+        with self._lock:
+            if self._futures.get(key) is future:
+                self._futures.pop(key, None)
+            self._active.discard(key)
+            self._running.discard(key)
+            self._activity_changed.notify_all()
 
     def _heartbeat(
         self,
@@ -1594,6 +1693,7 @@ class UnifiedJobRuntime:
         job: dict[str, Any],
         lease_token: str,
         lease_alive: threading.Event,
+        generation: int,
     ) -> JobOutcome:
         """Wait on a compute child while this Supervisor keeps the lease alive."""
 
@@ -1622,7 +1722,7 @@ class UnifiedJobRuntime:
                 process.join(0.2)
                 if not lease_alive.is_set():
                     raise JobLeaseLost(str(job["id"]))
-                if self.stopping:
+                if not self.execution_allowed(generation):
                     raise InterruptedError("worker stopped")
                 if time.monotonic() >= deadline:
                     raise JobDeadlineExceeded(
@@ -1664,14 +1764,18 @@ class UnifiedJobRuntime:
             results.close()
             results.join_thread()
 
-    def _run(self, job_id: str) -> None:
+    def _run(self, job_id: str, generation: int) -> None:
+        key = (job_id, generation)
         heartbeat_stop = threading.Event()
         lease_alive = threading.Event()
         lease_alive.set()
         heartbeat: threading.Thread | None = None
         retry_delay = 0.0
         try:
-            if self.stopping:
+            with self._lock:
+                self._running.add(key)
+                self._activity_changed.notify_all()
+            if not self.execution_allowed(generation):
                 return
             if not self.store.claim(job_id, self.identity.value):
                 return
@@ -1706,13 +1810,14 @@ class UnifiedJobRuntime:
                             job,
                             lease_token,
                             lease_alive,
+                            generation,
                         )
                     if not lease_alive.is_set():
                         raise JobLeaseLost(job_id)
                     if self.store.cancelled(job_id, self.identity.value, lease_token):
                         raise InterruptedError("job cancelled")
                 else:
-                    context = JobContext(self, job, lease_alive)
+                    context = JobContext(self, job, lease_alive, generation)
                     if context.llm_scope:
                         from quantmaster.runtime.llm import get_llm_execution_coordinator
 
@@ -1728,7 +1833,7 @@ class UnifiedJobRuntime:
             except InterruptedError as exc:
                 if not lease_alive.is_set():
                     return
-                if self.stopping:
+                if not self.execution_allowed(generation):
                     return
                 outcome = JobOutcome("cancelled", str(exc))
             except (
@@ -1767,16 +1872,44 @@ class UnifiedJobRuntime:
             if heartbeat is not None:
                 heartbeat.join(timeout=1.0)
             with self._lock:
-                self._active.discard(job_id)
-                reschedule = job_id in self._reschedule_after_active
-                self._reschedule_after_active.discard(job_id)
-            if reschedule and not self.stopping:
-                self._schedule(job_id)
-            elif retry_delay and not self.stopping:
-                timer = threading.Timer(retry_delay, self._schedule, args=(job_id,))
-                timer.name = f"unified-retry-{job_id[-8:]}"
-                timer.daemon = True
-                timer.start()
+                self._running.discard(key)
+                self._active.discard(key)
+                reschedule = key in self._reschedule_after_active
+                self._reschedule_after_active.discard(key)
+                self._activity_changed.notify_all()
+            if reschedule and self._accepting_generation(generation):
+                self._schedule(job_id, generation=generation)
+            elif retry_delay and self._accepting_generation(generation):
+                self._start_retry_timer(job_id, generation, retry_delay)
+
+    def _start_retry_timer(self, job_id: str, generation: int, delay: float) -> None:
+        key = (job_id, generation)
+
+        def fire() -> None:
+            with self._lock:
+                if self._retry_timers.get(key) is not timer:
+                    return
+                self._retry_timers.pop(key, None)
+            self._schedule(job_id, generation=generation)
+
+        timer = threading.Timer(max(0.0, delay), fire)
+        timer.name = f"unified-retry-{job_id[-8:]}-g{generation}"
+        timer.daemon = True
+        with self._lock:
+            if not self._accepting_generation(generation):
+                return
+            previous = self._retry_timers.pop(key, None)
+            if previous is not None:
+                previous.cancel()
+            self._retry_timers[key] = timer
+        timer.start()
+
+    def _cancel_retry_timers(self) -> None:
+        with self._lock:
+            timers = list(self._retry_timers.values())
+            self._retry_timers.clear()
+        for timer in timers:
+            timer.cancel()
 
     @staticmethod
     def _is_transient_failure(detail: str) -> bool:
@@ -1799,7 +1932,11 @@ class UnifiedJobRuntime:
 
     def pause(self) -> None:
         """Stop accepting work and durably interrupt owned jobs for maintenance."""
-        self._paused.set()
+        with self._lock:
+            self._paused.set()
+            self._phase = "paused"
+            self._generation += 1
+        self._cancel_retry_timers()
         if self._dispatch_enabled:
             self.store.interrupt_owned(self.identity.value)
 
@@ -1807,15 +1944,62 @@ class UnifiedJobRuntime:
         """Resume interrupted jobs after a bounded maintenance window."""
         self.start()
 
-    def stop(self) -> None:
-        self._stop.set()
+    def stop(self, deadline_seconds: float = DEFAULT_RUNTIME_DRAIN_SECONDS) -> dict[str, Any]:
+        """Drain current atomic units, then fence late work at a finite deadline."""
+
+        deadline = time.monotonic() + max(0.0, float(deadline_seconds))
+        with self._lock:
+            if self._phase == "stopped":
+                return self.snapshot()
+            self._phase = "draining"
+            self._shutdown_deadline_at = deadline
+            draining_generation = self._generation
         self._paused.set()
         self._dispatcher_stop.set()
+        self._cancel_retry_timers()
         if self._dispatcher is not None and self._dispatcher.is_alive():
-            self._dispatcher.join(timeout=1.0)
-        if self._dispatch_enabled:
-            self.store.interrupt_owned(self.identity.value)
+            self._dispatcher.join(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+        # Cancel work that the pool has not started. Running handlers retain
+        # their lease until the bounded drain below, allowing an atomic
+        # article/chunk plus checkpoint to commit without accepting new work.
         self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._activity_changed:
+            while any(generation == draining_generation for _job_id, generation in self._running):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._activity_changed.wait(timeout=min(0.1, remaining))
+            timed_out = [
+                job_id
+                for job_id, generation in self._running
+                if generation == draining_generation
+            ]
+            if timed_out:
+                diagnostic_id = f"runtime-drain-{uuid.uuid4().hex[:12]}"
+                self._shutdown_timeouts.append({
+                    "diagnostic_id": diagnostic_id,
+                    "phase": "draining_provider_or_atomic_unit",
+                    "task_count": len(timed_out),
+                })
+                logger.error(
+                    "Unified runtime drain deadline exceeded diagnostic_id=%s generation=%s tasks=%s",
+                    diagnostic_id,
+                    draining_generation,
+                    len(timed_out),
+                )
+            self._phase = "stopping"
+            self._generation += 1
+            self._activity_changed.notify_all()
+        if self._dispatch_enabled:
+            # This durable fence rejects every late artifact/result from the
+            # old generation and leaves interrupted work recoverable.
+            self.store.interrupt_owned(self.identity.value)
+        self._stop.set()
+        with self._lock:
+            self._phase = "stopped"
+            self._started = False
+            self._shutdown_deadline_at = 0.0
+        return self.snapshot()
 
     @staticmethod
     def public(job: dict[str, Any]) -> dict[str, Any]:

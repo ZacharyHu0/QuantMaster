@@ -226,6 +226,114 @@ def test_retry_queued_before_previous_worker_cleanup_is_rescheduled(tmp_path):
     runtime.stop()
 
 
+def test_runtime_stop_drains_current_atomic_unit_and_rejects_new_work(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    started = threading.Event()
+    release_atomic_unit = threading.Event()
+
+    def handler(context, _spec):
+        started.set()
+        assert release_atomic_unit.wait(2)
+        context.write_checkpoint(
+            "article-1",
+            context.spec_hash,
+            {"schema_version": "1.0", "article_id": 1, "committed": True},
+        )
+        return JobOutcome("completed", "article committed")
+
+    runtime.register("test.atomic-drain", handler)
+    job, _ = runtime.submit("test.atomic-drain", {"article_id": 1})
+    assert started.wait(2)
+
+    result: dict = {}
+
+    def stop_runtime():
+        result.update(runtime.stop(deadline_seconds=2))
+
+    stopper = threading.Thread(target=stop_runtime)
+    stopper.start()
+    deadline = time.monotonic() + 1
+    while runtime.snapshot()["status"] != "draining" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runtime.snapshot()["accepting"] is False
+    with pytest.raises(RuntimeError, match=r"维护|停止"):
+        runtime.submit("test.atomic-drain", {"article_id": 2})
+
+    release_atomic_unit.set()
+    stopper.join(timeout=3)
+    assert not stopper.is_alive()
+    assert result["status"] == "stopped"
+    assert result["timeout_issues"] == []
+    completed = store.get(job["id"])
+    assert completed["status"] == "completed"
+    assert store.checkpoint(job["id"], "article-1", job["spec_hash"])["committed"] is True
+
+
+def test_runtime_stop_deadline_fences_late_provider_result_and_preserves_queue(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    provider_started = threading.Event()
+    provider_returned = threading.Event()
+
+    def handler(context, _spec):
+        provider_started.set()
+        assert provider_returned.wait(2)
+        context.write_artifact(
+            "late.provider.result",
+            {"schema_version": "1.0", "value": "late"},
+            {"schema_version": "1.0", "lineage": {}},
+        )
+        return JobOutcome("completed", "late")
+
+    runtime.register("test.provider-deadline", handler)
+    job, _ = runtime.submit("test.provider-deadline", {"value": 1})
+    assert provider_started.wait(2)
+
+    started_at = time.monotonic()
+    stopped = runtime.stop(deadline_seconds=0.05)
+    elapsed = time.monotonic() - started_at
+    assert elapsed < 0.5
+    assert stopped["status"] == "stopped"
+    assert stopped["timeout_issues"][0]["phase"] == "draining_provider_or_atomic_unit"
+    assert stopped["timeout_issues"][0]["task_count"] == 1
+    assert store.get(job["id"])["status"] == "interrupted"
+
+    provider_returned.set()
+    deadline = time.monotonic() + 2
+    while not runtime.idle and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runtime.idle
+    assert store.get(job["id"])["status"] == "interrupted"
+    assert store.latest_artifact(job["id"], "late.provider.result") is None
+
+
+def test_runtime_shutdown_cancels_owned_retry_timer_and_submit_race(tmp_path, monkeypatch):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    runtime.register("test.retry-owner", lambda _context, _spec: JobOutcome())
+    job, _ = store.submit("test.retry-owner", {"value": 1})
+    generation = runtime.generation
+    runtime._start_retry_timer(job["id"], generation, 60)
+    assert runtime.snapshot()["retry_timers"] == 1
+
+    runtime.stop(deadline_seconds=0)
+    assert runtime.snapshot()["retry_timers"] == 0
+
+    raced = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "race.sqlite"), max_workers=1)
+    raced.register("test.submit-race", lambda _context, _spec: JobOutcome())
+    race_job, _ = raced.store.submit("test.submit-race", {"value": 1})
+
+    def rejected_submit(*_args, **_kwargs):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(raced._executor, "submit", rejected_submit)
+    raced._schedule(race_job["id"])
+    assert raced.idle
+    assert raced.snapshot()["active_tasks"] == 0
+    raced.stop(deadline_seconds=0)
+
+
 def test_unified_runtime_converts_unexpected_value_error_to_terminal_failure(tmp_path):
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     runtime = UnifiedJobRuntime(store, max_workers=1)
