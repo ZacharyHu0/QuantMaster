@@ -704,6 +704,8 @@ async def liveness() -> dict:
         "status": "ok",
         "version": __version__,
         "release_date": RELEASE_DATE,
+        "process_pid": os.getpid(),
+        "generation": os.environ.get("QM_WEB_GENERATION", "0"),
         "web_threads": threads,
         "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
     }

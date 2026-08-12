@@ -90,6 +90,11 @@ def test_run_uvicorn_foreground_releases_handlers(monkeypatch):
         Server = FakeServer
 
     monkeypatch.setitem(__import__("sys").modules, "uvicorn", FakeUvicorn())
+    monkeypatch.setattr(
+        lifecycle,
+        "inspect_startup_address",
+        lambda host, port, *, version: lifecycle.StartupPreflight(host, port, True, "start"),
+    )
     monkeypatch.setattr(lifecycle.os, "getppid", lambda: 12345)
     monkeypatch.setattr(lifecycle, "_process_is_alive", lambda _pid: True)
     monkeypatch.setattr(
@@ -110,6 +115,73 @@ def test_run_uvicorn_foreground_releases_handlers(monkeypatch):
     ]
 
 
+def test_startup_preflight_reuses_healthy_same_version_quantmaster(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_port_is_available", lambda _host, _port: False)
+    monkeypatch.setattr(
+        lifecycle,
+        "_http_json",
+        lambda _host, _port, path: (
+            {"status": "ok", "version": "9.9.9", "generation": "4"}
+            if path.endswith("/live") else {"status": "ready", "generation": "4"}
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle, "_listener_process",
+        lambda _host, _port: lifecycle.ListenProcess(
+            pid=4321, name="QuantMaster Web Worker.exe", executable="C:/qm.exe",
+        ),
+    )
+
+    result = lifecycle.inspect_startup_address("127.0.0.1", 8686, version="9.9.9")
+
+    assert result.action == "reuse"
+    assert result.process and result.process.pid == 4321
+    assert result.process and result.process.quantmaster_role == "web"
+    assert result.health and result.health["live"]["generation"] == "4"
+    assert "复用" in result.message
+
+
+def test_startup_preflight_reports_unknown_listener_without_touching_it(monkeypatch):
+    monkeypatch.setattr(lifecycle, "_port_is_available", lambda _host, _port: False)
+    monkeypatch.setattr(lifecycle, "_http_json", lambda *_args: None)
+    process = lifecycle.ListenProcess(pid=9876, name="nginx.exe", executable="C:/nginx/nginx.exe")
+    monkeypatch.setattr(lifecycle, "_listener_process", lambda _host, _port: process)
+
+    result = lifecycle.inspect_startup_address("127.0.0.1", 8686, version="9.9.9")
+
+    assert result.action == "blocked"
+    assert result.process == process
+    assert "PID 9876" in result.message
+    assert "不会自动结束" in result.message
+
+
+def test_run_uvicorn_foreground_returns_without_starting_duplicate_same_version(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", object())
+    monkeypatch.setattr(
+        lifecycle,
+        "inspect_startup_address",
+        lambda host, port, *, version: lifecycle.StartupPreflight(
+            host, port, False, "reuse", "复用现有实例",
+        ),
+    )
+
+    lifecycle.run_uvicorn_foreground("app", "127.0.0.1", 8686)
+
+
+def test_run_uvicorn_foreground_raises_diagnostic_port_conflict(monkeypatch):
+    conflict = lifecycle.StartupPreflight(
+        "127.0.0.1", 8686, False, "blocked", "PID 9876 已占用",
+        lifecycle.ListenProcess(pid=9876, name="nginx.exe"),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", object())
+    monkeypatch.setattr(
+        lifecycle, "inspect_startup_address", lambda *_args, **_kwargs: conflict,
+    )
+
+    with pytest.raises(lifecycle.StartupPortConflictError, match="PID 9876"):
+        lifecycle.run_uvicorn_foreground("app", "127.0.0.1", 8686)
+
+
 def test_reload_supervisor_owns_free_stockdb_across_worker_reloads(monkeypatch, tmp_path):
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
 
@@ -124,6 +196,11 @@ def test_reload_supervisor_owns_free_stockdb_across_worker_reloads(monkeypatch, 
         assert lifecycle.os.environ["QM_SERVER_RELOAD_VERBOSE"] == "0"
 
     monkeypatch.setitem(__import__("sys").modules, "uvicorn", FakeUvicorn())
+    monkeypatch.setattr(
+        lifecycle,
+        "inspect_startup_address",
+        lambda host, port, *, version: lifecycle.StartupPreflight(host, port, True, "start"),
+    )
     monkeypatch.setattr(free_stockdb_runtime, "start", lambda: calls.append(("stockdb-start",)))
     monkeypatch.setattr(free_stockdb_runtime, "stop", lambda: calls.append(("stockdb-stop",)))
     monkeypatch.setattr("quantmaster.logging_config.is_verbose_logging", lambda: False)
@@ -159,6 +236,11 @@ def test_reload_console_close_stops_owned_stockdb_once(monkeypatch):
         return lambda: calls.append("unregister")
 
     monkeypatch.setitem(__import__("sys").modules, "uvicorn", FakeUvicorn())
+    monkeypatch.setattr(
+        lifecycle,
+        "inspect_startup_address",
+        lambda host, port, *, version: lifecycle.StartupPreflight(host, port, True, "start"),
+    )
     monkeypatch.setattr(free_stockdb_runtime, "start", lambda: calls.append("start"))
     monkeypatch.setattr(free_stockdb_runtime, "stop", lambda: calls.append("stop"))
     monkeypatch.setattr(lifecycle, "install_windows_console_handler", install)

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import functools
 import http.client
+import json
 import logging
 import os
 import signal
 import socket as socket_module
+import subprocess
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,172 @@ RELOAD_DRAIN_SECONDS = 10.0
 RELOAD_FORCE_KILL_SECONDS = 5.0
 WEB_GENERATION_ENV = "QM_WEB_GENERATION"
 WEB_PROCESS_ENV = "QM_WEB_PROCESS"
+
+
+@dataclass(frozen=True)
+class ListenProcess:
+    """Best-effort, non-invasive description of the owner of a TCP listener."""
+
+    pid: int | None = None
+    name: str = ""
+    executable: str = ""
+    command: str = ""
+
+    @property
+    def quantmaster_role(self) -> str:
+        text = " ".join((self.name, self.executable, self.command)).lower()
+        if "quantmaster" not in text and "qm-web" not in text:
+            return ""
+        if "web" in text:
+            return "web"
+        if "supervisor" in text:
+            return "supervisor"
+        if "worker" in text:
+            return "worker"
+        return "web"
+
+
+@dataclass(frozen=True)
+class StartupPreflight:
+    """The decision made before a server is allowed to bind its configured URL."""
+
+    host: str
+    port: int
+    available: bool
+    action: str
+    message: str = ""
+    process: ListenProcess | None = None
+    health: dict[str, Any] | None = None
+
+
+class StartupPortConflictError(RuntimeError):
+    """A configured listen address belongs to another, non-reusable process."""
+
+    def __init__(self, preflight: StartupPreflight) -> None:
+        self.preflight = preflight
+        super().__init__(preflight.message)
+
+
+def _probe_host(host: str) -> str:
+    """Choose a loopback address for a local probe of a wildcard listener."""
+
+    value = str(host).strip()
+    if value in {"", "0.0.0.0", "::", "[::]"}:
+        return "127.0.0.1"
+    return value
+
+
+def _http_json(host: str, port: int, path: str) -> dict[str, Any] | None:
+    connection = http.client.HTTPConnection(_probe_host(host), int(port), timeout=0.5)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        raw = response.read()
+        if response.status != 200:
+            return None
+        value = json.loads(raw.decode("utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+
+
+def _listener_process(host: str, port: int) -> ListenProcess:
+    """Identify a listener when the platform exposes it; never kill or alter it."""
+
+    if os.name == "nt":
+        # netstat is present on supported Windows versions and does not need
+        # elevation.  Process metadata may be unavailable for protected PIDs;
+        # the PID is still useful to the operator.
+        try:
+            output = subprocess.check_output(
+                ["netstat", "-ano", "-p", "tcp"], text=True,
+                encoding="utf-8", errors="replace", timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ListenProcess()
+        target_port = str(int(port))
+        pid: int | None = None
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 5 and fields[3].upper() == "LISTENING":
+                local = fields[1].rsplit(":", 1)
+                if len(local) == 2 and local[1] == target_port:
+                    try:
+                        pid = int(fields[-1])
+                    except ValueError:
+                        continue
+                    break
+        if pid is None:
+            return ListenProcess()
+        try:
+            query = (
+                "Get-CimInstance Win32_Process -Filter 'ProcessId=" + str(pid) + "' | "
+                "Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+            )
+            detail = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command", query], text=True,
+                encoding="utf-8", errors="replace", timeout=2,
+            )
+            value = json.loads(detail)
+            if isinstance(value, dict):
+                return ListenProcess(
+                    pid=pid, name=str(value.get("Name") or ""),
+                    executable=str(value.get("ExecutablePath") or ""),
+                    command=str(value.get("CommandLine") or ""),
+                )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        return ListenProcess(pid=pid)
+    return ListenProcess()
+
+
+def _port_is_available(host: str, port: int) -> bool:
+    family = socket_module.AF_INET6 if ":" in str(host) else socket_module.AF_INET
+    listener = socket_module.socket(family, socket_module.SOCK_STREAM)
+    try:
+        listener.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        listener.close()
+
+
+def inspect_startup_address(host: str, port: int, *, version: str) -> StartupPreflight:
+    """Safely classify a configured address before starting QuantMaster.
+
+    A healthy same-version server is intentionally a reusable success.  Every
+    other listener remains untouched and produces an actionable diagnostic;
+    choosing another port must be an explicit operator configuration change.
+    """
+
+    if _port_is_available(host, port):
+        return StartupPreflight(host, int(port), True, "start")
+    live = _http_json(host, port, "/api/v1/health/live")
+    ready = _http_json(host, port, "/api/v1/health/ready") if live else None
+    process = _listener_process(host, port)
+    health = {"live": live, "ready": ready} if live else None
+    if live and str(live.get("version") or "") == str(version):
+        generation = str(live.get("generation") or "")
+        message = (
+            f"检测到已运行的 QuantMaster {version}（{host}:{port}）"
+            f"；复用现有实例。"
+        )
+        if generation:
+            message += f" Web 代次 {generation}。"
+        return StartupPreflight(host, int(port), False, "reuse", message, process, health)
+    identity = f"PID {process.pid}" if process.pid else "未能识别 PID"
+    if process.name:
+        identity += f"（{process.name}）"
+    if process.executable:
+        identity += f"，{process.executable}"
+    message = (
+        f"QuantMaster 无法监听 {host}:{port}：端口由 {identity} 占用。"
+        "请停止或重新配置该程序后重试；QuantMaster 不会自动结束进程或改用随机端口。"
+    )
+    return StartupPreflight(host, int(port), False, "blocked", message, process, health)
 
 
 def _run_web_generation(
@@ -761,9 +930,16 @@ def run_uvicorn_foreground(
     """运行 Uvicorn，并把终端、启动器与服务生命周期绑定在一起。"""
     import uvicorn
 
+    from quantmaster import __version__
     from quantmaster.runtime.network import validate_listen_host
 
     host = validate_listen_host(host)
+    preflight = inspect_startup_address(host, port, version=__version__)
+    if preflight.action == "reuse":
+        logger.info(preflight.message)
+        return
+    if preflight.action == "blocked":
+        raise StartupPortConflictError(preflight)
 
     if reload:
         _run_uvicorn_reload(host, port, log_level)
