@@ -177,6 +177,34 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .migration-progress > div:first-child { display: flex; justify-content: space-between; grid-column: 1 / -1; }
 .migration-progress .load-track { margin: 0; }
 .migration-progress .load-fill { transform: scaleX(var(--migration-progress, 0)); }
+.contract-migration-box {
+  display: grid; gap: 16px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border);
+}
+.contract-migration-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
+.contract-migration-heading p { max-width: 720px; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.contract-migration-controls { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(170px, .7fr) auto; gap: 10px; align-items: end; }
+.contract-migration-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.contract-migration-status { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in oklch, var(--surface) 70%, transparent); }
+.contract-migration-phase { display: flex; justify-content: space-between; gap: 12px; color: var(--ink-2); font-size: 12px; }
+.contract-migration-phase strong { font-variant-numeric: tabular-nums; }
+.contract-migration-status .load-track { margin: 0; }
+.contract-migration-status .load-fill { transform: scaleX(var(--contract-migration-progress, 0)); }
+.contract-migration-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin: 0; border-block: 1px solid var(--border); }
+.contract-migration-counts div { display: grid; gap: 3px; padding: 10px 12px; }
+.contract-migration-counts div + div { border-left: 1px solid var(--border); }
+.contract-migration-counts dt { color: var(--muted); font-size: 10px; }
+.contract-migration-counts dd { margin: 0; color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }
+.contract-migration-meta, .contract-migration-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.contract-migration-meta { color: var(--muted); font-size: 11px; }
+.contract-migration-meta code { padding: 2px 6px; border: 1px solid var(--axis); border-radius: 5px; color: var(--s4); font-size: 10px; }
+.contract-migration-investigation { padding-top: 10px; border-top: 1px solid var(--border); }
+.contract-migration-investigation h5 { margin-bottom: 8px; color: var(--ink-2); font-size: 11px; }
+.contract-migration-investigation ol { display: grid; gap: 8px; margin: 0; padding-left: 20px; }
+.contract-migration-investigation li { display: grid; grid-template-columns: minmax(100px, .7fr) auto minmax(140px, 1fr); gap: 4px 10px; color: var(--muted); font-size: 11px; }
+.contract-migration-investigation li strong { color: var(--ink-2); overflow-wrap: anywhere; }
+.contract-migration-investigation li code { color: var(--s4); }
+.contract-migration-investigation li small { grid-column: 1 / -1; color: var(--muted); }
+.contract-migration-empty { margin: 0; color: var(--muted); font-size: 11px; }
 .maintenance-box {
   display: grid; gap: 14px; margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border);
 }
@@ -349,7 +377,11 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
   .settings-content { padding-top: 14px; }
   .field-grid, .channel-grid { grid-template-columns: 1fr; }
   .check-stack { grid-template-columns: 1fr; }
-  .migration-controls, .maintenance-controls { grid-template-columns: 1fr; }
+  .migration-controls, .maintenance-controls, .contract-migration-controls { grid-template-columns: 1fr; }
+  .contract-migration-heading { display: grid; }
+  .contract-migration-counts { grid-template-columns: repeat(3, 1fr); }
+  .contract-migration-counts div:nth-child(4) { border-left: 0; }
+  .contract-migration-counts div:nth-child(n+4) { border-top: 1px solid var(--border); }
   .maintenance-confirm { align-items: stretch; flex-direction: column; }
   .save-dock { position: static; flex-wrap: wrap; bottom: auto; }
   #settings-save-state { flex-basis: 100%; }
@@ -379,6 +411,11 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 }
 
 @media (max-width: 520px) {
+  .contract-migration-counts { grid-template-columns: repeat(2, 1fr); }
+  .contract-migration-counts div:nth-child(odd) { border-left: 0; }
+  .contract-migration-counts div:nth-child(n+3) { border-top: 1px solid var(--border); }
+  .contract-migration-investigation li { grid-template-columns: 1fr; }
+  .contract-migration-investigation li small { grid-column: auto; }
   .channel-connect { grid-template-columns: 1fr; }
   .channel-connect img { width: min(100%, 220px); height: auto; aspect-ratio: 1; }
   .channel-diagnostic-item { grid-template-columns: 72px 58px minmax(0, 1fr); }

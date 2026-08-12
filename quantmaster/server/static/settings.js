@@ -25,6 +25,9 @@
     weixinLoginTimer: null,
     lastRuntime: null,
     diagnosticTasks: {},
+    contractMigrationTimer: null,
+    contractMigrationFailures: 0,
+    contractMigrationId: '',
   };
   const form = document.getElementById('settings-form');
   let freeStockDbPollTimer = null;
@@ -93,6 +96,7 @@
     if (mobileSelect && mobileSelect.value !== name) mobileSelect.value = name;
     form.hidden = ['sources', 'backup'].includes(name);
     if (name === 'backup') loadSnapshots();
+    if (name === 'local-data') loadContractMigrationStatus();
     if (['automation', 'lab'].includes(name)) loadAutomationOverview();
   }
 
@@ -1364,6 +1368,119 @@
   document.getElementById('migration-cancel').addEventListener('click', async event => {
     const id = event.target.dataset.taskId;
     if (id) await request(`/api/v1/data/migrations/${id}/cancel`, {method: 'POST'});
+  });
+
+  const contractMigrationLabels = {
+    'market-data-legacy': '行情与证券主数据', decision: '决策快照', paper: '模拟盘账本',
+    news: '资讯记录', automation: '自动化设置', 'after-close': '盘后快照', rotation: '轮动快照',
+  };
+
+  function contractDomainLabel(domain) {
+    return contractMigrationLabels[domain] || String(domain || '').replaceAll('-', ' ');
+  }
+
+  function renderContractMigration(task) {
+    const empty = document.getElementById('contract-migration-empty');
+    if (!task) {
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    state.contractMigrationId = task.id;
+    const total = Number(task.total || 0);
+    const checked = Number(task.checked || 0);
+    const ratio = total > 0 ? Math.min(1, checked / total) : 0;
+    const root = document.getElementById('contract-migration-status');
+    root.style.setProperty('--contract-migration-progress', ratio);
+    root.querySelector('[data-contract-phase]').textContent =
+      `${contractDomainLabel(task.domain)} · ${task.phase || task.status}`;
+    root.querySelector('[data-contract-progress]').textContent = `${checked} / ${total}`;
+    ['total', 'checked', 'converted', 'blank', 'review', 'conflicts'].forEach(name => {
+      root.querySelector(`[data-contract-count="${name}"]`).textContent = Number(task[name] || 0).toLocaleString('zh-CN');
+    });
+    root.querySelector('[data-contract-batch]').textContent = `最近批次：${task.last_batch || '—'}${task.last_key ? ` · ${task.last_key}` : ''}`;
+    root.querySelector('[data-contract-eta]').textContent = task.estimated_remaining_seconds == null
+      ? '预计剩余：—' : `预计剩余：${Math.max(0, Number(task.estimated_remaining_seconds))} 秒`;
+    const diagnostic = root.querySelector('[data-contract-diagnostic]');
+    diagnostic.hidden = !task.diagnostic_code;
+    diagnostic.textContent = task.diagnostic_code ? `诊断码 ${task.diagnostic_code}` : '';
+    const writeState = document.getElementById('contract-migration-write-state');
+    writeState.textContent = task.write_paused ? '业务写入已暂停' : '业务写入未暂停';
+    writeState.className = `state-pill ${task.write_paused ? 'sell' : ''}`;
+    const active = ['queued', 'backing_up', 'running', 'pausing'].includes(task.status);
+    document.getElementById('contract-migration-pause').hidden = !active || task.status === 'pausing';
+    document.getElementById('contract-migration-resume').hidden = !['paused', 'failed'].includes(task.status);
+    document.getElementById('contract-migration-rollback').hidden = !(task.mode === 'apply' && task.status === 'completed' && task.backup_path);
+    const investigation = document.getElementById('contract-migration-investigation');
+    const list = investigation.querySelector('ol');
+    const unknown = Array.isArray(task.unknown_results) ? task.unknown_results : [];
+    investigation.hidden = unknown.length === 0;
+    list.innerHTML = unknown.map(item => `<li><strong>${html(item.record_key)}</strong><code>${html(item.diagnostic_code || 'needs_review')}</code><span>${html((item.unknown_fields || []).join('、') || '未确认可选字段')}</span><small>${html(item.detail || '原记录证据不足，当前字段保持为空。')}</small></li>`).join('');
+    if (active) scheduleContractMigrationPoll(task.id);
+  }
+
+  function scheduleContractMigrationPoll(id, delay = 800) {
+    clearTimeout(state.contractMigrationTimer);
+    state.contractMigrationTimer = setTimeout(() => pollContractMigration(id), delay);
+  }
+
+  async function pollContractMigration(id) {
+    try {
+      const task = await request(`/api/v1/data/contract-migrations/${id}`);
+      state.contractMigrationFailures = 0;
+      renderContractMigration(task);
+    } catch (error) {
+      state.contractMigrationFailures += 1;
+      if (state.contractMigrationFailures === 1) {
+        document.querySelector('[data-contract-phase]').textContent = `状态暂时不可用：${error.message}`;
+      }
+      if (state.contractMigrationFailures < 5) {
+        scheduleContractMigrationPoll(id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)));
+      }
+    }
+  }
+
+  async function loadContractMigrationStatus() {
+    try {
+      const data = await request('/api/v1/data/contract-migrations');
+      const select = document.getElementById('contract-migration-domain');
+      const current = select.value;
+      select.innerHTML = (data.available_types || []).length
+        ? data.available_types.map(name => `<option value="${html(name)}">${html(contractDomainLabel(name))}</option>`).join('')
+        : '<option value="">暂无可用迁移</option>';
+      if ([...select.options].some(option => option.value === current)) select.value = current;
+      document.getElementById('contract-migration-start').disabled = !select.value;
+      renderContractMigration(data.latest);
+    } catch (error) {
+      document.querySelector('[data-contract-phase]').textContent = `迁移状态不可用：${error.message}`;
+    }
+  }
+
+  document.getElementById('contract-migration-mode').addEventListener('change', event => {
+    document.getElementById('contract-migration-start').textContent =
+      event.target.value === 'apply' ? '备份并迁移' : '开始只读检查';
+  });
+  document.getElementById('contract-migration-start').addEventListener('click', async event => {
+    const domain = document.getElementById('contract-migration-domain').value;
+    const mode = document.getElementById('contract-migration-mode').value;
+    if (!domain) return;
+    if (mode === 'apply' && !window.confirm('将先暂停业务写入并创建可恢复备份。确认开始？')) return;
+    event.target.disabled = true;
+    try {
+      renderContractMigration(await request('/api/v1/data/contract-migrations', {
+        method: 'POST', body: {domain, mode, batch_size: 250},
+      }));
+    } finally { event.target.disabled = false; }
+  });
+  document.getElementById('contract-migration-pause').addEventListener('click', async () => {
+    if (state.contractMigrationId) renderContractMigration(await request(`/api/v1/data/contract-migrations/${state.contractMigrationId}/pause`, {method: 'POST'}));
+  });
+  document.getElementById('contract-migration-resume').addEventListener('click', async () => {
+    if (state.contractMigrationId) renderContractMigration(await request(`/api/v1/data/contract-migrations/${state.contractMigrationId}/resume`, {method: 'POST'}));
+  });
+  document.getElementById('contract-migration-rollback').addEventListener('click', async () => {
+    if (!state.contractMigrationId || !window.confirm('确认从迁移前备份回滚？')) return;
+    renderContractMigration(await request(`/api/v1/data/contract-migrations/${state.contractMigrationId}/rollback`, {method: 'POST'}));
   });
 
   async function pollFreeStockDbSidecar() {

@@ -1275,6 +1275,25 @@
             <div class="migration-controls"><input id="migration-target" placeholder="新的空目录绝对路径"><select id="migration-mode"><option value="copy">复制并切换（推荐）</option><option value="switch">仅切换（不复制）</option></select><button class="ghost" id="migration-start" type="button">开始迁移</button></div>
             <div class="migration-progress" id="migration-progress" hidden><div><span data-migration-phase>准备中</span><strong data-migration-percent>0%</strong></div><div class="load-track"><div class="load-fill"></div></div><button class="ghost" id="migration-cancel" type="button">取消</button></div>
           </div>
+          <section class="contract-migration-box" aria-labelledby="contract-migration-title">
+            <div class="contract-migration-heading"><div><h4 id="contract-migration-title">历史合同一次性迁移</h4><p>先只读检查，再在暂停写入和可恢复备份下分批转换。无法确认的可选字段保持为空，并保留具体调查结果。</p></div><span class="state-pill" id="contract-migration-write-state">未暂停写入</span></div>
+            <div class="contract-migration-controls">
+              <label>迁移类型<select id="contract-migration-domain" aria-label="历史合同迁移类型"><option value="">暂无可用迁移</option></select></label>
+              <label>执行方式<select id="contract-migration-mode"><option value="dry_run">只读检查（推荐）</option><option value="apply">备份并迁移</option></select></label>
+              <button class="ghost" id="contract-migration-start" type="button">开始只读检查</button>
+            </div>
+            <div class="contract-migration-status" id="contract-migration-status" aria-live="polite">
+              <div class="contract-migration-phase"><span data-contract-phase>尚未运行</span><strong data-contract-progress>0 / 0</strong></div>
+              <div class="load-track"><div class="load-fill"></div></div>
+              <dl class="contract-migration-counts">
+                <div><dt>总数</dt><dd data-contract-count="total">0</dd></div><div><dt>已检查</dt><dd data-contract-count="checked">0</dd></div><div><dt>已转换</dt><dd data-contract-count="converted">0</dd></div><div><dt>留空</dt><dd data-contract-count="blank">0</dd></div><div><dt>需确认</dt><dd data-contract-count="review">0</dd></div><div><dt>冲突</dt><dd data-contract-count="conflicts">0</dd></div>
+              </dl>
+              <div class="contract-migration-meta"><span data-contract-batch>最近批次：—</span><span data-contract-eta>预计剩余：—</span><code data-contract-diagnostic hidden></code></div>
+              <div class="contract-migration-actions"><button class="ghost" id="contract-migration-pause" type="button" hidden>安全暂停</button><button class="ghost" id="contract-migration-resume" type="button" hidden>从最近批次续跑</button><button class="ghost danger" id="contract-migration-rollback" type="button" hidden>从备份回滚</button></div>
+              <div class="contract-migration-investigation" id="contract-migration-investigation" hidden><h5>未知字段调查结果</h5><ol></ol></div>
+              <p class="contract-migration-empty" id="contract-migration-empty">暂无迁移记录。可先运行只读检查，不会修改业务数据。</p>
+            </div>
+          </section>
         </section>
 
         <section class="settings-group" data-settings-panel="online-data">

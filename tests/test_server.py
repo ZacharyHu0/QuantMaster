@@ -340,6 +340,7 @@ class TestBasics:
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
         app_styles = client.get("/static/app.css").text
+        settings_script = client.get("/static/settings.js").text
         settings_styles = client.get("/static/settings.css").text
         assert resp.status_code == 200
         assert "QuantMaster" in resp.text
@@ -511,6 +512,9 @@ class TestBasics:
         assert 'id="data-refresh-preview"' in resp.text
         assert 'id="data-refresh-start-button"' in resp.text
         assert 'id="data-refresh-resume"' in resp.text
+        assert 'id="contract-migration-status"' in resp.text
+        assert 'data-contract-count="blank"' in resp.text
+        assert 'id="contract-migration-investigation"' in resp.text
         assert "同步观察行情" in resp.text
         assert "不更新全市场 free-stockdb" in resp.text
         assert "自动更新本地库" in resp.text
@@ -551,6 +555,10 @@ class TestBasics:
         assert "runtimeInfo.begin(source, '正在加载数据'" in app_script
         assert "if (safeLevel === 'error') setExpanded(true)" not in app_script
         assert "window.QuantMasterAPI" in app_script
+        assert "/api/v1/data/contract-migrations" in settings_script
+        assert "estimated_remaining_seconds" in settings_script
+        assert "unknown_results" in settings_script
+        assert ".contract-migration-counts" in settings_styles
         assert "unhandledrejection" in app_script
         assert 'id="release-trigger"' in resp.text
         assert 'id="release-popover"' in resp.text
