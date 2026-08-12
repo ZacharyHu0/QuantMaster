@@ -519,6 +519,11 @@ class DataRepairManager:
         for worker in workers:
             worker.join(per_worker)
         with self._conn() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_repairs'"
+            ).fetchone()
+            if table is None:
+                return
             connection.execute(
                 "UPDATE data_repairs SET status='queued',owner='',lease_expires=0,"
                 "next_run=?,updated_at=? WHERE owner=? AND status IN ('running','cancelling')",

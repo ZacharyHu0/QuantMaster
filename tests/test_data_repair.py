@@ -197,3 +197,10 @@ def test_corrupt_endpoint_cache_is_quarantined_and_uses_global_repair_queue(
     assert completed["status"] == "completed"
     assert completed["result"]["state"] == "replaced"
     assert completed["result"]["rows"] == 1
+def test_shutdown_of_never_initialized_repair_store_is_a_noop(tmp_path):
+    manager = DataRepairManager(tmp_path / "repairs.sqlite")
+
+    manager.shutdown(timeout=0.1)
+
+    assert not (tmp_path / "repairs.sqlite-wal").exists()
+
