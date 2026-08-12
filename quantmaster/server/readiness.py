@@ -67,6 +67,8 @@ def runtime_status() -> dict[str, Any]:
         worker = runtime_worker_status()
     except (OSError, RuntimeError, TypeError, ValueError):
         worker = {"status": "unavailable", "available": False, "reason": "状态读取失败"}
+    from quantmaster.server.storage_status import storage_status
+
     return {
         "web": {
             "pid": os.getpid(),
@@ -85,11 +87,7 @@ def runtime_status() -> dict[str, Any]:
             "available": bool(worker.get("available")),
             "reason": str(worker.get("reason") or ""),
         },
-        "storage": {
-            "status": "ready" if readiness["storage_ready"] else "unavailable",
-            "data_root": readiness["data_root"],
-            "core": True,
-        },
+        "storage": storage_status(),
         # The scheduler is owned by the durable worker.  Do not instantiate
         # AutomationRuntime from a status GET merely to ask it for this value.
         "scheduler": {

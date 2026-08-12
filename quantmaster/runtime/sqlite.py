@@ -133,6 +133,30 @@ def connect_sqlite_recovery(path: str | Path, *, read_only: bool = False) -> sql
     return sqlite3.connect(destination, timeout=30.0, factory=_ManagedConnection)
 
 
+def connect_sqlite_diagnostic(
+    path: str | Path, *, timeout: float = 0.25,
+) -> sqlite3.Connection:
+    """Open the main database file for a strictly side-effect-free diagnosis.
+
+    ``immutable=1`` prevents SQLite from creating or consulting WAL/SHM files.
+    Callers must inspect and disclose sidecars separately: this connection can
+    establish whether the main file is readable, but a non-empty WAL requires
+    a later quiescent check before declaring the complete database healthy.
+    """
+
+    destination = Path(path).expanduser()
+    if not destination.is_absolute():
+        raise ValueError("SQLite diagnostic path must be absolute")
+    if not destination.is_file():
+        raise FileNotFoundError(destination)
+    connection = sqlite3.connect(
+        f"{destination.resolve().as_uri()}?mode=ro&immutable=1",
+        uri=True, timeout=timeout, factory=_ManagedConnection,
+    )
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
 Migration = tuple[int, Callable[[sqlite3.Connection], None]]
 
 

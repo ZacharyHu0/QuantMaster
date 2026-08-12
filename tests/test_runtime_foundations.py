@@ -25,7 +25,12 @@ from quantmaster.runtime.maintenance import (
 )
 from quantmaster.runtime.paths import confined_path
 from quantmaster.runtime.process import ProcessLimitError, ProcessLimits, run_restricted_process
-from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.runtime.sqlite import (
+    connect_sqlite,
+    connect_sqlite_diagnostic,
+    execute_sql_script,
+    migrate_schema,
+)
 
 
 def test_confined_path_accepts_manifest_files_and_rejects_traversal(tmp_path):
@@ -44,6 +49,31 @@ def test_connection_factory_context_releases_database_handle(tmp_path):
 
     with pytest.raises(sqlite3.ProgrammingError):
         connection.execute("SELECT 1")
+
+
+def test_diagnostic_factory_is_immutable_and_never_creates_sidecars(tmp_path):
+    path = (tmp_path / "diagnostic.sqlite").resolve()
+    with sqlite3.connect(path) as writer:
+        writer.execute("CREATE TABLE values_table (value INTEGER)")
+        writer.execute("INSERT INTO values_table VALUES (7)")
+    before = (path.stat().st_size, path.stat().st_mtime_ns)
+
+    with connect_sqlite_diagnostic(path) as connection:
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert connection.execute("SELECT value FROM values_table").fetchone()[0] == 7
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("INSERT INTO values_table VALUES (8)")
+
+    assert (path.stat().st_size, path.stat().st_mtime_ns) == before
+    assert not path.with_name(f"{path.name}-wal").exists()
+    assert not path.with_name(f"{path.name}-shm").exists()
+
+
+def test_diagnostic_factory_rejects_relative_or_missing_paths(tmp_path):
+    with pytest.raises(ValueError, match="absolute"):
+        connect_sqlite_diagnostic("relative.sqlite")
+    with pytest.raises(FileNotFoundError):
+        connect_sqlite_diagnostic((tmp_path / "missing.sqlite").resolve())
 
 
 def test_windows_venv_launch_uses_base_interpreter_without_an_extra_job_slot():

@@ -47,18 +47,15 @@ def _refresh() -> None:
 
         runtime = runtime_status()
         try:
-            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-
-            stockdb = free_stockdb_runtime.status()
+            storage = dict(runtime.get("storage") or {})
             # This is a public status endpoint, not a sidecar debug dump.
             # Keep only an explicit non-secret allowlist.
             runtime["free_stockdb"] = {
-                key: stockdb.get(key)
-                for key in (
-                    "state", "managed", "supervised", "validated_session",
-                    "target_session", "actual_session", "update_result",
-                    "next_update_at", "sdk_engine",
-                )
+                "state": "running" if storage.get("active_writers") else "stopped",
+                "managed": bool(storage.get("active_writers")),
+                "update_result": (
+                    "failed" if storage.get("last_error") else "unknown"
+                ),
             }
         except (OSError, RuntimeError, TypeError, ValueError):
             runtime["free_stockdb"] = {
