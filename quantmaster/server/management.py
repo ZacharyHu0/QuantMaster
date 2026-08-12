@@ -194,7 +194,6 @@ def _apply_free_stockdb(changed: list[str], result: dict[str, Any]) -> dict[str,
 
 def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     """按变更字段热应用进程内服务；配置落盘成功不因联网状态回滚。"""
-    from quantmaster.automation.runtime import get_runtime
     from quantmaster.lab.worker import get_worker
 
     changed = list(result.get("changed_fields") or [])
@@ -206,8 +205,10 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     }
     apply_status["free_stockdb"] = _apply_free_stockdb(changed, result)
     try:
-        runtime = get_runtime()
         if "data.root" in changed:
+            from quantmaster.automation.runtime import get_runtime
+
+            runtime = get_runtime()
             active = runtime.start() if get_config().automation.enabled else False
             apply_status["automation"] = {
                 "status": "applied"
@@ -217,7 +218,11 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
                 else "standby"
             }
         elif any(field.startswith("automation.") for field in changed):
-            apply_status["automation"] = runtime.apply_config(changed)
+            from quantmaster.runtime.worker_ipc import call_worker_command
+
+            apply_status["automation"] = call_worker_command(
+                "automation.apply_config", {"changed_fields": changed}, timeout=3.0,
+            )
     except Exception:  # 配置已安全保存；运行态失败降级为可操作警告。
         logger.warning("自动化运行时热应用失败", exc_info=True)
         apply_status["automation"] = {

@@ -96,8 +96,8 @@ def validate_schedule(name: str, schedule: dict[str, Any]) -> dict[str, Any]:
     kind = schedule.get("type")
     if kind == "interval":
         minutes = int(schedule.get("minutes", 0))
-        if not 5 <= minutes <= 60:
-            raise ValueError("扫描间隔必须为 5–60 分钟")
+        if not 5 <= minutes <= 1440:
+            raise ValueError("扫描间隔必须为 5–1440 分钟")
         result = {"type": "interval", "minutes": minutes}
         if "window" in schedule:
             if not re.fullmatch(r"\d{2}:\d{2}-\d{2}:\d{2}", str(schedule["window"])):

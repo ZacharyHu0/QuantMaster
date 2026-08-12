@@ -223,6 +223,9 @@ class AutomationSettings(StrictModel):
     weixin_api_base: str = Field(default="https://ilinkai.weixin.qq.com", max_length=2048)
     feishu_app_id: str = Field(default="", max_length=200)
     retention_days: int = Field(default=90, ge=7, le=3650)
+    fast_news_interval_minutes: int = Field(default=20, ge=5, le=1440)
+    official_news_interval_minutes: int = Field(default=120, ge=5, le=1440)
+    periodic_news_interval_minutes: int = Field(default=360, ge=5, le=1440)
 
     @field_validator("timezone")
     @classmethod

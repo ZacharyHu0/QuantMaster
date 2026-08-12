@@ -19,16 +19,22 @@ DEFAULT_TARGETS = (
     ("feishu_group", "feishu", "飞书提醒群", "group"),
     ("feishu_owner", "feishu", "飞书管理员私聊", "direct"),
 )
-AUTOMATION_SCHEMA_VERSION = 7
+AUTOMATION_SCHEMA_VERSION = 8
+
+NEWS_INTERVAL_FIELDS = {
+    "fast_news_scan": "fast_news_interval_minutes",
+    "official_news_scan": "official_news_interval_minutes",
+    "periodic_news_scan": "periodic_news_interval_minutes",
+}
 
 DEFAULT_JOBS = {
     "intraday_monitor": (True, {
         "type": "interval", "minutes": 5,
         "windows": ["09:35-11:30", "13:05-15:00"], "weekdays": True,
     }),
-    "fast_news_scan": (True, {"type": "interval", "minutes": 5}),
-    "official_news_scan": (True, {"type": "interval", "minutes": 15}),
-    "periodic_news_scan": (True, {"type": "interval", "minutes": 30}),
+    "fast_news_scan": (True, {"type": "interval", "minutes": 20}),
+    "official_news_scan": (True, {"type": "interval", "minutes": 120}),
+    "periodic_news_scan": (True, {"type": "interval", "minutes": 360}),
     "daily_close_pipeline": (True, {"type": "daily", "times": ["15:20", "15:35", "15:50"], "weekdays": True}),
     "news_digest": (True, {"type": "daily", "times": ["11:35", "15:25", "21:00"]}),
     "news_dead_letter_recovery": (
@@ -59,6 +65,7 @@ class AutomationStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._migrate()
             self.ensure_defaults()
+            self.sync_news_intervals()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -204,8 +211,35 @@ class AutomationStore:
                     (json.dumps(schedule), now, name),
                 )
 
+        def schema_v8(conn: sqlite3.Connection) -> None:
+            # The settings document is now the single owner of these three
+            # intervals.  Exact historical defaults move to the new quieter
+            # defaults; any legacy custom value remains recoverable until the
+            # configured settings are explicitly synchronized below.
+            old_defaults = {
+                "fast_news_scan": {"type": "interval", "minutes": 5},
+                "official_news_scan": {"type": "interval", "minutes": 15},
+                "periodic_news_scan": {"type": "interval", "minutes": 30},
+            }
+            now = utc_now()
+            for name, old_schedule in old_defaults.items():
+                row = conn.execute(
+                    "SELECT schedule FROM job_templates WHERE name=?", (name,),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    current = json.loads(str(row[0] or "{}"))
+                except json.JSONDecodeError:
+                    continue
+                if current == old_schedule:
+                    conn.execute(
+                        "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
+                        (json.dumps(DEFAULT_JOBS[name][1]), now, name),
+                    )
+
         with self._conn() as conn:
-            migrate_schema(conn, ((6, schema_v6), (AUTOMATION_SCHEMA_VERSION, schema_v7)))
+            migrate_schema(conn, ((6, schema_v6), (7, schema_v7), (8, schema_v8)))
 
     @staticmethod
     def _decode_row(row: sqlite3.Row | None, json_fields: tuple[str, ...] = ()) -> dict | None:
@@ -238,6 +272,22 @@ class AutomationStore:
                     "(name,enabled,schedule,updated_at) VALUES (?,?,?,?)",
                     (name, int(enabled), json.dumps(schedule), now),
                 )
+
+    def sync_news_intervals(self) -> dict[str, int]:
+        """Make the persisted scheduler projection match the settings document."""
+        cfg = get_config().automation
+        values = {
+            name: int(getattr(cfg, field))
+            for name, field in NEWS_INTERVAL_FIELDS.items()
+        }
+        now = utc_now()
+        with self._conn() as conn:
+            for name, minutes in values.items():
+                conn.execute(
+                    "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
+                    (json.dumps({"type": "interval", "minutes": minutes}), now, name),
+                )
+        return values
 
     def targets(self) -> list[dict]:
         with self._conn() as conn:

@@ -1491,9 +1491,9 @@ def test_news_api_csrf_and_ui_contract():
 
 
 def test_periodic_news_job_is_registered():
-    assert DEFAULT_JOBS["fast_news_scan"][1]["minutes"] == 5
-    assert DEFAULT_JOBS["official_news_scan"][1]["minutes"] == 15
-    assert DEFAULT_JOBS["periodic_news_scan"][1]["minutes"] == 30
+    assert DEFAULT_JOBS["fast_news_scan"][1]["minutes"] == 20
+    assert DEFAULT_JOBS["official_news_scan"][1]["minutes"] == 120
+    assert DEFAULT_JOBS["periodic_news_scan"][1]["minutes"] == 360
     assert "window" not in DEFAULT_JOBS["fast_news_scan"][1]
     assert "periodic_news_scan" in ALLOWED_TASKS
 

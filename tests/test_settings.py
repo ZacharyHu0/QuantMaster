@@ -11,7 +11,33 @@ from fastapi.testclient import TestClient
 from quantmaster.config import load_config, set_config
 from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.server.app import app
-from quantmaster.settings import ConfigManager, SettingsUpdate, document_from_config
+from quantmaster.settings import (
+    AutomationSettings,
+    ConfigManager,
+    SettingsUpdate,
+    document_from_config,
+)
+
+
+def test_news_scan_interval_settings_defaults_and_bounds():
+    settings = AutomationSettings()
+    assert settings.fast_news_interval_minutes == 20
+    assert settings.official_news_interval_minutes == 120
+    assert settings.periodic_news_interval_minutes == 360
+    with pytest.raises(ValueError):
+        AutomationSettings(fast_news_interval_minutes=4)
+    with pytest.raises(ValueError):
+        AutomationSettings(periodic_news_interval_minutes=1441)
+
+
+def test_settings_page_exposes_news_scan_intervals():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "quantmaster" / "server" / "static" / "index.html"
+    ).read_text(encoding="utf-8")
+    assert 'name="automation.fast_news_interval_minutes"' in source
+    assert 'name="automation.official_news_interval_minutes"' in source
+    assert 'name="automation.periodic_news_interval_minutes"' in source
 
 
 class FakeCredentials:

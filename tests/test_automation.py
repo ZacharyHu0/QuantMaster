@@ -37,7 +37,7 @@ class MemoryCredentials:
         self.values.pop(target, None)
 
 
-def test_v6_to_v7_news_schedule_migration_preserves_custom_intervals(tmp_path):
+def test_legacy_news_schedules_are_replaced_by_settings_defaults(tmp_path):
     path = tmp_path / "automation.sqlite"
     AutomationStore(path)
     expected = {
@@ -55,7 +55,39 @@ def test_v6_to_v7_news_schedule_migration_preserves_custom_intervals(tmp_path):
 
     migrated = AutomationStore(path)
     schedules = {item["name"]: item["schedule"] for item in migrated.jobs()}
-    assert {name: schedules[name] for name in expected} == expected
+    assert {name: schedules[name] for name in expected} == {
+        "fast_news_scan": {"type": "interval", "minutes": 20},
+        "official_news_scan": {"type": "interval", "minutes": 120},
+        "periodic_news_scan": {"type": "interval", "minutes": 360},
+    }
+
+
+def test_news_schedule_defaults_follow_settings(tmp_path, isolated_config):
+    isolated_config.automation.fast_news_interval_minutes = 25
+    isolated_config.automation.official_news_interval_minutes = 150
+    isolated_config.automation.periodic_news_interval_minutes = 420
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+
+    assert [store.job(name)["schedule"]["minutes"] for name in (
+        "fast_news_scan", "official_news_scan", "periodic_news_scan",
+    )] == [25, 150, 420]
+
+
+def test_news_interval_setting_hot_syncs_scheduler_projection(tmp_path, isolated_config):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    isolated_config.automation.fast_news_interval_minutes = 45
+    isolated_config.automation.official_news_interval_minutes = 180
+    isolated_config.automation.periodic_news_interval_minutes = 480
+
+    assert store.sync_news_intervals() == {
+        "fast_news_scan": 45,
+        "official_news_scan": 180,
+        "periodic_news_scan": 480,
+    }
+    assert [store.job(name)["schedule"]["minutes"] for name in (
+        "fast_news_scan", "official_news_scan", "periodic_news_scan",
+    )] == [45, 180, 480]
 
 
 class RecordingGateway:

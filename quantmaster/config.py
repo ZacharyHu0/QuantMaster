@@ -131,6 +131,9 @@ class AutomationConfig:
     weixin_api_base: str = "https://ilinkai.weixin.qq.com"
     feishu_app_id: str = ""
     retention_days: int = 90
+    fast_news_interval_minutes: int = 20
+    official_news_interval_minutes: int = 120
+    periodic_news_interval_minutes: int = 360
 
 
 @dataclass

@@ -238,6 +238,12 @@ class RuntimeWorker:
                         return data_refresh_manager.cancel(str(payload.get("job_id") or ""))
                     if operation == "data.refresh.retry":
                         return data_refresh_manager.resume(str(payload.get("job_id") or ""))
+                    if operation == "automation.apply_config":
+                        from quantmaster.config import load_config, set_config
+
+                        set_config(load_config())
+                        changed = [str(value) for value in payload.get("changed_fields") or []]
+                        return runtime.apply_config(changed)
                 except KeyError as exc:
                     raise WorkerCommandError("job_not_found", "数据刷新任务不存在") from exc
                 except ValueError as exc:

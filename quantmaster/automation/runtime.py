@@ -325,6 +325,14 @@ class AutomationRuntime:
             return {"status": state}
         if "automation.timezone" in changed:
             return {"status": self.rebuild_scheduler()}
+        news_intervals = {
+            "automation.fast_news_interval_minutes",
+            "automation.official_news_interval_minutes",
+            "automation.periodic_news_interval_minutes",
+        }
+        if changed & news_intervals:
+            self.service.store.sync_news_intervals()
+            return {"status": self.rebuild_scheduler()}
         return {"status": "applied" if changed & {
             "automation.primary_universe", "automation.watchlist",
             "automation.sentinel_indices", "automation.retention_days",
