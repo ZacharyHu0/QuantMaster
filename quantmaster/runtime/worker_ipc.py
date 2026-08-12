@@ -119,6 +119,7 @@ class RuntimeCommandServer:
                     operation = str(raw.get("operation") or "")
                     if operation == "__shutdown__":
                         connection.send({"ok": True, "value": {}})
+                        self._stop.set()
                         continue
                     payload = raw.get("payload")
                     if not isinstance(payload, dict):
@@ -145,17 +146,19 @@ class RuntimeCommandServer:
 
     def stop(self) -> None:
         with self._lock:
-            listener, self._listener = self._listener, None
-            thread, self._thread = self._thread, None
-            self._stop.set()
+            listener = self._listener
+            thread = self._thread
         # Wake an accept() call so shutdown never inherits the historical
-        # unbounded join failure.  Closing the listener covers a concurrent
-        # client that has already disconnected.
+        # unbounded join failure.  The server sets the stop flag only after it
+        # has authenticated this client and acknowledged the shutdown request;
+        # setting it here first could make the accept loop exit before the
+        # authentication handshake completes.
         try:
             with Client(self.endpoint, family=self.family, authkey=self._authkey) as connection:
                 connection.send({"operation": "__shutdown__", "payload": {}})
+                connection.recv()
         except (AuthenticationError, OSError, EOFError):
-            pass
+            self._stop.set()
         if listener is not None:
             try:
                 listener.close()
@@ -163,6 +166,11 @@ class RuntimeCommandServer:
                 pass
         if thread is not None:
             thread.join(timeout=1.0)
+        with self._lock:
+            if self._listener is listener:
+                self._listener = None
+            if self._thread is thread:
+                self._thread = None
         if self.family == "AF_UNIX":
             Path(self.endpoint).unlink(missing_ok=True)
 

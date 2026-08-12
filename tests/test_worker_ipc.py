@@ -1,5 +1,7 @@
 """Runtime-worker local command channel contracts."""
 
+import threading
+
 import pytest
 
 from quantmaster.runtime.worker_ipc import (
@@ -35,6 +37,16 @@ def test_runtime_worker_command_channel_round_trips_without_web_writes(tmp_path)
 
     assert result == {"id": "job-1", "status": "queued"}
     assert received == [("data.refresh.create", {"scope": "market"})]
+
+
+def test_runtime_worker_stop_completes_during_accept_loop_transition(tmp_path):
+    server = RuntimeCommandServer(lambda *_args: {}, root=tmp_path / "runtime")
+    server.start()
+    stopper = threading.Thread(target=server.stop)
+    stopper.start()
+    stopper.join(timeout=2)
+    assert not stopper.is_alive()
+    assert not server.running
 
 
 def test_runtime_worker_command_channel_fails_fast_when_no_worker_exists(tmp_path):
