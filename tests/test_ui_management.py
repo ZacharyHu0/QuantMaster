@@ -2612,12 +2612,20 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         playwright_sync.expect(page.locator(".etf-summary")).to_have_count(3)
         playwright_sync.expect(page.locator("#rotation-etf-map")).to_be_visible()
         playwright_sync.expect(page.locator(".etf-queues")).to_contain_text("领涨")
+        assert page.locator("#rotation-etf-map").bounding_box()["height"] == 320
+        assert page.locator(".etf-queues").evaluate(
+            "node => getComputedStyle(node).flexDirection"
+        ) == "column"
+        queue_items = page.locator(".etf-queues section > div")
+        assert queue_items.count() > 0
+        assert queue_items.first.evaluate("node => getComputedStyle(node).flexDirection") == "column"
+        assert queue_items.first.evaluate("node => getComputedStyle(node).overflowX") == "visible"
         assert page.locator("#rotation-etf-product-results tbody tr").count() <= 50
         product_results = page.locator("#rotation-etf-product-results")
         playwright_sync.expect(product_results).to_contain_text("+1.20 亿份（+3.20%）· 估算净申购3.10 亿元")
         playwright_sync.expect(product_results).to_contain_text("0 份（0.00%）· 已确认当日无净申赎")
         assert "估算净申购+" not in product_results.inner_text()
-        for selector in (".etf-freshness", ".etf-summary-grid", ".etf-radar-grid"):
+        for selector in (".etf-freshness", ".etf-summary-grid"):
             box = page.locator(selector).bounding_box()
             assert box and box["y"] + box["height"] <= 720, (selector, box)
 

@@ -120,17 +120,17 @@
 .etf-radar-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,310px); gap:8px; align-items:stretch; }
 .etf-radar-panel,.etf-queues { min-width:0; border:1px solid var(--border); border-radius:8px; background:var(--page); }
 .etf-radar-panel { padding:10px 10px 6px; }
-.rotation-chart.etf-map { height:160px; }
+.rotation-chart.etf-map { height:320px; }
 .etf-map-select { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:8px; padding-top:5px; color:var(--muted); font-size:10px; }
 .etf-map-select select { min-width:0; min-height:44px; padding:6px 9px; border:1px solid var(--border); border-radius:6px; background:var(--surface); color:var(--ink-2); font:inherit; font-size:11px; }
-.etf-queues { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-content:start; gap:0 8px; padding:8px 10px; }
-.etf-queues .rotation-section-head { grid-column:1 / -1; margin-bottom:3px; }
+.etf-queues { display:flex; flex-direction:column; align-self:start; padding:8px 10px; }
+.etf-queues .rotation-section-head { margin-bottom:3px; }
 .etf-queues section { min-width:0; padding:3px 0; border-top:1px solid var(--border); }
 .etf-queues h4 { display:flex; justify-content:space-between; color:var(--ink-2); font-size:11px; font-weight:650; }
 .etf-queues h4 span { color:var(--muted); font-variant-numeric:tabular-nums; }
-.etf-queues section > div { display:flex; gap:4px; margin-top:3px; overflow-x:auto; }
+.etf-queues section > div { display:flex; flex-direction:column; gap:4px; margin-top:3px; }
 .etf-queues section button {
-  display:grid; flex:1 0 110px; gap:1px; min-width:0; min-height:44px; padding:4px 6px; border:0; border-radius:4px;
+  display:grid; gap:1px; width:100%; min-width:0; min-height:44px; padding:4px 6px; border:0; border-radius:4px;
   background:var(--surface); color:var(--ink-2); cursor:pointer; text-align:left;
 }
 .etf-queues section button strong { overflow:hidden; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
@@ -791,8 +791,6 @@
 
 @media (max-width:959px) {
   .etf-radar-grid { grid-template-columns:1fr; }
-  .etf-queues { grid-template-columns:repeat(2,minmax(0,1fr)); grid-template-rows:auto; }
-  .etf-queues > .rotation-section-head { grid-column:1 / -1; }
   .rotation-etf-drawer { inset:54px 0 0; width:100%; border-width:1px 0 0; border-radius:0; }
   .etf-product-filters { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
@@ -805,10 +803,9 @@
   .etf-freshness > div { border-bottom:1px solid var(--border); }
   .etf-summary-grid { grid-template-columns:1fr; }
   .etf-summary { min-height:62px; }
-  .etf-queues { grid-template-columns:1fr; }
   .etf-product-filters { grid-template-columns:1fr; }
   .etf-map-select { grid-template-columns:1fr; }
-  .rotation-chart.etf-map { height:230px; }
+  .rotation-chart.etf-map { height:320px; }
   .rotation-etf-more-menu { position:fixed; inset:120px 12px auto; width:auto; }
   .rotation-etf-research-table,.rotation-etf-research-table tbody,
   .rotation-etf-research-table tr,.rotation-etf-research-table td { display:block; width:100%; }
