@@ -280,18 +280,8 @@ class AutomationRuntime:
                 "",
                 str(float(window_end_epoch)),
             )
-        if name in {"daily_close_pipeline", "paper_rebalance_proposal"}:
-            business_date = current.date().isoformat()
-        else:
-            business_date = current.date().isoformat()
-        slot = ""
-        if name == "news_digest":
-            slot = max(
-                (value for value in schedule.get("times") or () if value <= current.strftime("%H:%M")),
-                default=str((schedule.get("times") or [current.strftime("%H:%M")])[0]),
-            )
-        suffix = f":{slot}" if slot else ""
-        return f"{name}:date:{business_date}{suffix}", business_date, ""
+        business_key, as_of = self.service.business_request(name, now=current)
+        return business_key, as_of, ""
 
     def discover_job(self, name: str, *, now: datetime | None = None, actor: str = "scheduler") -> dict:
         """Fast APS callback: discover and wake one durable business task."""

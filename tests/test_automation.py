@@ -1577,6 +1577,34 @@ def test_daily_triggers_manual_and_stockdb_share_trade_date_job(tmp_path, monkey
     service.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def test_daily_scheduler_uses_the_same_resolved_trade_date_as_manual(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import quantmaster.automation.runtime as runtime_module
+
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    runtime = runtime_module.AutomationRuntime(service)
+    monkeypatch.setattr(
+        "quantmaster.automation.service.resolve_session_target",
+        lambda as_of="", now=None: SimpleNamespace(
+            session=as_of or "2026-08-14", ready=True,
+        ),
+    )
+    holiday = datetime(2026, 8, 17, 15, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    scheduled = runtime.discover_job("daily_close_pipeline", now=holiday)
+    manual = service.run_task(
+        "daily_close_pipeline", actor="web", as_of="2026-08-14",
+    )
+
+    assert scheduled["business_key"] == "daily_close_pipeline:date:2026-08-14"
+    assert manual["job_id"] == scheduled["job_id"]
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
+
+
 def test_interval_discovery_merges_missed_windows_without_losing_boundary(tmp_path):
     from types import SimpleNamespace
     from zoneinfo import ZoneInfo
