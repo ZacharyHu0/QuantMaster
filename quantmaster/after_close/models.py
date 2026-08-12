@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any
 
@@ -92,8 +92,31 @@ class AfterCloseSnapshot:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> AfterCloseSnapshot:
+        if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(f"盘后快照必须使用当前 schema {SCHEMA_VERSION}")
+        expected = {item.name for item in fields(cls)}
+        if set(value) != expected:
+            missing = sorted(expected - set(value))
+            extra = sorted(set(value) - expected)
+            raise ValueError(f"盘后快照字段不匹配: missing={missing}, extra={extra}")
         data = dict(value)
-        data["sectors"] = tuple(SectorRank(**item) for item in data.get("sectors") or ())
+        sector_fields = {item.name for item in fields(SectorRank)}
+        candidate_fields = {item.name for item in fields(ResearchCandidate)}
+        sectors = data.get("sectors")
+        candidates = data.get("candidates")
+        shadow_candidates = data.get("shadow_candidates")
+        if not isinstance(sectors, (list, tuple)) or not isinstance(candidates, (list, tuple)):
+            raise ValueError("盘后快照 sectors/candidates 必须是列表")
+        if not isinstance(shadow_candidates, (list, tuple)):
+            raise ValueError("盘后快照 shadow_candidates 必须是列表")
+        if any(not isinstance(item, dict) or set(item) != sector_fields for item in sectors):
+            raise ValueError("盘后板块字段不符合当前 schema")
+        if any(
+            not isinstance(item, dict) or set(item) != candidate_fields
+            for item in (*candidates, *shadow_candidates)
+        ):
+            raise ValueError("盘后候选字段不符合当前 schema")
+        data["sectors"] = tuple(SectorRank(**item) for item in sectors)
         data["candidates"] = tuple(
             ResearchCandidate(
                 **{
@@ -103,7 +126,7 @@ class AfterCloseSnapshot:
                     "exclusion_rules": tuple(item.get("exclusion_rules") or ()),
                 }
             )
-            for item in data.get("candidates") or ()
+            for item in candidates
         )
         data["shadow_candidates"] = tuple(
             ResearchCandidate(
@@ -114,6 +137,6 @@ class AfterCloseSnapshot:
                     "exclusion_rules": tuple(item.get("exclusion_rules") or ()),
                 }
             )
-            for item in data.get("shadow_candidates") or ()
+            for item in shadow_candidates
         )
         return cls(**data)

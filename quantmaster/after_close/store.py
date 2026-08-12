@@ -13,7 +13,6 @@ from quantmaster.after_close.models import (
     utc_now,
 )
 from quantmaster.config import get_config
-from quantmaster.research.contracts import content_hash
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -34,7 +33,7 @@ class AfterCloseStore:
                 CREATE TABLE IF NOT EXISTS snapshots (
                     snapshot_id TEXT PRIMARY KEY, as_of_date TEXT NOT NULL,
                     score_version TEXT NOT NULL, input_hash TEXT NOT NULL,
-                    payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
                     generated_at TEXT NOT NULL, published_at TEXT NOT NULL,
                     UNIQUE(as_of_date,score_version,input_hash));
                 CREATE INDEX IF NOT EXISTS idx_after_close_asof
@@ -70,27 +69,25 @@ class AfterCloseStore:
         self._require_writer()
         payload = snapshot.to_dict()
         encoded = strict_json_dumps(payload, sort_keys=True)
-        digest = content_hash(payload)
         now = utc_now()
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT payload_hash FROM snapshots WHERE snapshot_id=?",
+                "SELECT payload_json FROM snapshots WHERE snapshot_id=?",
                 (snapshot.snapshot_id,),
             ).fetchone()
-            if existing and str(existing["payload_hash"]) != digest:
+            if existing and str(existing["payload_json"]) != encoded:
                 raise AfterCloseIntegrityError("盘后快照 ID 已存在但内容不同")
             connection.execute(
                 "INSERT OR IGNORE INTO snapshots "
-                "(snapshot_id,as_of_date,score_version,input_hash,payload_json,payload_hash,"
-                "generated_at,published_at) VALUES (?,?,?,?,?,?,?,?)",
+                "(snapshot_id,as_of_date,score_version,input_hash,payload_json,"
+                "generated_at,published_at) VALUES (?,?,?,?,?,?,?)",
                 (
                     snapshot.snapshot_id,
                     snapshot.as_of_date,
                     snapshot.score_version,
                     snapshot.input_hash,
                     encoded,
-                    digest,
                     snapshot.generated_at,
                     now,
                 ),
@@ -100,7 +97,7 @@ class AfterCloseStore:
                 "VALUES ('published',?, '[]', ?, ?, ?)",
                 (snapshot.as_of_date, strict_json_dumps(snapshot.coverage), snapshot.snapshot_id, now),
             )
-        return {"snapshot_id": snapshot.snapshot_id, "payload_hash": digest, "published_at": now}
+        return {"snapshot_id": snapshot.snapshot_id, "published_at": now}
 
     def record_failure(
         self,
@@ -122,8 +119,6 @@ class AfterCloseStore:
         if row is None:
             return None
         payload = json.loads(str(row["payload_json"]))
-        if content_hash(payload) != str(row["payload_hash"]):
-            raise AfterCloseIntegrityError("盘后快照内容哈希校验失败")
         return AfterCloseSnapshot.from_dict(payload)
 
     def get(self, snapshot_id: str) -> AfterCloseSnapshot | None:
@@ -172,7 +167,7 @@ class AfterCloseStore:
     def history(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._conn() as connection:
             rows = connection.execute(
-                "SELECT snapshot_id,as_of_date,score_version,input_hash,payload_hash,generated_at,"
+                "SELECT snapshot_id,as_of_date,score_version,input_hash,generated_at,"
                 "published_at FROM snapshots ORDER BY as_of_date DESC,published_at DESC LIMIT ?",
                 (max(1, min(500, int(limit))),),
             ).fetchall()
@@ -268,7 +263,7 @@ class AfterCloseStore:
                         "score_version": score_version,
                         "market_regime": snapshot.validation.get("market_regime", "unknown"),
                         "primary_l1": "all",
-                        "filter_signature": content_hash(snapshot.filters)[:12],
+                        "filter_signature": strict_json_dumps(snapshot.filters, sort_keys=True),
                         "coverage_anomaly": bool(
                             snapshot.coverage.get("issues")
                             or snapshot.coverage.get("status") not in {None, "complete"}

@@ -66,8 +66,8 @@ def history(request: Request, limit: int = Query(30, ge=1, le=500)) -> dict:
     return {"items": _published_service().store.history(limit)}
 
 
-@router.get("/health")
-def strategy_health(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
+@router.get("/diagnostics")
+def strategy_diagnostics(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
     require_local(request)
     return _published_service().store.health(limit)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -124,7 +126,7 @@ def service(tmp_path, isolated_config, monkeypatch):
     value = AfterCloseService(
         source=_Source(_frame()),
         instruments=_Instruments(),
-        store=AfterCloseStore(tmp_path / "after-close.sqlite"),
+        store=AfterCloseStore(tmp_path / "after_close.sqlite"),
     )
     monkeypatch.setattr(value, "_write_research_lake", lambda *_args: None)
     return value
@@ -320,10 +322,14 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     client = TestClient(app)
 
     latest = client.get("/api/v1/after-close/snapshots/latest")
+    diagnostics = client.get("/api/v1/after-close/diagnostics")
+    old_health = client.get("/api/v1/after-close/health")
     exported = client.get(f"/api/v1/after-close/export/{snapshot.snapshot_id}?format=csv")
     page = client.get("/")
 
     assert latest.status_code == 200
+    assert diagnostics.status_code == 200
+    assert old_health.status_code == 404
     assert latest.json()["snapshot"]["snapshot_id"] == snapshot.snapshot_id
     assert exported.status_code == 200
     assert "600001.SH" in exported.content.decode("utf-8-sig")
@@ -341,6 +347,8 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     assert "盘后扫描专用的 free-stockdb" in script.text
     assert "QuantMasterManagement?.open('local-data')" in script.text
     assert "/api/v1/settings/free-stockdb/update" in script.text
+    assert "/api/v1/after-close/diagnostics?limit=500" in script.text
+    assert "/api/v1/after-close/health" not in script.text
     assert "扫描数据已更新至" in script.text
 
 
@@ -362,6 +370,76 @@ def test_after_close_cli_contract_supports_csv_export() -> None:
 
     score = build_parser().parse_args(["after-close", "score-version", "status"])
     assert score.score_version_cmd == "status"
+
+
+def test_after_close_current_decoder_never_guesses_old_or_damaged_payload(service) -> None:
+    from quantmaster.after_close.models import AfterCloseSnapshot
+
+    payload = service.scan().to_dict()
+    old = dict(payload)
+    old["schema_version"] = "1.1"
+    with pytest.raises(ValueError, match="当前 schema"):
+        AfterCloseSnapshot.from_dict(old)
+    damaged = dict(payload)
+    damaged.pop("validation")
+    with pytest.raises(ValueError, match="字段不匹配"):
+        AfterCloseSnapshot.from_dict(damaged)
+
+
+def test_after_close_one_shot_migration_uses_schema_label_and_leaves_new_facts_empty(service) -> None:
+    from quantmaster.after_close.migration import (
+        inspect_after_close_snapshots,
+        migrate_after_close_batch,
+    )
+    from quantmaster.runtime.sqlite import connect_sqlite
+
+    snapshot = service.scan()
+    payload = snapshot.to_dict()
+    payload["schema_version"] = "1.0"
+    payload.pop("ingest_id")
+    payload.pop("artifact_id")
+    payload.pop("shadow_candidates")
+    for sector in payload["sectors"]:
+        sector.pop("sensitivity")
+    for candidate in payload["candidates"]:
+        candidate.pop("shadow")
+    with connect_sqlite(service.store.path) as connection:
+        connection.execute("ALTER TABLE snapshots ADD COLUMN payload_hash TEXT NOT NULL DEFAULT ''")
+        connection.execute(
+            "UPDATE snapshots SET payload_json=?,payload_hash='retired' WHERE snapshot_id=?",
+            (json.dumps(payload, ensure_ascii=False), snapshot.snapshot_id),
+        )
+
+    planned = inspect_after_close_snapshots(service.store.path.parent)
+    assert planned[0]["diagnostic_code"] == "after_close_optional_fields_empty"
+    assert "ingest_id" in planned[0]["unknown_fields"]
+    migrate_after_close_batch(service.store.path.parent)
+
+    with connect_sqlite(service.store.path, read_only=True) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(snapshots)")}
+    assert "payload_hash" not in columns
+    migrated = service.store.get(snapshot.snapshot_id)
+    assert migrated.schema_version == "1.2"
+    assert migrated.ingest_id == ""
+    assert migrated.artifact_id == ""
+    assert migrated.shadow_candidates == ()
+
+
+def test_after_close_damaged_current_is_not_misclassified_as_old(service) -> None:
+    from quantmaster.after_close.migration import inspect_after_close_snapshots
+    from quantmaster.runtime.sqlite import connect_sqlite
+
+    snapshot = service.scan()
+    payload = snapshot.to_dict()
+    payload.pop("validation")
+    with connect_sqlite(service.store.path) as connection:
+        connection.execute(
+            "UPDATE snapshots SET payload_json=? WHERE snapshot_id=?",
+            (json.dumps(payload, ensure_ascii=False), snapshot.snapshot_id),
+        )
+    planned = inspect_after_close_snapshots(service.store.path.parent)
+    assert planned[0]["diagnostic_code"] == "after_close_schema_invalid"
+    assert planned[0]["outcome"] == "review"
 
 
 def test_after_close_submit_uses_versioned_singleflight_key(monkeypatch) -> None:

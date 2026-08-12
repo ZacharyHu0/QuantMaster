@@ -89,7 +89,7 @@
     const status = document.querySelector('[data-after-close-health-status]');
     if (!target || !status) return;
     try {
-      const health = await api('/api/v1/after-close/health?limit=500');
+      const health = await api('/api/v1/after-close/diagnostics?limit=500');
       status.textContent = health.manual_review_eligible ? 'V2 可人工评审' : 'V2 观察中';
       const v2 = (health.summaries || []).find(item => item.score_version === 'QM_AFTER_CLOSE_V2_SHADOW' && item.horizon === 5);
       const drift = health.drift || {};
