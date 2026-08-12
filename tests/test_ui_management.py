@@ -79,7 +79,7 @@ def live_server(tmp_path_factory):
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            if httpx.get(f"{url}/api/v1/health/live", timeout=0.3).status_code == 200:
+            if httpx.get(f"{url}/api/v1/health", timeout=0.3).status_code == 200:
                 break
         except httpx.HTTPError:
             time.sleep(0.1)

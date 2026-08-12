@@ -1940,10 +1940,12 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
         )
     assert credential_error.value.status_code == 409
     public_error = str(news_module._error(RuntimeError("Bearer secret-value")).detail)
-    assert public_error == "资讯请求执行失败，请查看本机日志"
+    assert public_error == "资讯操作未能完成，详细原因已写入服务端日志"
     assert "secret-value" not in public_error
 
-    assert news_module.news_stats(request, news_module.Response(), days=9999) == {"days": 3650}
+    with pytest.raises(news_module.HTTPException) as invalid_stats_days:
+        news_module.news_stats(request, news_module.Response(), days=9999)
+    assert invalid_stats_days.value.status_code == 422
     assert news_module.news_event_focus(request, news_module.Response(), days=7) == {
         "days": 7, "top_symbols": [],
     }

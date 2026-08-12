@@ -122,7 +122,7 @@ def test_startup_preflight_reuses_healthy_same_version_quantmaster(monkeypatch):
         "_http_json",
         lambda _host, _port, path: (
             {"status": "ok", "version": "9.9.9", "generation": "4"}
-            if path.endswith("/live") else {"status": "ready", "generation": "4"}
+                if path.endswith("/health") else {"status": "ready", "generation": "4"}
         ),
     )
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def test_startup_preflight_reuses_healthy_same_version_quantmaster(monkeypatch):
     assert result.action == "reuse"
     assert result.process and result.process.pid == 4321
     assert result.process and result.process.quantmaster_role == "web"
-    assert result.health and result.health["live"]["generation"] == "4"
+    assert result.health and result.health["health"]["generation"] == "4"
     assert "复用" in result.message
 
 

@@ -206,7 +206,7 @@ def _api_issues() -> list[dict[str, Any]]:
     paths = _route_paths(app.routes)
     issues: list[dict[str, Any]] = []
     required = {
-        "/api/v1/session", "/api/v1/health/live", "/api/v1/health/ready",
+        "/api/v1/session", "/api/v1/health",
         "/api/v1/diagnostics", "/api/v1/jobs",
     }
     missing = sorted(required - paths)
@@ -219,10 +219,10 @@ def _api_issues() -> list[dict[str, Any]]:
         issues.append(_issue(
             "legacy_api_present", "high", "旧版 API 路径仍可路由", ", ".join(old[:30]),
         ))
-    if "/api/v1/health" in paths:
+    if "/api/v1/health/live" in paths or "/api/v1/health/ready" in paths:
         issues.append(_issue(
-            "aggregate_health_present", "high", "聚合健康接口重新进入公共契约",
-            "/api/v1/health 必须保持 404；请使用 /live、/ready 或 /diagnostics",
+            "obsolete_health_route_present", "high", "废弃健康检查路由重新进入公共契约",
+            "仅可使用 /api/v1/health；可选组件状态请使用 /api/v1/diagnostics",
         ))
     return issues
 

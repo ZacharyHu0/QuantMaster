@@ -187,6 +187,64 @@ def _safe_client_error(exc: Exception) -> str:
     return message[:297] + "…" if len(message) > 300 else message
 
 
+def _problem_response(
+    request_id: str,
+    problem: dict[str, Any],
+    *,
+    status_code: int,
+    detail: object | None = None,
+    **extra: Any,
+) -> JSONResponse:
+    """Return the public, redacted error envelope used by every API failure."""
+    payload: dict[str, Any] = {
+        "detail": problem["message"] if detail is None else detail,
+        "problem": problem,
+        "error_id": request_id,
+        "request_id": request_id,
+        "diagnostic_id": request_id,
+        "code": problem["code"],
+        "message": problem["message"],
+        "retryable": bool(problem.get("retryable", status_code in {429, 502, 503})),
+        "suggestion": problem.get("suggestion", problem.get("action", "")),
+    }
+    if problem.get("field"):
+        payload["field"] = problem["field"]
+    if problem.get("retry_after") is not None:
+        payload["retry_after"] = problem["retry_after"]
+    payload.update(extra)
+    response = JSONResponse(status_code=status_code, content=jsonable_encoder(payload))
+    if problem.get("retry_after") is not None:
+        response.headers["Retry-After"] = str(problem["retry_after"])
+    return response
+
+
+def _validation_field(exc: RequestValidationError) -> str | None:
+    """Extract a field path without including Pydantic's rejected input."""
+    for item in exc.errors():
+        location = item.get("loc") or ()
+        parts = [str(value) for value in location if value not in {"body", "query", "path"}]
+        if parts:
+            return ".".join(parts)
+    return None
+
+
+def _http_exception_response(request_id: str, exc: HTTPException) -> JSONResponse:
+    """Translate intentional plain HTTP errors into the public problem contract."""
+    status = int(exc.status_code)
+    code = {
+        404: "resource_not_found", 409: "write_conflict",
+        422: "request_validation_failed", 503: "service_temporarily_unavailable",
+    }.get(status, "request_rejected")
+    retryable = status in {429, 502, 503}
+    problem = make_problem(
+        code, source="本地服务", title="请求未能执行",
+        message=_safe_client_error(Exception(str(exc.detail))),
+        action="请稍后重试。" if retryable else "请检查请求内容后重试。",
+        blocking=True, retryable=retryable, retry_after=2 if status == 503 else None,
+    )
+    return _problem_response(request_id, problem, status_code=status)
+
+
 def _logged_bad_request(operation: str) -> HTTPException:
     """记录完整内部异常，但只向客户端返回稳定的操作级错误。"""
     logger.exception("%s失败", operation)
@@ -196,38 +254,33 @@ def _logged_bad_request(operation: str) -> HTTPException:
 @app.exception_handler(RequestValidationError)
 async def safe_validation_error(request: Request, exc: RequestValidationError):
     """设置请求的校验错误不回显输入值，防止替换中的密钥进入响应。"""
-    content = {
-        "error_id": _request_id(request),
-        "problem": make_problem(
+    request_id = _request_id(request)
+    field = _validation_field(exc)
+    problem = make_problem(
             "request_validation_failed",
             source="本地服务",
             title="提交内容需要修改",
             message="部分字段缺失或格式不正确。",
             action="按页面提示修改输入后重试。",
             blocking=True,
-        ),
-    }
-    if (
-        request.url.path.startswith("/api/v1/settings")
-        or request.url.path.startswith("/api/v1/news/sources")
-        or request.url.path.startswith("/api/v1/automation/channels/")
-    ):
-        errors = [
-            {key: value for key, value in item.items() if key not in {"input", "ctx"}}
-            for item in exc.errors()
-        ]
-        content["detail"] = jsonable_encoder(errors)
-        return JSONResponse(status_code=422, content=content)
-    content["detail"] = jsonable_encoder(exc.errors())
-    return JSONResponse(status_code=422, content=content)
+            field=field,
+            retryable=False,
+        )
+    # Validation diagnostics deliberately omit rejected values and context:
+    # source definitions and query strings may contain credentials.
+    errors = [
+        {key: value for key, value in item.items() if key not in {"input", "ctx"}}
+        for item in exc.errors()
+    ]
+    return _problem_response(request_id, problem, status_code=422, detail=errors)
 
 
 @app.exception_handler(OperationProblem)
 async def operation_problem(request: Request, exc: OperationProblem):
     """向普通请求和前端返回一致、可恢复的问题语义。"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=jsonable_encoder(exc.response(_request_id(request))),
+    return _problem_response(
+        _request_id(request), exc.problem, status_code=exc.status_code,
+        data_quality=exc.data_quality,
     )
 
 
@@ -243,15 +296,9 @@ async def market_data_unavailable(request: Request, exc: MarketDataUnavailable):
         blocking=True,
         can_continue=False,
     )
-    return JSONResponse(
-        status_code=503,
-        content={
-            "detail": str(exc),
-            "problem": problem,
-            "data_quality": exc.quality.to_dict(),
-            "provenance": list(exc.provenance),
-            "error_id": _request_id(request),
-        },
+    return _problem_response(
+        _request_id(request), problem, status_code=503,
+        data_quality=exc.quality.to_dict(), provenance=list(exc.provenance),
     )
 
 
@@ -269,18 +316,10 @@ async def evidence_not_ready(request: Request, exc: DataEvidenceNotReady):
         blocking=True,
         can_continue=False,
     )
-    return JSONResponse(
-        status_code=409,
-        content={
-            "detail": problem["message"],
-            "problem": problem,
-            "code": "evidence_not_ready",
-            "data_quality": exc.quality.to_dict(),
-            "eligibility": exc.quality.assess_eligibility().to_dict(),
-            "provenance": list(exc.provenance),
-            "refresh": {"status": "available", "resource": "bars"},
-            "error_id": _request_id(request),
-        },
+    return _problem_response(
+        _request_id(request), problem, status_code=409,
+        data_quality=exc.quality.to_dict(), eligibility=exc.quality.assess_eligibility().to_dict(),
+        provenance=list(exc.provenance), refresh={"status": "available", "resource": "bars"},
     )
 
 
@@ -305,8 +344,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
     allowed = (
         path
         in {
-            "/api/v1/health/live",
-            "/api/v1/health/ready",
+            "/api/v1/health",
             "/api/v1/diagnostics",
             "/api/v1/release",
             "/api/v1/session",
@@ -331,14 +369,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
                 action="等待迁移完成后重试。",
                 blocking=True,
             )
-            response = JSONResponse(
-                status_code=423,
-                content={
-                    "detail": problem["message"],
-                    "problem": problem,
-                    "error_id": request_id,
-                },
-            )
+            response = _problem_response(request_id, problem, status_code=423)
         else:
             # HTTP handlers are a local snapshot/read-command boundary.  The
             # sole exception is the explicit operator provider probe; refresh
@@ -367,31 +398,17 @@ async def request_context_and_migration_lock(request: Request, call_next):
             action=exc.action,
             blocking=True,
         )
-        response = JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": str(exc.detail), "problem": problem, "error_id": request_id},
-        )
+        response = _problem_response(request_id, problem, status_code=exc.status_code)
     except OperationProblem as exc:
         # Starlette's exception handlers sit inside this request middleware.
         # Preserve a deliberate cold/degraded operation contract instead of
         # accidentally turning it into a generic 500 at the outer boundary.
-        response = JSONResponse(
-            status_code=exc.status_code,
-            content=exc.response(request_id),
+        response = _problem_response(
+            request_id, exc.problem, status_code=exc.status_code,
+            data_quality=exc.data_quality,
         )
     except HTTPException as exc:
-        problem = make_problem(
-            "request_rejected",
-            source="本地服务",
-            title="请求未能执行",
-            message=str(exc.detail),
-            action="请检查请求内容后重试。",
-            blocking=True,
-        )
-        response = JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": str(exc.detail), "problem": problem, "error_id": request_id},
-        )
+        response = _http_exception_response(request_id, exc)
     except Exception:
         logger.exception(
             "未处理的接口异常 request_id=%s method=%s path=%s",
@@ -407,20 +424,13 @@ async def request_context_and_migration_lock(request: Request, call_next):
             action="稍后重试；如持续发生，请提供请求编号。",
             blocking=True,
         )
-        response = JSONResponse(
-            status_code=500,
-            content={
-                "detail": problem["message"],
-                "problem": problem,
-                "error_id": request_id,
-            },
-        )
+        response = _problem_response(request_id, problem, status_code=500)
     try:
         response.headers["X-Request-ID"] = request_id
         response.headers["X-QM-Worker-Generation"] = os.environ.get("QM_WEB_GENERATION", "0")
         duration_ms = (time.perf_counter() - started) * 1000
         response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
-        if path != "/api/v1/health/ready":
+        if path != "/api/v1/health":
             try:
                 route = getattr(request.scope.get("route"), "path", None) or path
                 get_runtime_metrics_recorder = __import__(
@@ -696,9 +706,12 @@ def create_browser_session(request: Request, response: Response) -> dict:
     return {"csrf_token": token, "expires_in": 8 * 60 * 60, "local_only": True}
 
 
-@app.get("/api/v1/health/live")
+@app.get("/api/v1/health")
 async def liveness() -> dict:
-    """Constant-time process liveness; deliberately performs no store access."""
+    """Sole constant-time health probe; it deliberately performs no store access.
+
+    Optional provider/worker state is reported separately by ``/diagnostics``.
+    """
     threads = threading.active_count()
     return {
         "status": "ok",
@@ -709,14 +722,6 @@ async def liveness() -> dict:
         "web_threads": threads,
         "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
     }
-
-
-@app.get("/api/v1/health/ready")
-async def readiness() -> dict:
-    """Return the explicit Web readiness contract without touching stores."""
-    from quantmaster.server.readiness import readiness_status
-
-    return readiness_status()
 
 
 @app.get("/api/v1/diagnostics")
@@ -1845,22 +1850,40 @@ def _decision_dashboard_data(
             req.universe,
             panel={**panel, **decision_feature_inputs},
         )
-    history = store.history(req.universe, limit=10, profile=req.profile)
-    # 旧版本快照没有 name 字段；响应时补齐，避免历史区继续只显示代码。
-    for snapshot in history:
-        for pick in snapshot.get("picks", []):
-            if not pick.get("name") or pick.get("name") == "名称待同步":
-                pick["name"] = names.get(pick.get("symbol"), "名称待同步")
-    history_symbols = _decision_history_symbols(history)
-    history = enrich_decision_snapshots(
-        history, price_frames_from_panel(panel, history_symbols),
-    )
+    # The dashboard is a mixed current-result/history view.  A corrupt or
+    # pre-hash legacy snapshot must remain visibly degraded, but must not make
+    # the freshly computed selection fail after it has already reached 96%.
+    # Strict consumers still use DecisionStore.history() and fail closed.
+    issues: list[dict[str, Any]] = []
+    try:
+        history = store.history(req.universe, limit=10, profile=req.profile)
+        # Legacy/corrupt history is optional display data. It must not erase a
+        # freshly calculated decision.
+        for snapshot in history:
+            for pick in snapshot.get("picks", []):
+                if not pick.get("name") or pick.get("name") == "名称待同步":
+                    pick["name"] = names.get(pick.get("symbol"), "名称待同步")
+        history_symbols = _decision_history_symbols(history)
+        history = enrich_decision_snapshots(
+            history, price_frames_from_panel(panel, history_symbols),
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
+        logger.warning("决策历史不可用，将返回当前计算结果: %s", _safe_client_error(exc))
+        history = []
+        issues.append(make_problem(
+            "history_unavailable", severity="warning", source="决策历史",
+            title="历史快照暂不可用", message="当前决策已完成，但历史验证暂时无法读取。",
+            action="可稍后重试读取历史；当前计算结果未受影响。", blocking=False,
+            can_continue=True, retryable=True, suggestion="稍后重试历史验证。",
+            component="history",
+        ))
     if progress:
         progress(
             99,
-            "历史快照与验证已就绪",
-            f"已读取 {len(history)} 条本地记录并核对后续价格",
+            "历史快照与验证已就绪" if not issues else "历史验证暂不可用",
+            f"已读取 {len(history)} 条本地记录并核对后续价格" if not issues else "已保留当前决策结果",
             {"kind": "decision_history", "history": history},
+            "warning" if issues else "info",
         )
     result = {
         "market": market,
@@ -1874,6 +1897,9 @@ def _decision_dashboard_data(
         "universe_evidence": universe_snapshot.to_dict(),
         "industry_evidence": industry_evidence,
     }
+    if progress:
+        result["status"] = "completed_with_issues" if issues else "completed"
+        result["issues"] = issues
     if progress:
         progress(100, "决策数据已就绪", f"生成 {len(selection.get('picks', []))} 只候选")
     return result

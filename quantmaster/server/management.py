@@ -569,7 +569,14 @@ def free_stockdb_experimental_tick(
     try:
         return StockDBExperimentalOnline().tick(body.symbol, count=body.count)
     except PermissionError as exc:
-        raise HTTPException(403, str(exc)) from None
+        raise OperationProblem(
+            403,
+            make_problem(
+                "permission_denied", source="本地服务", title="当前操作没有权限",
+                message="当前配置不允许执行此操作。", action="检查本机设置或权限后重试。",
+                blocking=True, retryable=False,
+            ),
+        ) from exc
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from None
 
@@ -589,7 +596,14 @@ def free_stockdb_experimental_fundamentals(
             stat_date=body.stat_date,
         )
     except PermissionError as exc:
-        raise HTTPException(403, str(exc)) from None
+        raise OperationProblem(
+            403,
+            make_problem(
+                "permission_denied", source="本地服务", title="当前操作没有权限",
+                message="当前配置不允许执行此操作。", action="检查本机设置或权限后重试。",
+                blocking=True, retryable=False,
+            ),
+        ) from exc
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from None
 

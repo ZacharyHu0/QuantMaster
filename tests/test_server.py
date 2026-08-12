@@ -5,6 +5,7 @@ import html
 import inspect
 import json
 import re
+import sqlite3
 import sys
 from html.parser import HTMLParser
 
@@ -17,7 +18,7 @@ from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.data.universe import UniverseSnapshot
 from quantmaster.release import RELEASE_DATE
 from quantmaster.runtime.process import run_process
-from quantmaster.server.app import app, liveness, readiness
+from quantmaster.server.app import app, liveness
 
 client = TestClient(app)
 _csrf = client.get("/api/v1/session").json()["csrf_token"]
@@ -72,7 +73,31 @@ class TestBasics:
         assert resp.json()["checked_at"]
         assert isinstance(resp.json()["issues"], list)
         assert len(resp.headers["X-Request-ID"]) == 12
-        assert client.get("/api/v1/health").status_code == 404
+        health = client.get("/api/v1/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+        assert client.get("/api/v1/health/live").status_code == 404
+        assert client.get("/api/v1/health/ready").status_code == 404
+
+    def test_news_lock_is_retryable_service_unavailable(self, monkeypatch):
+        from quantmaster.server import news as news_module
+
+        class LockedNewsStore:
+            def __init__(self, **_kwargs):
+                pass
+
+            def stats(self, *, days):
+                raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(news_module, "NewsStore", LockedNewsStore)
+        response = client.get("/api/v1/news/stats?days=30")
+
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["code"] == "snapshot_unavailable"
+        assert payload["retryable"] is True
+        assert payload["retry_after"] == 2
+        assert payload["request_id"] == response.headers["X-Request-ID"]
 
     def test_market_history_read_failure_is_service_unavailable(self, monkeypatch):
         def fail_load(*_args, **_kwargs):
@@ -145,16 +170,11 @@ class TestBasics:
         # handler queues behind the default threadpool under load, turning the
         # watchdog's constant-time probe into a false availability failure.
         assert inspect.iscoroutinefunction(liveness)
-        assert inspect.iscoroutinefunction(readiness)
         monkeypatch.setattr(
             "quantmaster.server.problems.collect_health_report",
             lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe stores")),
         )
-        monkeypatch.setattr(
-            "quantmaster.runtime.worker.runtime_worker_status",
-            lambda: {"available": False},
-        )
-        live = client.get("/api/v1/health/live")
+        live = client.get("/api/v1/health")
         assert live.status_code == 200
         assert {
             key: live.json()[key]
@@ -164,57 +184,6 @@ class TestBasics:
         }
         assert live.json()["web_threads"] >= 1
         assert live.json()["thread_status"] in {"ok", "warning"}
-        ready = client.get("/api/v1/health/ready")
-        assert ready.status_code == 200
-        assert ready.json()["status"] == "ready"
-        assert {
-            key: ready.json()[key]
-            for key in (
-                "process_started", "web_bound", "core_ready", "storage_ready",
-                "optional_services_ready", "fully_ready",
-            )
-        } == {
-            "process_started": True, "web_bound": True, "core_ready": True,
-            "storage_ready": True, "optional_services_ready": False,
-            "fully_ready": False,
-        }
-
-    def test_readiness_does_not_create_a_cold_data_root(
-        self, isolated_config, tmp_path, monkeypatch,
-    ):
-        """A health probe is a pure observation, never a hidden bootstrap."""
-        cold_root = tmp_path / "cold-data-root"
-        isolated_config.data.root = str(cold_root)
-        assert not cold_root.exists()
-
-        # The route must use the in-memory state installed by the controlled
-        # configuration switch, not re-read config or create a directory.
-        from quantmaster.config import set_config
-
-        set_config(isolated_config)
-        monkeypatch.setattr(
-            "quantmaster.config.get_config",
-            lambda: (_ for _ in ()).throw(
-                AssertionError("readiness must use its cached configuration state")
-            ),
-        )
-
-        ready = client.get("/api/v1/health/ready")
-
-        assert ready.status_code == 200
-        assert ready.json() == {
-            "status": "not_ready",
-            "version": __version__,
-            "release_date": RELEASE_DATE,
-            "data_root": str(cold_root),
-            "process_started": True,
-            "web_bound": True,
-            "core_ready": False,
-            "storage_ready": False,
-            "optional_services_ready": False,
-            "fully_ready": False,
-        }
-        assert not cold_root.exists()
 
     def test_diagnostics_expose_sanitized_runtime_status_and_core_storage_problem(self, monkeypatch):
         from quantmaster.server import diagnostics as diagnostics_module
@@ -255,6 +224,8 @@ class TestBasics:
         blocked = anonymous.post("/api/v1/research/selection/daily", json={})
         assert blocked.status_code == 403
         assert blocked.json()["problem"]["code"] == "csrf_missing"
+        assert blocked.json()["code"] == "csrf_missing"
+        assert blocked.json()["retryable"] is False
 
         session = anonymous.get("/api/v1/session")
         token = session.json()["csrf_token"]
@@ -272,7 +243,7 @@ class TestBasics:
         assert cross_origin.status_code == 403
         assert cross_origin.json()["problem"]["code"] == "origin_rejected"
         cross_origin_read = anonymous.get(
-            "/api/v1/health/live",
+            "/api/v1/health",
             headers={"Origin": "https://attacker.example"},
         )
         assert cross_origin_read.status_code == 403

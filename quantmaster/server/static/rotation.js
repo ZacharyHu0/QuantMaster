@@ -1265,8 +1265,9 @@
         themePage = Number(payload.data?.pagination?.page || themePage);
         if (stillCurrent()) renderThemes(payload);
       } else if (rotationActive && rotationPage === 'etfs') {
-        const overviewParams = new URLSearchParams({asset:etfAsset});
-        const productParams = new URLSearchParams({page:String(etfProductPage),page_size:String(etfProductPageSize),asset:etfAsset,sort:etfSort,order:etfSort === 'name' ? 'asc' : 'desc'});
+        const overviewParams = new URLSearchParams();
+        const productParams = new URLSearchParams({page:String(etfProductPage),page_size:String(etfProductPageSize),sort:etfSort,order:etfSort === 'name' ? 'asc' : 'desc'});
+        if (etfAsset) { overviewParams.set('asset', etfAsset); productParams.set('asset', etfAsset); }
         if (etfQuery.trim()) productParams.set('query',etfQuery.trim());
         if (etfCategory) productParams.set('category',etfCategory);
         if (etfState) productParams.set('state',etfState);

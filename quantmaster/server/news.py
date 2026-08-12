@@ -106,12 +106,19 @@ class ReanalyzeRequest(StrictModel):
 
 
 def _error(exc: Exception) -> HTTPException:
-    logger.warning("资讯 API 请求失败（%s）", type(exc).__name__, exc_info=True)
+    """Classify known local failures without flattening them to a misleading 400."""
     if isinstance(exc, KeyError):
         return HTTPException(404, "资讯资源不存在")
+    if isinstance(exc, (ValueError, TypeError)):
+        return HTTPException(422, "资讯请求参数无效")
     if isinstance(exc, CredentialError):
         return HTTPException(409, "凭据操作失败，请检查本机凭据设置")
-    return HTTPException(400, "资讯请求执行失败，请查看本机日志")
+    if isinstance(exc, sqlite3.OperationalError):
+        text = str(exc).casefold()
+        if "locked" in text or "busy" in text:
+            return HTTPException(503, "资讯数据库暂时繁忙，请稍后重试", headers={"Retry-After": "2"})
+    logger.exception("资讯 API 未处理异常（%s）", type(exc).__name__)
+    return HTTPException(500, "资讯操作未能完成，详细原因已写入服务端日志")
 
 
 def _epoch(value: str | None, *, end: bool = False) -> float | None:
@@ -139,6 +146,9 @@ def _local_snapshot(callable_):
     try:
         return callable_()
     except (FileNotFoundError, sqlite3.OperationalError) as exc:
+        locked = isinstance(exc, sqlite3.OperationalError) and any(
+            token in str(exc).casefold() for token in ("locked", "busy")
+        )
         raise OperationProblem(
             503,
             make_problem(
@@ -150,6 +160,8 @@ def _local_snapshot(callable_):
                 action="可稍后重试；如为首次启动，请在后台完成一次资讯采集。",
                 blocking=False,
                 can_continue=True,
+                retryable=True,
+                retry_after=2 if locked else None,
                 resource="news",
             ),
         ) from exc
@@ -213,7 +225,7 @@ def sources_list(request: Request) -> dict:
     try:
         items = NewsSourceStore(read_only=True).list()
         cold = False
-    except (FileNotFoundError, sqlite3.OperationalError):
+    except FileNotFoundError:
         items = _cold_builtin_sources()
         cold = True
     return {
@@ -301,21 +313,23 @@ def source_run(source_id: str, request: Request, skip_llm: bool = False) -> dict
 
 
 @router.get("/stats", response_model=None)
-def news_stats(request: Request, response: Response, days: int = 30) -> dict | Response:
+def news_stats(
+    request: Request, response: Response, days: int = 30,
+) -> dict | Response:
     _require_local(request)
+    if not 1 <= days <= 3650:
+        raise HTTPException(422, "统计时间范围必须在 1 至 3650 日之间")
     value = _local_snapshot(
-        lambda: NewsStore(read_only=True).stats(days=max(1, min(days, 3650))),
+        lambda: NewsStore(read_only=True).stats(days=days),
     )
-    return _snapshot_etag(request, response, value, {"days": max(1, min(days, 3650))})
+    return _snapshot_etag(request, response, value, {"days": days})
 
 
 @router.get("/event-focus", response_model=None)
 def news_event_focus(
-    request: Request, response: Response, days: int = 7,
+    request: Request, response: Response, days: Literal[1, 3, 7, 30] = 7,
 ) -> dict | Response:
     _require_local(request)
-    if days not in {1, 3, 7, 30}:
-        raise HTTPException(422, "事件聚焦窗口仅支持 1、3、7、30 日")
     value = _local_snapshot(lambda: NewsStore(read_only=True).event_focus(days))
     return _snapshot_etag(request, response, value, {"days": days})
 

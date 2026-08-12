@@ -169,10 +169,9 @@ def inspect_startup_address(host: str, port: int, *, version: str) -> StartupPre
 
     if _port_is_available(host, port):
         return StartupPreflight(host, int(port), True, "start")
-    live = _http_json(host, port, "/api/v1/health/live")
-    ready = _http_json(host, port, "/api/v1/health/ready") if live else None
+    live = _http_json(host, port, "/api/v1/health")
     process = _listener_process(host, port)
-    health = {"live": live, "ready": ready} if live else None
+    health = {"health": live} if live else None
     if live and str(live.get("version") or "") == str(version):
         generation = str(live.get("generation") or "")
         message = (
@@ -534,7 +533,7 @@ def _generation_is_ready(host: str, port: int, generation: int) -> bool:
 
     connection = http.client.HTTPConnection(_reload_probe_host(host), int(port), timeout=0.35)
     try:
-        connection.request("GET", "/api/v1/health/live")
+        connection.request("GET", "/api/v1/health")
         response = connection.getresponse()
         response.read()
         return (

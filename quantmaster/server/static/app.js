@@ -112,6 +112,17 @@ function recoveryForStatus(status) {
   if (status === 429) return '稍候再试；如频繁出现，请降低刷新频率。';
   return '重试一次；如仍失败，请复制诊断信息排查后端日志。';
 }
+function recoveryForProblem(problem, status) {
+  const code = String(problem?.code || '');
+  const actions = {
+    csrf_missing:'正在刷新本机安全会话后重试。', csrf_mismatch:'正在刷新本机安全会话后重试。',
+    origin_rejected:'请从 QuantMaster 本机页面发起操作，不要使用跨站页面。',
+    client_not_loopback:'此服务只允许本机访问。', host_rejected:'请使用本机 QuantMaster 地址访问。',
+    confirmation_required:'请在页面确认此操作后再继续。', permission_denied:'当前账号没有执行此操作的权限。',
+    snapshot_unavailable:'本地快照暂不可用；可稍后重试。',
+  };
+  return actions[code] || problem?.suggestion || recoveryForStatus(status);
+}
 function optionalCount(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
@@ -130,6 +141,10 @@ function normalizeProblem(value, fallback = {}) {
     title:String(raw.title || fallback.title || (severity === 'warning' ? '操作需要确认' : '操作未能完成')),
     message:String(message),
     action:String(raw.action || fallback.action || '检查提示后重试。'),
+    field:String(raw.field || fallback.field || ''),
+    retryable:Boolean(raw.retryable ?? fallback.retryable),
+    retry_after:optionalCount(raw.retry_after ?? fallback.retry_after),
+    suggestion:String(raw.suggestion || fallback.suggestion || raw.action || fallback.action || ''),
     blocking:Boolean(raw.blocking ?? fallback.blocking),
     can_continue:Boolean(raw.can_continue ?? fallback.can_continue),
     items:Array.isArray(raw.items) ? raw.items.map(String) : [],
@@ -289,15 +304,19 @@ function ingestDataQuality(data, scope = 'operation') {
 function responseError(response, data, path, method, key = '') {
   const fallbackTitle = friendlyHttpMessage(response.status);
   const detail = readableDetail(data.detail);
-  const requestId = data.error_id || response.headers.get('X-Request-ID') || '';
+  const requestId = data.diagnostic_id || data.request_id || data.error_id || response.headers.get('X-Request-ID') || '';
   const route = apiRoute(path);
   const problem = normalizeProblem(data.problem, {
     id:`request:${method}:${route}`, source:sourceForPath(path), title:fallbackTitle,
-    message:detail || fallbackTitle, action:recoveryForStatus(response.status),
+    message:data.message || detail || fallbackTitle, action:recoveryForStatus(response.status),
+    code:data.code, field:data.field, retryable:data.retryable, retry_after:data.retry_after,
+    suggestion:data.suggestion,
     blocking:true, severity:response.status === 409 ? 'warning' : 'error',
   });
+  problem.action = recoveryForProblem(problem, response.status);
   const error = new QuantApiError(`${problem.title}：${problem.message}`, {
-    status:response.status, detail:data.detail, detailText:detail,
+    status:response.status, detail:data.detail, detailText:detail, field:problem.field,
+    retryable:problem.retryable, retryAfter:problem.retry_after,
     requestId, path:route, method, logged:true, problem,
     dataQuality:data.data_quality || null,
   });
@@ -3201,10 +3220,11 @@ async function loadDecisionHistory({force = false} = {}) {
   if (decisionLoading || decisionHistoryLoading) return;
   const form = document.getElementById('decision-form');
   const fd = new FormData(form);
-  const params = new URLSearchParams({
-    universe:String(fd.get('universe') || ''), profile:String(fd.get('profile') || ''),
-    horizon:String(fd.get('horizon') || '3'), limit:'10',
-  });
+  const params = new URLSearchParams({horizon:String(fd.get('horizon') || '3'), limit:'10'});
+  const universe = String(fd.get('universe') || '').trim();
+  const profile = String(fd.get('profile') || '').trim();
+  if (universe) params.set('universe', universe);
+  if (profile) params.set('profile', profile);
   const key = params.toString();
   if (!force && key === decisionHistoryKey) return;
   decisionHistoryLoading = true;
@@ -3212,7 +3232,10 @@ async function loadDecisionHistory({force = false} = {}) {
   const out = document.getElementById('decision-out');
   out.innerHTML = '<div class="trading-skeleton" aria-label="正在读取历史决策"></div>';
   try {
-    const data = await api(`/api/v1/research/selection/history?${key}`, {cache:'no-store'});
+    const params = new URLSearchParams();
+    if (universe) params.set('universe', universe);
+    if (profile) params.set('profile', profile);
+    const data = await api(`/api/v1/research/selection/history?${params}`, {cache:'no-store'});
     if (request !== decisionViewRequest) return;
     decisionHistoryKey = key;
     renderDecisionHistory(data.snapshots || [], out);

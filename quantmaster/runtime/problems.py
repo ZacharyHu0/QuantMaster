@@ -26,6 +26,10 @@ def make_problem(
     action: str,
     blocking: bool = False,
     can_continue: bool = False,
+    field: str | None = None,
+    retryable: bool | None = None,
+    retry_after: int | None = None,
+    suggestion: str | None = None,
     problem_id: str | None = None,
     items: list[object] | None = None,
     **context: object,
@@ -42,7 +46,16 @@ def make_problem(
         "action": _clean(action),
         "blocking": bool(blocking),
         "can_continue": bool(can_continue),
+        # These names form the small HTTP-facing problem contract as well as
+        # being useful to background workers.  Keep the recovery text in one
+        # place so callers cannot accidentally expose an exception as a hint.
+        "retryable": bool(can_continue) if retryable is None else bool(retryable),
+        "suggestion": _clean(suggestion if suggestion is not None else action),
     }
+    if field:
+        problem["field"] = _clean(field, 160)
+    if retry_after is not None:
+        problem["retry_after"] = max(0, int(retry_after))
     if items:
         problem["items"] = [_clean(item, 100) for item in items[:20]]
     for key, value in context.items():
@@ -74,11 +87,22 @@ class OperationProblem(Exception):
         self.data_quality = data_quality
 
     def response(self, error_id: str) -> dict[str, Any]:
+        retryable = bool(self.problem.get("retryable", self.status_code in {429, 502, 503}))
         result: dict[str, Any] = {
             "detail": self.problem["message"],
             "problem": self.problem,
             "error_id": error_id,
+            "request_id": error_id,
+            "diagnostic_id": error_id,
+            "code": self.problem["code"],
+            "message": self.problem["message"],
+            "retryable": retryable,
+            "suggestion": self.problem.get("suggestion", self.problem.get("action", "")),
         }
+        if self.problem.get("field"):
+            result["field"] = self.problem["field"]
+        if self.problem.get("retry_after") is not None:
+            result["retry_after"] = self.problem["retry_after"]
         if self.data_quality is not None:
             result["data_quality"] = self.data_quality
         return result
