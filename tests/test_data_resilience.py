@@ -1181,6 +1181,9 @@ def test_source_health_removes_obsolete_tushare_ths_lane():
         )
         connection.execute("PRAGMA user_version=3")
 
+    with pytest.raises(RuntimeError, match="remaining-schemas"):
+        PROVIDER_HEALTH.status()
+    PROVIDER_HEALTH.migrate_legacy_database(PROVIDER_HEALTH._path())
     assert lane not in PROVIDER_HEALTH.status()
     with PROVIDER_HEALTH._conn() as connection:
         assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 4

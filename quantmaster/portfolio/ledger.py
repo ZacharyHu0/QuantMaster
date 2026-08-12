@@ -34,6 +34,10 @@ class LedgerIntegrityError(ValueError):
     """Stored trades violate a ledger accounting invariant."""
 
 
+class LedgerSchemaMigrationRequired(RuntimeError):
+    """The ledger needs the explicit remaining-schema migrator."""
+
+
 def _finite_number(
     value: Any,
     label: str,
@@ -95,9 +99,14 @@ class Ledger:
     ):
         self.path = path or get_config().data_root / f"ledger_{name}.sqlite"
         self.read_only = bool(read_only)
-        if not self.read_only:
+        if not self.path.is_file():
+            if self.read_only:
+                raise FileNotFoundError(self.path)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._conn() as conn:
                 migrate_schema(conn, ((LEDGER_SCHEMA_VERSION, self._schema_v1),))
+        else:
+            self._require_current()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -109,6 +118,41 @@ class Ledger:
     def _require_writable(self) -> None:
         if self.read_only:
             raise RuntimeError("只读账本不能修改")
+
+    def _require_current(self) -> None:
+        with self._conn() as connection:
+            tables = {str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            trade_columns = {str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(trades)"
+            )}
+            cash_columns = {str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(cashflows)"
+            )}
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if (
+                version != LEDGER_SCHEMA_VERSION
+                or {"trades", "cashflows", "import_batches", "ledger_anomalies"} - tables
+                or {"import_batch", "fingerprint", "idempotency_key"} - trade_columns
+                or {"idempotency_key"} - cash_columns
+            ):
+                raise LedgerSchemaMigrationRequired(
+                    "ledger SQLite 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+                )
+
+    @classmethod
+    def migrate_legacy_database(cls, path: str | Path) -> None:
+        path = Path(path)
+        with connect_sqlite(path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cls._schema_v1(connection)
+                connection.execute(f"PRAGMA user_version={LEDGER_SCHEMA_VERSION}")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @classmethod
     def _schema_v1(cls, connection: sqlite3.Connection) -> None:

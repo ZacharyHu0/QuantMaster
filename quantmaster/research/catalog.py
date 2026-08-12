@@ -24,15 +24,23 @@ from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migra
 RESEARCH_SCHEMA_VERSION = 1
 
 
+class ResearchSchemaMigrationRequired(RuntimeError):
+    """The research catalog needs the explicit remaining-schema migrator."""
+
+
 class ResearchCatalog:
     """Small transactional source of truth; Parquet remains the numeric store."""
 
     def __init__(self, path: str | Path, *, read_only: bool = False):
         self.path = Path(path)
         self.read_only = bool(read_only)
-        if not self.read_only:
+        if not self.path.is_file():
+            if self.read_only:
+                raise FileNotFoundError(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._initialize()
+        else:
+            self._require_current()
 
     def _connect(self) -> sqlite3.Connection:
         return connect_sqlite(
@@ -43,7 +51,11 @@ class ResearchCatalog:
         )
 
     def _initialize(self) -> None:
-        def schema_v1(connection: sqlite3.Connection) -> None:
+        with self._connect() as connection:
+            migrate_schema(connection, ((RESEARCH_SCHEMA_VERSION, self._schema_v1),))
+
+    @staticmethod
+    def _schema_v1(connection: sqlite3.Connection) -> None:
             execute_sql_script(
                 connection,
                 """
@@ -172,8 +184,44 @@ class ResearchCatalog:
                     (canonical_json(list(range(int(row["total"])))), row["id"]),
                 )
 
+    def _require_current(self) -> None:
         with self._connect() as connection:
-            migrate_schema(connection, ((RESEARCH_SCHEMA_VERSION, schema_v1),))
+            tables = {str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            required = {
+                "research_specs", "research_partitions", "research_runs",
+                "research_leases", "research_partition_intents",
+                "research_capabilities", "research_jobs", "research_job_events",
+            }
+            partition_columns = {str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(research_partitions)"
+            )}
+            job_columns = {str(row[1]) for row in connection.execute(
+                "PRAGMA table_info(research_jobs)"
+            )}
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if (
+                version != RESEARCH_SCHEMA_VERSION or required - tables
+                or {"file_size", "file_mtime_ns"} - partition_columns
+                or {"owner", "lease_expires", "heartbeat_at", "attempt", "task_indexes_json"}
+                - job_columns
+            ):
+                raise ResearchSchemaMigrationRequired(
+                    "research catalog 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+                )
+
+    @classmethod
+    def migrate_legacy_database(cls, path: str | Path) -> None:
+        with connect_sqlite(Path(path), row_factory=True) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cls._schema_v1(connection)
+                connection.execute(f"PRAGMA user_version={RESEARCH_SCHEMA_VERSION}")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def recover_interrupted_jobs(self) -> int:
         """Recover only abandoned leases; live workers in other processes are untouched."""

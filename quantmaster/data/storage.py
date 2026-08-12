@@ -196,6 +196,8 @@ class BarBatchReadResult:
 
 
 class BarStore:
+    SCHEMA_VERSION = 1
+
     def __init__(self, root: Path | None = None, *, read_only: bool | None = None):
         self.root = Path(root) if root else get_config().data_root / "bars"
         # A Web request enters ``local_only_data_access`` before routing.  In
@@ -205,10 +207,21 @@ class BarStore:
         # the request path.
         self.read_only = (not remote_io_allowed()) if read_only is None else bool(read_only)
         self.meta_db = self.root / "meta.sqlite"
+        if not self.meta_db.is_file():
+            if self.read_only:
+                return
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._migrate_legacy_schema()
+            self._recover_writes()
+            return
+        self._require_current()
         if self.read_only:
             return
-        self.root.mkdir(parents=True, exist_ok=True)
+        self._recover_writes()
+
+    def _migrate_legacy_schema(self) -> None:
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS bar_meta ("
                 "symbol TEXT PRIMARY KEY, start TEXT, end TEXT, updated_at REAL)"
@@ -255,7 +268,38 @@ class BarStore:
                 "backup_name TEXT NOT NULL, content_sha256 TEXT NOT NULL,"
                 "metadata_json TEXT NOT NULL, created_at REAL NOT NULL)"
             )
-        self._recover_writes()
+            conn.execute(f"PRAGMA user_version={self.SCHEMA_VERSION}")
+            conn.commit()
+
+    def _require_current(self) -> None:
+        with self._conn() as conn:
+            tables = {str(row[0]) for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(bar_meta)")}
+            required_columns = {
+                "coverage_start", "coverage_end", "checked_at", "last_source",
+                "last_status", "content_sha256", "row_count", "file_size",
+                "file_mtime_ns", "quality_json", "source_chain_json",
+                "observed_start", "observed_end",
+            }
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if (
+                version != self.SCHEMA_VERSION
+                or {"bar_meta", "bar_write_intents"} - tables
+                or required_columns - columns
+            ):
+                raise RuntimeError(
+                    "bar meta 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+                )
+
+    @classmethod
+    def migrate_legacy_database(cls, root: str | Path) -> None:
+        store = cls.__new__(cls)
+        store.root = Path(root)
+        store.read_only = False
+        store.meta_db = store.root / "meta.sqlite"
+        store._migrate_legacy_schema()
 
     def _conn(self) -> sqlite3.Connection:
         return connect_sqlite(

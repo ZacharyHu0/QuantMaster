@@ -525,7 +525,16 @@ class ProviderHealthStore:
 
     def _conn(self) -> sqlite3.Connection:
         path = self._path()
+        database_exists = path.is_file()
         conn = connect_sqlite(path, policy="cache")
+        if not database_exists:
+            self._initialize_schema(conn)
+        else:
+            self._require_current(conn)
+        return conn
+
+    @staticmethod
+    def _initialize_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS source_health ("
             "lane TEXT PRIMARY KEY,state TEXT NOT NULL DEFAULT 'closed',"
@@ -578,7 +587,28 @@ class ProviderHealthStore:
             conn.execute("DELETE FROM source_health WHERE lane='tushare:ths-concept'")
             conn.execute("PRAGMA user_version=4")
             conn.commit()
-        return conn
+
+    @staticmethod
+    def _require_current(conn: sqlite3.Connection) -> None:
+        tables = {str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(source_health)")}
+        if (
+            int(conn.execute("PRAGMA user_version").fetchone()[0]) != 4
+            or "source_health" not in tables
+            or {"failure_class", "config_revision", "probe_started", "retry_after", "diagnostic_code"}
+            - columns
+        ):
+            conn.close()
+            raise RuntimeError(
+                "source health 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+            )
+
+    @classmethod
+    def migrate_legacy_database(cls, path: str | Path) -> None:
+        with connect_sqlite(Path(path), policy="cache") as conn:
+            cls._initialize_schema(conn)
 
     def status(self, lane: str | None = None) -> dict[str, dict]:
         now = time.time()
@@ -977,11 +1007,12 @@ class TushareRateLimiter:
         interval = 60.0 / calls
         with self._lock:
             path = get_config().data_root / "tushare_rate.sqlite"
+            database_exists = path.is_file()
             with connect_sqlite(path, policy="cache") as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS rate_state ("
-                    "name TEXT PRIMARY KEY, next_call REAL NOT NULL)"
-                )
+                if not database_exists:
+                    self._initialize_schema(conn)
+                else:
+                    self._require_current(conn)
                 conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT next_call FROM rate_state WHERE name='global'").fetchone()
@@ -997,6 +1028,33 @@ class TushareRateLimiter:
             delay = reserved - _wall_time()
         if delay > 0:
             _rate_limit_sleep(delay)
+
+    @staticmethod
+    def _initialize_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS rate_state ("
+            "name TEXT PRIMARY KEY, next_call REAL NOT NULL)"
+        )
+        conn.execute("PRAGMA user_version=1")
+
+    @staticmethod
+    def _require_current(conn: sqlite3.Connection) -> None:
+        tables = {str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(rate_state)")}
+        if (
+            int(conn.execute("PRAGMA user_version").fetchone()[0]) != 1
+            or "rate_state" not in tables or {"name", "next_call"} - columns
+        ):
+            raise RuntimeError(
+                "tushare rate 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+            )
+
+    @classmethod
+    def migrate_legacy_database(cls, path: str | Path) -> None:
+        with connect_sqlite(Path(path), policy="cache") as conn:
+            cls._initialize_schema(conn)
 
 
 TUSHARE_LIMITER = TushareRateLimiter()
