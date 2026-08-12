@@ -51,29 +51,26 @@ WEB_BLOCKING_TOKENS = 16
 WEB_THREAD_WARNING = 64
 _web_blocking_slots = threading.BoundedSemaphore(WEB_BLOCKING_TOKENS)
 _web_stream_lock = threading.Lock()
-_web_stream_executor: ThreadPoolExecutor | None = None
+_web_stream_runtime = None
 
 
-def _submit_web_stream(task: Callable[[], None]) -> None:
-    """Submit a bounded Web escape-hatch task, recreating after a lifespan restart."""
+def _stream_runtime():
+    global _web_stream_runtime
+    from quantmaster.server.stream_runtime import WebStreamRuntime
 
-    global _web_stream_executor
     with _web_stream_lock:
-        if _web_stream_executor is None:
-            _web_stream_executor = ThreadPoolExecutor(
-                max_workers=WEB_BLOCKING_TOKENS,
-                thread_name_prefix="qm-web-stream",
-            )
-        _web_stream_executor.submit(task)
+        if _web_stream_runtime is None:
+            _web_stream_runtime = WebStreamRuntime(max_workers=WEB_BLOCKING_TOKENS)
+        return _web_stream_runtime
 
 
-def _shutdown_web_stream_executor() -> None:
-    global _web_stream_executor
+def _shutdown_web_stream_executor(timeout: float = 5.0) -> None:
+    global _web_stream_runtime
     with _web_stream_lock:
-        executor = _web_stream_executor
-        _web_stream_executor = None
-    if executor is not None:
-        executor.shutdown(wait=False, cancel_futures=True)
+        runtime = _web_stream_runtime
+        _web_stream_runtime = None
+    if runtime is not None:
+        runtime.shutdown(timeout)
 
 
 def _default_close_data_end(as_of: str | None = None) -> str:
@@ -104,6 +101,7 @@ def _configure_reload_worker_logging() -> bool:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
+    _stream_runtime()
     _configure_reload_worker_logging()
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.logging_config import current_log_path
@@ -510,6 +508,7 @@ def _progress_stream(
     """在线程中执行同步数据任务，以 NDJSON 持续发送真实阶段进度。"""
     request_id = request_id or _new_request_id()
     events: queue.Queue[dict | None] = queue.Queue()
+    cancelled = threading.Event()
 
     def emit(
         progress: int,
@@ -518,6 +517,10 @@ def _progress_stream(
         partial: dict | None = None,
         level: str = "info",
     ) -> None:
+        if cancelled.is_set():
+            from quantmaster.server.stream_runtime import StreamGenerationClosed
+
+            raise StreamGenerationClosed("stream client or generation disconnected")
         event = {
             "type": "progress",
             "progress": max(0, min(100, int(progress))),
@@ -577,6 +580,11 @@ def _progress_stream(
                 "request_id": request_id,
             })
         except Exception as exc:
+            from quantmaster.server.stream_runtime import StreamGenerationClosed
+
+            if isinstance(exc, StreamGenerationClosed):
+                logger.info("流式数据任务已在安全边界停止 request_id=%s", request_id)
+                return
             logger.exception("流式数据任务失败 request_id=%s", request_id)
             message = _safe_client_error(exc)
             problem = make_problem(
@@ -612,17 +620,24 @@ def _progress_stream(
             _web_blocking_slots.release()
 
     try:
-        _submit_web_stream(bounded_run)
+        _stream_runtime().submit(
+            bounded_run, request_id=request_id, cancel=cancelled,
+        )
     except Exception:
         _web_blocking_slots.release()
         raise
 
     def generate() -> Iterator[str]:
-        while True:
-            event = events.get()
-            if event is None:
-                break
-            yield strict_json_dumps(jsonable_encoder(event)) + "\n"
+        try:
+            while True:
+                event = events.get()
+                if event is None:
+                    break
+                yield strict_json_dumps(jsonable_encoder(event)) + "\n"
+        finally:
+            # Starlette closes this iterator on client disconnect.  The
+            # producer then stops at its next emit/checkpoint boundary.
+            cancelled.set()
 
     return StreamingResponse(
         generate(),
