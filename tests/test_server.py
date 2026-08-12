@@ -1212,6 +1212,21 @@ class TestBasics:
                    for pick in data["selection"]["picks"])
         assert data["history"][0]["signal_date"] == data["selection"]["signal_date"]
 
+        # A legacy row without a trusted hash is still useful as an explicit
+        # preview, but must not abort a new dashboard calculation after the
+        # current selection has already been emitted.
+        from quantmaster.decision import DecisionStore
+
+        store = DecisionStore()
+        with store._conn() as connection:
+            connection.execute(
+                "INSERT INTO selection_snapshots "
+                "(signal_date,universe,horizon,profile,policy_hash,model_version,"
+                "payload,payload_sha256,created_at) "
+                "SELECT '2022-12-30',universe,horizon,profile,'legacy-unhashed',"
+                "model_version,payload,'',created_at-1 FROM selection_snapshots LIMIT 1"
+            )
+
         streamed = client.post("/api/v1/research/decision/dashboard/stream", json={
             "universe": "demo", "start": "2023-01-01", "top_n": 4,
             "horizon": 3, "save": True,
@@ -1240,6 +1255,124 @@ class TestBasics:
         ) < 100
         result = next(event["data"] for event in events if event["type"] == "result")
         assert len(result["selection"]["picks"]) == 4
+        degraded = [
+            snapshot for snapshot in result["history"]
+            if snapshot.get("snapshot", {}).get("state") == "degraded"
+        ]
+        assert len(degraded) == 1
+        assert degraded[0]["formal_allowed"] is False
+        assert "缺少可信哈希" in degraded[0]["snapshot"]["issues"][0]
+
+    def test_decision_dashboard_refreshes_low_coverage_and_persists_partial_panel(
+        self, panel, monkeypatch,
+    ):
+        from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+
+        symbols = list(panel["close"].columns)
+        missing = symbols[-1]
+        local_panel = {
+            field: frame.drop(columns=[missing]) for field, frame in panel.items()
+        }
+        local_quality = BarDataQuality(
+            "degraded", "2023-01-01", "2023-12-31",
+            coverage_ratio=0.80, partial=True,
+            requested_symbols=tuple(symbols),
+            observed_symbols=tuple(symbols[:-1]),
+            missing_symbols=(missing,),
+        )
+        refreshed_quality = BarDataQuality(
+            "degraded", "2023-01-01", "2023-12-31",
+            coverage_ratio=0.95, partial=True, issues=("仍缺少少量交易日",),
+            requested_symbols=tuple(symbols), observed_symbols=tuple(symbols),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe_analysis_snapshot",
+            lambda _name, **_kwargs: UniverseSnapshot(
+                name="demo", symbols=tuple(symbols),
+                observed_at="2023-12-31T00:00:00+00:00",
+                effective_as_of="2023-12-31", content_hash="fixture-universe",
+                source="fixture",
+            ),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.read_panel",
+            lambda *_args, **_kwargs: BarDataEnvelope(local_panel, local_quality),
+        )
+        refreshed = BarDataEnvelope(panel, refreshed_quality)
+        monkeypatch.setattr(
+            "quantmaster.data.refresh_panel", lambda *_args, **_kwargs: refreshed,
+        )
+        monkeypatch.setattr("quantmaster.data.read_stock_names", lambda values: {
+            symbol: symbol for symbol in values
+        })
+        monkeypatch.setattr(
+            "quantmaster.data.industry.load_industry_analysis_context",
+            lambda **_kwargs: ({symbol: "行业A" for symbol in symbols}, {
+                "status": "verified", "content_hash": "fixture-industry",
+                "formal_eligible": True, "issues": [],
+            }),
+        )
+
+        response = client.post("/api/v1/research/decision/dashboard", json={
+            "universe": "demo", "start": "2023-01-01", "top_n": 4,
+            "horizon": 3, "save": True,
+        })
+
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["persistence"]["saved"] is True
+        assert result["data_quality"]["coverage_ratio"] == 0.95
+        assert result["data_quality"]["decision_formal_eligible"] is True
+
+    def test_decision_dashboard_uses_sufficient_local_coverage_when_refresh_fails(
+        self, panel, monkeypatch,
+    ):
+        from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+
+        symbols = list(panel["close"].columns)
+        quality = BarDataQuality(
+            "degraded", "2023-01-01", "2023-12-31",
+            coverage_ratio=0.95, partial=True, issues=("缺少少量交易日",),
+            requested_symbols=tuple(symbols), observed_symbols=tuple(symbols),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.universe.load_universe_analysis_snapshot",
+            lambda _name, **_kwargs: UniverseSnapshot(
+                name="demo", symbols=tuple(symbols),
+                observed_at="2023-12-31T00:00:00+00:00",
+                effective_as_of="2023-12-31", content_hash="fixture-universe",
+                source="fixture",
+            ),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.read_panel",
+            lambda *_args, **_kwargs: BarDataEnvelope(panel, quality),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.refresh_panel",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+        )
+        monkeypatch.setattr("quantmaster.data.read_stock_names", lambda values: {
+            symbol: symbol for symbol in values
+        })
+        monkeypatch.setattr(
+            "quantmaster.data.industry.load_industry_analysis_context",
+            lambda **_kwargs: ({symbol: "行业A" for symbol in symbols}, {
+                "status": "verified", "content_hash": "fixture-industry",
+                "formal_eligible": True, "issues": [],
+            }),
+        )
+
+        response = client.post("/api/v1/research/decision/dashboard", json={
+            "universe": "demo", "start": "2023-01-01", "top_n": 4,
+            "horizon": 3, "save": True,
+        })
+
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["persistence"]["saved"] is True
+        assert result["data_quality"]["coverage_ratio"] == 0.95
+        assert result["data_quality"]["issues"] == ["缺少少量交易日"]
 
     def test_decision_stream_unavailable_preserves_truth_contract(self, monkeypatch):
         symbols = ["600000.SH", "000001.SZ"]
@@ -1256,6 +1389,12 @@ class TestBasics:
         )
         monkeypatch.setattr(
             "quantmaster.data.read_panel",
+            lambda *_args, **_kwargs: _unavailable_market_data(
+                {}, symbols=tuple(symbols),
+            ),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.refresh_panel",
             lambda *_args, **_kwargs: _unavailable_market_data(
                 {}, symbols=tuple(symbols),
             ),

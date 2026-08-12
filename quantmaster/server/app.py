@@ -1625,6 +1625,30 @@ class DecisionDashboardRequest(ContractModel):
     policy_mode: Literal["live", "historical_replay", "retrospective"] = "live"
 
 
+_DECISION_MIN_MARKET_COVERAGE = 0.90
+
+
+def _decision_market_formal_eligible(quality: Any) -> bool:
+    """Admit a disclosed partial panel unless too much of the universe is absent."""
+    coverage = quality.coverage_ratio
+    return bool(
+        quality.analysis_eligible
+        and coverage is not None
+        and float(coverage) >= _DECISION_MIN_MARKET_COVERAGE
+    )
+
+
+def _decision_panel_has_minimum_history(envelope: Any) -> bool:
+    panel = envelope.data
+    if not isinstance(panel, dict):
+        return False
+    close = panel.get("close")
+    return bool(
+        isinstance(close, pd.DataFrame)
+        and len(close.dropna(how="all")) >= 20
+    )
+
+
 @app.post("/api/v1/research/decision/dashboard")
 def decision_dashboard(req: DecisionDashboardRequest) -> dict:
     """决策工作台：只加载一次行情，同时生成市场、板块、选股和历史快照。"""
@@ -1640,7 +1664,7 @@ def _decision_dashboard_data(
     req: DecisionDashboardRequest,
     progress: ProgressEmitter | None = None,
 ) -> dict:
-    from quantmaster.data import read_panel, read_stock_names
+    from quantmaster.data import read_panel, read_stock_names, refresh_panel
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import (
@@ -1686,6 +1710,31 @@ def _decision_dashboard_data(
     market_envelope = read_panel(
         symbols, req.start, end, progress=on_symbol if progress else None,
     )
+    local_market_envelope = market_envelope
+    if req.save and not market_envelope.quality.formal_eligible:
+        if progress:
+            progress(64, "补齐候选行情", "本地证据不足，尝试在线补齐并写回行情库")
+        try:
+            refreshed = refresh_panel(
+                symbols,
+                req.start,
+                end,
+                mode="auto",
+                work_class="normal",
+            )
+            if (
+                refreshed.quality.analysis_eligible
+                and _decision_panel_has_minimum_history(refreshed)
+            ):
+                market_envelope = refreshed
+        except (MarketDataUnavailable, OSError, RuntimeError, ValueError) as exc:
+            logger.warning("选股行情在线补齐失败，继续评估本地覆盖：%s", exc)
+            market_envelope = local_market_envelope
+    if req.save and (
+        not _decision_market_formal_eligible(market_envelope.quality)
+        or not _decision_panel_has_minimum_history(market_envelope)
+    ):
+        raise MarketDataUnavailable(market_envelope.quality, market_envelope.provenance)
     panel = market_envelope.require_data()
     if progress:
         progress(67, "加载行业与名称", "优先复用本地缓存")
@@ -1752,12 +1801,17 @@ def _decision_dashboard_data(
         evidence_sink=decision_feature_inputs,
     )
     selection["calculation_quality"] = selection.get("data_quality")
-    selection["data_quality"] = market_envelope.quality.to_dict()
+    market_quality = market_envelope.quality.to_dict()
+    market_quality["decision_formal_eligible"] = _decision_market_formal_eligible(
+        market_envelope.quality
+    )
+    market_quality["decision_minimum_coverage"] = _DECISION_MIN_MARKET_COVERAGE
+    selection["data_quality"] = market_quality
     selection["market_provenance"] = list(market_envelope.provenance)
     selection["universe_evidence"] = universe_snapshot.to_dict()
     selection["industry_evidence"] = industry_evidence
     save_allowed = (
-        market_envelope.quality.formal_eligible
+        _decision_market_formal_eligible(market_envelope.quality)
         and universe_snapshot.formal_eligible
         and bool(industry_evidence.get("formal_eligible"))
     )
@@ -1792,7 +1846,11 @@ def _decision_dashboard_data(
             req.universe,
             panel={**panel, **decision_feature_inputs},
         )
-    history = store.history(req.universe, limit=10, profile=req.profile)
+    # The dashboard is a mixed current-result/history view.  A corrupt or
+    # pre-hash legacy snapshot must remain visibly degraded, but must not make
+    # the freshly computed selection fail after it has already reached 96%.
+    # Strict consumers still use DecisionStore.history() and fail closed.
+    history = store.preview_history(req.universe, limit=10, profile=req.profile)
     # 旧版本快照没有 name 字段；响应时补齐，避免历史区继续只显示代码。
     for snapshot in history:
         for pick in snapshot.get("picks", []):
@@ -1815,7 +1873,7 @@ def _decision_dashboard_data(
         "history": history,
         "model_snapshot": selection.get("model_snapshot"),
         "calculation_quality": selection.get("calculation_quality"),
-        "data_quality": market_envelope.quality.to_dict(),
+        "data_quality": market_quality,
         "provenance": list(market_envelope.provenance),
         "persistence": persistence,
         "universe_evidence": universe_snapshot.to_dict(),
