@@ -1904,11 +1904,21 @@ class LabStore:
     def job(self, job_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM lab_jobs WHERE id=?", (job_id,)).fetchone()
+            checkpoint_row = conn.execute(
+                "SELECT event_json,created_at FROM lab_job_events WHERE job_id=? "
+                "AND json_extract(event_json,'$.type')='partition_checkpoint' "
+                "ORDER BY seq DESC LIMIT 1",
+                (job_id,),
+            ).fetchone()
         value = self._decode(
             row, ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
         )
         if value is not None:
             self._public_job(value)
+            value["checkpoint"] = (
+                {"created_at": checkpoint_row["created_at"], **json.loads(checkpoint_row["event_json"])}
+                if checkpoint_row is not None else {}
+            )
         return value
 
     def jobs(

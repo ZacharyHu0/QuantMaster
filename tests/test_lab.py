@@ -513,6 +513,131 @@ def test_job_partial_completion_and_retry_are_auditable(tmp_path):
     assert any(item["type"] == "retry_of" for item in store.events(retried["id"]))
 
 
+def test_prepare_data_keeps_partition_checkpoints_and_partial_result(tmp_path, monkeypatch):
+    _config(tmp_path)
+    service = LabService(LabStore(tmp_path / "lab.sqlite"))
+    before = {
+        "membership_missing": False,
+        "providers": [
+            {"id": "free-stockdb", "available": True},
+            {"id": "tushare", "available": False},
+        ],
+        "gaps": [
+            {
+                "symbol": "A.SH",
+                "segments": [{
+                    "start": "2024-01-01", "end": "2024-01-31", "kind": "critical",
+                }],
+            },
+            {
+                "symbol": "B.SH",
+                "segments": [{
+                    "start": "2024-01-01", "end": "2024-01-31", "kind": "critical",
+                }],
+            },
+        ],
+        "repair_symbol_count": 2,
+        "critical_repair_symbol_count": 2,
+        "research_eligible": False,
+    }
+    after = {
+        **before, "gaps": [before["gaps"][1]], "repair_symbol_count": 1,
+        "critical_repair_symbol_count": 1,
+    }
+    plans = iter([before, after])
+    monkeypatch.setattr("quantmaster.lab.service.dataset_repair_plan", lambda *_: next(plans))
+    monkeypatch.setattr("quantmaster.lab.dataset.clear_local_dataset_caches", lambda: None)
+
+    class Envelope:
+        def __init__(self, symbol):
+            self.symbol = symbol
+            self.quality = SimpleNamespace(to_dict=lambda: {
+                "status": "verified", "symbol": symbol,
+            })
+
+        def require_data(self):
+            if self.symbol == "B.SH":
+                raise OSError("disk I/O error")
+
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_history", lambda symbol, *_args, **_kwargs: Envelope(symbol),
+    )
+    events = []
+
+    def progress(value, phase, detail="", **metadata):
+        events.append({"progress": value, "phase": phase, "detail": detail, **metadata})
+
+    result = service.prepare_data(
+        universe="demo", start="2024-01-01", end="2024-01-31",
+        provider="free-stockdb", progress=progress,
+    )
+
+    assert result["partitions"] == {
+        "total": 2, "persisted": 1, "failed": 1, "remaining": 1,
+        "persisted_items": ["A.SH"], "failed_items": ["B.SH"],
+    }
+    assert result["warnings"][0]["code"] == "DATA_PARTITION_INCOMPLETE"
+    assert result["safe_retry_point"] == "bars"
+    checkpoints = [item for item in events if item.get("event_type") == "partition_checkpoint"]
+    assert {item["metadata"]["partition"] for item in checkpoints} >= {"universe", "A.SH", "B.SH"}
+    assert result["stages"]["bars"]["status"] == "completed_with_warnings"
+
+
+def test_prepare_data_preflight_estimates_atomic_rewrite_peak(tmp_path, monkeypatch):
+    _config(tmp_path)
+    service = LabService(LabStore(tmp_path / "lab.sqlite"))
+    monkeypatch.setattr("quantmaster.lab.service.run_preflight", lambda *_: {
+        "runnable": True, "state": "ready", "blockers": [], "warnings": [],
+        "estimate": {}, "dataset": {},
+    })
+    monkeypatch.setattr("quantmaster.lab.service.dataset_repair_plan", lambda *_: {
+        "repair_symbol_count": 2, "membership_missing": False,
+        "missing_session_count": 10,
+        "gaps": [{"existing_bytes": 1000}, {"existing_bytes": 2000}],
+    })
+    monkeypatch.setattr(
+        "quantmaster.lab.service.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=1024),
+    )
+
+    report = service.preflight("prepare_data", {
+        "universe": "demo", "start": "2024-01-01", "end": "2024-01-31",
+    })
+
+    estimate = report["estimate"]
+    assert estimate["space_purpose"] == "bars_atomic_rewrite"
+    assert estimate["repair_temporary_bytes"] == 3000
+    assert estimate["repair_output_bytes"] == 640
+    assert report["runnable"] is False
+    assert report["blockers"][-1]["code"] == "DISK_SPACE_INSUFFICIENT"
+
+
+def test_partition_checkpoint_is_projected_and_warnings_finish_partial(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    queued = store.enqueue("prepare_data", {"universe": "demo"})
+    store.claim_next("worker")
+    store.update_job(
+        queued["id"], 40, "数据准备 · bars", "A.SH 已持久化",
+        event_type="partition_checkpoint",
+        metadata={
+            "stage": "bars", "status": "completed", "partition": "A.SH",
+            "persisted": 1, "total": 2,
+        },
+    )
+    store.finish_job(queued["id"], result={
+        "warnings": [{"code": "DATA_PARTITION_INCOMPLETE", "message": "1 个分区未完成"}],
+        "partitions": {"persisted": 1, "failed": 1, "remaining": 1},
+    })
+
+    job = store.job(queued["id"])
+
+    assert job["status"] == "completed_with_warnings"
+    assert job["checkpoint"]["type"] == "partition_checkpoint"
+    assert job["checkpoint"]["partition"] == "A.SH"
+    assert job["checkpoint"]["persisted"] == 1
+
+
 def test_model_publication_outbox_is_immutable_leased_and_idempotent(
     tmp_path, monkeypatch,
 ):

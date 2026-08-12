@@ -726,6 +726,7 @@ def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
             "required": [required_start, required_end],
             "available": [available_start, available_end],
             "missing_sessions": missing_sessions,
+            "existing_bytes": int(row.get("bytes") or 0),
         }
         cells.append(cell)
         if segments:

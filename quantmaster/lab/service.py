@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 import uuid
 from dataclasses import asdict
@@ -377,6 +378,41 @@ class LabService:
         repair = dataset_repair_plan(universe, start, end)
         if repair["repair_symbol_count"] or repair["membership_missing"]:
             report["coverage"] = repair
+        if operation == "prepare_data":
+            estimate = dict(report.get("estimate") or {})
+            bars_root = get_config().data_root / "bars"
+            existing = sorted(
+                (int(item.get("existing_bytes") or 0) for item in repair.get("gaps") or []),
+                reverse=True,
+            )
+            workers = min(4, max(1, int(get_config().lab.max_workers)))
+            rewritten_bytes = sum(existing[:workers])
+            new_bytes = int(repair.get("missing_session_count") or 0) * 64
+            sqlite_headroom = 8 * 1024 * 1024
+            peak_bytes = rewritten_bytes + new_bytes + sqlite_headroom
+            probe = bars_root if bars_root.exists() else get_config().data_root
+            free_bytes = shutil.disk_usage(probe).free
+            estimate.update({
+                "disk_bytes": peak_bytes,
+                "disk_free_bytes": free_bytes,
+                "repair_output_bytes": new_bytes,
+                "repair_temporary_bytes": rewritten_bytes,
+                "repair_sqlite_headroom_bytes": sqlite_headroom,
+                "space_purpose": "bars_atomic_rewrite",
+            })
+            report["estimate"] = estimate
+            if peak_bytes > free_bytes and not any(
+                item.get("code") == "DISK_SPACE_INSUFFICIENT"
+                for item in report.get("blockers") or []
+            ):
+                report.setdefault("blockers", []).append({
+                    "code": "DISK_SPACE_INSUFFICIENT",
+                    "message": "数据补齐所需磁盘空间不足",
+                    "action": "释放数据目录所在卷空间，或缩小补齐范围后重试",
+                    "context": {"required_bytes": peak_bytes, "free_bytes": free_bytes},
+                })
+                report["runnable"] = False
+                report["state"] = "blocked"
         if operation != "validate" or not values.get("version_id"):
             return report
         version = self.store.version(str(values["version_id"]))
@@ -678,6 +714,38 @@ class LabService:
 
         del data_policy
         before = dataset_repair_plan(universe, start, end)
+        stages: dict[str, dict[str, Any]] = {
+            "universe": {"status": "completed", "partitions": 1},
+            "membership": {
+                "status": "pending" if before["membership_missing"] else "completed",
+                "partitions": 0 if before["membership_missing"] else 1,
+            },
+            "bars": {"status": "running", "completed": 0, "failed": 0},
+            "dataset": {"status": "pending"},
+            "snapshot": {"status": "pending"},
+        }
+
+        def checkpoint(
+            value: int, stage: str, status: str, detail: str = "", **metadata: Any,
+        ) -> None:
+            if progress:
+                try:
+                    progress(
+                        value, f"数据准备 · {stage}", detail,
+                        event_type="partition_checkpoint",
+                        metadata={"stage": stage, "status": status, **metadata},
+                    )
+                except TypeError:
+                    # Direct service callers historically supplied a simple
+                    # three-argument callback.  The worker callback accepts
+                    # the durable event metadata above.
+                    progress(value, f"数据准备 · {stage}", detail)
+
+        checkpoint(
+            1, "universe", "completed",
+            f"已规划 {before['repair_symbol_count']} 个行情分区",
+            partition="universe", persisted=1,
+        )
         selected = str(provider or "").strip().lower()
         if not selected:
             stockdb = next(item for item in before["providers"] if item["id"] == "free-stockdb")
@@ -701,6 +769,11 @@ class LabService:
             load_csi800_membership(start, end)
             clear_local_dataset_caches()
             before = dataset_repair_plan(universe, start, end)
+            stages["membership"] = {"status": "completed", "partitions": 1}
+            checkpoint(
+                4, "membership", "completed", "CSI800 点时成分已持久化",
+                partition="csi800_membership", persisted=1,
+            )
 
         targets: list[dict[str, Any]] = []
         for item in before["gaps"]:
@@ -717,6 +790,7 @@ class LabService:
             })
         failures: dict[str, str] = {}
         degraded: dict[str, dict[str, Any]] = {}
+        persisted: list[str] = []
         completed = 0
 
         def repair(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -737,12 +811,25 @@ class LabService:
                 item = futures[future]
                 try:
                     repaired_symbol, quality = future.result()
+                    persisted.append(repaired_symbol)
                     if quality.get("status") != "verified":
                         degraded[repaired_symbol] = quality
+                    checkpoint(
+                        5 + int(82 * (completed + 1) / max(1, len(targets))),
+                        "bars", "completed", f"{repaired_symbol} 已持久化",
+                        partition=repaired_symbol, persisted=len(persisted),
+                        total=len(targets), quality_status=quality.get("status", ""),
+                    )
                 except InterruptedError:
                     raise
                 except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     failures[str(item["symbol"])] = str(exc)[:300]
+                    checkpoint(
+                        5 + int(82 * (completed + 1) / max(1, len(targets))),
+                        "bars", "failed", str(exc)[:300],
+                        partition=str(item["symbol"]), persisted=len(persisted),
+                        total=len(targets), error_type=type(exc).__name__,
+                    )
                 completed += 1
                 if progress:
                     progress(
@@ -750,15 +837,27 @@ class LabService:
                         f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
                     )
         clear_local_dataset_caches()
+        stages["bars"] = {
+            "status": "completed_with_warnings" if failures else "completed",
+            "completed": len(persisted), "failed": len(failures), "total": len(targets),
+        }
         after = dataset_repair_plan(universe, start, end)
         count_key = "repair_symbol_count" if include_warmup else "critical_repair_symbol_count"
         resolved = max(0, int(before[count_key]) - int(after[count_key]))
         snapshot: dict[str, Any] = {}
         if after["research_eligible"]:
+            stages["dataset"] = {"status": "running"}
             _panel, _membership, value = load_local_dataset(
                 universe, start, end, policy=DataPolicy.PREFER_LOCAL.value,
             )
+            stages["dataset"] = {"status": "completed"}
+            checkpoint(91, "dataset", "completed", "本地研究数据集已物化", persisted=1)
             snapshot = self.store.save_snapshot(value)
+            stages["snapshot"] = {"status": "completed", "partitions": 1}
+            checkpoint(95, "snapshot", "completed", "冻结快照已登记", persisted=1)
+        else:
+            stages["dataset"] = {"status": "blocked", "remaining": after[count_key]}
+            stages["snapshot"] = {"status": "not_published"}
         if progress:
             remaining = int(after[count_key])
             progress(96, f"补齐完成 · 修复 {resolved} 只，当前范围剩余 {remaining} 只")
@@ -771,6 +870,14 @@ class LabService:
                 context={"provider": selected, "failed_symbols": len(failures)},
                 status_code=503,
             )
+        warnings = [
+            {
+                "code": "DATA_PARTITION_INCOMPLETE",
+                "message": f"{len(failures)} 个行情分区未完成；已持久化结果仍然保留",
+                "action": "修复数据源或存储问题后按原参数重试",
+                "context": {"failed_partitions": sorted(failures)[:20]},
+            }
+        ] if failures else []
         return {
             "provider": selected,
             "requested_symbols": len(targets),
@@ -780,6 +887,17 @@ class LabService:
             "include_warmup": bool(include_warmup),
             "failures": failures,
             "degraded": degraded,
+            "warnings": warnings,
+            "stages": stages,
+            "partitions": {
+                "total": len(targets), "persisted": len(persisted),
+                "failed": len(failures), "remaining": int(after[count_key]),
+                "persisted_items": sorted(persisted),
+                "failed_items": sorted(failures),
+            },
+            "safe_retry_point": (
+                "snapshot" if snapshot else "dataset" if after["research_eligible"] else "bars"
+            ),
             "analysis_ready_symbols": max(0, len(targets) - len(failures)),
             "formal_eligible": bool(after.get("research_eligible")),
             "before": before,

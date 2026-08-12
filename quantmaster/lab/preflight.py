@@ -224,8 +224,11 @@ def run_preflight(operation: str, params: dict[str, Any] | None = None) -> dict[
         sessions = max(1, len(pd.bdate_range(start, end)))
     except (TypeError, ValueError):
         sessions = 1
-    feature_bytes = symbol_count * sessions * 48 * 4
-    sample_count = max(0, symbol_count * max(0, sessions - int(values.get("sequence_length") or 20)))
+    feature_bytes = 0 if operation == "prepare_data" else symbol_count * sessions * 48 * 4
+    sample_count = (
+        0 if operation == "prepare_data"
+        else max(0, symbol_count * max(0, sessions - int(values.get("sequence_length") or 20)))
+    )
     cache_root = cfg.data_root / "lab_cache"
     cache_root.mkdir(parents=True, exist_ok=True)
     disk_free = shutil.disk_usage(cache_root).free
