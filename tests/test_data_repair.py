@@ -114,17 +114,7 @@ def test_corrupt_bar_is_quarantined_refetched_and_audited(
     ]
 
 
-def test_legacy_bar_filename_is_migrated_and_failed_repair_reconciled(
-    tmp_path, isolated_config, monkeypatch,
-):
-    from quantmaster.data import repair
-
-    isolated_config.data.repair_max_attempts = 1
-    manager = DataRepairManager(tmp_path / "repairs.sqlite")
-    manager.register_handler(
-        "bar", lambda _item: (_ for _ in ()).throw(OSError("offline")),
-    )
-    monkeypatch.setattr(repair, "_MANAGER", manager)
+def test_bar_read_never_moves_a_legacy_filename(isolated_config):
     store = BarStore(root=isolated_config.data_root / "bars")
     symbol = "HG=F.US"
     dates = pd.bdate_range("2024-01-02", "2024-01-12")
@@ -133,25 +123,12 @@ def test_legacy_bar_filename_is_migrated_and_failed_repair_reconciled(
     current = store.path_for_repair(symbol)
     legacy = current.with_name("HG_F.US.parquet")
     current.replace(legacy)
-    store.mark_status(symbol, "corrupt")
-    target = f"{store.root.resolve()}::{symbol}"
-    queued = manager.enqueue(
-        "bar", target, reason="cataloged bar file is missing",
-        spec={"root": str(store.root.resolve()), "symbol": symbol}, source="test",
-    )
-    failed = manager.run_one()
+    before = legacy.stat().st_mtime_ns
+    result = store.read(symbol, enqueue_repair=False)
 
-    assert failed is not None and failed["status"] == "failed"
-    result = store.read(symbol)
-    resolved = manager.get(queued["id"])
-
-    assert result.status == "ready"
-    assert result.frame is not None and len(result.frame) == len(original)
-    assert current.is_file() and not legacy.exists()
-    assert store.metadata(symbol)["last_status"] == "ready"
-    assert resolved["status"] == "completed"
-    assert resolved["result"]["reason"] == "legacy_filename_migrated"
-    assert manager.events(queued["id"])[-1]["type"] == "resolved_by_validation"
+    assert result.status == "corrupt"
+    assert not current.exists()
+    assert legacy.is_file() and legacy.stat().st_mtime_ns == before
 
 
 def test_research_integrity_failure_enqueues_one_repair(

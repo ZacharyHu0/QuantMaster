@@ -1,5 +1,6 @@
 """行业中性化测试（合成映射，离线）。"""
 
+import json
 from datetime import date
 
 import numpy as np
@@ -11,7 +12,6 @@ from quantmaster.data.industry import (
     load_industry_analysis_context,
     load_industry_evidence,
     load_industry_map,
-    migrate_trusted_legacy_industry_map,
     save_industry_map,
 )
 from quantmaster.factors.neutral import industry_neutralize
@@ -177,7 +177,7 @@ class TestIndustryMapCache:
         with pytest.raises(RuntimeError, match="拒绝用当前行业映射"):
             load_industry_map(as_of="2026-08-08")
 
-    def test_legacy_current_mapping_is_available_only_as_degraded_preview(
+    def test_unmigrated_current_mapping_is_not_loaded(
         self, isolated_config, monkeypatch,
     ):
         from quantmaster.data import industry as mod
@@ -198,38 +198,40 @@ class TestIndustryMapCache:
             as_of="2026-08-08",
         )
 
-        assert mapping == {"600519.SH": "食品饮料"}
-        assert evidence["source"] == "legacy-local-preview"
+        assert mapping == {}
+        assert evidence["source"] == "unavailable"
         assert evidence["formal_eligible"] is False
         assert historical == {}
         assert historical_evidence["formal_eligible"] is False
 
-    def test_trusted_legacy_migration_is_current_only_and_has_no_content_hash(
+    def test_explicit_migration_is_current_only_and_has_no_content_hash(
         self, isolated_config, monkeypatch,
     ):
         from quantmaster.data import industry as mod
+        from quantmaster.data.legacy_migrations import migrate_industry_current_projection
 
-        legacy = isolated_config.data_root / "legacy-industry.json"
-        legacy.write_text(
+        projection = isolated_config.data_root / "industry_map.json"
+        projection.write_text(
             '{"updated_at": 1785119503.0, "mapping": {'
             '"600519.SH": "食品饮料", "000001.sz": "银行"}}',
             encoding="utf-8",
         )
-        migrated = migrate_trusted_legacy_industry_map(
-            legacy, imported_at="2026-08-13T00:00:00+00:00",
-        )
+        result = migrate_industry_current_projection(isolated_config.data_root)
+        migrated = json.loads(projection.read_text(encoding="utf-8"))
 
+        assert result[0]["outcome"] == "converted"
         assert "content_sha256" not in migrated
-        assert migrated["observed_at"] == "2026-07-27T02:31:43+00:00"
+        assert migrated["projection"] == "current_only"
+        assert migrated["updated_at"] == 1785119503.0
         assert load_industry_map() == {
             "600519.SH": "食品饮料", "000001.SZ": "银行",
         }
         evidence = load_industry_evidence()
-        assert evidence["status"] == "trusted"
+        assert evidence["status"] == "degraded"
         assert evidence["content_hash"] == ""
         mapping, context = load_industry_analysis_context()
         assert mapping == load_industry_map()
-        assert context["formal_eligible"] is True
+        assert context["formal_eligible"] is False
         with pytest.raises(RuntimeError, match="拒绝用当前行业映射"):
             load_industry_map(as_of="2026-07-27")
         assert not list(mod._history_root().glob("*.json"))

@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import logging
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from quantmaster.config import get_config
 from quantmaster.research.contracts import (
     ArtifactKind,
     AssetClass,
@@ -27,8 +23,6 @@ MAX_CSI800_SNAPSHOT_AGE_DAYS = 45
 EXPECTED_INDEX_MEMBERS = {"000300.SH": 300, "000905.SH": 500}
 MIN_INDEX_COMPLETENESS = 1.0
 logger = logging.getLogger(__name__)
-_LEGACY_CACHE_LOCK = threading.RLock()
-_LEGACY_CACHE: dict[tuple[str, int, int, int], pd.DataFrame] = {}
 
 
 def _normalize(records: pd.DataFrame | None) -> pd.DataFrame:
@@ -197,8 +191,7 @@ def load_cached_csi800_records(
         ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
         CSI800_DATASET, start, end,
     ))
-    legacy_records = load_legacy_csi800_records(start, end)
-    local = _normalize(pd.concat((legacy_records, lake_records), ignore_index=True))
+    local = lake_records
     requested = pd.Timestamp(end).normalize()
     cutoff = pd.Timestamp(daily_signal_cutoff(requested.date())).tz_convert("UTC")
     available_at = local["published_at"].where(
@@ -232,76 +225,13 @@ def load_cached_csi800_records(
                     ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
                     CSI800_DATASET, start, end,
                 ))
-                local = _normalize(pd.concat((legacy_records, lake_records), ignore_index=True))
+                local = lake_records
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.warning(
                 "中证800远端补缺失败；保留本地证据并由后续时点/新鲜度门禁裁决",
                 exc_info=True,
             )
     return local
-
-
-def load_legacy_csi800_records(
-    start: str, end: str, *, root: str | Path | None = None,
-) -> pd.DataFrame:
-    """Read historical PIT snapshots already present in the legacy Tushare cache.
-
-    This is deliberately read-only: older installations often contain years of
-    ``index_weight`` responses even when the newer research-lake migration only
-    retained recent partitions.
-    """
-    cache_root = (
-        Path(root) if root is not None
-        else get_config().data_root / "api_cache" / "tushare"
-    )
-    if not cache_root.is_dir():
-        return _normalize(None)
-    files = sorted(cache_root.glob("index_weight-*.parquet"))
-    identities = []
-    for path in files:
-        try:
-            stat = path.stat()
-            identities.append((path, stat.st_size, stat.st_mtime_ns))
-        except OSError:
-            continue
-    key = (
-        str(cache_root.resolve()), len(identities),
-        sum(size for _path, size, _mtime in identities),
-        max((mtime for _path, _size, mtime in identities), default=0),
-    )
-    with _LEGACY_CACHE_LOCK:
-        cached = _LEGACY_CACHE.get(key)
-    if cached is None:
-        def read(path: Path) -> pd.DataFrame | None:
-            try:
-                frame = pd.read_parquet(
-                    path, columns=["index_code", "con_code", "trade_date", "weight"],
-                )
-                acquired_at = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-                value = _with_temporal_evidence(
-                    frame.rename(columns={"con_code": "symbol"}),
-                    acquired_at=acquired_at,
-                )
-                value["temporal_quality"] = "legacy_unverified"
-                return value
-            except (OSError, ValueError, KeyError) as exc:
-                logger.warning("跳过不可读的本地 index_weight 缓存 %s: %s", path.name, exc)
-                return None
-
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(identities)))) as executor:
-            loaded = list(executor.map(read, (item[0] for item in identities)))
-        cached = _normalize(pd.concat(
-            [frame for frame in loaded if frame is not None and not frame.empty],
-            ignore_index=True,
-        )) if any(frame is not None and not frame.empty for frame in loaded) else _normalize(None)
-        with _LEGACY_CACHE_LOCK:
-            _LEGACY_CACHE.clear()
-            _LEGACY_CACHE[key] = cached
-    beginning = pd.Timestamp(start).normalize()
-    ending = pd.Timestamp(end).normalize()
-    return cached.loc[
-        (cached["trade_date"] >= beginning) & (cached["trade_date"] <= ending)
-    ].copy()
 
 
 def load_cached_csi800_members_as_of(

@@ -208,8 +208,6 @@ class InstrumentStore:
             count = connection.execute("SELECT COUNT(*) FROM instruments").fetchone()[0]
         if not count:
             self._import_bundled_snapshot()
-        self._migrate_legacy_names()
-        self._migrate_exchange_etfs()
 
     def _import_bundled_snapshot(self) -> None:
         records: list[dict[str, Any]] = []
@@ -232,45 +230,6 @@ class InstrumentStore:
                        VALUES(?,?,?,?,?,?)""",
                     (source, generated_at, generated_at, "bundled", imported, ""),
                 )
-
-    def _migrate_legacy_names(self) -> None:
-        legacy = self.path.parent / "stock_names.json"
-        if not legacy.is_file():
-            return
-        with self._connection() as connection:
-            done = connection.execute(
-                "SELECT value FROM meta WHERE key='legacy_names_migrated'"
-            ).fetchone()
-        if done:
-            return
-        try:
-            payload = json.loads(legacy.read_text(encoding="utf-8"))
-            names = payload.get("names", {}) if isinstance(payload, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            names = {}
-        with self._connection() as connection:
-            for symbol, name in names.items():
-                clean = str(name).strip()
-                if clean:
-                    connection.execute(
-                        "UPDATE instruments SET name=CASE WHEN name='' THEN ? ELSE name END "
-                        "WHERE symbol=?", (clean, str(symbol).upper()),
-                    )
-                    self._insert_alias(connection, clean, str(symbol).upper(), "legacy_name", 88)
-            connection.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('legacy_names_migrated', ?)",
-                (str(int(time.time())),),
-            )
-
-    def _migrate_exchange_etfs(self) -> None:
-        """Repair old Tushare fund_basic imports that labeled listed ETFs as funds."""
-        with self._connection() as connection:
-            connection.execute(
-                """UPDATE instruments SET asset_type='etf'
-                   WHERE market='CN' AND exchange IN ('SH','SZ') AND asset_type='fund'
-                     AND UPPER(name) LIKE '%ETF%' AND UPPER(name) NOT LIKE '%LOF%'
-                     AND name NOT LIKE '%联接%'"""
-            )
 
     @staticmethod
     def _coerce(record: Instrument | dict[str, Any], source: str, priority: int) -> dict[str, Any]:
