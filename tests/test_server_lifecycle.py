@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from quantmaster.server import lifecycle
 
 
@@ -173,6 +175,78 @@ def test_reload_lifecycle_deadlines_are_bounded(monkeypatch):
     monkeypatch.setenv("QM_RELOAD_DRAIN_SECONDS", "0")
     monkeypatch.setenv("QM_RELOAD_FORCE_KILL_SECONDS", "999")
     assert lifecycle._reload_lifecycle_seconds() == (20.0, 1.0, 120.0)
+
+
+def test_windows_reload_listener_uses_exclusive_address(monkeypatch):
+    calls = []
+
+    class FakeListener:
+        def setsockopt(self, *args):
+            calls.append(("setsockopt", args))
+
+        def bind(self, address):
+            calls.append(("bind", address))
+
+        def set_inheritable(self, value):
+            calls.append(("inheritable", value))
+
+        def close(self):
+            calls.append(("close",))
+
+    listener = FakeListener()
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(
+        lifecycle.socket_module,
+        "socket",
+        lambda *, family, type: listener,
+    )
+
+    class Config:
+        def bind_socket(self):
+            raise AssertionError("Windows must not use Uvicorn's reusable socket")
+
+    assert lifecycle._bind_reload_socket(Config(), "127.0.0.1", 8686) is listener
+    assert calls == [
+        (
+            "setsockopt",
+            (
+                lifecycle.socket_module.SOL_SOCKET,
+                lifecycle.socket_module.SO_EXCLUSIVEADDRUSE,
+                1,
+            ),
+        ),
+        ("bind", ("127.0.0.1", 8686)),
+        ("inheritable", True),
+    ]
+
+
+def test_windows_reload_listener_reports_port_conflict(monkeypatch):
+    calls = []
+
+    class ConflictingListener:
+        def setsockopt(self, *_args):
+            pass
+
+        def bind(self, _address):
+            raise OSError("address already in use")
+
+        def set_inheritable(self, _value):
+            raise AssertionError("a failed listener must not be inherited")
+
+        def close(self):
+            calls.append("closed")
+
+    monkeypatch.setattr(lifecycle.os, "name", "nt")
+    monkeypatch.setattr(
+        lifecycle.socket_module,
+        "socket",
+        lambda **_kwargs: ConflictingListener(),
+    )
+
+    with pytest.raises(RuntimeError, match=r"127\.0\.0\.1:8686.*端口已被"):
+        lifecycle._bind_reload_socket(object(), "127.0.0.1", 8686)
+
+    assert calls == ["closed"]
 
 
 def test_reload_stop_never_joins_a_wedged_worker_without_a_deadline(monkeypatch):

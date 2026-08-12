@@ -4,7 +4,7 @@
 每次仓库修改都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
 """
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 RELEASE_DATE = "2026-08-12"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -12,6 +12,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Windows 重载端口隔离修复",
+                "items": (
+                    (
+                        "Windows 热重载监督器改为独占 Web 监听端口；已有实例运行时"
+                        "立即报告端口占用，不再与旧代次共享端口后误报启动超时。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.8.0",
+        "date": "2026-08-12",
         "sections": (
             {
                 "title": "全局页面可用性根治",

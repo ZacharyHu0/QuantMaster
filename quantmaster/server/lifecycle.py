@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import functools
-import logging
-import multiprocessing
-import os
 import http.client
+import logging
+import os
 import signal
+import socket as socket_module
 import threading
 import time
 from collections.abc import Callable
@@ -411,6 +411,40 @@ def _generation_is_ready(host: str, port: int, generation: int) -> bool:
         connection.close()
 
 
+def _bind_reload_socket(config: Any, host: str, port: int) -> Any:
+    """Bind the stable reload listener without sharing it with another app.
+
+    Uvicorn enables ``SO_REUSEADDR`` in ``Config.bind_socket``.  On Windows
+    that permits two live processes to bind the same address.  A new reload
+    supervisor can then start successfully while its health probes are routed
+    to the older QuantMaster generation, so it waits until the readiness
+    deadline and reports a misleading startup failure.  The supervisor owns
+    one socket for its whole lifetime, so Windows can and should make that
+    listener exclusive; child generations continue to inherit this same
+    socket for blue/green replacement.
+    """
+
+    if os.name != "nt":
+        return config.bind_socket()
+
+    family = socket_module.AF_INET6 if host and ":" in host else socket_module.AF_INET
+    listener = socket_module.socket(family=family, type=socket_module.SOCK_STREAM)
+    try:
+        listener.setsockopt(
+            socket_module.SOL_SOCKET,
+            socket_module.SO_EXCLUSIVEADDRUSE,
+            1,
+        )
+        listener.bind((host, int(port)))
+        listener.set_inheritable(True)
+    except OSError:
+        listener.close()
+        raise RuntimeError(
+            f"QuantMaster 无法独占监听 {host}:{port}：端口已被其他进程占用"
+        ) from None
+    return listener
+
+
 class _ReloadChangeGate:
     """Accumulate backend changes and enforce a real minimum reload interval."""
 
@@ -478,9 +512,9 @@ def _run_quiet_uvicorn_reload(
     the historical failure mode where ``BaseReload.restart()`` joined a wedged
     worker forever while the TCP port still accepted connections.
     """
+    from uvicorn._subprocess import get_subprocess, spawn
     from uvicorn.supervisors.basereload import BaseReload
     from uvicorn.supervisors.watchfilesreload import FileFilter
-    from uvicorn._subprocess import get_subprocess, spawn
     from watchfiles import watch
 
     quiet_ms, maximum_ms, interval_ms = _reload_timing_ms()
@@ -688,7 +722,7 @@ def _run_quiet_uvicorn_reload(
         reload_dirs=[str(package_dir)],
         reload_includes=["*.py"],
     )
-    socket = config.bind_socket()
+    socket = _bind_reload_socket(config, host, port)
     try:
         QuietReload(config, target=_run_web_generation, sockets=[socket]).run()
     except KeyboardInterrupt:  # pragma: no cover - interactive terminal path
