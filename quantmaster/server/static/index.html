@@ -1263,6 +1263,16 @@
             <div class="diagnostic-heading"><div><h4>数据目录</h4><p>确认当前目录可写并读取剩余空间。</p></div><button class="ghost check-button" type="button" data-check="storage">检测目录</button></div>
             <div class="check-result" data-check-result="storage" aria-live="polite"><div class="check-summary">目录尚未检测</div></div>
           </section>
+          <section class="cache-observability" aria-labelledby="cache-observability-title">
+            <div class="cache-observability-heading">
+              <div><h4 id="cache-observability-title">缓存可信度</h4><p>按 namespace 查看新鲜度、部分结果、负缓存、待补齐与精确失效版本。</p></div>
+              <span id="cache-observability-state" role="status" aria-live="polite" aria-atomic="true">等待后台观测</span>
+            </div>
+            <dl class="cache-observability-summary" id="cache-observability-summary" aria-label="缓存状态摘要">
+              <div><dt>已观测</dt><dd>—</dd></div><div><dt>命中率</dt><dd>—</dd></div><div><dt>Fresh / Stale</dt><dd>—</dd></div><div><dt>Partial / Negative</dt><dd>—</dd></div><div><dt>Pending</dt><dd>—</dd></div>
+            </dl>
+            <div class="cache-namespace-list" id="cache-namespace-list"><p class="cache-observability-empty">诊断采样完成后显示 namespace 明细。</p></div>
+          </section>
           <div class="field-grid settings-subsection">
             <label class="field-wide">当前数据根目录<input name="data.root" readonly><small>要更换目录，请使用下方迁移工具。</small></label>
             <label>free-stockdb 超时（秒）<input name="data.free_stockdb_timeout" type="number" min="0.5" max="30" step="0.5" required><small>仅用于本机 HTTP 兼容接口。</small></label>

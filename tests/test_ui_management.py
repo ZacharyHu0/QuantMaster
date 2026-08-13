@@ -482,6 +482,61 @@ def test_runtime_lifecycle_snapshot_is_compact_sanitized_and_backward_compatible
         browser.close()
 
 
+def test_cache_namespace_observability_is_progressive_accessible_and_narrow(live_server):
+    url, _ = live_server
+    cache = {
+        "summary": {
+            "namespace_count": 1, "observed_count": 1, "hit_rate": 0.75,
+            "fresh": 7, "stale": 1, "partial": 2, "negative": 1,
+            "pending": 2, "provider_revalidation_pending": 1,
+        },
+        "namespaces": [{
+            "namespace": "market.bars", "label": "行情", "observed": True,
+            "value_kind": "normalized OHLCV bars",
+            "freshness_rule": "交易日与收盘边界，formal read 受 as_of 约束",
+            "dependencies": ["provider_config", "parser", "calendar"],
+            "hit_rate": 0.75, "hits": 3, "misses": 1,
+            "counts": {"fresh": 7, "stale": 1, "partial": 2, "negative": 1},
+            "oldest_at": "2026-08-01T00:00:00Z", "newest_at": "2026-08-13T07:00:00Z",
+            "refresh": {"completed": 8, "total": 10, "pending": 2},
+            "negatives": [{"reason": "instrument_not_found", "count": 1}],
+            "stale_consumers": ["市场页"], "provider_revalidation_pending": 1,
+            "config_revision": "cfg-12", "parser_revision": "bars-v4",
+            "issues": [{"code": "CACHE_PARTIAL", "message": "2 项待补齐"}],
+        }],
+    }
+    diagnostics = {
+        "issues": [], "recent_recovered": [], "cache": cache,
+        "runtime": {"readiness": {}, "web": {}, "supervisor": {}, "storage": {}, "scheduler": {}},
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.route(
+            "**/api/v1/diagnostics",
+            lambda route: route.fulfill(status=200, json=diagnostics),
+        )
+        page.goto(url)
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.locator("#settings-section-select").select_option("local-data")
+        state = page.locator("#cache-observability-state")
+        _wait_for_text(state, "已观测 1 / 1")
+        assert "75.0%" in page.locator("#cache-observability-summary").inner_text()
+        namespace = page.locator(".cache-namespace")
+        assert "需关注" in namespace.locator("summary").inner_text()
+        assert namespace.get_attribute("data-cache-state") == "attention"
+        namespace.locator("summary").focus()
+        page.keyboard.press("Enter")
+        assert "formal read 受 as_of 约束" in namespace.inner_text()
+        assert "instrument_not_found · 1 项" in namespace.inner_text()
+        assert "CACHE_PARTIAL" in namespace.inner_text()
+        assert "市场页" in namespace.inner_text()
+        assert "cfg-12 / bars-v4" in namespace.inner_text()
+        _wait_for_document_fit(page)
+        browser.close()
+
+
 def test_help_handbook_search_routes_and_calculators(live_server):
     url, _ = live_server
     trade_settings = {

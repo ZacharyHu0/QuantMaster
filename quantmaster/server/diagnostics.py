@@ -42,6 +42,9 @@ def _refresh() -> None:
         from quantmaster.runtime.llm import get_llm_execution_coordinator
 
         report["components"] = safe_operational_metrics()
+        from quantmaster.server.cache_observability import collect_cache_observability
+
+        report["cache"] = collect_cache_observability()
         report["llm"] = get_llm_execution_coordinator().diagnostics()
         from quantmaster.server.readiness import runtime_status
 

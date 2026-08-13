@@ -79,6 +79,23 @@ class TestBasics:
         assert client.get("/api/v1/health/live").status_code == 404
         assert client.get("/api/v1/health/ready").status_code == 404
 
+    def test_cache_observability_ui_contract_is_accessible_and_responsive(self):
+        page = client.get("/").text
+        script = client.get("/static/app.js").text
+        styles = client.get("/static/settings.css").text
+
+        assert 'aria-labelledby="cache-observability-title"' in page
+        assert 'id="cache-observability-state" role="status" aria-live="polite"' in page
+        assert 'aria-label="缓存状态摘要"' in page
+        assert "renderCacheObservability(data.cache)" in script
+        assert "数据截至 ${asOf}" in script
+        assert "已完成 ${completed} / ${requested}" in script
+        assert "CACHE_NAMESPACE_UNOBSERVED" not in script
+        assert "这不代表缓存为空或健康" in script
+        assert ".cache-namespace > summary:focus-visible" in styles
+        assert "min-height:44px" in styles
+        assert "@media (max-width: 680px)" in styles
+
     def test_news_lock_is_retryable_service_unavailable(self, monkeypatch):
         from quantmaster.server import news as news_module
 
@@ -216,6 +233,7 @@ class TestBasics:
         assert problem["consecutive_count"] >= 1
         assert problem["first_seen"] and problem["last_seen"]
         assert "secret-token" not in str(payload)
+        assert payload["cache"]["summary"]["namespace_count"] >= 1
         assert "错误码" in (client.get("/static/app.js").text)
         assert "syncRuntime(data.runtime)" in (client.get("/static/app.js").text)
         app_script = client.get("/static/app.js").text

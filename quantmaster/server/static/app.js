@@ -1031,6 +1031,7 @@ async function refreshBackendHealth() {
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
     runtimeInfo.sync('recovered', Array.isArray(data.recent_recovered) ? data.recent_recovered : []);
     runtimeInfo.syncRuntime(data.runtime);
+    renderCacheObservability(data.cache);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
       id:'health-unreachable', severity:'error', source:'后台状态',
@@ -1040,6 +1041,63 @@ async function refreshBackendHealth() {
     runtimeInfo.resolve('request:GET:/api/v1/diagnostics');
     runtimeInfo.sync('health', [problem]);
   }
+}
+
+function cacheDate(value) {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? esc(String(value))
+    : esc(parsed.toLocaleString('zh-CN', {hour12:false}));
+}
+
+function cacheIssueMarkup(issue) {
+  const code = String(issue?.code || 'CACHE_DIAGNOSTIC');
+  const message = String(issue?.message || '没有更多诊断说明');
+  return `<li><code>${esc(code)}</code><span>${esc(message)}</span></li>`;
+}
+
+function cacheNamespaceMarkup(item, index) {
+  const counts = item?.counts || {}, refresh = item?.refresh || {};
+  const observed = item?.observed !== false;
+  const status = observed ? (Number(counts.stale || 0) || Number(counts.partial || 0)
+    || Number(refresh.pending || 0) ? 'attention' : 'healthy') : 'unavailable';
+  const label = String(item?.label || item?.namespace || '未命名 namespace');
+  const namespace = String(item?.namespace || 'unknown');
+  const hitRate = item?.hit_rate == null ? '无请求样本' : `${(Number(item.hit_rate) * 100).toFixed(1)}%`;
+  const negatives = Array.isArray(item?.negatives) ? item.negatives : [];
+  const issues = Array.isArray(item?.issues) ? item.issues : [];
+  const consumers = Array.isArray(item?.stale_consumers) ? item.stale_consumers : [];
+  const dependencies = Array.isArray(item?.dependencies) ? item.dependencies : [];
+  const refreshText = Number(refresh.total || 0)
+    ? `${Number(refresh.completed || 0)} / ${Number(refresh.total || 0)}，pending ${Number(refresh.pending || 0)}`
+    : `pending ${Number(refresh.pending || 0)}`;
+  const stateLabel = !observed ? '未观测' : status === 'attention' ? '需关注' : '正常';
+  const detailsId = `cache-namespace-detail-${index}`;
+  return `<details class="cache-namespace" data-cache-state="${status}">
+    <summary aria-controls="${detailsId}"><span class="cache-namespace-identity"><strong>${esc(label)}</strong><code>${esc(namespace)}</code></span><span class="cache-namespace-state"><span aria-hidden="true">${status === 'healthy' ? '✓' : status === 'attention' ? '!' : '?'}</span>${stateLabel}</span><span class="cache-namespace-quick">命中 ${hitRate} · Fresh ${Number(counts.fresh || 0)} · Stale ${Number(counts.stale || 0)} · Partial ${Number(counts.partial || 0)} · Negative ${Number(counts.negative || 0)}</span></summary>
+    <div class="cache-namespace-detail" id="${detailsId}">
+      <dl><div><dt>值类型</dt><dd>${esc(item?.value_kind || '—')}</dd></div><div><dt>Freshness 规则</dt><dd>${esc(item?.freshness_rule || '—')}</dd></div><div><dt>最旧 / 最新</dt><dd>${cacheDate(item?.oldest_at)} / ${cacheDate(item?.newest_at)}</dd></div><div><dt>刷新 / 待补齐</dt><dd>${esc(refreshText)}</dd></div><div><dt>Provider 恢复待重验</dt><dd>${item?.provider_revalidation_pending == null ? '尚未观测' : Number(item.provider_revalidation_pending)}</dd></div><div><dt>Config / Parser revision</dt><dd>${esc(item?.config_revision || '—')} / ${esc(item?.parser_revision || '—')}</dd></div><div><dt>失效依赖</dt><dd>${dependencies.length ? dependencies.map(esc).join('、') : '—'}</dd></div><div><dt>使用 stale 的页面</dt><dd>${consumers.length ? consumers.map(esc).join('、') : '无'}</dd></div></dl>
+      ${negatives.length ? `<section><h5>负缓存原因（${negatives.length} 类）</h5><ul class="cache-negative-list">${negatives.map(value => `<li><strong>${esc(value.reason || '确证不存在')} · ${Number(value.count || 0)} 项</strong><span>${value.source ? `${esc(value.source)} · ` : ''}${value.observed_at ? `观察 ${cacheDate(value.observed_at)} · ` : ''}${value.expires_at ? `到期 ${cacheDate(value.expires_at)}` : '详细时间尚未观测'}</span></li>`).join('')}</ul></section>` : ''}
+      ${issues.length || item?.diagnostic_code ? `<section><h5>问题与诊断码</h5><ul class="cache-issue-list">${issues.map(cacheIssueMarkup).join('') || cacheIssueMarkup({code:item.diagnostic_code,message:'该 namespace 尚未发布运行期观测。'})}</ul></section>` : ''}
+    </div>
+  </details>`;
+}
+
+function renderCacheObservability(cache) {
+  const state = document.getElementById('cache-observability-state');
+  const summary = document.getElementById('cache-observability-summary');
+  const list = document.getElementById('cache-namespace-list');
+  if (!state || !summary || !list) return;
+  const values = Array.isArray(cache?.namespaces) ? cache.namespaces : [];
+  const totals = cache?.summary || {};
+  const observed = Number(totals.observed_count || 0);
+  const total = Number(totals.namespace_count ?? values.length);
+  state.textContent = observed ? `已观测 ${observed} / ${total}` : '尚无运行期观测';
+  state.dataset.state = observed === total && total ? 'healthy' : 'unavailable';
+  const hitRate = totals.hit_rate == null ? '无样本' : `${(Number(totals.hit_rate) * 100).toFixed(1)}%`;
+  summary.innerHTML = `<div><dt>已观测</dt><dd>${observed} / ${total}</dd></div><div><dt>命中率</dt><dd>${hitRate}</dd></div><div><dt>Fresh / Stale</dt><dd>${Number(totals.fresh || 0)} / ${Number(totals.stale || 0)}</dd></div><div><dt>Partial / Negative</dt><dd>${Number(totals.partial || 0)} / ${Number(totals.negative || 0)}</dd></div><div><dt>Pending</dt><dd>${Number(totals.pending || 0)} · 重验 ${Number(totals.provider_revalidation_pending || 0)}</dd></div>`;
+  list.innerHTML = values.length ? values.map(cacheNamespaceMarkup).join('')
+    : '<p class="cache-observability-empty">缓存观测暂不可用；这不代表缓存为空或健康。</p>';
 }
 queueMicrotask(refreshBackendHealth);
 setInterval(refreshBackendHealth, 30_000);
@@ -2515,9 +2573,14 @@ async function loadMarket() {
       window.clearTimeout(marketColdRetryTimer);
       marketColdRetryTimer = null;
     }
+    const quality = data?.data_quality || {};
+    const completed = Number(quality.observed_count ?? renderer.count);
+    const requested = Number(quality.requested_count ?? completed);
+    const completion = requested ? ` · 已完成 ${completed} / ${requested}` : '';
+    const asOf = snapshot?.as_of || data?.meta?.as_of || '';
     document.getElementById('mkt-stamp').textContent = snapshot?.state === 'stale'
-      ? `正在展示陈旧快照${snapshot.as_of ? `（截至 ${snapshot.as_of}）` : ''}`
-      : '检查于 ' + new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'});
+      ? `正在展示陈旧快照${asOf ? ` · 数据截至 ${asOf}` : ''}${completion}`
+      : `${asOf ? `数据截至 ${asOf}` : `检查于 ${new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'})}`}${completion}`;
   } catch (e) {
     const snapshotUnavailable = e?.problem?.code === 'snapshot_unavailable';
     if (renderer && tracker) {
