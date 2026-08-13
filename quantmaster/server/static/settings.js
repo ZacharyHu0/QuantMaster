@@ -150,7 +150,12 @@
       } else if (input.type === 'checkbox') input.checked = Boolean(value);
       else if (input.dataset.valueType === 'list') input.value = (value || []).join('\n');
       else {
-        if (input.matches('[data-candidate-select]')) input.dataset.candidateValue = value;
+        if (input.matches('[data-candidate-select]')) {
+          input.dataset.candidateValue = value;
+          if (value && ![...input.options].some(option => option.value === value)) {
+            input.add(new Option(value, value));
+          }
+        }
         input.value = value;
       }
       input.removeAttribute('aria-invalid');

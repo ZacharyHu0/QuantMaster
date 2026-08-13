@@ -192,10 +192,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         browser_settings = page.evaluate("structuredClone(window.QuantMasterManagement.state.config)")
 
         def fulfill_settings_save(route):
+            body = route.request.post_data_json
             if route.request.method != "PUT":
                 route.continue_()
                 return
-            body = route.request.post_data_json
             for key in (
                 "config_version",
                 "llm",
@@ -225,6 +225,17 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
                 ),
             )
 
+        page.route(
+            "**/api/v1/settings/validate",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "normalized": route.request.post_data_json,
+                    "warnings": [],
+                }),
+            ),
+        )
         page.route("**/api/v1/settings", fulfill_settings_save)
 
         page.locator('[name="llm.provider"]').select_option("openai-compatible")
@@ -233,6 +244,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator('[name="llm.reasoning_effort"]').select_option("high")
         page.locator('[name="llm.max_concurrency"]').fill("2")
         page.locator('[name="llm.max_concurrency"]').blur()
+        invalid_fields = page.locator("#settings-form :invalid").evaluate_all(
+            "elements => elements.map(element => element.name || element.id)"
+        )
+        assert invalid_fields == []
         _wait_for_class(page.locator("#settings-save-state"), "saved")
         page.locator('[data-check="llm-models"]').click()
         model_check = page.locator('[data-check-result="llm-models"]')
