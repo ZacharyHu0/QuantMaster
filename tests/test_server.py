@@ -1154,7 +1154,7 @@ class TestBasics:
         from quantmaster.data.storage import BarStore
         from quantmaster.server import app as app_module
 
-        symbol = "^GSPC.US"
+        symbol = "SPX.INDEX"
         dates = pd.bdate_range("2026-07-20", periods=3)
         BarStore().put(symbol, pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates))
         monkeypatch.setattr(app_module, "_market_groups", lambda: {
@@ -1184,7 +1184,7 @@ class TestBasics:
     def test_market_overview_exposes_unavailable_reference_details(self, monkeypatch):
         from quantmaster.server import app as app_module
 
-        symbol = "DX-Y.NYB.US"
+        symbol = "DXY.INDEX"
         monkeypatch.setattr(app_module, "_personal_market_symbols", lambda: ({}, {}))
         monkeypatch.setattr(app_module, "_market_groups", lambda: {
             "商品与汇率": {symbol: "美元指数"},

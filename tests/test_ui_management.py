@@ -82,8 +82,9 @@ def live_server(tmp_path_factory, _minimal_security_master):
     env = os.environ.copy()
     env["QM_DATA_ROOT"] = str(data_root)
     # The browser lane exercises the web process, not the background worker
-    # supervisor.  Keeping the supervisor disabled prevents descendants from
-    # retaining SQLite and directory handles after uvicorn exits on Windows.
+    # supervisor.  A fixed seed avoids racing the legitimate first-start
+    # catalogue migration, while disabling the supervisor prevents descendants
+    # from retaining SQLite and directory handles after uvicorn exits on Windows.
     env["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
     project = Path(__file__).parents[1]
     env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
@@ -406,6 +407,14 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.get_by_role("button", name="批量编辑", exact=True).click()
         page.locator("#candidate-bulk-text").fill("600519\n000001\n600519.SH")
         page.get_by_role("button", name="应用到草稿", exact=True).click()
+        # 000001 is both the SSE composite index and a Shenzhen stock.  The
+        # identity contract deliberately requires an explicit user choice.
+        resolution = page.locator(
+            '.candidate-resolution [data-candidate-query="000001"]'
+            '[data-candidate-choice="000001.SZ"]'
+        )
+        resolution.wait_for(state="visible")
+        resolution.click()
         page.get_by_text("有尚未生效的更改", exact=True).wait_for()
         member_symbols = page.locator(".candidate-member-symbol")
         playwright_sync.expect(member_symbols).to_have_count(2)

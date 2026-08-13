@@ -909,6 +909,12 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
         "/api/v1/settings/universes",
         json={"name": "core", "symbols": ["600519", "000001"]}, headers=headers,
     )
+    assert created.status_code == 422
+    assert "多个市场" in created.text
+    created = client.post(
+        "/api/v1/settings/universes",
+        json={"name": "core", "symbols": ["600519.SH", "000001.SZ"]}, headers=headers,
+    )
     assert created.status_code == 200
     detail = client.get("/api/v1/settings/universes/core").json()
     assert detail["symbols"] == ["600519.SH", "000001.SZ"]

@@ -28,7 +28,7 @@ def test_reference_market_prefers_validated_sina_route(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Yahoo 不应被调用")),
     )
 
-    result = fetch_reference("^GSPC.US", "2026-07-01", "2026-07-31")
+    result = fetch_reference("SPX.INDEX", "2026-07-01", "2026-07-31")
 
     assert result.source == "sina:test"
     assert list(result.frame.columns) == ["open", "high", "low", "close", "volume"]
@@ -49,7 +49,7 @@ def test_reference_market_falls_back_per_symbol_and_records_attempt(monkeypatch)
         lambda *args, **kwargs: yahoo,
     )
 
-    result = fetch_reference("^GSPC.US", "2026-07-01", "2026-07-31")
+    result = fetch_reference("SPX.INDEX", "2026-07-01", "2026-07-31")
 
     assert result.source == "yfinance"
     assert result.attempts[0]["source"] == "sina:test"
@@ -71,7 +71,7 @@ def test_reference_market_normalizes_tushare_fx_trade_date(monkeypatch):
         "quantmaster.data.reference_market._tushare_cny", lambda start, end: raw,
     )
 
-    result = fetch_reference("CNY=X.US", "2026-07-01", "2026-07-31")
+    result = fetch_reference("USD-CNY.FX", "2026-07-01", "2026-07-31")
 
     assert result.source == "tushare:fx"
     assert result.frame.index.tolist() == [pd.Timestamp("2026-07-30")]
@@ -96,7 +96,7 @@ def test_dollar_index_uses_akshare_before_yahoo(monkeypatch):
     monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
         index_global_hist_em=global_index,
     ))
-    result = fetch_reference("DX-Y.NYB.US", "2024-01-01", "2024-01-05")
+    result = fetch_reference("DXY.INDEX", "2024-01-01", "2024-01-05")
     assert result.source == "akshare:global-index"
     assert calls == [{"symbol": "美元指数"}]
     assert result.frame["close"].iloc[-1] == 103.0
@@ -117,7 +117,7 @@ def test_refresh_reference_symbol_uses_dedicated_route_and_writes_cache(tmp_path
         "quantmaster.data.reference_market.fetch_reference", reference,
     )
     monkeypatch.setattr(
-        "quantmaster.data.reference_market.is_reference_symbol", lambda symbol: symbol == "GC=F.US",
+        "quantmaster.data.reference_market.is_reference_symbol", lambda symbol: symbol == "GC.CONTINUOUS",
     )
     monkeypatch.setattr(
         registry, "_request_factories", lambda **kwargs: (_ for _ in ()).throw(
@@ -127,9 +127,9 @@ def test_refresh_reference_symbol_uses_dedicated_route_and_writes_cache(tmp_path
 
     store = BarStore(root=tmp_path / "bars")
     result = registry.refresh_history(
-        "GC=F.US", "2026-07-20", "2026-07-24", store=store,
+        "GC.CONTINUOUS", "2026-07-20", "2026-07-24", store=store,
     )
 
-    assert calls == [("GC=F.US", "2026-07-20", "2026-07-24")]
+    assert calls == [("GC.CONTINUOUS", "2026-07-20", "2026-07-24")]
     assert result.data.index.equals(raw.index)
-    assert store.metadata("GC=F.US")["last_source"] == "sina:foreign-futures"
+    assert store.metadata("GC.CONTINUOUS")["last_source"] == "sina:foreign-futures"

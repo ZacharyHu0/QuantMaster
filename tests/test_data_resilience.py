@@ -1392,9 +1392,9 @@ def test_yahoo_daily_many_uses_one_batch_and_restores_symbol_mapping(monkeypatch
         lambda lane, key, func, **kwargs: func(),
     )
     result = YFinanceSource().daily_many(
-        ["^GSPC.US", "^N225.JP"], "2024-01-02", "2024-01-04")
+        ["SPX.INDEX", "N225.INDEX"], "2024-01-02", "2024-01-04")
 
     assert len(FakeYF.calls) == 1
     assert set(FakeYF.calls[0][0]) == {"^GSPC", "^N225"}
-    assert result["^GSPC.US"].iloc[-1]["close"] == 102.0
-    assert result["^N225.JP"].iloc[-1]["close"] == 204.0
+    assert result["SPX.INDEX"].iloc[-1]["close"] == 102.0
+    assert result["N225.INDEX"].iloc[-1]["close"] == 204.0

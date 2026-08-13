@@ -122,6 +122,13 @@ class AkshareSource(DataSource):
                 ak.index_zh_a_hist_min_em,
                 symbol=code, period=period, start_date=start, end_date=end,
             )
+        elif market == Market.CN and instrument_type in {"etf", "fund"}:
+            raw = akshare_call(
+                f"fund_etf_hist_min_em({symbol},{frequency})",
+                ak.fund_etf_hist_min_em,
+                symbol=code, period=period, start_date=start, end_date=end,
+                adjust="",
+            )
         elif market == Market.CN:
             raw = akshare_call(
                 f"stock_zh_a_hist_min_em({symbol},{frequency})",
@@ -185,15 +192,26 @@ class AkshareSource(DataSource):
             raise RuntimeError(f"{index_symbol} 成分响应缺少证券代码列")
         result = []
         seen = set()
-        for value in raw[member_column].dropna():
-            c = str(value).strip().split(".", 1)[0].zfill(6)
+        exchange_column = next(
+            (column for column in ("交易所", "所属交易所") if column in raw), None,
+        )
+        if exchange_column is None:
+            raise RuntimeError(
+                f"{index_symbol} 成分响应缺少交易所；不能按代码首位猜市场"
+            )
+        exchanges = {
+            "上海证券交易所": "SH", "上交所": "SH", "SSE": "SH", "SH": "SH",
+            "深圳证券交易所": "SZ", "深交所": "SZ", "SZSE": "SZ", "SZ": "SZ",
+            "北京证券交易所": "BJ", "北交所": "BJ", "BSE": "BJ", "BJ": "BJ",
+        }
+        for _, row in raw[[member_column, exchange_column]].dropna().iterrows():
+            c = str(row[member_column]).strip().split(".", 1)[0].zfill(6)
             if not c.isdigit() or len(c) != 6 or c in seen:
                 continue
+            suffix = exchanges.get(str(row[exchange_column]).strip().upper())
+            if suffix is None:
+                raise RuntimeError(f"{index_symbol} 成分包含未识别交易所: {row[exchange_column]}")
             seen.add(c)
-            suffix = (
-                "BJ" if c.startswith(("4", "8", "92"))
-                else ("SH" if c.startswith(("6", "9")) else "SZ")
-            )
             result.append(f"{c}.{suffix}")
         if not result:
             raise RuntimeError(f"{index_symbol} 没有可用成分")

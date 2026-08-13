@@ -31,9 +31,9 @@ def market_symbols() -> list[str]:
 
     return list(dict.fromkeys([
         *A_SHARE_INDEXES,
-        *(symbol for symbol in GLOBAL_REFS if "=" not in symbol and "-" not in symbol),
+        *(symbol for symbol in GLOBAL_REFS if not symbol.endswith((".CONTINUOUS", ".FX"))),
         *(symbol for symbol in FUTURES_MAIN if not symbol.startswith("IF")),
-        *(symbol for symbol in GLOBAL_REFS if "=" in symbol or "-" in symbol),
+        *(symbol for symbol in GLOBAL_REFS if symbol.endswith((".CONTINUOUS", ".FX"))),
     ]))
 
 

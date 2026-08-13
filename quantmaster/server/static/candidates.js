@@ -53,7 +53,8 @@
   }
 
   function assetLabel(value) {
-    return ({stock:'股票', etf:'ETF', fund:'基金', index:'指数', future:'期货'})[value] || value || '标的';
+    return ({stock:'股票', etf:'ETF', fund:'基金', index:'指数', otc:'OTC', forex:'外汇',
+      future_contract:'月份期货合约', future_continuous:'Provider 连续期货序列'})[value] || value || '标的';
   }
 
   function marketLabel(item) {
@@ -64,7 +65,7 @@
     return `<button class="candidate-resolution-choice" type="button" data-candidate-choice="${html(item.symbol)}"
       data-candidate-query="${html(query)}" data-candidate-scope="${scope}">
       <span><strong>${html(item.name || item.en_name || item.symbol)}</strong><small>${html(item.symbol)}</small></span>
-      <span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em><em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em></span>
+      <span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em><em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em><em>${html(item.currency || '币种待确认')}</em></span>
     </button>`;
   }
 
@@ -495,7 +496,8 @@
       root = document.createElement('div');
       root.id = 'candidate-instrument-options';
       root.className = 'candidate-instrument-options';
-      root.setAttribute('role', 'listbox');
+    root.setAttribute('role', 'listbox');
+    root.setAttribute('aria-live', 'polite');
       root.hidden = true;
       document.body.appendChild(root);
     }
@@ -527,8 +529,8 @@
     root.innerHTML = state.searchItems.length ? state.searchItems.map((item, index) =>
       `<button id="candidate-instrument-option-${index}" type="button" role="option" aria-selected="${index === 0}"
         data-instrument-option="${index}"><span><strong>${html(item.name || item.en_name || item.symbol)}</strong>
-        <small>${html(item.symbol)}</small></span><span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em>
-        <em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em></span></button>`
+        <small>${html(item.symbol)}${item.identity_description ? ` · ${html(item.identity_description)}` : ''}</small></span><span class="candidate-instrument-tags"><em>${html(marketLabel(item))}</em>
+        <em>${html(item.exchange)}</em><em>${html(assetLabel(item.asset_type))}</em><em>${html(item.currency || '币种待确认')}</em></span></button>`
     ).join('') : '<div class="candidate-instrument-empty">本地主数据和可用在线目录中均未找到匹配项</div>';
     positionInstrumentSearch(root, input);
     root.hidden = false;

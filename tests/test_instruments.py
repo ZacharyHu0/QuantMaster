@@ -7,9 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
-from quantmaster.data.instruments import InstrumentStore, resolve_instruments
+from quantmaster.data.instruments import InstrumentStore, ProviderAlias, resolve_instruments
 from quantmaster.server.app import app
 
 
@@ -147,6 +148,56 @@ def test_short_numeric_code_requires_explicit_market_choice():
     assert selected["resolved"][0]["instrument"]["symbol"] == "00700.HK"
 
 
+def test_bare_code_never_prefers_active_stock_over_index():
+    store = InstrumentStore()
+    result = store.resolve("000001")
+
+    assert result["status"] == "ambiguous"
+    assert {item["symbol"] for item in result["candidates"]} >= {
+        "000001.SH", "000001.SZ",
+    }
+
+
+def test_provider_alias_uses_historical_validity_and_rejects_conflicts(tmp_path):
+    store = InstrumentStore(tmp_path / "master.sqlite")
+    instrument = store.get("AAPL.US")
+    assert instrument and instrument.instrument_id
+    store.add_provider_alias(ProviderAlias(
+        instrument_id=instrument.instrument_id, provider="test", provider_symbol="OLD",
+        valid_from="2000-01-01", valid_to="2020-12-31", provider_exchange="NASDAQ",
+        provider_asset_type="stock", provider_currency="USD", evidence_source="fixture",
+    ))
+    store.add_provider_alias(ProviderAlias(
+        instrument_id=instrument.instrument_id, provider="test", provider_symbol="NEW",
+        valid_from="2021-01-01", provider_exchange="NASDAQ",
+        provider_asset_type="stock", provider_currency="USD", evidence_source="fixture",
+    ))
+
+    assert store.provider_alias(instrument.instrument_id, "test", as_of="2019-01-01").provider_symbol == "OLD"
+    assert store.provider_alias(instrument.instrument_id, "test", as_of="2025-01-01").provider_symbol == "NEW"
+    with pytest.raises(ValueError, match="currency"):
+        store.add_provider_alias(ProviderAlias(
+            instrument_id=instrument.instrument_id, provider="bad", provider_symbol="AAPL",
+            provider_exchange="NASDAQ", provider_asset_type="stock", provider_currency="CNY",
+        ))
+
+
+def test_reference_identities_separate_forex_and_continuous_futures():
+    store = InstrumentStore()
+    fx = store.get("USD-CNY.FX")
+    gold = store.get("GC.CONTINUOUS")
+
+    assert (fx.asset_type, fx.base_currency, fx.quote_currency) == ("forex", "USD", "CNY")
+    assert store.provider_alias(fx.instrument_id, "yahoo").provider_symbol == "CNY=X"
+    assert gold.asset_type == "future_continuous"
+    assert gold.contract_kind == "provider_current_active_series"
+    assert gold.roll_rule == gold.adjustment == "provider_undocumented"
+    assert gold.tradable is False
+    assert gold.quote_unit == "USD/troy ounce"
+    with pytest.raises(ValueError, match="明确月份合约"):
+        store.require_tradable(gold.instrument_id)
+
+
 def test_tushare_routes_etf_and_csi_index(monkeypatch):
     from quantmaster.data.tushare_source import TushareSource
 
@@ -167,6 +218,30 @@ def test_tushare_routes_etf_and_csi_index(monkeypatch):
     assert calls == [("fund_daily", "589160.SH"), ("index_daily", "931743.CSI")]
 
 
+def test_akshare_etf_intraday_uses_fund_endpoint(monkeypatch):
+    from quantmaster.data import akshare_source
+
+    calls = []
+    frame = pd.DataFrame({
+        "时间": ["2026-07-27 09:35:00"], "开盘": [1], "最高": [1],
+        "最低": [1], "收盘": [1], "成交量": [1],
+    })
+    provider = SimpleNamespace(
+        fund_etf_hist_min_em=lambda **kwargs: calls.append(kwargs) or frame,
+    )
+    monkeypatch.setattr(akshare_source, "_require_akshare", lambda: provider)
+    monkeypatch.setattr(
+        akshare_source, "akshare_call",
+        lambda _label, function, *, lane=None, **params: function(**params),
+    )
+
+    result = akshare_source.AkshareSource().intraday(
+        "589160.SH", "2026-07-27", "2026-07-27 23:59:00", "5m",
+    )
+    assert not result.empty
+    assert calls[0]["symbol"] == "589160"
+
+
 def test_index_members_falls_back_for_exchange_managed_indexes(monkeypatch):
     from quantmaster.data import akshare_source
 
@@ -177,7 +252,10 @@ def test_index_members_falls_back_for_exchange_managed_indexes(monkeypatch):
 
         @staticmethod
         def index_stock_cons(**_params):
-            return pd.DataFrame({"品种代码": ["300750", "688981", "920128", "300750"]})
+            return pd.DataFrame({
+                "品种代码": ["300750", "688981", "920128", "300750"],
+                "交易所": ["深圳证券交易所", "上海证券交易所", "北京证券交易所", "深圳证券交易所"],
+            })
 
     def direct_call(_label, function, *, lane=None, **params):
         return function(**params)
@@ -188,6 +266,23 @@ def test_index_members_falls_back_for_exchange_managed_indexes(monkeypatch):
     assert akshare_source.AkshareSource().index_members("399006.SZ") == [
         "300750.SZ", "688981.SH", "920128.BJ",
     ]
+
+
+def test_index_members_without_exchange_stays_unresolved(monkeypatch):
+    from quantmaster.data import akshare_source
+
+    class Source:
+        @staticmethod
+        def index_stock_cons_csindex(**_params):
+            return pd.DataFrame({"成分券代码": ["600519"]})
+
+    monkeypatch.setattr(akshare_source, "_require_akshare", lambda: Source())
+    monkeypatch.setattr(
+        akshare_source, "akshare_call",
+        lambda _label, function, *, lane=None, **params: function(**params),
+    )
+    with pytest.raises(RuntimeError, match="不能按代码首位"):
+        akshare_source.AkshareSource().index_members("000300.SH")
 
 
 def test_snapshot_is_declared_as_package_data():

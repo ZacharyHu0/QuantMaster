@@ -1,6 +1,7 @@
-"""本地证券主数据、智能代码解析与离线搜索。
+"""本地标的身份、provider alias 与离线搜索。
 
-统一代码是 QuantMaster 内部唯一标识；数据源代码只保存在 ``provider_symbol``。
+``instrument_id`` 是内部稳定身份；``symbol`` 只是本地展示代码。provider
+symbol 必须经过身份元数据交叉验证，并且按目标 ``as_of`` 从有效期中选择。
 首次使用会把随安装包发布的压缩快照导入用户数据目录下的 SQLite。后续同步只
 做 upsert，不删除旧名称与别名，因此上游短暂缺行不会让已经可用的标的消失。
 """
@@ -30,10 +31,13 @@ from quantmaster.trading_sessions import market_date
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_NAME = "security_master.json.gz"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 DOMESTIC_SUFFIXES = {"SH", "SZ", "BJ", "CSI"}
 FOREIGN_SUFFIXES = {"HK", "US", "JP", "KR"}
-SUPPORTED_ASSET_TYPES = {"stock", "etf", "index", "future", "fund"}
+SUPPORTED_ASSET_TYPES = {
+    "stock", "etf", "fund", "index", "otc", "forex",
+    "future_contract", "future_continuous",
+}
 
 
 @dataclass(frozen=True)
@@ -57,9 +61,41 @@ class Instrument:
     delist_date: str = ""
     observed_at: float = 0.0
     bars_verified_at: float = 0.0
+    instrument_id: int | None = None
+    resolution_status: str = "confirmed"
+    base_currency: str = ""
+    quote_currency: str = ""
+    contract_kind: str = ""
+    product_code: str = ""
+    contract_month: str = ""
+    multiplier: str = ""
+    quote_unit: str = ""
+    timezone: str = ""
+    roll_rule: str = ""
+    adjustment: str = ""
+    usage: str = "research"
+    tradable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProviderAlias:
+    instrument_id: int
+    provider: str
+    provider_symbol: str
+    valid_from: str = ""
+    valid_to: str = ""
+    provider_exchange: str = ""
+    provider_asset_type: str = ""
+    provider_currency: str = ""
+    provider_timezone: str = ""
+    provider_name: str = ""
+    verification_status: str = "confirmed"
+    evidence_source: str = ""
+    observed_at: float = 0.0
+    diagnostic_code: str = ""
 
 
 def _normalized_alias(value: str) -> str:
@@ -77,7 +113,7 @@ def _display_market(market: str) -> str:
 def _seed_records() -> list[dict[str, Any]]:
     """快照损坏时仍能让演示候选和全球参考标的离线工作。"""
     from quantmaster.data.universe import DEMO_STOCK_NAMES
-    from quantmaster.data.yfinance_source import GLOBAL_REFS
+    from quantmaster.data.yfinance_source import GLOBAL_REFS, REFERENCE_IDENTITIES
 
     rows: list[dict[str, Any]] = []
     for symbol, name in DEMO_STOCK_NAMES.items():
@@ -88,12 +124,13 @@ def _seed_records() -> list[dict[str, Any]]:
             "asset_type": "stock", "currency": "CNY", "source": "built_in",
         })
     for symbol, (provider, name) in GLOBAL_REFS.items():
-        code, suffix = symbol.rsplit(".", 1)
+        code = symbol.rsplit(".", 1)[0]
+        identity = REFERENCE_IDENTITIES[symbol]
         rows.append({
             "symbol": symbol, "provider_symbol": provider, "code": code,
-            "name": name, "market": suffix, "exchange": suffix,
-            "asset_type": "index" if provider.startswith("^") else "future",
-            "source": "built_in",
+            "name": name, **identity, "source": "built_in",
+            "usage": "observation/research",
+            "tradable": identity["asset_type"] != "future_continuous",
         })
     rows.extend([
         {"symbol": "589160.SH", "code": "589160", "name": "广发上证科创板芯片ETF",
@@ -113,6 +150,22 @@ def _seed_records() -> list[dict[str, Any]]:
          "asset_type": "stock", "currency": "USD", "provider_symbol": "BRK-B"},
     ])
     return rows
+
+
+def _reference_records() -> list[dict[str, Any]]:
+    from quantmaster.data.yfinance_source import GLOBAL_REFS, REFERENCE_IDENTITIES
+
+    records = []
+    for symbol, (provider, name) in GLOBAL_REFS.items():
+        identity = REFERENCE_IDENTITIES[symbol]
+        records.append({
+            "symbol": symbol, "provider_symbol": provider,
+            "code": symbol.rsplit(".", 1)[0], "name": name, **identity,
+            "source": "built_in", "source_priority": 100,
+            "usage": "observation/research",
+            "tradable": identity["asset_type"] != "future_continuous",
+        })
+    return records
 
 
 class InstrumentStore:
@@ -201,6 +254,7 @@ class InstrumentStore:
                 );
                 """
             )
+            self._migrate_identity_schema(connection)
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (SCHEMA_VERSION,),
@@ -208,6 +262,78 @@ class InstrumentStore:
             count = connection.execute("SELECT COUNT(*) FROM instruments").fetchone()[0]
         if not count:
             self._import_bundled_snapshot()
+        self.upsert(_reference_records(), source="built_in", source_priority=100)
+
+    @staticmethod
+    def _migrate_identity_schema(connection: sqlite3.Connection) -> None:
+        """Upgrade schema-v1 without guessing any historical provider identity."""
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(instruments)")
+        }
+        additions = {
+            "instrument_id": "INTEGER",
+            "resolution_status": "TEXT NOT NULL DEFAULT 'confirmed'",
+            "base_currency": "TEXT NOT NULL DEFAULT ''",
+            "quote_currency": "TEXT NOT NULL DEFAULT ''",
+            "contract_kind": "TEXT NOT NULL DEFAULT ''",
+            "product_code": "TEXT NOT NULL DEFAULT ''",
+            "contract_month": "TEXT NOT NULL DEFAULT ''",
+            "multiplier": "TEXT NOT NULL DEFAULT ''",
+            "quote_unit": "TEXT NOT NULL DEFAULT ''",
+            "timezone": "TEXT NOT NULL DEFAULT ''",
+            "roll_rule": "TEXT NOT NULL DEFAULT ''",
+            "adjustment": "TEXT NOT NULL DEFAULT ''",
+            "usage": "TEXT NOT NULL DEFAULT 'research'",
+            "tradable": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE instruments ADD COLUMN {name} {declaration}")
+        connection.execute(
+            "UPDATE instruments SET instrument_id=rowid WHERE instrument_id IS NULL"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_instruments_identity "
+            "ON instruments(instrument_id)"
+        )
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS provider_aliases (
+                alias_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_id INTEGER NOT NULL REFERENCES instruments(instrument_id),
+                provider TEXT NOT NULL,
+                provider_symbol TEXT NOT NULL,
+                valid_from TEXT NOT NULL DEFAULT '',
+                valid_to TEXT NOT NULL DEFAULT '',
+                provider_exchange TEXT NOT NULL DEFAULT '',
+                provider_asset_type TEXT NOT NULL DEFAULT '',
+                provider_currency TEXT NOT NULL DEFAULT '',
+                provider_timezone TEXT NOT NULL DEFAULT '',
+                provider_name TEXT NOT NULL DEFAULT '',
+                verification_status TEXT NOT NULL,
+                evidence_source TEXT NOT NULL DEFAULT '',
+                observed_at REAL NOT NULL DEFAULT 0,
+                diagnostic_code TEXT NOT NULL DEFAULT '',
+                UNIQUE(instrument_id,provider,provider_symbol,valid_from)
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_alias_asof
+              ON provider_aliases(instrument_id,provider,valid_from,valid_to);
+            CREATE TABLE IF NOT EXISTS identity_investigations (
+                investigation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_symbol TEXT NOT NULL,
+                status TEXT NOT NULL,
+                diagnostic_code TEXT NOT NULL,
+                evidence_source TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                observed_at REAL NOT NULL
+            );
+            """
+        )
+        legacy = ("GC=F.US", "CL=F.US", "HG=F.US", "CNY=X.US", "DX-Y.NYB.US")
+        connection.execute(
+            f"UPDATE instruments SET resolution_status='unresolved' WHERE symbol IN "
+            f"({','.join('?' for _ in legacy)})", legacy,
+        )
 
     def _import_bundled_snapshot(self) -> None:
         records: list[dict[str, Any]] = []
@@ -241,7 +367,7 @@ class InstrumentStore:
         market = str(value.get("market") or ("CN" if suffix in DOMESTIC_SUFFIXES else suffix)).upper()
         return {
             "symbol": symbol,
-            "provider_symbol": str(value.get("provider_symbol") or symbol),
+            "provider_symbol": str(value.get("provider_symbol") or ""),
             "code": str(value.get("code") or code).upper(),
             "name": str(value.get("name") or "").strip(),
             "full_name": str(value.get("full_name") or "").strip(),
@@ -259,6 +385,20 @@ class InstrumentStore:
             "source_priority": int(value.get("source_priority") or priority),
             "observed_at": float(value.get("observed_at") or time.time()),
             "bars_verified_at": float(value.get("bars_verified_at") or 0),
+            "instrument_id": value.get("instrument_id"),
+            "resolution_status": str(value.get("resolution_status") or "confirmed"),
+            "base_currency": str(value.get("base_currency") or "").upper(),
+            "quote_currency": str(value.get("quote_currency") or "").upper(),
+            "contract_kind": str(value.get("contract_kind") or ""),
+            "product_code": str(value.get("product_code") or "").upper(),
+            "contract_month": str(value.get("contract_month") or ""),
+            "multiplier": str(value.get("multiplier") or ""),
+            "quote_unit": str(value.get("quote_unit") or ""),
+            "timezone": str(value.get("timezone") or ""),
+            "roll_rule": str(value.get("roll_rule") or ""),
+            "adjustment": str(value.get("adjustment") or ""),
+            "usage": str(value.get("usage") or "research"),
+            "tradable": int(bool(value.get("tradable", True))),
         }
 
     def upsert(
@@ -303,8 +443,166 @@ class InstrumentStore:
         with self._lock, self._connection() as connection:
             for value in values:
                 connection.execute(sql, tuple(value[column] for column in columns))
+                connection.execute(
+                    "UPDATE instruments SET instrument_id=rowid "
+                    "WHERE symbol=? AND instrument_id IS NULL", (value["symbol"],),
+                )
                 self._replace_generated_aliases(connection, value)
+                if (
+                    value["source"] == "built_in" and value["provider_symbol"]
+                    and value["provider_symbol"] != value["symbol"]
+                ):
+                    instrument_id = connection.execute(
+                        "SELECT instrument_id FROM instruments WHERE symbol=?", (value["symbol"],),
+                    ).fetchone()[0]
+                    connection.execute(
+                        """INSERT OR IGNORE INTO provider_aliases(
+                           instrument_id,provider,provider_symbol,provider_exchange,
+                           provider_asset_type,provider_currency,provider_timezone,provider_name,
+                           verification_status,evidence_source,observed_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            instrument_id, "yahoo", value["provider_symbol"], value["exchange"],
+                            value["asset_type"], value["currency"], value["timezone"], value["name"],
+                            "confirmed", "bundled:official-provider-cross-check", value["observed_at"],
+                        ),
+                    )
+                elif value["source"] == "tushare:catalog" and value["provider_symbol"]:
+                    instrument_id = connection.execute(
+                        "SELECT instrument_id FROM instruments WHERE symbol=?", (value["symbol"],),
+                    ).fetchone()[0]
+                    connection.execute(
+                        """INSERT OR IGNORE INTO provider_aliases(
+                           instrument_id,provider,provider_symbol,valid_from,valid_to,
+                           provider_exchange,provider_asset_type,provider_currency,provider_name,
+                           verification_status,evidence_source,observed_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            instrument_id, "tushare", value["provider_symbol"], value["list_date"],
+                            value["delist_date"], value["exchange"], value["asset_type"],
+                            value["currency"], value["name"], "confirmed",
+                            "tushare:catalog-snapshot", value["observed_at"],
+                        ),
+                    )
         return len(values)
+
+    def add_provider_alias(self, alias: ProviderAlias) -> None:
+        """Persist a verified alias; conflicting provider metadata is rejected."""
+        provider = alias.provider.strip().lower()
+        provider_symbol = alias.provider_symbol.strip()
+        if not provider or not provider_symbol:
+            raise ValueError("provider alias 缺少 provider/provider_symbol")
+        if alias.verification_status not in {"confirmed", "candidate", "rejected"}:
+            raise ValueError("provider alias 验证状态非法")
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM instruments WHERE instrument_id=?", (alias.instrument_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"未找到 instrument_id={alias.instrument_id}")
+            conflicts = []
+            checks = (
+                ("exchange", alias.provider_exchange),
+                ("asset_type", alias.provider_asset_type),
+                ("currency", alias.provider_currency),
+            )
+            for field, evidence in checks:
+                local = str(row[field] or "").strip().casefold()
+                remote = str(evidence or "").strip().casefold()
+                if local and remote and local != remote:
+                    conflicts.append(f"{field}:{local}!={remote}")
+            if conflicts and alias.verification_status == "confirmed":
+                raise ValueError("provider 身份元数据冲突: " + ",".join(conflicts))
+            connection.execute(
+                """INSERT INTO provider_aliases(
+                   instrument_id,provider,provider_symbol,valid_from,valid_to,
+                   provider_exchange,provider_asset_type,provider_currency,
+                   provider_timezone,provider_name,verification_status,evidence_source,
+                   observed_at,diagnostic_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(instrument_id,provider,provider_symbol,valid_from) DO UPDATE SET
+                   valid_to=excluded.valid_to,provider_exchange=excluded.provider_exchange,
+                   provider_asset_type=excluded.provider_asset_type,
+                   provider_currency=excluded.provider_currency,
+                   provider_timezone=excluded.provider_timezone,
+                   provider_name=excluded.provider_name,
+                   verification_status=excluded.verification_status,
+                   evidence_source=excluded.evidence_source,
+                   observed_at=excluded.observed_at,
+                   diagnostic_code=excluded.diagnostic_code""",
+                (
+                    alias.instrument_id, provider, provider_symbol, alias.valid_from,
+                    alias.valid_to, alias.provider_exchange, alias.provider_asset_type,
+                    alias.provider_currency, alias.provider_timezone, alias.provider_name,
+                    alias.verification_status, alias.evidence_source,
+                    alias.observed_at or time.time(), alias.diagnostic_code,
+                ),
+            )
+
+    def provider_alias(
+        self, instrument: int | str, provider: str, *, as_of: str = "",
+    ) -> ProviderAlias:
+        """Return the one confirmed alias valid at ``as_of``; never use today's alias implicitly."""
+        target = str(as_of or market_date().isoformat())[:10]
+        with self._connection() as connection:
+            if isinstance(instrument, int):
+                instrument_id = instrument
+            else:
+                row = connection.execute(
+                    "SELECT instrument_id FROM instruments WHERE symbol=?",
+                    (str(instrument).strip().upper(),),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"未找到标的: {instrument}")
+                instrument_id = int(row["instrument_id"])
+            rows = connection.execute(
+                """SELECT * FROM provider_aliases
+                   WHERE instrument_id=? AND provider=? AND verification_status='confirmed'
+                     AND (valid_from='' OR valid_from<=?)
+                     AND (valid_to='' OR valid_to>=?)
+                   ORDER BY valid_from DESC,alias_id DESC""",
+                (instrument_id, provider.strip().lower(), target, target),
+            ).fetchall()
+        if not rows:
+            raise ValueError(
+                f"instrument_id={instrument_id} 在 {target} 缺少 {provider} 的已确认 alias"
+            )
+        symbols = {row["provider_symbol"] for row in rows}
+        if len(symbols) != 1:
+            raise ValueError(
+                f"instrument_id={instrument_id} 在 {target} 存在重叠 {provider} aliases"
+            )
+        fields = ProviderAlias.__dataclass_fields__
+        return ProviderAlias(**{name: rows[0][name] for name in fields})
+
+    def require_tradable(self, instrument: int | str) -> Instrument:
+        value = self.get(instrument) if isinstance(instrument, str) else None
+        if value is None and isinstance(instrument, int):
+            with self._connection() as connection:
+                value = self._instrument(connection.execute(
+                    "SELECT * FROM instruments WHERE instrument_id=?", (instrument,),
+                ).fetchone())
+        if value is None:
+            raise ValueError(f"未找到标的: {instrument}")
+        if value.resolution_status != "confirmed":
+            raise ValueError(f"{value.symbol} 身份未确认")
+        if value.asset_type == "future_continuous" or not value.tradable:
+            raise ValueError(
+                f"{value.symbol} 是 provider 连续期货序列，仅用于观察/研究；"
+                "paper trading 必须选择明确月份合约"
+            )
+        return value
+
+    def record_investigation(
+        self, raw_symbol: str, *, status: str, diagnostic_code: str,
+        evidence_source: str = "", details: str = "",
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO identity_investigations
+                   (raw_symbol,status,diagnostic_code,evidence_source,details,observed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (raw_symbol, status, diagnostic_code, evidence_source, details, time.time()),
+            )
 
     @staticmethod
     def _insert_alias(
@@ -321,8 +619,7 @@ class InstrumentStore:
         symbol, code = value["symbol"], value["code"]
         suffix = symbol.rsplit(".", 1)[-1]
         aliases: list[tuple[str, str, int]] = [
-            (symbol, "canonical", 100), (value["provider_symbol"], "provider", 98),
-            (code, "code", 92),
+            (symbol, "canonical", 100), (code, "code", 92),
         ]
         if code.isdigit():
             aliases.append((code.lstrip("0") or "0", "short_code", 84))
@@ -364,7 +661,11 @@ class InstrumentStore:
 
     @staticmethod
     def _instrument(row: sqlite3.Row | None) -> Instrument | None:
-        return Instrument(**dict(row)) if row else None
+        if row is None:
+            return None
+        value = dict(row)
+        value["tradable"] = bool(value.get("tradable", True))
+        return Instrument(**value)
 
     def get(self, symbol: str) -> Instrument | None:
         canonical = str(symbol).strip().upper()
@@ -410,7 +711,7 @@ class InstrumentStore:
             rows = connection.execute(
                 f"SELECT * FROM instruments{where} ORDER BY symbol", params,
             ).fetchall()
-        return [Instrument(**dict(row)) for row in rows]
+        return [self._instrument(row) for row in rows if row is not None]
 
     def names(self, symbols: Iterable[str]) -> dict[str, str]:
         requested = [str(item).upper() for item in dict.fromkeys(symbols)]
@@ -434,6 +735,17 @@ class InstrumentStore:
             "market_label": _display_market(instrument.market),
             "match_kind": match_kind, "score": round(score, 3),
         })
+        if instrument.asset_type == "forex" and instrument.base_currency and instrument.quote_currency:
+            data["identity_description"] = (
+                f"1 {instrument.base_currency} 兑多少 {instrument.quote_currency}"
+            )
+        elif instrument.asset_type == "future_continuous":
+            data["identity_description"] = (
+                f"Provider 连续期货序列 · {instrument.quote_unit or '单位待确认'} "
+                f"· {instrument.usage} · 不可交易"
+            )
+        elif instrument.resolution_status != "confirmed":
+            data["identity_description"] = "原始代码已保留 · 身份需确认"
         return data
 
     def search(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -473,7 +785,9 @@ class InstrumentStore:
                 ranked[row["symbol"]] = (key, row)
         result = []
         for key, row in sorted(ranked.values(), key=lambda item: item[0])[:limit]:
-            instrument = Instrument(**{field: row[field] for field in Instrument.__dataclass_fields__})
+            value = {field: row[field] for field in Instrument.__dataclass_fields__}
+            value["tradable"] = bool(value.get("tradable", True))
+            instrument = Instrument(**value)
             score = 100 - key[0] * 20 + int(row["alias_priority"]) / 100
             result.append(self._public(instrument, match_kind=row["match_kind"], score=score))
         return result
@@ -505,18 +819,6 @@ class InstrumentStore:
             return {"query": raw, "status": "resolved", "instrument": exact[0],
                     "candidates": exact, "corrected": exact[0]["symbol"] != raw.upper()}
         if len(exact) > 1:
-            if re.fullmatch(r"\d{6}", normalized):
-                active_stocks = [
-                    item for item in exact
-                    if item["asset_type"] == "stock"
-                    and item["symbol"].rsplit(".", 1)[-1] in {"SH", "SZ", "BJ"}
-                    and item["status"] in {"listed", "active", "l"}
-                ]
-                if len(active_stocks) == 1:
-                    return {
-                        "query": raw, "status": "resolved", "instrument": active_stocks[0],
-                        "candidates": exact, "corrected": active_stocks[0]["symbol"] != raw.upper(),
-                    }
             return {"query": raw, "status": "ambiguous", "candidates": exact,
                     "message": f"{raw} 对应多个市场，请选择具体标的"}
         if candidates:
@@ -612,11 +914,41 @@ class InstrumentStore:
                 "SELECT * FROM sync_state ORDER BY source"
             ).fetchall()
             newest = connection.execute("SELECT MAX(observed_at) FROM instruments").fetchone()[0] or 0
+            ambiguous = connection.execute(
+                "SELECT COUNT(*) FROM (SELECT alias FROM aliases GROUP BY alias "
+                "HAVING COUNT(DISTINCT symbol)>1)"
+            ).fetchone()[0]
+            alias_states = connection.execute(
+                "SELECT provider,verification_status,COUNT(*) AS count FROM provider_aliases "
+                "GROUP BY provider,verification_status ORDER BY provider,verification_status"
+            ).fetchall()
+            historical_gaps = connection.execute(
+                "SELECT COUNT(*) FROM instruments i WHERE NOT EXISTS ("
+                "SELECT 1 FROM provider_aliases p WHERE p.instrument_id=i.instrument_id "
+                "AND p.verification_status='confirmed')"
+            ).fetchone()[0]
+            investigations = connection.execute(
+                "SELECT status,diagnostic_code,COUNT(*) AS count FROM identity_investigations "
+                "GROUP BY status,diagnostic_code ORDER BY status,diagnostic_code"
+            ).fetchall()
         return {
             "status": "success" if total else "error", "path": str(self.path),
             "record_count": total, "updated_at": newest,
             "coverage": [dict(row) for row in groups],
             "sources": [dict(row) for row in states],
+            "governance": {
+                "phase": "checked",
+                "stockdb_confirmation": "schema_unverified",
+                "cross_validation": "required",
+                "ambiguous_aliases": ambiguous,
+                "provider_coverage": [dict(row) for row in alias_states],
+                "historical_alias_gaps": historical_gaps,
+                "conflicts": sum(
+                    int(row["count"]) for row in investigations if row["status"] == "conflict"
+                ),
+                "investigations": [dict(row) for row in investigations],
+                "diagnostic_codes": ["stockdb_catalog_schema_unverified"],
+            },
         }
 
 
@@ -667,11 +999,12 @@ def _online_yahoo_records(query: str, limit: int) -> list[dict[str, Any]]:
         )
         name = str(quote.get("longname") or quote.get("shortname") or provider).strip()
         records.append({
-            "symbol": canonical, "provider_symbol": provider,
+            "symbol": canonical, "provider_symbol": "",
             "code": canonical.rsplit(".", 1)[0], "name": name, "en_name": name,
             "market": market, "exchange": exchange or market,
             "asset_type": asset_type, "currency": currency, "status": "listed",
             "source": "yahoo:search", "source_priority": 30,
+            "resolution_status": "candidate",
         })
     return records
 
@@ -908,10 +1241,14 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
     instrument = store.get(symbol)
     if instrument is None:
         raise ValueError(f"证券主数据中不存在 {symbol}")
+    if instrument.resolution_status != "confirmed":
+        raise ValueError(f"{symbol} 身份尚未确认，不能发起正式行情请求")
     suffix = instrument.symbol.rsplit(".", 1)[-1]
     if instrument.asset_type not in SUPPORTED_ASSET_TYPES:
         raise ValueError(f"{symbol} 的品种类型 {instrument.asset_type} 暂不支持日线")
-    if suffix in DOMESTIC_SUFFIXES or instrument.asset_type == "future":
+    if suffix in DOMESTIC_SUFFIXES or instrument.asset_type in {
+        "future_contract", "future_continuous", "forex",
+    }:
         return instrument
     if suffix not in FOREIGN_SUFFIXES:
         raise ValueError(f"{symbol} 暂无可用日线数据路由")

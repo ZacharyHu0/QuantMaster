@@ -259,7 +259,7 @@
     stage.hidden = true;
     reportRoot.innerHTML = `<article class="sa-report">
       <header class="sa-report-head">
-        <div class="sa-report-identity"><span class="sa-report-symbol">${esc(instrument.symbol || '')} · ${esc(instrument.market_label || instrument.market || '')}</span>
+        <div class="sa-report-identity"><span class="sa-report-symbol">${esc(instrument.symbol || '')} · ${esc(instrument.market_label || instrument.market || '')} · ${esc(instrument.exchange || '')} · ${esc(instrument.asset_type || '')} · ${esc(instrument.currency || '')}</span>
           <h2>${esc(instrument.name || instrument.en_name || instrument.symbol || '标的')}</h2>
           <p class="sa-thesis">${esc(displayText(overall.thesis, '结论待核查'))}</p><p class="sa-summary">${esc(displayText(overall.summary))}</p></div>
         <div class="sa-report-score"><div class="sa-score-heading"><span>COMPOSITE SCORE</span><strong>${esc(overall.stance || '待核查')}</strong></div>
@@ -493,8 +493,8 @@
         `<button class="sa-suggestion" id="sa-suggestion-${index}" type="button" role="option"
           aria-selected="${index === activeSuggestion}" data-sa-suggestion="${index}">
           <span><strong>${esc(item.name || item.en_name || item.symbol)}</strong><small>${esc(item.symbol)}</small></span>
-          <em>${esc(item.market_label || item.market || '')}</em></button>`
-      ).join('') : '<div class="sa-suggestion-empty">本地证券主数据中没有匹配项；可直接输入完整代码后尝试。</div>';
+          <em>${esc(item.market_label || item.market || '')} · ${esc(item.exchange || '')} · ${esc(item.asset_type || '')} · ${esc(item.currency || '币种待确认')}</em></button>`
+      ).join('') : '<div class="sa-suggestion-empty">本地标的目录中没有已确认匹配项；请先确认市场与资产类型。</div>';
       suggestions.hidden = false;
       input.setAttribute('aria-expanded', 'true');
       syncSuggestionSelection();

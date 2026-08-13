@@ -161,6 +161,8 @@ def _us_records() -> list[dict]:
 
 
 def _static_records() -> list[dict]:
+    from quantmaster.data.yfinance_source import REFERENCE_IDENTITIES
+
     rows = []
     for symbol, name in DEMO_STOCK_NAMES.items():
         rows.append(_base(
@@ -170,13 +172,13 @@ def _static_records() -> list[dict]:
     for symbol, name in FUTURES_MAIN.items():
         rows.append(_base(
             symbol, name, market="FUT", exchange=symbol.rsplit(".", 1)[-1],
-            asset_type="future", currency="CNY", source="built_in",
+            asset_type="future_continuous", currency="CNY", source="built_in",
         ))
     for symbol, (provider, name) in GLOBAL_REFS.items():
+        identity = REFERENCE_IDENTITIES[symbol]
         rows.append(_base(
-            symbol, name, market=symbol.rsplit(".", 1)[-1],
-            exchange=symbol.rsplit(".", 1)[-1],
-            asset_type="index" if provider.startswith("^") else "future",
+            symbol, name, market=identity["market"], exchange=identity["exchange"],
+            asset_type=identity["asset_type"], currency=identity["currency"],
             provider_symbol=provider, source="built_in",
         ))
     return rows

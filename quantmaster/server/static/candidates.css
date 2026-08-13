@@ -184,7 +184,7 @@
 }
 .candidate-instrument-options button,.candidate-resolution-choice {
   display:flex; align-items:center; justify-content:space-between; gap:16px; width:100%;
-  padding:9px 10px; border:0; border-radius:5px; background:transparent; color:var(--ink-2);
+  min-height:44px; padding:9px 10px; border:0; border-radius:5px; background:transparent; color:var(--ink-2);
   text-align:left; cursor:pointer;
 }
 .candidate-instrument-options button:hover,
@@ -271,6 +271,11 @@
   .candidate-heading-actions button { flex:1 1 auto; }
   .candidate-date-row { grid-template-columns:1fr; }
   .candidate-save-dock { bottom:58px; }
+  .candidate-instrument-options { inset-inline:8px auto !important; width:calc(100vw - 16px) !important; }
+  .candidate-instrument-options button,.candidate-resolution-choice {
+    align-items:flex-start; flex-direction:column; gap:7px;
+  }
+  .candidate-instrument-tags { justify-content:flex-start; flex:0 1 auto; }
 }
 
 @media (prefers-reduced-motion:reduce) {

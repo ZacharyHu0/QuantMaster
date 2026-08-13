@@ -30,11 +30,11 @@ class ReferenceMarketUnavailable(RuntimeError):
         super().__init__(f"{symbol} 暂不可用：{detail}")
 
 
-_SINA_US = {"^GSPC.US": ".INX", "^IXIC.US": ".IXIC", "^DJI.US": ".DJI"}
-_SINA_HK = {"^HSI.HK": "HSI", "^HSTECH.HK": "HSTECH"}
-_SINA_GLOBAL = {"^N225.JP": "日经225指数", "^KS11.KR": "首尔综合指数"}
-_SINA_FUTURES = {"GC=F.US": "GC", "CL=F.US": "CL", "HG=F.US": "HG"}
-_REFERENCE_SYMBOLS = frozenset((*_SINA_FUTURES, "CNY=X.US"))
+_SINA_US = {"SPX.INDEX": ".INX", "IXIC.INDEX": ".IXIC", "DJI.INDEX": ".DJI"}
+_SINA_HK = {"HSI.INDEX": "HSI", "HSTECH.INDEX": "HSTECH"}
+_SINA_GLOBAL = {"N225.INDEX": "日经225指数", "KS11.INDEX": "首尔综合指数"}
+_SINA_FUTURES = {"GC.CONTINUOUS": "GC", "CL.CONTINUOUS": "CL", "HG.CONTINUOUS": "HG"}
+_REFERENCE_SYMBOLS = frozenset((*_SINA_FUTURES, "USD-CNY.FX"))
 
 
 def is_reference_symbol(symbol: str) -> bool:
@@ -107,7 +107,7 @@ def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFr
             symbol=_SINA_FUTURES[symbol],
             lane="akshare:sina-reference",
         )
-    if symbol == "^TNX.US":
+    if symbol == "US10Y.RATE":
         compact = pd.Timestamp(start).strftime("%Y%m%d")
         return "akshare:us-treasury", lambda: akshare_call(
             f"bond_zh_us_rate({compact})",
@@ -115,7 +115,7 @@ def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFr
             start_date=compact,
             lane="akshare:bond-reference",
         )
-    if symbol == "DX-Y.NYB.US":
+    if symbol == "DXY.INDEX":
         return "akshare:global-index", lambda: akshare_call(
             "index_global_hist_em(美元指数)",
             ak.index_global_hist_em,
@@ -148,7 +148,7 @@ def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
     akshare_route = _akshare_route(symbol, start)
     if akshare_route is not None:
         routes.append(akshare_route)
-    if symbol == "CNY=X.US":
+    if symbol == "USD-CNY.FX":
         routes.append(("tushare:fx", lambda: _tushare_cny(start, end)))
 
     from quantmaster.data.yfinance_source import YFinanceSource

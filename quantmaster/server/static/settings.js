@@ -486,6 +486,16 @@
         value: `${master.record_count || 0} 条${coverage ? ` · ${coverage}` : ''}`,
         status: master.status,
       }] : [];
+      const governance = master?.governance || {};
+      if (master && governance.phase) masterRows.push(
+        {label: '身份治理阶段', value: governance.phase, status: 'success'},
+        {label: 'StockDB 确认', value: governance.stockdb_confirmation || '待检查', status: governance.stockdb_confirmation === 'confirmed' ? 'success' : 'warning'},
+        {label: '交叉验证', value: governance.cross_validation || '待检查', status: governance.cross_validation === 'confirmed' ? 'success' : 'warning'},
+        {label: '歧义 / 冲突', value: `${governance.ambiguous_aliases || 0} / ${governance.conflicts || 0}`, status: (governance.ambiguous_aliases || governance.conflicts) ? 'warning' : 'success'},
+        {label: '历史 alias 缺口', value: governance.historical_alias_gaps || 0, status: governance.historical_alias_gaps ? 'warning' : 'success'},
+        {label: 'Provider 覆盖', value: (governance.provider_coverage || []).map(item => `${item.provider}/${item.verification_status} ${item.count}`).join('、') || '暂无已确认 alias'},
+        {label: '诊断码', value: (governance.diagnostic_codes || []).join('、') || '无'},
+      );
       const proxies = Object.entries(details.proxies || {}).map(([name, value]) => ({
         label: name, value,
       }));

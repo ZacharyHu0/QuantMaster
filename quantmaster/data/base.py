@@ -8,8 +8,9 @@ symbol 约定（跨市场统一标识）：
     A股      600519.SH / 000001.SZ / 300750.SZ / 688111.SH
     港股     00700.HK
     美股     AAPL.US
-    指数     000300.SH(沪深300) 931743.CSI ^N225.JP ^KS11.KR ^GSPC.US ^HSI.HK
-    期货主力 AU0.SHF(沪金) CU0.SHF(沪铜) SC0.INE(原油) 等
+    指数     000300.SH(沪深300) 931743.CSI SPX.INDEX HSI.INDEX
+    期货连续 GC.CONTINUOUS（provider 连续序列，不可交易）
+    外汇     USD-CNY.FX（base=USD, quote=CNY）
 """
 
 from __future__ import annotations
@@ -221,6 +222,7 @@ class Market(enum.StrEnum):
     KR = "kr"          # 韩国
     FUTURES = "fut"    # 商品期货/期指
     INDEX = "idx"      # 指数
+    FOREX = "fx"       # 外汇货币对
 
 
 class DataCapability(enum.StrEnum):
@@ -254,23 +256,20 @@ class Bar:
 
 
 def guess_market(symbol: str) -> Market:
-    """根据 symbol 后缀推断市场。"""
+    """Classify a fully-qualified local symbol; never guess a bare code."""
     suffix = symbol.rsplit(".", 1)[-1].upper() if "." in symbol else ""
-    if suffix == "CSI":
-        return Market.INDEX
-    if suffix in ("SH", "SZ", "BJ"):
-        return Market.CN
-    if suffix == "HK":
-        return Market.HK
-    if suffix == "US":
-        return Market.US
-    if suffix == "JP":
-        return Market.JP
-    if suffix == "KR":
-        return Market.KR
-    if suffix in ("SHF", "INE", "DCE", "CZC", "CFX", "CFFEX"):
-        return Market.FUTURES
-    return Market.CN
+    market = {
+        "CSI": Market.INDEX, "INDEX": Market.INDEX,
+        "SH": Market.CN, "SZ": Market.CN, "BJ": Market.CN,
+        "HK": Market.HK, "US": Market.US, "JP": Market.JP, "KR": Market.KR,
+        "FX": Market.FOREX,
+        "CONTINUOUS": Market.FUTURES, "SHF": Market.FUTURES,
+        "INE": Market.FUTURES, "DCE": Market.FUTURES, "CZC": Market.FUTURES,
+        "CFX": Market.FUTURES, "CFFEX": Market.FUTURES,
+    }.get(suffix)
+    if market is None:
+        raise ValueError(f"标的缺少已确认市场身份: {symbol}")
+    return market
 
 
 def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:

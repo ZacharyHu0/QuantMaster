@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
-
 import pandas as pd
 
 from quantmaster.data.base import DataCapability, DataSource, Market, normalize_daily
@@ -23,21 +21,11 @@ def _require_yfinance():
         ) from e
 
 
-def to_yahoo_symbol(symbol: str) -> str:
-    """QuantMaster 统一符号 -> Yahoo 符号。"""
-    if symbol in GLOBAL_REFS:
-        return GLOBAL_REFS[symbol][0]
-    code, _, suffix = symbol.partition(".")
-    suffix = suffix.upper()
-    if suffix == "US":
-        return code
-    if suffix == "HK":
-        return f"{code.lstrip('0').zfill(4)}.HK"
-    if suffix == "JP":
-        return code if code.startswith("^") else f"{code}.T"
-    if suffix == "KR":
-        return code if code.startswith("^") else f"{code}.KS"
-    return code
+def to_yahoo_symbol(symbol: str, *, as_of: str = "") -> str:
+    """Resolve a verified Yahoo alias; suffix concatenation is intentionally forbidden."""
+    from quantmaster.data.instruments import InstrumentStore
+
+    return InstrumentStore().provider_alias(symbol, "yahoo", as_of=as_of).provider_symbol
 
 
 class YFinanceSource(DataSource):
@@ -47,7 +35,7 @@ class YFinanceSource(DataSource):
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         yf = _require_yfinance()
-        ticker = to_yahoo_symbol(symbol)
+        ticker = to_yahoo_symbol(symbol, as_of=end)
         inclusive_end = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
         key = f"history:{ticker}:{start}:{inclusive_end}"
 
@@ -72,11 +60,9 @@ class YFinanceSource(DataSource):
         if not symbols:
             return {}
         yf = _require_yfinance()
-        mapping = {symbol: to_yahoo_symbol(symbol) for symbol in symbols}
+        mapping = {symbol: to_yahoo_symbol(symbol, as_of=end) for symbol in symbols}
         inclusive_end = str((pd.Timestamp(end) + pd.Timedelta(days=1)).date())
-        digest = hashlib.sha256(
-            "|".join(sorted(mapping.values())).encode("utf-8")).hexdigest()[:16]
-        key = f"batch:{digest}:{start}:{inclusive_end}"
+        key = f"batch:{','.join(sorted(mapping.values()))}:{start}:{inclusive_end}"
 
         def fetch():
             return yf.download(
@@ -107,19 +93,56 @@ class YFinanceSource(DataSource):
         return result
 
 
-# 全球参考标的：统一符号 -> (yahoo 符号, 中文名)
+# Global references use local display symbols; provider symbols live in aliases.
 GLOBAL_REFS = {
-    "^GSPC.US": ("^GSPC", "标普500"),
-    "^IXIC.US": ("^IXIC", "纳斯达克"),
-    "^DJI.US": ("^DJI", "道琼斯"),
-    "^N225.JP": ("^N225", "日经225"),
-    "^KS11.KR": ("^KS11", "韩国KOSPI"),
-    "^HSI.HK": ("^HSI", "恒生指数"),
-    "^HSTECH.HK": ("^HSTECH", "恒生科技"),
-    "GC=F.US": ("GC=F", "COMEX黄金"),
-    "CL=F.US": ("CL=F", "WTI原油"),
-    "HG=F.US": ("HG=F", "COMEX铜"),
-    "DX-Y.NYB.US": ("DX-Y.NYB", "美元指数"),
-    "CNY=X.US": ("CNY=X", "美元兑人民币"),
-    "^TNX.US": ("^TNX", "美债10年收益率"),
+    "SPX.INDEX": ("^GSPC", "标普500"),
+    "IXIC.INDEX": ("^IXIC", "纳斯达克"),
+    "DJI.INDEX": ("^DJI", "道琼斯"),
+    "N225.INDEX": ("^N225", "日经225"),
+    "KS11.INDEX": ("^KS11", "韩国KOSPI"),
+    "HSI.INDEX": ("^HSI", "恒生指数"),
+    "HSTECH.INDEX": ("^HSTECH", "恒生科技"),
+    "GC.CONTINUOUS": ("GC=F", "COMEX黄金"),
+    "CL.CONTINUOUS": ("CL=F", "WTI原油"),
+    "HG.CONTINUOUS": ("HG=F", "COMEX铜"),
+    "DXY.INDEX": ("DX-Y.NYB", "美元指数"),
+    "USD-CNY.FX": ("CNY=X", "美元兑人民币"),
+    "US10Y.RATE": ("^TNX", "美债10年收益率"),
+}
+
+REFERENCE_IDENTITIES = {
+    "SPX.INDEX": {"market": "US", "exchange": "S&P DJI", "asset_type": "index", "currency": "USD"},
+    "IXIC.INDEX": {"market": "US", "exchange": "NASDAQ", "asset_type": "index", "currency": "USD"},
+    "DJI.INDEX": {"market": "US", "exchange": "S&P DJI", "asset_type": "index", "currency": "USD"},
+    "N225.INDEX": {"market": "JP", "exchange": "JPX", "asset_type": "index", "currency": "JPY"},
+    "KS11.INDEX": {"market": "KR", "exchange": "KRX", "asset_type": "index", "currency": "KRW"},
+    "HSI.INDEX": {"market": "HK", "exchange": "HKEX", "asset_type": "index", "currency": "HKD"},
+    "HSTECH.INDEX": {"market": "HK", "exchange": "HKEX", "asset_type": "index", "currency": "HKD"},
+    "GC.CONTINUOUS": {
+        "market": "FUT", "exchange": "COMEX", "asset_type": "future_continuous",
+        "currency": "USD", "contract_kind": "provider_current_active_series",
+        "product_code": "GC", "multiplier": "100 troy ounces",
+        "quote_unit": "USD/troy ounce", "timezone": "America/New_York",
+        "roll_rule": "provider_undocumented", "adjustment": "provider_undocumented",
+    },
+    "CL.CONTINUOUS": {
+        "market": "FUT", "exchange": "NYMEX", "asset_type": "future_continuous",
+        "currency": "USD", "contract_kind": "provider_current_active_series",
+        "product_code": "CL", "multiplier": "1000 barrels",
+        "quote_unit": "USD/barrel", "timezone": "America/New_York",
+        "roll_rule": "provider_undocumented", "adjustment": "provider_undocumented",
+    },
+    "HG.CONTINUOUS": {
+        "market": "FUT", "exchange": "COMEX", "asset_type": "future_continuous",
+        "currency": "USD", "contract_kind": "provider_current_active_series",
+        "product_code": "HG", "multiplier": "25000 pounds",
+        "quote_unit": "USD/pound", "timezone": "America/New_York",
+        "roll_rule": "provider_undocumented", "adjustment": "provider_undocumented",
+    },
+    "DXY.INDEX": {"market": "US", "exchange": "ICE", "asset_type": "index", "currency": "USD"},
+    "USD-CNY.FX": {
+        "market": "FX", "exchange": "OTC", "asset_type": "forex", "currency": "CNY",
+        "base_currency": "USD", "quote_currency": "CNY", "timezone": "UTC",
+    },
+    "US10Y.RATE": {"market": "US", "exchange": "US TREASURY", "asset_type": "index", "currency": "USD"},
 }
