@@ -857,9 +857,18 @@
       </div>
       <div id="bt-job-state" class="trading-job-state" aria-live="polite"></div>
       <div id="bt-out" class="trading-result"><div class="trading-empty"><strong>尚未选择回测</strong><span>运行新实验，或从下方历史记录打开一个结果。</span></div></div>
-      <div class="trading-history-head"><h3>实验历史</h3><span>最多选择 4 个已完成实验比较</span></div>
-      <div id="bt-history" class="trading-history" aria-live="polite"><div class="trading-skeleton"></div></div>
     </div>
+    <section class="trading-history-section" aria-labelledby="bt-history-title">
+      <div class="trading-history-head"><h3 id="bt-history-title">实验历史</h3><span>最多选择 4 个已完成实验比较</span></div>
+      <div class="trading-history-table" role="table" aria-labelledby="bt-history-title">
+        <div class="trading-history-columns" role="rowgroup">
+          <div role="row">
+            <span role="columnheader">选择</span><span role="columnheader">实验名称</span><span role="columnheader">候选 · 策略</span><span role="columnheader">年化收益</span><span role="columnheader">状态</span><span role="columnheader">操作</span>
+          </div>
+        </div>
+        <div id="bt-history" class="trading-history" role="rowgroup" aria-live="polite"><div class="trading-skeleton"></div></div>
+      </div>
+    </section>
   </div>
 </section>
 

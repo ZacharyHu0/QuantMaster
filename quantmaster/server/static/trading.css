@@ -59,10 +59,20 @@
 
 .trading-layout {
   display: grid;
+  grid-template-areas:
+    "config workspace"
+    "history history";
   grid-template-columns: minmax(300px, 0.34fr) minmax(0, 1fr);
-  min-height: 650px;
   border: 1px solid var(--trade-line);
   background: var(--surface);
+}
+
+.trading-config { grid-area: config; }
+.trading-workspace { grid-area: workspace; min-height: 650px; }
+.trading-history-section {
+  grid-area: history;
+  min-width: 0;
+  border-top: 1px solid var(--trade-line);
 }
 
 .trading-config,
@@ -352,14 +362,27 @@
 
 .trading-history-head { padding: 16px 18px 9px; }
 .trading-history { padding-bottom: 4px; }
+.trading-history-columns > [role="row"],
 .trading-history-row {
   display: grid;
   grid-template-columns: 28px minmax(150px, 1.4fr) minmax(100px, 0.8fr) 78px 88px 64px;
   align-items: center;
   gap: 10px;
+}
+.trading-history-columns > [role="row"] {
+  min-height: 34px;
+  padding: 0 18px;
+  border-top: 1px solid var(--grid);
+  border-bottom: 1px solid var(--grid);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 560;
+}
+.trading-history-columns [role="columnheader"]:first-child { text-align: center; }
+.trading-history-row {
   min-height: 52px;
   padding: 6px 18px;
-  border-top: 1px solid var(--grid);
+  border-bottom: 1px solid var(--grid);
   color: var(--ink-2);
   font-size: 11px;
 }
@@ -377,6 +400,8 @@
 }
 .trading-history-row input[type="checkbox"]:disabled { cursor: not-allowed; }
 .trading-history-name { min-width: 0; overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+.trading-history-cell { min-width: 0; }
+.trading-history-cell-select { display: grid; place-items: center; }
 .trading-history-row button { min-height: 36px; border: 0; background: transparent; color: var(--trade-accent); cursor: pointer; font: inherit; }
 .trading-status { width: max-content; border: 1px solid var(--axis); border-radius: 999px; padding: 2px 7px; color: var(--muted); font-size: 10px; }
 .trading-status.completed,
@@ -528,7 +553,9 @@
   .trading-metrics { grid-template-columns: repeat(3, 1fr); }
   .trading-metric:nth-child(3) { border-right: 0; }
   .trading-metric:nth-child(-n+3) { border-bottom: 1px solid var(--trade-line); }
+  .trading-history-columns > [role="row"],
   .trading-history-row { grid-template-columns: 28px minmax(130px, 1fr) 74px 78px 52px; }
+  .trading-history-columns [role="columnheader"]:nth-child(3),
   .trading-history-row > :nth-child(3) { display: none; }
 }
 
@@ -537,6 +564,12 @@
   .trading-rule { width: 100%; grid-template-columns: max-content max-content 1fr max-content max-content; }
   .trading-layout,
   .paper-layout { grid-template-columns: minmax(0, 1fr); }
+  .trading-layout {
+    grid-template-areas:
+      "config"
+      "workspace"
+      "history";
+  }
   .trading-config,
   .paper-accounts { border-right: 0; border-bottom: 1px solid var(--trade-line); }
   .trading-chart-grid { grid-template-columns: 1fr; }
@@ -572,7 +605,10 @@
   .trading-metric:nth-child(3) { border-right: 1px solid var(--trade-line); }
   .trading-metric:nth-child(2n) { border-right: 0; }
   .trading-metric:nth-child(-n+4) { border-bottom: 1px solid var(--trade-line); }
+  .trading-history-columns > [role="row"],
   .trading-history-row { grid-template-columns: 24px minmax(0, 1fr) 62px; gap: 7px; padding-inline: 12px; }
+  .trading-history-columns [role="columnheader"]:nth-child(3),
+  .trading-history-columns [role="columnheader"]:nth-child(4),
   .trading-history-row > :nth-child(3),
   .trading-history-row > :nth-child(4) { display: none; }
   .trading-progress { grid-template-columns: minmax(0, 1fr); }

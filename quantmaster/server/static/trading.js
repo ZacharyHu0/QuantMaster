@@ -595,13 +595,13 @@
     btHistory.innerHTML = btState.runs.map(run => {
       const metrics = run.result?.metrics || {};
       const selectable = run.status === 'completed';
-      return `<div class="trading-history-row" data-run-id="${run.id}">
-        <input type="checkbox" data-bt-select aria-label="选择 ${escapeHtml(run.name)} 进行比较" ${btState.selected.has(run.id) ? 'checked' : ''} ${selectable ? '' : 'disabled'}>
-        <span class="trading-history-name" title="${escapeHtml(run.name)}">${escapeHtml(run.name)}</span>
-        <span>${escapeHtml(run.config?.universe || '—')} · ${escapeHtml(strategyLabel(run.config?.strategy))}</span>
-        <span class="${signedClass(metrics.annual_return)}">${percent(metrics.annual_return)}</span>
-        <span class="trading-status ${run.status}">${statusLabel[run.status] || run.status}</span>
-        <button type="button" data-bt-open>${run.id === btState.activeId ? '当前' : '打开'}</button>
+      return `<div class="trading-history-row" role="row" data-run-id="${run.id}">
+        <span class="trading-history-cell trading-history-cell-select" role="cell"><input type="checkbox" data-bt-select aria-label="选择 ${escapeHtml(run.name)} 进行比较" ${btState.selected.has(run.id) ? 'checked' : ''} ${selectable ? '' : 'disabled'}></span>
+        <span class="trading-history-cell trading-history-name" role="cell" title="${escapeHtml(run.name)}">${escapeHtml(run.name)}</span>
+        <span class="trading-history-cell" role="cell">${escapeHtml(run.config?.universe || '—')} · ${escapeHtml(strategyLabel(run.config?.strategy))}</span>
+        <span class="trading-history-cell ${signedClass(metrics.annual_return)}" role="cell">${percent(metrics.annual_return)}</span>
+        <span class="trading-history-cell" role="cell"><span class="trading-status ${run.status}">${statusLabel[run.status] || run.status}</span></span>
+        <span class="trading-history-cell" role="cell"><button type="button" data-bt-open>${run.id === btState.activeId ? '当前' : '打开'}</button></span>
       </div>`;
     }).join('');
   }

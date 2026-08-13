@@ -1539,6 +1539,49 @@ def test_backtest_factor_completion_supports_lab_names_and_comma_segments(live_s
         browser.close()
 
 
+def test_backtest_workspace_and_history_keep_a_clear_responsive_order(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url)
+        page.get_by_role("button", name="研究", exact=True).click()
+        page.get_by_role("tab", name="回测", exact=True).click()
+
+        config = page.locator("#tab-backtest .trading-config")
+        workspace = page.locator("#tab-backtest .trading-workspace")
+        history = page.locator("#tab-backtest .trading-history-section")
+        headers = history.get_by_role("columnheader")
+        playwright_sync.expect(headers).to_have_count(6)
+        assert headers.all_inner_texts() == [
+            "选择", "实验名称", "候选 · 策略", "年化收益", "状态", "操作",
+        ]
+        assert all(header.is_visible() for header in headers.all())
+
+        desktop = [locator.bounding_box() for locator in (config, workspace, history)]
+        assert abs(desktop[0]["y"] - desktop[1]["y"]) < 1
+        assert history.evaluate("element => getComputedStyle(element).gridArea") == "history"
+        assert desktop[2]["y"] >= max(
+            desktop[0]["y"] + desktop[0]["height"],
+            desktop[1]["y"] + desktop[1]["height"],
+        ) - 1
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
+        mobile = [locator.bounding_box() for locator in (config, workspace, history)]
+        assert mobile[0]["y"] < mobile[1]["y"] < mobile[2]["y"]
+        assert headers.nth(0).is_visible()
+        assert headers.nth(1).is_visible()
+        dom_headers = history.locator('.trading-history-columns [role="columnheader"]')
+        assert dom_headers.nth(0).is_visible()
+        assert dom_headers.nth(1).is_visible()
+        assert dom_headers.nth(2).is_hidden()
+        assert dom_headers.nth(3).is_hidden()
+        assert dom_headers.nth(4).is_visible()
+        assert dom_headers.nth(5).is_visible()
+        browser.close()
+
+
 def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
     url, _ = live_server
     target = {

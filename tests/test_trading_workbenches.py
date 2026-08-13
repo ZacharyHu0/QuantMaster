@@ -1378,6 +1378,18 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
     assert "每日自动交易" in page
     assert "进入页面只读取历史快照，不会自动计算" in page
+    backtest_layout = page.split('<div class="trading-layout">', 1)[1].split(
+        "</section>\n\n<!-- ================= 挖掘", 1,
+    )[0]
+    assert backtest_layout.index('class="trading-config"') < backtest_layout.index(
+        'class="trading-workspace"'
+    ) < backtest_layout.index('class="trading-history-section"')
+    assert 'class="trading-history-table" role="table"' in backtest_layout
+    assert backtest_layout.count('role="columnheader"') == 6
+    assert all(
+        label in backtest_layout
+        for label in ("选择", "实验名称", "候选 · 策略", "年化收益", "状态", "操作")
+    )
     app_script = client.get("/static/app.js").text
     assert "void loadDecisionHistory()" in app_script
     assert "document.getElementById('decision-form').requestSubmit()" not in app_script
@@ -1397,6 +1409,9 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "后台撮合任务" in trading_script
     assert "订单业务状态" in trading_script
     assert "核心数量冲突" in trading_script
+    assert 'class="trading-history-row" role="row"' in trading_script
+    assert trading_script.count('class="trading-history-cell') == 6
+    assert trading_script.count('role="cell"') >= 6
     assert "waiting_market_data: '等待行情'" in trading_script
     assert "stalled: '已卡死'" in trading_script
     assert '.paper-task-panel[data-health="problem"]' in css
