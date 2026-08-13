@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
@@ -24,6 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 VERSION_PATHS = frozenset({"quantmaster/release.py"})
+TASK_LEASE = ".task-running.lock"
+COMPLETION_SCHEMA = 1
 
 
 def git(args: list[str], *, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -126,6 +130,102 @@ def task_changed_paths(cwd: Path) -> list[str]:
     return git_lines(["diff", "--name-only", "--diff-filter=ACMR", "main...HEAD"], cwd=cwd)
 
 
+def _try_lock(stream) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(stream) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def task_artifact_lease(artifacts: Path):
+    lease_root = artifacts.parents[1] / "task-leases"
+    prepare_pytest_directory(lease_root)
+    marker = lease_root / f"{artifacts.name}{TASK_LEASE}"
+    with marker.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        if not _try_lock(stream):
+            raise RuntimeError(f"任务工件正在被另一进程使用：{artifacts}")
+        try:
+            yield
+        finally:
+            _unlock(stream)
+
+
+def task_artifacts_active(artifacts: Path) -> bool:
+    marker = artifacts.parents[1] / "task-leases" / f"{artifacts.name}{TASK_LEASE}"
+    prepare_pytest_directory(marker.parent)
+    with marker.open("a+b") as stream:
+        if not _try_lock(stream):
+            return True
+        _unlock(stream)
+    return False
+
+
+def task_completion_path(primary: Path, slug: str) -> Path:
+    return primary / ".artifacts" / "task-completions" / f"{slug}.json"
+
+
+def record_task_completion(
+    primary: Path, slug: str, *, branch: str, superseded_by: str | None,
+) -> Path:
+    root = task_completion_path(primary, slug).parent
+    prepare_pytest_directory(root)
+    path = root / f"{slug}.json"
+    temporary = root / f".{slug}.{uuid.uuid4().hex}.tmp"
+    payload = {
+        "schema": COMPLETION_SCHEMA,
+        "slug": slug,
+        "branch": branch,
+        "main_commit": git(["rev-parse", "main^{commit}"], cwd=primary).stdout.strip(),
+        "superseded_by": superseded_by or "",
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+    return path
+
+
+def valid_task_completion(primary: Path, slug: str) -> bool:
+    path = task_completion_path(primary, slug)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if payload.get("schema") != COMPLETION_SCHEMA or payload.get("slug") != slug:
+        return False
+    commit = str(payload.get("main_commit") or "")
+    return bool(re.fullmatch(r"[0-9a-f]{40}", commit)) and git(
+        ["merge-base", "--is-ancestor", commit, "main"], cwd=primary, check=False,
+    ).returncode == 0
+
+
 def run(command: list[str], *, cwd: Path) -> None:
     print(f"[task] {' '.join(command)}", flush=True)
     primary = primary_root(cwd)
@@ -136,7 +236,8 @@ def run(command: list[str], *, cwd: Path) -> None:
     env["UV_CACHE_DIR"] = str(artifacts / "uv-cache")
     env["QM_CONFIG_PATH"] = os.devnull
     env["QM_FREE_STOCKDB_ROOT"] = str(artifacts / "runtime" / "tests" / "free-stockdb")
-    subprocess.run(command, cwd=cwd, env=env, check=True)
+    with task_artifact_lease(artifacts):
+        subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
 def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impact:
@@ -348,6 +449,88 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         ) from None
 
 
+def gc_task_artifacts(
+    *, apply: bool, retention_days: int, adopt_legacy_orphans: bool = False,
+) -> None:
+    if retention_days < 0:
+        raise SystemExit("retention days 不能为负数")
+    primary = primary_root(ROOT)
+    root = (primary / ".artifacts" / "worktrees").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    registered = registered_worktrees(primary)
+    states = (
+        "removed", "eligible", "protected", "active", "retained", "invalid", "failed",
+    )
+    counts = {key: 0 for key in states}
+
+    for artifacts in sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name):
+        slug = artifacts.name
+        if not SLUG_PATTERN.fullmatch(slug):
+            counts["invalid"] += 1
+            print(f"[task-gc] invalid slug, skipped: {artifacts}")
+            continue
+        target = (primary / ".worktrees" / slug).resolve()
+        branch = f"codex/{slug}"
+        branch_exists = git(
+            ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=primary, check=False,
+        ).returncode == 0
+        if target in registered or target.exists() or branch_exists:
+            counts["protected"] += 1
+            print(f"[task-gc] protected task state: {slug}")
+            continue
+        completed = valid_task_completion(primary, slug)
+        if not completed and not adopt_legacy_orphans:
+            counts["protected"] += 1
+            print(f"[task-gc] orphan lacks completion evidence: {slug}")
+            continue
+        if task_artifacts_active(artifacts):
+            counts["active"] += 1
+            print(f"[task-gc] active lease: {slug}")
+            continue
+        modified = datetime.fromtimestamp(artifacts.stat().st_mtime, UTC)
+        if modified > cutoff:
+            counts["retained"] += 1
+            expires = modified + timedelta(days=retention_days)
+            print(f"[task-gc] retained until {expires:%Y-%m-%d %H:%M:%S%z}: {slug}")
+            continue
+        if not apply:
+            counts["eligible"] += 1
+            print(f"[task-gc] eligible: {slug}")
+            continue
+        try:
+            with task_artifact_lease(artifacts):
+                current_registered = registered_worktrees(primary)
+                current_branch = git(
+                    ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                    cwd=primary, check=False,
+                ).returncode == 0
+                if target in current_registered or target.exists() or current_branch:
+                    counts["protected"] += 1
+                    print(f"[task-gc] state changed, protected: {slug}")
+                    continue
+                if not valid_task_completion(primary, slug):
+                    if not adopt_legacy_orphans:
+                        counts["protected"] += 1
+                        print(f"[task-gc] completion evidence missing: {slug}")
+                        continue
+                    record_task_completion(
+                        primary, slug, branch=f"codex/{slug}",
+                        superseded_by="legacy-orphan-owner-authorized",
+                    )
+                remove_task_artifacts(primary, slug)
+            counts["removed"] += 1
+            print(f"[task-gc] removed: {slug}")
+        except (OSError, SystemExit) as exc:
+            counts["failed"] += 1
+            print(f"[task-gc] failed: {slug}: {exc}")
+
+    print("[task-gc] summary " + " ".join(f"{key}={value}" for key, value in counts.items()))
+    if counts["failed"]:
+        raise SystemExit("部分任务工件清理失败")
+
+
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
@@ -399,7 +582,7 @@ def superseding_main_commit(primary: Path, commit: str | None) -> str | None:
     return commit
 
 
-def remove(slug: str, *, superseded_by: str | None = None) -> None:
+def _remove_locked(slug: str, *, superseded_by: str | None = None) -> None:
     if not SLUG_PATTERN.fullmatch(slug):
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
@@ -415,6 +598,16 @@ def remove(slug: str, *, superseded_by: str | None = None) -> None:
     registered = target in registered_worktrees(primary)
     replacement = superseding_main_commit(primary, superseded_by)
     if not branch_exists and not registered and not target.exists():
+        artifacts = primary / ".artifacts" / "worktrees" / slug
+        if replacement is not None:
+            record_task_completion(
+                primary, slug, branch=branch, superseded_by=replacement,
+            )
+        elif artifacts.exists() and not valid_task_completion(primary, slug):
+            raise SystemExit(
+                f"{branch} 仅剩孤儿工件但缺少完成凭据；"
+                "请使用 gc --adopt-legacy-orphans 做一次性所有者授权清理"
+            )
         remove_task_artifacts(primary, slug)
         print(f"[task] {branch} 已清理")
         return
@@ -433,11 +626,23 @@ def remove(slug: str, *, superseded_by: str | None = None) -> None:
             remove_verified_residual(primary, target, branch)
     else:
         remove_verified_residual(primary, target, branch)
+    record_task_completion(
+        primary, slug, branch=branch, superseded_by=replacement,
+    )
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     remove_task_artifacts(primary, slug)
     evidence = f"; superseded by main commit {replacement}" if replacement else ""
     print(f"[task] removed {branch} and {target}{evidence}")
+
+
+def remove(slug: str, *, superseded_by: str | None = None) -> None:
+    if not SLUG_PATTERN.fullmatch(slug):
+        raise SystemExit("无效 slug")
+    primary = primary_root(ROOT)
+    artifacts = primary / ".artifacts" / "worktrees" / slug
+    with task_artifact_lease(artifacts):
+        _remove_locked(slug, superseded_by=superseded_by)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -455,6 +660,10 @@ def parser() -> argparse.ArgumentParser:
     remove_parser = commands.add_parser("remove")
     remove_parser.add_argument("slug")
     remove_parser.add_argument("--superseded-by")
+    gc_parser = commands.add_parser("gc")
+    gc_parser.add_argument("--apply", action="store_true")
+    gc_parser.add_argument("--retention-days", type=int, default=7)
+    gc_parser.add_argument("--adopt-legacy-orphans", action="store_true")
     return result
 
 
@@ -470,6 +679,11 @@ def main(argv: list[str] | None = None) -> int:
             ready(cwd, ui=args.ui, rust=args.rust, package=args.package)
         elif args.command == "remove":
             remove(args.slug, superseded_by=args.superseded_by)
+        elif args.command == "gc":
+            gc_task_artifacts(
+                apply=args.apply, retention_days=args.retention_days,
+                adopt_legacy_orphans=args.adopt_legacy_orphans,
+            )
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[task] FAILED: {exc}", file=sys.stderr)
         return 1

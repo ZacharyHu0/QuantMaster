@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
     Impact,
+    gc_task_artifacts,
     remove,
     remove_empty_residual,
     remove_primary_venv_link,
@@ -14,6 +15,8 @@ from scripts.dev.tasks import (
     remove_verified_residual,
     select_impact,
     superseding_main_commit,
+    task_artifact_lease,
+    task_artifacts_active,
     task_changed_paths,
     validate_ready_state,
 )
@@ -23,6 +26,70 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_documentation_only_changes_skip_python_tests():
     assert select_impact(["README.md", "docs/guide.md"]) == Impact("docs")
+
+
+def test_task_artifact_lease_is_external_and_reusable_after_use(tmp_path):
+    artifacts = tmp_path / ".artifacts" / "worktrees" / "task"
+    with task_artifact_lease(artifacts):
+        marker = tmp_path / ".artifacts" / "task-leases" / "task.task-running.lock"
+        assert marker.is_file()
+        assert task_artifacts_active(artifacts) is True
+    assert marker.is_file()
+    assert task_artifacts_active(artifacts) is False
+
+
+def test_gc_removes_only_orphan_artifacts_and_protects_task_state(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    orphan = primary / ".artifacts" / "worktrees" / "orphan"
+    protected = primary / ".artifacts" / "worktrees" / "protected"
+    orphan.mkdir(parents=True)
+    protected.mkdir(parents=True)
+    (primary / ".worktrees" / "protected").mkdir(parents=True)
+
+    class Result:
+        returncode = 1
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "valid_task_completion", lambda root, slug: True)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    gc_task_artifacts(apply=True, retention_days=0, adopt_legacy_orphans=True)
+
+    assert not orphan.exists()
+    assert protected.exists()
+
+
+def test_gc_requires_completion_evidence_and_honors_retention(monkeypatch, tmp_path):
+    import os
+    import time
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    missing = primary / ".artifacts" / "worktrees" / "missing"
+    recent = primary / ".artifacts" / "worktrees" / "recent"
+    expired = primary / ".artifacts" / "worktrees" / "expired"
+    for path in (missing, recent, expired):
+        path.mkdir(parents=True)
+    old = time.time() - 10 * 86400
+    os.utime(expired, (old, old))
+
+    class Result:
+        returncode = 1
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(
+        tasks, "valid_task_completion", lambda root, slug: slug != "missing",
+    )
+    gc_task_artifacts(apply=True, retention_days=7)
+
+    assert missing.exists()
+    assert recent.exists()
+    assert not expired.exists()
 
 
 def test_data_changes_select_adjacent_contracts_and_architecture():
@@ -230,6 +297,7 @@ def test_remove_cleans_task_artifacts_after_checkout_and_branch(monkeypatch, tmp
 
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "valid_task_completion", lambda root, slug: True)
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
     remove("recovery")
     assert not artifacts.exists()
