@@ -383,7 +383,23 @@ def validate_ready_state(branch: str, status: str, behind: bool, changed: list[s
         raise SystemExit("任务分支不得修改版本元数据：" + ", ".join(sorted(version_changes)))
 
 
-def remove(slug: str) -> None:
+def superseding_main_commit(primary: Path, commit: str | None) -> str | None:
+    if commit is None:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit("--superseded-by 必须是完整的 40 位小写 Git commit SHA")
+    exists = git(
+        ["cat-file", "-e", f"{commit}^{{commit}}"], cwd=primary, check=False,
+    ).returncode == 0
+    on_main = git(
+        ["merge-base", "--is-ancestor", commit, "main"], cwd=primary, check=False,
+    ).returncode == 0
+    if not exists or not on_main:
+        raise SystemExit(f"替代证据提交不在 main 中：{commit}")
+    return commit
+
+
+def remove(slug: str, *, superseded_by: str | None = None) -> None:
     if not SLUG_PATTERN.fullmatch(slug):
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
@@ -397,11 +413,12 @@ def remove(slug: str) -> None:
         cwd=primary, check=False,
     ).returncode == 0
     registered = target in registered_worktrees(primary)
+    replacement = superseding_main_commit(primary, superseded_by)
     if not branch_exists and not registered and not target.exists():
         remove_task_artifacts(primary, slug)
         print(f"[task] {branch} 已清理")
         return
-    if branch_exists and not task_integrated(primary, branch):
+    if branch_exists and not task_integrated(primary, branch) and replacement is None:
         raise SystemExit(f"{branch} 尚未完整 squash 到 main，拒绝移除")
     if registered:
         if git(["status", "--porcelain"], cwd=target).stdout.strip():
@@ -419,7 +436,8 @@ def remove(slug: str) -> None:
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     remove_task_artifacts(primary, slug)
-    print(f"[task] removed {branch} and {target}")
+    evidence = f"; superseded by main commit {replacement}" if replacement else ""
+    print(f"[task] removed {branch} and {target}{evidence}")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -436,6 +454,7 @@ def parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--package", action="store_true")
     remove_parser = commands.add_parser("remove")
     remove_parser.add_argument("slug")
+    remove_parser.add_argument("--superseded-by")
     return result
 
 
@@ -450,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "ready":
             ready(cwd, ui=args.ui, rust=args.rust, package=args.package)
         elif args.command == "remove":
-            remove(args.slug)
+            remove(args.slug, superseded_by=args.superseded_by)
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[task] FAILED: {exc}", file=sys.stderr)
         return 1

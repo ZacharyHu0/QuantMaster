@@ -13,6 +13,7 @@ from scripts.dev.tasks import (
     remove_task_artifacts,
     remove_verified_residual,
     select_impact,
+    superseding_main_commit,
     task_changed_paths,
     validate_ready_state,
 )
@@ -272,6 +273,50 @@ def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="尚未完整 squash"):
         remove("recovery")
     assert target.exists()
+
+
+def test_superseding_commit_must_be_immutable_main_commit(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    with pytest.raises(SystemExit, match="完整的 40 位"):
+        superseding_main_commit(tmp_path, "main")
+
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(
+        tasks, "git", lambda args, **kwargs: calls.append(args) or Result(),
+    )
+    commit = "a" * 40
+    assert superseding_main_commit(tmp_path, commit) == commit
+    assert ["cat-file", "-e", f"{commit}^{{commit}}"] in calls
+    assert ["merge-base", "--is-ancestor", commit, "main"] in calls
+
+
+def test_remove_accepts_explicit_superseding_main_commit(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {target})
+    monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: False)
+    monkeypatch.setattr(tasks, "superseding_main_commit", lambda root, commit: commit)
+    monkeypatch.setattr(tasks, "remove_verified_residual", lambda *args: None)
+    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args: None)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+
+    remove("recovery", superseded_by="a" * 40)
 
 
 def test_remove_verified_residual_requires_clean_checkout(monkeypatch, tmp_path):
