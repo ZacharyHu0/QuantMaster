@@ -1,8 +1,11 @@
 """Contracts for isolated task development and impact-based validation."""
 
+import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
@@ -239,7 +242,8 @@ def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_pa
     assert factory._basetemp == basetemp.resolve()
     assert basetemp.is_dir()
     assert cache.is_dir()
-    assert cleanups == []
+    assert len(cleanups) == 1
+    cleanups.pop()()
 
 
 def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
@@ -259,9 +263,11 @@ def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
         basetemp=None,
         _ispytest=True,
     )
+    cleanups = []
     config = SimpleNamespace(
         cache=None,
         _tmp_path_factory=factory,
+        add_cleanup=cleanups.append,
     )
 
     pytest_windows_acl.pytest_configure(config)
@@ -270,6 +276,45 @@ def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
 
     assert factory.getbasetemp() == basetemp.resolve()
     assert sentinel.read_text(encoding="utf-8") == "keep"
+    cleanups.pop()()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
+def test_windows_pytest_fixture_tree_inherits_acl_and_is_removable(tmp_path):
+    import shutil
+
+    from _pytest.tmpdir import TempPathFactory
+
+    from quantmaster.runtime.storage_governance import inspect_acl
+    from scripts.dev import pytest_windows_acl
+
+    basetemp = tmp_path / "prepared-basetemp"
+    factory = TempPathFactory(
+        given_basetemp=basetemp,
+        retention_count=3,
+        retention_policy="all",
+        trace=lambda *_args: None,
+        basetemp=None,
+        _ispytest=True,
+    )
+    cleanups = []
+    config = SimpleNamespace(
+        cache=None,
+        _tmp_path_factory=factory,
+        add_cleanup=cleanups.append,
+    )
+    pytest_windows_acl.pytest_configure(config)
+
+    fixture = factory.mktemp("catalog-seed")
+    nested = fixture / "second-level"
+    nested.mkdir()
+
+    assert inspect_acl(basetemp).inherited is True
+    assert inspect_acl(fixture).inherited is True
+    assert inspect_acl(nested).inherited is True
+    shutil.rmtree(basetemp)
+    assert not basetemp.exists()
+    cleanups.pop()()
 
 
 def test_windows_pytest_plugin_is_inert_on_other_platforms(monkeypatch, tmp_path):

@@ -18,6 +18,39 @@ def prepare_pytest_directory(path: Path) -> Path:
     return target
 
 
+def _install_inheriting_tmp_path_factory(config: Any) -> None:
+    """Route pytest fixture directories through the verified Windows creator."""
+    from _pytest.pathlib import find_suffixes, parse_num
+    from _pytest.tmpdir import TempPathFactory
+
+    original = TempPathFactory.mktemp
+
+    def mktemp_inheriting_acl(
+        factory: TempPathFactory, basename: str, numbered: bool = True,
+    ) -> Path:
+        relative = factory._ensure_relative_to_basetemp(basename)
+        if numbered:
+            root = factory.getbasetemp()
+            for _attempt in range(10):
+                number = max(map(parse_num, find_suffixes(root, relative)), default=-1) + 1
+                path = root / f"{relative}{number}"
+                try:
+                    path.mkdir()
+                except FileExistsError:
+                    continue
+                break
+            else:
+                raise OSError(f"无法创建 pytest fixture 目录：{root / relative}")
+        else:
+            path = factory.getbasetemp() / relative
+            path.mkdir()
+        factory._trace("mktemp", path)
+        return path
+
+    TempPathFactory.mktemp = mktemp_inheriting_acl
+    config.add_cleanup(lambda: setattr(TempPathFactory, "mktemp", original))
+
+
 @hookimpl(trylast=True)
 def pytest_configure(config: Any) -> None:
     if os.name != "nt":
@@ -38,3 +71,4 @@ def pytest_configure(config: Any) -> None:
     # remove the directory.  Bind the prepared directory as the resolved base
     # before pytest gets a chance to replace it.
     factory._basetemp = prepare_pytest_directory(Path(given_basetemp))
+    _install_inheriting_tmp_path_factory(config)
