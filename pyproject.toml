@@ -92,6 +92,7 @@ addopts = "-q -p no:xonsh -p scripts.dev.pytest_windows_acl"
 cache_dir = ".artifacts/pytest/cache"
 markers = [
     "full: deterministic benchmark or complete-suite validation",
+    "module_isolated_config: module fixture owns Config lifecycle instead of per-test replacement",
 ]
 
 [tool.coverage.run]

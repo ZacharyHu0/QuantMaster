@@ -99,68 +99,73 @@ def _configure_reload_worker_logging() -> bool:
     return True
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
-    _stream_runtime()
-    _configure_reload_worker_logging()
-    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.logging_config import current_log_path
-    from quantmaster.runtime.supervisor import get_worker_supervisor
-    from quantmaster.runtime.worker import get_runtime_worker
-    from quantmaster.server.management import capture_runtime_baseline
+def create_lifespan(*, bootstrap_rotation: bool):
+    """Build the Web lifespan with explicit ownership of rotation bootstrap."""
 
-    capture_runtime_baseline()
-    supervisor_state = "reload-attached"
-    previous_web_process = os.environ.get("QM_WEB_PROCESS")
-    if reload_worker:
-        # The reload supervisor owns all persistent workers.  A Web generation
-        # only serves HTTP and attaches to the already-running local StockDB
-        # sidecar, so it can be discarded even if a prior generation was stuck.
-        free_stockdb_runtime.attach_to_supervisor()
-    else:
-        free_stockdb_runtime.start()
-        supervisor_state = get_worker_supervisor().start(bootstrap_rotation=True)
-        if supervisor_state == "disabled":
-            # Deterministic test/maintenance fallback.  Normal desktop use
-            # always has a separate worker Supervisor process.
-            get_runtime_worker().start(bootstrap_rotation=True)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
+        _stream_runtime()
+        _configure_reload_worker_logging()
+        from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+        from quantmaster.logging_config import current_log_path
+        from quantmaster.runtime.supervisor import get_worker_supervisor
+        from quantmaster.runtime.worker import get_runtime_worker
+        from quantmaster.server.management import capture_runtime_baseline
+
+        capture_runtime_baseline()
+        supervisor_state = "reload-attached"
+        previous_web_process = os.environ.get("QM_WEB_PROCESS")
+        if reload_worker:
+            free_stockdb_runtime.attach_to_supervisor()
         else:
-            os.environ["QM_WEB_PROCESS"] = "1"
-    cfg = get_config()
-    log_path = current_log_path()
-    logger.info(
-        "QuantMaster %s 已就绪 · http://%s:%s",
-        __version__,
-        cfg.server.host,
-        cfg.server.port,
-    )
-    logger.info(
-        "Web 代次 %s · 后台 runtime-worker %s · 完整日志 %s",
-        os.environ.get("QM_WEB_GENERATION", "0"),
-        "由重载监督器托管" if reload_worker else (
-            "本地测试/维护回退" if supervisor_state == "disabled" else "独立 Worker Supervisor 托管"
-        ),
-        str(log_path) if log_path else "仅终端",
-    )
-    try:
-        yield
-    finally:
-        if not reload_worker:
+            free_stockdb_runtime.start()
+            supervisor_state = get_worker_supervisor().start(
+                bootstrap_rotation=bootstrap_rotation,
+            )
             if supervisor_state == "disabled":
-                get_runtime_worker().stop()
+                get_runtime_worker().start(bootstrap_rotation=bootstrap_rotation)
             else:
-                get_worker_supervisor().stop()
-            free_stockdb_runtime.stop()
-        if previous_web_process is None:
-            os.environ.pop("QM_WEB_PROCESS", None)
-        else:
-            os.environ["QM_WEB_PROCESS"] = previous_web_process
-        _shutdown_web_stream_executor()
-        from quantmaster.ai.llm import close_llm_http_clients
+                os.environ["QM_WEB_PROCESS"] = "1"
+        cfg = get_config()
+        log_path = current_log_path()
+        logger.info(
+            "QuantMaster %s 已就绪 · http://%s:%s",
+            __version__, cfg.server.host, cfg.server.port,
+        )
+        logger.info(
+            "Web 代次 %s · 后台 runtime-worker %s · 完整日志 %s",
+            os.environ.get("QM_WEB_GENERATION", "0"),
+            "由重载监督器托管" if reload_worker else (
+                "本地测试/维护回退"
+                if supervisor_state == "disabled"
+                else "独立 Worker Supervisor 托管"
+            ),
+            str(log_path) if log_path else "仅终端",
+        )
+        try:
+            yield
+        finally:
+            if not reload_worker:
+                if supervisor_state == "disabled":
+                    get_runtime_worker().stop()
+                else:
+                    get_worker_supervisor().stop()
+                free_stockdb_runtime.stop()
+            if previous_web_process is None:
+                os.environ.pop("QM_WEB_PROCESS", None)
+            else:
+                os.environ["QM_WEB_PROCESS"] = previous_web_process
+            _shutdown_web_stream_executor()
+            from quantmaster.ai.llm import close_llm_http_clients
 
-        close_llm_http_clients()
-        logger.info("QuantMaster 已停止")
+            close_llm_http_clients()
+            logger.info("QuantMaster 已停止")
+
+    return lifespan
+
+
+lifespan = create_lifespan(bootstrap_rotation=True)
 
 
 app = FastAPI(

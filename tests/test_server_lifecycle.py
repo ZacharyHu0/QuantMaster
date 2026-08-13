@@ -2,11 +2,78 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 
 import pytest
 
 from quantmaster.server import lifecycle
+
+
+def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+    from quantmaster.runtime.supervisor import get_worker_supervisor
+    from quantmaster.server import app as server_app
+
+    calls = []
+    supervisor = get_worker_supervisor()
+    monkeypatch.delenv("QM_SERVER_RELOAD_WORKER", raising=False)
+    monkeypatch.setattr(server_app, "_stream_runtime", lambda: None)
+    monkeypatch.setattr(server_app, "_shutdown_web_stream_executor", lambda: None)
+    monkeypatch.setattr(server_app, "_configure_reload_worker_logging", lambda: False)
+    monkeypatch.setattr("quantmaster.server.management.capture_runtime_baseline", lambda: None)
+    monkeypatch.setattr("quantmaster.logging_config.current_log_path", lambda: None)
+    monkeypatch.setattr("quantmaster.ai.llm.close_llm_http_clients", lambda: None)
+    monkeypatch.setattr(free_stockdb_runtime, "start", lambda: calls.append("stockdb-start"))
+    monkeypatch.setattr(free_stockdb_runtime, "stop", lambda: calls.append("stockdb-stop"))
+    monkeypatch.setattr(
+        supervisor, "start",
+        lambda *, bootstrap_rotation: calls.append(("supervisor", bootstrap_rotation)) or "started",
+    )
+    monkeypatch.setattr(supervisor, "stop", lambda: calls.append("supervisor-stop"))
+
+    async def run() -> None:
+        async with server_app.create_lifespan(bootstrap_rotation=False)(server_app.app):
+            pass
+
+    asyncio.run(run())
+
+    assert ("supervisor", False) in calls
+    assert "supervisor-stop" in calls
+
+
+def test_app_lifespan_forwards_rotation_bootstrap_to_disabled_fallback(monkeypatch):
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+    from quantmaster.runtime.supervisor import get_worker_supervisor
+    from quantmaster.runtime.worker import get_runtime_worker
+    from quantmaster.server import app as server_app
+
+    calls = []
+    supervisor = get_worker_supervisor()
+    worker = get_runtime_worker()
+    monkeypatch.delenv("QM_SERVER_RELOAD_WORKER", raising=False)
+    monkeypatch.setattr(server_app, "_stream_runtime", lambda: None)
+    monkeypatch.setattr(server_app, "_shutdown_web_stream_executor", lambda: None)
+    monkeypatch.setattr(server_app, "_configure_reload_worker_logging", lambda: False)
+    monkeypatch.setattr("quantmaster.server.management.capture_runtime_baseline", lambda: None)
+    monkeypatch.setattr("quantmaster.logging_config.current_log_path", lambda: None)
+    monkeypatch.setattr("quantmaster.ai.llm.close_llm_http_clients", lambda: None)
+    monkeypatch.setattr(free_stockdb_runtime, "start", lambda: None)
+    monkeypatch.setattr(free_stockdb_runtime, "stop", lambda: None)
+    monkeypatch.setattr(supervisor, "start", lambda **_kwargs: "disabled")
+    monkeypatch.setattr(
+        worker, "start",
+        lambda *, bootstrap_rotation: calls.append(("worker", bootstrap_rotation)),
+    )
+    monkeypatch.setattr(worker, "stop", lambda: calls.append("worker-stop"))
+
+    async def run() -> None:
+        async with server_app.create_lifespan(bootstrap_rotation=False)(server_app.app):
+            pass
+
+    asyncio.run(run())
+
+    assert calls == [("worker", False), "worker-stop"]
 
 
 def test_parent_exit_requests_graceful_shutdown(monkeypatch):

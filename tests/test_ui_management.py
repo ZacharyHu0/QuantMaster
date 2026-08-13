@@ -2,26 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import multiprocessing
 import os
 import re
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
 
 from quantmaster import __version__
+from quantmaster.config import Config, set_config
 from quantmaster.release import RELEASE_DATE
+from quantmaster.settings import ConfigManager
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("QM_RUN_UI") != "1",
-    reason="浏览器验收使用独立 lane；设置 QM_RUN_UI=1 可显式启用",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("QM_RUN_UI") != "1",
+        reason="浏览器验收使用独立 lane；设置 QM_RUN_UI=1 可显式启用",
+    ),
+    pytest.mark.timeout(300),
+    pytest.mark.module_isolated_config,
+]
 playwright_sync = pytest.importorskip("playwright.sync_api")
 
 
@@ -68,61 +79,196 @@ def _wait_for_document_fit(page, *, timeout: float = 30_000) -> None:
     raise AssertionError(f"页面存在横向溢出: {dimensions}")
 
 
+def _wait_for_ui_health(url, thread, failures) -> None:
+    deadline = time.monotonic() + 300
+    with httpx.Client(trust_env=False) as client:
+        while time.monotonic() < deadline and thread.is_alive() and not failures:
+            try:
+                if client.get(f"{url}/api/v1/health", timeout=0.3).status_code == 200:
+                    return
+            except httpx.HTTPError:
+                time.sleep(0.1)
+    raise RuntimeError(f"测试服务启动失败: {failures!r}")
+
+
+def _wait_for_ui_runtime(url) -> None:
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    deadline = time.monotonic() + 60
+    readiness: dict[str, object] = {}
+    with httpx.Client(trust_env=False, timeout=1) as client:
+        while time.monotonic() < deadline:
+            statuses = {}
+            for path in ("/api/v1/market/overview", "/api/v1/backtests", "/api/v1/paper/accounts"):
+                try:
+                    statuses[path] = client.get(f"{url}{path}").status_code
+                except httpx.HTTPError:
+                    statuses[path] = 599
+            worker = runtime_worker_status()
+            readiness = {"statuses": statuses, "worker": worker}
+            if (
+                worker.get("available")
+                and worker.get("status") == "running"
+                and int(worker.get("pid") or 0) == os.getpid()
+                and all(status < 500 for status in statuses.values())
+            ):
+                return
+            time.sleep(0.1)
+    raise RuntimeError(f"UI 测试运行时未就绪: {readiness!r}")
+
+
+def _assert_no_ui_process_owners() -> None:
+    frames = sys._current_frames()
+    threads = []
+    for active in threading.enumerate():
+        if active is threading.main_thread() or not active.is_alive():
+            continue
+        frame = frames.get(active.ident) if active.ident is not None else None
+        threads.append({
+            "name": active.name, "ident": active.ident, "daemon": active.daemon,
+            "stack": "".join(traceback.format_stack(frame)) if frame else "unavailable",
+        })
+    children = [
+        {"pid": child.pid, "name": child.name, "exitcode": child.exitcode}
+        for child in multiprocessing.active_children()
+    ]
+    blocking_threads = [
+        item for item in threads
+        if not item["daemon"] and not str(item["name"]).startswith("pytest_timeout ")
+    ]
+    assert not blocking_threads and not children, (
+        f"UI 测试生命周期仍有阻塞所有者: threads={blocking_threads!r} "
+        f"children={children!r} daemon_threads={threads!r}"
+    )
+
+
 @pytest.fixture(scope="module")
-def live_server(tmp_path_factory, _minimal_security_master):
+def module_config(tmp_path_factory, _minimal_security_master):
     root = tmp_path_factory.mktemp("qm-ui")
-    data_root = root / "data"
-    data_root.mkdir(parents=True, exist_ok=True)
-    (data_root / "security_master.sqlite").write_bytes(
+    cfg = Config()
+    cfg.data.root = str(root / "data")
+    cfg.data_root.mkdir(parents=True, exist_ok=True)
+    (cfg.data_root / "security_master.sqlite").write_bytes(
         Path(_minimal_security_master).read_bytes()
     )
+    previous = {name: os.environ.get(name) for name in (
+        "QM_DATA_ROOT", "QM_CONFIG_PATH", "QM_FREE_STOCKDB_MANAGED",
+        "QM_DISABLE_WORKER_SUPERVISOR",
+    )}
+    os.environ["QM_DATA_ROOT"] = str(cfg.data_root)
+    os.environ["QM_CONFIG_PATH"] = str(root / "config.yaml")
+    os.environ["QM_FREE_STOCKDB_MANAGED"] = "false"
+    os.environ["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
+    set_config(cfg)
+    from quantmaster.data.migration import migration_manager
+
+    previous_manager = migration_manager.config_manager
+    task_manager = ConfigManager(root / "config.yaml", root / "config.snapshots")
+    migration_manager.config_manager = task_manager
+    management_module = sys.modules.get("quantmaster.server.management")
+    if management_module is not None:
+        management_module.settings_manager = task_manager
+    assert migration_manager.config_manager is task_manager
+    assert task_manager.backup_dir == (root / "config.snapshots").resolve()
+    from quantmaster.ai.crawler import NewsStore
+
+    assert NewsStore().recent(limit=1) == []
+    assert NewsStore(read_only=True).recent(limit=1) == []
+    try:
+        yield cfg, root
+    finally:
+        management_module = sys.modules.get("quantmaster.server.management")
+        if management_module is not None:
+            management_module.settings_manager = previous_manager
+        migration_manager.config_manager = previous_manager
+        set_config(None)
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@pytest.fixture(scope="module")
+def live_server(module_config):
+    cfg, root = module_config
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    env = os.environ.copy()
-    env["QM_DATA_ROOT"] = str(data_root)
-    # The browser lane exercises the web process, not the background worker
-    # supervisor.  A fixed seed avoids racing the legitimate first-start
-    # catalogue migration, while disabling the supervisor prevents descendants
-    # from retaining SQLite and directory handles after uvicorn exits on Windows.
-    env["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
-    project = Path(__file__).parents[1]
-    env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "quantmaster.server.app:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
-        cwd=root,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=(
-            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        ),
-    )
-    url = f"http://127.0.0.1:{port}"
-    for _ in range(100):
+    from quantmaster.data.migration import migration_manager
+    from quantmaster.server import management
+    from quantmaster.server.app import app as ui_test_app
+    from quantmaster.server.app import create_lifespan
+
+    assert management.settings_manager is migration_manager.config_manager
+    assert management.settings_manager.backup_dir == (root / "config.snapshots").resolve()
+    production_lifespan = ui_test_app.router.lifespan_context
+    ui_test_app.router.lifespan_context = create_lifespan(bootstrap_rotation=False)
+    server = uvicorn.Server(uvicorn.Config(
+        ui_test_app, host="127.0.0.1", port=port, log_level="warning",
+        log_config=None, access_log=False, timeout_graceful_shutdown=10,
+    ))
+    failures: list[BaseException] = []
+    loop_ready = threading.Event()
+    server_loop: list[asyncio.AbstractEventLoop] = []
+
+    def run_server() -> None:
         try:
-            if httpx.get(f"{url}/api/v1/health", timeout=0.3).status_code == 200:
-                break
-        except httpx.HTTPError:
-            time.sleep(0.1)
-    else:
-        _stop_live_server(process)
-        raise RuntimeError("测试服务启动失败")
+            with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+                server_loop.append(runner.get_loop())
+                loop_ready.set()
+                runner.run(server.serve())
+        except BaseException as exc:
+            failures.append(exc)
+
+    def request_server_stop() -> None:
+        if not loop_ready.wait(timeout=5) or not server_loop:
+            raise RuntimeError("UI 测试服务 event loop 未就绪")
+        loop = server_loop[0]
+        if loop.is_closed():
+            if thread.is_alive():
+                raise RuntimeError("UI 测试服务 event loop 已关闭但线程仍存活")
+            return
+        loop.call_soon_threadsafe(setattr, server, "should_exit", True)
+
+    thread = threading.Thread(target=run_server, name="qm-ui-test-server")
+    thread.start()
+    url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_ui_health(url, thread, failures)
+    except RuntimeError:
+        request_server_stop()
+        thread.join(timeout=20)
+        raise
+    from quantmaster.runtime.worker import get_runtime_worker
+
+    owned_worker = get_runtime_worker()
+    heartbeat_path = cfg.data_root / "runtime-worker.json"
+    try:
+        _wait_for_ui_runtime(url)
+    except RuntimeError:
+        request_server_stop()
+        thread.join(timeout=20)
+        raise
     try:
         yield url, root
     finally:
-        _stop_live_server(process)
+        os.environ["QM_DATA_ROOT"] = str(cfg.data_root)
+        os.environ["QM_CONFIG_PATH"] = str(root / "config.yaml")
+        os.environ["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
+        set_config(cfg)
+        owned_worker.stop()
+        assert owned_worker.status()["in_process_started"] is False
+        assert not heartbeat_path.exists()
+        request_server_stop()
+        thread.join(timeout=60)
+        ui_test_app.router.lifespan_context = production_lifespan
+        if thread.is_alive():
+            frame = sys._current_frames().get(thread.ident) if thread.ident is not None else None
+            stack = "".join(traceback.format_stack(frame)) if frame else "unavailable"
+            raise AssertionError(f"UI 测试服务未在期限内停止: {failures=!r} server_stack={stack}")
+        assert not failures, f"UI 测试服务异常退出: {failures!r}"
+        _assert_no_ui_process_owners()
 
 
 def test_live_server_teardown_prefers_graceful_lifespan_signal() -> None:
@@ -382,7 +528,14 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
 
         page.locator('[data-settings-section="backup"]').click()
         page.locator('#snapshot-form [name="name"]').fill("UI baseline")
-        page.locator("#snapshot-form button").click()
+        with page.expect_response(
+            lambda response: (
+                response.request.method == "POST"
+                and response.url == f"{url}/api/v1/settings/snapshots"
+            ),
+        ) as snapshot_response:
+            page.locator("#snapshot-form button").click()
+        assert snapshot_response.value.status == 200
         page.get_by_text("UI baseline", exact=True).first.wait_for()
 
         page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
@@ -433,7 +586,15 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "坏日期,000001,卖出,11,100,5\n",
             encoding="utf-8-sig",
         )
-        page.locator('header [data-tab="ledger"]').evaluate("element => element.click()")
+        page.locator('header [data-workspace="trade"]').click()
+        trade_pages = page.locator('header [data-workspace-pages="trade"]')
+        playwright_sync.expect(trade_pages).to_be_visible()
+        trade_pages.locator('[data-tab="ledger"]').click()
+        ledger_tab = page.locator("#tab-ledger")
+        playwright_sync.expect(ledger_tab).to_be_visible()
+        playwright_sync.expect(ledger_tab).to_have_class(
+            re.compile(r"(?:^|\s)active(?:\s|$)"),
+        )
         page.locator("#broker-csv").set_input_files(csv)
         preview_button = page.locator("#csv-preview-form button")
         preview_button.wait_for(state="visible")

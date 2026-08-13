@@ -943,6 +943,20 @@ def test_pboc_listing_date_may_be_a_sibling_of_the_anchor_parent(monkeypatch):
     )
 
 
+def test_initial_news_freshness_rejects_evidence_beyond_declared_boundary():
+    published = pd.Timestamp("2026-08-07", tz="Asia/Shanghai").timestamp()
+    boundary = published + 168 * 3600
+
+    health, code, message = evaluate_freshness(
+        _source("pboc"), published, "", now=boundary,
+    )
+    assert (health, code, message) == ("healthy", "", "")
+
+    with pytest.raises(NewsContractError) as error:
+        evaluate_freshness(_source("pboc"), published, "", now=boundary + 1)
+    assert error.value.code == "stale_initial_batch"
+
+
 def test_official_limit_gap_does_not_advance_committed_watermark(monkeypatch):
     hrefs = [
         "/disclosure/announcement/general/jjzssgg/c/c_20260809_10828295.shtml",

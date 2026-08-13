@@ -161,8 +161,11 @@ def _full_security_master(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def isolated_config(tmp_path, request, _minimal_security_master):
+def isolated_config(tmp_path, request):
     """每个测试用独立数据目录，避免污染真实数据。"""
+    if request.node.get_closest_marker("module_isolated_config") is not None:
+        yield None
+        return
     from quantmaster.data.repair import reset_data_repair_manager_for_tests
     from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
     from quantmaster.rotation.etf_research import reset_etf_research_service
@@ -184,7 +187,7 @@ def isolated_config(tmp_path, request, _minimal_security_master):
     seed = (
         request.getfixturevalue("_full_security_master")
         if request.node.path.name == "test_instruments.py"
-        else _minimal_security_master
+        else request.getfixturevalue("_minimal_security_master")
     )
     shutil.copy2(seed, cfg.data_root / "security_master.sqlite")
     set_config(cfg)
