@@ -209,6 +209,57 @@ def test_akshare_exponential_retry(isolated_config, monkeypatch):
     assert sleeps == [0.25, 0.5]
 
 
+def test_scheduled_provider_captures_retry_hook_before_foreign_test_patch(
+    isolated_config, monkeypatch,
+):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    foreign_attempts = 0
+    owner_sleeps: list[float] = []
+    foreign_observer: list[float] = []
+
+    def foreign() -> str:
+        nonlocal foreign_attempts
+        foreign_attempts += 1
+        if foreign_attempts == 1:
+            entered.set()
+            assert release.wait(5)
+            raise ConnectionError("foreign temporary failure")
+        return "foreign-ok"
+
+    def run_foreign() -> None:
+        try:
+            provider_call(
+                "yahoo:foreign-idle-barrier",
+                "foreign",
+                foreign,
+                retry_attempts=2,
+                retry_backoff=1.6,
+            )
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        "quantmaster.data.resilience._retry_sleep",
+        owner_sleeps.append,
+    )
+    thread = threading.Thread(target=run_foreign, name="foreign-provider-test")
+    thread.start()
+    assert entered.wait(5)
+    # Model the next test installing its observer while this provider call is
+    # still executing on the process-global scheduler.
+    monkeypatch.setattr(
+        "quantmaster.data.resilience._retry_sleep",
+        foreign_observer.append,
+    )
+    release.set()
+    assert finished.wait(5)
+    thread.join(5)
+    assert owner_sleeps == [1.6]
+    assert foreign_observer == []
+
+
 def test_online_provider_switches_block_direct_calls(isolated_config):
     isolated_config.data.akshare_enabled = False
     isolated_config.data.tushare_enabled = False

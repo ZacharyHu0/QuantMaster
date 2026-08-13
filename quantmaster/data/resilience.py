@@ -509,7 +509,6 @@ class ProviderScheduler:
             "lanes": lane_status,
         }
 
-
 PROVIDER_SCHEDULER = ProviderScheduler()
 
 
@@ -925,6 +924,11 @@ def provider_call[T](
     _require_remote_io(lane)
     _require_provider_enabled(lane, probe=probe)
     PROVIDER_HEALTH.check_available(lane, probe=probe)
+    # The scheduler owns daemon workers shared by the process.  Capture the
+    # execution hook with this logical request so a call submitted by an
+    # earlier test cannot observe a later test's temporary monkeypatch while
+    # it is still queued or unwinding from a provider timeout.
+    retry_sleep = _retry_sleep
 
     def scheduled() -> T:
         # 在真正轮到上游执行时再次看熔断状态；否则高并发会在首个失败
@@ -964,7 +968,7 @@ def provider_call[T](
                     lane, attempt, attempts, delay, exc,
                 )
                 if delay:
-                    _retry_sleep(delay)
+                    retry_sleep(delay)
         raise AssertionError("unreachable")
 
     return _run_scheduled_provider(lane, key, scheduled)
