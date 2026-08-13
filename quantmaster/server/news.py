@@ -335,9 +335,11 @@ def news_stats(
 
 @router.get("/event-focus", response_model=None)
 def news_event_focus(
-    request: Request, response: Response, days: Literal[1, 3, 7, 30] = 7,
+    request: Request, response: Response, days: int = 7,
 ) -> dict | Response:
     _require_local(request)
+    if days not in {1, 3, 7, 30}:
+        raise HTTPException(422, "事件聚焦窗口仅支持 1、3、7、30 日")
     value = _local_snapshot(lambda: NewsStore(read_only=True).event_focus(days))
     return _snapshot_etag(request, response, value, {"days": days})
 

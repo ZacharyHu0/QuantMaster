@@ -1971,6 +1971,9 @@ def test_news_route_helpers_cover_crud_filters_and_reanalysis_modes(monkeypatch)
     assert news_module.news_event_focus(request, news_module.Response(), days=7) == {
         "days": 7, "top_symbols": [],
     }
+    valid_focus = TestClient(app).get("/api/v1/news/event-focus?days=7")
+    assert valid_focus.status_code == 200
+    assert valid_focus.json() == {"days": 7, "top_symbols": []}
     assert TestClient(app).get("/api/v1/news/event-focus?days=2").status_code == 422
     queried = news_module.news_query(
         request,
