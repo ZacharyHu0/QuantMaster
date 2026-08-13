@@ -7,7 +7,10 @@ from types import SimpleNamespace
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
     Impact,
+    full_validation_identity,
     gc_task_artifacts,
+    has_full_validation,
+    record_full_validation,
     remove,
     remove_empty_residual,
     remove_primary_venv_link,
@@ -99,6 +102,15 @@ def test_data_changes_select_adjacent_contracts_and_architecture():
     assert "tests/test_data_resilience.py" in impact.tests
 
 
+def test_test_only_change_does_not_pay_for_unrelated_architecture_scan():
+    impact = select_impact(["tests/test_news_workbench.py"])
+    assert "tests/test_architecture.py" not in impact.tests
+
+
+def test_changelog_is_documentation_only():
+    assert select_impact(["CHANGELOG.md"]) == Impact("docs")
+
+
 def test_static_server_change_includes_browser_contract():
     impact = select_impact(["quantmaster/server/static/app.js"])
     assert impact.mode == "selected"
@@ -176,6 +188,28 @@ def test_task_changed_paths_excludes_inherited_main_history(monkeypatch, tmp_pat
     assert observed == [(
         ["diff", "--name-only", "--diff-filter=ACMR", "main...HEAD"], tmp_path,
     )]
+
+
+def test_full_validation_evidence_requires_exact_identity(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    evidence = tmp_path / "full.json"
+    python = tmp_path / "python.exe"
+    python.touch()
+    monkeypatch.setattr(tasks, "validation_evidence_path", lambda cwd: evidence)
+    monkeypatch.setattr(tasks, "project_python", lambda cwd: python)
+    monkeypatch.setattr(tasks, "project_environment_identity", lambda python, *, cwd: "env")
+    monkeypatch.setattr(
+        tasks, "git",
+        lambda args, *, cwd, check=True: SimpleNamespace(
+            stdout="" if args[0] == "status" else ("task-sha\n" if args[-1] == "HEAD" else "base-sha\n")
+        ),
+    )
+    identity = full_validation_identity(tmp_path, base="origin/main")
+    record_full_validation(tmp_path, identity)
+
+    assert has_full_validation(tmp_path, identity)
+    assert not has_full_validation(tmp_path, {**identity, "ui": True})
 
 
 def test_prepare_pytest_cache_precreates_directory(tmp_path):

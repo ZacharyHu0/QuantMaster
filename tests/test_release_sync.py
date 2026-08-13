@@ -14,7 +14,6 @@ from scripts.release.sync import (
     cut_release_candidate,
     github_https_push_url,
     is_next_patch,
-    post_commit,
     pre_commit,
     publish_release_candidate,
     push_config_variants,
@@ -548,11 +547,29 @@ def test_version_commit_does_not_require_a_tag_or_auto_push(monkeypatch):
         lambda version: (_ for _ in ()).throw(AssertionError("tag gate called")),
     )
     assert pre_commit() == 0
+
+
+def test_release_ci_uses_project_interpreter_and_release_contract(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    python = tmp_path / ".venv" / ("Scripts/python.exe" if release_sync.os.name == "nt" else "bin/python")
+    python.parent.mkdir(parents=True)
+    python.touch()
+    captured = {}
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr(release_sync, "ROOT", tmp_path)
     monkeypatch.setattr(
-        release_sync, "push_current_release",
-        lambda: (_ for _ in ()).throw(AssertionError("implicit push called")),
+        release_sync.subprocess, "run",
+        lambda command, **kwargs: captured.update(command=command, kwargs=kwargs) or Result(),
     )
-    assert post_commit() == 0
+
+    assert release_sync.run_local_ci() == 0
+    assert captured["command"] == [
+        str(python), "-m", "pytest", "tests/test_release_sync.py", "--timeout=180",
+    ]
 
 
 @pytest.mark.parametrize("release_path", [RELEASE_FILE])

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 VERSION_PATHS = frozenset({"quantmaster/release.py"})
+VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
 
@@ -240,18 +241,72 @@ def run(command: list[str], *, cwd: Path) -> None:
         subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
+def validation_evidence_path(cwd: Path) -> Path:
+    primary = primary_root(cwd)
+    return primary / ".artifacts" / "worktrees" / cwd.name / VALIDATION_EVIDENCE
+
+
+def project_environment_identity(python: Path, *, cwd: Path) -> str:
+    command = [
+        str(python), "-c",
+        "import importlib.metadata as m; "
+        "print('\\n'.join(sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions())))",
+    ]
+    return subprocess.run(
+        command, cwd=cwd, check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout
+
+
+def full_validation_identity(
+    cwd: Path, *, base: str, ui: bool = False, rust: bool = False, package: bool = False,
+) -> dict[str, object]:
+    python = project_python(cwd)
+    python_stat = python.stat()
+    return {
+        "commit": git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip(),
+        "base": git(["rev-parse", base], cwd=cwd).stdout.strip(),
+        "python": str(python.resolve()),
+        "python_size": python_stat.st_size,
+        "python_mtime_ns": python_stat.st_mtime_ns,
+        "environment": project_environment_identity(python, cwd=cwd),
+        "ui": ui,
+        "rust": rust,
+        "package": package,
+    }
+
+
+def record_full_validation(cwd: Path, identity: dict[str, object]) -> None:
+    if git(["status", "--porcelain"], cwd=cwd).stdout.strip():
+        return
+    target = validation_evidence_path(cwd)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(identity, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(target)
+
+
+def has_full_validation(cwd: Path, identity: dict[str, object]) -> bool:
+    target = validation_evidence_path(cwd)
+    try:
+        recorded = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    return recorded == identity
+
+
 def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impact:
     paths = changed_paths(cwd, staged=staged, base=base)
     impact = select_impact(paths)
     print(f"[task] changed paths: {len(paths)}; validation: {impact.mode}")
     python = str(project_python(cwd))
     python_paths = [path for path in paths if path.endswith(".py") and (cwd / path).is_file()]
-    if python_paths:
+    if python_paths and impact.mode != "full":
         run([python, "-m", "ruff", "check", *python_paths], cwd=cwd)
     if impact.mode == "full":
         if impact.unknown:
             print("[task] unknown paths force full validation: " + ", ".join(impact.unknown))
         run([python, "scripts/ci/run.py", "--full"], cwd=cwd)
+        record_full_validation(cwd, full_validation_identity(cwd, base=base))
     elif impact.mode == "selected":
         primary = primary_root(cwd)
         temp = (
@@ -265,6 +320,7 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
             "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),
         ], cwd=cwd)
+        shutil.rmtree(temp)
     elif impact.mode == "docs":
         print("[task] documentation-only change: Python tests skipped")
     else:
@@ -534,15 +590,21 @@ def gc_task_artifacts(
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
-    behind = bool(
-        git(
-            ["merge-base", "--is-ancestor", "origin/main", "HEAD"],
-            cwd=cwd,
-            check=False,
-        ).returncode
-    )
+    behind_origin = bool(git(
+        ["merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=False,
+    ).returncode)
+    behind_local = bool(git(
+        ["merge-base", "--is-ancestor", "main", "HEAD"], cwd=cwd, check=False,
+    ).returncode)
     task_changes = task_changed_paths(cwd)
-    validate_ready_state(branch, status, behind, task_changes)
+    validate_ready_state(branch, status, behind_origin or behind_local, task_changes)
+    identity = full_validation_identity(
+        cwd, base="main", ui=ui, rust=rust, package=package,
+    )
+    if has_full_validation(cwd, identity):
+        print("[task] identical clean-commit full validation already passed; reusing evidence")
+        print("[task] READY: 可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
+        return
     args = [str(project_python(cwd)), "scripts/ci/run.py", "--full"]
     if ui:
         args.append("--ui")
@@ -551,6 +613,7 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     if package:
         args.append("--package")
     run(args, cwd=cwd)
+    record_full_validation(cwd, identity)
     print("[task] READY: 可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
 
 

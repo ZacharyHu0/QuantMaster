@@ -1,8 +1,7 @@
 """Validate QuantMaster version bookkeeping without publishing a release.
 
-The tracked pre-commit hook validates version changes on ``main``.  Commits,
-pushes, tags, and GitHub Releases remain explicit operations; the post-commit
-hook intentionally has no side effects.
+The tracked pre-commit hook validates version changes on ``main``. Commits,
+pushes, tags, and GitHub Releases remain explicit operations.
 """
 
 from __future__ import annotations
@@ -397,9 +396,13 @@ def local_ci_required(paths: set[str]) -> bool:
 
 
 def run_local_ci() -> int:
-    """Run the same local pre-push gates used before an automatic GitHub push."""
-    command = [sys.executable, str(ROOT / "scripts" / "ci" / "run.py"), "--fast"]
-    print("[QuantMaster] main 发布提交先运行快速门禁：scripts/ci/run.py --fast")
+    """Run only the release contract affected by a metadata-only version commit."""
+    python = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file():
+        print(f"[QuantMaster] 项目解释器不存在：{python}", file=sys.stderr)
+        return 1
+    command = [str(python), "-m", "pytest", "tests/test_release_sync.py", "--timeout=180"]
+    print("[QuantMaster] main 版本提交运行发布专项契约：tests/test_release_sync.py")
     result = subprocess.run(command, cwd=ROOT, check=False)
     if result.returncode:
         print(
@@ -875,13 +878,8 @@ def push_current_release() -> int:
     return 1
 
 
-def post_commit() -> int:
-    """Never turn a commit or version bump into an implicit publication."""
-    return 0
-
-
 def install_hooks(args: argparse.Namespace) -> int:
-    expected_hooks = [ROOT / ".githooks" / name for name in ("pre-commit", "post-commit")]
+    expected_hooks = [ROOT / ".githooks" / "pre-commit"]
     missing = [path for path in expected_hooks if not path.is_file()]
     if missing:
         return print_errors([f"钩子文件不可用：{path}" for path in missing], "安装失败")
@@ -1004,7 +1002,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("replace-failed", help="按失败 CI 授权替换当前版本 Release")
     subparsers.add_parser("pre-commit", help=argparse.SUPPRESS)
-    subparsers.add_parser("post-commit", help=argparse.SUPPRESS)
     return parser
 
 
@@ -1020,7 +1017,6 @@ def main(argv: list[str] | None = None) -> int:
         "recover-ci": lambda: authorize_ci_recovery(args.run_id, replace=args.replace),
         "replace-failed": replace_failed_release,
         "pre-commit": pre_commit,
-        "post-commit": post_commit,
     }
     return int(commands[args.command]())
 

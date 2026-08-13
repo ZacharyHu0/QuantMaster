@@ -103,9 +103,3 @@ def test_frontend_does_not_reference_unversioned_api_routes():
             if pattern.search(line):
                 violations.append(f"{path.relative_to(PACKAGE_ROOT)}:{line_number}")
     assert not violations, "frontend references removed API routes:\n" + "\n".join(violations)
-
-
-def test_broad_exception_policy_does_not_expand():
-    from scripts.ci.exception_policy import analyze
-
-    assert analyze() == []

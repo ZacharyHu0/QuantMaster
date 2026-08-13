@@ -51,7 +51,15 @@ def artifact_root() -> Path:
 
 ARTIFACTS = artifact_root()
 PYTEST_ROOT = ARTIFACTS / "pytest" / "runs"
-PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
+LOCAL_PYTEST_DURATIONS = ARTIFACTS / "pytest" / "durations.json"
+
+
+def pytest_durations_path(primary: Path, artifacts: Path) -> Path:
+    shared = primary / ".artifacts" / "pytest" / "durations.json"
+    return shared if shared.is_file() else artifacts / "pytest" / "durations.json"
+
+
+PYTEST_DURATIONS = pytest_durations_path(primary_root(), ARTIFACTS)
 PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
@@ -181,8 +189,9 @@ def rust_environment() -> dict[str, str]:
     return env
 
 
-def run_shards() -> None:
-    with ThreadPoolExecutor(max_workers=3) as pool:
+def run_shards(max_workers: int = 3) -> None:
+    """Run the three duration-balanced shards concurrently."""
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(pytest_shard, shard): shard for shard in (1, 2, 3)}
         for future in as_completed(futures):
             future.result()
@@ -250,100 +259,109 @@ def main() -> int:
     prepare_pytest_directory(RUN_ROOT)
     prepare_pytest_directory(PYTEST_CACHE)
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "scripts"])
-    run("exception policy", ["scripts/ci/exception_policy.py"])
-    run("complexity policy", ["scripts/ci/complexity_policy.py"])
-    run("mypy", ["-m", "mypy"])
-    if args.refresh_durations:
-        run(
-            "refresh full-suite durations",
-            pytest_args(
-                "--full", "--ignore=tests/test_ui_management.py",
-                "--store-durations", "--clean-durations", "--durations-path",
-                str(PYTEST_DURATIONS), "--timeout=180", "--durations=30",
-                "--basetemp", str(RUN_ROOT / "duration-sample"),
-            ),
-        )
-    elif args.full or args.all:
-        if args.serial:
-            for shard in (1, 2, 3):
-                pytest_shard(shard)
-        else:
-            run_shards()
-    else:
-        run(
-            "core tests",
-            pytest_args(
-                "tests/test_architecture.py",
-                "tests/test_runtime_foundations.py", "tests/test_runtime_jobs.py",
-                "tests/test_release_sync.py", "tests/test_settings.py",
-                "--timeout=180", "--durations=30", "--basetemp",
-                str(RUN_ROOT / "fast"),
-            ),
-        )
-
-    if args.ui or args.all:
-        ui_env = os.environ.copy()
-        ui_env["QM_RUN_UI"] = "1"
-        run(
-            "Chromium management",
-            pytest_args(
-                "tests/test_ui_management.py", "--timeout=180",
-                "--basetemp", str(RUN_ROOT / "ui"),
-            ),
-            env=ui_env,
-        )
-
-    if args.rust or args.all:
-        manifest = "rust/quantmaster-kernel/Cargo.toml"
-        rust_env = rust_environment()
-        run_external(
-            "Rust fmt", ["cargo", "fmt", "--manifest-path", manifest, "--check"], env=rust_env,
-        )
-        run_external(
-            "Rust check", ["cargo", "check", "--manifest-path", manifest, "--locked"], env=rust_env,
-        )
-        run_external(
-            "Rust clippy",
-            ["cargo", "clippy", "--manifest-path", manifest, "--locked", "--", "-D", "warnings"],
-            env=rust_env,
-        )
-        run_external(
-            "Rust tests", ["cargo", "test", "--manifest-path", manifest, "--locked"], env=rust_env,
-        )
-
-    if args.package or args.all:
-        build_env = os.environ.copy()
-        build_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
-        run_external(
-            "wheel build",
-            ["uv", "build", "--out-dir", str(PACKAGE_ROOT / "python")],
-            env=build_env,
-        )
-        smoke_fresh_wheel()
-        run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm",
-            "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
-            str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
-        exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
-        if exe.exists():
+    passed = False
+    try:
+        run("ruff", ["-m", "ruff", "check", "quantmaster", "tests", "scripts"])
+        run("exception policy", ["scripts/ci/exception_policy.py"])
+        run("complexity policy", ["scripts/ci/complexity_policy.py"])
+        run("mypy", ["-m", "mypy"])
+        if args.refresh_durations:
             run(
-                "desktop artifact policy",
-                [
-                    "scripts/release/check_desktop_artifact.py", str(exe), "--analysis",
-                    str(ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
-                ],
+                "refresh full-suite durations",
+                pytest_args(
+                    "--full", "--ignore=tests/test_ui_management.py",
+                    "--store-durations", "--clean-durations", "--durations-path",
+                    str(LOCAL_PYTEST_DURATIONS), "--timeout=180", "--durations=30",
+                    "--basetemp", str(RUN_ROOT / "duration-sample"),
+                ),
             )
-            run_external("EXE help", [str(exe), "--help"])
-            with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
-                exe_env = os.environ.copy()
-                exe_env["QM_CONFIG_PATH"] = os.devnull
-                exe_env["QM_DATA_ROOT"] = str(Path(raw_temp) / "data")
-                run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
+        elif args.full or args.all:
+            if args.serial:
+                for shard in (1, 2, 3):
+                    pytest_shard(shard)
+            else:
+                run_shards()
         else:
-            print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")
+            run(
+                "core tests",
+                pytest_args(
+                    "tests/test_architecture.py",
+                    "tests/test_runtime_foundations.py", "tests/test_runtime_jobs.py",
+                    "tests/test_release_sync.py", "tests/test_settings.py",
+                    "--timeout=180", "--durations=30", "--basetemp",
+                    str(RUN_ROOT / "fast"),
+                ),
+            )
 
-    print("\n[local-ci] ALL REQUESTED GATES PASSED")
-    return 0
+        if args.ui or args.all:
+            ui_env = os.environ.copy()
+            ui_env["QM_RUN_UI"] = "1"
+            run(
+                "Chromium management",
+                pytest_args(
+                    "tests/test_ui_management.py", "--timeout=180",
+                    "--basetemp", str(RUN_ROOT / "ui"),
+                ),
+                env=ui_env,
+            )
+
+        if args.rust or args.all:
+            manifest = "rust/quantmaster-kernel/Cargo.toml"
+            rust_env = rust_environment()
+            run_external(
+                "Rust fmt", ["cargo", "fmt", "--manifest-path", manifest, "--check"],
+                env=rust_env,
+            )
+            run_external(
+                "Rust check", ["cargo", "check", "--manifest-path", manifest, "--locked"],
+                env=rust_env,
+            )
+            run_external(
+                "Rust clippy",
+                ["cargo", "clippy", "--manifest-path", manifest, "--locked", "--", "-D", "warnings"],
+                env=rust_env,
+            )
+            run_external(
+                "Rust tests", ["cargo", "test", "--manifest-path", manifest, "--locked"],
+                env=rust_env,
+            )
+
+        if args.package or args.all:
+            build_env = os.environ.copy()
+            build_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
+            run_external(
+                "wheel build",
+                ["uv", "build", "--out-dir", str(PACKAGE_ROOT / "python")],
+                env=build_env,
+            )
+            smoke_fresh_wheel()
+            run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm",
+                "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
+                str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
+            exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
+            if exe.exists():
+                run(
+                    "desktop artifact policy",
+                    [
+                        "scripts/release/check_desktop_artifact.py", str(exe), "--analysis",
+                        str(ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
+                    ],
+                )
+                run_external("EXE help", [str(exe), "--help"])
+                with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
+                    exe_env = os.environ.copy()
+                    exe_env["QM_CONFIG_PATH"] = os.devnull
+                    exe_env["QM_DATA_ROOT"] = str(Path(raw_temp) / "data")
+                    run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
+            else:
+                print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")
+
+        print("\n[local-ci] ALL REQUESTED GATES PASSED")
+        passed = True
+        return 0
+    finally:
+        if passed:
+            shutil.rmtree(RUN_ROOT)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
 {
   "version": 1,
-  "always": [
-    "tests/test_architecture.py"
-  ],
+  "always": [],
   "docs_only": [
     "AGENTS.md",
     "README.md",
     "docs/**",
     "examples/**",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "full_suite": [
     ".github/**",
@@ -19,10 +18,13 @@
     "scripts/ci/**",
     "scripts/release/**",
     "scripts/dev/test-impact.json",
-    "quantmaster/release.py",
-    "CHANGELOG.md"
+    "quantmaster/release.py"
   ],
   "rules": [
+    {
+      "paths": ["quantmaster/**"],
+      "tests": ["tests/test_architecture.py"]
+    },
     {
       "paths": ["quantmaster/data/**"],
       "tests": [

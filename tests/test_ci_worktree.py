@@ -68,6 +68,16 @@ def test_artifact_root_keeps_primary_artifact_contract(monkeypatch, tmp_path):
     assert run.artifact_root() == primary / ".artifacts"
 
 
+def test_task_full_suite_reads_existing_primary_duration_cache(tmp_path):
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "task"
+    shared = primary / ".artifacts" / "pytest" / "durations.json"
+    shared.parent.mkdir(parents=True)
+    shared.touch()
+
+    assert run.pytest_durations_path(primary, artifacts) == shared
+
+
 def test_pytest_args_override_checkout_cache_dir(monkeypatch, tmp_path):
     cache = tmp_path / "external-cache"
     monkeypatch.setattr(run, "PYTEST_CACHE", cache)
@@ -99,6 +109,34 @@ def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
     run.run("test", ["-c", "pass"])
     assert captured["env"]["RUFF_CACHE_DIR"] == str(artifacts / "cache" / "ruff")
     assert captured["env"]["MYPY_CACHE_DIR"] == str(artifacts / "cache" / "mypy")
+
+
+def test_full_shards_use_three_way_parallelism(monkeypatch):
+    observed = {}
+
+    class Future:
+        def result(self):
+            return None
+
+    class Pool:
+        def __init__(self, max_workers):
+            observed["max_workers"] = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, function, shard):
+            return Future()
+
+    monkeypatch.setattr(run, "ThreadPoolExecutor", Pool)
+    monkeypatch.setattr(run, "as_completed", lambda futures: futures)
+    monkeypatch.setattr(run, "pytest_shard", lambda shard: None)
+
+    run.run_shards()
+    assert observed["max_workers"] == 3
 
 
 def test_ci_script_can_import_project_modules_when_executed_directly():
