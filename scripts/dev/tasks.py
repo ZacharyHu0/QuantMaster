@@ -29,6 +29,7 @@ VERSION_PATHS = frozenset({"quantmaster/release.py"})
 VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
+REMOVE_INTENT_SCHEMA = 1
 
 
 def git(args: list[str], *, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -225,6 +226,47 @@ def valid_task_completion(primary: Path, slug: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{40}", commit)) and git(
         ["merge-base", "--is-ancestor", commit, "main"], cwd=primary, check=False,
     ).returncode == 0
+
+
+def task_remove_intent_path(primary: Path, slug: str) -> Path:
+    return primary / ".artifacts" / "task-remove" / f"{slug}.json"
+
+
+def record_task_remove_intent(primary: Path, slug: str, *, branch: str) -> Path:
+    root = task_remove_intent_path(primary, slug).parent
+    prepare_pytest_directory(root)
+    path = root / f"{slug}.json"
+    temporary = root / f".{slug}.{uuid.uuid4().hex}.tmp"
+    payload = {
+        "schema": REMOVE_INTENT_SCHEMA,
+        "slug": slug,
+        "branch": branch,
+        "branch_commit": git(["rev-parse", f"{branch}^{{commit}}"], cwd=primary).stdout.strip(),
+        "target": str((primary / ".worktrees" / slug).resolve()),
+        "recorded_at": datetime.now(UTC).isoformat(),
+    }
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, path)
+    return path
+
+
+def valid_task_remove_intent(primary: Path, target: Path, branch: str) -> bool:
+    path = task_remove_intent_path(primary, target.name)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if payload.get("schema") != REMOVE_INTENT_SCHEMA:
+        return False
+    if payload.get("slug") != target.name or payload.get("branch") != branch:
+        return False
+    if payload.get("target") != str(target.resolve()):
+        return False
+    branch_commit = str(payload.get("branch_commit") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", branch_commit):
+        return False
+    current = git(["rev-parse", f"{branch}^{{commit}}"], cwd=primary, check=False)
+    return current.returncode == 0 and current.stdout.strip() == branch_commit
 
 
 def run(command: list[str], *, cwd: Path) -> None:
@@ -459,7 +501,8 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
     if not target.exists():
         return
     remove_primary_venv_link(target, primary)
-    if not residual_checkout_clean(primary, target, branch):
+    clean_checkout = residual_checkout_clean(primary, target, branch)
+    if not clean_checkout and not valid_task_remove_intent(primary, target, branch):
         raise SystemExit("worktree 登记已移除，但残留 checkout 无法证明干净，拒绝删除")
     resolved = target.resolve()
     expected_parent = (primary / ".worktrees").resolve()
@@ -645,7 +688,10 @@ def superseding_main_commit(primary: Path, commit: str | None) -> str | None:
     return commit
 
 
-def _remove_locked(slug: str, *, superseded_by: str | None = None) -> None:
+def _remove_locked(
+    slug: str, *, superseded_by: str | None = None,
+    adopt_partial_removal: bool = False,
+) -> None:
     if not SLUG_PATTERN.fullmatch(slug):
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
@@ -676,13 +722,19 @@ def _remove_locked(slug: str, *, superseded_by: str | None = None) -> None:
         return
     if branch_exists and not task_integrated(primary, branch) and replacement is None:
         raise SystemExit(f"{branch} 尚未完整 squash 到 main，拒绝移除")
+    if adopt_partial_removal:
+        if registered or not target.exists() or (target / ".git").exists():
+            raise SystemExit("--adopt-partial-removal 仅用于未登记且缺少 .git 的残留 checkout")
+        record_task_remove_intent(primary, slug, branch=branch)
     if registered:
         if git(["status", "--porcelain"], cwd=target).stdout.strip():
             raise SystemExit("worktree 不干净，拒绝移除")
         remove_primary_venv_link(target, primary)
+        record_task_remove_intent(primary, slug, branch=branch)
         result = git(["worktree", "remove", str(target)], cwd=primary, check=False)
         still_registered = target in registered_worktrees(primary)
         if result.returncode and still_registered:
+            task_remove_intent_path(primary, slug).unlink(missing_ok=True)
             detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
             raise RuntimeError(f"Git worktree 移除失败：{detail}")
         if target.exists():
@@ -695,17 +747,24 @@ def _remove_locked(slug: str, *, superseded_by: str | None = None) -> None:
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     remove_task_artifacts(primary, slug)
+    task_remove_intent_path(primary, slug).unlink(missing_ok=True)
     evidence = f"; superseded by main commit {replacement}" if replacement else ""
     print(f"[task] removed {branch} and {target}{evidence}")
 
 
-def remove(slug: str, *, superseded_by: str | None = None) -> None:
+def remove(
+    slug: str, *, superseded_by: str | None = None,
+    adopt_partial_removal: bool = False,
+) -> None:
     if not SLUG_PATTERN.fullmatch(slug):
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
     artifacts = primary / ".artifacts" / "worktrees" / slug
     with task_artifact_lease(artifacts):
-        _remove_locked(slug, superseded_by=superseded_by)
+        _remove_locked(
+            slug, superseded_by=superseded_by,
+            adopt_partial_removal=adopt_partial_removal,
+        )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -723,6 +782,7 @@ def parser() -> argparse.ArgumentParser:
     remove_parser = commands.add_parser("remove")
     remove_parser.add_argument("slug")
     remove_parser.add_argument("--superseded-by")
+    remove_parser.add_argument("--adopt-partial-removal", action="store_true")
     gc_parser = commands.add_parser("gc")
     gc_parser.add_argument("--apply", action="store_true")
     gc_parser.add_argument("--retention-days", type=int, default=7)
@@ -741,7 +801,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "ready":
             ready(cwd, ui=args.ui, rust=args.rust, package=args.package)
         elif args.command == "remove":
-            remove(args.slug, superseded_by=args.superseded_by)
+            remove(
+                args.slug, superseded_by=args.superseded_by,
+                adopt_partial_removal=args.adopt_partial_removal,
+            )
         elif args.command == "gc":
             gc_task_artifacts(
                 apply=args.apply, retention_days=args.retention_days,

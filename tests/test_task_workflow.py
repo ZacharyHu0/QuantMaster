@@ -11,6 +11,7 @@ from scripts.dev.tasks import (
     gc_task_artifacts,
     has_full_validation,
     record_full_validation,
+    record_task_remove_intent,
     remove,
     remove_empty_residual,
     remove_primary_venv_link,
@@ -21,6 +22,7 @@ from scripts.dev.tasks import (
     task_artifact_lease,
     task_artifacts_active,
     task_changed_paths,
+    task_remove_intent_path,
     validate_ready_state,
 )
 
@@ -311,11 +313,94 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {primary})
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
+    monkeypatch.setattr(tasks, "record_task_remove_intent", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "remove_verified_residual", lambda root, path, branch: path.rmdir())
     monkeypatch.setattr(tasks, "git", fake_git)
     remove("recovery")
     assert not target.exists()
     assert ["branch", "-D", "codex/recovery"] in calls
+
+
+def test_remove_intent_recovers_checkout_after_git_partially_removed_it(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    (target / "runtime").mkdir()
+
+    class Result:
+        returncode = 0
+        stdout = "a" * 40
+
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    record_task_remove_intent(primary, "recovery", branch="codex/recovery")
+    assert task_remove_intent_path(primary, "recovery").is_file()
+    remove_verified_residual(primary, target, "codex/recovery")
+    assert not target.exists()
+
+
+def test_remove_intent_rejects_branch_moved_after_partial_removal(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+
+    class Result:
+        returncode = 0
+        stdout = "a" * 40
+
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    record_task_remove_intent(primary, "recovery", branch="codex/recovery")
+    Result.stdout = "b" * 40
+    with pytest.raises(SystemExit, match="无法证明干净"):
+        remove_verified_residual(primary, target, "codex/recovery")
+
+
+def test_remove_explicitly_adopts_legacy_partial_checkout(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    (target / "runtime").mkdir()
+
+    class Result:
+        returncode = 0
+        stdout = "a" * 40
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "task_integrated", lambda *args: True)
+    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args: None)
+    monkeypatch.setattr(tasks, "record_task_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    remove("recovery", adopt_partial_removal=True)
+    assert not target.exists()
+
+
+def test_remove_refuses_partial_adoption_while_checkout_is_registered(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {target})
+    monkeypatch.setattr(tasks, "task_integrated", lambda *args: True)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    with pytest.raises(SystemExit, match="仅用于未登记"):
+        remove("recovery", adopt_partial_removal=True)
 
 
 def test_remove_cleans_task_artifacts_after_checkout_and_branch(monkeypatch, tmp_path):
