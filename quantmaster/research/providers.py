@@ -176,7 +176,10 @@ def build_future_continuous(
 ) -> pd.DataFrame:
     """Build forward ratio-adjusted research series while retaining the tradable contract."""
     required_bars = {"trade_date", "symbol", "close"}
-    required_mapping = {"trade_date", "symbol", "mapping_ts_code"}
+    required_mapping = {
+        "trade_date", "symbol", "mapping_ts_code", "exchange", "currency",
+        "quote_unit", "contract_multiplier", "tick_size", "roll_method",
+    }
     if not required_bars.issubset(contract_bars) or not required_mapping.issubset(mapping):
         raise ValueError("期货连续序列缺少合约行情或主力映射字段")
     bars = contract_bars.copy()
@@ -218,6 +221,14 @@ def build_future_continuous(
                 "mapping_ts_code": contract,
                 "roll_flag": roll,
                 "continuous_adj_factor": scale,
+                "price_type": "continuous_futures",
+                "intended_use": "research_only_not_tradable",
+                "exchange": str(item.exchange),
+                "currency": str(item.currency),
+                "quote_unit": str(item.quote_unit),
+                "contract_multiplier": float(item.contract_multiplier),
+                "tick_size": float(item.tick_size),
+                "roll_method": str(item.roll_method),
             })
             for column in ("open", "high", "low", "close", "settle", "pre_settle"):
                 if column in row and pd.notna(row[column]):

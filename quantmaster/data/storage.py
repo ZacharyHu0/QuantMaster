@@ -727,6 +727,31 @@ class BarStore:
         if df is None or df.empty:
             return
         df = self._normalize_frame_index(df)
+        event_semantics = dict((quality or {}).get("semantics") or {})
+        if not replace_coverage:
+            previous = self.metadata(symbol) or {}
+            try:
+                previous_quality = json.loads(str(previous.get("quality_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_quality = {}
+            previous_semantics = dict(previous_quality.get("semantics") or {})
+            previous_source = str(previous.get("last_source") or "")
+            if (
+                previous.get("row_count")
+                and previous_source
+                and source
+                and previous_source != source
+                and (not previous_semantics or not event_semantics)
+            ):
+                raise ValueError(
+                    "拒绝合并缺少 instrument/time/price_type/currency/unit 语义的跨来源行情缓存"
+                )
+            if previous_semantics and event_semantics:
+                from quantmaster.data.semantics import NumericSemantics
+
+                NumericSemantics.from_dict(previous_semantics).require_mergeable(
+                    NumericSemantics.from_dict(event_semantics)
+                )
         from quantmaster.runtime.maintenance import maintenance_barrier
 
         maintenance_barrier.require_writable()

@@ -450,8 +450,10 @@ class FreeStockDBSource(DataSource):
             # Confirmed from the user-installed StockDB table examples and
             # their internal arithmetic (price * shares = market value).
             "unit_status": "verified_local_stockdb_schema_v1",
-            "adjustment": "qfq" if not intraday else "none",
-            "adjustment_status": "factor_applied_by_stockdb" if not intraday else "raw",
+            "adjustment": "qfq" if not intraday else "raw",
+            "adjustment_status": "requested_unverified" if not intraday else "raw",
+            "factor_coverage": "unconfirmed" if not intraday else "not_applicable",
+            "provider_interface": "stock_sdk:daily" if not intraday else "stock_sdk:intraday",
         })
         return result
 

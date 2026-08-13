@@ -320,7 +320,19 @@ def test_strict_json_boundary_converts_nonfinite_values_to_null():
     response = TestClient(app).get("/values")
 
     assert response.status_code == 200
-    assert response.json() == {"nan": None, "values": [None, None, 1.0]}
+    assert response.json() == {
+        "nan": None,
+        "values": [None, None, 1.0],
+        "numeric_missing": {
+            "count": 3,
+            "reason_counts": {"calculation_nonfinite": 3},
+            "items": [
+                {"path": "payload.nan", "reason": "calculation_nonfinite"},
+                {"path": "payload.values[0]", "reason": "calculation_nonfinite"},
+                {"path": "payload.values[1]", "reason": "calculation_nonfinite"},
+            ],
+        },
+    }
     encoded = strict_json_dumps({
         "value": float("nan"), "decimal": Decimal("Infinity"),
         "overflow": Decimal("1e10000"), "finite": Decimal("1.25"),

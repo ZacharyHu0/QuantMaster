@@ -22,6 +22,8 @@ from typing import Any, Literal, TypeVar
 
 import pandas as pd
 
+from quantmaster.data.semantics import NumericSemantics
+
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
 _SYMBOL_PATTERN = re.compile(r"[0-9A-Za-z._^=-]{1,48}")
@@ -104,6 +106,10 @@ class BarDataQuality:
     refresh_reason: str = ""
     expected_session: str = ""
     future_rows: int = 0
+    semantics: NumericSemantics | None = None
+    semantic_diagnostic_code: str = ""
+    missing_reason_counts: tuple[tuple[str, int], ...] = ()
+    anomaly_counts: tuple[tuple[str, int], ...] = ()
 
     @property
     def analysis_eligible(self) -> bool:
@@ -114,9 +120,15 @@ class BarDataQuality:
     def formal_eligible(self) -> bool:
         """Whether the result may enter formal history without another quality gate."""
         freshness_ok = self.freshness_state in {"unknown", "fresh"}
+        semantic_ok = self.semantics is not None
+        if self.semantics is not None:
+            try:
+                self.semantics.require_formal()
+            except ValueError:
+                semantic_ok = False
         return (
             self.status == "verified" and not self.stale and not self.partial
-            and freshness_ok and self.future_rows == 0
+            and freshness_ok and self.future_rows == 0 and semantic_ok
         )
 
     @property
@@ -166,6 +178,10 @@ class BarDataQuality:
             "refresh_reason": self.refresh_reason,
             "expected_session": self.expected_session,
             "future_rows": self.future_rows,
+            "semantics": self.semantics.to_dict() if self.semantics else None,
+            "semantic_diagnostic_code": self.semantic_diagnostic_code,
+            "missing_reason_counts": dict(self.missing_reason_counts),
+            "anomaly_counts": dict(self.anomaly_counts),
             "analysis_eligible": self.analysis_eligible,
             "formal_eligible": self.formal_eligible,
             "preview_eligible": self.preview_eligible,
@@ -265,7 +281,7 @@ def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
         "日期": "date", "时间": "date", "日期时间": "date",
         "开盘": "open", "收盘": "close", "最高": "high", "最低": "low",
         "成交量": "volume", "成交额": "amount", "换手率": "turnover",
-        "adj close": "close",
+        "adj close": "adjusted_close",
     }
     df = df.rename(columns=rename)
     if "date" in df.columns:
@@ -273,7 +289,10 @@ def normalize_bars(df: pd.DataFrame) -> pd.DataFrame:
         df = df.set_index("date")
     df.index = pd.to_datetime(df.index)
     df.index.name = "date"
-    keep = [c for c in ["open", "high", "low", "close", "volume", "amount", "turnover"] if c in df.columns]
+    candidates = [
+        "open", "high", "low", "close", "adjusted_close", "volume", "amount", "turnover",
+    ]
+    keep = [column for column in candidates if column in df.columns]
     df = df[keep].sort_index()
     return df.astype(float)
 

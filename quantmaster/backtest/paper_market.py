@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from quantmaster.data.base import Market, guess_market
+from quantmaster.data.semantics import NumericSemantics, PriceType
 
 if TYPE_CHECKING:
     from quantmaster.data.storage import BarStore
@@ -131,6 +132,7 @@ class DailyBarEvidence:
     open_price: float
     observed_at: datetime
     source: str
+    semantics: NumericSemantics | None = None
 
 
 def market_for_symbol(symbol: str) -> PaperMarket:
@@ -344,6 +346,15 @@ def select_next_open_bar(
         raise ValueError("拒绝使用在撮合决策之后才观测到的未来行情")
     if not bar.source.strip():
         raise ValueError("开盘行情缺少来源引用")
+    if bar.semantics is None:
+        raise ValueError("模拟撮合缺少价格数值语义")
+    if bar.semantics.price_type != PriceType.RAW:
+        raise ValueError("模拟撮合仅允许当时真实可交易 raw 价格")
+    if bar.semantics.instrument != bar.symbol:
+        raise ValueError("模拟撮合价格语义与订单标的不一致")
+    if bar.semantics.intended_use != "paper_trading":
+        raise ValueError("价格合同未授权用于模拟撮合")
+    bar.semantics.require_formal()
     if not pd.notna(bar.open_price) or float(bar.open_price) <= 0:
         raise ValueError("开盘行情价格无效")
     return bar

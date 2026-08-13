@@ -214,11 +214,7 @@ class TushareSource(DataSource):
         return normalize_daily(frame)
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
-        """A 股前复权日线，或沪深指数日线。
-
-        股票使用 ``daily + adj_factor`` 在本地计算前复权，避免旧实现的
-        Tushare 未复权价格与 AKShare qfq 缓存口径不一致。
-        """
+        """A 股前复权日线，或无需复权的指数/基金日线。"""
         start_c, end_c = start.replace("-", ""), end.replace("-", "")
         ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
         fields = "ts_code,trade_date,open,high,low,close,vol,amount"
@@ -247,7 +243,8 @@ class TushareSource(DataSource):
         if raw.empty or factors.empty:
             return pd.DataFrame()
         merged = raw.merge(
-            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner")
+            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
+        )
         merged["trade_date"] = pd.to_datetime(merged["trade_date"])
         merged = merged.sort_values("trade_date")
         factor = pd.to_numeric(merged["adj_factor"], errors="coerce")

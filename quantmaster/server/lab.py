@@ -6,13 +6,13 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import Field
-from starlette.responses import JSONResponse
 
 from quantmaster.config import get_config
 from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.service import LabService
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.problems import OperationProblem, make_problem
 
 router = APIRouter(prefix="/api/v1/lab", tags=["quant-lab"])

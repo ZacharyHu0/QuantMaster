@@ -38,6 +38,16 @@ class _Source:
             self.frame["symbol"].isin(symbols) & (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
         ].copy()
 
+    def adjustment_factors(self, symbols, start, end):
+        dates = pd.to_datetime(self.frame["date"])
+        value = self.frame.loc[
+            self.frame["symbol"].isin(symbols)
+            & (dates >= pd.Timestamp(start))
+            & (dates <= pd.Timestamp(end)),
+            ["symbol", "date"],
+        ].drop_duplicates()
+        return value.assign(adj_factor=1.0)
+
     def board_hierarchy(self):
         symbols = sorted(self.frame["symbol"].unique())
         return [

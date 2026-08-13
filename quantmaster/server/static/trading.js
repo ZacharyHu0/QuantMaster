@@ -419,7 +419,7 @@
     const cells = [
       ['累计收益', percent(metrics.total_return), signedClass(metrics.total_return)],
       ['年化收益', percent(metrics.annual_return), signedClass(metrics.annual_return)],
-      ['最大回撤', percent(-Math.abs(Number(metrics.max_drawdown || 0))), 'risk'],
+      ['最大回撤', metrics.max_drawdown == null ? '无法计算' : percent(-Math.abs(Number(metrics.max_drawdown))), 'risk'],
       ['夏普', number(metrics.sharpe), ''],
       ['信息比率', number(metrics.information_ratio), ''],
       ['Sortino', number(metrics.sortino), ''],

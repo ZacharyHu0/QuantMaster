@@ -268,6 +268,8 @@ function ingestDataQuality(data, scope = 'operation') {
     : Number(quality.missing_symbol_count || 0);
   const coverage = Number(quality.coverage_ratio);
   const adjustment = String(quality.adjustment || '').trim();
+  const semantics = quality.semantics && typeof quality.semantics === 'object'
+    ? quality.semantics : {};
   const units = Array.isArray(quality.units)
     ? quality.units.slice(0, 4).map(item => Array.isArray(item) ? humanUnit(item[0], item[1]) : String(item))
       .filter(Boolean).join(', ')
@@ -282,6 +284,11 @@ function ingestDataQuality(data, scope = 'operation') {
     Number.isFinite(coverage) ? `覆盖率 ${(coverage * 100).toFixed(2)}%` : '',
     missing ? `${missing} 个标的缺失` : '',
     adjustment ? `价格口径 ${humanAdjustment(adjustment)}` : '',
+    semantics.currency ? `币种 ${semantics.currency}` : '',
+    semantics.volume_unit ? `成交量单位 ${semantics.volume_unit}` : '',
+    semantics.price_type === 'continuous_futures'
+      ? '连续期货仅供研究展示，不是可交易合约' : '',
+    semantics.adjustment_anchor_date ? `复权锚点 ${semantics.adjustment_anchor_date}` : '',
     units ? `单位 ${units}` : '',
     provenance ? `证据链 ${provenance}` : '',
   ].filter(Boolean).join('；') || '当前结果使用了未完整或已过期的数据证据。';
@@ -299,11 +306,11 @@ function ingestDataQuality(data, scope = 'operation') {
     || freshness === 'unavailable';
   runtimeInfo.add(
     blocked ? 'error' : 'warning',
-    '行情数据', blocked ? '行情证据不可用，计算已停止' : '使用降级数据继续计算', {
+    '行情数据', blocked ? '行情证据不可用，计算已停止' : '行情语义待确认，仅保留普通展示', {
       detail,
       action:blocked
         ? '当前结果不可采信；请补齐缺失证据或恢复可信数据源后重新运行。'
-        : '结果仍可查看；请以真实数据日、来源和缺失范围为准，并在数据源恢复后刷新。',
+        : `诊断码 ${quality.semantic_diagnostic_code || 'data_evidence_incomplete'}；正式研究、组合换算或撮合不会使用该数据。`,
       key, scope, persistent:true,
       revision:String(quality.revision || quality.evidence_manifest_id || detail),
     },
@@ -1087,6 +1094,7 @@ function renderCacheObservability(cache) {
   const state = document.getElementById('cache-observability-state');
   const summary = document.getElementById('cache-observability-summary');
   const list = document.getElementById('cache-namespace-list');
+  const numericGovernance = document.getElementById('cache-numeric-governance');
   if (!state || !summary || !list) return;
   const values = Array.isArray(cache?.namespaces) ? cache.namespaces : [];
   const totals = cache?.summary || {};
@@ -1095,7 +1103,12 @@ function renderCacheObservability(cache) {
   state.textContent = observed ? `已观测 ${observed} / ${total}` : '尚无运行期观测';
   state.dataset.state = observed === total && total ? 'healthy' : 'unavailable';
   const hitRate = totals.hit_rate == null ? '无样本' : `${(Number(totals.hit_rate) * 100).toFixed(1)}%`;
-  summary.innerHTML = `<div><dt>已观测</dt><dd>${observed} / ${total}</dd></div><div><dt>命中率</dt><dd>${hitRate}</dd></div><div><dt>Fresh / Stale</dt><dd>${Number(totals.fresh || 0)} / ${Number(totals.stale || 0)}</dd></div><div><dt>Partial / Negative</dt><dd>${Number(totals.partial || 0)} / ${Number(totals.negative || 0)}</dd></div><div><dt>Pending</dt><dd>${Number(totals.pending || 0)} · 重验 ${Number(totals.provider_revalidation_pending || 0)}</dd></div>`;
+  summary.innerHTML = `<div><dt>已观测</dt><dd>${observed} / ${total}</dd></div><div><dt>命中率</dt><dd>${hitRate}</dd></div><div><dt>Fresh / Stale</dt><dd>${Number(totals.fresh || 0)} / ${Number(totals.stale || 0)}</dd></div><div><dt>Partial / Negative</dt><dd>${Number(totals.partial || 0)} / ${Number(totals.negative || 0)}</dd></div><div><dt>待补齐 / 非有限数拦截</dt><dd>${Number(totals.pending || 0)} / ${Number(totals.numeric_intercepted || 0)}</dd></div>`;
+  if (numericGovernance) {
+    const numeric = cache?.numeric_boundary || {};
+    const reasons = Object.entries(numeric.reason_counts || {});
+    numericGovernance.innerHTML = `<p role="status">NaN/Infinity 已拦截 ${Number(numeric.intercepted || 0)} 项；均转换为 null，未使用巨大替代数。</p>${reasons.length ? `<ul>${reasons.map(([reason,count]) => `<li><code>${esc(reason)}</code>：${Number(count || 0)} 项</li>`).join('')}</ul>` : '<p>当前无非有限数拦截；批次缺失原因在对应 Partial 明细中展开。</p>'}`;
+  }
   list.innerHTML = values.length ? values.map(cacheNamespaceMarkup).join('')
     : '<p class="cache-observability-empty">缓存观测暂不可用；这不代表缓存为空或健康。</p>';
 }

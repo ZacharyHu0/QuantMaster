@@ -48,22 +48,22 @@ def _read_backtests() -> BacktestStore:
 
 
 def _read_paper_service():
-    service = get_paper_service(read_only=True)
-    if service.store.path.is_file():
-        return service
-    raise OperationProblem(
-        503,
-        make_problem(
-            "snapshot_unavailable",
-            severity="warning",
-            source="模拟盘账本",
-            title="尚无本地模拟盘账本",
-            message="后台 worker 尚未创建任何可展示的模拟账户。",
-            action="可先创建模拟账户，或继续浏览其他页面。",
-            blocking=True,
-            can_continue=True,
-        ),
-    )
+    path = get_config().data_root / "paper.sqlite"
+    if not path.is_file():
+        raise OperationProblem(
+            503,
+            make_problem(
+                "snapshot_unavailable",
+                severity="warning",
+                source="模拟盘账本",
+                title="尚无本地模拟盘账本",
+                message="后台 worker 尚未创建任何可展示的模拟账户。",
+                action="可先创建模拟账户，或继续浏览其他页面。",
+                blocking=True,
+                can_continue=True,
+            ),
+        )
+    return get_paper_service(read_only=True)
 
 
 def _wake_auto_account(account: dict) -> dict:

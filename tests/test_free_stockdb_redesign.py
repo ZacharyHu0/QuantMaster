@@ -414,7 +414,9 @@ def test_frozen_factor_derives_research_price_without_mutating_raw_frame():
 
     assert raw["close"].tolist() == [10.0, 5.0]
     assert research["close"].tolist() == [5.0, 5.0]
-    assert research["price_adjustment"].unique().tolist() == ["qfq_from_frozen_factor_v1"]
+    assert research["price_adjustment"].unique().tolist() == [
+        "forward_adjusted_from_frozen_factor_v1"
+    ]
 
 
 class _NoReadSource:

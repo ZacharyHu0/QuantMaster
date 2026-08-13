@@ -139,6 +139,10 @@ button.danger { color: var(--up); border-color: color-mix(in oklch, var(--up) 42
 .cache-negative-list li,.cache-issue-list li { display:grid; grid-template-columns:minmax(120px,.7fr) minmax(0,1.3fr); gap:8px; color:var(--muted); font-size:10px; }
 .cache-negative-list strong,.cache-issue-list code { color:var(--ink-2); font-size:10px; font-weight:600; overflow-wrap:anywhere; }
 .cache-observability-empty { margin:0; padding:10px; color:var(--muted); font-size:11px; text-align:center; }
+.cache-governance-detail { border:1px solid var(--border); border-radius:8px; padding:9px 10px; color:var(--muted); font-size:11px; }
+.cache-governance-detail summary { cursor:pointer; color:var(--ink-2); font-weight:600; }
+.cache-governance-detail div { margin-top:8px; overflow-wrap:anywhere; }
+.cache-governance-detail p { margin:4px 0; }
 .diagnostic-heading {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 24px;
 }

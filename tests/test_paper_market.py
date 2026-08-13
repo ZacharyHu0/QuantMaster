@@ -14,6 +14,16 @@ from quantmaster.backtest.paper_market import (
     select_next_open_bar,
     session_windows,
 )
+from quantmaster.data.semantics import NumericSemantics, PriceType
+
+
+def raw_paper_semantics(symbol="600000.SH"):
+    return NumericSemantics(
+        instrument=symbol, observation_time="exchange_session_open",
+        price_type=PriceType.RAW, currency="CNY", price_unit="CNY/share",
+        volume_unit="share", amount_unit="CNY", provider="free-stockdb",
+        provider_interface="daily", intended_use="paper_trading",
+    )
 from quantmaster.data.storage import BarStore
 
 
@@ -112,6 +122,7 @@ def test_recovery_cursor_never_skips_gap_or_uses_future_bar():
     bar_12 = DailyBarEvidence(
         "600000.SH", pd.Timestamp("2026-08-12").date(), 10.0,
         datetime.fromisoformat("2026-08-12T09:31:00+08:00"), "free-stockdb:daily",
+        raw_paper_semantics(),
     )
     # The first unprocessed session is the 11th; a bar for the 12th cannot
     # advance the cursor across that missing evidence.
@@ -123,6 +134,7 @@ def test_recovery_cursor_never_skips_gap_or_uses_future_bar():
     bar_11_from_future = DailyBarEvidence(
         "600000.SH", pd.Timestamp("2026-08-11").date(), 10.0,
         datetime.fromisoformat("2026-08-11T15:30:00+08:00"), "free-stockdb:daily",
+        raw_paper_semantics(),
     )
     with pytest.raises(ValueError, match="未来行情"):
         select_next_open_bar(

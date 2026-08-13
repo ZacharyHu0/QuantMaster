@@ -269,9 +269,9 @@
 
   function eventTemplate(item) {
     const timestamp = localDate(item.first_seen_at || item.published_at);
-    const sentiment = Number(item.sentiment || 0);
-    const sentimentClass = sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
-    const score = Math.round(Number(item.alert_importance_score || 0));
+    const sentiment = item.sentiment == null ? null : Number(item.sentiment);
+    const sentimentClass = sentiment == null ? 'missing' : sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
+    const score = item.alert_importance_score == null ? null : Math.round(Number(item.alert_importance_score));
     const sectors = Array.isArray(item.sectors) ? item.sectors : [];
     const tags = [
       item.is_official ? '<span class="news-tag official">官方</span>' : '',
@@ -290,12 +290,12 @@
           <span class="news-event-summary">${html(item.summary || item.content || '等待结构化摘要')}</span>
           <span class="news-event-meta"><span class="news-tag">${html(sourceName(item))}</span>${tags}</span>
         </span>
-        <span class="news-event-score ${sentimentClass}"><strong>${sentiment > 0 ? '+' : ''}${sentiment.toFixed(2)}</strong><span>${score} IMP</span></span>
+        <span class="news-event-score ${sentimentClass}"><strong>${sentiment == null ? '待更新' : `${sentiment > 0 ? '+' : ''}${sentiment.toFixed(2)}`}</strong><span>${score == null ? '等待补齐' : `${score} IMP`}</span></span>
       </button>
       <div class="news-event-detail">
         <div class="news-detail-copy">${html(item.content || item.summary || '暂无正文')}</div>
         ${failureTemplate(item)}
-        <div class="news-detail-metric"><span>置信度</span><strong>${Math.round(Number(item.confidence || 0) * 100)}%</strong></div>
+        <div class="news-detail-metric"><span>置信度</span><strong>${item.confidence == null ? '无法计算' : `${Math.round(Number(item.confidence) * 100)}%`}</strong></div>
         <div class="news-detail-metric"><span>影响范围</span><strong>${html(item.scope || '待判断')}</strong></div>
         <div class="news-detail-metric"><span>相关板块</span><strong>${html(sectors.join('、') || '未映射')}</strong></div>
         <div class="news-detail-metric"><span>首次获取</span><strong>${html(item.first_seen_at || '—')}</strong></div>
@@ -404,7 +404,8 @@
       },
       series: [{
         id: 'market-sentiment', name: '大盘情绪', type: 'line', showSymbol: false,
-        data: series.map(item => Math.max(-maxAbs, Math.min(maxAbs, Number(item[1] || 0) * 100))),
+        connectNulls: false,
+        data: series.map(item => item[1] == null ? null : Number(item[1]) * 100),
         lineStyle: {width: 2, color: CHART_COLORS.primary},
         markLine: {silent: true, symbol: 'none', label: {show: false},
           lineStyle: {color: AXIS, width: 1}, data: [{yAxis: 0}]},

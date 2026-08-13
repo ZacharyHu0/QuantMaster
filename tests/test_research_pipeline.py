@@ -1094,6 +1094,12 @@ def test_future_continuous_uses_previous_overlap_ratio_at_roll():
         "trade_date": dates,
         "symbol": ["CU.SHF"] * 3,
         "mapping_ts_code": ["CU2401.SHF", "CU2401.SHF", "CU2402.SHF"],
+        "exchange": ["SHFE"] * 3,
+        "currency": ["CNY"] * 3,
+        "quote_unit": ["CNY/tonne"] * 3,
+        "contract_multiplier": [5.0] * 3,
+        "tick_size": [10.0] * 3,
+        "roll_method": ["previous_overlap_settlement_ratio"] * 3,
     })
     result = build_future_continuous(bars, mapping)
     rolled = result.iloc[-1]

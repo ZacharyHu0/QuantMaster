@@ -111,6 +111,11 @@ def test_partial_batch_persists_reason_and_resumes_only_missing(tmp_path) -> Non
     assert summary["pending_count"] == 1
     assert summary["pending"][0]["reason"] == "TLS handshake failed"
     assert summary["pending"][0]["diagnostic_code"] == "tls_error"
+    assert summary["requested"] == symbols
+    assert summary["completed"] == ["600000.SH"]
+    assert summary["missing"][0]["reason"] == "source_unavailable"
+    assert summary["complete"] is False
+    assert summary["reason_counts"] == {"source_unavailable": 1}
 
     resumed_id, retry, resumed = store.begin_or_resume(
         symbols, "2026-08-03", "2026-08-07", frequency="1d", provider="fixture",

@@ -46,6 +46,7 @@ from quantmaster.data.resilience import (
     local_only_data_access,
     remote_io_allowed,
 )
+from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.data.storage import BarStore, IntradayBarStore
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
 
@@ -195,6 +196,59 @@ def _unit_contract(symbol: str) -> tuple[tuple[tuple[str, str], ...], str]:
     return unknown, f"{symbol} 的 {asset_type or 'unknown'} 品种缺少可验证单位契约"
 
 
+def _numeric_semantics(
+    symbol: str, source: str, frame: pd.DataFrame, units: tuple[tuple[str, str], ...],
+) -> tuple[NumericSemantics, tuple[str, ...]]:
+    """Build a provider-boundary contract without guessing absent dimensions."""
+    unit_map = dict(units)
+    adjustment = str(frame.attrs.get("adjustment") or "raw").lower()
+    price_type = {
+        "none": PriceType.RAW, "raw": PriceType.RAW,
+        "qfq": PriceType.FORWARD_ADJUSTED, "hfq": PriceType.BACKWARD_ADJUSTED,
+    }.get(adjustment, PriceType.RAW)
+    issues: list[str] = []
+    factor_coverage = "not_applicable"
+    provider_definition = ""
+    company_actions = ""
+    anchor = ""
+    if price_type != PriceType.RAW:
+        factor_coverage = str(frame.attrs.get("factor_coverage") or "unconfirmed")
+        provider_definition = str(frame.attrs.get("adjustment_provider_definition") or "")
+        company_actions = str(frame.attrs.get("adjustment_company_actions") or "")
+        anchor = str(frame.attrs.get("adjustment_anchor_date") or "")
+        if factor_coverage != "complete" or not provider_definition or not company_actions:
+            issues.append(
+                "factor_contract_incomplete: 缺少完整因子链、provider 定义或公司行为范围"
+            )
+    currency = str(unit_map.get("amount") or "")
+    if currency == "unknown" or "/" in currency:
+        currency = ""
+    continuous = guess_market(symbol) == Market.FUTURES and symbol.partition(".")[0].endswith("0")
+    if continuous:
+        price_type = PriceType.CONTINUOUS_FUTURES
+        issues.append(
+            "continuous_contract_unconfirmed: 连续序列缺少具体合约、roll、乘数与 tick"
+        )
+    semantics = NumericSemantics(
+        instrument=symbol,
+        observation_time="exchange_session" if frame.index.name == "date" else "",
+        price_type=price_type,
+        currency=currency,
+        price_unit=str(unit_map.get("close") or "unknown"),
+        volume_unit=str(unit_map.get("volume") or "unknown"),
+        amount_unit=str(unit_map.get("amount") or "unknown"),
+        provider=source or "unknown",
+        provider_interface=str(frame.attrs.get("provider_interface") or source or "unknown"),
+        adjustment_anchor_date=anchor,
+        adjustment_provider_definition=provider_definition,
+        adjustment_company_actions=company_actions,
+        factor_coverage=factor_coverage,
+        roll_method=str(frame.attrs.get("roll_method") or ""),
+        intended_use="display",
+    )
+    return semantics, tuple(issues)
+
+
 def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.DatetimeIndex, str]:
     """Return only locally published trading-session evidence."""
     try:
@@ -302,11 +356,19 @@ def _assess_daily_frame(
                 f"存在 {invalid_numeric} 行无法识别的开盘、最高、最低、收盘或成交量"
             )
         prices = numeric[["open", "high", "low", "close"]]
+        scale = prices.abs().max(axis=1).clip(lower=1.0)
+        tolerance = scale.mul(1e-8)
+        future_family = symbol.upper().split(".", 1)[0].rstrip("0123456789")
+        energy_future = (
+            guess_market(symbol) == Market.FUTURES
+            and future_family in {"CL", "SC", "WTI", "BRENT"}
+        )
+        valid_price_domain = prices.notna().all(axis=1) if energy_future else prices.gt(0).all(axis=1)
         semantic = (
-            prices.gt(0).all(axis=1)
-            & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
-            & numeric["low"].le(prices[["open", "close"]].min(axis=1))
-            & numeric["high"].ge(numeric["low"])
+            valid_price_domain
+            & numeric["high"].add(tolerance).ge(prices[["open", "close"]].max(axis=1))
+            & numeric["low"].sub(tolerance).le(prices[["open", "close"]].min(axis=1))
+            & numeric["high"].add(tolerance).ge(numeric["low"])
             & numeric["volume"].ge(0)
         )
         invalid_semantics = int((finite & ~semantic).sum())
@@ -316,9 +378,11 @@ def _assess_daily_frame(
         "verified", "verified_local_stockdb_schema_v1",
     }:
         issues.append("本地 StockDB 未附带可核验的单位说明，当前按每股价格和人民币金额使用")
-    adjustment = "qfq"
+    semantics, semantic_issues = _numeric_semantics(symbol, source, df, units)
+    issues.extend(semantic_issues)
+    adjustment = semantics.price_type.value
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
-        adjustment = "qfq_requested_unverified"
+        adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
     boundary_tolerance = pd.Timedelta(days=14)
     if pd.isna(observed_start) or pd.isna(observed_end):
@@ -378,6 +442,17 @@ def _assess_daily_frame(
         units=units,
         duplicate_rows=duplicate_rows,
         future_rows=future_rows,
+        semantics=semantics,
+        semantic_diagnostic_code=(semantic_issues[0].split(":", 1)[0] if semantic_issues else ""),
+        missing_reason_counts=(
+            (("not_published", 1),) if df is None or df.empty else ()
+        ),
+        anomaly_counts=tuple((key, value) for key, value in (
+            ("duplicate_time", duplicate_rows),
+            ("future_time", future_rows),
+            ("nonfinite_ohlcv", invalid_numeric),
+            ("ohlcv_conflict", invalid_semantics),
+        ) if value),
         requested_symbols=(symbol,) if symbol else (),
         observed_symbols=(symbol,) if symbol else (),
     )

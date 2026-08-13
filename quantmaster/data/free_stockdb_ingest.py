@@ -1463,15 +1463,9 @@ class StockDBIngestService:
         cross_validation = self._cross_source_validation(frame)
         coverage["cross_source_validation"] = cross_validation
         coverage["acceptance"] = {
-            "formal_allowed": (
-                cross_validation.get("status") == "verified" and not calendar_issues
-            ),
+            "formal_allowed": False,
             "preview_allowed": True,
-            "reason": (
-                ""
-                if cross_validation.get("status") == "verified" and not calendar_issues
-                else "整批独立抽检或交易日历证据尚未完成，结果仅可预览"
-            ),
+            "reason": "复权因子完整性尚未逐标的确认，结果仅可预览",
         }
         if catalog_issue:
             coverage.setdefault("issues_non_blocking", []).append(catalog_issue)
@@ -1489,10 +1483,19 @@ class StockDBIngestService:
                 if missing_factor_symbols:
                     coverage["price_adjustment_status"] = "degraded"
                     coverage.setdefault("issues_non_blocking", []).append(
-                        f"{len(missing_factor_symbols)} 只证券缺少可验证复权因子；研究价保留原价并显式降级"
+                        f"{len(missing_factor_symbols)} 只证券缺少可验证复权因子；正式研究已停止"
                     )
                 else:
                     coverage["price_adjustment_status"] = "verified"
+                    coverage["acceptance"] = {
+                        "formal_allowed": bool(
+                            cross_validation.get("status") == "verified" and not calendar_issues
+                        ),
+                        "preview_allowed": True,
+                        "reason": "" if (
+                            cross_validation.get("status") == "verified" and not calendar_issues
+                        ) else "整批独立抽检或交易日历证据尚未完成，结果仅可预览",
+                    }
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 coverage["price_adjustment_status"] = "degraded"
                 coverage["adjustment_factor_missing_symbols"] = list(symbols)
@@ -1562,10 +1565,7 @@ class StockDBIngestService:
         if frame.empty:
             return frame
         if adjustment.empty:
-            value = frame.copy()
-            value["price_adjustment"] = "raw_missing_factor"
-            value["adjustment_status"] = "degraded"
-            return value
+            raise ValueError("正式研究缺少完整复权因子链")
         factors = adjustment[["symbol", "date", "adj_factor"]].copy()
         factors["date"] = pd.to_datetime(factors["date"], errors="coerce")
         factors["adj_factor"] = pd.to_numeric(factors["adj_factor"], errors="coerce")
@@ -1581,10 +1581,7 @@ class StockDBIngestService:
                 raise ValueError("复权因子存在同证券同日冲突值")
             factors = factors.drop_duplicates(["symbol", "date"], keep="last")
         if factors.empty:
-            value = frame.copy()
-            value["price_adjustment"] = "raw_missing_factor"
-            value["adjustment_status"] = "degraded"
-            return value
+            raise ValueError("正式研究复权因子链没有有效记录")
         value = frame.copy()
         value["date"] = pd.to_datetime(value["date"], errors="coerce")
         value = pd.merge_asof(
@@ -1602,13 +1599,17 @@ class StockDBIngestService:
             & denominator.notna()
             & denominator.gt(0)
         )
+        missing_symbols = sorted(set(value.loc[~verified, "symbol"].astype(str)))
+        if missing_symbols:
+            raise ValueError(
+                f"正式研究复权因子链不完整：{len(missing_symbols)} 只证券缺口；"
+                + "、".join(missing_symbols[:10])
+            )
         scale = value["adj_factor"].div(denominator).replace([np.inf, -np.inf], np.nan)
         for column in ("open", "high", "low", "close", "pre_close"):
             if column in value:
                 raw = pd.to_numeric(value[column], errors="coerce")
                 value[column] = raw.where(~verified, raw * scale)
-        value["price_adjustment"] = np.where(
-            verified, "qfq_from_frozen_factor_v1", "raw_missing_factor",
-        )
-        value["adjustment_status"] = np.where(verified, "verified", "degraded")
+        value["price_adjustment"] = "forward_adjusted_from_frozen_factor_v1"
+        value["adjustment_status"] = "verified"
         return value.drop(columns=["adj_factor"]).sort_values(["symbol", "date"]).reset_index(drop=True)

@@ -13,12 +13,13 @@ import json
 import sqlite3
 import time
 import uuid
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pandas as pd
 
@@ -153,6 +154,28 @@ class BarRefreshBatchStore:
 
     SCHEMA_VERSION = 1
 
+    _REASON_BY_DIAGNOSTIC: ClassVar[dict[str, str]] = {
+        "not_attempted": "partial_pending",
+        "not_found": "not_published",
+        "empty_response": "not_published",
+        "parse_error": "parse_failed",
+        "invalid_response": "parse_failed",
+        "insufficient_history": "insufficient_history",
+        "market_suspended": "market_suspended",
+        "filtered_by_contract": "filtered_by_contract",
+    }
+
+    @classmethod
+    def _missing_reason(cls, diagnostic_code: str) -> str:
+        code = str(diagnostic_code or "").lower()
+        if code in cls._REASON_BY_DIAGNOSTIC:
+            return cls._REASON_BY_DIAGNOSTIC[code]
+        if any(token in code for token in ("parse", "schema", "invalid")):
+            return "parse_failed"
+        if any(token in code for token in ("timeout", "tls", "network", "http", "upstream")):
+            return "source_unavailable"
+        return "source_unavailable"
+
     def __init__(self, bars_root: str | Path):
         self.path = Path(bars_root) / "refresh_pending.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +306,23 @@ class BarRefreshBatchStore:
         result = dict(row)
         result["symbols"] = json.loads(str(result.pop("symbols_json")))
         result["pending"] = [dict(item) for item in pending]
+        missing = [{
+            "item": item["symbol"],
+            "reason": self._missing_reason(item["diagnostic_code"]),
+            "detail": item["reason"],
+            "diagnostic_code": item["diagnostic_code"],
+            "attempts": item["attempts"],
+        } for item in result["pending"]]
+        missing_names = {item["item"] for item in missing}
+        completed = [symbol for symbol in result["symbols"] if symbol not in missing_names]
+        reason_counts = Counter(item["reason"] for item in missing)
+        result.update({
+            "requested": list(result["symbols"]),
+            "completed": completed,
+            "missing": missing,
+            "complete": not missing,
+            "reason_counts": dict(sorted(reason_counts.items())),
+        })
         return result
 
     def latest_exact(

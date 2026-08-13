@@ -177,6 +177,9 @@ def collect_cache_observability(snapshot: Any = None) -> dict[str, Any]:
     hits = sum(item["hits"] for item in observed)
     misses = sum(item["misses"] for item in observed)
     requests = hits + misses
+    from quantmaster.runtime.json import numeric_boundary_diagnostics
+
+    numeric = numeric_boundary_diagnostics()
     return {
         "checked_at": datetime.now(UTC).isoformat(),
         "summary": {
@@ -191,6 +194,8 @@ def collect_cache_observability(snapshot: Any = None) -> dict[str, Any]:
             "provider_revalidation_pending": sum(
                 item["provider_revalidation_pending"] or 0 for item in observed
             ),
+            "numeric_intercepted": numeric["intercepted"],
         },
+        "numeric_boundary": numeric,
         "namespaces": namespaces,
     }

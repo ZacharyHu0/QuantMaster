@@ -561,7 +561,7 @@ class TestBasics:
         assert "if (data.data_quality) ingestDataQuality(data" in app_script
         assert "数据来源与口径已验证" in app_script
         assert "证据链" in app_script
-        assert "使用降级数据继续计算" in app_script
+        assert "行情语义待确认，仅保留普通展示" in app_script
         assert "effective_as_of || quality.observed_end" in app_script
         assert 'id="operation-problem-dialog"' in resp.text
         assert 'data-runtime-filter="problem"' in resp.text

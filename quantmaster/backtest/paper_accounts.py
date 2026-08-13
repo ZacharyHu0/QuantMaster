@@ -40,6 +40,7 @@ from quantmaster.backtest.spec import (
     signal_is_due,
 )
 from quantmaster.config import get_config
+from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
@@ -2019,6 +2020,28 @@ class PaperService:
                 DailyBarEvidence(
                     symbol, pd.Timestamp(value).date(), float(raw), decision_at,
                     "panel-fixture" if observed_at is not None else "local-cache",
+                    NumericSemantics(
+                        instrument=symbol,
+                        observation_time="exchange_session_open",
+                        price_type=PriceType.RAW,
+                        currency={"cn": "CNY", "hk": "HKD", "us": "USD"}[
+                            market_for_symbol(symbol).value
+                        ],
+                        price_unit=(
+                            {"cn": "CNY", "hk": "HKD", "us": "USD"}[
+                                market_for_symbol(symbol).value
+                            ] + "/share"
+                        ),
+                        volume_unit="share",
+                        amount_unit={"cn": "CNY", "hk": "HKD", "us": "USD"}[
+                            market_for_symbol(symbol).value
+                        ],
+                        provider=("panel-fixture" if observed_at is not None else "local-cache"),
+                        provider_interface=(
+                            "test_fixture" if observed_at is not None else "bar_store"
+                        ),
+                        intended_use="paper_trading",
+                    ),
                 )
                 for value, raw in open_prices.get(symbol, pd.Series(dtype=float)).items()
                 if pd.notna(raw)

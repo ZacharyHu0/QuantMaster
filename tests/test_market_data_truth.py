@@ -500,7 +500,7 @@ def test_public_stockdb_http_is_not_a_trusted_market_source(isolated_config):
     }
 
 
-def test_missing_adjustment_factor_is_explicitly_degraded():
+def test_missing_adjustment_factor_stops_formal_research():
     raw = pd.DataFrame(
         {
             "symbol": ["600000.SH", "000001.SZ"],
@@ -519,11 +519,8 @@ def test_missing_adjustment_factor_is_explicitly_degraded():
         }
     )
 
-    result = StockDBIngestService._research_prices(raw, factors)
-
-    status = result.set_index("symbol")["adjustment_status"].to_dict()
-    assert status == {"000001.SZ": "degraded", "600000.SH": "verified"}
-    assert result.set_index("symbol").loc["000001.SZ", "price_adjustment"] == "raw_missing_factor"
+    with pytest.raises(ValueError, match="因子链不完整"):
+        StockDBIngestService._research_prices(raw, factors)
 
 
 def test_stockdb_daily_without_factor_lineage_is_degraded(monkeypatch):
@@ -544,7 +541,8 @@ def test_stockdb_daily_without_factor_lineage_is_degraded(monkeypatch):
     )
 
     assert quality.status == "degraded"
-    assert quality.adjustment == "qfq_requested_unverified"
+    assert quality.adjustment == "forward_adjusted_unverified"
+    assert quality.formal_eligible is False
     assert any("复权因子记录" in issue for issue in quality.issues)
 
 
@@ -602,33 +600,17 @@ def test_mixed_source_extension_cannot_upgrade_old_degraded_range(tmp_path, monk
         replace_coverage=True,
     )
     merged = pd.concat((old, fresh)).sort_index()
-    store.put(
-        "600000.SH", merged, replace=True,
-        request_start="2024-01-11", request_end="2024-01-19",
-        source="tushare",
-        quality={
-            "status": "verified", "issues": [], "sources": ["tushare"],
-            "observed_start": "2024-01-11", "observed_end": "2024-01-19",
-            "coverage_ratio": 1.0, "partial": False, "stale": False,
-        },
-    )
-
-    old_result = registry._bar_envelope(
-        old, symbol="600000.SH", start="2024-01-02", end="2024-01-10",
-        store=store, frequency="1d",
-    )
-    new_result = registry._bar_envelope(
-        fresh, symbol="600000.SH", start="2024-01-11", end="2024-01-19",
-        store=store, frequency="1d",
-    )
-
-    assert old_result.quality.status == "degraded"
-    assert "StockDB 因子链未验证" in old_result.quality.issues
-    assert {item["source"] for item in old_result.provenance} == {"free-stockdb"}
-    assert new_result.quality.status == "verified"
-    assert {item["source"] for item in new_result.provenance} == {"tushare"}
-
-
+    with pytest.raises(ValueError, match="拒绝合并缺少"):
+        store.put(
+            "600000.SH", merged, replace=True,
+            request_start="2024-01-11", request_end="2024-01-19",
+            source="tushare",
+            quality={
+                "status": "verified", "issues": [], "sources": ["tushare"],
+                "observed_start": "2024-01-11", "observed_end": "2024-01-19",
+                "coverage_ratio": 1.0, "partial": False, "stale": False,
+            },
+        )
 def test_public_envelope_verified_tail_cannot_upgrade_unverified_history(
     tmp_path, monkeypatch,
 ):
