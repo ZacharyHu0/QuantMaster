@@ -324,6 +324,30 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
         ) from None
 
 
+def remove_task_artifacts(primary: Path, slug: str) -> None:
+    artifact_root = (primary / ".artifacts" / "worktrees" / slug).resolve()
+    expected_parent = (primary / ".artifacts" / "worktrees").resolve()
+    if artifact_root.parent != expected_parent:
+        raise SystemExit("拒绝删除预期目录之外的任务工件")
+    if not artifact_root.exists():
+        return
+
+    def make_writable(function, path, error):
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+
+    try:
+        shutil.rmtree(artifact_root, onexc=make_writable)
+    except PermissionError as exc:
+        blocked = Path(exc.filename or artifact_root)
+        raise SystemExit(
+            "Windows ACL 阻止删除任务工件："
+            f"{blocked}；修复该路径权限后重新运行 remove"
+        ) from None
+
+
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
@@ -374,6 +398,7 @@ def remove(slug: str) -> None:
     ).returncode == 0
     registered = target in registered_worktrees(primary)
     if not branch_exists and not registered and not target.exists():
+        remove_task_artifacts(primary, slug)
         print(f"[task] {branch} 已清理")
         return
     if branch_exists and not task_integrated(primary, branch):
@@ -393,6 +418,7 @@ def remove(slug: str) -> None:
         remove_verified_residual(primary, target, branch)
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
+    remove_task_artifacts(primary, slug)
     print(f"[task] removed {branch} and {target}")
 
 

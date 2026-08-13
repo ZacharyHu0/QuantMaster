@@ -10,6 +10,7 @@ from scripts.dev.tasks import (
     remove,
     remove_empty_residual,
     remove_primary_venv_link,
+    remove_task_artifacts,
     remove_verified_residual,
     select_impact,
     task_changed_paths,
@@ -213,6 +214,42 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     remove("recovery")
     assert not target.exists()
     assert ["branch", "-D", "codex/recovery"] in calls
+
+
+def test_remove_cleans_task_artifacts_after_checkout_and_branch(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    (artifacts / "pytest" / "cache").mkdir(parents=True)
+
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    remove("recovery")
+    assert not artifacts.exists()
+
+
+def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
+    import pytest
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "cache"
+    blocked.mkdir(parents=True)
+    monkeypatch.setattr(
+        tasks.shutil, "rmtree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(13, "denied", blocked)),
+    )
+    with pytest.raises(SystemExit, match=r"Windows ACL.*pytest[\\/]cache"):
+        remove_task_artifacts(primary, "recovery")
+    assert artifacts.exists()
 
 
 def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
