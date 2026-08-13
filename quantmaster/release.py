@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.15.1"
+VERSION = "1.15.2"
 RELEASE_DATE = "2026-08-13"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "不可变发布候选",
+                "items": (
+                    (
+                        "发布候选冻结为 origin/main 历史中的完整 commit SHA；人工确认期间 main"
+                        " 可继续前进，最终发布仍精确指向已验证候选，不再反复重排主线。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.15.1",
+        "date": "2026-08-13",
         "sections": (
             {
                 "title": "设置与迁移安全性",
