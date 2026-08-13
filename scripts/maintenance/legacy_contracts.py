@@ -22,6 +22,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id")
     parser.add_argument("--batch-size", type=int, default=250)
     parser.add_argument("--confirm-root", required=True, type=Path)
+    parser.add_argument("--backup-root", type=Path)
+    parser.add_argument("--confirm-backup-root", type=Path)
     parser.add_argument("--writer-stopped-evidence", required=True)
     return parser
 
@@ -31,8 +33,22 @@ def main(argv: list[str] | None = None) -> int:
     root, confirmed = args.data_root.resolve(), args.confirm_root.resolve()
     if root != confirmed:
         raise SystemExit("--confirm-root must exactly match --data-root")
+    backup_root = None
+    if args.backup_root is not None or args.confirm_backup_root is not None:
+        if args.backup_root is None or args.confirm_backup_root is None:
+            raise SystemExit("external backup requires both --backup-root and --confirm-backup-root")
+        backup_root = args.backup_root.resolve()
+        confirmed_backup = args.confirm_backup_root.resolve()
+        if backup_root != confirmed_backup:
+            raise SystemExit("--confirm-backup-root must exactly match --backup-root")
+        if backup_root == Path(backup_root.anchor):
+            raise SystemExit("--backup-root cannot be a drive/filesystem root")
+        if backup_root == root or root in backup_root.parents or backup_root in root.parents:
+            raise SystemExit("external --backup-root must be outside and disjoint from --data-root")
     evidence = OfflineMaintenanceEvidence(confirmed, True, args.writer_stopped_evidence)
-    manager = LegacyMigrationManager(root, offline_evidence=evidence)
+    manager = LegacyMigrationManager(
+        root, backup_root=backup_root, offline_evidence=evidence,
+    )
     task: dict | None
     if args.action == "apply":
         if not args.domain:

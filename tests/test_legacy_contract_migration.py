@@ -122,6 +122,22 @@ def test_apply_backs_up_before_batches_and_can_rollback(tmp_path, fixture_migrat
     assert fixture_migrator.rolled_back is True
 
 
+def test_apply_records_absolute_external_backup_run_directory(tmp_path, fixture_migrator):
+    root = tmp_path / "data"
+    external = tmp_path / "external-backups"
+    root.mkdir(exist_ok=True)
+    manager = offline_manager(root, backup_root=external)
+
+    task = manager.create(fixture_migrator.name, mode="apply", batch_size=3)
+    result = wait_finished(manager, task["id"])
+
+    backup_path = Path(result["backup_path"])
+    assert backup_path.is_absolute()
+    assert backup_path.parent == external.resolve()
+    assert backup_path.name == task["id"]
+    assert (backup_path / BACKUP_MARKER).is_file()
+
+
 def test_only_one_active_run_and_resume_from_last_batch(tmp_path, fixture_migrator, monkeypatch):
     def slow_backup(root, target):
         time.sleep(0.1)
@@ -221,6 +237,10 @@ def test_backup_staging_marker_and_recursive_backup_exclusion(tmp_path):
     nested.mkdir(parents=True)
     with sqlite3.connect(nested / "recursive.sqlite") as connection:
         connection.execute("CREATE TABLE forbidden(value TEXT)")
+    manual = tmp_path / "backups" / "manual-snapshots"
+    manual.mkdir(parents=True)
+    with sqlite3.connect(manual / "historical.sqlite") as connection:
+        connection.execute("CREATE TABLE historical(value TEXT)")
     target = tmp_path / "backups" / "legacy-contracts" / "new"
 
     backup_sqlite_tree(tmp_path, target, exclude={"legacy_contract_migrations.sqlite"})
@@ -229,6 +249,20 @@ def test_backup_staging_marker_and_recursive_backup_exclusion(tmp_path):
     assert (target / "source.sqlite").is_file()
     assert not (target / "backups").exists()
     validate_backup_tree(target)
+
+
+@pytest.mark.parametrize("relative", (
+    "backups/manual.sqlite", "backups/legacy-contracts/run/data.sqlite",
+    "BACKUPS/manual.sqlite",
+))
+def test_explicit_extra_path_cannot_reinclude_historical_backup_tree(tmp_path, relative):
+    target = tmp_path / "snapshot"
+
+    with pytest.raises(ValueError, match="历史备份树"):
+        backup_sqlite_tree(tmp_path, target, extra_paths=(relative,))
+
+    assert not target.exists()
+    assert not target.with_name(f".{target.name}.staging").exists()
 
 
 def test_old_partial_final_backup_is_rejected_and_new_run_can_backup(tmp_path):

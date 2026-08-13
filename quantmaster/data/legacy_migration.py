@@ -150,11 +150,14 @@ class LegacyMigrationManager:
         root: str | Path | None = None,
         *,
         backup: Callable[[Path, Path], None] | None = None,
+        backup_root: str | Path | None = None,
         offline_evidence: OfflineMaintenanceEvidence | None = None,
     ) -> None:
         self.root = Path(root or get_config().data_root).resolve()
         self.state_path = self.root / "legacy_contract_migrations.sqlite"
-        self.backup_root = self.root / "backups" / "legacy-contracts"
+        self.backup_root = Path(
+            backup_root or self.root / "backups" / "legacy-contracts"
+        ).resolve()
         self._backup = backup or self._backup_sqlite_files
         self._offline_evidence = offline_evidence
         self._lock = threading.RLock()

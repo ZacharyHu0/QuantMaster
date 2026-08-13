@@ -163,7 +163,7 @@ def validate_backup_tree(root: Path) -> dict:
 
 
 def _backup_sqlite_entries(
-    source_root: Path, staging: Path, excluded: set[str], backup_family: Path,
+    source_root: Path, staging: Path, excluded: set[str], backups_root: Path,
 ) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for source in sorted(source_root.rglob("*")):
@@ -171,8 +171,8 @@ def _backup_sqlite_entries(
             continue
         resolved = source.resolve()
         if (
-            backup_family == resolved
-            or backup_family in resolved.parents
+            backups_root == resolved
+            or backups_root in resolved.parents
             or source.name in excluded
             or _is_sqlite_sidecar(source)
         ):
@@ -187,6 +187,8 @@ def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str,
     relative = Path(raw)
     if relative.is_absolute() or ".." in relative.parts:
         raise MigrationError(f"额外备份路径越界: {raw}")
+    if relative.parts and relative.parts[0].casefold() == "backups":
+        raise MigrationError(f"额外备份路径不能指向历史备份树: {raw}")
     source = source_root / relative
     exists = source.exists()
     kind = (
@@ -233,6 +235,13 @@ def backup_sqlite_tree(
 ) -> None:
     """Atomically publish a verified backup; an unmarked staging tree is never reusable."""
     source_root, target_root = source_root.resolve(), target_root.resolve()
+    normalized_extras = tuple(sorted(set(extra_paths)))
+    for raw in normalized_extras:
+        relative = Path(raw)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise MigrationError(f"额外备份路径越界: {raw}")
+        if relative.parts and relative.parts[0].casefold() == "backups":
+            raise MigrationError(f"额外备份路径不能指向历史备份树: {raw}")
     if target_root.exists():
         validate_backup_tree(target_root)
         return
@@ -246,11 +255,11 @@ def backup_sqlite_tree(
         shutil.rmtree(staging)
     staging.mkdir(parents=True, exist_ok=False)
     excluded = set(exclude or ())
-    backup_family = source_root / "backups" / "legacy-contracts"
+    backups_root = source_root / "backups"
     entries: list[dict[str, object]] = []
     try:
-        entries.extend(_backup_sqlite_entries(source_root, staging, excluded, backup_family))
-        for raw in sorted(set(extra_paths)):
+        entries.extend(_backup_sqlite_entries(source_root, staging, excluded, backups_root))
+        for raw in normalized_extras:
             if any(item["path"] == Path(raw).as_posix() for item in entries):
                 continue
             entries.append(_backup_extra_entry(source_root, staging, raw))
