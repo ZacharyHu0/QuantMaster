@@ -28,23 +28,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolved_backup_root(args: argparse.Namespace, root: Path) -> Path | None:
+    if args.backup_root is None and args.confirm_backup_root is None:
+        return None
+    if args.backup_root is None or args.confirm_backup_root is None:
+        raise SystemExit("external backup requires both --backup-root and --confirm-backup-root")
+    backup_root = args.backup_root.resolve()
+    if backup_root != args.confirm_backup_root.resolve():
+        raise SystemExit("--confirm-backup-root must exactly match --backup-root")
+    if backup_root == Path(backup_root.anchor):
+        raise SystemExit("--backup-root cannot be a drive/filesystem root")
+    if backup_root == root or root in backup_root.parents or backup_root in root.parents:
+        raise SystemExit("external --backup-root must be outside and disjoint from --data-root")
+    return backup_root
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root, confirmed = args.data_root.resolve(), args.confirm_root.resolve()
     if root != confirmed:
         raise SystemExit("--confirm-root must exactly match --data-root")
-    backup_root = None
-    if args.backup_root is not None or args.confirm_backup_root is not None:
-        if args.backup_root is None or args.confirm_backup_root is None:
-            raise SystemExit("external backup requires both --backup-root and --confirm-backup-root")
-        backup_root = args.backup_root.resolve()
-        confirmed_backup = args.confirm_backup_root.resolve()
-        if backup_root != confirmed_backup:
-            raise SystemExit("--confirm-backup-root must exactly match --backup-root")
-        if backup_root == Path(backup_root.anchor):
-            raise SystemExit("--backup-root cannot be a drive/filesystem root")
-        if backup_root == root or root in backup_root.parents or backup_root in root.parents:
-            raise SystemExit("external --backup-root must be outside and disjoint from --data-root")
+    backup_root = _resolved_backup_root(args, root)
     evidence = OfflineMaintenanceEvidence(confirmed, True, args.writer_stopped_evidence)
     manager = LegacyMigrationManager(
         root, backup_root=backup_root, offline_evidence=evidence,

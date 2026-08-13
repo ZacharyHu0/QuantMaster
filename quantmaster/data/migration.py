@@ -183,12 +183,17 @@ def _backup_sqlite_entries(
     return entries
 
 
-def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str, object]:
+def _backup_extra_path(raw: str) -> Path:
     relative = Path(raw)
     if relative.is_absolute() or ".." in relative.parts:
         raise MigrationError(f"额外备份路径越界: {raw}")
     if relative.parts and relative.parts[0].casefold() == "backups":
         raise MigrationError(f"额外备份路径不能指向历史备份树: {raw}")
+    return relative
+
+
+def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str, object]:
+    relative = _backup_extra_path(raw)
     source = source_root / relative
     exists = source.exists()
     kind = (
@@ -237,11 +242,7 @@ def backup_sqlite_tree(
     source_root, target_root = source_root.resolve(), target_root.resolve()
     normalized_extras = tuple(sorted(set(extra_paths)))
     for raw in normalized_extras:
-        relative = Path(raw)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise MigrationError(f"额外备份路径越界: {raw}")
-        if relative.parts and relative.parts[0].casefold() == "backups":
-            raise MigrationError(f"额外备份路径不能指向历史备份树: {raw}")
+        _backup_extra_path(raw)
     if target_root.exists():
         validate_backup_tree(target_root)
         return
