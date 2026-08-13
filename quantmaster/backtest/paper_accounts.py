@@ -857,7 +857,7 @@ class PaperStore:
         erasing an operator decision or retrying an unrelated defect.
         """
         clauses = [
-            "run_date=?",
+            "run_date<=?",
             "failure_code='market_data_unavailable'",
             "status IN ('failed','manual_recovery')",
         ]
@@ -866,14 +866,49 @@ class PaperStore:
             clauses.append("account_id=?")
             params.append(account_id)
         with self._conn() as conn:
-            changed = conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            requeued_accounts = {
+                str(row[0]) for row in conn.execute(
+                    "SELECT DISTINCT account_id FROM paper_auto_runs WHERE "
+                    + " AND ".join(clauses),
+                    params,
+                )
+            }
+            conn.execute(
                 "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
                 "lease_owner='',lease_expires=0,lease_token='',heartbeat_at=0,"
                 "last_error='',failure_code='',updated_at=? WHERE "
                 + " AND ".join(clauses),
                 [utc_now(), *params],
-            ).rowcount
-        return int(changed)
+            )
+            account_clause = "AND a.id=?" if account_id else ""
+            account_params: list[object] = [account_id] if account_id else []
+            resumable_accounts = {
+                str(row[0]) for row in conn.execute(
+                    "SELECT a.id FROM paper_accounts a "
+                    "WHERE a.status='paused' AND a.mode='auto' "
+                    "AND (a.runtime_warning LIKE '行情证据%' "
+                    "OR a.runtime_warning LIKE '待撮合行情证据%' "
+                    "OR a.runtime_warning LIKE '最新行情停留在%') "
+                    "AND EXISTS (SELECT 1 FROM paper_orders o "
+                    "WHERE o.account_id=a.id AND o.status='waiting_market_data') "
+                    + account_clause,
+                    account_params,
+                )
+            }
+            resumable_accounts.update(requeued_accounts)
+            if resumable_accounts:
+                placeholders = ",".join("?" for _ in resumable_accounts)
+                conn.execute(
+                "UPDATE paper_accounts SET status='active',runtime_warning='',"
+                "warning=strategy_warning,updated_at=? "
+                    f"WHERE id IN ({placeholders}) AND status='paused' AND mode='auto' "
+                    "AND (runtime_warning LIKE '行情证据%' "
+                    "OR runtime_warning LIKE '待撮合行情证据%' "
+                    "OR runtime_warning LIKE '最新行情停留在%')",
+                    [utc_now(), *sorted(resumable_accounts)],
+                )
+        return len(resumable_accounts)
 
     def latest_auto_run(self, account_id: str) -> dict | None:
         with self._conn() as conn:
@@ -1741,11 +1776,11 @@ class PaperService:
             or market_quality.partial
         ):
             message = "行情证据未通过正式提案门禁：" + "；".join(market_quality.issues)
-            self.store.set_warning(account_id, message, pause=True)
+            self.store.set_warning(account_id, message)
             raise ValueError(message)
         if loaded_live and (pd.Timestamp(end).normalize() - latest_date.normalize()).days > 7:
             message = f"最新行情停留在 {latest_date.date()}，账户已暂停以避免使用过期数据。"
-            self.store.set_warning(account_id, message, pause=True)
+            self.store.set_warning(account_id, message)
             raise ValueError(message)
         strategy_spec = account["strategy"]
         if strategy_spec.get("kind") == "decision":
@@ -1943,7 +1978,7 @@ class PaperService:
                     "待撮合行情证据未通过成交门禁："
                     + "；".join(market_envelope.quality.issues)
                 )
-                self.store.set_warning(account_id, message, pause=True)
+                self.store.set_warning(account_id, message)
                 raise ValueError(message)
             if calendar is None:
                 quality = market_envelope.quality

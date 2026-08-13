@@ -876,6 +876,52 @@ def test_paper_auto_run_reclaims_expired_lease_at_retry_ceiling(tmp_path):
     assert latest["reclaim_count"] == 1
 
 
+def test_stockdb_success_requeues_older_market_failures_and_only_resumes_data_pauses(
+    tmp_path,
+):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    data_paused = store.create_account(
+        account_spec("行情暂停").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    manual_paused = store.create_account(
+        account_spec("人工暂停").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    strategy_paused = store.create_account(
+        account_spec("策略暂停").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    for account in (data_paused, manual_paused, strategy_paused):
+        store.update_account(account["id"], status="paused")
+    store.set_runtime_warning(data_paused["id"], "行情证据不可用：缺少目标日")
+    store.set_runtime_warning(strategy_paused["id"], "策略快照需要人工迁移")
+
+    token = store.claim_auto_run("2026-08-12", data_paused["id"], "worker", now=100)
+    assert token
+    assert store.fail_auto_run(
+        "2026-08-12", data_paused["id"], "worker", token,
+        "行情证据不可用", failure_code="market_data_unavailable", now=100,
+    )
+    future_token = store.claim_auto_run(
+        "2026-08-14", manual_paused["id"], "worker", now=100,
+    )
+    assert future_token
+    assert store.fail_auto_run(
+        "2026-08-14", manual_paused["id"], "worker", future_token,
+        "行情证据不可用", failure_code="market_data_unavailable", now=100,
+    )
+
+    assert store.requeue_market_data_failures("2026-08-13") == 1
+    recovered = store.account(data_paused["id"])
+    assert recovered["status"] == "active"
+    assert recovered["runtime_warning"] == ""
+    assert store.latest_auto_run(data_paused["id"])["attempts"] == 0
+    assert store.account(manual_paused["id"])["status"] == "paused"
+    assert store.latest_auto_run(manual_paused["id"])["attempts"] == 1
+    assert store.account(strategy_paused["id"])["status"] == "paused"
+
+
 def test_paper_process_recovers_ledger_fill_after_lease_loss(tmp_path, monkeypatch):
     service, account = make_paper_service(tmp_path)
     dates = pd.bdate_range("2024-01-01", periods=6)
