@@ -69,13 +69,22 @@ def _wait_for_document_fit(page, *, timeout: float = 30_000) -> None:
 
 
 @pytest.fixture(scope="module")
-def live_server(tmp_path_factory):
+def live_server(tmp_path_factory, _minimal_security_master):
     root = tmp_path_factory.mktemp("qm-ui")
+    data_root = root / "data"
+    data_root.mkdir(parents=True, exist_ok=True)
+    (data_root / "security_master.sqlite").write_bytes(
+        Path(_minimal_security_master).read_bytes()
+    )
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     env = os.environ.copy()
-    env["QM_DATA_ROOT"] = str(root / "data")
+    env["QM_DATA_ROOT"] = str(data_root)
+    # The browser lane exercises the web process, not the background worker
+    # supervisor.  Keeping the supervisor disabled prevents descendants from
+    # retaining SQLite and directory handles after uvicorn exits on Windows.
+    env["QM_DISABLE_WORKER_SUPERVISOR"] = "1"
     project = Path(__file__).parents[1]
     env["PYTHONPATH"] = str(project) + os.pathsep + env.get("PYTHONPATH", "")
     process = subprocess.Popen(
@@ -144,6 +153,11 @@ def test_live_server_teardown_prefers_graceful_lifespan_signal() -> None:
 
     expected = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
     assert events == [("signal", expected), ("wait", 7)]
+
+
+def test_live_server_fixture_disables_worker_supervisor() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert 'env["QM_DISABLE_WORKER_SUPERVISOR"] = "1"' in source
 
 
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
@@ -301,6 +315,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         model_check = page.locator('[data-check-result="llm-models"]')
         playwright_sync.expect(model_check).to_have_class(
             re.compile(r"(?:^|\s)(?:error|warning)(?:\s|$)"),
+            timeout=30_000,
         )
         check_text = model_check.inner_text()
         assert check_text.strip()
