@@ -44,6 +44,62 @@ def test_local_stockdb_advertises_eod_but_not_realtime_spot():
     assert DataCapability.SPOT not in FreeStockDBSource.capabilities
 
 
+def test_etf_sandbox_candidate_filter_rejects_lof_and_deduplicates_evidence():
+    candidates: dict[str, dict] = {}
+    evidence: dict[str, list[dict[str, str]]] = {}
+    target = pd.Timestamp("2026-08-08")
+    observed_at = pd.Timestamp("2026-08-08T06:00:00+00:00")
+
+    EtfResearchService._add_sandbox_candidate(
+        candidates,
+        evidence,
+        target=target,
+        symbol="510300.SH",
+        row={"name": "沪深300ETF", "exchange": "SH", "list_date": "2012-05-28"},
+        kind="instrument_store",
+        source="InstrumentStore",
+        observed_at=observed_at,
+    )
+    EtfResearchService._add_sandbox_candidate(
+        candidates,
+        evidence,
+        target=target,
+        symbol="510300.SH",
+        row={"name": "沪深300ETF", "exchange": "SH", "list_date": "2012-05-28"},
+        kind="instrument_store",
+        source="InstrumentStore",
+        observed_at=observed_at,
+    )
+    EtfResearchService._add_sandbox_candidate(
+        candidates,
+        evidence,
+        target=target,
+        symbol="160000.SZ",
+        row={"name": "示例LOF", "exchange": "SZ"},
+        kind="etf_metadata",
+        source="RotationStore",
+        observed_at=observed_at,
+    )
+    EtfResearchService._add_sandbox_candidate(
+        candidates,
+        evidence,
+        target=target,
+        symbol="510500.SH",
+        row={"name": "未来ETF", "exchange": "SH", "list_date": "2026-08-09"},
+        kind="etf_metadata",
+        source="RotationStore",
+        observed_at=observed_at,
+    )
+
+    assert list(candidates) == ["510300.SH"]
+    assert candidates["510300.SH"]["asset_type"] == "etf"
+    assert evidence["510300.SH"] == [{
+        "kind": "instrument_store",
+        "source": "InstrumentStore",
+        "observed_at": "2026-08-08T06:00:00+00:00",
+    }]
+
+
 def test_native_acceleration_requires_current_artifact_profile(isolated_config, monkeypatch):
     close = np.linspace(10, 14, 80) + np.sin(np.arange(80))
     bars = pd.DataFrame(

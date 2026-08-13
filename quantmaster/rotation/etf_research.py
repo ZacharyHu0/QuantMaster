@@ -93,6 +93,46 @@ def _clean_scalar_text(*candidates: Any) -> str:
     return ""
 
 
+def _sandbox_text(*values: Any) -> str:
+    for raw in values:
+        if raw is None:
+            continue
+        if isinstance(raw, (dict, list, set, tuple)):
+            if raw:
+                return str(raw)
+            continue
+        if pd.isna(raw):
+            continue
+        value = str(raw).strip()
+        if value and value.casefold() not in {"nan", "none", "nat"}:
+            return value
+    return ""
+
+
+def _utc_iso(value: pd.Timestamp | None) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        return ""
+    return stamp.tz_convert("UTC").isoformat()
+
+
+def _sandbox_lifecycle_valid(row: dict[str, Any], target: pd.Timestamp) -> bool:
+    listed = pd.to_datetime(row.get("list_date"), errors="coerce")
+    delisted = pd.to_datetime(row.get("delist_date"), errors="coerce")
+    if pd.notna(listed) and pd.Timestamp(listed).normalize() > target:
+        return False
+    if pd.notna(delisted) and target > pd.Timestamp(delisted).normalize():
+        return False
+    status = _sandbox_text(row.get("status")).casefold()
+    return not (status in {"d", "delisted", "terminated"} and pd.isna(delisted))
+
+
+def _is_exchange_etf_symbol(symbol: str) -> bool:
+    return symbol.endswith((".SH", ".SZ")) and len(symbol.split(".", 1)[0]) == 6
+
+
 def _atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -756,6 +796,183 @@ class EtfResearchService:
             return stamp.tz_convert("UTC")
         return None
 
+    @staticmethod
+    def _add_sandbox_candidate(
+        candidates: dict[str, dict[str, Any]],
+        evidence: dict[str, list[dict[str, str]]],
+        *,
+        target: pd.Timestamp,
+        symbol: str,
+        row: dict[str, Any],
+        kind: str,
+        source: str,
+        observed_at: pd.Timestamp | None,
+    ) -> None:
+        canonical = symbol.upper()
+        if not _is_exchange_etf_symbol(canonical) or not _sandbox_lifecycle_valid(row, target):
+            return
+        name = _sandbox_text(row.get("name"), canonical)
+        if "LOF" in name.upper() or "联接" in name:
+            return
+        existing = candidates.get(canonical, {})
+        candidates[canonical] = {
+            **existing,
+            **{key: value for key, value in row.items() if _sandbox_text(value)},
+            "symbol": canonical,
+            "name": _sandbox_text(row.get("name"), existing.get("name"), canonical),
+            "exchange": _sandbox_text(
+                row.get("exchange"), existing.get("exchange"), canonical[-2:],
+            ).upper(),
+            "asset_type": "etf",
+        }
+        item = {
+            "kind": kind,
+            "source": source or "unknown-local-source",
+            "observed_at": _utc_iso(observed_at),
+        }
+        if item not in evidence.setdefault(canonical, []):
+            evidence[canonical].append(item)
+
+    def _add_sandbox_instruments(
+        self,
+        *,
+        historical: bool,
+        knowledge_cutoff: pd.Timestamp,
+        add_candidate: Callable[..., None],
+    ) -> None:
+        if self.instruments is None:
+            return
+        try:
+            local_instruments = self.instruments.list(market="CN")
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            local_instruments = []
+        for instrument in local_instruments:
+            name = _sandbox_text(instrument.name)
+            exchange_etf = instrument.asset_type == "etf" or (
+                instrument.asset_type == "fund"
+                and ("ETF" in name.upper() or "交易型" in name)
+            )
+            if instrument.exchange not in {"SH", "SZ"} or not exchange_etf:
+                continue
+            observed_at = (
+                pd.Timestamp(float(instrument.observed_at), unit="s", tz="UTC")
+                if float(instrument.observed_at or 0) > 0
+                else None
+            )
+            if (historical and observed_at is None) or (
+                observed_at is not None and observed_at > knowledge_cutoff
+            ):
+                continue
+            add_candidate(
+                instrument.symbol,
+                instrument.to_dict(),
+                kind="instrument_store",
+                source=_sandbox_text(instrument.source, "InstrumentStore"),
+                observed_at=observed_at,
+            )
+
+    def _sandbox_evidence_frames(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        try:
+            metadata_store = self._rotation_evidence_store()
+            metadata = (
+                metadata_store.etf_metadata_history()
+                if hasattr(metadata_store, "etf_metadata_history")
+                else metadata_store.etf_metadata()
+            )
+            return metadata, metadata_store.etf_observations()
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            return pd.DataFrame(), pd.DataFrame()
+
+    def _add_sandbox_metadata(
+        self,
+        metadata: pd.DataFrame,
+        *,
+        target: pd.Timestamp,
+        historical: bool,
+        knowledge_cutoff: pd.Timestamp,
+        rich_rows: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], dict[str, Any]]],
+        add_candidate: Callable[..., None],
+    ) -> None:
+        if metadata.empty or "symbol" not in metadata:
+            return
+        for row in metadata.to_dict("records"):
+            symbol = _sandbox_text(row.get("symbol")).upper()
+            asset_type = _sandbox_text(row.get("asset_type")).casefold()
+            name = _sandbox_text(row.get("name"))
+            exchange_etf = asset_type == "etf" or (
+                asset_type in {"", "fund"}
+                and (not name or "ETF" in name.upper() or "交易型" in name)
+            )
+            if not _is_exchange_etf_symbol(symbol) or not exchange_etf:
+                continue
+            effective = self._metadata_effective_date(row)
+            observed_at = self._metadata_observed_at(row)
+            if (effective is not None and effective > target) or (
+                observed_at is not None and observed_at > knowledge_cutoff
+            ) or (historical and observed_at is None):
+                continue
+            key = (
+                effective if effective is not None else pd.Timestamp.min,
+                observed_at.tz_localize(None) if observed_at is not None else pd.Timestamp.min,
+            )
+            if symbol not in rich_rows or key >= rich_rows[symbol][0]:
+                rich_rows[symbol] = (key, dict(row))
+            add_candidate(
+                symbol,
+                row,
+                kind="etf_metadata",
+                source=_sandbox_text(
+                    row.get("metadata_source"), "RotationStore:etf_metadata",
+                ),
+                observed_at=observed_at,
+            )
+
+    def _add_sandbox_observations(
+        self,
+        observations: pd.DataFrame,
+        *,
+        target: pd.Timestamp,
+        historical: bool,
+        knowledge_cutoff: pd.Timestamp,
+        share_rows: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], dict[str, Any]]],
+        add_candidate: Callable[..., None],
+    ) -> None:
+        if observations.empty or "symbol" not in observations:
+            return
+        for row in observations.to_dict("records"):
+            symbol = _sandbox_text(row.get("symbol")).upper()
+            trade_date = pd.to_datetime(row.get("trade_date"), errors="coerce")
+            acquired = pd.to_datetime(row.get("acquired_at"), errors="coerce", utc=True)
+            acquired_at = pd.Timestamp(acquired) if pd.notna(acquired) else None
+            if not _is_exchange_etf_symbol(symbol) or pd.isna(trade_date):
+                continue
+            if pd.Timestamp(trade_date).normalize() > target or (
+                acquired_at is not None and acquired_at > knowledge_cutoff
+            ) or (historical and acquired_at is None):
+                continue
+            key = (
+                pd.Timestamp(trade_date).normalize(),
+                acquired_at.tz_localize(None) if acquired_at is not None else pd.Timestamp.min,
+            )
+            if symbol not in share_rows or key >= share_rows[symbol][0]:
+                share_rows[symbol] = (key, dict(row))
+            add_candidate(
+                symbol,
+                {
+                    **row,
+                    "name": _sandbox_text(row.get("name")),
+                    "list_date": _sandbox_text(row.get("list_date")),
+                    "delist_date": _sandbox_text(row.get("delist_date")),
+                },
+                kind="etf_observation",
+                source=_sandbox_text(
+                    row.get("share_source"),
+                    row.get("source"),
+                    "RotationStore:etf_observations",
+                ),
+                observed_at=acquired_at,
+            )
+
     def _sandbox_profiles(
         self,
         target: pd.Timestamp,
@@ -763,29 +980,6 @@ class EtfResearchService:
         historical: bool,
     ) -> list[EtfProfile]:
         """Build an explicitly incomplete local denominator for exploratory analysis."""
-
-        def clean(*values: Any) -> str:
-            for raw in values:
-                if raw is None:
-                    continue
-                if isinstance(raw, (dict, list, set, tuple)):
-                    if raw:
-                        return str(raw)
-                    continue
-                if pd.isna(raw):
-                    continue
-                value = str(raw).strip()
-                if value and value.casefold() not in {"nan", "none", "nat"}:
-                    return value
-            return ""
-
-        def utc_iso(value: pd.Timestamp | None) -> str:
-            if value is None or pd.isna(value):
-                return ""
-            stamp = pd.Timestamp(value)
-            if stamp.tzinfo is None:
-                return ""
-            return stamp.tz_convert("UTC").isoformat()
 
         cutoff = pd.Timestamp(daily_signal_cutoff(target.date())).tz_convert("UTC")
         current = pd.Timestamp(market_now())
@@ -797,170 +991,33 @@ class EtfResearchService:
         rich_rows: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], dict[str, Any]]] = {}
         share_rows: dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], dict[str, Any]]] = {}
 
-        def lifecycle_valid(row: dict[str, Any]) -> bool:
-            listed = pd.to_datetime(row.get("list_date"), errors="coerce")
-            delisted = pd.to_datetime(row.get("delist_date"), errors="coerce")
-            if pd.notna(listed) and pd.Timestamp(listed).normalize() > target:
-                return False
-            if pd.notna(delisted) and target > pd.Timestamp(delisted).normalize():
-                return False
-            status = clean(row.get("status")).casefold()
-            return not (
-                status in {"d", "delisted", "terminated"}
-                and pd.isna(delisted)
+        def add_candidate(symbol: str, row: dict[str, Any], **details: Any) -> None:
+            self._add_sandbox_candidate(
+                candidates, evidence, target=target, symbol=symbol, row=row, **details,
             )
 
-        def accept_symbol(symbol: str) -> bool:
-            return symbol.endswith((".SH", ".SZ")) and len(symbol.split(".", 1)[0]) == 6
-
-        def add_candidate(
-            symbol: str,
-            row: dict[str, Any],
-            *,
-            kind: str,
-            source: str,
-            observed_at: pd.Timestamp | None,
-        ) -> None:
-            canonical = symbol.upper()
-            if not accept_symbol(canonical) or not lifecycle_valid(row):
-                return
-            name = clean(row.get("name"), canonical)
-            if "LOF" in name.upper() or "联接" in name:
-                return
-            existing = candidates.get(canonical, {})
-            candidates[canonical] = {
-                **existing,
-                **{key: value for key, value in row.items() if clean(value)},
-                "symbol": canonical,
-                "name": clean(row.get("name"), existing.get("name"), canonical),
-                "exchange": clean(row.get("exchange"), existing.get("exchange"), canonical[-2:]).upper(),
-                "asset_type": "etf",
-            }
-            item = {
-                "kind": kind,
-                "source": source or "unknown-local-source",
-                "observed_at": utc_iso(observed_at),
-            }
-            if item not in evidence.setdefault(canonical, []):
-                evidence[canonical].append(item)
-
-        try:
-            local_instruments = self.instruments.list(market="CN")
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            local_instruments = []
-        for instrument in local_instruments:
-            name = clean(instrument.name)
-            if instrument.exchange not in {"SH", "SZ"}:
-                continue
-            if instrument.asset_type != "etf" and not (
-                instrument.asset_type == "fund"
-                and ("ETF" in name.upper() or "交易型" in name)
-            ):
-                continue
-            observed_at = (
-                pd.Timestamp(float(instrument.observed_at), unit="s", tz="UTC")
-                if float(instrument.observed_at or 0) > 0
-                else None
-            )
-            if historical and observed_at is None:
-                continue
-            if observed_at is not None and observed_at > knowledge_cutoff:
-                continue
-            add_candidate(
-                instrument.symbol,
-                instrument.to_dict(),
-                kind="instrument_store",
-                source=clean(instrument.source, "InstrumentStore"),
-                observed_at=observed_at,
-            )
-
-        metadata = pd.DataFrame()
-        observations = pd.DataFrame()
-        try:
-            metadata_store = self._rotation_evidence_store()
-            metadata = (
-                metadata_store.etf_metadata_history()
-                if hasattr(metadata_store, "etf_metadata_history")
-                else metadata_store.etf_metadata()
-            )
-            observations = metadata_store.etf_observations()
-        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-            pass
-
-        if not metadata.empty and "symbol" in metadata:
-            for row in metadata.to_dict("records"):
-                symbol = clean(row.get("symbol")).upper()
-                if not accept_symbol(symbol):
-                    continue
-                asset_type = clean(row.get("asset_type")).casefold()
-                name = clean(row.get("name"))
-                if asset_type and asset_type not in {"etf", "fund"}:
-                    continue
-                if asset_type != "etf" and name and "ETF" not in name.upper() and "交易型" not in name:
-                    continue
-                effective = self._metadata_effective_date(row)
-                observed_at = self._metadata_observed_at(row)
-                if effective is not None and effective > target:
-                    continue
-                if observed_at is not None and observed_at > knowledge_cutoff:
-                    continue
-                if historical and observed_at is None:
-                    continue
-                effective_key = effective if effective is not None else pd.Timestamp.min
-                observed_key = (
-                    observed_at.tz_localize(None)
-                    if observed_at is not None
-                    else pd.Timestamp.min
-                )
-                key = (effective_key, observed_key)
-                if symbol not in rich_rows or key >= rich_rows[symbol][0]:
-                    rich_rows[symbol] = (key, dict(row))
-                add_candidate(
-                    symbol,
-                    row,
-                    kind="etf_metadata",
-                    source=clean(row.get("metadata_source"), "RotationStore:etf_metadata"),
-                    observed_at=observed_at,
-                )
-
-        if not observations.empty and "symbol" in observations:
-            for row in observations.to_dict("records"):
-                symbol = clean(row.get("symbol")).upper()
-                if not accept_symbol(symbol):
-                    continue
-                trade_date = pd.to_datetime(row.get("trade_date"), errors="coerce")
-                if pd.isna(trade_date) or pd.Timestamp(trade_date).normalize() > target:
-                    continue
-                acquired = pd.to_datetime(row.get("acquired_at"), errors="coerce", utc=True)
-                acquired_at = pd.Timestamp(acquired) if pd.notna(acquired) else None
-                if acquired_at is not None and acquired_at > knowledge_cutoff:
-                    continue
-                if historical and acquired_at is None:
-                    continue
-                observed_key = (
-                    acquired_at.tz_localize(None)
-                    if acquired_at is not None
-                    else pd.Timestamp.min
-                )
-                key = (pd.Timestamp(trade_date).normalize(), observed_key)
-                if symbol not in share_rows or key >= share_rows[symbol][0]:
-                    share_rows[symbol] = (key, dict(row))
-                add_candidate(
-                    symbol,
-                    {
-                        **row,
-                        "name": clean(row.get("name")),
-                        "list_date": clean(row.get("list_date")),
-                        "delist_date": clean(row.get("delist_date")),
-                    },
-                    kind="etf_observation",
-                    source=clean(
-                        row.get("share_source"),
-                        row.get("source"),
-                        "RotationStore:etf_observations",
-                    ),
-                    observed_at=acquired_at,
-                )
+        self._add_sandbox_instruments(
+            historical=historical,
+            knowledge_cutoff=knowledge_cutoff,
+            add_candidate=add_candidate,
+        )
+        metadata, observations = self._sandbox_evidence_frames()
+        self._add_sandbox_metadata(
+            metadata,
+            target=target,
+            historical=historical,
+            knowledge_cutoff=knowledge_cutoff,
+            rich_rows=rich_rows,
+            add_candidate=add_candidate,
+        )
+        self._add_sandbox_observations(
+            observations,
+            target=target,
+            historical=historical,
+            knowledge_cutoff=knowledge_cutoff,
+            share_rows=share_rows,
+            add_candidate=add_candidate,
+        )
 
         if not candidates:
             self._profile_metadata_frame = pd.DataFrame()
@@ -984,30 +1041,30 @@ class EtfResearchService:
             lifecycle = dict(base)
             for lifecycle_row in (share, rich):
                 for lifecycle_field in ("list_date", "delist_date", "status"):
-                    value = clean(lifecycle_row.get(lifecycle_field))
+                    value = _sandbox_text(lifecycle_row.get(lifecycle_field))
                     if value:
                         lifecycle[lifecycle_field] = value
-            if not lifecycle_valid(lifecycle):
+            if not _sandbox_lifecycle_valid(lifecycle, target):
                 continue
             sources = sorted({item["source"] for item in evidence.get(symbol, [])})
             observed_values = sorted(
                 item["observed_at"] for item in evidence.get(symbol, []) if item["observed_at"]
             )
-            name = clean(rich.get("name"), base.get("name"), symbol)
-            benchmark = clean(rich.get("benchmark"), share.get("benchmark"))
-            benchmark_code = clean(rich.get("benchmark_code"))
-            fund_type = clean(rich.get("fund_type"), share.get("fund_type"), "ETF")
-            invest_type = clean(rich.get("invest_type"), share.get("invest_type"))
+            name = _sandbox_text(rich.get("name"), base.get("name"), symbol)
+            benchmark = _sandbox_text(rich.get("benchmark"), share.get("benchmark"))
+            benchmark_code = _sandbox_text(rich.get("benchmark_code"))
+            fund_type = _sandbox_text(rich.get("fund_type"), share.get("fund_type"), "ETF")
+            invest_type = _sandbox_text(rich.get("invest_type"), share.get("invest_type"))
             taxonomy = classify_etf_profile(
                 name,
                 benchmark=benchmark,
                 benchmark_code=benchmark_code,
-                index_name=clean(rich.get("index_name"), benchmark),
+                index_name=_sandbox_text(rich.get("index_name"), benchmark),
                 fund_type=fund_type,
                 invest_type=invest_type,
-                etf_type=clean(rich.get("etf_type")),
-                benchmark_type=clean(rich.get("benchmark_type")),
-                index_type=clean(rich.get("index_type")),
+                etf_type=_sandbox_text(rich.get("etf_type")),
+                benchmark_type=_sandbox_text(rich.get("benchmark_type")),
+                index_type=_sandbox_text(rich.get("index_type")),
                 metadata_source="local_stockdb",
             )
             effective = self._metadata_effective_date(rich) if rich else None
@@ -1019,8 +1076,8 @@ class EtfResearchService:
                     else None
                 )
             effective_text = effective.date().isoformat() if effective is not None else ""
-            raw_list_date = clean(rich.get("list_date"), base.get("list_date"))
-            raw_delist_date = clean(rich.get("delist_date"), base.get("delist_date"))
+            raw_list_date = _sandbox_text(rich.get("list_date"), base.get("list_date"))
+            raw_delist_date = _sandbox_text(rich.get("delist_date"), base.get("delist_date"))
             member = {
                 "symbol": symbol,
                 "sources": sources,
@@ -1046,22 +1103,24 @@ class EtfResearchService:
                     sector_name=taxonomy["sector_name"],
                     benchmark=benchmark,
                     benchmark_code=benchmark_code,
-                    benchmark_type=clean(rich.get("benchmark_type")),
-                    benchmark_level=clean(rich.get("benchmark_level")),
-                    index_type=clean(rich.get("index_type")),
-                    index_provider=clean(rich.get("index_provider")),
+                    benchmark_type=_sandbox_text(rich.get("benchmark_type")),
+                    benchmark_level=_sandbox_text(rich.get("benchmark_level")),
+                    index_type=_sandbox_text(rich.get("index_type")),
+                    index_provider=_sandbox_text(rich.get("index_provider")),
                     normalized_index=taxonomy["normalized_index"],
                     fund_type=fund_type,
                     invest_type=invest_type,
-                    manager=clean(rich.get("manager"), rich.get("mgr_name")),
-                    custodian=clean(rich.get("custodian"), rich.get("custod_name")),
+                    manager=_sandbox_text(rich.get("manager"), rich.get("mgr_name")),
+                    custodian=_sandbox_text(rich.get("custodian"), rich.get("custod_name")),
                     management_fee=float(numeric_fee) if pd.notna(numeric_fee) else None,
                     metadata_source=" + ".join(sources) or "local_stockdb",
                     classification_source=taxonomy["classification_source"],
                     classification_confidence=taxonomy["classification_confidence"],
                     list_date=raw_list_date,
                     metadata_effective_as_of=effective_text,
-                    status=clean(rich.get("status"), base.get("status"), "locally_observed"),
+                    status=_sandbox_text(
+                        rich.get("status"), base.get("status"), "locally_observed",
+                    ),
                     classification_evidence=taxonomy["classification_evidence"],
                 )
             )
