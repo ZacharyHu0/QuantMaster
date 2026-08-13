@@ -88,7 +88,7 @@ version = {attr = "quantmaster.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -p no:xonsh"
+addopts = "-q -p no:xonsh -p scripts.dev.pytest_windows_acl"
 cache_dir = ".artifacts/pytest/cache"
 markers = [
     "full: deterministic benchmark or complete-suite validation",

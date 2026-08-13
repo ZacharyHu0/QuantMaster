@@ -82,7 +82,7 @@ def test_pytest_args_override_checkout_cache_dir(monkeypatch, tmp_path):
     cache = tmp_path / "external-cache"
     monkeypatch.setattr(run, "PYTEST_CACHE", cache)
     assert run.pytest_args("tests/test_one.py") == [
-        "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+        "-m", "pytest",
         "-o", f"cache_dir={cache}", "tests/test_one.py",
     ]
 

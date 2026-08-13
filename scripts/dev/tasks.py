@@ -357,7 +357,7 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
         )
         cache = prepare_pytest_directory(temp.parent / "cache")
         run([
-            python, "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+            python, "-m", "pytest",
             "-o", f"cache_dir={cache}",
             "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),

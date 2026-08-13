@@ -76,7 +76,7 @@ def prepare_pytest_directory(path: Path) -> Path:
 
 def pytest_args(*args: str) -> list[str]:
     return [
-        "-m", "pytest", "-p", "scripts.dev.pytest_windows_acl",
+        "-m", "pytest",
         "-o", f"cache_dir={PYTEST_CACHE}", *args,
     ]
 
