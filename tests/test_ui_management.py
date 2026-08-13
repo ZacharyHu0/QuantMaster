@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +23,25 @@ pytestmark = pytest.mark.skipif(
     reason="浏览器验收使用独立 lane；设置 QM_RUN_UI=1 可显式启用",
 )
 playwright_sync = pytest.importorskip("playwright.sync_api")
+
+
+def _stop_live_server(process: subprocess.Popen, *, timeout: float = 20) -> None:
+    """Let application lifespan release child processes before hard termination."""
+    if process.poll() is not None:
+        return
+    graceful_signal = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+    try:
+        process.send_signal(graceful_signal)
+        process.wait(timeout=timeout)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def _wait_for_text(locator, text: str, *, timeout: float = 30_000) -> None:
@@ -75,6 +95,9 @@ def live_server(tmp_path_factory):
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        ),
     )
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
@@ -84,18 +107,43 @@ def live_server(tmp_path_factory):
         except httpx.HTTPError:
             time.sleep(0.1)
     else:
-        process.terminate()
+        _stop_live_server(process)
         raise RuntimeError("测试服务启动失败")
     try:
         yield url, root
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+        _stop_live_server(process)
+
+
+def test_live_server_teardown_prefers_graceful_lifespan_signal() -> None:
+    events = []
+
+    class Process:
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def send_signal(value):
+            events.append(("signal", value))
+
+        @staticmethod
+        def wait(timeout):
+            events.append(("wait", timeout))
+            return 0
+
+        @staticmethod
+        def terminate():
+            events.append(("terminate", None))
+
+        @staticmethod
+        def kill():
+            events.append(("kill", None))
+
+    _stop_live_server(Process(), timeout=7)
+
+    expected = signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT
+    assert events == [("signal", expected), ("wait", 7)]
 
 
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
