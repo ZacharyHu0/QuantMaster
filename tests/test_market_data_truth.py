@@ -443,10 +443,21 @@ def test_structurally_invalid_cache_remains_unavailable(tmp_path):
         end="2024-03-29",
         store=store,
         frequency="1d",
+        metadata={},
     )
 
     assert result.quality.status == "unavailable"
     assert result.quality.duplicate_rows == 2
+    assert result.quality.partial is True
+    assert result.provenance == ({
+        "status": "provenance_missing",
+        "diagnostic_code": "provenance_missing",
+        "observed_start": "2024-03-28",
+        "observed_end": "2024-03-29",
+    },)
+    assert "provenance_missing: 缓存记录没有请求区间的来源证据" in (
+        result.quality.issues
+    )
 
 
 def test_marking_stale_preserves_source_and_persists_event(tmp_path):
@@ -661,8 +672,12 @@ def test_public_envelope_verified_tail_cannot_upgrade_unverified_history(
 
     assert result.quality.status == "degraded"
     assert result.quality.partial is True
-    assert "版本化来源链没有覆盖完整请求区间" in result.quality.issues
+    assert "provenance_incomplete: 来源证据没有覆盖完整请求区间" in (
+        result.quality.issues
+    )
     assert result.provenance[-1]["status"] == "lineage_gap"
+    assert result.provenance[-1]["diagnostic_code"] == "provenance_incomplete"
+    assert "source" not in result.provenance[-1]
 
 
 def test_spot_uses_oldest_row_timestamp_and_rejects_mixed_freshness(monkeypatch):

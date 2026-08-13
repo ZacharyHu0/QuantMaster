@@ -685,7 +685,7 @@ def _bar_envelope(
     purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame]:
     metadata = metadata if metadata is not None else store.metadata(symbol) or {}
-    source = str(metadata.get("last_source") or "local-cache")
+    source = str(metadata.get("last_source") or "")
     stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
     if frequency == "1d":
         quality = _assess_daily_frame(
@@ -888,22 +888,28 @@ def _bar_envelope(
             ),
         )
     if not provenance:
-        provenance = [{
-            "source": source,
-            "status": "legacy_unverified",
+        missing_provenance: dict[str, object] = {
+            "status": "provenance_missing",
+            "diagnostic_code": "provenance_missing",
             "observed_start": quality.observed_start,
             "observed_end": quality.observed_end,
-        }]
+        }
+        if source:
+            missing_provenance["source"] = source
+        provenance = [missing_provenance]
         quality = replace(
             quality,
             status="degraded" if quality.status == "verified" else quality.status,
             partial=True,
-            issues=tuple(dict.fromkeys((*quality.issues, "缓存缺少版本化来源链"))),
+            issues=tuple(dict.fromkeys((
+                *quality.issues,
+                "provenance_missing: 缓存记录没有请求区间的来源证据",
+            ))),
         )
     elif not lineage_complete:
         provenance.append({
-            "source": "local-cache",
             "status": "lineage_gap",
+            "diagnostic_code": "provenance_incomplete",
             "requested_start": requested_start.isoformat(),
             "requested_end": requested_end.isoformat(),
         })
@@ -913,7 +919,7 @@ def _bar_envelope(
             partial=True,
             issues=tuple(dict.fromkeys((
                 *quality.issues,
-                "版本化来源链没有覆盖完整请求区间",
+                "provenance_incomplete: 来源证据没有覆盖完整请求区间",
             ))),
         )
     return BarDataEnvelope(frame, quality, tuple(provenance))
