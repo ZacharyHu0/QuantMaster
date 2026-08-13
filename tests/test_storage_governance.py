@@ -10,11 +10,56 @@ from quantmaster.runtime.storage_governance import (
     StorageBoundaryError,
     StorageRequest,
     classify_sqlite_error,
+    create_inheriting_temporary_directory,
     diagnose_sqlite,
     repair_instance_database,
     resolve_storage,
     validate_instance_repair_target,
 )
+
+
+def test_temporary_directory_keeps_parent_inheritance_contract(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
+    parent = tmp_path / "pytest-run" / "test-case" / "lab_evidence"
+    inspected = []
+    original = storage_governance.prepare_writable_directory
+
+    def inspect(path, **kwargs):
+        result = original(path, **kwargs)
+        inspected.append(Path(path).resolve())
+        return result
+
+    monkeypatch.setattr(storage_governance, "prepare_writable_directory", inspect)
+    staged = create_inheriting_temporary_directory(parent, prefix=".dataset-")
+    published = parent / "published"
+    staged.replace(published)
+
+    assert inspected == [parent.resolve(), staged.resolve()]
+    assert published.is_dir()
+    assert published.parent == parent.resolve()
+
+
+def test_temporary_directory_removes_acl_rejected_candidate(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
+    parent = tmp_path / "pytest-run" / "test-case" / "lab_evidence"
+    original = storage_governance.prepare_writable_directory
+    calls = 0
+
+    def reject_candidate(path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original(path, **kwargs)
+        raise PermissionError("目录未保留 Windows ACL 继承")
+
+    monkeypatch.setattr(storage_governance, "prepare_writable_directory", reject_candidate)
+    with pytest.raises(PermissionError, match="ACL"):
+        create_inheriting_temporary_directory(parent, prefix=".dataset-")
+
+    assert parent.is_dir()
+    assert list(parent.iterdir()) == []
 
 
 def test_resolver_rejects_relative_workspace_and_test_writes_without_task(tmp_path):

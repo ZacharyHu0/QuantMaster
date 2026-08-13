@@ -169,6 +169,28 @@ def prepare_writable_directory(path: str | Path, *, require_inheritance: bool = 
     return status
 
 
+def create_inheriting_temporary_directory(
+    parent: str | Path, *, prefix: str = ".tmp-", attempts: int = 10,
+) -> Path:
+    """Atomically create a private temporary directory without severing Windows ACL inheritance."""
+
+    root = Path(parent).resolve()
+    prepare_writable_directory(root)
+    for _attempt in range(max(1, int(attempts))):
+        target = root / f"{prefix}{uuid.uuid4().hex}"
+        try:
+            target.mkdir(mode=0o777)
+        except FileExistsError:
+            continue
+        try:
+            prepare_writable_directory(target)
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        return target
+    raise FileExistsError(f"无法在安全重试次数内创建临时目录：{root / prefix}")
+
+
 def classify_sqlite_error(error: BaseException) -> str:
     text = str(error).lower()
     if "locked" in text or "busy" in text:

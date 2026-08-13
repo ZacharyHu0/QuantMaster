@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -904,7 +903,9 @@ def _freeze_dataset_evidence(
         )
     evidence_root = get_config().data_root / "lab_evidence"
     evidence_root.mkdir(parents=True, exist_ok=True)
-    staged = Path(tempfile.mkdtemp(prefix=".dataset-", dir=evidence_root))
+    from quantmaster.runtime.storage_governance import create_inheriting_temporary_directory
+
+    staged = create_inheriting_temporary_directory(evidence_root, prefix=".dataset-")
     files: list[dict[str, Any]] = []
     try:
         for field, frame in sorted(panel.items()):
