@@ -119,6 +119,7 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
 def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_path):
     from scripts.dev import pytest_windows_acl
 
+    monkeypatch.setattr(pytest_windows_acl.os, "name", "nt")
     basetemp = tmp_path / "pytest" / "run"
     factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
     cache = tmp_path / "pytest" / "cache"
@@ -134,6 +135,28 @@ def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_pa
     assert basetemp.is_dir()
     assert cache.is_dir()
     cleanups.pop()()
+
+
+def test_windows_pytest_plugin_is_inert_on_other_platforms(monkeypatch, tmp_path):
+    from scripts.dev import pytest_windows_acl
+
+    monkeypatch.setattr(pytest_windows_acl.os, "name", "posix")
+    basetemp = tmp_path / "pytest" / "run"
+    factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
+    cache = tmp_path / "pytest" / "cache"
+    cleanups = []
+    config = SimpleNamespace(
+        cache=SimpleNamespace(_cachedir=cache),
+        _tmp_path_factory=factory,
+        add_cleanup=cleanups.append,
+    )
+
+    pytest_windows_acl.pytest_configure(config)
+
+    assert factory._basetemp is None
+    assert not basetemp.exists()
+    assert not cache.exists()
+    assert cleanups == []
 
 
 def test_remove_empty_residual_is_idempotent_and_rejects_content(tmp_path):
