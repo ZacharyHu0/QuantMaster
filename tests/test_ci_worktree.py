@@ -94,6 +94,68 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
     assert cache.is_dir()
 
 
+def _windows_cleanup_error(code: int, path: Path) -> OSError:
+    error = OSError(f"locked: {path}")
+    error.winerror = code
+    return error
+
+
+def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    attempts = []
+    delays = []
+
+    def remove(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise _windows_cleanup_error(32, path)
+
+    monkeypatch.setattr(run.shutil, "rmtree", remove)
+    monkeypatch.setattr(run.time, "sleep", delays.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root, run_root]
+    assert delays == [run._CLEANUP_INITIAL_DELAY_SECONDS]
+
+
+def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, tmp_path):
+    run_root = tmp_path / "run" / "ui" / "qm-ui0"
+    attempts = []
+    monkeypatch.setattr(
+        run.shutil, "rmtree",
+        lambda path: attempts.append(path) or (_ for _ in ()).throw(
+            _windows_cleanup_error(32, path),
+        ),
+    )
+    monkeypatch.setattr(run.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(RuntimeError) as captured:
+        run.cleanup_run_root(run_root)
+
+    assert f"retained evidence at {run_root}" in str(captured.value)
+    assert attempts == [run_root] * run._CLEANUP_ATTEMPTS
+
+
+def test_cleanup_run_root_does_not_retry_non_transient_error(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    error = _windows_cleanup_error(5, run_root)
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(
+        run.shutil, "rmtree",
+        lambda path: attempts.append(path) or (_ for _ in ()).throw(error),
+    )
+    monkeypatch.setattr(run.time, "sleep", sleeps.append)
+
+    with pytest.raises(OSError) as captured:
+        run.cleanup_run_root(run_root)
+
+    assert captured.value is error
+    assert attempts == [run_root]
+    assert sleeps == []
+
+
 def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
     artifacts = tmp_path / "artifacts"
     captured = {}

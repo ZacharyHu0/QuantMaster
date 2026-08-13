@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -63,6 +64,10 @@ PYTEST_DURATIONS = pytest_durations_path(primary_root(), ARTIFACTS)
 PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
+_CLEANUP_ATTEMPTS = 8
+_CLEANUP_INITIAL_DELAY_SECONDS = 0.1
+_CLEANUP_MAX_DELAY_SECONDS = 1.0
+_WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33})
 
 
 def prepare_pytest_directory(path: Path) -> Path:
@@ -72,6 +77,26 @@ def prepare_pytest_directory(path: Path) -> Path:
     target = path.resolve()
     prepare_writable_directory(target)
     return target
+
+
+def cleanup_run_root(path: Path) -> None:
+    """Remove one successful run, tolerating only transient Windows file locks."""
+
+    delay = _CLEANUP_INITIAL_DELAY_SECONDS
+    for attempt in range(1, _CLEANUP_ATTEMPTS + 1):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+                raise
+            if attempt == _CLEANUP_ATTEMPTS:
+                raise RuntimeError(
+                    f"[local-ci] successful run cleanup remained locked after {attempt} "
+                    f"attempts; retained evidence at {path}"
+                ) from exc
+            time.sleep(delay)
+            delay = min(delay * 2, _CLEANUP_MAX_DELAY_SECONDS)
 
 
 def pytest_args(*args: str) -> list[str]:
@@ -361,7 +386,7 @@ def main() -> int:
         return 0
     finally:
         if passed:
-            shutil.rmtree(RUN_ROOT)
+            cleanup_run_root(RUN_ROOT)
 
 
 if __name__ == "__main__":
