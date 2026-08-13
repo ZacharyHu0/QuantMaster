@@ -32,21 +32,9 @@ def pytest_configure(config: Any) -> None:
     if factory is None or given_basetemp is None:
         return
 
-    basetemp = Path(given_basetemp)
-    prepare_pytest_directory(basetemp)
-    factory._basetemp = basetemp.resolve()
-
-    import _pytest.tmpdir
-
-    original = _pytest.tmpdir.make_numbered_dir
-
-    def make_numbered_dir_inheriting_acl(
-        root: Path, prefix: str, mode: int = 0o700,
-    ) -> Path:
-        del mode
-        return original(root, prefix, 0o777)
-
-    _pytest.tmpdir.make_numbered_dir = make_numbered_dir_inheriting_acl
-    config.add_cleanup(
-        lambda: setattr(_pytest.tmpdir, "make_numbered_dir", original)
-    )
+    # TempPathFactory.getbasetemp() deletes an existing --basetemp and recreates
+    # it with mode=0700.  On Windows that replacement protects the DACL instead
+    # of inheriting the task artifact ACL, so a later sandbox identity cannot
+    # remove the directory.  Bind the prepared directory as the resolved base
+    # before pytest gets a chance to replace it.
+    factory._basetemp = prepare_pytest_directory(Path(given_basetemp))

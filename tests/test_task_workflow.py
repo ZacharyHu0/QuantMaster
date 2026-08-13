@@ -222,19 +222,9 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
 
 
 def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_path):
-    import _pytest.tmpdir
-
     from scripts.dev import pytest_windows_acl
 
     monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="nt"))
-    numbered_calls = []
-    monkeypatch.setattr(
-        _pytest.tmpdir,
-        "make_numbered_dir",
-        lambda root, prefix, mode=0o700: numbered_calls.append(
-            (root, prefix, mode)
-        ) or root / f"{prefix}0",
-    )
     basetemp = tmp_path / "pytest" / "run"
     factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
     cache = tmp_path / "pytest" / "cache"
@@ -249,9 +239,37 @@ def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_pa
     assert factory._basetemp == basetemp.resolve()
     assert basetemp.is_dir()
     assert cache.is_dir()
-    assert _pytest.tmpdir.make_numbered_dir(basetemp, "test_") == basetemp / "test_0"
-    assert numbered_calls == [(basetemp, "test_", 0o777)]
-    cleanups.pop()()
+    assert cleanups == []
+
+
+def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
+    monkeypatch, tmp_path,
+):
+    from _pytest.tmpdir import TempPathFactory
+
+    from scripts.dev import pytest_windows_acl
+
+    monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="nt"))
+    basetemp = tmp_path / "pytest" / "full-1"
+    factory = TempPathFactory(
+        given_basetemp=basetemp,
+        retention_count=3,
+        retention_policy="all",
+        trace=lambda *_args: None,
+        basetemp=None,
+        _ispytest=True,
+    )
+    config = SimpleNamespace(
+        cache=None,
+        _tmp_path_factory=factory,
+    )
+
+    pytest_windows_acl.pytest_configure(config)
+    sentinel = basetemp / "prepared-by-task-tooling"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    assert factory.getbasetemp() == basetemp.resolve()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_windows_pytest_plugin_is_inert_on_other_platforms(monkeypatch, tmp_path):
