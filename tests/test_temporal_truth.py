@@ -638,6 +638,73 @@ def test_etf_historical_profiles_fail_closed_without_verified_directory(
         service.profiles(as_of="2026-08-09")
 
 
+def test_etf_complete_directory_rejects_missing_artifact_evidence(
+    tmp_path, monkeypatch,
+) -> None:
+    metadata = _etf_directory(
+        [{"symbol": "510300.SH", "name": "300ETF"}],
+        snapshot_id="directory-missing-evidence",
+        effective_date="2026-08-09",
+        observed_at="2026-08-09T07:01:00+00:00",
+        monkeypatch=monkeypatch,
+    ).drop(columns=["directory_catalog_file_sha256"])
+
+    class RotationStore:
+        @staticmethod
+        def etf_metadata_history():
+            return metadata
+
+        @staticmethod
+        def etf_observations():
+            return pd.DataFrame()
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", RotationStore)
+    service = EtfResearchService(
+        source=object(), instruments=object(), ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "etf-research"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="声称 complete 但缺少 artifact 证据字段: directory_catalog_file_sha256",
+    ):
+        service.profiles(as_of="2026-08-09")
+
+
+def test_etf_complete_directory_rejects_tampered_artifact_identity(
+    tmp_path, monkeypatch,
+) -> None:
+    metadata = _etf_directory(
+        [{"symbol": "510300.SH", "name": "300ETF"}],
+        snapshot_id="directory-tampered-evidence",
+        effective_date="2026-08-09",
+        observed_at="2026-08-09T07:01:00+00:00",
+        monkeypatch=monkeypatch,
+    )
+    metadata["directory_catalog_file_sha256"] = "0" * 64
+
+    class RotationStore:
+        @staticmethod
+        def etf_metadata_history():
+            return metadata
+
+        @staticmethod
+        def etf_observations():
+            return pd.DataFrame()
+
+    monkeypatch.setattr("quantmaster.rotation.store.RotationStore", RotationStore)
+    service = EtfResearchService(
+        source=object(), instruments=object(), ingest_store=object(),
+        store=EtfResearchStore(tmp_path / "etf-research"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="ETF complete 目录无法通过 immutable artifact 复验",
+    ):
+        service.profiles(as_of="2026-08-09")
+
+
 def test_etf_same_day_metadata_uses_latest_verified_closing_catalog(
     tmp_path, monkeypatch,
 ) -> None:

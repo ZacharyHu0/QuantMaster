@@ -58,6 +58,35 @@ ETF_DIRECTORY_ATTESTATION_VERSION = "1.0"
 ETF_DIRECTORY_TRUSTED_SOURCE = "tushare:catalog"
 _PRODUCTION_SNAPSHOT_ID = re.compile(r"etf_[0-9a-f]{24}")
 _EXCHANGE_ETF_SYMBOL = re.compile(r"[0-9]{6}\.(?:SH|SZ)")
+_DIRECTORY_EVIDENCE_COLUMNS = {
+    "exchange",
+    "asset_type",
+    "status",
+    "list_date",
+    "delist_date",
+    "directory_snapshot_id",
+    "directory_complete",
+    "directory_expected_symbols",
+    "directory_observed_symbols",
+    "directory_member_source",
+    "directory_member_observed_at",
+    "directory_source",
+    "directory_acquired_at",
+    "directory_cutoff_at",
+    "directory_freshness",
+    "directory_master_record_count",
+    "directory_master_batch_record_count",
+    "directory_master_snapshot_sha256",
+    "directory_catalog_snapshot_id",
+    "directory_catalog_records_sha256",
+    "directory_catalog_file_sha256",
+    "directory_catalog_file_size",
+    "directory_catalog_file_mtime_ns",
+    "directory_catalog_relative_path",
+    "directory_catalog_as_of",
+    "directory_catalog_expected_count",
+    "directory_attestation_sha256",
+}
 
 
 def _read_current_adjustment_factors(path: Path) -> pd.DataFrame:
@@ -131,6 +160,10 @@ def _sandbox_lifecycle_valid(row: dict[str, Any], target: pd.Timestamp) -> bool:
 
 def _is_exchange_etf_symbol(symbol: str) -> bool:
     return symbol.endswith((".SH", ".SZ")) and len(symbol.split(".", 1)[0]) == 6
+
+
+def _explicit_true(value: Any) -> bool:
+    return value is True or str(value).strip().casefold() in {"1", "true", "yes"}
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -1188,12 +1221,6 @@ class EtfResearchService:
         tier: str = "production",
     ) -> list[EtfProfile]:
         """Build ETF profiles using only metadata evidenced by ``as_of``."""
-        from quantmaster.data.instrument_snapshots import (
-            InstrumentCatalogEvidenceError,
-            load_instrument_catalog_snapshot,
-            verify_instrument_catalog_evidence,
-        )
-
         selected_tier = self._research_tier(tier)
         target, target_source = self._research_target(as_of)
         current_market_date = pd.Timestamp(market_date()).normalize()
@@ -1204,86 +1231,21 @@ class EtfResearchService:
         historical = bool(as_of)
         if selected_tier == "sandbox":
             return self._sandbox_profiles(target, historical=historical)
-        try:
-            catalog_snapshot, expected_symbols, catalog_evidence = (
-                load_instrument_catalog_snapshot(
-                    as_of=target.date().isoformat(),
-                    market="CN",
-                    asset_type="etf",
-                )
-            )
-        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError) as exc:
-            if not historical:
-                try:
-                    local_profiles = self._sandbox_profiles(target, historical=False)
-                except (OSError, RuntimeError, TypeError, ValueError) as local_exc:
-                    self._profile_capabilities = {
-                        "status": "unavailable",
-                        "source": "immutable-tushare-catalog + local-etf-evidence",
-                        "covered_symbols": 0,
-                        "reason": (
-                            f"正式 ETF 目录不可用：{str(exc)[:180]}；"
-                            f"本地 ETF 母集也不可用：{str(local_exc)[:180]}"
-                        ),
-                    }
-                    raise RuntimeError(
-                        f"{target.date()} 没有可用的 ETF 目录或本地母集"
-                    ) from local_exc
-                local_capabilities = dict(self._profile_capabilities)
-                denominator = dict(local_capabilities.get("denominator") or {})
-                denominator.update({
-                    "formal_eligible": True,
-                    "publication_basis": "explicit-local-denominator-degradation",
-                })
-                reason = (
-                    f"{target.date()} 的不可变 Tushare ETF 目录无法精确复验："
-                    f"{str(exc)[:180]}；已改用 stockdb 与本地缓存中已观测的场内 ETF "
-                    "母集继续生成，未覆盖产品不参与结论"
-                )
-                self._profile_capabilities = {
-                    **local_capabilities,
-                    "status": "degraded",
-                    "tier": "production",
-                    "formal_eligible": True,
-                    "publication_allowed": True,
-                    "source": local_capabilities.get("source") or "local-etf-evidence",
-                    "target_source": target_source,
-                    "denominator": denominator,
-                    "reason": reason,
-                    "catalog_error": str(exc)[:300],
-                }
-                return local_profiles
-            self._profile_capabilities = {
-                "status": "unavailable",
-                "source": "immutable-tushare-catalog",
-                "covered_symbols": 0,
-                "target_source": target_source,
-                "reason": f"不可变 ETF 证券目录证据不可用：{exc}",
-            }
-            raise RuntimeError(
-                f"{target.date()} 没有完整、可复验的 Tushare ETF 目录 artifact"
-            ) from exc
-        catalog_rows = {
-            str(row.get("symbol") or "").upper(): dict(row)
-            for row in catalog_snapshot.records
-            if str(row.get("symbol") or "").upper() in expected_symbols
-        }
-        if set(catalog_rows) != expected_symbols:
-            raise RuntimeError("ETF catalog artifact 的 records 与 PIT expected 集合不一致")
-        for symbol, row in catalog_rows.items():
-            status = str(row.get("status") or "").strip().casefold()
-            listed = pd.to_datetime(row.get("list_date"), errors="coerce")
-            delisted = pd.to_datetime(row.get("delist_date"), errors="coerce")
-            if (
-                str(row.get("exchange") or "").upper() not in {"SH", "SZ"}
-                or str(row.get("asset_type") or "").casefold() != "etf"
-                or not status
-                or pd.isna(listed)
-                or pd.Timestamp(listed).normalize() > target
-                or (status in {"d", "delisted", "terminated"} and pd.isna(delisted))
-            ):
-                raise RuntimeError(f"ETF catalog artifact 的 {symbol} 生命周期证据不完整")
-        directory: dict[str, dict[str, Any]] = {
+
+        catalog = self._production_profile_catalog(
+            target,
+            historical=historical,
+            target_source=target_source,
+        )
+        if isinstance(catalog, list):
+            return catalog
+        catalog_snapshot, expected_symbols, catalog_evidence = catalog
+        catalog_rows = self._production_catalog_rows(
+            catalog_snapshot.records,
+            expected_symbols=expected_symbols,
+            target=target,
+        )
+        directory = {
             symbol: {
                 **row,
                 "symbol": symbol,
@@ -1292,361 +1254,531 @@ class EtfResearchService:
             }
             for symbol, row in catalog_rows.items()
         }
+        share_metadata = self._profile_share_metadata(target, historical=historical)
+        cached = self._profile_metadata_history()
+        cached = self._enrich_profile_directory(
+            cached,
+            directory=directory,
+            catalog_rows=catalog_rows,
+            catalog_snapshot=catalog_snapshot,
+            catalog_evidence=catalog_evidence,
+            expected_symbols=expected_symbols,
+            target=target,
+        )
+        self._profile_metadata_frame = cached.copy()
+        return self._build_production_profiles(
+            directory,
+            share_metadata=share_metadata,
+            target=target,
+        )
+
+    def _production_profile_catalog(
+        self,
+        target: pd.Timestamp,
+        *,
+        historical: bool,
+        target_source: str,
+    ) -> tuple[Any, set[str], dict[str, Any]] | list[EtfProfile]:
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_instrument_catalog_snapshot,
+        )
+
+        try:
+            return load_instrument_catalog_snapshot(
+                as_of=target.date().isoformat(),
+                market="CN",
+                asset_type="etf",
+            )
+        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError) as exc:
+            return self._profile_catalog_fallback(
+                target,
+                historical=historical,
+                target_source=target_source,
+                catalog_error=exc,
+            )
+
+    def _profile_catalog_fallback(
+        self,
+        target: pd.Timestamp,
+        *,
+        historical: bool,
+        target_source: str,
+        catalog_error: Exception,
+    ) -> list[EtfProfile]:
+        if historical:
+            self._profile_capabilities = {
+                "status": "unavailable",
+                "source": "immutable-tushare-catalog",
+                "covered_symbols": 0,
+                "target_source": target_source,
+                "reason": f"不可变 ETF 证券目录证据不可用：{catalog_error}",
+            }
+            raise RuntimeError(
+                f"{target.date()} 没有完整、可复验的 Tushare ETF 目录 artifact"
+            ) from catalog_error
+        try:
+            local_profiles = self._sandbox_profiles(target, historical=False)
+        except (OSError, RuntimeError, TypeError, ValueError) as local_exc:
+            self._profile_capabilities = {
+                "status": "unavailable",
+                "source": "immutable-tushare-catalog + local-etf-evidence",
+                "covered_symbols": 0,
+                "reason": (
+                    f"正式 ETF 目录不可用：{str(catalog_error)[:180]}；"
+                    f"本地 ETF 母集也不可用：{str(local_exc)[:180]}"
+                ),
+            }
+            raise RuntimeError(
+                f"{target.date()} 没有可用的 ETF 目录或本地母集"
+            ) from local_exc
+        local_capabilities = dict(self._profile_capabilities)
+        denominator = dict(local_capabilities.get("denominator") or {})
+        denominator.update({
+            "formal_eligible": True,
+            "publication_basis": "explicit-local-denominator-degradation",
+        })
+        self._profile_capabilities = {
+            **local_capabilities,
+            "status": "degraded",
+            "tier": "production",
+            "formal_eligible": True,
+            "publication_allowed": True,
+            "source": local_capabilities.get("source") or "local-etf-evidence",
+            "target_source": target_source,
+            "denominator": denominator,
+            "reason": (
+                f"{target.date()} 的不可变 Tushare ETF 目录无法精确复验："
+                f"{str(catalog_error)[:180]}；已改用 stockdb 与本地缓存中已观测的场内 ETF "
+                "母集继续生成，未覆盖产品不参与结论"
+            ),
+            "catalog_error": str(catalog_error)[:300],
+        }
+        return local_profiles
+
+    @staticmethod
+    def _production_catalog_rows(
+        records: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+        *,
+        expected_symbols: set[str],
+        target: pd.Timestamp,
+    ) -> dict[str, dict[str, Any]]:
+        catalog_rows = {
+            str(row.get("symbol") or "").upper(): dict(row)
+            for row in records
+            if str(row.get("symbol") or "").upper() in expected_symbols
+        }
+        if set(catalog_rows) != expected_symbols:
+            raise RuntimeError("ETF catalog artifact 的 records 与 PIT expected 集合不一致")
+        for symbol, row in catalog_rows.items():
+            if not EtfResearchService._production_catalog_row_valid(row, target):
+                raise RuntimeError(f"ETF catalog artifact 的 {symbol} 生命周期证据不完整")
+        return catalog_rows
+
+    @staticmethod
+    def _production_catalog_row_valid(
+        row: dict[str, Any], target: pd.Timestamp,
+    ) -> bool:
+        status = str(row.get("status") or "").strip().casefold()
+        listed = pd.to_datetime(row.get("list_date"), errors="coerce")
+        delisted = pd.to_datetime(row.get("delist_date"), errors="coerce")
+        exchange_valid = str(row.get("exchange") or "").upper() in {"SH", "SZ"}
+        asset_valid = str(row.get("asset_type") or "").casefold() == "etf"
+        listed_valid = pd.notna(listed) and pd.Timestamp(listed).normalize() <= target
+        delisted_valid = status not in {"d", "delisted", "terminated"} or pd.notna(delisted)
+        return bool(exchange_valid and asset_valid and status and listed_valid and delisted_valid)
+
+    def _profile_share_metadata(
+        self,
+        target: pd.Timestamp,
+        *,
+        historical: bool,
+    ) -> dict[str, dict[str, str]]:
         observations = self._direct_share_observations()
+        if observations.empty:
+            return {}
+        observations = observations.copy()
+        observations["trade_date"] = pd.to_datetime(
+            observations.get("trade_date"), errors="coerce"
+        )
+        observations["acquired_at"] = pd.to_datetime(
+            observations.get("acquired_at"), errors="coerce", utc=True,
+        )
+        eligible = observations["trade_date"].le(target)
+        if historical:
+            cutoff = pd.Timestamp(daily_signal_cutoff(target.date())).tz_convert("UTC")
+            eligible &= observations["acquired_at"].notna() & observations[
+                "acquired_at"
+            ].le(cutoff)
         share_metadata: dict[str, dict[str, str]] = {}
-        if not observations.empty:
-            observations = observations.copy()
-            observations["trade_date"] = pd.to_datetime(
-                observations.get("trade_date"), errors="coerce"
-            )
-            observations["acquired_at"] = pd.to_datetime(
-                observations.get("acquired_at"), errors="coerce", utc=True,
-            )
-            eligible_observations = observations["trade_date"].le(target)
-            if historical:
-                cutoff = pd.Timestamp(daily_signal_cutoff(target.date())).tz_convert("UTC")
-                eligible_observations &= (
-                    observations["acquired_at"].notna()
-                    & observations["acquired_at"].le(cutoff)
-                )
-            observations = observations.loc[eligible_observations]
-            for symbol, group in observations.groupby("symbol"):
-                last = group.sort_values(["trade_date", "acquired_at"]).iloc[-1]
-                share_metadata[str(symbol).upper()] = {
-                    **{
-                        key: _clean_scalar_text(last.get(key))
-                        for key in ("benchmark", "fund_type", "invest_type")
-                    },
-                    "effective_as_of": pd.Timestamp(last["trade_date"]).strftime("%Y-%m-%d"),
-                }
-        cached = pd.DataFrame()
+        for symbol, group in observations.loc[eligible].groupby("symbol"):
+            last = group.sort_values(["trade_date", "acquired_at"]).iloc[-1]
+            share_metadata[str(symbol).upper()] = {
+                **{
+                    key: _clean_scalar_text(last.get(key))
+                    for key in ("benchmark", "fund_type", "invest_type")
+                },
+                "effective_as_of": pd.Timestamp(last["trade_date"]).strftime("%Y-%m-%d"),
+            }
+        return share_metadata
+
+    def _profile_metadata_history(self) -> pd.DataFrame:
         try:
             metadata_store = self._rotation_evidence_store()
         except ImportError:
-            cached = pd.DataFrame()
-        else:
-            cached = (
-                metadata_store.etf_metadata_history()
-                if hasattr(metadata_store, "etf_metadata_history")
-                else metadata_store.etf_metadata()
+            return pd.DataFrame()
+        return (
+            metadata_store.etf_metadata_history()
+            if hasattr(metadata_store, "etf_metadata_history")
+            else metadata_store.etf_metadata()
+        )
+
+    def _enrich_profile_directory(
+        self,
+        cached: pd.DataFrame,
+        *,
+        directory: dict[str, dict[str, Any]],
+        catalog_rows: dict[str, dict[str, Any]],
+        catalog_snapshot: Any,
+        catalog_evidence: dict[str, Any],
+        expected_symbols: set[str],
+        target: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if cached.empty or "symbol" not in cached:
+            self._profile_capabilities = self._profile_capability(directory)
+            return pd.DataFrame(directory.values())
+        eligible = self._eligible_profile_metadata(
+            cached,
+            catalog_effective=pd.Timestamp(catalog_evidence["as_of"]).normalize(),
+        )
+        complete = self._latest_complete_profile_directory(
+            eligible,
+            catalog_rows=catalog_rows,
+            catalog_snapshot=catalog_snapshot,
+            catalog_evidence=catalog_evidence,
+            expected_symbols=expected_symbols,
+        )
+        selected = self._merge_complete_profile_directory(
+            complete,
+            directory=directory,
+            catalog_rows=catalog_rows,
+            catalog_effective=pd.Timestamp(catalog_evidence["as_of"]).normalize(),
+        )
+        self._profile_capabilities = self._profile_capability(directory, selected)
+        return selected
+
+    def _eligible_profile_metadata(
+        self,
+        cached: pd.DataFrame,
+        *,
+        catalog_effective: pd.Timestamp,
+    ) -> pd.DataFrame:
+        cached = cached.copy()
+        cached["symbol"] = cached["symbol"].astype(str).str.upper()
+        records = cached.to_dict("records")
+        cached["_metadata_effective"] = [
+            self._metadata_effective_date(row) for row in records
+        ]
+        cached["_metadata_observed"] = pd.to_datetime(
+            [self._metadata_observed_at(row) for row in records], utc=True,
+        )
+        return cached.loc[cached["_metadata_effective"].eq(catalog_effective)].sort_values(
+            ["symbol", "_metadata_effective", "_metadata_observed"],
+            na_position="first",
+        ).copy()
+
+    def _latest_complete_profile_directory(
+        self,
+        cached: pd.DataFrame,
+        *,
+        catalog_rows: dict[str, dict[str, Any]],
+        catalog_snapshot: Any,
+        catalog_evidence: dict[str, Any],
+        expected_symbols: set[str],
+    ) -> pd.DataFrame:
+        if cached.empty:
+            return pd.DataFrame()
+        missing_columns = sorted(_DIRECTORY_EVIDENCE_COLUMNS - set(cached.columns))
+        if missing_columns:
+            if "directory_complete" in cached and cached["directory_complete"].map(
+                _explicit_true
+            ).any():
+                raise RuntimeError(
+                    "ETF 目录声称 complete 但缺少 artifact 证据字段: "
+                    + ", ".join(missing_columns)
+                )
+            return pd.DataFrame()
+        complete_snapshots: list[pd.DataFrame] = []
+        claimed_complete = False
+        for directory_snapshot_id, group in cached.groupby(
+            "directory_snapshot_id", dropna=False,
+        ):
+            truth = group["directory_complete"].map(_explicit_true)
+            if not truth.any():
+                continue
+            claimed_complete = True
+            verified = self._verify_complete_profile_directory(
+                group,
+                snapshot_key=str(directory_snapshot_id or "").strip(),
+                truth=truth,
+                catalog_rows=catalog_rows,
+                catalog_snapshot=catalog_snapshot,
+                catalog_evidence=catalog_evidence,
+                expected_symbols=expected_symbols,
             )
-        if not cached.empty and "symbol" in cached:
-            cached = cached.copy()
-            cached["symbol"] = cached["symbol"].astype(str).str.upper()
-            records = cached.to_dict("records")
-            cached["_metadata_effective"] = [
-                self._metadata_effective_date(row) for row in records
-            ]
-            cached["_metadata_observed"] = pd.to_datetime(
-                [self._metadata_observed_at(row) for row in records], utc=True,
+            if verified is not None:
+                complete_snapshots.append(verified)
+        if claimed_complete and not complete_snapshots:
+            effective = pd.Timestamp(catalog_evidence["as_of"]).date()
+            raise RuntimeError(
+                f"{effective} 的 ETF complete 目录无法通过 immutable artifact 复验"
             )
-            catalog_effective = pd.Timestamp(catalog_evidence["as_of"]).normalize()
-            eligible = cached["_metadata_effective"].eq(catalog_effective)
-            cached = cached.loc[eligible].sort_values(
-                ["symbol", "_metadata_effective", "_metadata_observed"],
-                na_position="first",
-            ).copy()
-            required = {
-                "exchange",
-                "asset_type",
-                "status",
-                "list_date",
-                "delist_date",
-                "directory_snapshot_id",
-                "directory_complete",
+        if not complete_snapshots:
+            return pd.DataFrame()
+        return max(
+            complete_snapshots,
+            key=lambda frame: frame["_metadata_observed"].max(),
+        ).sort_values(["symbol", "_metadata_observed"])
+
+    def _verify_complete_profile_directory(
+        self,
+        group: pd.DataFrame,
+        *,
+        snapshot_key: str,
+        truth: pd.Series,
+        catalog_rows: dict[str, dict[str, Any]],
+        catalog_snapshot: Any,
+        catalog_evidence: dict[str, Any],
+        expected_symbols: set[str],
+    ) -> pd.DataFrame | None:
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            verify_instrument_catalog_evidence,
+        )
+
+        master_group = (
+            group.sort_values("_metadata_observed")
+            .drop_duplicates("symbol", keep="last")
+            .copy()
+        )
+        try:
+            verified_catalog, verified_symbols = verify_instrument_catalog_evidence(
+                self._directory_artifact_evidence(
+                    master_group.iloc[0], catalog_evidence=catalog_evidence,
+                ),
+                market="CN",
+                asset_type="etf",
+            )
+            actual_attestation = etf_directory_master_hash(master_group)
+        except (InstrumentCatalogEvidenceError, OSError, TypeError, ValueError):
+            return None
+        validations = (
+            self._directory_counts_valid(master_group, catalog_snapshot, expected_symbols),
+            self._directory_identity_valid(master_group, catalog_rows),
+            self._directory_batch_valid(master_group, catalog_snapshot, catalog_evidence),
+            self._directory_fields_valid(
+                master_group,
+                truth=truth,
+                snapshot_key=snapshot_key,
+                actual_attestation=actual_attestation,
+                verified_catalog=verified_catalog,
+                verified_symbols=verified_symbols,
+                catalog_snapshot=catalog_snapshot,
+                catalog_evidence=catalog_evidence,
+                expected_symbols=expected_symbols,
+            ),
+        )
+        return master_group if all(validations) else None
+
+    @staticmethod
+    def _directory_artifact_evidence(
+        representative: pd.Series,
+        *,
+        catalog_evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        as_of = str(representative["directory_catalog_as_of"])
+        return {
+            "snapshot_id": str(representative["directory_catalog_snapshot_id"]),
+            "file_sha256": str(representative["directory_catalog_file_sha256"]),
+            "file_size": int(representative["directory_catalog_file_size"]),
+            "file_mtime_ns": int(representative["directory_catalog_file_mtime_ns"]),
+            "relative_path": str(representative["directory_catalog_relative_path"]),
+            "as_of": as_of,
+            "expected_count": int(representative["directory_catalog_expected_count"]),
+            "membership_as_of": str(catalog_evidence.get("membership_as_of") or as_of),
+            "observation_active_as_of": str(
+                catalog_evidence.get("observation_active_as_of") or as_of
+            ),
+            "membership_reconstructed": bool(
+                catalog_evidence.get("membership_reconstructed", False)
+            ),
+            "membership_contract": str(catalog_evidence.get("membership_contract") or ""),
+        }
+
+    @staticmethod
+    def _directory_counts_valid(
+        master_group: pd.DataFrame,
+        catalog_snapshot: Any,
+        expected_symbols: set[str],
+    ) -> bool:
+        expected_count = len(expected_symbols)
+        expected_valid = all(
+            master_group[column].astype(str).nunique() == 1
+            and int(master_group[column].iloc[0]) == expected_count
+            for column in (
                 "directory_expected_symbols",
                 "directory_observed_symbols",
-                "directory_member_source",
-                "directory_member_observed_at",
-                "directory_source",
-                "directory_acquired_at",
-                "directory_cutoff_at",
-                "directory_freshness",
+                "directory_catalog_expected_count",
+            )
+        )
+        master_count = int(catalog_snapshot.manifest["record_count"])
+        master_valid = all(
+            master_group[column].astype(str).nunique() == 1
+            and int(master_group[column].iloc[0]) == master_count
+            for column in (
                 "directory_master_record_count",
                 "directory_master_batch_record_count",
-                "directory_master_snapshot_sha256",
-                "directory_catalog_snapshot_id",
-                "directory_catalog_records_sha256",
-                "directory_catalog_file_sha256",
-                "directory_catalog_file_size",
-                "directory_catalog_file_mtime_ns",
-                "directory_catalog_relative_path",
-                "directory_catalog_as_of",
-                "directory_catalog_expected_count",
-                "directory_attestation_sha256",
-            }
-            complete_snapshots: list[pd.DataFrame] = []
-            claimed_complete = False
-            if not cached.empty:
-                missing_columns = sorted(required - set(cached.columns))
-                if missing_columns:
-                    if "directory_complete" in cached and cached[
-                        "directory_complete"
-                    ].map(
-                        lambda value: value is True
-                        or str(value).strip().casefold() in {"1", "true", "yes"}
-                    ).any():
-                        raise RuntimeError(
-                            "ETF 目录声称 complete 但缺少 artifact 证据字段: "
-                            + ", ".join(missing_columns)
-                        )
-                    cached = pd.DataFrame()
-            if not cached.empty:
-                for directory_snapshot_id, group in cached.groupby(
-                    "directory_snapshot_id", dropna=False
-                ):
-                    truth = group["directory_complete"].map(
-                        lambda value: value is True
-                        or str(value).strip().casefold() in {"1", "true", "yes"}
-                    )
-                    if not truth.any():
-                        continue
-                    claimed_complete = True
-                    snapshot_key = str(directory_snapshot_id or "").strip()
-                    master_group = (
-                        group.sort_values("_metadata_observed")
-                        .drop_duplicates("symbol", keep="last")
-                        .copy()
-                    )
-                    expected_count = len(expected_symbols)
-                    symbol_set = set(master_group["symbol"].astype(str).str.upper())
-                    acquired = pd.to_datetime(
-                        master_group["directory_acquired_at"], errors="coerce", utc=True
-                    )
-                    member_observed = pd.to_datetime(
-                        master_group["directory_member_observed_at"],
-                        errors="coerce",
-                        utc=True,
-                    )
-                    declared_cutoff = pd.to_datetime(
-                        master_group["directory_cutoff_at"], errors="coerce", utc=True
-                    )
-                    metadata_observed = master_group["_metadata_observed"]
-                    catalog_acquired = pd.Timestamp(catalog_snapshot.acquired_at)
-                    if catalog_acquired.tzinfo is None:
-                        catalog_acquired = catalog_acquired.tz_localize("UTC")
-                    catalog_acquired = catalog_acquired.tz_convert("UTC")
-                    cutoff = pd.Timestamp(
-                        daily_signal_cutoff(catalog_effective.date())
-                    ).tz_convert("UTC")
-                    representative = master_group.iloc[0]
-                    artifact_evidence = {
-                        "snapshot_id": str(
-                            representative["directory_catalog_snapshot_id"]
-                        ),
-                        "file_sha256": str(
-                            representative["directory_catalog_file_sha256"]
-                        ),
-                        "file_size": int(
-                            representative["directory_catalog_file_size"]
-                        ),
-                        "file_mtime_ns": int(
-                            representative["directory_catalog_file_mtime_ns"]
-                        ),
-                        "relative_path": str(
-                            representative["directory_catalog_relative_path"]
-                        ),
-                        "as_of": str(representative["directory_catalog_as_of"]),
-                        "expected_count": int(
-                            representative["directory_catalog_expected_count"]
-                        ),
-                        # Reconstruct the complete membership contract as well
-                        # as the file identity.  Omitting these fields makes a
-                        # valid historical catalog look unverifiable even when
-                        # its bytes and record hash are unchanged.
-                        "membership_as_of": str(
-                            catalog_evidence.get("membership_as_of")
-                            or representative["directory_catalog_as_of"]
-                        ),
-                        "observation_active_as_of": str(
-                            catalog_evidence.get("observation_active_as_of")
-                            or representative["directory_catalog_as_of"]
-                        ),
-                        "membership_reconstructed": bool(
-                            catalog_evidence.get("membership_reconstructed", False)
-                        ),
-                        "membership_contract": str(
-                            catalog_evidence.get("membership_contract") or ""
-                        ),
-                    }
-                    try:
-                        verified_catalog, verified_symbols = (
-                            verify_instrument_catalog_evidence(
-                                artifact_evidence,
-                                market="CN",
-                                asset_type="etf",
-                            )
-                        )
-                        actual_attestation = etf_directory_master_hash(master_group)
-                    except (
-                        InstrumentCatalogEvidenceError,
-                        OSError,
-                        TypeError,
-                        ValueError,
-                    ):
-                        continue
-                    counts_valid = all(
-                        master_group[column].astype(str).nunique() == 1
-                        and int(master_group[column].iloc[0]) == expected_count
-                        for column in (
-                            "directory_expected_symbols",
-                            "directory_observed_symbols",
-                            "directory_catalog_expected_count",
-                        )
-                    )
-                    master_count = int(catalog_snapshot.manifest["record_count"])
-                    master_counts_valid = all(
-                        master_group[column].astype(str).nunique() == 1
-                        and int(master_group[column].iloc[0]) == master_count
-                        for column in (
-                            "directory_master_record_count",
-                            "directory_master_batch_record_count",
-                        )
-                    )
-                    identity_valid = all(
-                        all(
-                            str(row.get(column) or "")
-                            == str(catalog_rows[symbol].get(column) or "")
-                            for column in (
-                                "exchange",
-                                "asset_type",
-                                "status",
-                                "list_date",
-                                "delist_date",
-                            )
-                        )
-                        for symbol, row in {
-                            str(item.get("symbol") or "").upper(): item
-                            for item in master_group.to_dict("records")
-                        }.items()
-                        if symbol in catalog_rows
-                    )
-                    batch_valid = bool(
-                        acquired.notna().all()
-                        and acquired.nunique() == 1
-                        and acquired.iloc[0] == catalog_acquired
-                        and acquired.iloc[0] >= cutoff
-                        and acquired.iloc[0].tz_convert("Asia/Shanghai").date()
-                        == catalog_effective.date()
-                        and member_observed.notna().all()
-                        and member_observed.eq(catalog_acquired).all()
-                        and declared_cutoff.notna().all()
-                        and declared_cutoff.eq(cutoff).all()
-                        and metadata_observed.notna().all()
-                        and metadata_observed.ge(catalog_acquired).all()
-                        and metadata_observed.map(
-                            lambda value: value.tz_convert("Asia/Shanghai").date()
-                        ).eq(catalog_effective.date()).all()
-                    )
-                    fields_valid = (
-                        truth.all()
-                        and symbol_set == expected_symbols == verified_symbols
-                        and verified_catalog.snapshot_id == catalog_snapshot.snapshot_id
-                        and master_group["directory_source"].astype(str).eq(
-                            ETF_DIRECTORY_TRUSTED_SOURCE
-                        ).all()
-                        and master_group["directory_member_source"].astype(str).eq(
-                            ETF_DIRECTORY_TRUSTED_SOURCE
-                        ).all()
-                        and master_group["directory_freshness"].astype(str).eq("fresh").all()
-                        and master_group["directory_master_snapshot_sha256"].astype(str).eq(
-                            catalog_snapshot.snapshot_id
-                        ).all()
-                        and master_group["directory_catalog_snapshot_id"].astype(str).eq(
-                            catalog_snapshot.snapshot_id
-                        ).all()
-                        and master_group["directory_catalog_records_sha256"].astype(str).eq(
-                            catalog_evidence["records_sha256"]
-                        ).all()
-                        and master_group["directory_catalog_file_sha256"].astype(str).eq(
-                            catalog_evidence["file_sha256"]
-                        ).all()
-                        and master_group["directory_catalog_as_of"].astype(str).eq(
-                            catalog_evidence["as_of"]
-                        ).all()
-                        and master_group["directory_attestation_sha256"].astype(str).eq(
-                            actual_attestation
-                        ).all()
-                        and snapshot_key == "etf_directory_" + actual_attestation[:24]
-                    )
-                    if (
-                        fields_valid
-                        and counts_valid
-                        and master_counts_valid
-                        and identity_valid
-                        and batch_valid
-                    ):
-                        complete_snapshots.append(master_group)
-                if claimed_complete and not complete_snapshots:
-                    raise RuntimeError(
-                        f"{target.date()} 的 ETF complete 目录无法通过 immutable artifact 复验"
-                    )
-            if complete_snapshots:
-                cached = max(
-                    complete_snapshots,
-                    key=lambda frame: frame["_metadata_observed"].max(),
-                ).sort_values(["symbol", "_metadata_observed"])
-                rich_directory = {
-                    str(row.get("symbol") or "").upper(): row
-                    for row in cached.to_dict("records")
-                }
-                identity_columns = (
-                    "symbol",
-                    "exchange",
-                    "asset_type",
-                    "status",
-                    "list_date",
-                    "delist_date",
-                )
-                for symbol, base in catalog_rows.items():
-                    rich = rich_directory.get(symbol, {})
-                    merged = {**base, **rich}
-                    for column in identity_columns:
-                        merged[column] = symbol if column == "symbol" else base.get(column, "")
-                    merged["_metadata_effective"] = catalog_effective
-                    directory[symbol] = merged
-            else:
-                cached = pd.DataFrame(directory.values())
-            sources = sorted(
-                {
-                    str(value)
-                    for value in cached.get("metadata_source", pd.Series(dtype=str)).dropna()
-                    if str(value)
-                }
             )
-            source_values = cached.get("metadata_source", pd.Series("", index=cached.index)).astype(str)
-            enhanced_covered = int(
-                source_values.str.contains("tushare:etf_basic", na=False).sum()
+        )
+        return expected_valid and master_valid
+
+    @staticmethod
+    def _directory_identity_valid(
+        master_group: pd.DataFrame,
+        catalog_rows: dict[str, dict[str, Any]],
+    ) -> bool:
+        identity_columns = ("exchange", "asset_type", "status", "list_date", "delist_date")
+        rows = {
+            str(item.get("symbol") or "").upper(): item
+            for item in master_group.to_dict("records")
+        }
+        return all(
+            all(
+                str(row.get(column) or "") == str(catalog_rows[symbol].get(column) or "")
+                for column in identity_columns
             )
-            benchmark_covered = int(
-                (
-                    cached.get("benchmark_code", pd.Series("", index=cached.index))
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .ne("")
-                    | cached.get("benchmark", pd.Series("", index=cached.index))
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .ne("")
-                ).sum()
-            )
-            self._profile_capabilities = {
-                "status": "ready",
-                "source": ", ".join(sources) or ETF_DIRECTORY_TRUSTED_SOURCE,
-                "covered_symbols": len(directory),
-                "official_covered_symbols": len(directory),
-                "enhanced_covered_symbols": enhanced_covered,
-                "benchmark_covered_symbols": benchmark_covered,
-                "reason": (
-                    "不可变 Tushare ETF 目录已复验；etf_basic 增强权限不足"
-                    if enhanced_covered < len(directory)
-                    else "不可变 Tushare ETF 目录及增强信息均已复验"
-                ),
-            }
-        else:
-            self._profile_capabilities = {
+            for symbol, row in rows.items()
+            if symbol in catalog_rows
+        )
+
+    @staticmethod
+    def _directory_batch_valid(
+        master_group: pd.DataFrame,
+        catalog_snapshot: Any,
+        catalog_evidence: dict[str, Any],
+    ) -> bool:
+        acquired = pd.to_datetime(
+            master_group["directory_acquired_at"], errors="coerce", utc=True,
+        )
+        member_observed = pd.to_datetime(
+            master_group["directory_member_observed_at"], errors="coerce", utc=True,
+        )
+        declared_cutoff = pd.to_datetime(
+            master_group["directory_cutoff_at"], errors="coerce", utc=True,
+        )
+        metadata_observed = master_group["_metadata_observed"]
+        catalog_acquired = pd.Timestamp(catalog_snapshot.acquired_at)
+        if catalog_acquired.tzinfo is None:
+            catalog_acquired = catalog_acquired.tz_localize("UTC")
+        catalog_acquired = catalog_acquired.tz_convert("UTC")
+        effective = pd.Timestamp(catalog_evidence["as_of"]).normalize()
+        cutoff = pd.Timestamp(daily_signal_cutoff(effective.date())).tz_convert("UTC")
+        return bool(
+            acquired.notna().all()
+            and acquired.nunique() == 1
+            and acquired.iloc[0] == catalog_acquired
+            and acquired.iloc[0] >= cutoff
+            and acquired.iloc[0].tz_convert("Asia/Shanghai").date() == effective.date()
+            and member_observed.notna().all()
+            and member_observed.eq(catalog_acquired).all()
+            and declared_cutoff.notna().all()
+            and declared_cutoff.eq(cutoff).all()
+            and metadata_observed.notna().all()
+            and metadata_observed.ge(catalog_acquired).all()
+            and metadata_observed.map(
+                lambda value: value.tz_convert("Asia/Shanghai").date()
+            ).eq(effective.date()).all()
+        )
+
+    @staticmethod
+    def _directory_fields_valid(
+        master_group: pd.DataFrame,
+        *,
+        truth: pd.Series,
+        snapshot_key: str,
+        actual_attestation: str,
+        verified_catalog: Any,
+        verified_symbols: set[str],
+        catalog_snapshot: Any,
+        catalog_evidence: dict[str, Any],
+        expected_symbols: set[str],
+    ) -> bool:
+        symbol_set = set(master_group["symbol"].astype(str).str.upper())
+        sources_valid = master_group["directory_source"].astype(str).eq(
+            ETF_DIRECTORY_TRUSTED_SOURCE
+        ).all() and master_group["directory_member_source"].astype(str).eq(
+            ETF_DIRECTORY_TRUSTED_SOURCE
+        ).all()
+        catalog_valid = (
+            verified_catalog.snapshot_id == catalog_snapshot.snapshot_id
+            and master_group["directory_master_snapshot_sha256"].astype(str).eq(
+                catalog_snapshot.snapshot_id
+            ).all()
+            and master_group["directory_catalog_snapshot_id"].astype(str).eq(
+                catalog_snapshot.snapshot_id
+            ).all()
+            and master_group["directory_catalog_records_sha256"].astype(str).eq(
+                catalog_evidence["records_sha256"]
+            ).all()
+            and master_group["directory_catalog_file_sha256"].astype(str).eq(
+                catalog_evidence["file_sha256"]
+            ).all()
+            and master_group["directory_catalog_as_of"].astype(str).eq(
+                catalog_evidence["as_of"]
+            ).all()
+        )
+        attestation_valid = master_group["directory_attestation_sha256"].astype(str).eq(
+            actual_attestation
+        ).all() and snapshot_key == "etf_directory_" + actual_attestation[:24]
+        return bool(
+            truth.all()
+            and symbol_set == expected_symbols == verified_symbols
+            and sources_valid
+            and master_group["directory_freshness"].astype(str).eq("fresh").all()
+            and catalog_valid
+            and attestation_valid
+        )
+
+    @staticmethod
+    def _merge_complete_profile_directory(
+        complete: pd.DataFrame,
+        *,
+        directory: dict[str, dict[str, Any]],
+        catalog_rows: dict[str, dict[str, Any]],
+        catalog_effective: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if complete.empty:
+            return pd.DataFrame(directory.values())
+        rich_directory = {
+            str(row.get("symbol") or "").upper(): row
+            for row in complete.to_dict("records")
+        }
+        identity_columns = ("symbol", "exchange", "asset_type", "status", "list_date", "delist_date")
+        for symbol, base in catalog_rows.items():
+            merged = {**base, **rich_directory.get(symbol, {})}
+            for column in identity_columns:
+                merged[column] = symbol if column == "symbol" else base.get(column, "")
+            merged["_metadata_effective"] = catalog_effective
+            directory[symbol] = merged
+        return complete
+
+    @staticmethod
+    def _profile_capability(
+        directory: dict[str, dict[str, Any]],
+        cached: pd.DataFrame | None = None,
+    ) -> dict[str, Any]:
+        if cached is None:
+            return {
                 "status": "ready",
                 "source": ETF_DIRECTORY_TRUSTED_SOURCE,
                 "covered_symbols": len(directory),
@@ -1655,9 +1787,59 @@ class EtfResearchService:
                 "benchmark_covered_symbols": 0,
                 "reason": "不可变 Tushare ETF 目录可用；没有可验证的增强元数据",
             }
-            cached = pd.DataFrame(directory.values())
-        self._profile_metadata_frame = cached.copy()
-        result = []
+        sources = sorted({
+            str(value)
+            for value in cached.get("metadata_source", pd.Series(dtype=str)).dropna()
+            if str(value)
+        })
+        source_values = cached.get(
+            "metadata_source", pd.Series("", index=cached.index),
+        ).astype(str)
+        enhanced_covered = int(source_values.str.contains("tushare:etf_basic", na=False).sum())
+        benchmark_covered = int(
+            (
+                cached.get("benchmark_code", pd.Series("", index=cached.index))
+                .fillna("").astype(str).str.strip().ne("")
+                | cached.get("benchmark", pd.Series("", index=cached.index))
+                .fillna("").astype(str).str.strip().ne("")
+            ).sum()
+        )
+        return {
+            "status": "ready",
+            "source": ", ".join(sources) or ETF_DIRECTORY_TRUSTED_SOURCE,
+            "covered_symbols": len(directory),
+            "official_covered_symbols": len(directory),
+            "enhanced_covered_symbols": enhanced_covered,
+            "benchmark_covered_symbols": benchmark_covered,
+            "reason": (
+                "不可变 Tushare ETF 目录已复验；etf_basic 增强权限不足"
+                if enhanced_covered < len(directory)
+                else "不可变 Tushare ETF 目录及增强信息均已复验"
+            ),
+        }
+
+    def _build_production_profiles(
+        self,
+        directory: dict[str, dict[str, Any]],
+        *,
+        share_metadata: dict[str, dict[str, str]],
+        target: pd.Timestamp,
+    ) -> list[EtfProfile]:
+        instruments = self._profile_instruments(directory, target=target)
+        result = [
+            self._profile_from_instrument(
+                instrument,
+                rich=directory.get(instrument.symbol, {}),
+                extra=share_metadata.get(instrument.symbol, {}),
+            )
+            for instrument in instruments
+        ]
+        return sorted(result, key=lambda item: item.symbol)
+
+    @staticmethod
+    def _profile_instruments(
+        directory: dict[str, dict[str, Any]], target: pd.Timestamp,
+    ) -> list[Instrument]:
         instruments: list[Instrument] = []
         for symbol, rich in directory.items():
             name = str(rich.get("name") or symbol)
@@ -1681,84 +1863,81 @@ class EtfResearchService:
                     delist_date=str(rich.get("delist_date") or ""),
                 )
             )
-        for instrument in instruments:
-            extra = share_metadata.get(instrument.symbol, {})
-            rich = directory.get(instrument.symbol, {})
-            raw_list_date = _clean_scalar_text(
-                rich.get("list_date"), instrument.list_date,
-            )
-            listed = pd.to_datetime(raw_list_date, errors="coerce")
-            if pd.notna(listed) and pd.Timestamp(listed).normalize() > target:
-                continue
-            raw_source = _clean_scalar_text(
-                rich.get("metadata_source"), self._profile_capabilities.get("source")
-            )
-            source = (
-                "etf_basic"
-                if "etf_basic" in raw_source
-                else "fund_basic"
-                if "tushare:fund_basic" in raw_source
-                else "fund_basic"
-                if raw_source == ETF_DIRECTORY_TRUSTED_SOURCE
-                else "local_stockdb"
-            )
-            benchmark = _clean_scalar_text(rich.get("benchmark"), extra.get("benchmark"))
-            index_name = _clean_scalar_text(
-                rich.get("index_name"), rich.get("normalized_index"), benchmark
-            )
-            benchmark_code = _clean_scalar_text(rich.get("benchmark_code"))
-            fund_type = _clean_scalar_text(rich.get("fund_type"), extra.get("fund_type"))
-            invest_type = _clean_scalar_text(rich.get("invest_type"), extra.get("invest_type"))
-            profile_name = _clean_scalar_text(rich.get("name"), instrument.name)
-            taxonomy = classify_etf_profile(
-                profile_name,
-                benchmark=benchmark,
-                benchmark_code=benchmark_code,
-                index_name=index_name,
-                fund_type=fund_type,
-                invest_type=invest_type,
-                etf_type=_clean_scalar_text(rich.get("etf_type")),
-                benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
-                index_type=_clean_scalar_text(rich.get("index_type")),
-                metadata_source=source,
-            )
-            fee = rich.get("management_fee", rich.get("mgt_fee"))
-            numeric_fee = pd.to_numeric(pd.Series([fee]), errors="coerce").iloc[0]
-            result.append(
-                EtfProfile(
-                    symbol=instrument.symbol,
-                    name=profile_name,
-                    category=taxonomy["category"],
-                    asset_class=taxonomy["asset_class"],
-                    sector_id=taxonomy["sector_id"],
-                    sector_name=taxonomy["sector_name"],
-                    benchmark=benchmark,
-                    benchmark_code=benchmark_code,
-                    benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
-                    benchmark_level=_clean_scalar_text(rich.get("benchmark_level")),
-                    index_type=_clean_scalar_text(rich.get("index_type")),
-                    index_provider=_clean_scalar_text(rich.get("index_provider")),
-                    normalized_index=taxonomy["normalized_index"],
-                    fund_type=fund_type,
-                    invest_type=invest_type,
-                    manager=_clean_scalar_text(rich.get("manager"), rich.get("mgr_name")),
-                    custodian=_clean_scalar_text(rich.get("custodian"), rich.get("custod_name")),
-                    management_fee=float(numeric_fee) if pd.notna(numeric_fee) else None,
-                    metadata_source=source,
-                    classification_source=taxonomy["classification_source"],
-                    classification_confidence=taxonomy["classification_confidence"],
-                    list_date=raw_list_date,
-                    metadata_effective_as_of=(
-                        pd.Timestamp(rich["_metadata_effective"]).strftime("%Y-%m-%d")
-                        if rich.get("_metadata_effective") is not None
-                        and pd.notna(rich.get("_metadata_effective"))
-                        else str(extra.get("effective_as_of") or "")
-                    ),
-                    status=instrument.status,
-                    classification_evidence=taxonomy["classification_evidence"],
-                )
-            )
-        return sorted(result, key=lambda item: item.symbol)
+        return instruments
+
+    def _profile_from_instrument(
+        self,
+        instrument: Instrument,
+        *,
+        rich: dict[str, Any],
+        extra: dict[str, str],
+    ) -> EtfProfile:
+        raw_list_date = _clean_scalar_text(rich.get("list_date"), instrument.list_date)
+        raw_source = _clean_scalar_text(
+            rich.get("metadata_source"), self._profile_capabilities.get("source")
+        )
+        source = self._profile_source(raw_source)
+        benchmark = _clean_scalar_text(rich.get("benchmark"), extra.get("benchmark"))
+        benchmark_code = _clean_scalar_text(rich.get("benchmark_code"))
+        fund_type = _clean_scalar_text(rich.get("fund_type"), extra.get("fund_type"))
+        invest_type = _clean_scalar_text(rich.get("invest_type"), extra.get("invest_type"))
+        profile_name = _clean_scalar_text(rich.get("name"), instrument.name)
+        taxonomy = classify_etf_profile(
+            profile_name,
+            benchmark=benchmark,
+            benchmark_code=benchmark_code,
+            index_name=_clean_scalar_text(
+                rich.get("index_name"), rich.get("normalized_index"), benchmark,
+            ),
+            fund_type=fund_type,
+            invest_type=invest_type,
+            etf_type=_clean_scalar_text(rich.get("etf_type")),
+            benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
+            index_type=_clean_scalar_text(rich.get("index_type")),
+            metadata_source=source,
+        )
+        fee = rich.get("management_fee", rich.get("mgt_fee"))
+        numeric_fee = pd.to_numeric(pd.Series([fee]), errors="coerce").iloc[0]
+        effective = rich.get("_metadata_effective")
+        return EtfProfile(
+            symbol=instrument.symbol,
+            name=profile_name,
+            category=taxonomy["category"],
+            asset_class=taxonomy["asset_class"],
+            sector_id=taxonomy["sector_id"],
+            sector_name=taxonomy["sector_name"],
+            benchmark=benchmark,
+            benchmark_code=benchmark_code,
+            benchmark_type=_clean_scalar_text(rich.get("benchmark_type")),
+            benchmark_level=_clean_scalar_text(rich.get("benchmark_level")),
+            index_type=_clean_scalar_text(rich.get("index_type")),
+            index_provider=_clean_scalar_text(rich.get("index_provider")),
+            normalized_index=taxonomy["normalized_index"],
+            fund_type=fund_type,
+            invest_type=invest_type,
+            manager=_clean_scalar_text(rich.get("manager"), rich.get("mgr_name")),
+            custodian=_clean_scalar_text(rich.get("custodian"), rich.get("custod_name")),
+            management_fee=float(numeric_fee) if pd.notna(numeric_fee) else None,
+            metadata_source=source,
+            classification_source=taxonomy["classification_source"],
+            classification_confidence=taxonomy["classification_confidence"],
+            list_date=raw_list_date,
+            metadata_effective_as_of=(
+                pd.Timestamp(effective).strftime("%Y-%m-%d")
+                if effective is not None and pd.notna(effective)
+                else str(extra.get("effective_as_of") or "")
+            ),
+            status=instrument.status,
+            classification_evidence=taxonomy["classification_evidence"],
+        )
+
+    @staticmethod
+    def _profile_source(raw_source: str) -> str:
+        if "etf_basic" in raw_source:
+            return "etf_basic"
+        if "tushare:fund_basic" in raw_source or raw_source == ETF_DIRECTORY_TRUSTED_SOURCE:
+            return "fund_basic"
+        return "local_stockdb"
 
     def _direct_share_observations(self) -> pd.DataFrame:
         try:
