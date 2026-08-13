@@ -16,6 +16,7 @@ from quantmaster.rotation.service import (
     RotationService,
     RotationWorker,
     _overlay_stockdb_etf_prices,
+    _RotationBuildRun,
 )
 from quantmaster.rotation.store import (
     RotationIntegrityError,
@@ -184,6 +185,44 @@ def test_market_etf_evidence_overlays_stockdb_prices_for_unpriced_share_rows(
     )
     assert evidence["available"] is True
     assert evidence["as_of"] == "2026-08-10"
+
+
+def test_stockdb_etf_overlay_selects_only_a_snapshot_covering_the_target(monkeypatch):
+    observations = pd.DataFrame([{
+        "trade_date": "2026-08-10", "symbol": "510300.SH", "shares": 110.0,
+    }])
+    invalid_status = SimpleNamespace(
+        status="failed", assets={"etf": {}}, content_hashes={"etf_daily": "bad"},
+        start_date="2026-08-01", end_date="2026-08-10", as_of_date="2026-08-10",
+    )
+    ends_too_early = SimpleNamespace(
+        status="complete", assets={"etf": {}}, content_hashes={"etf_daily": "old"},
+        start_date="2026-08-01", end_date="2026-08-09", as_of_date="2026-08-09",
+    )
+    eligible = SimpleNamespace(
+        status="degraded", assets={"etf": {}}, content_hashes={"etf_daily": "good"},
+        start_date="2026-08-01", end_date="2026-08-11", as_of_date="2026-08-11",
+    )
+
+    class FakeIngestStore:
+        def history(self, _limit):
+            return [invalid_status, ends_too_early, eligible]
+
+        def load_frame(self, snapshot, name):
+            assert snapshot is eligible
+            assert name == "etf_daily"
+            return pd.DataFrame([{
+                "symbol": "510300.SH", "date": "2026-08-10", "close": 4.2,
+            }])
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestStore", FakeIngestStore,
+    )
+
+    enriched, source = _overlay_stockdb_etf_prices(observations, as_of="2026-08-10")
+
+    assert source == "local:stockdb:etf_daily"
+    assert enriched.loc[0, "close"] == 4.2
 
 
 def test_rotation_store_round_trips_snapshots_preferences_and_auxiliary_data(tmp_path):
@@ -637,6 +676,38 @@ def test_historical_taxonomy_requires_pit_membership_and_knowledge_cutoff(tmp_pa
         service._validate_temporal_taxonomy(valid)
 
 
+def test_historical_taxonomy_rejects_wrong_dated_snapshot_and_empty_intervals(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    spec = RotationJobSpec(
+        scope="industries", purpose="formal_research", as_of="2024-01-02",
+        knowledge_cutoff="2024-01-03T00:00:00+08:00",
+        taxonomy_id="sws:industry:2021",
+    )
+    node = {
+        "code": "801080.SI", "name": "电子", "level": "L1",
+        "parent_code": "", "members": ["600000.SH"], "source": "SW2021",
+        "taxonomy_id": "sws:industry:2021",
+        "membership_semantics": "dated_snapshot",
+        "effective_date": "2024-01-01",
+    }
+    store.replace_taxonomy_nodes([node])
+    with store._cache() as connection:
+        connection.execute("UPDATE taxonomy_nodes SET observed_at=?", (1_700_000_000,))
+
+    with pytest.raises(ValueError, match="不适用于 2024-01-02"):
+        service._validate_temporal_taxonomy(spec)
+
+    node["membership_semantics"] = "historical_intervals"
+    node.pop("effective_date")
+    store.replace_taxonomy_nodes([node])
+    with store._cache() as connection:
+        connection.execute("UPDATE taxonomy_nodes SET observed_at=?", (1_700_000_000,))
+
+    with pytest.raises(ValueError, match="缺少成员有效期"):
+        service._validate_temporal_taxonomy(spec)
+
+
 def test_rotation_charts_use_adaptive_axes_and_scoped_zoom():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
@@ -973,6 +1044,79 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     # A narrower task against the same published input must short-circuit
     # before loading matrices or rebuilding trend state.
     assert trend_calls == [len(close)]
+
+
+def test_rotation_reuse_result_deduplicates_warnings_and_marks_partial(tmp_path):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    store.save_snapshots({
+        "themes": {
+            "meta": {
+                "snapshot_id": "themes-current",
+                "as_of": "2026-07-30",
+                "generated_at": "2026-07-30T08:00:00+00:00",
+            },
+            "data": {"items": []},
+        },
+    })
+
+    result = service._reuse_result(
+        RotationJobSpec(scope="themes", source="auto"),
+        scope_snapshot_kinds=("themes",),
+        need_market=True,
+        local_state={"expected_count": 40},
+        input_fingerprint="inputs-v1",
+        warnings=["题材目录受限", "题材目录受限"],
+    )
+
+    assert result["outcome"] == "partial"
+    assert result["warnings"] == ["题材目录受限"]
+    assert result["tracked_count"] == 40
+    assert result["snapshot_id"]
+
+
+def test_rotation_provider_plan_preserves_historical_theme_contract(tmp_path):
+    service = RotationService(
+        RotationStore(tmp_path / "rotation"),
+        UnifiedJobStore(tmp_path / "jobs.sqlite"),
+    )
+    spec = RotationJobSpec(
+        scope="themes",
+        source="auto",
+        as_of="2024-01-02",
+        purpose="historical_replay",
+        knowledge_cutoff="2024-01-03T00:00:00+00:00",
+        taxonomy_id="sws:industry:2021",
+    )
+    run = _RotationBuildRun(
+        service,
+        spec,
+        progress=lambda *_: None,
+        cancelled=lambda: False,
+        job_id="",
+        checkpoint=None,
+    )
+    run.state.remote_required = {
+        "market": False,
+        "industries": False,
+        "themes": True,
+        "etf": False,
+    }
+    calls = []
+
+    class Provider:
+        @staticmethod
+        def sync_themes(progress, cancelled, **kwargs):
+            calls.append(kwargs)
+            return {}
+
+    operations = run._provider_operations(Provider())
+
+    assert [(key, label) for key, label, _ in operations] == [
+        ("themes", "细分题材目录"),
+    ]
+    assert operations[0][2]() == {}
+    assert calls == [{"purpose": "historical_replay", "as_of": "2024-01-02"}]
 
 
 def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues(

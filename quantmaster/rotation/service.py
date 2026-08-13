@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from statistics import median
 from typing import Any
@@ -103,6 +104,108 @@ def _market_close_epoch(as_of: str) -> float:
     return value.timestamp()
 
 
+def _knowledge_cutoff_epoch(value: str) -> float:
+    try:
+        cutoff = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("knowledge_cutoff 必须是 ISO-8601 时间") from exc
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return cutoff.timestamp()
+
+
+def _validate_taxonomy_evidence(
+    item: dict[str, Any],
+    *,
+    declared: set[str],
+    cutoff_epoch: float,
+    as_of: str,
+) -> None:
+    taxonomy_id = str(item.get("taxonomy_id") or "")
+    semantics = str(item.get("membership_semantics") or "")
+    observed_at = float(item.get("observed_at_epoch") or 0)
+    if taxonomy_id not in declared:
+        raise ValueError(f"历史用途拒绝未声明 taxonomy：{taxonomy_id or 'unresolved'}")
+    if semantics not in {"historical_intervals", "dated_snapshot"}:
+        raise ValueError(f"历史用途拒绝 current-only taxonomy：{taxonomy_id}")
+    if not observed_at or observed_at > cutoff_epoch:
+        raise ValueError(f"taxonomy observation 晚于 knowledge_cutoff：{taxonomy_id}")
+    effective_date = str(item.get("effective_date") or "")[:10]
+    if semantics == "dated_snapshot" and effective_date != as_of:
+        raise ValueError(
+            f"dated taxonomy 不适用于 {as_of}：{taxonomy_id} @ {effective_date or 'unknown'}"
+        )
+    if semantics == "historical_intervals" and not item.get("membership_records"):
+        raise ValueError(f"taxonomy 缺少成员有效期：{taxonomy_id}")
+
+
+def _normalized_etf_observations(
+    observations: pd.DataFrame,
+    as_of: str,
+) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    required = {"trade_date", "symbol", "shares"}
+    if observations is None or observations.empty or not required.issubset(observations.columns):
+        return observations, None
+    value = observations.copy()
+    if "close" not in value:
+        value["close"] = pd.NA
+    value["trade_date"] = pd.to_datetime(
+        value["trade_date"], errors="coerce",
+    ).dt.normalize()
+    value["symbol"] = value["symbol"].astype(str).str.upper()
+    target = pd.to_datetime(as_of, errors="coerce")
+    if pd.isna(target):
+        target = value["trade_date"].max()
+    return value, None if pd.isna(target) else pd.Timestamp(target).normalize()
+
+
+def _stockdb_etf_daily(target: pd.Timestamp) -> pd.DataFrame | None:
+    from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
+
+    ingest_store = StockDBIngestStore()
+    candidates: list[tuple[pd.Timestamp, Any]] = []
+    for snapshot in ingest_store.history(100):
+        start = pd.to_datetime(snapshot.start_date, errors="coerce")
+        end = pd.to_datetime(snapshot.end_date or snapshot.as_of_date, errors="coerce")
+        eligible = (
+            snapshot.status in {"complete", "degraded"}
+            and "etf" in snapshot.assets
+            and "etf_daily" in snapshot.content_hashes
+            and pd.notna(end)
+            and end >= target
+            and (pd.isna(start) or start <= target)
+        )
+        if eligible:
+            candidates.append((pd.Timestamp(end), snapshot))
+    if not candidates:
+        return None
+    _, snapshot = max(candidates, key=lambda item: item[0])
+    return ingest_store.load_frame(snapshot, "etf_daily")
+
+
+def _etf_price_lookup(
+    daily: pd.DataFrame | None,
+    target: pd.Timestamp,
+) -> pd.Series | None:
+    required = {"symbol", "date", "close"}
+    if daily is None or daily.empty or not required.issubset(daily.columns):
+        return None
+    prices = daily.loc[:, ["symbol", "date", "close"]].copy()
+    prices["trade_date"] = pd.to_datetime(
+        prices.pop("date"), errors="coerce",
+    ).dt.normalize()
+    prices["symbol"] = prices["symbol"].astype(str).str.upper()
+    prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
+    prices = prices[
+        prices["trade_date"].notna()
+        & prices["trade_date"].le(target)
+        & prices["close"].gt(0)
+    ].drop_duplicates(["trade_date", "symbol"], keep="last")
+    if prices.empty:
+        return None
+    return prices.set_index(["trade_date", "symbol"])["close"]
+
+
 def _overlay_stockdb_etf_prices(
     observations: pd.DataFrame,
     *,
@@ -116,63 +219,17 @@ def _overlay_stockdb_etf_prices(
     row without a price as a missing trading day.  The overlay is read-only and
     only fills missing ``close`` values; it never rewrites the rotation cache.
     """
-    required = {"trade_date", "symbol", "shares"}
-    if observations is None or observations.empty or not required.issubset(observations.columns):
-        return observations, ""
-    value = observations.copy()
-    if "close" not in value:
-        value["close"] = pd.NA
-    value["trade_date"] = pd.to_datetime(
-        value["trade_date"], errors="coerce",
-    ).dt.normalize()
-    value["symbol"] = value["symbol"].astype(str).str.upper()
-    target = pd.to_datetime(as_of, errors="coerce")
-    if pd.isna(target):
-        target = value["trade_date"].max()
-    if pd.isna(target):
+    value, target = _normalized_etf_observations(observations, as_of)
+    if target is None:
         return value, ""
-    target = pd.Timestamp(target).normalize()
     try:
-        from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
-
-        ingest_store = StockDBIngestStore()
-        candidates = []
-        for snapshot in ingest_store.history(100):
-            if (
-                snapshot.status not in {"complete", "degraded"}
-                or "etf" not in snapshot.assets
-                or "etf_daily" not in snapshot.content_hashes
-            ):
-                continue
-            start = pd.to_datetime(snapshot.start_date, errors="coerce")
-            end = pd.to_datetime(snapshot.end_date or snapshot.as_of_date, errors="coerce")
-            if pd.isna(end) or end < target or (pd.notna(start) and start > target):
-                continue
-            candidates.append((pd.Timestamp(end), snapshot))
-        if not candidates:
-            return value, ""
-        _, snapshot = max(candidates, key=lambda item: item[0])
-        daily = ingest_store.load_frame(snapshot, "etf_daily")
+        daily = _stockdb_etf_daily(target)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError):
         logger.debug("读取 StockDB ETF 日线价格叠加失败", exc_info=True)
         return value, ""
-    required_price = {"symbol", "date", "close"}
-    if daily is None or daily.empty or not required_price.issubset(daily.columns):
+    lookup = _etf_price_lookup(daily, target)
+    if lookup is None:
         return value, ""
-    prices = daily.loc[:, ["symbol", "date", "close"]].copy()
-    prices["trade_date"] = pd.to_datetime(
-        prices.pop("date"), errors="coerce",
-    ).dt.normalize()
-    prices["symbol"] = prices["symbol"].astype(str).str.upper()
-    prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
-    prices = prices[
-        prices["trade_date"].notna()
-        & prices["trade_date"].le(target)
-        & prices["close"].gt(0)
-    ].drop_duplicates(["trade_date", "symbol"], keep="last")
-    if prices.empty:
-        return value, ""
-    lookup = prices.set_index(["trade_date", "symbol"])["close"]
     keys = pd.MultiIndex.from_arrays(
         [value["trade_date"], value["symbol"]],
         names=["trade_date", "symbol"],
@@ -483,41 +540,63 @@ class RotationDataLoader:
             "available": bool(selected_entries),
         }
 
-    def market_matrices(
+    @staticmethod
+    def _eligible_cn_stocks(symbols: Any, records: dict[str, Any]) -> list[str]:
+        return [
+            str(symbol) for symbol in symbols
+            if (record := records.get(str(symbol))) is not None
+            and record.asset_type == "stock"
+            and record.market == "CN"
+            and record.status.lower() in {"l", "listed"}
+        ]
+
+    def _research_lake_matrices(
         self,
-        *,
+        instruments: InstrumentStore,
+        expected_count: int,
+        progress: Progress,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]] | None:
+        lake_values = self._research_lake()
+        if lake_values is None:
+            return None
+        close, amount = lake_values
+        lake_as_of = str(pd.Timestamp(close.index.max()).date())
+        newer_bar_count = sum(
+            str(meta.get("end") or "") > lake_as_of
+            for symbol, meta in BarStore().metadata_many().items()
+            if symbol.endswith((".SH", ".SZ", ".BJ"))
+            and len(symbol.rsplit(".", 1)[0]) == 6
+        )
+        if newer_bar_count >= max(1000, round(expected_count * 0.70)):
+            return None
+        records = instruments.get_many(close.columns)
+        selected = self._eligible_cn_stocks(close.columns, records)
+        close, amount = close[selected], amount.reindex(columns=selected)
+        names = {symbol: records[symbol].name or symbol for symbol in selected}
+        progress(30, "读取全市场研究湖", f"已读取 {len(selected)} 只股票")
+        return close, amount, names, expected_count, ["local:research_lake"]
+
+    @staticmethod
+    def _bar_series(frame: pd.DataFrame | None, symbol: str) -> tuple[pd.Series, pd.Series] | None:
+        if frame is None or frame.empty or "close" not in frame:
+            return None
+        frame = frame.tail(820)
+        close = pd.to_numeric(frame["close"], errors="coerce").rename(symbol)
+        if "amount" in frame:
+            amount = pd.to_numeric(frame["amount"], errors="coerce").rename(symbol)
+        elif "volume" in frame:
+            amount = (pd.to_numeric(frame["volume"], errors="coerce") * close).rename(symbol)
+        else:
+            amount = pd.Series(index=close.index, dtype=float, name=symbol)
+        return (close, amount) if close.notna().sum() >= 30 else None
+
+    def _bar_store_matrices(
+        self,
+        instruments: InstrumentStore,
+        expected_count: int,
         progress: Progress,
         cancelled: Cancelled,
     ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
-        instruments, expected_count = self._listed_instruments()
-        lake_values = self._research_lake()
-        if lake_values is not None:
-            close, amount = lake_values
-            lake_as_of = str(pd.Timestamp(close.index.max()).date())
-            bar_metadata = BarStore().metadata_many()
-            newer_bar_count = sum(
-                str(meta.get("end") or "") > lake_as_of
-                for symbol, meta in bar_metadata.items()
-                if symbol.endswith((".SH", ".SZ", ".BJ"))
-                and len(symbol.rsplit(".", 1)[0]) == 6
-            )
-            if newer_bar_count >= max(1000, round(expected_count * 0.70)):
-                lake_values = None
-        if lake_values is not None:
-            close, amount = lake_values
-            records = instruments.get_many(close.columns)
-            selected = [
-                symbol for symbol in close.columns
-                if (record := records.get(str(symbol))) is not None
-                and record.asset_type == "stock"
-                and record.market == "CN"
-                and record.status.lower() in {"l", "listed"}
-            ]
-            close, amount = close[selected], amount.reindex(columns=selected)
-            names = {symbol: records[symbol].name or symbol for symbol in selected}
-            progress(30, "读取全市场研究湖", f"已读取 {len(selected)} 只股票")
-            return close, amount, names, expected_count, ["local:research_lake"]
-
         bars = BarStore()
         symbols = [
             symbol for symbol in bars.symbols()
@@ -525,13 +604,7 @@ class RotationDataLoader:
             and len(symbol.rsplit(".", 1)[0]) == 6
         ]
         records = instruments.get_many(symbols)
-        selected = [
-            symbol for symbol in symbols
-            if (record := records.get(symbol)) is not None
-            and record.asset_type == "stock"
-            and record.market == "CN"
-            and record.status.lower() in {"l", "listed"}
-        ]
+        selected = self._eligible_cn_stocks(symbols, records)
         if not selected:
             selected = symbols
         names = {
@@ -552,21 +625,11 @@ class RotationDataLoader:
         for completed, symbol in enumerate(selected, start=1):
             if cancelled():
                 raise InterruptedError("板块联动刷新已取消")
-            frame = batch.frames.get(symbol)
-            if frame is not None and not frame.empty and "close" in frame:
-                frame = frame.tail(820)
-                close = pd.to_numeric(frame["close"], errors="coerce").rename(symbol)
-                if "amount" in frame:
-                    amount = pd.to_numeric(frame["amount"], errors="coerce").rename(symbol)
-                elif "volume" in frame:
-                    amount = (
-                        pd.to_numeric(frame["volume"], errors="coerce") * close
-                    ).rename(symbol)
-                else:
-                    amount = pd.Series(index=close.index, dtype=float, name=symbol)
-                if close.notna().sum() >= 30:
-                    close_series.append(close)
-                    amount_series.append(amount)
+            series = self._bar_series(batch.frames.get(symbol), symbol)
+            if series is not None:
+                close, amount = series
+                close_series.append(close)
+                amount_series.append(amount)
             if completed == total or completed % 40 == 0:
                 progress(
                     4 + round(25 * completed / max(1, total)),
@@ -579,6 +642,22 @@ class RotationDataLoader:
         amount = pd.concat(amount_series, axis=1).reindex(close.index).sort_index()
         selected_names = {symbol: names.get(symbol, symbol) for symbol in close.columns}
         return close, amount, selected_names, expected_count, ["local:bar_store"]
+
+    def market_matrices(
+        self,
+        *,
+        progress: Progress,
+        cancelled: Cancelled,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
+        instruments, expected_count = self._listed_instruments()
+        lake_result = self._research_lake_matrices(
+            instruments, expected_count, progress,
+        )
+        if lake_result is not None:
+            return lake_result
+        return self._bar_store_matrices(
+            instruments, expected_count, progress, cancelled,
+        )
 
 
 def _deduplicate_themes(themes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -736,6 +815,54 @@ def _resonance_rows(
     return rows
 
 
+@dataclass
+class _RotationBuildState:
+    """Mutable state shared by the explicit rotation build stages."""
+
+    spec: RotationJobSpec
+    progress: Progress
+    cancelled: Cancelled
+    job_id: str
+    checkpoint: Callable[[str, dict[str, Any]], None] | None
+    generated_at: str
+    need_market: bool
+    local_state: dict[str, Any]
+    input_fingerprint: str
+    snapshot_fingerprints: dict[str, str]
+    scope_snapshot_kinds: tuple[str, ...]
+    computed: dict[str, dict[str, Any]] = field(default_factory=dict)
+    previous_snapshot_ids: dict[str, str] = field(default_factory=dict)
+    remote_required: dict[str, bool] = field(default_factory=dict)
+    provider_warnings: list[str] = field(default_factory=list)
+    provider_issues: dict[str, list[str]] = field(default_factory=lambda: {
+        "market": [], "industries": [], "themes": [], "etf": [],
+    })
+    provider_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    compute_kinds: set[str] = field(default_factory=set)
+    etf_observations: pd.DataFrame = field(default_factory=pd.DataFrame)
+    close: pd.DataFrame = field(default_factory=pd.DataFrame)
+    amount: pd.DataFrame = field(default_factory=pd.DataFrame)
+    names: dict[str, str] = field(default_factory=dict)
+    expected_count: int = 0
+    sources: list[str] = field(default_factory=lambda: ["local:rotation_cache"])
+    as_of: str = ""
+    etf_price_source: str = ""
+    etf_expected_funds: int | None = None
+    expected_as_of: str = ""
+    snapshot_id: str = ""
+    compute_base: int = 34
+    trend: Any = None
+    l1_groups: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    @property
+    def scope(self) -> str:
+        return self.spec.scope
+
+    def checkpoint_node(self, node: str, payload: dict[str, Any]) -> None:
+        if self.checkpoint is not None:
+            self.checkpoint(node, payload)
+
+
 class RotationService:
     def __init__(
         self,
@@ -849,42 +976,24 @@ class RotationService:
 
         if spec.purpose not in {"historical_replay", "formal_research"}:
             return
-        try:
-            cutoff = datetime.fromisoformat(spec.knowledge_cutoff.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError("knowledge_cutoff 必须是 ISO-8601 时间") from exc
-        if cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-        cutoff_epoch = cutoff.timestamp()
+        cutoff_epoch = _knowledge_cutoff_epoch(spec.knowledge_cutoff)
         declared = {
             value.strip() for value in spec.taxonomy_id.split(",") if value.strip()
         }
-        needs_industry = spec.scope in {"all", "close", "industries"}
-        needs_themes = spec.scope in {"all", "close", "themes"}
         evidence: list[dict[str, Any]] = []
-        if needs_industry:
+        if spec.scope in {"all", "close", "industries"}:
             evidence.extend(self.store.taxonomy_evidence())
-        if needs_themes:
+        if spec.scope in {"all", "close", "themes"}:
             evidence.extend(self.store.theme_evidence())
         if not evidence:
             raise ValueError("历史用途没有可用的 taxonomy observation")
         for item in evidence:
-            taxonomy_id = str(item.get("taxonomy_id") or "")
-            semantics = str(item.get("membership_semantics") or "")
-            observed_at = float(item.get("observed_at_epoch") or 0)
-            if taxonomy_id not in declared:
-                raise ValueError(f"历史用途拒绝未声明 taxonomy：{taxonomy_id or 'unresolved'}")
-            if semantics not in {"historical_intervals", "dated_snapshot"}:
-                raise ValueError(f"历史用途拒绝 current-only taxonomy：{taxonomy_id}")
-            if not observed_at or observed_at > cutoff_epoch:
-                raise ValueError(f"taxonomy observation 晚于 knowledge_cutoff：{taxonomy_id}")
-            effective_date = str(item.get("effective_date") or "")[:10]
-            if semantics == "dated_snapshot" and effective_date != spec.as_of:
-                raise ValueError(
-                    f"dated taxonomy 不适用于 {spec.as_of}：{taxonomy_id} @ {effective_date or 'unknown'}"
-                )
-            if semantics == "historical_intervals" and not item.get("membership_records"):
-                raise ValueError(f"taxonomy 缺少成员有效期：{taxonomy_id}")
+            _validate_taxonomy_evidence(
+                item,
+                declared=declared,
+                cutoff_epoch=cutoff_epoch,
+                as_of=spec.as_of,
+            )
 
     def input_fingerprint(
         self,
@@ -1058,6 +1167,102 @@ class RotationService:
             "data": data,
         }
 
+    def _matching_snapshot_kinds(
+        self,
+        scope_snapshot_kinds: tuple[str, ...],
+        snapshot_fingerprints: dict[str, str],
+    ) -> set[str]:
+        matched: set[str] = set()
+        for kind in scope_snapshot_kinds:
+            try:
+                header = self.store.snapshot_header(kind)
+            except RotationIntegrityError:
+                header = None
+            meta = (header or {}).get("meta") or {}
+            if (
+                str(meta.get("algorithm_version") or "") == ALGORITHM_VERSION
+                and str(meta.get("input_fingerprint") or "")
+                == str(snapshot_fingerprints.get(kind) or "")
+            ):
+                matched.add(kind)
+        return matched
+
+    def _reuse_result(
+        self,
+        spec: RotationJobSpec,
+        *,
+        scope_snapshot_kinds: tuple[str, ...],
+        need_market: bool,
+        local_state: dict[str, Any],
+        input_fingerprint: str,
+        warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        headers = [
+            self.store.snapshot_header(kind) or {}
+            for kind in scope_snapshot_kinds
+        ]
+        as_of = max(
+            (str((header.get("meta") or {}).get("as_of") or "") for header in headers),
+            default="",
+        )
+        expected_as_of = self._expected_for_spec(spec) if need_market else ""
+        unique_warnings = list(dict.fromkeys(warnings or []))
+        return {
+            "snapshot_id": _snapshot_id(
+                as_of,
+                [str((header.get("meta") or {}).get("snapshot_id") or "") for header in headers],
+                spec.scope,
+            ),
+            "as_of": as_of,
+            "expected_as_of": expected_as_of,
+            "fresh": not expected_as_of or as_of >= expected_as_of,
+            "outcome": "partial" if unique_warnings else "unchanged",
+            "updated": [],
+            "computed": [],
+            "warnings": unique_warnings,
+            "tracked_count": int(local_state.get("expected_count") or 0),
+            "expected_count": int(local_state.get("expected_count") or 0),
+            "input_fingerprint": input_fingerprint,
+        }
+
+    def _reuse_incremental_result(
+        self,
+        spec: RotationJobSpec,
+        *,
+        snapshot_fingerprints: dict[str, str],
+        scope_snapshot_kinds: tuple[str, ...],
+        local_state: dict[str, Any],
+        input_fingerprint: str,
+        remote_required: dict[str, bool],
+        need_market: bool,
+        progress: Progress,
+        checkpoint_node: Callable[[str, dict[str, Any]], None],
+        job_id: str,
+    ) -> dict[str, Any] | None:
+        if spec.mode != "incremental":
+            return None
+        if not self._published_for_input(spec, snapshot_fingerprints, local_state):
+            return None
+        if spec.source == "auto" and any(remote_required.values()):
+            return None
+        self._validate_temporal_taxonomy(spec)
+        progress(100, "复用已发布快照", "本地输入 generation 未变化；未读取行情或访问 provider")
+        checkpoint_node("source", {
+            "cache_hit": True,
+            "input_fingerprint": input_fingerprint,
+        })
+        get_runtime_metrics().record_node(
+            "rotation.refresh", job_id=job_id, input_fingerprint=input_fingerprint,
+            cache_hit=True,
+        )
+        return self._reuse_result(
+            spec,
+            scope_snapshot_kinds=scope_snapshot_kinds,
+            need_market=need_market,
+            local_state=local_state,
+            input_fingerprint=input_fingerprint,
+        )
+
     def build(
         self,
         spec: RotationJobSpec,
@@ -1067,765 +1272,14 @@ class RotationService:
         job_id: str = "",
         checkpoint: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        scope = spec.scope
-        generated_at = _utc_now()
-        computed: dict[str, dict[str, Any]] = {}
-        need_market = scope in {"all", "close", "market", "industries", "themes"}
-        local_state: dict[str, Any] = self._local_input_state() if need_market else {
-            "generations": [], "as_of": "", "source": "not_required",
-            "expected_count": 0, "available": True,
-        }
-        input_fingerprint, local_state = self.input_fingerprint(
-            spec, local_state=local_state,
-        )
-        snapshot_fingerprints = self.snapshot_input_fingerprints(
-            spec, local_state=local_state,
-        )
-        scope_snapshot_kinds = self._scope_snapshot_kinds(scope)
-
-        def matching_snapshot_kinds() -> set[str]:
-            matched: set[str] = set()
-            for kind in scope_snapshot_kinds:
-                try:
-                    header = self.store.snapshot_header(kind)
-                except RotationIntegrityError:
-                    header = None
-                meta = (header or {}).get("meta") or {}
-                if (
-                    str(meta.get("algorithm_version") or "") == ALGORITHM_VERSION
-                    and str(meta.get("input_fingerprint") or "")
-                    == str(snapshot_fingerprints.get(kind) or "")
-                ):
-                    matched.add(kind)
-            return matched
-        metrics = get_runtime_metrics()
-
-        def checkpoint_node(node: str, payload: dict[str, Any]) -> None:
-            if checkpoint is not None:
-                checkpoint(node, payload)
-        remote_required = (
-            self._remote_requirements(spec, local_state)
-            if spec.source == "auto" else {}
-        )
-        if (
-            spec.mode == "incremental"
-            and self._published_for_input(spec, snapshot_fingerprints, local_state)
-            # A locally selected refresh may intentionally retain a stale
-            # snapshot; it still must not recompute identical inputs.  ``auto``
-            # only short-circuits when the compact generation/catalog check
-            # proves no remote supplement is due.
-            and (spec.source != "auto" or not any(remote_required.values()))
-        ):
-            self._validate_temporal_taxonomy(spec)
-            progress(100, "复用已发布快照", "本地输入 generation 未变化；未读取行情或访问 provider")
-            checkpoint_node("source", {
-                "cache_hit": True,
-                "input_fingerprint": input_fingerprint,
-            })
-            metrics.record_node(
-                "rotation.refresh", job_id=job_id, input_fingerprint=input_fingerprint,
-                cache_hit=True,
-            )
-            headers = [
-                self.store.snapshot_header(kind) or {}
-                for kind in self._scope_snapshot_kinds(scope)
-            ]
-            as_of = max(
-                (str((header.get("meta") or {}).get("as_of") or "") for header in headers),
-                default="",
-            )
-            expected_as_of = self._expected_for_spec(spec) if need_market else ""
-            return {
-                "snapshot_id": _snapshot_id(
-                    as_of,
-                    [str((header.get("meta") or {}).get("snapshot_id") or "") for header in headers],
-                    scope,
-                ),
-                "as_of": as_of,
-                "expected_as_of": expected_as_of,
-                "fresh": not expected_as_of or as_of >= expected_as_of,
-                "outcome": "unchanged",
-                "updated": [],
-                "computed": [],
-                "warnings": [],
-                "tracked_count": int(local_state.get("expected_count") or 0),
-                "expected_count": int(local_state.get("expected_count") or 0),
-                "input_fingerprint": input_fingerprint,
-            }
-        previous_snapshot_ids: dict[str, str] = {}
-        for kind in ("temperature", "structure", "industries", "themes", "etf_flows", "taxonomy"):
-            try:
-                previous = self.store.snapshot_header(kind)
-            except RotationIntegrityError:
-                previous = None
-            previous_snapshot_ids[kind] = str((previous or {}).get("meta", {}).get("snapshot_id") or "")
-        provider_warnings: list[str] = []
-        provider_issues: dict[str, list[str]] = {
-            "market": [], "industries": [], "themes": [], "etf": [],
-        }
-        provider_results: dict[str, dict[str, Any]] = {}
-        if spec.source == "auto":
-            from quantmaster.rotation.provider import RotationProvider
-
-            provider = RotationProvider(self.store)
-            operations: list[tuple[str, str, Callable[[], dict[str, Any]]]] = []
-            if remote_required["market"]:
-                market_kwargs: dict[str, Any] = {"rebuild": spec.mode == "rebuild"}
-                if spec.as_of:
-                    market_kwargs["as_of"] = spec.as_of
-                operations.append((
-                    "market",
-                    "全市场日线",
-                    lambda: provider.sync_market_history(
-                        progress,
-                        cancelled,
-                        **market_kwargs,
-                    ),
-                ))
-            if remote_required["industries"]:
-                if spec.as_of:
-                    operations.append((
-                        "industries", "申万行业层级",
-                        lambda: provider.sync_industry_taxonomy(
-                            progress, cancelled, as_of=spec.as_of,
-                        ),
-                    ))
-                else:
-                    operations.append((
-                        "industries", "申万行业层级",
-                        lambda: provider.sync_industry_taxonomy(progress, cancelled),
-                    ))
-            if remote_required["themes"]:
-                theme_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
-                if spec.as_of and spec.purpose in {"historical_replay", "formal_research"}:
-                    operations.append((
-                        "themes", "细分题材目录",
-                        lambda: provider.sync_themes(
-                            progress, cancelled, purpose=spec.purpose, **theme_kwargs,
-                        ),
-                    ))
-                else:
-                    operations.append((
-                        "themes", "细分题材目录",
-                        lambda: provider.sync_themes(progress, cancelled, **theme_kwargs),
-                    ))
-            if remote_required["etf"]:
-                etf_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
-                operations.append((
-                    "etf",
-                    "ETF 份额",
-                    lambda: provider.sync_etf_observations(
-                        progress, cancelled, **etf_kwargs,
-                    ),
-                ))
-            for key, label, operation in operations:
-                started_wall = time.perf_counter()
-                started_cpu = time.process_time()
-                try:
-                    provider_results[key] = operation()
-                    metrics.record_node(
-                        f"rotation.source.{key}", job_id=job_id,
-                        input_fingerprint=input_fingerprint,
-                        wall_ms=(time.perf_counter() - started_wall) * 1000,
-                        cpu_ms=(time.process_time() - started_cpu) * 1000,
-                        remote_calls=1,
-                    )
-                    issues = [
-                        str(issue) for issue in provider_results[key].get("issues") or []
-                    ]
-                    provider_warnings.extend(issues)
-                    # A successful probe of an unchanged local catalog is a
-                    # freshness observation, not a new input generation.  It
-                    # prevents ``source=auto`` from treating the same
-                    # taxonomy/ETF directory as stale on every click while
-                    # preserving the downstream no-op fingerprint.
-                    source_name = {
-                        "industries": "rotation.taxonomy",
-                        "themes": "rotation.themes",
-                        "etf": "rotation.etf_observations",
-                    }.get(key, "")
-                    quality_status = str(
-                        provider_results[key].get("quality_status") or "complete"
-                    ).lower()
-                    if quality_status in {"partial", "failed", "unavailable"}:
-                        provider_issues[key].extend(issues)
-                    observed_as_of = str(
-                        provider_results[key].get("as_of")
-                        or provider_results[key].get("expected_as_of")
-                        or spec.as_of
-                        or self._expected_for_spec(spec)
-                        or ""
-                    )
-                    if source_name and quality_status not in {"partial", "failed", "unavailable"}:
-                        self.store.mark_source_coverage(source_name, observed_as_of)
-                except InterruptedError:
-                    raise
-                except Exception as exc:  # 外部数据源边界：记录后降级到已有快照
-                    metrics.record_node(
-                        f"rotation.source.{key}", job_id=job_id,
-                        input_fingerprint=input_fingerprint, status="failed",
-                        wall_ms=(time.perf_counter() - started_wall) * 1000,
-                        cpu_ms=(time.process_time() - started_cpu) * 1000,
-                        remote_calls=1,
-                    )
-                    logger.info("%s 上游不可用；将按本地数据覆盖判定可用性：%s", label, exc)
-                    warning = f"{label}同步失败：{str(exc)[:160]}"
-                    provider_warnings.append(warning)
-            if operations:
-                # Provider writes are visible through local catalogs.  Rebuild
-                # the fingerprint from those generations before computing or
-                # publishing any downstream node.
-                local_state = self._local_input_state() if need_market else local_state
-                input_fingerprint, local_state = self.input_fingerprint(
-                    spec, local_state=local_state,
-                )
-                snapshot_fingerprints = self.snapshot_input_fingerprints(
-                    spec, local_state=local_state,
-                )
-        checkpoint_node("source", {
-            "input_fingerprint": input_fingerprint,
-            "remote_operations": sorted(provider_results),
-            "source_generations": list(local_state.get("generations") or []),
-        })
-        self._validate_temporal_taxonomy(spec)
-        compute_kinds = set(scope_snapshot_kinds) - matching_snapshot_kinds()
-        if not compute_kinds:
-            # A remote freshness probe can be required even when it ultimately
-            # confirms that the authoritative local object has not changed.
-            # Do not turn that observation into a full rebuild (or an empty
-            # publication): retain the existing current pointers verbatim.
-            headers = [
-                self.store.snapshot_header(kind) or {}
-                for kind in scope_snapshot_kinds
-            ]
-            as_of = max(
-                (str((header.get("meta") or {}).get("as_of") or "") for header in headers),
-                default="",
-            )
-            expected_as_of = self._expected_for_spec(spec) if need_market else ""
-            progress(100, "复用已发布快照", "远程新鲜度探测未发现新的输入 generation")
-            return {
-                "snapshot_id": _snapshot_id(
-                    as_of,
-                    [str((header.get("meta") or {}).get("snapshot_id") or "") for header in headers],
-                    scope,
-                ),
-                "as_of": as_of,
-                "expected_as_of": expected_as_of,
-                "fresh": not expected_as_of or as_of >= expected_as_of,
-                "outcome": "partial" if provider_warnings else "unchanged",
-                "updated": [],
-                "computed": [],
-                "warnings": list(dict.fromkeys(provider_warnings)),
-                "tracked_count": int(local_state.get("expected_count") or 0),
-                "expected_count": int(local_state.get("expected_count") or 0),
-                "input_fingerprint": input_fingerprint,
-            }
-        load_market_matrix = bool(
-            compute_kinds & {"temperature", "structure", "industries", "themes"}
-        )
-        etf_observations = pd.DataFrame()
-        if compute_kinds & {"temperature", "etf_flows"}:
-            try:
-                etf_observations = self.store.etf_observations()
-            except RotationIntegrityError:
-                if scope in {"all", "etf"}:
-                    raise
-                logger.warning("市场温度读取 ETF 观察文件失败", exc_info=True)
-        close = pd.DataFrame()
-        amount = pd.DataFrame()
-        names: dict[str, str] = {}
-        expected_count = int(local_state.get("expected_count") or 0)
-        sources = ["local:rotation_cache"]
-        if load_market_matrix:
-            loader_progress = progress
-            if spec.source == "auto":
-                def loader_progress(value: int, phase: str, detail: str) -> None:
-                    progress(
-                        62 + round(max(0, min(30, value)) * 0.20), phase, detail,
-                    )
-            with metrics.node_timer(
-                "rotation.market_matrix", job_id=job_id,
-                input_fingerprint=input_fingerprint,
-            ) as dimensions:
-                close, amount, names, expected_count, sources = self.loader.market_matrices(
-                    progress=loader_progress, cancelled=cancelled,
-                )
-                dimensions.update(
-                    input_rows=len(close), output_rows=int(close.notna().sum().sum()),
-                )
-            if cancelled():
-                raise InterruptedError("板块联动刷新已取消")
-            checkpoint_node("market_panel", {
-                "as_of": str(close.index[-1].date()) if not close.empty else "",
-                "rows": len(close),
-                "symbols": len(close.columns),
-            })
-        current_headers = [
-            self.store.snapshot_header(kind) or {}
-            for kind in scope_snapshot_kinds
-        ]
-        as_of = (
-            str(close.index[-1].date()) if not close.empty else max(
-                (str((header.get("meta") or {}).get("as_of") or "") for header in current_headers),
-                default="",
-            )
-        )
-        etf_price_source = ""
-        if not etf_observations.empty:
-            etf_observations, etf_price_source = _overlay_stockdb_etf_prices(
-                etf_observations,
-                as_of=as_of,
-            )
-        etf_expected_funds = _expected_etf_funds(self.store)
-        expected_as_of = str(
-            provider_results.get("market", {}).get("expected_as_of")
-            or self._expected_for_spec(spec)
-        ) if need_market else ""
-        snapshot_id = _snapshot_id(as_of, list(close.columns), scope)
-        compute_base = 70 if spec.source == "auto" else 34
-        trend = compute_trend_matrices(close) if load_market_matrix else None
-        if trend is not None:
-            checkpoint_node("trend_state", {
-                "as_of": as_of,
-                "rows": len(close),
-                "symbols": len(close.columns),
-                "windows": list(ROTATION_WINDOWS),
-            })
-
-        temperature_quality: dict[str, Any] | None = None
-        if "temperature" in compute_kinds:
-            progress(compute_base, "计算市场温度", "汇总四档趋势分布与证据权重")
-            assert trend is not None
-            temperature_dates = market_temperature_reference_dates(trend)
-            temperature_as_of = temperature_dates.get(0, as_of)
-            evidence_knowledge_as_of = time.time()
-            etf_evidence = compute_etf_capital_evidence(
-                etf_observations,
-                as_of=temperature_as_of,
-                expected_funds=etf_expected_funds,
-            )
-            sentiment_evidence = _news_sentiment_evidence(
-                temperature_as_of, knowledge_as_of=evidence_knowledge_as_of,
-            )
-            historical_evidence: dict[str, dict[str, dict[str, Any]]] = {}
-            for window in ROTATION_WINDOWS:
-                reference_as_of = temperature_dates.get(window)
-                if not reference_as_of or reference_as_of in historical_evidence:
-                    continue
-                historical_evidence[reference_as_of] = {
-                    "etf_capital": compute_etf_capital_evidence(
-                        etf_observations,
-                        as_of=reference_as_of,
-                        expected_funds=etf_expected_funds,
-                    ),
-                    "sentiment": _news_sentiment_evidence(
-                        reference_as_of,
-                        knowledge_as_of=evidence_knowledge_as_of,
-                    ),
-                }
-            temperature = compute_market_temperature(
-                close,
-                amount,
-                expected_count=expected_count,
-                trend=trend,
-                supplemental_evidence={
-                    "etf_capital": etf_evidence,
-                    "sentiment": sentiment_evidence,
-                },
-                supplemental_evidence_history=historical_evidence,
-            )
-            temperature_quality = temperature.pop("quality")
-            temperature_quality["issues"] = list(dict.fromkeys([
-                *(temperature_quality.get("issues") or []), *provider_issues["market"],
-            ]))
-            temperature_quality = _mark_stale(
-                temperature_quality, str(temperature.get("as_of") or ""), expected_as_of,
-            )
-            temperature_sources = list(sources)
-            all_etf_evidence = [
-                etf_evidence,
-                *(value["etf_capital"] for value in historical_evidence.values()),
-            ]
-            all_sentiment_evidence = [
-                sentiment_evidence,
-                *(value["sentiment"] for value in historical_evidence.values()),
-            ]
-            if any(value.get("available") for value in all_etf_evidence):
-                temperature_sources.extend(["tushare:fund_share", "local:rotation_cache"])
-                if etf_price_source:
-                    temperature_sources.append(etf_price_source)
-                if "nav" in etf_observations and etf_observations["nav"].notna().any():
-                    temperature_sources.append("tushare:fund_nav")
-                if "close" in etf_observations and etf_observations["close"].notna().any():
-                    temperature_sources.append("tushare:fund_daily")
-            if any(value.get("available") for value in all_sentiment_evidence):
-                temperature_sources.append("local:news")
-            computed["temperature"] = self._envelope(
-                temperature,
-                snapshot_id=snapshot_id,
-                generated_at=generated_at,
-                quality=temperature_quality,
-                sources=list(dict.fromkeys(temperature_sources)),
-                expected_as_of=expected_as_of,
-                purpose=spec.purpose,
-                remote_fills=int(bool(provider_results.get("market"))),
-            )
-        if "structure" in compute_kinds:
-            progress(compute_base + 7, "计算市场风格", "比较强势与低位样本收益分布")
-            assert trend is not None
-            structure = compute_market_structure(close, names=names, trend=trend)
-            structure_quality = temperature_quality
-            if structure_quality is None:
-                structure_quality = _mark_stale(
-                    _status_quality(
-                        "complete" if len(close.columns) >= expected_count else "partial",
-                        eligible=len(close.columns),
-                        expected=expected_count,
-                        issues=list(provider_issues["market"]),
-                    ),
-                    as_of,
-                    expected_as_of,
-                )
-            computed["structure"] = self._envelope(
-                structure,
-                snapshot_id=snapshot_id,
-                generated_at=generated_at,
-                quality=structure_quality,
-                sources=sources,
-                expected_as_of=expected_as_of,
-                purpose=spec.purpose,
-                remote_fills=int(bool(provider_results.get("market"))),
-            )
-
-        l1_groups: dict[str, dict[str, Any]] = {}
-        l2_groups: dict[str, dict[str, Any]] = {}
-        needs_industries = "industries" in compute_kinds
-        needs_taxonomy = "taxonomy" in compute_kinds
-        if needs_industries or needs_taxonomy:
-            progress(compute_base + 12, "聚合申万行业", "严格过滤申万 2021 层级")
-            l1_groups = _load_l1_groups(self.store, expected_count)
-            l2_groups = merge_l2_groups(l1_groups, self.store.taxonomy_nodes("L2"))
-            industry_quality: dict[str, Any]
-            if needs_industries:
-                assert trend is not None
-                with metrics.node_timer(
-                    "rotation.industries", job_id=job_id,
-                    input_fingerprint=input_fingerprint,
-                ) as dimensions:
-                    industries = analyze_group_rotation(
-                        close, {**l1_groups, **l2_groups}, names=names, amount=amount,
-                        trend=trend,
-                    )
-                    dimensions.update(input_rows=len(close), output_rows=len(industries["items"]))
-                count = len(industries["items"])
-                industry_quality = _status_quality(
-                    "complete" if count >= 28 else "partial" if count >= 20 else "limited",
-                    eligible=count,
-                    expected=31 + len(l2_groups),
-                    issues=[
-                        *([] if count >= 28 else ["部分行业未达到 8 只成分与 70% 行情覆盖门槛"]),
-                        *provider_issues["market"],
-                        *provider_issues["industries"],
-                    ],
-                )
-                industry_quality = _mark_stale(industry_quality, as_of, expected_as_of)
-                computed["industries"] = self._envelope(
-                    industries,
-                    snapshot_id=snapshot_id,
-                    generated_at=generated_at,
-                    quality=industry_quality,
-                    sources=[*sources, "SW2021"],
-                    expected_as_of=expected_as_of,
-                    purpose=spec.purpose,
-                    remote_fills=int(
-                        provider_results.get("industries", {}).get("fresh") or 0
-                    ),
-                    pending=dict(
-                        provider_results.get("industries", {}).get("pending") or {}
-                    ),
-                )
-            else:
-                # This defensive branch is normally unreachable because an
-                # industry snapshot depends on the taxonomy generation.  It
-                # keeps a damaged/missing taxonomy pointer recoverable without
-                # pretending that a market matrix was recomputed.
-                header = self.store.snapshot_header("industries") or {}
-                industry_quality = dict((header.get("meta") or {}).get("quality") or {})
-                if not industry_quality:
-                    industry_quality = _status_quality("complete")
-                count = 0
-            if needs_taxonomy:
-                taxonomy = taxonomy_payload(l1_groups, l2_groups)
-                taxonomy["as_of"] = (
-                    industries["as_of"] if needs_industries else as_of
-                )
-                computed["taxonomy"] = self._envelope(
-                    taxonomy,
-                    snapshot_id=snapshot_id,
-                    generated_at=generated_at,
-                    quality=industry_quality,
-                    sources=["SW2021"],
-                    expected_as_of=expected_as_of,
-                    purpose=spec.purpose,
-                    remote_fills=int(
-                        provider_results.get("industries", {}).get("fresh") or 0
-                    ),
-                    pending=dict(
-                        provider_results.get("industries", {}).get("pending") or {}
-                    ),
-                )
-            checkpoint_node("industries", {
-                "as_of": as_of,
-                "groups": count,
-                "input_fingerprint": snapshot_fingerprints.get("industries", ""),
-            })
-
-        if "themes" in compute_kinds:
-            progress(compute_base + 17, "扫描细分题材", "合并高度重叠的概念板块")
-            assert trend is not None
-            stored_themes = self.store.themes()
-            if spec.source == "auto" and "themes" not in provider_results and not stored_themes:
-                raise RuntimeError(
-                    next(
-                        (warning for warning in provider_warnings if "细分题材目录" in warning),
-                        "细分题材三套数据源均不可用，未生成空快照",
-                    )
-                )
-            themes = _deduplicate_themes(stored_themes)
-            theme_sources = list(dict.fromkeys(
-                str(item.get("source") or "") for item in stored_themes
-                if str(item.get("source") or "")
-            ))
-            theme_provider_issues = list(
-                provider_results.get("themes", {}).get("issues") or []
-            )
-            if themes:
-                if not l1_groups:
-                    l1_groups = _load_l1_groups(self.store, expected_count)
-                with metrics.node_timer(
-                    "rotation.themes", job_id=job_id,
-                    input_fingerprint=input_fingerprint,
-                ) as dimensions:
-                    theme_data = analyze_group_rotation(
-                        close, themes, names=names, amount=amount, kind="theme", trend=trend,
-                    )
-                    dimensions.update(input_rows=len(close), output_rows=len(theme_data["items"]))
-                industry_links = map_theme_industries(themes, l1_groups)
-                for item in theme_data["items"]:
-                    item.update(industry_links.get(str(item.get("code")), {}))
-                for code, item in theme_data["details"].items():
-                    item.update(industry_links.get(str(code), {}))
-                theme_data["definition"]["industry_mapping"] = (
-                    "申万一级行业真实成分交集；主行业至少 3 只且占已映射成员 25%"
-                )
-                count = len(theme_data["items"])
-                provider_quality = str(
-                    provider_results.get("themes", {}).get("quality_status") or "complete"
-                )
-                if provider_quality == "complete":
-                    theme_provider_issues = []
-                catalog_expected = int(
-                    provider_results.get("themes", {}).get("catalog") or len(themes)
-                )
-                quality_issues = list(dict.fromkeys([
-                    *([] if count >= 50 else ["概念成分目录仍在积累"]),
-                    *theme_provider_issues,
-                    *provider_issues["market"],
-                    *provider_issues["themes"],
-                ]))
-                theme_quality = _status_quality(
-                    "complete" if count >= 50 and provider_quality == "complete" else "partial",
-                    eligible=count,
-                    expected=catalog_expected,
-                    issues=quality_issues,
-                )
-            else:
-                theme_data = {
-                    "as_of": as_of,
-                    "kind": "theme",
-                    "items": [],
-                    "details": {},
-                    "summary": {"group_count": 0, "stages": {}},
-                    "definition": {
-                        "minimum_members": 8,
-                        "minimum_coverage": 0.70,
-                        "positive_states": ["strong_up", "up"],
-                        "score": {
-                            "weights": dict(GROUP_SCORE_WEIGHTS),
-                            "minimum_available_weight": MIN_GROUP_SCORE_WEIGHT,
-                            "disclaimer": "结构状态评分，不构成交易评级",
-                        },
-                    },
-                }
-                theme_quality = _status_quality(
-                    "cold",
-                    issues=[
-                        "尚未建立细分题材成分目录",
-                        *provider_issues["market"],
-                        *provider_issues["themes"],
-                    ],
-                )
-            theme_quality = _mark_stale(theme_quality, as_of, expected_as_of)
-            computed["themes"] = self._envelope(
-                theme_data,
-                snapshot_id=snapshot_id,
-                generated_at=generated_at,
-                quality=theme_quality,
-                sources=list(dict.fromkeys([*sources, *theme_sources])),
-                expected_as_of=expected_as_of,
-                purpose=spec.purpose,
-                remote_fills=int(provider_results.get("themes", {}).get("fresh") or 0),
-                pending=dict(provider_results.get("themes", {}).get("pending") or {}),
-            )
-            checkpoint_node("themes", {
-                "as_of": as_of,
-                "groups": count if themes else 0,
-                "input_fingerprint": snapshot_fingerprints.get("themes", ""),
-            })
-
-        if "etf_flows" in compute_kinds:
-            progress(compute_base + 21, "估算宽基资金", "按份额变化与净值计算申赎资金")
-            etf_data = estimate_etf_flows(etf_observations)
-            etf_ready = etf_data["summary"].get("status") == "ready"
-            close_fallback_count = int(
-                etf_data["summary"].get("close_fallback_count") or 0
-            )
-            etf_quality = _status_quality(
-                "partial" if etf_ready and close_fallback_count else (
-                    "complete" if etf_ready else "cold"
-                ),
-                eligible=len(etf_data["items"]),
-                expected=len(etf_data["items"]),
-                issues=[
-                    *([] if etf_ready else ["等待 09:05 后的 ETF 份额快照"]),
-                    *(
-                        [f"{close_fallback_count} 只宽基 ETF 缺少单位净值，已使用收盘价"]
-                        if close_fallback_count else []
-                    ),
-                    *provider_issues["etf"],
-                ],
-            )
-            etf_snapshot = _snapshot_id(
-                etf_data.get("as_of") or as_of,
-                [str(item.get("symbol") or "") for item in etf_data["items"]],
-                "etf",
-            )
-            price_sources = {
-                str(item.get("price_source") or "") for item in etf_data["items"]
-            }
-            etf_sources = ["tushare:fund_share"]
-            if "nav" in price_sources:
-                etf_sources.append("tushare:fund_nav")
-            if "close" in price_sources:
-                etf_sources.append("tushare:fund_daily")
-            if etf_price_source:
-                etf_sources.append(etf_price_source)
-            etf_sources.append("local:rotation_cache")
-            computed["etf_flows"] = self._envelope(
-                etf_data,
-                snapshot_id=etf_snapshot,
-                generated_at=generated_at,
-                quality=etf_quality,
-                sources=etf_sources,
-                purpose=spec.purpose,
-                remote_fills=int(bool(provider_results.get("etf"))),
-            )
-            checkpoint_node("etf", {
-                "as_of": str(etf_data.get("as_of") or as_of),
-                "items": len(etf_data.get("items") or []),
-                "input_fingerprint": snapshot_fingerprints.get("etf_flows", ""),
-            })
-
-        if cancelled():
-            raise InterruptedError("板块联动刷新已取消")
-        content_digests = {
-            kind: hashlib.sha256(
-                strict_json_dumps(payload.get("data") or {}, sort_keys=True).encode("utf-8")
-            ).hexdigest()
-            for kind, payload in sorted(computed.items())
-        }
-        batch_id = _snapshot_id(
-            as_of,
-            [f"{kind}:{digest}" for kind, digest in sorted(content_digests.items())],
-            "batch",
-        )
-        for kind, payload in computed.items():
-            payload["meta"]["snapshot_id"] = _snapshot_id(
-                str(payload["meta"].get("as_of") or ""),
-                [content_digests[kind]],
-                kind,
-            )
-            payload["meta"]["batch_id"] = batch_id
-            payload["meta"]["schema_version"] = 2
-            payload["meta"]["input_fingerprint"] = snapshot_fingerprints.get(
-                kind, input_fingerprint,
-            )
-            quality = payload["meta"].get("quality") or {}
-            payload["meta"]["stale"] = str(quality.get("status") or "") == "stale"
-            payload["meta"]["stale_reasons"] = (
-                list(quality.get("issues") or [])
-                if payload["meta"]["stale"] else []
-            )
-        progress(96, "提交分析快照", "原子更新页面所需视图")
-        with metrics.node_timer(
-            "rotation.publish", job_id=job_id, input_fingerprint=input_fingerprint,
-        ) as dimensions:
-            self.store.save_snapshots(computed)
-            dimensions["output_rows"] = sum(
-                len((payload.get("data") or {}).get("items") or [])
-                for payload in computed.values()
-            )
-        checkpoint_node("published_snapshots", {
-            "kinds": sorted(computed),
-            "input_fingerprint": input_fingerprint,
-        })
-        changed = sorted(
-            kind for kind, payload in computed.items()
-            if str(payload.get("meta", {}).get("snapshot_id") or "")
-            != previous_snapshot_ids.get(kind, "")
-        )
-        non_complete = [
-            kind for kind, payload in computed.items()
-            if str(payload.get("meta", {}).get("quality", {}).get("status") or "")
-            not in {"complete"}
-        ]
-        outcome = "unchanged" if not changed else (
-            "partial" if non_complete else "updated"
-        )
-        # A partial DAG update deliberately leaves unrelated current pointers
-        # untouched.  The task-level identity must therefore include every
-        # snapshot in the requested scope, not merely the nodes computed by
-        # this worker invocation.
-        published_headers = [
-            self.store.snapshot_header(kind) or {}
-            for kind in scope_snapshot_kinds
-        ]
-        published_as_of = max(
-            (str((header.get("meta") or {}).get("as_of") or "") for header in published_headers),
-            default=as_of,
-        )
-        snapshot_id = _snapshot_id(
-            published_as_of,
-            [
-                str((header.get("meta") or {}).get("snapshot_id") or "")
-                for header in published_headers
-            ],
-            scope,
-        )
-        return {
-            "snapshot_id": snapshot_id,
-            "as_of": published_as_of,
-            "expected_as_of": expected_as_of,
-            "fresh": not expected_as_of or published_as_of >= expected_as_of,
-            "outcome": outcome,
-            "updated": changed,
-            "computed": sorted(computed),
-            "warnings": list(dict.fromkeys(provider_warnings)),
-            "tracked_count": len(close.columns) or int(local_state.get("expected_count") or 0),
-            "expected_count": expected_count,
-            "input_fingerprint": input_fingerprint,
-        }
+        return _RotationBuildRun(
+            self,
+            spec,
+            progress=progress,
+            cancelled=cancelled,
+            job_id=job_id,
+            checkpoint=checkpoint,
+        ).run()
 
     @staticmethod
     def cold(kind: str) -> dict[str, Any]:
@@ -2130,6 +1584,820 @@ class RotationService:
         if item is None:
             return None
         return {"meta": snapshot["meta"], "data": item}
+
+
+class _RotationBuildRun:
+    """Execute one refresh as explicit source, compute, and publish stages."""
+
+    def __init__(
+        self,
+        service: RotationService,
+        spec: RotationJobSpec,
+        *,
+        progress: Progress,
+        cancelled: Cancelled,
+        job_id: str,
+        checkpoint: Callable[[str, dict[str, Any]], None] | None,
+    ) -> None:
+        need_market = spec.scope in {"all", "close", "market", "industries", "themes"}
+        local_state = service._local_input_state() if need_market else {
+            "generations": [], "as_of": "", "source": "not_required",
+            "expected_count": 0, "available": True,
+        }
+        input_fingerprint, local_state = service.input_fingerprint(
+            spec, local_state=local_state,
+        )
+        self.service = service
+        self.metrics = get_runtime_metrics()
+        self.state = _RotationBuildState(
+            spec=spec,
+            progress=progress,
+            cancelled=cancelled,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            generated_at=_utc_now(),
+            need_market=need_market,
+            local_state=local_state,
+            input_fingerprint=input_fingerprint,
+            snapshot_fingerprints=service.snapshot_input_fingerprints(
+                spec, local_state=local_state,
+            ),
+            scope_snapshot_kinds=service._scope_snapshot_kinds(spec.scope),
+        )
+        self.state.remote_required = (
+            service._remote_requirements(spec, local_state)
+            if spec.source == "auto" else {}
+        )
+
+    def run(self) -> dict[str, Any]:
+        state = self.state
+        reused = self.service._reuse_incremental_result(
+            state.spec,
+            snapshot_fingerprints=state.snapshot_fingerprints,
+            scope_snapshot_kinds=state.scope_snapshot_kinds,
+            local_state=state.local_state,
+            input_fingerprint=state.input_fingerprint,
+            remote_required=state.remote_required,
+            need_market=state.need_market,
+            progress=state.progress,
+            checkpoint_node=state.checkpoint_node,
+            job_id=state.job_id,
+        )
+        if reused is not None:
+            return reused
+        self._capture_previous_snapshots()
+        self._sync_remote_sources()
+        state.checkpoint_node("source", {
+            "input_fingerprint": state.input_fingerprint,
+            "remote_operations": sorted(state.provider_results),
+            "source_generations": list(state.local_state.get("generations") or []),
+        })
+        self.service._validate_temporal_taxonomy(state.spec)
+        state.compute_kinds = set(state.scope_snapshot_kinds) - self.service._matching_snapshot_kinds(
+            state.scope_snapshot_kinds, state.snapshot_fingerprints,
+        )
+        reused = self._reuse_after_remote_probe()
+        if reused is not None:
+            return reused
+        self._load_compute_inputs()
+        temperature_quality = self._compute_temperature()
+        self._compute_structure(temperature_quality)
+        self._compute_industries()
+        self._compute_themes()
+        self._compute_etf_flows()
+        return self._publish()
+
+    def _capture_previous_snapshots(self) -> None:
+        state = self.state
+        for kind in (
+            "temperature", "structure", "industries", "themes", "etf_flows", "taxonomy",
+        ):
+            try:
+                previous = self.service.store.snapshot_header(kind)
+            except RotationIntegrityError:
+                previous = None
+            state.previous_snapshot_ids[kind] = str(
+                (previous or {}).get("meta", {}).get("snapshot_id") or ""
+            )
+
+    def _provider_operations(
+        self, provider: Any,
+    ) -> list[tuple[str, str, Callable[[], dict[str, Any]]]]:
+        state = self.state
+        spec = state.spec
+        required = state.remote_required
+        operations: list[tuple[str, str, Callable[[], dict[str, Any]]]] = []
+        if required["market"]:
+            market_kwargs: dict[str, Any] = {"rebuild": spec.mode == "rebuild"}
+            if spec.as_of:
+                market_kwargs["as_of"] = spec.as_of
+            operations.append((
+                "market", "全市场日线",
+                lambda: provider.sync_market_history(
+                    state.progress, state.cancelled, **market_kwargs,
+                ),
+            ))
+        if required["industries"]:
+            operations.append((
+                "industries", "申万行业层级",
+                lambda: provider.sync_industry_taxonomy(
+                    state.progress, state.cancelled, **(
+                        {"as_of": spec.as_of} if spec.as_of else {}
+                    ),
+                ),
+            ))
+        if required["themes"]:
+            theme_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
+            purpose_kwargs = (
+                {"purpose": spec.purpose}
+                if spec.as_of and spec.purpose in {"historical_replay", "formal_research"}
+                else {}
+            )
+            operations.append((
+                "themes", "细分题材目录",
+                lambda: provider.sync_themes(
+                    state.progress, state.cancelled, **purpose_kwargs, **theme_kwargs,
+                ),
+            ))
+        if required["etf"]:
+            etf_kwargs = {"as_of": spec.as_of} if spec.as_of else {}
+            operations.append((
+                "etf", "ETF 份额",
+                lambda: provider.sync_etf_observations(
+                    state.progress, state.cancelled, **etf_kwargs,
+                ),
+            ))
+        return operations
+
+    def _record_provider_success(self, key: str) -> None:
+        state = self.state
+        result = state.provider_results[key]
+        issues = [str(issue) for issue in result.get("issues") or []]
+        state.provider_warnings.extend(issues)
+        source_name = {
+            "industries": "rotation.taxonomy",
+            "themes": "rotation.themes",
+            "etf": "rotation.etf_observations",
+        }.get(key, "")
+        quality_status = str(result.get("quality_status") or "complete").lower()
+        unavailable = {"partial", "failed", "unavailable"}
+        if quality_status in unavailable:
+            state.provider_issues[key].extend(issues)
+        observed_as_of = str(
+            result.get("as_of")
+            or result.get("expected_as_of")
+            or state.spec.as_of
+            or self.service._expected_for_spec(state.spec)
+            or ""
+        )
+        if source_name and quality_status not in unavailable:
+            self.service.store.mark_source_coverage(source_name, observed_as_of)
+
+    def _run_provider_operation(
+        self,
+        key: str,
+        label: str,
+        operation: Callable[[], dict[str, Any]],
+    ) -> None:
+        state = self.state
+        started_wall = time.perf_counter()
+        started_cpu = time.process_time()
+        try:
+            state.provider_results[key] = operation()
+            self.metrics.record_node(
+                f"rotation.source.{key}", job_id=state.job_id,
+                input_fingerprint=state.input_fingerprint,
+                wall_ms=(time.perf_counter() - started_wall) * 1000,
+                cpu_ms=(time.process_time() - started_cpu) * 1000,
+                remote_calls=1,
+            )
+            self._record_provider_success(key)
+        except InterruptedError:
+            raise
+        except Exception as exc:  # 外部数据源边界：记录后降级到已有快照
+            self.metrics.record_node(
+                f"rotation.source.{key}", job_id=state.job_id,
+                input_fingerprint=state.input_fingerprint, status="failed",
+                wall_ms=(time.perf_counter() - started_wall) * 1000,
+                cpu_ms=(time.process_time() - started_cpu) * 1000,
+                remote_calls=1,
+            )
+            logger.info("%s 上游不可用；将按本地数据覆盖判定可用性：%s", label, exc)
+            state.provider_warnings.append(f"{label}同步失败：{str(exc)[:160]}")
+
+    def _sync_remote_sources(self) -> None:
+        state = self.state
+        if state.spec.source != "auto":
+            return
+        from quantmaster.rotation.provider import RotationProvider
+
+        operations = self._provider_operations(RotationProvider(self.service.store))
+        for key, label, operation in operations:
+            self._run_provider_operation(key, label, operation)
+        if not operations:
+            return
+        if state.need_market:
+            state.local_state = self.service._local_input_state()
+        state.input_fingerprint, state.local_state = self.service.input_fingerprint(
+            state.spec, local_state=state.local_state,
+        )
+        state.snapshot_fingerprints = self.service.snapshot_input_fingerprints(
+            state.spec, local_state=state.local_state,
+        )
+
+    def _reuse_after_remote_probe(self) -> dict[str, Any] | None:
+        state = self.state
+        if state.compute_kinds:
+            return None
+        state.progress(100, "复用已发布快照", "远程新鲜度探测未发现新的输入 generation")
+        return self.service._reuse_result(
+            state.spec,
+            scope_snapshot_kinds=state.scope_snapshot_kinds,
+            need_market=state.need_market,
+            local_state=state.local_state,
+            input_fingerprint=state.input_fingerprint,
+            warnings=state.provider_warnings,
+        )
+
+    def _load_etf_observations(self) -> pd.DataFrame:
+        state = self.state
+        if not state.compute_kinds & {"temperature", "etf_flows"}:
+            return pd.DataFrame()
+        try:
+            return self.service.store.etf_observations()
+        except RotationIntegrityError:
+            if state.scope in {"all", "etf"}:
+                raise
+            logger.warning("市场温度读取 ETF 观察文件失败", exc_info=True)
+            return pd.DataFrame()
+
+    def _market_loader_progress(self) -> Progress:
+        state = self.state
+        if state.spec.source != "auto":
+            return state.progress
+
+        def scaled(value: int, phase: str, detail: str) -> None:
+            state.progress(62 + round(max(0, min(30, value)) * 0.20), phase, detail)
+
+        return scaled
+
+    def _load_market_matrices(self) -> None:
+        state = self.state
+        with self.metrics.node_timer(
+            "rotation.market_matrix", job_id=state.job_id,
+            input_fingerprint=state.input_fingerprint,
+        ) as dimensions:
+            (
+                state.close, state.amount, state.names,
+                state.expected_count, state.sources,
+            ) = self.service.loader.market_matrices(
+                progress=self._market_loader_progress(), cancelled=state.cancelled,
+            )
+            dimensions.update(
+                input_rows=len(state.close),
+                output_rows=int(state.close.notna().sum().sum()),
+            )
+        if state.cancelled():
+            raise InterruptedError("板块联动刷新已取消")
+        state.checkpoint_node("market_panel", {
+            "as_of": str(state.close.index[-1].date()) if not state.close.empty else "",
+            "rows": len(state.close),
+            "symbols": len(state.close.columns),
+        })
+
+    def _load_compute_inputs(self) -> None:
+        state = self.state
+        load_market_matrix = bool(
+            state.compute_kinds & {"temperature", "structure", "industries", "themes"}
+        )
+        state.etf_observations = self._load_etf_observations()
+        state.expected_count = int(state.local_state.get("expected_count") or 0)
+        if load_market_matrix:
+            self._load_market_matrices()
+        current_headers = [
+            self.service.store.snapshot_header(kind) or {}
+            for kind in state.scope_snapshot_kinds
+        ]
+        state.as_of = (
+            str(state.close.index[-1].date()) if not state.close.empty else max(
+                (
+                    str((header.get("meta") or {}).get("as_of") or "")
+                    for header in current_headers
+                ),
+                default="",
+            )
+        )
+        if not state.etf_observations.empty:
+            state.etf_observations, state.etf_price_source = _overlay_stockdb_etf_prices(
+                state.etf_observations, as_of=state.as_of,
+            )
+        state.etf_expected_funds = _expected_etf_funds(self.service.store)
+        state.expected_as_of = str(
+            state.provider_results.get("market", {}).get("expected_as_of")
+            or self.service._expected_for_spec(state.spec)
+        ) if state.need_market else ""
+        state.snapshot_id = _snapshot_id(
+            state.as_of, list(state.close.columns), state.scope,
+        )
+        state.compute_base = 70 if state.spec.source == "auto" else 34
+        state.trend = compute_trend_matrices(state.close) if load_market_matrix else None
+        if state.trend is not None:
+            state.checkpoint_node("trend_state", {
+                "as_of": state.as_of,
+                "rows": len(state.close),
+                "symbols": len(state.close.columns),
+                "windows": list(ROTATION_WINDOWS),
+            })
+
+    def _temperature_evidence(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, dict[str, Any]]]]:
+        state = self.state
+        temperature_dates = market_temperature_reference_dates(state.trend)
+        temperature_as_of = temperature_dates.get(0, state.as_of)
+        knowledge_as_of = time.time()
+        etf_evidence = compute_etf_capital_evidence(
+            state.etf_observations,
+            as_of=temperature_as_of,
+            expected_funds=state.etf_expected_funds,
+        )
+        sentiment_evidence = _news_sentiment_evidence(
+            temperature_as_of, knowledge_as_of=knowledge_as_of,
+        )
+        historical: dict[str, dict[str, dict[str, Any]]] = {}
+        for window in ROTATION_WINDOWS:
+            reference_as_of = temperature_dates.get(window)
+            if not reference_as_of or reference_as_of in historical:
+                continue
+            historical[reference_as_of] = {
+                "etf_capital": compute_etf_capital_evidence(
+                    state.etf_observations,
+                    as_of=reference_as_of,
+                    expected_funds=state.etf_expected_funds,
+                ),
+                "sentiment": _news_sentiment_evidence(
+                    reference_as_of, knowledge_as_of=knowledge_as_of,
+                ),
+            }
+        return etf_evidence, sentiment_evidence, historical
+
+    def _temperature_sources(
+        self,
+        etf_evidence: dict[str, Any],
+        sentiment_evidence: dict[str, Any],
+        historical: dict[str, dict[str, dict[str, Any]]],
+    ) -> list[str]:
+        state = self.state
+        sources = list(state.sources)
+        all_etf = [
+            etf_evidence,
+            *(value["etf_capital"] for value in historical.values()),
+        ]
+        all_sentiment = [
+            sentiment_evidence,
+            *(value["sentiment"] for value in historical.values()),
+        ]
+        if any(value.get("available") for value in all_etf):
+            sources.extend(["tushare:fund_share", "local:rotation_cache"])
+            if state.etf_price_source:
+                sources.append(state.etf_price_source)
+            if "nav" in state.etf_observations and state.etf_observations["nav"].notna().any():
+                sources.append("tushare:fund_nav")
+            if "close" in state.etf_observations and state.etf_observations["close"].notna().any():
+                sources.append("tushare:fund_daily")
+        if any(value.get("available") for value in all_sentiment):
+            sources.append("local:news")
+        return list(dict.fromkeys(sources))
+
+    def _compute_temperature(self) -> dict[str, Any] | None:
+        state = self.state
+        if "temperature" not in state.compute_kinds:
+            return None
+        state.progress(state.compute_base, "计算市场温度", "汇总四档趋势分布与证据权重")
+        assert state.trend is not None
+        etf_evidence, sentiment_evidence, historical = self._temperature_evidence()
+        temperature = compute_market_temperature(
+            state.close,
+            state.amount,
+            expected_count=state.expected_count,
+            trend=state.trend,
+            supplemental_evidence={
+                "etf_capital": etf_evidence,
+                "sentiment": sentiment_evidence,
+            },
+            supplemental_evidence_history=historical,
+        )
+        quality = temperature.pop("quality")
+        quality["issues"] = list(dict.fromkeys([
+            *(quality.get("issues") or []), *state.provider_issues["market"],
+        ]))
+        quality = _mark_stale(
+            quality, str(temperature.get("as_of") or ""), state.expected_as_of,
+        )
+        state.computed["temperature"] = self.service._envelope(
+            temperature,
+            snapshot_id=state.snapshot_id,
+            generated_at=state.generated_at,
+            quality=quality,
+            sources=self._temperature_sources(
+                etf_evidence, sentiment_evidence, historical,
+            ),
+            expected_as_of=state.expected_as_of,
+            purpose=state.spec.purpose,
+            remote_fills=int(bool(state.provider_results.get("market"))),
+        )
+        return quality
+
+    def _compute_structure(self, temperature_quality: dict[str, Any] | None) -> None:
+        state = self.state
+        if "structure" not in state.compute_kinds:
+            return
+        state.progress(state.compute_base + 7, "计算市场风格", "比较强势与低位样本收益分布")
+        assert state.trend is not None
+        structure = compute_market_structure(
+            state.close, names=state.names, trend=state.trend,
+        )
+        quality = temperature_quality
+        if quality is None:
+            quality = _mark_stale(
+                _status_quality(
+                    "complete" if len(state.close.columns) >= state.expected_count else "partial",
+                    eligible=len(state.close.columns),
+                    expected=state.expected_count,
+                    issues=list(state.provider_issues["market"]),
+                ),
+                state.as_of,
+                state.expected_as_of,
+            )
+        state.computed["structure"] = self.service._envelope(
+            structure,
+            snapshot_id=state.snapshot_id,
+            generated_at=state.generated_at,
+            quality=quality,
+            sources=state.sources,
+            expected_as_of=state.expected_as_of,
+            purpose=state.spec.purpose,
+            remote_fills=int(bool(state.provider_results.get("market"))),
+        )
+
+    def _analyze_industries(
+        self, l2_groups: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any], int]:
+        state = self.state
+        assert state.trend is not None
+        with self.metrics.node_timer(
+            "rotation.industries", job_id=state.job_id,
+            input_fingerprint=state.input_fingerprint,
+        ) as dimensions:
+            industries = analyze_group_rotation(
+                state.close,
+                {**state.l1_groups, **l2_groups},
+                names=state.names,
+                amount=state.amount,
+                trend=state.trend,
+            )
+            dimensions.update(
+                input_rows=len(state.close), output_rows=len(industries["items"]),
+            )
+        count = len(industries["items"])
+        quality = _status_quality(
+            "complete" if count >= 28 else "partial" if count >= 20 else "limited",
+            eligible=count,
+            expected=31 + len(l2_groups),
+            issues=[
+                *([] if count >= 28 else ["部分行业未达到 8 只成分与 70% 行情覆盖门槛"]),
+                *state.provider_issues["market"],
+                *state.provider_issues["industries"],
+            ],
+        )
+        return industries, _mark_stale(quality, state.as_of, state.expected_as_of), count
+
+    def _compute_industries(self) -> None:
+        state = self.state
+        needs_industries = "industries" in state.compute_kinds
+        needs_taxonomy = "taxonomy" in state.compute_kinds
+        if not (needs_industries or needs_taxonomy):
+            return
+        state.progress(state.compute_base + 12, "聚合申万行业", "严格过滤申万 2021 层级")
+        state.l1_groups = _load_l1_groups(self.service.store, state.expected_count)
+        l2_groups = merge_l2_groups(
+            state.l1_groups, self.service.store.taxonomy_nodes("L2"),
+        )
+        industries: dict[str, Any] = {}
+        if needs_industries:
+            industries, quality, count = self._analyze_industries(l2_groups)
+            state.computed["industries"] = self.service._envelope(
+                industries,
+                snapshot_id=state.snapshot_id,
+                generated_at=state.generated_at,
+                quality=quality,
+                sources=[*state.sources, "SW2021"],
+                expected_as_of=state.expected_as_of,
+                purpose=state.spec.purpose,
+                remote_fills=int(
+                    state.provider_results.get("industries", {}).get("fresh") or 0
+                ),
+                pending=dict(
+                    state.provider_results.get("industries", {}).get("pending") or {}
+                ),
+            )
+        else:
+            header = self.service.store.snapshot_header("industries") or {}
+            quality = dict((header.get("meta") or {}).get("quality") or {})
+            quality = quality or _status_quality("complete")
+            count = 0
+        if needs_taxonomy:
+            taxonomy = taxonomy_payload(state.l1_groups, l2_groups)
+            taxonomy["as_of"] = industries["as_of"] if needs_industries else state.as_of
+            state.computed["taxonomy"] = self.service._envelope(
+                taxonomy,
+                snapshot_id=state.snapshot_id,
+                generated_at=state.generated_at,
+                quality=quality,
+                sources=["SW2021"],
+                expected_as_of=state.expected_as_of,
+                purpose=state.spec.purpose,
+                remote_fills=int(
+                    state.provider_results.get("industries", {}).get("fresh") or 0
+                ),
+                pending=dict(
+                    state.provider_results.get("industries", {}).get("pending") or {}
+                ),
+            )
+        state.checkpoint_node("industries", {
+            "as_of": state.as_of,
+            "groups": count,
+            "input_fingerprint": state.snapshot_fingerprints.get("industries", ""),
+        })
+
+    @staticmethod
+    def _cold_theme_data(as_of: str) -> dict[str, Any]:
+        return {
+            "as_of": as_of,
+            "kind": "theme",
+            "items": [],
+            "details": {},
+            "summary": {"group_count": 0, "stages": {}},
+            "definition": {
+                "minimum_members": 8,
+                "minimum_coverage": 0.70,
+                "positive_states": ["strong_up", "up"],
+                "score": {
+                    "weights": dict(GROUP_SCORE_WEIGHTS),
+                    "minimum_available_weight": MIN_GROUP_SCORE_WEIGHT,
+                    "disclaimer": "结构状态评分，不构成交易评级",
+                },
+            },
+        }
+
+    def _analyze_themes(
+        self,
+        themes: dict[str, dict[str, Any]],
+        provider_issues: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], int]:
+        state = self.state
+        if not state.l1_groups:
+            state.l1_groups = _load_l1_groups(self.service.store, state.expected_count)
+        assert state.trend is not None
+        with self.metrics.node_timer(
+            "rotation.themes", job_id=state.job_id,
+            input_fingerprint=state.input_fingerprint,
+        ) as dimensions:
+            data = analyze_group_rotation(
+                state.close, themes, names=state.names, amount=state.amount,
+                kind="theme", trend=state.trend,
+            )
+            dimensions.update(input_rows=len(state.close), output_rows=len(data["items"]))
+        industry_links = map_theme_industries(themes, state.l1_groups)
+        for item in data["items"]:
+            item.update(industry_links.get(str(item.get("code")), {}))
+        for code, item in data["details"].items():
+            item.update(industry_links.get(str(code), {}))
+        data["definition"]["industry_mapping"] = (
+            "申万一级行业真实成分交集；主行业至少 3 只且占已映射成员 25%"
+        )
+        count = len(data["items"])
+        provider_quality = str(
+            state.provider_results.get("themes", {}).get("quality_status") or "complete"
+        )
+        effective_issues = [] if provider_quality == "complete" else provider_issues
+        catalog_expected = int(
+            state.provider_results.get("themes", {}).get("catalog") or len(themes)
+        )
+        quality = _status_quality(
+            "complete" if count >= 50 and provider_quality == "complete" else "partial",
+            eligible=count,
+            expected=catalog_expected,
+            issues=list(dict.fromkeys([
+                *([] if count >= 50 else ["概念成分目录仍在积累"]),
+                *effective_issues,
+                *state.provider_issues["market"],
+                *state.provider_issues["themes"],
+            ])),
+        )
+        return data, quality, count
+
+    def _compute_themes(self) -> None:
+        state = self.state
+        if "themes" not in state.compute_kinds:
+            return
+        state.progress(state.compute_base + 17, "扫描细分题材", "合并高度重叠的概念板块")
+        assert state.trend is not None
+        stored_themes = self.service.store.themes()
+        if state.spec.source == "auto" and "themes" not in state.provider_results and not stored_themes:
+            raise RuntimeError(next(
+                (
+                    warning for warning in state.provider_warnings
+                    if "细分题材目录" in warning
+                ),
+                "细分题材三套数据源均不可用，未生成空快照",
+            ))
+        themes = _deduplicate_themes(stored_themes)
+        theme_sources = list(dict.fromkeys(
+            str(item.get("source") or "")
+            for item in stored_themes if str(item.get("source") or "")
+        ))
+        provider_issues = list(
+            state.provider_results.get("themes", {}).get("issues") or []
+        )
+        if themes:
+            data, quality, count = self._analyze_themes(themes, provider_issues)
+        else:
+            data = self._cold_theme_data(state.as_of)
+            quality = _status_quality("cold", issues=[
+                "尚未建立细分题材成分目录",
+                *state.provider_issues["market"],
+                *state.provider_issues["themes"],
+            ])
+            count = 0
+        quality = _mark_stale(quality, state.as_of, state.expected_as_of)
+        state.computed["themes"] = self.service._envelope(
+            data,
+            snapshot_id=state.snapshot_id,
+            generated_at=state.generated_at,
+            quality=quality,
+            sources=list(dict.fromkeys([*state.sources, *theme_sources])),
+            expected_as_of=state.expected_as_of,
+            purpose=state.spec.purpose,
+            remote_fills=int(state.provider_results.get("themes", {}).get("fresh") or 0),
+            pending=dict(state.provider_results.get("themes", {}).get("pending") or {}),
+        )
+        state.checkpoint_node("themes", {
+            "as_of": state.as_of,
+            "groups": count,
+            "input_fingerprint": state.snapshot_fingerprints.get("themes", ""),
+        })
+
+    def _etf_sources(self, data: dict[str, Any]) -> list[str]:
+        state = self.state
+        price_sources = {
+            str(item.get("price_source") or "") for item in data["items"]
+        }
+        sources = ["tushare:fund_share"]
+        if "nav" in price_sources:
+            sources.append("tushare:fund_nav")
+        if "close" in price_sources:
+            sources.append("tushare:fund_daily")
+        if state.etf_price_source:
+            sources.append(state.etf_price_source)
+        sources.append("local:rotation_cache")
+        return sources
+
+    def _compute_etf_flows(self) -> None:
+        state = self.state
+        if "etf_flows" not in state.compute_kinds:
+            return
+        state.progress(state.compute_base + 21, "估算宽基资金", "按份额变化与净值计算申赎资金")
+        data = estimate_etf_flows(state.etf_observations)
+        ready = data["summary"].get("status") == "ready"
+        fallback_count = int(data["summary"].get("close_fallback_count") or 0)
+        quality = _status_quality(
+            "partial" if ready and fallback_count else "complete" if ready else "cold",
+            eligible=len(data["items"]),
+            expected=len(data["items"]),
+            issues=[
+                *([] if ready else ["等待 09:05 后的 ETF 份额快照"]),
+                *(
+                    [f"{fallback_count} 只宽基 ETF 缺少单位净值，已使用收盘价"]
+                    if fallback_count else []
+                ),
+                *state.provider_issues["etf"],
+            ],
+        )
+        snapshot_id = _snapshot_id(
+            data.get("as_of") or state.as_of,
+            [str(item.get("symbol") or "") for item in data["items"]],
+            "etf",
+        )
+        state.computed["etf_flows"] = self.service._envelope(
+            data,
+            snapshot_id=snapshot_id,
+            generated_at=state.generated_at,
+            quality=quality,
+            sources=self._etf_sources(data),
+            purpose=state.spec.purpose,
+            remote_fills=int(bool(state.provider_results.get("etf"))),
+        )
+        state.checkpoint_node("etf", {
+            "as_of": str(data.get("as_of") or state.as_of),
+            "items": len(data.get("items") or []),
+            "input_fingerprint": state.snapshot_fingerprints.get("etf_flows", ""),
+        })
+
+    def _finalize_snapshot_metadata(self) -> None:
+        state = self.state
+        digests = {
+            kind: hashlib.sha256(
+                strict_json_dumps(payload.get("data") or {}, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            for kind, payload in sorted(state.computed.items())
+        }
+        batch_id = _snapshot_id(
+            state.as_of,
+            [f"{kind}:{digest}" for kind, digest in sorted(digests.items())],
+            "batch",
+        )
+        for kind, payload in state.computed.items():
+            meta = payload["meta"]
+            meta["snapshot_id"] = _snapshot_id(
+                str(meta.get("as_of") or ""), [digests[kind]], kind,
+            )
+            meta["batch_id"] = batch_id
+            meta["schema_version"] = 2
+            meta["input_fingerprint"] = state.snapshot_fingerprints.get(
+                kind, state.input_fingerprint,
+            )
+            quality = meta.get("quality") or {}
+            meta["stale"] = str(quality.get("status") or "") == "stale"
+            meta["stale_reasons"] = (
+                list(quality.get("issues") or []) if meta["stale"] else []
+            )
+
+    def _published_identity(self) -> tuple[str, str]:
+        state = self.state
+        headers = [
+            self.service.store.snapshot_header(kind) or {}
+            for kind in state.scope_snapshot_kinds
+        ]
+        as_of = max(
+            (str((header.get("meta") or {}).get("as_of") or "") for header in headers),
+            default=state.as_of,
+        )
+        snapshot_id = _snapshot_id(
+            as_of,
+            [
+                str((header.get("meta") or {}).get("snapshot_id") or "")
+                for header in headers
+            ],
+            state.scope,
+        )
+        return snapshot_id, as_of
+
+    def _publish(self) -> dict[str, Any]:
+        state = self.state
+        if state.cancelled():
+            raise InterruptedError("板块联动刷新已取消")
+        self._finalize_snapshot_metadata()
+        state.progress(96, "提交分析快照", "原子更新页面所需视图")
+        with self.metrics.node_timer(
+            "rotation.publish", job_id=state.job_id,
+            input_fingerprint=state.input_fingerprint,
+        ) as dimensions:
+            self.service.store.save_snapshots(state.computed)
+            dimensions["output_rows"] = sum(
+                len((payload.get("data") or {}).get("items") or [])
+                for payload in state.computed.values()
+            )
+        state.checkpoint_node("published_snapshots", {
+            "kinds": sorted(state.computed),
+            "input_fingerprint": state.input_fingerprint,
+        })
+        changed = sorted(
+            kind for kind, payload in state.computed.items()
+            if str(payload.get("meta", {}).get("snapshot_id") or "")
+            != state.previous_snapshot_ids.get(kind, "")
+        )
+        non_complete = [
+            kind for kind, payload in state.computed.items()
+            if str(payload.get("meta", {}).get("quality", {}).get("status") or "")
+            != "complete"
+        ]
+        outcome = "unchanged" if not changed else "partial" if non_complete else "updated"
+        snapshot_id, published_as_of = self._published_identity()
+        return {
+            "snapshot_id": snapshot_id,
+            "as_of": published_as_of,
+            "expected_as_of": state.expected_as_of,
+            "fresh": not state.expected_as_of or published_as_of >= state.expected_as_of,
+            "outcome": outcome,
+            "updated": changed,
+            "computed": sorted(state.computed),
+            "warnings": list(dict.fromkeys(state.provider_warnings)),
+            "tracked_count": len(state.close.columns)
+            or int(state.local_state.get("expected_count") or 0),
+            "expected_count": state.expected_count,
+            "input_fingerprint": state.input_fingerprint,
+        }
 
 
 ROTATION_TASK_TYPE = "rotation.refresh"

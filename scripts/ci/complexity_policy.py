@@ -8,11 +8,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-# Stock research orchestration, web search, and technical scoring now have
-# independently testable lifecycle and decision steps.
+# Stock research and rotation snapshot orchestration now have independently
+# testable lifecycle, source-planning, matrix-loading, validation, computation,
+# and publication steps.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
-BASELINE = 174
+BASELINE = 170
 
 
 def main() -> int:
