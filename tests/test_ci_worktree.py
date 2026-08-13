@@ -100,6 +100,61 @@ def _windows_cleanup_error(code: int, path: Path) -> OSError:
     return error
 
 
+def test_cleanup_run_root_retries_when_child_disappears_during_walk(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    attempts = []
+    delays = []
+
+    def remove(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise FileNotFoundError(2, "missing child", path / "ui" / "jobs.sqlite-shm")
+
+    monkeypatch.setattr(run.shutil, "rmtree", remove)
+    monkeypatch.setattr(run.time, "sleep", delays.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root, run_root]
+    assert delays == [run._CLEANUP_INITIAL_DELAY_SECONDS]
+
+
+def test_cleanup_run_root_accepts_concurrently_removed_root(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(
+        run.shutil, "rmtree",
+        lambda path: attempts.append(path) or (_ for _ in ()).throw(
+            FileNotFoundError(2, "missing root", path),
+        ),
+    )
+    monkeypatch.setattr(run.time, "sleep", sleeps.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root]
+    assert sleeps == []
+
+
+def test_cleanup_run_root_does_not_hide_permission_error_while_probing_root(
+    monkeypatch, tmp_path,
+):
+    run_root = tmp_path / "run"
+    denied = PermissionError(13, "denied", run_root)
+    monkeypatch.setattr(
+        run.shutil, "rmtree",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(2, "missing child", path)),
+    )
+    monkeypatch.setattr(run.Path, "stat", lambda _path: (_ for _ in ()).throw(denied))
+
+    with pytest.raises(PermissionError) as captured:
+        run.cleanup_run_root(run_root)
+
+    assert captured.value is denied
+
+
 def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
     run_root = tmp_path / "run"
     attempts = []

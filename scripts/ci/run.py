@@ -80,13 +80,23 @@ def prepare_pytest_directory(path: Path) -> Path:
 
 
 def cleanup_run_root(path: Path) -> None:
-    """Remove one successful run, tolerating only transient Windows file locks."""
+    """Remove one successful run despite transient locks or disappearing entries."""
 
     delay = _CLEANUP_INITIAL_DELAY_SECONDS
     for attempt in range(1, _CLEANUP_ATTEMPTS + 1):
         try:
             shutil.rmtree(path)
             return
+        except FileNotFoundError as exc:
+            try:
+                path.stat()
+            except FileNotFoundError:
+                return
+            if attempt == _CLEANUP_ATTEMPTS:
+                raise RuntimeError(
+                    f"[local-ci] successful run cleanup kept changing after {attempt} "
+                    f"attempts; retained evidence at {path}"
+                ) from exc
         except OSError as exc:
             if getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
                 raise
@@ -95,8 +105,8 @@ def cleanup_run_root(path: Path) -> None:
                     f"[local-ci] successful run cleanup remained locked after {attempt} "
                     f"attempts; retained evidence at {path}"
                 ) from exc
-            time.sleep(delay)
-            delay = min(delay * 2, _CLEANUP_MAX_DELAY_SECONDS)
+        time.sleep(delay)
+        delay = min(delay * 2, _CLEANUP_MAX_DELAY_SECONDS)
 
 
 def pytest_args(*args: str) -> list[str]:
