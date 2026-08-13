@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.15.2"
+VERSION = "1.15.3"
 RELEASE_DATE = "2026-08-13"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,47 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "缓存治理与可观测性",
+                "items": (
+                    (
+                        "缓存身份、命名空间、失效和来源证据使用明确契约；缺少 provenance"
+                        " 时显式失败，不再把不完整证据解释为当前数据。"
+                    ),
+                    (
+                        "数据源新鲜度、部分成功和重试状态可持久恢复，设置诊断新增缓存"
+                        "命名空间、覆盖与失效状态。"
+                    ),
+                ),
+            },
+            {
+                "title": "Quant Lab 模型契约",
+                "items": (
+                    (
+                        "Lab 模型迁移到当前唯一 schema，旧模型通过显式迁移或明确拒绝处理，"
+                        "不再保留重复的历史解码路径。"
+                    ),
+                ),
+            },
+            {
+                "title": "开发工作流与代码维护",
+                "items": (
+                    (
+                        "验证按影响范围运行并复用同一提交的成功证据，自动回收任务制品；"
+                        "Windows 运行时临时目录保持继承 ACL。"
+                    ),
+                    (
+                        "ETF 正式与 sandbox 画像、轮动快照构建拆为独立证据阶段，保持"
+                        "时间边界、发布资格、降级错误和持久化契约不变。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.15.2",
+        "date": "2026-08-13",
         "sections": (
             {
                 "title": "不可变发布候选",
